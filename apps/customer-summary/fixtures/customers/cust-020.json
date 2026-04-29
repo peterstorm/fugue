@@ -1,0 +1,277 @@
+{
+  "customerId": "cust-020",
+  "name": "Uma Krishnamurthy",
+  "email": "uma.k@megacorp.com",
+  "phone": "+1-555-2020",
+  "accountType": "business",
+  "createdAt": "2021-01-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-020a",
+      "date": "2024-07-20",
+      "channel": "phone",
+      "agent": "Zara",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "I need help with billing discrepancy. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about API rate limits. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T09:07:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with data export. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T09:14:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about SSO configuration. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T09:21:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with performance issues. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T10:28:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about mobile app bugs. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T10:35:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with onboarding. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T10:42:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about compliance requirements. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T10:49:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with billing discrepancy. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T11:56:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about API rate limits. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T11:03:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with data export. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T11:10:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about SSO configuration. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T11:17:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with performance issues. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T12:24:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about mobile app bugs. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T12:31:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with onboarding. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T12:38:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about compliance requirements. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T12:45:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with billing discrepancy. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T13:52:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about API rate limits. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T13:59:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with data export. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T13:06:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about SSO configuration. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T13:13:00Z"
+        }
+      ],
+      "resolution": "Partial resolution - follow-up needed",
+      "tags": [
+        "complex",
+        "multi-topic",
+        "escalation"
+      ]
+    },
+    {
+      "id": "conv-020b",
+      "date": "2024-07-25",
+      "channel": "email",
+      "agent": "Zara",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "I need help with performance issues. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T14:20:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about mobile app bugs. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T14:27:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with onboarding. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T14:34:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about compliance requirements. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T14:41:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with billing discrepancy. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T15:48:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about API rate limits. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T15:55:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with data export. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T15:02:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about SSO configuration. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T15:09:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with performance issues. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T16:16:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about mobile app bugs. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T16:23:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with onboarding. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T16:30:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about compliance requirements. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T16:37:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with billing discrepancy. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T17:44:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about API rate limits. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T17:51:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with data export. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T17:58:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about SSO configuration. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T17:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with performance issues. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T18:12:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about mobile app bugs. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T18:19:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I need help with onboarding. We've been experiencing significant challenges in this area and our team is blocked. This has been an ongoing issue for several weeks now and we really need a resolution. The impact on our business operations has been substantial and we're falling behind on our quarterly goals as a result.",
+          "timestamp": "2024-07-20T18:26:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern about compliance requirements. Let me provide a detailed explanation of how to address this. First, I'll walk you through the current configuration. Then we'll look at optimization options. We have several approaches available depending on your specific use case and requirements. Our engineering team has been working on improvements in this area.",
+          "timestamp": "2024-07-20T18:33:00Z"
+        }
+      ],
+      "resolution": "Action items documented",
+      "tags": [
+        "complex",
+        "follow-up",
+        "multi-topic"
+      ]
+    },
+    {
+      "id": "conv-020c",
+      "date": "2024-08-01",
+      "channel": "chat",
+      "agent": "Alex",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Following up on all the open items from our previous conversations. We still have outstanding issues with billing, API limits, and the mobile app.",
+          "timestamp": "2024-08-01T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I have the full history. Let me address each point: billing has been corrected, API limits increased to 10k/min, and the mobile fix is in the next release.",
+          "timestamp": "2024-08-01T10:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Okay, the billing and API fixes sound good. When is the mobile release?",
+          "timestamp": "2024-08-01T10:07:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Scheduled for August 15th. I'll send you early access to the beta.",
+          "timestamp": "2024-08-01T10:08:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Appreciated. This has been a long journey but I'm glad we're making progress.",
+          "timestamp": "2024-08-01T10:10:00Z"
+        }
+      ],
+      "resolution": "All items tracked",
+      "tags": [
+        "complex",
+        "follow-up",
+        "resolution"
+      ]
+    }
+  ]
+}

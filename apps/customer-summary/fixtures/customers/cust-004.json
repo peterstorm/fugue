@@ -1,0 +1,64 @@
+{
+  "customerId": "cust-004",
+  "name": "David Park",
+  "email": "dpark@email.com",
+  "accountType": "business",
+  "createdAt": "2023-03-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-004a",
+      "date": "2024-03-20",
+      "channel": "email",
+      "agent": "Helen",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Is there any way to export reports as PDF? Our compliance team needs this.",
+          "timestamp": "2024-03-20T08:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "PDF export is on our roadmap for Q3. I'll add your request to the feature tracker.",
+          "timestamp": "2024-03-20T08:45:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Great, looking forward to it.",
+          "timestamp": "2024-03-20T09:00:00Z"
+        }
+      ],
+      "tags": [
+        "feature-request",
+        "export"
+      ]
+    },
+    {
+      "id": "conv-004b",
+      "date": "2024-07-15",
+      "channel": "chat",
+      "agent": "Ian",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Saw the announcement about PDF export. How do I enable it?",
+          "timestamp": "2024-07-15T13:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Go to Settings > Reports > Export Format and select PDF. It's available on Business plans.",
+          "timestamp": "2024-07-15T13:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Found it! Works perfectly. Thanks!",
+          "timestamp": "2024-07-15T13:05:00Z"
+        }
+      ],
+      "resolution": "Feature enabled",
+      "tags": [
+        "feature",
+        "resolved"
+      ]
+    }
+  ]
+}

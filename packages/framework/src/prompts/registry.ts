@@ -1,0 +1,66 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { type Result, ok, err } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
+import { computePromptHash } from "./hash.js";
+
+export interface PromptEntry {
+  readonly text: string;
+  readonly hash: string;
+  readonly version: string;
+}
+
+export interface PromptRegistry {
+  load(name: string): Promise<Result<PromptEntry, FrameworkError>>;
+}
+
+const promptNotFound = (promptName: string, reason: string): FrameworkError => ({
+  kind: "prompt-not-found",
+  promptName,
+  reason,
+});
+
+export const FilePromptRegistry = ({
+  dir,
+  registryPath,
+}: {
+  readonly dir: string;
+  readonly registryPath: string;
+}): PromptRegistry => ({
+  async load(name) {
+    // 1. Read prompt file
+    let text: string;
+    try {
+      text = await readFile(join(dir, `${name}.txt`), "utf-8");
+    } catch {
+      return err(promptNotFound(name, "file not found"));
+    }
+
+    // 2. Compute hash
+    const hash = computePromptHash(text);
+
+    // 3. Read registry
+    let registry: Record<string, { version: string; hash: string }>;
+    try {
+      const raw = await readFile(registryPath, "utf-8");
+      registry = JSON.parse(raw);
+    } catch {
+      return err(promptNotFound(name, "not in registry"));
+    }
+
+    // 4. Check registry entry
+    const entry = registry[name];
+    if (!entry) {
+      return err(promptNotFound(name, "not in registry"));
+    }
+
+    // 5. Cross-check hash
+    if (entry.hash !== hash) {
+      return err(
+        promptNotFound(name, "hash mismatch — prompt edited without version bump"),
+      );
+    }
+
+    return ok({ text, hash, version: entry.version });
+  },
+});

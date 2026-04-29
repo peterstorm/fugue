@@ -1,0 +1,60 @@
+{
+  "customerId": "cust-007",
+  "name": "George Miller",
+  "email": "gmiller@freelance.net",
+  "accountType": "personal",
+  "createdAt": "2023-02-15T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-007a",
+      "date": "2024-03-10",
+      "channel": "social",
+      "agent": "Liam",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "@YourProduct just saved me 3 hours on my monthly reports. Best tool ever! 🎉",
+          "timestamp": "2024-03-10T15:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "That's wonderful to hear, George! Glad we could help streamline your workflow.",
+          "timestamp": "2024-03-10T15:30:00Z"
+        }
+      ],
+      "tags": [
+        "social",
+        "positive",
+        "testimonial"
+      ]
+    },
+    {
+      "id": "conv-007b",
+      "date": "2024-05-22",
+      "channel": "chat",
+      "agent": "Mia",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Can I get a referral link? I want to recommend this to colleagues.",
+          "timestamp": "2024-05-22T12:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Here's your unique referral link. You'll get a 20% discount for each signup!",
+          "timestamp": "2024-05-22T12:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Awesome, sharing it right away!",
+          "timestamp": "2024-05-22T12:03:00Z"
+        }
+      ],
+      "resolution": "Referral link provided",
+      "tags": [
+        "referral",
+        "positive"
+      ]
+    }
+  ]
+}

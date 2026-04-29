@@ -1,0 +1,67 @@
+{
+  "customerId": "cust-012",
+  "name": "Leo Fernandez",
+  "email": "leo.f@smallbiz.com",
+  "accountType": "business",
+  "createdAt": "2023-07-15T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-012a",
+      "date": "2024-05-20",
+      "channel": "chat",
+      "agent": "Sam",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "I was charged twice for my subscription this month!",
+          "timestamp": "2024-05-20T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I see the duplicate charge. I'm processing a refund right now. It should appear in 3-5 business days.",
+          "timestamp": "2024-05-20T10:03:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "This shouldn't have happened in the first place. Very disappointing.",
+          "timestamp": "2024-05-20T10:05:00Z"
+        }
+      ],
+      "resolution": "Refund processed",
+      "tags": [
+        "billing",
+        "duplicate-charge",
+        "complaint"
+      ]
+    },
+    {
+      "id": "conv-012b",
+      "date": "2024-06-20",
+      "channel": "phone",
+      "agent": "Tina",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "It happened AGAIN. Double charged for June. What is wrong with your billing system?",
+          "timestamp": "2024-06-20T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I'm so sorry. There's a known bug with our billing processor. I've manually corrected your account and added a month free.",
+          "timestamp": "2024-06-20T09:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "A free month doesn't fix the trust issue. Fix your systems.",
+          "timestamp": "2024-06-20T09:10:00Z"
+        }
+      ],
+      "resolution": "Refund + free month issued",
+      "tags": [
+        "billing",
+        "recurring-issue",
+        "complaint"
+      ]
+    }
+  ]
+}

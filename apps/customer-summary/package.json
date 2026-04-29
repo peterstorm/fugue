@@ -1,0 +1,24 @@
+{
+  "name": "customer-summary",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@ai-summary/framework": "workspace:*",
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@mlflow/anthropic": "^0.2.0",
+    "@mlflow/core": "^0.2.0",
+    "hono": "^4.12.15",
+    "ioredis": "^5.10.1",
+    "openai": "^6.35.0",
+    "zod": "^4.3.6"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev": "bun run src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13"
+  }
+}

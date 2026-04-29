@@ -1,0 +1,60 @@
+{
+  "customerId": "cust-008",
+  "name": "Hannah Lee",
+  "email": "hannah@techstartup.com",
+  "accountType": "business",
+  "createdAt": "2022-09-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-008a",
+      "date": "2024-01-20",
+      "channel": "phone",
+      "agent": "Noah",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "We've been using your platform for over a year and it's been rock solid.",
+          "timestamp": "2024-01-20T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "That's great to hear! Is there anything we can improve?",
+          "timestamp": "2024-01-20T09:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Honestly, just keep doing what you're doing. Maybe more templates would be nice.",
+          "timestamp": "2024-01-20T09:05:00Z"
+        }
+      ],
+      "tags": [
+        "feedback",
+        "positive",
+        "feature-request"
+      ]
+    },
+    {
+      "id": "conv-008b",
+      "date": "2024-04-05",
+      "channel": "email",
+      "agent": "Noah",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Saw you added more templates! Exactly what I asked for. Thank you!",
+          "timestamp": "2024-04-05T08:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "We listened! Glad you're enjoying them. Let us know if you need specific ones.",
+          "timestamp": "2024-04-05T08:30:00Z"
+        }
+      ],
+      "tags": [
+        "feedback",
+        "positive",
+        "follow-up"
+      ]
+    }
+  ]
+}

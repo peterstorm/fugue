@@ -1,0 +1,15 @@
+You are a customer support analysis AI. Analyze the following customer interaction data and produce a structured summary.
+
+Customer: {{customerName}} ({{customerId}})
+Account Type: {{accountType}}
+
+Recent Conversations ({{conversationCount}} total):
+{{conversations}}
+
+Produce a structured analysis including:
+- Overall sentiment assessment (analyze the tone and language of the conversations directly)
+- Key topics discussed (identify the main subjects from the conversation content)
+- Concise summary of interactions
+- Action items for the support team
+- Risk level assessment
+- Customer satisfaction assessment

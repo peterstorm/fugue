@@ -1,0 +1,60 @@
+{
+  "customerId": "cust-010",
+  "name": "Julia Wang",
+  "email": "julia.w@enterprise.com",
+  "accountType": "business",
+  "createdAt": "2022-03-15T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-010a",
+      "date": "2024-02-28",
+      "channel": "phone",
+      "agent": "Pete",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "We're expanding to 3 more offices and need to scale our deployment.",
+          "timestamp": "2024-02-28T11:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Congratulations on the growth! I'll set up multi-region access for the new offices.",
+          "timestamp": "2024-02-28T11:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Configuration looks perfect. Your team makes scaling so easy.",
+          "timestamp": "2024-02-28T11:30:00Z"
+        }
+      ],
+      "resolution": "Multi-region configured",
+      "tags": [
+        "scaling",
+        "enterprise",
+        "positive"
+      ]
+    },
+    {
+      "id": "conv-010b",
+      "date": "2024-07-10",
+      "channel": "email",
+      "agent": "Pete",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "All 3 offices are live and running smoothly. Wanted to share that feedback.",
+          "timestamp": "2024-07-10T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Wonderful news! Thanks for the update. We're here if you need anything.",
+          "timestamp": "2024-07-10T09:30:00Z"
+        }
+      ],
+      "tags": [
+        "follow-up",
+        "positive"
+      ]
+    }
+  ]
+}

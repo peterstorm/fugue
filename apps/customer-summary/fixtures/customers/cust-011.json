@@ -1,0 +1,82 @@
+{
+  "customerId": "cust-011",
+  "name": "Karen Mitchell",
+  "email": "karen.m@company.org",
+  "accountType": "business",
+  "createdAt": "2023-04-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-011a",
+      "date": "2024-06-05",
+      "channel": "phone",
+      "agent": "Quinn",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "This is the third time this month your service has gone down. We're losing money!",
+          "timestamp": "2024-06-05T08:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I sincerely apologize. We had an infrastructure issue. Our team is working on a permanent fix.",
+          "timestamp": "2024-06-05T08:03:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "That's what you said last time. I want to speak to a manager.",
+          "timestamp": "2024-06-05T08:05:00Z"
+        },
+        {
+          "role": "system",
+          "content": "Call escalated to manager Rachel.",
+          "timestamp": "2024-06-05T08:06:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Hi Karen, this is Rachel. I understand your frustration. We're offering a service credit and priority SLA.",
+          "timestamp": "2024-06-05T08:10:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Fine. But if this happens again, we're switching providers.",
+          "timestamp": "2024-06-05T08:15:00Z"
+        }
+      ],
+      "resolution": "Service credit issued, escalated",
+      "tags": [
+        "outage",
+        "escalation",
+        "complaint"
+      ]
+    },
+    {
+      "id": "conv-011b",
+      "date": "2024-07-01",
+      "channel": "email",
+      "agent": "Rachel",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Another outage last night. We're seriously evaluating alternatives.",
+          "timestamp": "2024-07-01T07:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand your concern. We've migrated your account to our high-availability cluster. This should prevent future issues.",
+          "timestamp": "2024-07-01T07:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "I'll give it one more month. After that, we're done.",
+          "timestamp": "2024-07-01T08:00:00Z"
+        }
+      ],
+      "resolution": "Migrated to HA cluster",
+      "tags": [
+        "outage",
+        "churn-risk",
+        "complaint"
+      ]
+    }
+  ]
+}

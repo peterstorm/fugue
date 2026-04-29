@@ -1,0 +1,18 @@
+{
+  "current_phase": "execute",
+  "phase_artifacts": {},
+  "skipped_phases": [
+    "brainstorm",
+    "specify",
+    "clarify",
+    "plan-alignment",
+    "architecture",
+    "decompose"
+  ],
+  "spec_dir": ".claude/specs/2026-04-28-ai-summary-dag",
+  "spec_file": ".claude/specs/2026-04-28-ai-summary-dag/spec.md",
+  "plan_file": ".claude/plans/2026-04-28-ai-summary-dag.md",
+  "tasks": [],
+  "wave_gates": {},
+  "updated_at": "2026-04-29T10:02:37.879Z"
+}

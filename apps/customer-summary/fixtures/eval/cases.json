@@ -1,0 +1,82 @@
+[
+  {
+    "customer_id": "cust-001",
+    "reference_summary": "Customer had billing inquiry about prorated charge and asked about premium features. Generally satisfied."
+  },
+  {
+    "customer_id": "cust-002",
+    "reference_summary": "Business customer needed API migration help and added seats. Constructive feedback about documentation."
+  },
+  {
+    "customer_id": "cust-003",
+    "reference_summary": "Customer experienced shipping delay and received damaged item. Replacement resolved the issue successfully."
+  },
+  {
+    "customer_id": "cust-004",
+    "reference_summary": "Customer requested PDF export feature, which was later delivered. Happy with responsiveness."
+  },
+  {
+    "customer_id": "cust-005",
+    "reference_summary": "New business customer completed onboarding with CRM integration and SSO. Very satisfied with setup."
+  },
+  {
+    "customer_id": "cust-006",
+    "reference_summary": "Long-term customer upgraded to enterprise. Very positive sentiment and product advocacy."
+  },
+  {
+    "customer_id": "cust-007",
+    "reference_summary": "Enthusiastic user who refers others. Strong positive sentiment and social media advocate."
+  },
+  {
+    "customer_id": "cust-008",
+    "reference_summary": "Loyal customer who provided feature feedback that was implemented. Very positive experience."
+  },
+  {
+    "customer_id": "cust-009",
+    "reference_summary": "Highly satisfied customer who renewed subscription citing excellent service."
+  },
+  {
+    "customer_id": "cust-010",
+    "reference_summary": "Enterprise customer scaling to multiple offices. Smooth expansion, very positive."
+  },
+  {
+    "customer_id": "cust-011",
+    "reference_summary": "Frustrated business customer experiencing repeated outages. High churn risk. Escalated to manager."
+  },
+  {
+    "customer_id": "cust-012",
+    "reference_summary": "Customer double-charged twice. Billing system bug causing trust erosion. High risk."
+  },
+  {
+    "customer_id": "cust-013",
+    "reference_summary": "Customer waited 2 weeks for support response. Unhappy with service timeliness."
+  },
+  {
+    "customer_id": "cust-014",
+    "reference_summary": "Business customer unhappy with forced UI change. Reluctantly adapted but still negative."
+  },
+  {
+    "customer_id": "cust-015",
+    "reference_summary": "Minimal interaction — brief browsing chat. Insufficient data for meaningful summary."
+  },
+  {
+    "customer_id": "cust-016",
+    "reference_summary": "Single pricing inquiry via email. Insufficient data for meaningful summary."
+  },
+  {
+    "customer_id": "cust-017",
+    "reference_summary": "Voicemail only, no agent interaction. Insufficient data for meaningful summary."
+  },
+  {
+    "customer_id": "cust-018",
+    "reference_summary": "No conversation history available."
+  },
+  {
+    "customer_id": "cust-019",
+    "reference_summary": "No conversation history available."
+  },
+  {
+    "customer_id": "cust-020",
+    "reference_summary": "Complex enterprise customer with extensive multi-topic conversations covering billing, API, mobile app, and compliance. Mixed sentiment trending positive after resolutions."
+  }
+]

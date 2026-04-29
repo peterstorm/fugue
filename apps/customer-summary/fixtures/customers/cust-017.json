@@ -1,0 +1,24 @@
+{
+  "customerId": "cust-017",
+  "name": "Rita Yamamoto",
+  "createdAt": "2024-07-10T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-017a",
+      "date": "2024-07-12",
+      "channel": "phone",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Customer called, no agent available. Voicemail left.",
+          "timestamp": "2024-07-12T18:00:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Please call me back about my account.",
+          "timestamp": "2024-07-12T18:01:00Z"
+        }
+      ]
+    }
+  ]
+}
