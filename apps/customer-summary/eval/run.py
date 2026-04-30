@@ -24,7 +24,7 @@ from typing import Any, Optional
 import requests
 
 
-SCORER_NAMES = ["factuality", "completeness", "conciseness"]
+SCORER_NAMES = ["factuality", "completeness", "conciseness", "grounding"]
 PASS_THRESHOLD = 4.0
 
 

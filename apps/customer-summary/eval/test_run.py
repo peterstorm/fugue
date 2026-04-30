@@ -79,9 +79,10 @@ class TestComputeAggregate:
                 "factuality/score/mean": 4.5,
                 "completeness/score/mean": 4.0,
                 "conciseness/score/mean": 5.0,
+                "grounding/score/mean": 4.5,
             }
 
-        agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness"])
+        agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness", "grounding"])
         assert agg.overall_mean == pytest.approx(4.5)
         assert agg.passed is True
 
@@ -91,8 +92,9 @@ class TestComputeAggregate:
                 "factuality/score/mean": 3.0,
                 "completeness/score/mean": 3.0,
                 "conciseness/score/mean": 3.0,
+                "grounding/score/mean": 3.0,
             }
 
-        agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness"])
+        agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness", "grounding"])
         assert agg.overall_mean == pytest.approx(3.0)
         assert agg.passed is False

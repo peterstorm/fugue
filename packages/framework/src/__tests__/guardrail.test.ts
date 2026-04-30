@@ -1,0 +1,109 @@
+import { describe, test, expect } from "bun:test";
+import { createGuardrailNode, ok } from "../../src/index.js";
+import type { GuardrailResult } from "../../src/index.js";
+import { z } from "zod";
+import { NoopObserver, RecordingObserver } from "../../src/observer/observer.js";
+
+const InputSchema = z.object({ value: z.number() });
+const OutputSchema: z.ZodType<GuardrailResult<number>> = z.any();
+
+const makeCtx = (observer = new NoopObserver()) => ({
+  runId: "test",
+  dagId: "test",
+  observer,
+  cache: null,
+  logger: null,
+  prompts: null,
+  llm: null,
+});
+
+describe("createGuardrailNode", () => {
+  test("passes data through when validation succeeds", async () => {
+    const node = createGuardrailNode({
+      id: "test-guardrail",
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      deps: [],
+      validate: (input) => ({
+        value: input.value,
+        passed: true,
+        warnings: [],
+        checks: [{ dimension: "range", passed: true, detail: "Value in range" }],
+      }),
+    });
+
+    expect(node.kind).toBe("guardrail");
+
+    const result = await node.run({ value: 42 }, makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.value).toBe(42);
+      expect(result.value.passed).toBe(true);
+      expect(result.value.warnings).toHaveLength(0);
+    }
+  });
+
+  test("passes data through with warnings when validation fails", async () => {
+    const node = createGuardrailNode({
+      id: "test-guardrail",
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      deps: [],
+      validate: (input) => ({
+        value: input.value,
+        passed: false,
+        warnings: ["Value too high"],
+        checks: [{ dimension: "range", passed: false, detail: "Value exceeds maximum" }],
+      }),
+    });
+
+    const result = await node.run({ value: 9999 }, makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.value).toBe(9999);
+      expect(result.value.passed).toBe(false);
+      expect(result.value.warnings).toContain("Value too high");
+    }
+  });
+
+  test("emits sub-span event on failure", async () => {
+    const observer = new RecordingObserver();
+    const node = createGuardrailNode({
+      id: "test-guardrail",
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      deps: [],
+      validate: (input) => ({
+        value: input.value,
+        passed: false,
+        warnings: ["bad"],
+        checks: [{ dimension: "test", passed: false, detail: "failed" }],
+      }),
+    });
+
+    await node.run({ value: 1 }, makeCtx(observer));
+    const subSpans = observer.events.filter((e) => e.type === "sub-span");
+    expect(subSpans).toHaveLength(1);
+    expect((subSpans[0] as any).kind).toBe("GUARDRAIL");
+  });
+
+  test("does not emit sub-span on success", async () => {
+    const observer = new RecordingObserver();
+    const node = createGuardrailNode({
+      id: "test-guardrail",
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      deps: [],
+      validate: (input) => ({
+        value: input.value,
+        passed: true,
+        warnings: [],
+        checks: [{ dimension: "test", passed: true, detail: "ok" }],
+      }),
+    });
+
+    await node.run({ value: 1 }, makeCtx(observer));
+    const subSpans = observer.events.filter((e) => e.type === "sub-span");
+    expect(subSpans).toHaveLength(0);
+  });
+});

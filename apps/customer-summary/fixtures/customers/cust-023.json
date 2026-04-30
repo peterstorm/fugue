@@ -1,0 +1,39 @@
+{
+  "customerId": "cust-023",
+  "name": "Yuki Tanaka",
+  "email": "yuki@enterprise.co.jp",
+  "accountType": "business",
+  "createdAt": "2023-03-15T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-023a",
+      "date": "2024-07-10",
+      "channel": "email",
+      "agent": "Chris",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "We need to configure OAuth 2.0 PKCE flow with our Azure AD tenant for the B2C portal. The JWKS endpoint rotation is causing 401s after key rollover. We also need SCIM provisioning for auto-deprovisioning when users leave our IdP.",
+          "timestamp": "2024-07-10T08:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "For the JWKS rotation issue, you'll need to set jwks_cache_ttl to 3600 in your OAuth config. For SCIM, we support SCIM 2.0 with the /scim/v2/Users endpoint. I'll send the integration guide.",
+          "timestamp": "2024-07-10T08:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "What about the PKCE code_verifier length? We're generating S256 challenges but getting invalid_grant errors.",
+          "timestamp": "2024-07-10T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "The code_verifier must be between 43-128 characters per RFC 7636. Check your implementation is using URL-safe base64 encoding without padding.",
+          "timestamp": "2024-07-10T09:15:00Z"
+        }
+      ],
+      "resolution": "Technical guidance provided",
+      "tags": ["technical", "integration", "oauth", "enterprise"]
+    }
+  ]
+}

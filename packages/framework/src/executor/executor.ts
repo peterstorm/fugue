@@ -30,6 +30,7 @@ const SPAN_TYPE_MAP: Record<string, string> = {
   llm: "LLM",
   fetch: "RETRIEVER",
   transform: "CHAIN",
+  guardrail: "TOOL",
 };
 
 export interface RunOptions {
@@ -56,9 +57,16 @@ export const runDag = async <I, O>(
   if (_withSpan) {
     return _withSpan(async (rootSpan) => {
       rootSpan.setInputs({ dagId: dag.id, runId: ctx.runId });
-      const result = await runDagInner(dag, input, ctx, opts);
+      const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [] };
+      const result = await runDagInner(dag, input, ctx, opts, meta);
       if (result.ok) {
-        rootSpan.setOutputs({ status: "ok" });
+        if (meta.guardrailFailed) {
+          // Guardrail failed but response still returned — mark trace as ERROR so it's visible in MLflow
+          rootSpan.setStatus(_SpanStatusCode!.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
+          rootSpan.setOutputs({ status: "ok", guardrailWarnings: meta.guardrailWarnings });
+        } else {
+          rootSpan.setOutputs({ status: "ok" });
+        }
       } else {
         rootSpan.setStatus(_SpanStatusCode!.ERROR, String(result.error));
         rootSpan.setOutputs({ status: "error", error: result.error });
@@ -67,14 +75,23 @@ export const runDag = async <I, O>(
     }, { name: `run:${dag.id}`, spanType: _SpanType!.CHAIN }) as Promise<Result<O, FrameworkError>>;
   }
 
-  return runDagInner(dag, input, ctx, opts);
+  return runDagInner(dag, input, ctx, opts, undefined);
 };
+
+/** Metadata collected during DAG execution for trace-level status propagation. */
+interface DagRunMeta {
+  /** True if any guardrail node returned passed: false */
+  guardrailFailed: boolean;
+  /** Warning messages from failed guardrails */
+  guardrailWarnings: string[];
+}
 
 const runDagInner = async <I, O>(
   dag: DagDef,
   input: I,
   ctx: NodeContext,
   opts?: RunOptions,
+  meta?: DagRunMeta,
 ): Promise<Result<O, FrameworkError>> => {
   // 1. Topo sort (cycle detection)
   const sortResult = topoSort(dag);
@@ -190,6 +207,16 @@ const runDagInner = async <I, O>(
             const result = await executeNode();
             if (result.ok) {
               span.setOutputs(result.value);
+              // Guardrail nodes: set span to ERROR when validation fails
+              if (node.kind === "guardrail" && result.value && typeof result.value === "object" && "passed" in result.value && !(result.value as any).passed) {
+                const warnings = (result.value as any).warnings ?? [];
+                span.setStatus(_SpanStatusCode!.ERROR, `Guardrail failed: ${warnings.join("; ")}`);
+                // Propagate to trace-level meta
+                if (meta) {
+                  meta.guardrailFailed = true;
+                  meta.guardrailWarnings.push(...warnings);
+                }
+              }
             } else {
               span.setStatus(_SpanStatusCode!.ERROR, String(result.error));
             }

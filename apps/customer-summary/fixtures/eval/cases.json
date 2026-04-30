@@ -78,5 +78,25 @@
   {
     "customer_id": "cust-020",
     "reference_summary": "Complex enterprise customer with extensive multi-topic conversations covering billing, API, mobile app, and compliance. Mixed sentiment trending positive after resolutions."
+  },
+  {
+    "customer_id": "cust-021",
+    "reference_summary": "Single brief interaction about password change. Only 1 conversation with 3 messages. Summary should NOT invent patterns, recurring issues, or extended history. Minimal data available."
+  },
+  {
+    "customer_id": "cust-022",
+    "reference_summary": "Customer sentiment shifted dramatically from very positive (loved the product, recommended to others) to very negative (broken workflow, threatening cancellation). Summary must reflect BOTH sentiments and the contradiction — not pick one side. 2 conversations total."
+  },
+  {
+    "customer_id": "cust-023",
+    "reference_summary": "Highly technical enterprise customer discussing OAuth 2.0 PKCE, JWKS rotation, and SCIM provisioning. Summary should only reference technologies actually discussed (OAuth, PKCE, JWKS, SCIM, Azure AD). Must NOT fabricate additional technical details or protocols not in the conversation."
+  },
+  {
+    "customer_id": "cust-024",
+    "reference_summary": "Near-empty conversations — only 'Hello', 'Hi', and 'Nevermind'. 3 conversations but essentially no substantive content. Insufficient data for meaningful analysis. Summary must NOT invent issues, complaints, or customer intent from these fragments."
+  },
+  {
+    "customer_id": "cust-025",
+    "reference_summary": "Contract renewal negotiation. Customer negotiated price down from $5,000/month to $3,000/month. Specific dollar amounts discussed. Summary should reference correct pricing if mentioned. 2 conversations covering pricing, competitor comparison, and final agreement."
   }
 ]

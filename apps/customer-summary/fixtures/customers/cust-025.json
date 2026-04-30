@@ -1,0 +1,89 @@
+{
+  "customerId": "cust-025",
+  "name": "Björn Eriksson",
+  "email": "bjorn@nordic-corp.se",
+  "accountType": "business",
+  "createdAt": "2022-06-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-025a",
+      "date": "2024-06-15",
+      "channel": "phone",
+      "agent": "Sam",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "We need to discuss our contract renewal. The current pricing is too high for what we're getting.",
+          "timestamp": "2024-06-15T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand. Let me pull up your usage data. You're currently on the Enterprise plan at $5,000/month.",
+          "timestamp": "2024-06-15T10:03:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "We only use about 30% of the features. Can we downgrade?",
+          "timestamp": "2024-06-15T10:05:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "We could move you to the Business plan at $2,500/month, but you'd lose SSO and the dedicated support channel.",
+          "timestamp": "2024-06-15T10:08:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "We need SSO. What about a custom plan?",
+          "timestamp": "2024-06-15T10:10:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Let me get our account manager involved. We can discuss a tailored package.",
+          "timestamp": "2024-06-15T10:12:00Z"
+        }
+      ],
+      "resolution": "Escalated to account management",
+      "tags": ["billing", "renewal", "negotiation"]
+    },
+    {
+      "id": "conv-025b",
+      "date": "2024-07-01",
+      "channel": "email",
+      "agent": "Sam",
+      "messages": [
+        {
+          "role": "agent",
+          "content": "Hi Björn, following up on our pricing discussion. We've put together a custom plan: Enterprise features at $3,800/month with a 2-year commitment.",
+          "timestamp": "2024-07-01T09:00:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "That's still high. Our competitor quoted us $2,800 for similar features. We've been loyal customers for 2 years.",
+          "timestamp": "2024-07-01T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I appreciate your loyalty. Let me see what else we can do. Would $3,200/month with priority support included work?",
+          "timestamp": "2024-07-01T10:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Make it $3,000 and you have a deal.",
+          "timestamp": "2024-07-01T11:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Done. I'll send the updated contract today.",
+          "timestamp": "2024-07-01T11:15:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Great, thanks for working with us on this.",
+          "timestamp": "2024-07-01T11:20:00Z"
+        }
+      ],
+      "resolution": "Custom pricing agreed at $3,000/month",
+      "tags": ["billing", "renewal", "retention", "resolved"]
+    }
+  ]
+}

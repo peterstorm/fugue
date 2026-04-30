@@ -12,6 +12,8 @@
     "dev": "bun run --filter customer-summary dev"
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/sdk-node": "^0.215.0",
     "typescript": "^6.0.3",
     "yaml": "^2.8.3"
   }

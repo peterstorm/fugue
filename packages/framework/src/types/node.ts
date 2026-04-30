@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { Result } from "./result.js";
 import type { Observer } from "../observer/observer.js";
 
-export type NodeKind = "fetch" | "transform" | "llm";
+export type NodeKind = "fetch" | "transform" | "llm" | "guardrail";
 
 export interface NodeDef<I, O, E> {
   readonly id: string;
