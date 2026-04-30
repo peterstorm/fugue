@@ -8,8 +8,8 @@ import { ok } from "../types/result.js";
  * Result of a guardrail check.
  */
 export interface GuardrailResult<T> {
-  /** The original value being validated (passed through). */
-  readonly value: T;
+  /** The original value being validated (passed through). Undefined when upstream produced no data (e.g. non-ok branch). */
+  readonly value: T | undefined;
   /** Whether all checks passed. */
   readonly passed: boolean;
   /** Human-readable warnings for failed checks. */

@@ -108,7 +108,7 @@ export class TailSamplingExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    let forwarded = false;
+    const toForward: ReadableSpan[] = [];
 
     for (const span of spans) {
       // MlflowSpanProcessor only calls export for root spans,
@@ -121,9 +121,7 @@ export class TailSamplingExporter implements SpanExporter {
       const shouldFlush = this.policy.shouldFlush(toRunSummary(summary));
 
       if (shouldFlush) {
-        // Forward to real MLflow exporter — it will call popTrace() internally
-        this.inner.export([span], resultCallback);
-        forwarded = true;
+        toForward.push(span);
         this.exported++;
       } else {
         // Discard — but MUST clean up InMemoryTraceManager to prevent memory leak
@@ -134,8 +132,9 @@ export class TailSamplingExporter implements SpanExporter {
     }
 
     // SpanExporter contract: resultCallback must be invoked exactly once per export() call.
-    // If we forwarded to inner exporter, it handles the callback. Otherwise, signal success.
-    if (!forwarded) {
+    if (toForward.length > 0) {
+      this.inner.export(toForward, resultCallback);
+    } else {
       resultCallback({ code: 0 });
     }
   }

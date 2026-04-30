@@ -40,8 +40,9 @@ export const createAssembleResponseNode = (customerId: string) =>
           return ok({ status: "insufficient_data" as const, customerId, message: "Insufficient data for analysis" });
         case "ok": {
           const guardrail = input["grounding-guardrail"];
-          if (!guardrail) {
-            // Guardrail output missing — degrade gracefully, skip warnings
+          if (!guardrail?.value) {
+            // Guardrail output or synthesis missing — degrade gracefully
+            console.warn(`[assemble-response] guardrail output missing for customer ${customerId}`);
             return ok({ status: "ok" as const, customerId, summary: {} as SynthesisOutput });
           }
           const synthesis = guardrail.value;

@@ -186,9 +186,8 @@ const runDagInner = async <I, O>(
             try {
               await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
             } catch (e) {
-              if (ctx.logger) {
-                ctx.logger.warn?.(`Checkpoint write failed for ${nodeId}: ${e instanceof Error ? e.message : e}`);
-              }
+              const msg = `Checkpoint write failed for ${nodeId}: ${e instanceof Error ? e.message : e}`;
+              (ctx.logger?.warn ?? console.warn)(msg);
             }
           }
 

@@ -55,7 +55,7 @@ export const createGroundingGuardrailNode = () =>
       if (!synthesis) {
         // Non-ok branch (not_found, no_history, etc.) — nothing to validate
         return {
-          value: undefined as unknown as SynthesisOutput,
+          value: undefined,
           passed: true,
           warnings: [],
           checks: [{ dimension: "source_data", passed: true, detail: "No synthesis output to validate (non-ok branch)" }],

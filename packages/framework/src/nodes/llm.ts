@@ -75,6 +75,9 @@ export const createLlmNode = <I, O>(
       if (cacheResult?.ok && cacheResult.value !== undefined && cacheResult.value !== null) {
         return ok(cacheResult.value as O);
       }
+      if (cacheResult && !cacheResult.ok) {
+        console.warn(`[${config.id}] Cache read failed: ${cacheResult.error?.kind ?? "unknown"}`);
+      }
     }
 
     // LLM call — uses LlmClient.sendStructured with correct shape
@@ -151,10 +154,14 @@ export const createLlmNode = <I, O>(
 
     const output = llmResponse.output as O;
 
-    // Cache result (best-effort — Cache.set() returns Result but failure is non-fatal)
+    // Cache result (best-effort — failure is non-fatal)
     if (ctx.cache?.set) {
       const DEFAULT_CACHE_TTL_SEC = 86400; // 24 hours, matching FR-052
-      await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
+      try {
+        await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
+      } catch (e) {
+        console.warn(`[${config.id}] Cache write failed: ${e instanceof Error ? e.message : e}`);
+      }
     }
 
     return ok(output);
