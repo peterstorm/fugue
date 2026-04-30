@@ -10,6 +10,7 @@ import type { ExtractionResult } from "./extract-features.js";
 const InputSchema = z.object({
   "extract-features": z.object({ branch: z.string() }).passthrough(),
   "grounding-guardrail": z.object({
+    kind: z.enum(["skipped", "validated"]),
     value: SynthesisOutputSchema.optional(),
     passed: z.boolean(),
     warnings: z.array(z.string()),
@@ -40,10 +41,10 @@ export const createAssembleResponseNode = (customerId: string) =>
           return ok({ status: "insufficient_data" as const, customerId, message: "Insufficient data for analysis" });
         case "ok": {
           const guardrail = input["grounding-guardrail"];
-          if (!guardrail?.value) {
-            // Guardrail output or synthesis missing — degrade gracefully
-            console.warn(`[assemble-response] guardrail output missing for customer ${customerId}`);
-            return ok({ status: "ok" as const, customerId, summary: {} as SynthesisOutput });
+          if (guardrail === undefined || guardrail.kind === "skipped") {
+            // Guardrail output missing or skipped (non-ok upstream) — degrade gracefully
+            console.warn(`[assemble-response] guardrail output missing or skipped for customer ${customerId}`);
+            return ok({ status: "degraded" as const, customerId, message: "Guardrail data unavailable" });
           }
           const synthesis = guardrail.value;
 

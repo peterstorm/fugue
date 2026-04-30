@@ -203,7 +203,7 @@ describe("E2E resume integration (SC-008)", () => {
 
     // All nodes should be skipped
     const skipped = events.filter((e) => e.type === "node-skipped");
-    expect(skipped.length).toBe(4);
+    expect(skipped.length).toBe(5);
 
     // Zero node-start events (no re-execution)
     const starts = events.filter((e) => e.type === "node-start");

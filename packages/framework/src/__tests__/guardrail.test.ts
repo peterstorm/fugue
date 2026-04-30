@@ -25,6 +25,7 @@ describe("createGuardrailNode", () => {
       outputSchema: OutputSchema,
       deps: [],
       validate: (input) => ({
+        kind: "validated",
         value: input.value,
         passed: true,
         warnings: [],
@@ -50,6 +51,7 @@ describe("createGuardrailNode", () => {
       outputSchema: OutputSchema,
       deps: [],
       validate: (input) => ({
+        kind: "validated",
         value: input.value,
         passed: false,
         warnings: ["Value too high"],
@@ -74,6 +76,7 @@ describe("createGuardrailNode", () => {
       outputSchema: OutputSchema,
       deps: [],
       validate: (input) => ({
+        kind: "validated",
         value: input.value,
         passed: false,
         warnings: ["bad"],
@@ -95,6 +98,7 @@ describe("createGuardrailNode", () => {
       outputSchema: OutputSchema,
       deps: [],
       validate: (input) => ({
+        kind: "validated",
         value: input.value,
         passed: true,
         warnings: [],

@@ -407,6 +407,7 @@ describe("runDag", () => {
       outputSchema: z.any(),
       deps: ["source"],
       validate: (input: any) => ({
+        kind: "validated" as const,
         value: input,
         passed: false,
         warnings: ["test warning"],

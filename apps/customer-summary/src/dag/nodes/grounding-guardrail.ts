@@ -26,12 +26,22 @@ const GuardrailCheckSchema = z.object({
   detail: z.string(),
 });
 
-const OutputSchema: z.ZodType<GuardrailResult<SynthesisOutput>> = z.object({
-  value: SynthesisOutputSchema.optional(),
-  passed: z.boolean(),
-  warnings: z.array(z.string()),
-  checks: z.array(GuardrailCheckSchema),
-});
+const OutputSchema: z.ZodType<GuardrailResult<SynthesisOutput>> = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("skipped"),
+    value: z.undefined(),
+    passed: z.literal(true),
+    warnings: z.array(z.string()),
+    checks: z.array(GuardrailCheckSchema),
+  }),
+  z.object({
+    kind: z.literal("validated"),
+    value: SynthesisOutputSchema,
+    passed: z.boolean(),
+    warnings: z.array(z.string()),
+    checks: z.array(GuardrailCheckSchema),
+  }),
+]);
 
 /**
  * Grounding guardrail node.
@@ -55,6 +65,7 @@ export const createGroundingGuardrailNode = () =>
       if (!synthesis) {
         // Non-ok branch (not_found, no_history, etc.) — nothing to validate
         return {
+          kind: "skipped",
           value: undefined,
           passed: true,
           warnings: [],
@@ -64,6 +75,7 @@ export const createGroundingGuardrailNode = () =>
 
       if (!customer) {
         return {
+          kind: "validated",
           value: synthesis,
           passed: true,
           warnings: [],
@@ -74,6 +86,7 @@ export const createGroundingGuardrailNode = () =>
       const grounding = validateGrounding(synthesis, customer);
 
       return {
+        kind: "validated",
         value: synthesis,
         passed: grounding.allPassed,
         warnings: [...grounding.warnings],

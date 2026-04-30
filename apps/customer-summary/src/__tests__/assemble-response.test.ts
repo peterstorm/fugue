@@ -25,6 +25,7 @@ const makeSynthesis = (): SynthesisOutput => ({
 });
 
 const makeGuardrailPassed = (): GuardrailResult<SynthesisOutput> => ({
+  kind: "validated",
   value: makeSynthesis(),
   passed: true,
   warnings: [],
@@ -32,6 +33,7 @@ const makeGuardrailPassed = (): GuardrailResult<SynthesisOutput> => ({
 });
 
 const makeGuardrailFailed = (): GuardrailResult<SynthesisOutput> => ({
+  kind: "validated",
   value: makeSynthesis(),
   passed: false,
   warnings: ["[topic_grounding] Ungrounded topics: shipping"],
@@ -95,7 +97,7 @@ describe("assemble-response node", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.value.status).toBe("ok");
+      expect(result.value.status).toBe("degraded");
     }
   });
 

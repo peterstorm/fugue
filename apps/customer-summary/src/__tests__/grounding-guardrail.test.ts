@@ -53,6 +53,7 @@ describe("grounding-guardrail node", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
+      expect(result.value.kind).toBe("validated");
       expect(result.value.passed).toBe(true);
       expect(result.value.warnings).toHaveLength(0);
       expect(result.value.value).toEqual(makeSynthesis());
@@ -68,10 +69,13 @@ describe("grounding-guardrail node", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
+      expect(result.value.kind).toBe("validated");
       expect(result.value.passed).toBe(false);
       expect(result.value.warnings.length).toBeGreaterThan(0);
       // Value is still passed through
-      expect(result.value.value.keyTopics).toContain("shipping");
+      if (result.value.kind === "validated") {
+        expect(result.value.value.keyTopics).toContain("shipping");
+      }
     }
   });
 
@@ -84,13 +88,14 @@ describe("grounding-guardrail node", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
+      expect(result.value.kind).toBe("validated");
       expect(result.value.passed).toBe(true);
       expect(result.value.checks[0].dimension).toBe("source_data");
       expect(result.value.checks[0].detail).toContain("No customer data");
     }
   });
 
-  test("returns passed=true with skip message when synthesis is undefined (non-ok branch)", async () => {
+  test("returns passed=true with skip when synthesis is undefined (non-ok branch)", async () => {
     const node = createGroundingGuardrailNode();
     const result = await node.run(
       { "synthesize": undefined, "fetch-crm": { customer: null } },
@@ -99,6 +104,7 @@ describe("grounding-guardrail node", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) {
+      expect(result.value.kind).toBe("skipped");
       expect(result.value.passed).toBe(true);
       expect(result.value.checks[0].detail).toContain("non-ok branch");
     }

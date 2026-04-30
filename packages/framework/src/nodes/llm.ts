@@ -76,7 +76,8 @@ export const createLlmNode = <I, O>(
         return ok(cacheResult.value as O);
       }
       if (cacheResult && !cacheResult.ok) {
-        console.warn(`[${config.id}] Cache read failed: ${cacheResult.error?.kind ?? "unknown"}`);
+        const msg = `[${config.id}] Cache read failed: ${cacheResult.error?.kind ?? "unknown"}`;
+        (ctx.logger?.warn ?? console.warn)(msg);
       }
     }
 
@@ -160,7 +161,8 @@ export const createLlmNode = <I, O>(
       try {
         await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
       } catch (e) {
-        console.warn(`[${config.id}] Cache write failed: ${e instanceof Error ? e.message : e}`);
+        const msg = `[${config.id}] Cache write failed: ${e instanceof Error ? e.message : e}`;
+        (ctx.logger?.warn ?? console.warn)(msg);
       }
     }
 

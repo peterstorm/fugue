@@ -133,7 +133,11 @@ export class TailSamplingExporter implements SpanExporter {
 
     // SpanExporter contract: resultCallback must be invoked exactly once per export() call.
     if (toForward.length > 0) {
-      this.inner.export(toForward, resultCallback);
+      try {
+        this.inner.export(toForward, resultCallback);
+      } catch {
+        resultCallback({ code: 1 });
+      }
     } else {
       resultCallback({ code: 0 });
     }

@@ -4,22 +4,38 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 
+/** Individual check detail. */
+export interface GuardrailCheck {
+  readonly dimension: string;
+  readonly passed: boolean;
+  readonly detail: string;
+}
+
 /**
- * Result of a guardrail check.
+ * Result of a guardrail check — discriminated union.
+ *
+ * - `skipped`: upstream produced no data (e.g. non-ok branch); no validation was performed.
+ * - `validated`: upstream data was present and validation ran; `passed` indicates outcome.
  */
-export interface GuardrailResult<T> {
-  /** The original value being validated (passed through). Undefined when upstream produced no data (e.g. non-ok branch). */
-  readonly value: T | undefined;
+export type GuardrailResult<T> = GuardrailSkipped | GuardrailValidated<T>;
+
+export interface GuardrailSkipped {
+  readonly kind: "skipped";
+  readonly value: undefined;
+  readonly passed: true;
+  readonly warnings: readonly string[];  readonly checks: readonly GuardrailCheck[];
+}
+
+export interface GuardrailValidated<T> {
+  readonly kind: "validated";
+  /** The original value being validated (passed through). */
+  readonly value: T;
   /** Whether all checks passed. */
   readonly passed: boolean;
   /** Human-readable warnings for failed checks. */
   readonly warnings: readonly string[];
   /** Per-check details. */
-  readonly checks: readonly {
-    readonly dimension: string;
-    readonly passed: boolean;
-    readonly detail: string;
-  }[];
+  readonly checks: readonly GuardrailCheck[];
 }
 
 export interface GuardrailNodeConfig<I, T> {
