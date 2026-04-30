@@ -397,4 +397,65 @@ describe("runDag", () => {
       expect(result.error.kind).toBe("cycle-detected");
     }
   });
+
+  it("guardrail node in DAG passes data through with warnings to downstream nodes", async () => {
+    const { createGuardrailNode } = await import("../nodes/guardrail.js");
+
+    const guardrail = createGuardrailNode({
+      id: "guard",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      deps: ["source"],
+      validate: (input: any) => ({
+        value: input,
+        passed: false,
+        warnings: ["test warning"],
+        checks: [{ dimension: "test", passed: false, detail: "failed check" }],
+      }),
+    });
+
+    const dag: DagDef = {
+      id: "guardrail-test",
+      nodes: [
+        createTransformNode({ id: "source", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: () => ok({ data: 42 }) }),
+        guardrail,
+        createTransformNode({
+          id: "consumer",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          deps: ["guard"],
+          transform: (input: any) => ok({ received: input.passed, value: input.value }),
+        }),
+      ],
+      edges: [
+        { from: "source", to: "guard" },
+        { from: "guard", to: "consumer" },
+      ],
+    };
+
+    const result = await runDag(dag, {}, mkCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect((result.value as any).received).toBe(false);
+      expect((result.value as any).value).toEqual({ data: 42 });
+    }
+  });
+
+  it("checkpoint write failure does not crash DAG execution", async () => {
+    const failingCache = {
+      writeCheckpoint: async () => { throw new Error("Redis timeout"); },
+    };
+    const dag: DagDef = {
+      id: "checkpoint-fail",
+      nodes: [
+        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: () => ok(42) }),
+      ],
+      edges: [],
+    };
+    const result = await runDag(dag, {}, mkCtx({ cache: failingCache }));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe(42);
+    }
+  });
 });

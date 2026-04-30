@@ -108,6 +108,8 @@ export class TailSamplingExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+    let forwarded = false;
+
     for (const span of spans) {
       // MlflowSpanProcessor only calls export for root spans,
       // but guard just in case
@@ -121,6 +123,7 @@ export class TailSamplingExporter implements SpanExporter {
       if (shouldFlush) {
         // Forward to real MLflow exporter — it will call popTrace() internally
         this.inner.export([span], resultCallback);
+        forwarded = true;
         this.exported++;
       } else {
         // Discard — but MUST clean up InMemoryTraceManager to prevent memory leak
@@ -128,6 +131,12 @@ export class TailSamplingExporter implements SpanExporter {
         traceManager.popTrace(span.spanContext().traceId);
         this.dropped++;
       }
+    }
+
+    // SpanExporter contract: resultCallback must be invoked exactly once per export() call.
+    // If we forwarded to inner exporter, it handles the callback. Otherwise, signal success.
+    if (!forwarded) {
+      resultCallback({ code: 0 });
     }
   }
 

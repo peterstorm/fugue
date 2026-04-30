@@ -5,7 +5,7 @@ set -euo pipefail
 # Prerequisites: ollama must be running (ollama serve)
 
 MODEL="avcodes/flowaicom-flow-judge"
-OLLAMA_HOST="${OLLAMA_BASE_URL:-http://localhost:11434}"
+export OLLAMA_HOST="${OLLAMA_BASE_URL:-http://localhost:11434}"
 
 echo "Pulling Flow Judge model: $MODEL"
 echo "Ollama host: $OLLAMA_HOST"

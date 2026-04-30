@@ -95,7 +95,9 @@ export class RedisCheckpointer implements Checkpointer {
   async saveNode(runId: string, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
     try {
       await this.redis.hset(nodesKey(runId), nodeId, serializeNode(state));
+      // Extend TTL on both keys so they expire together
       await this.redis.expire(nodesKey(runId), TTL_SECONDS);
+      await this.redis.expire(metaKey(runId), TTL_SECONDS);
       return ok(undefined);
     } catch (e) {
       return err({

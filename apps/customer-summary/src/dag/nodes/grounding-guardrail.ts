@@ -2,23 +2,36 @@ import { z } from "zod";
 import { createGuardrailNode } from "@ai-summary/framework";
 import type { GuardrailResult } from "@ai-summary/framework";
 import { validateGrounding } from "../../validation/grounding.js";
+import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";
+import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord } from "../../schemas/crm.js";
 
 /**
  * Input shape: receives outputs from both synthesize and fetch-crm nodes.
  */
 interface GroundingInput {
-  readonly "synthesize": SynthesisOutput;
+  readonly "synthesize": SynthesisOutput | undefined;
   readonly "fetch-crm": { readonly customer: CrmRecord | null };
 }
 
 const InputSchema = z.object({
-  "synthesize": z.any(),
-  "fetch-crm": z.any(),
+  "synthesize": SynthesisOutputSchema.optional(),
+  "fetch-crm": z.object({ customer: CrmRecordSchema.nullable() }),
 });
 
-const OutputSchema: z.ZodType<GuardrailResult<SynthesisOutput>> = z.any();
+const GuardrailCheckSchema = z.object({
+  dimension: z.string(),
+  passed: z.boolean(),
+  detail: z.string(),
+});
+
+const OutputSchema: z.ZodType<GuardrailResult<SynthesisOutput>> = z.object({
+  value: SynthesisOutputSchema.optional(),
+  passed: z.boolean(),
+  warnings: z.array(z.string()),
+  checks: z.array(GuardrailCheckSchema),
+});
 
 /**
  * Grounding guardrail node.
@@ -38,6 +51,16 @@ export const createGroundingGuardrailNode = () =>
     validate: (input): GuardrailResult<SynthesisOutput> => {
       const synthesis = input["synthesize"];
       const customer = input["fetch-crm"]?.customer;
+
+      if (!synthesis) {
+        // Non-ok branch (not_found, no_history, etc.) — nothing to validate
+        return {
+          value: undefined as unknown as SynthesisOutput,
+          passed: true,
+          warnings: [],
+          checks: [{ dimension: "source_data", passed: true, detail: "No synthesis output to validate (non-ok branch)" }],
+        };
+      }
 
       if (!customer) {
         return {

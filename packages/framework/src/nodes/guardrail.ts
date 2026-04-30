@@ -46,15 +46,10 @@ export interface GuardrailNodeConfig<I, T> {
  * - Run a pure validation function against upstream outputs
  * - Always pass data through (never block the pipeline)
  * - Attach warnings when validation fails
- * - Emit as TOOL spans in MLflow (mapped by the executor)
- * - Set span status to ERROR when checks fail, so failures are visible in MLflow UI
+ * - Emit as TOOL spans in MLflow (mapped by the executor via SPAN_TYPE_MAP)
  *
- * The executor wraps each node in an @mlflow/core withSpan call,
- * setting inputs and outputs on the span automatically. For guardrail nodes,
- * the executor maps kind "guardrail" to SpanType.TOOL.
- *
- * When validation fails, the node sets the span status to ERROR via the observer,
- * so the span shows red in MLflow traces.
+ * The executor is responsible for setting span status to ERROR when
+ * `result.passed === false`. See executor.ts for span wrapping behavior.
  */
 export const createGuardrailNode = <I, T>(
   config: GuardrailNodeConfig<I, T>,

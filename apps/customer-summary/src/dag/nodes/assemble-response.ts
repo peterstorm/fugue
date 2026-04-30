@@ -3,12 +3,18 @@ import { createTransformNode, ok } from "@ai-summary/framework";
 import type { Result, FrameworkError, GuardrailResult } from "@ai-summary/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
 import type { SummaryResponse } from "../../schemas/response.js";
+import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 
 const InputSchema = z.object({
-  "extract-features": z.any(),
-  "grounding-guardrail": z.any(),
+  "extract-features": z.object({ branch: z.string() }).passthrough(),
+  "grounding-guardrail": z.object({
+    value: SynthesisOutputSchema.optional(),
+    passed: z.boolean(),
+    warnings: z.array(z.string()),
+    checks: z.array(z.object({ dimension: z.string(), passed: z.boolean(), detail: z.string() })),
+  }).optional(),
 });
 
 interface AssembleInput {
@@ -33,7 +39,11 @@ export const createAssembleResponseNode = (customerId: string) =>
         case "insufficient_data":
           return ok({ status: "insufficient_data" as const, customerId, message: "Insufficient data for analysis" });
         case "ok": {
-          const guardrail = input["grounding-guardrail"]!;
+          const guardrail = input["grounding-guardrail"];
+          if (!guardrail) {
+            // Guardrail output missing — degrade gracefully, skip warnings
+            return ok({ status: "ok" as const, customerId, summary: {} as SynthesisOutput });
+          }
           const synthesis = guardrail.value;
 
           const groundingWarnings = guardrail.passed

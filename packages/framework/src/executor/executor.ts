@@ -181,9 +181,15 @@ const runDagInner = async <I, O>(
           const duration = Date.now() - nodeStart;
           outputs.set(nodeId, outputResult.value);
 
-          // Write checkpoint if available
+          // Write checkpoint if available (best-effort — don't crash DAG on cache failure)
           if (ctx.cache?.writeCheckpoint) {
-            await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
+            try {
+              await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
+            } catch (e) {
+              if (ctx.logger) {
+                ctx.logger.warn?.(`Checkpoint write failed for ${nodeId}: ${e instanceof Error ? e.message : e}`);
+              }
+            }
           }
 
           emit(ctx, {

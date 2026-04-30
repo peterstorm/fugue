@@ -1,7 +1,7 @@
 # Plan Alignment Report
 
-**Spec:** /Users/hansen142/dev/agentic/ai-summary/.claude/specs/2026-04-28-ai-summary-dag/spec.md
-**Plan:** /Users/hansen142/dev/agentic/ai-summary/.claude/plans/2026-04-28-ai-summary-dag.md
+**Spec:** .claude/specs/2026-04-28-ai-summary-dag/spec.md
+**Plan:** .claude/plans/2026-04-28-ai-summary-dag.md
 **Date:** 2026-04-29
 
 ## Summary
