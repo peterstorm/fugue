@@ -3,22 +3,34 @@ Custom scorers using Flow Judge (3.8B) via Ollama for local + CI evaluation.
 
 Flow Judge is a purpose-built LLM-as-judge model that scores on rubrics
 and returns structured <feedback>/<score> output. Runs locally via Ollama
-with GPU acceleration (Metal on macOS, CUDA on Linux).
+with GPU acceleration (Metal on macOS, CUDA on Linux) or CPU.
 
 Ollama exposes an OpenAI-compatible API at /v1/chat/completions,
 so we use the openai SDK to call it.
+
+Modes:
+  - "full": All scorers (3 LLM-judged + 1 deterministic). Requires Ollama.
+  - "ci":   Deterministic grounding scorer only. No Ollama needed.
 """
 
+import json as _json
 import os
 import re
-from typing import Any, Optional
+import sys
+from pathlib import Path as _Path
+from typing import Any, Optional, TYPE_CHECKING
 
-from openai import OpenAI
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 FLOW_JUDGE_MODEL = "avcodes/flowaicom-flow-judge"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_TIMEOUT_SEC = int(os.environ.get("OLLAMA_TIMEOUT_SEC", "120"))
 
-SCORER_NAMES = ["factuality", "completeness", "conciseness", "grounding"]
+LLM_SCORER_NAMES = ["factuality", "completeness", "conciseness"]
+DETERMINISTIC_SCORER_NAMES = ["grounding"]
+SCORER_NAMES = LLM_SCORER_NAMES + DETERMINISTIC_SCORER_NAMES
+
 PASS_THRESHOLD = 4.0
 
 # --- Flow Judge prompt template ---
@@ -99,11 +111,17 @@ RUBRICS = {
 }
 
 
+# --- Parsing helpers ---
+
 def _parse_score(response_text: str) -> Optional[int]:
     """Extract numeric score from Flow Judge <score> tags."""
     match = re.search(r"<score>\s*(\d+)\s*</score>", response_text)
     if match:
-        return int(match.group(1))
+        score = int(match.group(1))
+        if 1 <= score <= 5:
+            return score
+        print(f"WARNING: Flow Judge returned out-of-range score {score}, clamping to 1-5", file=sys.stderr)
+        return max(1, min(5, score))
     return None
 
 
@@ -115,16 +133,25 @@ def _parse_feedback(response_text: str) -> str:
     return response_text.strip()
 
 
-def _create_client() -> OpenAI:
-    """Create OpenAI client pointing at Ollama's compatible API."""
-    return OpenAI(
-        base_url=f"{OLLAMA_BASE_URL}/v1",
-        api_key="ollama",  # Ollama doesn't require a real key
-    )
+# --- Shared Ollama client ---
+
+_client: Optional["OpenAI"] = None
+
+
+def _get_client() -> "OpenAI":
+    """Get or create a shared OpenAI client pointing at Ollama."""
+    global _client
+    if _client is None:
+        from openai import OpenAI
+        _client = OpenAI(
+            base_url=f"{OLLAMA_BASE_URL}/v1",
+            api_key="ollama",  # Ollama doesn't require a real key
+            timeout=OLLAMA_TIMEOUT_SEC,
+        )
+    return _client
 
 
 def _call_flow_judge(
-    client: OpenAI,
     output: str,
     reference_summary: str,
     scorer_name: str,
@@ -140,16 +167,29 @@ def _call_flow_judge(
         scoring_rubric=rubric["rubric"],
     )
 
-    response = client.chat.completions.create(
-        model=FLOW_JUDGE_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        max_tokens=1024,
-    )
+    client = _get_client()
+
+    try:
+        response = client.chat.completions.create(
+            model=FLOW_JUDGE_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=1024,
+        )
+    except Exception as e:
+        print(f"ERROR: Flow Judge call failed for {scorer_name}: {e}", file=sys.stderr)
+        return {"score": None, "feedback": f"Flow Judge call failed: {e}", "raw_response": ""}
 
     text = response.choices[0].message.content or ""
     score = _parse_score(text)
     feedback = _parse_feedback(text)
+
+    if score is None:
+        print(
+            f"WARNING: Flow Judge returned no parseable score for {scorer_name}. "
+            f"Raw response (first 200 chars): {text[:200]}",
+            file=sys.stderr,
+        )
 
     return {
         "score": score,
@@ -159,12 +199,10 @@ def _call_flow_judge(
 
 
 # --- MLflow-compatible scorer functions ---
-# These follow the interface expected by mlflow.genai.evaluate():
-#   scorer(inputs, outputs, expectations) -> dict with score
 
-def _make_scorer(scorer_name: str):
-    """Factory for MLflow @scorer-compatible functions."""
-    client = _create_client()
+
+def _make_llm_scorer(scorer_name: str):
+    """Create an LLM-based scorer function for the given dimension."""
 
     def score_fn(inputs: dict, outputs: dict, expectations: dict) -> dict[str, Any]:
         summary_text = outputs.get("summary", str(outputs))
@@ -172,15 +210,20 @@ def _make_scorer(scorer_name: str):
         customer_id = inputs.get("customer_id", "unknown")
 
         result = _call_flow_judge(
-            client=client,
             output=summary_text,
             reference_summary=reference,
             scorer_name=scorer_name,
             user_query=f"Summarize conversation history for customer {customer_id}.",
         )
 
+        score = result["score"]
+        if score is None:
+            # Default to lowest score on parse failure so it doesn't silently pass
+            print(f"WARNING: Defaulting {scorer_name} score to 1 for {customer_id} (parse failure)", file=sys.stderr)
+            score = 1
+
         return {
-            "score": result["score"],
+            "score": score,
             "justification": result["feedback"],
         }
 
@@ -189,11 +232,6 @@ def _make_scorer(scorer_name: str):
 
 
 # --- Deterministic grounding scorer ---
-# Verifies factual claims in the summary against source fixture data.
-# No LLM judge needed -- pure programmatic checks.
-
-import json as _json
-from pathlib import Path as _Path
 
 
 def _load_fixture(customer_id: str) -> Optional[dict]:
@@ -217,7 +255,6 @@ def _extract_all_messages(fixture: dict) -> list[str]:
 def _check_conversation_count(summary: str, fixture: dict) -> tuple[bool, str]:
     """Check if any conversation count mentioned in the summary matches reality."""
     actual_count = len(fixture.get("conversations", []))
-    # Look for numeric claims about conversations
     count_patterns = re.findall(r"(\d+)\s+conversation", summary.lower())
     if not count_patterns:
         return True, "No conversation count claim found"
@@ -232,12 +269,9 @@ def _check_customer_name(summary: str, fixture: dict) -> tuple[bool, str]:
     actual_name = fixture.get("name", "")
     if not actual_name:
         return True, "No name in fixture to verify"
-    # Check if summary mentions a different name (not the actual one)
-    # We only flag if the actual name is NOT found but another proper-noun-like name is
     first_name = actual_name.split()[0]
     if first_name.lower() in summary.lower():
         return True, f"Customer name '{first_name}' found in summary"
-    # No name mentioned is fine -- only flag if a wrong name appears
     return True, "Customer name not mentioned (acceptable)"
 
 
@@ -248,7 +282,6 @@ def _check_topic_grounding(summary: str, fixture: dict) -> tuple[float, str]:
     """
     all_text = " ".join(_extract_all_messages(fixture)).lower()
 
-    # Common topic keywords to check for in the summary
     topic_keywords = {
         "billing": ["invoice", "payment", "charge", "refund", "bill", "price", "cost", "subscription", "fee", "billing"],
         "technical": ["error", "bug", "crash", "slow", "install", "update", "login", "password", "api", "integration"],
@@ -263,10 +296,8 @@ def _check_topic_grounding(summary: str, fixture: dict) -> tuple[float, str]:
     grounded_topics = []
 
     for topic, keywords in topic_keywords.items():
-        # Check if summary mentions this topic
         if any(kw in summary_lower for kw in keywords) or topic in summary_lower:
             claimed_topics.append(topic)
-            # Check if source data supports this topic
             if any(kw in all_text for kw in keywords):
                 grounded_topics.append(topic)
 
@@ -296,7 +327,6 @@ def _check_sentiment_consistency(summary: str, fixture: dict) -> tuple[bool, str
     claims_positive = any(w in summary_lower for w in ["positive sentiment", "satisfied", "happy customer", "generally positive"])
     claims_negative = any(w in summary_lower for w in ["negative sentiment", "dissatisfied", "frustrated", "unhappy", "at risk", "churn"])
 
-    # Flag contradiction: summary says positive but source is overwhelmingly negative (or vice versa)
     if claims_positive and neg_count > pos_count * 2 and neg_count >= 3:
         return False, f"Claims positive but source has {neg_count} negative vs {pos_count} positive indicators"
     if claims_negative and pos_count > neg_count * 2 and pos_count >= 3:
@@ -325,32 +355,27 @@ def score_grounding(inputs: dict, outputs: dict, expectations: dict) -> dict[str
     checks: list[tuple[str, bool, str]] = []
     penalties = 0.0
 
-    # Check 1: Conversation count
     count_ok, count_msg = _check_conversation_count(summary_text, fixture)
     checks.append(("conversation_count", count_ok, count_msg))
     if not count_ok:
         penalties += 1.5
 
-    # Check 2: Customer name
     name_ok, name_msg = _check_customer_name(summary_text, fixture)
     checks.append(("customer_name", name_ok, name_msg))
     if not name_ok:
         penalties += 1.0
 
-    # Check 3: Topic grounding
     topic_ratio, topic_msg = _check_topic_grounding(summary_text, fixture)
     topic_ok = topic_ratio >= 0.8
     checks.append(("topic_grounding", topic_ok, topic_msg))
     if not topic_ok:
         penalties += (1.0 - topic_ratio) * 2.0
 
-    # Check 4: Sentiment consistency
     sent_ok, sent_msg = _check_sentiment_consistency(summary_text, fixture)
     checks.append(("sentiment_consistency", sent_ok, sent_msg))
     if not sent_ok:
         penalties += 1.5
 
-    # Convert penalties to 1-5 score
     raw_score = max(1, min(5, 5.0 - penalties))
     score = round(raw_score)
 
@@ -360,33 +385,58 @@ def score_grounding(inputs: dict, outputs: dict, expectations: dict) -> dict[str
     return {"score": score, "justification": justification}
 
 
-def get_scorers() -> list:
-    """Return all scorers wrapped for mlflow.genai.evaluate()."""
-    llm_scorer_names = [n for n in SCORER_NAMES if n != "grounding"]
+# --- Fixture validation ---
+
+def validate_fixtures(cases_path: str) -> list[str]:
+    """Check that fixture files exist for all eval case customer IDs. Returns list of warnings."""
+    warnings = []
+    raw = _json.loads(_Path(cases_path).read_text())
+    fixtures_dir = _Path(__file__).parent.parent / "fixtures" / "customers"
+    for item in raw:
+        cid = item.get("customer_id", "")
+        fixture_path = fixtures_dir / f"{cid}.json"
+        if not fixture_path.exists():
+            warnings.append(f"Missing fixture file for {cid}: {fixture_path}")
+    return warnings
+
+
+# --- Scorer registry ---
+
+def get_scorers(mode: str = "full") -> list:
+    """Return scorers wrapped for mlflow.genai.evaluate().
+
+    Args:
+        mode: "full" for all scorers (requires Ollama), "ci" for deterministic only.
+    """
+    if mode == "ci":
+        scorer_names = DETERMINISTIC_SCORER_NAMES
+    else:
+        scorer_names = SCORER_NAMES
 
     try:
         from mlflow.genai.scorers import scorer as mlflow_scorer
-
-        scorers = []
-        # LLM-based scorers (factuality, completeness, conciseness)
-        for name in llm_scorer_names:
-            fn = _make_scorer(name)
-
-            @mlflow_scorer(name=name)
-            def _scorer(inputs, outputs, expectations, _fn=fn):
-                return _fn(inputs, outputs, expectations)
-
-            scorers.append(_scorer)
-
-        # Deterministic grounding scorer
-        @mlflow_scorer(name="grounding")
-        def _grounding_scorer(inputs, outputs, expectations):
-            return score_grounding(inputs, outputs, expectations)
-
-        scorers.append(_grounding_scorer)
-        return scorers
     except ImportError:
         # Fallback: return raw functions if mlflow scorer decorator unavailable
-        fns = [_make_scorer(name) for name in llm_scorer_names]
-        fns.append(score_grounding)
+        fns = []
+        for name in scorer_names:
+            if name == "grounding":
+                fns.append(score_grounding)
+            else:
+                fns.append(_make_llm_scorer(name))
         return fns
+
+    scorers = []
+    for name in scorer_names:
+        if name == "grounding":
+            raw_fn = score_grounding
+        else:
+            raw_fn = _make_llm_scorer(name)
+
+        # Wrap with @mlflow_scorer — capture raw_fn via default arg
+        @mlflow_scorer(name=name)
+        def _wrapped(inputs, outputs, expectations, _fn=raw_fn):
+            return _fn(inputs, outputs, expectations)
+
+        scorers.append(_wrapped)
+
+    return scorers

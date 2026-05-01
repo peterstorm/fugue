@@ -47,11 +47,30 @@ services:
       - APP_BASE_URL=${APP_BASE_URL:-http://host.containers.internal:3000}
       - OLLAMA_BASE_URL=http://ollama:11434
       - EVAL_CASES_PATH=fixtures/eval/cases.json
+      - EVAL_MODE=full
     volumes:
       - ../apps/customer-summary/eval:/eval:ro
       - ../apps/customer-summary/fixtures:/eval/fixtures:ro
     profiles:
       - eval
+
+  eval-ci:
+    build:
+      context: ..
+      dockerfile: infra/eval.Dockerfile
+    depends_on:
+      mlflow:
+        condition: service_started
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - APP_BASE_URL=${APP_BASE_URL:-http://host.containers.internal:3000}
+      - EVAL_CASES_PATH=fixtures/eval/cases.json
+      - EVAL_MODE=ci
+    volumes:
+      - ../apps/customer-summary/eval:/eval:ro
+      - ../apps/customer-summary/fixtures:/eval/fixtures:ro
+    profiles:
+      - eval-ci
 
 volumes:
   mlflow_data:

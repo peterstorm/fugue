@@ -8,6 +8,7 @@
     "infra:up": "bash scripts/infra-up.sh",
     "infra:down": "bash scripts/infra-down.sh",
     "eval": "podman-compose -f infra/compose.yaml --profile eval up --build eval",
+    "eval:ci": "podman-compose -f infra/compose.yaml --profile eval-ci up --build eval-ci",
     "eval:pull-model": "bash scripts/pull-judge-model.sh",
     "dev": "bun run --filter customer-summary dev"
   },

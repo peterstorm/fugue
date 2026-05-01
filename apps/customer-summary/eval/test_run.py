@@ -61,15 +61,20 @@ class TestFormatResultsTable:
     def test_contains_key_info(self):
         results = [EvalResult(customer_id="c1", summary="some summary", reference_summary="ref")]
         agg = AggregateResult(scorer_means={"factuality": 4.5}, overall_mean=4.5, passed=True)
-        table = format_results_table(results, agg)
+        table = format_results_table(results, agg, mode="full")
         assert "c1" in table
         assert "4.50" in table
         assert "PASS" in table
 
     def test_fail_verdict(self):
         agg = AggregateResult(scorer_means={"factuality": 3.0}, overall_mean=3.0, passed=False)
-        table = format_results_table([], agg)
+        table = format_results_table([], agg, mode="full")
         assert "FAIL" in table
+
+    def test_mode_displayed(self):
+        agg = AggregateResult(scorer_means={}, overall_mean=0.0, passed=False)
+        table = format_results_table([], agg, mode="ci")
+        assert "mode=ci" in table
 
 
 class TestComputeAggregate:
@@ -97,4 +102,20 @@ class TestComputeAggregate:
 
         agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness", "grounding"])
         assert agg.overall_mean == pytest.approx(3.0)
+        assert agg.passed is False
+
+    def test_ci_mode_grounding_only(self):
+        class FakeResult:
+            metrics = {"grounding/score/mean": 4.5}
+
+        agg = compute_aggregate(FakeResult(), ["grounding"])
+        assert agg.overall_mean == pytest.approx(4.5)
+        assert agg.passed is True
+
+    def test_empty_metrics(self):
+        class FakeResult:
+            metrics = {}
+
+        agg = compute_aggregate(FakeResult(), ["factuality"])
+        assert agg.overall_mean == 0.0
         assert agg.passed is False
