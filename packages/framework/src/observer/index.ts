@@ -13,9 +13,7 @@ export {
   allOf,
   custom,
 } from "./policy.js";
-export type { MlflowSpanKind, MlflowSpan } from "./mlflow.js";
-export { MLflowObserver, mapNodeKindToMlflow, mapSubSpanKindToMlflow } from "./mlflow.js";
-export type { TraceSummary } from "./tail-sampling-exporter.js";
-export { TailSamplingExporter } from "./tail-sampling-exporter.js";
+export type { TraceManager } from "./tail-sampling-exporter.js";
+export { TailSamplingExporter, extractRunSummary } from "./tail-sampling-exporter.js";
 export type { TracingConfig, TracingHandle } from "./init-tracing.js";
 export { initTracing } from "./init-tracing.js";

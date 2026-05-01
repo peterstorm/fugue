@@ -21,8 +21,12 @@ const loadMlflow = async () => {
     _withSpan = mlflow.withSpan;
     _SpanType = mlflow.SpanType;
     _SpanStatusCode = mlflow.SpanStatusCode;
-  } catch {
-    // @mlflow/core not available — tracing disabled
+  } catch (e) {
+    // Distinguish "not installed" (expected) from "installed but broken" (bug)
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") {
+      console.warn(`[executor] @mlflow/core import failed unexpectedly: ${e instanceof Error ? e.message : e}`);
+    }
   }
 };
 

@@ -12,8 +12,11 @@ const loadMlflow = async () => {
   try {
     const mlflow = await import("@mlflow/core");
     _getCurrentActiveSpan = mlflow.getCurrentActiveSpan;
-  } catch {
-    // tracing not available
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") {
+      console.warn(`[llm] @mlflow/core import failed unexpectedly: ${e instanceof Error ? e.message : e}`);
+    }
   }
 };
 

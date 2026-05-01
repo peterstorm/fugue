@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
-import { TailSamplingExporter } from "../observer/tail-sampling-exporter.js";
+import { TailSamplingExporter, extractRunSummary, type TraceManager } from "../observer/tail-sampling-exporter.js";
 import { alwaysOn, errorOnly, anyOf, hadRetry } from "../observer/policy.js";
 
 // --- Helpers to create fake ReadableSpan objects ---
@@ -36,16 +36,23 @@ const fakeSpan = (overrides: {
   } as unknown as ReadableSpan;
 };
 
-// --- Mock the InMemoryTraceManager ---
-// We mock the module so extractTraceSummary works without a real MLflow trace
+// --- Stub TraceManager (no real MLflow dependency) ---
 
-// Since extractTraceSummary uses InMemoryTraceManager.getInstance() internally,
-// and we can't easily mock that deep import, we test the exporter's observable behavior:
-// - Does it call inner.export when policy says flush?
-// - Does it NOT call inner.export when policy says drop?
-// - Do counters increment correctly?
-
-// We use a mock inner exporter to track calls.
+const createStubTraceManager = (overrides?: {
+  spans?: Map<string, { name: string; getAttribute(key: string): unknown }>;
+}): TraceManager & { poppedTraceIds: string[] } => {
+  const poppedTraceIds: string[] = [];
+  return {
+    poppedTraceIds,
+    getMlflowTraceIdFromOtelId: (otelTraceId: string) => `mlflow-${otelTraceId}`,
+    getTrace: () =>
+      overrides?.spans ? { spanDict: overrides.spans } : null,
+    popTrace: (otelTraceId: string) => {
+      poppedTraceIds.push(otelTraceId);
+      return null;
+    },
+  };
+};
 
 const createMockExporter = (): SpanExporter & { exportCalls: ReadableSpan[][]; shutdownCalled: boolean } => {
   const exportCalls: ReadableSpan[][] = [];
@@ -63,44 +70,54 @@ const createMockExporter = (): SpanExporter & { exportCalls: ReadableSpan[][]; s
 };
 
 describe("TailSamplingExporter", () => {
-  // Note: These tests will encounter the InMemoryTraceManager.getInstance() call
-  // inside extractTraceSummary. If @mlflow/core is not initialized, this may throw.
-  // We wrap in try/catch to test what we can without a full MLflow init.
-
-  describe("policy-driven forwarding (unit level)", () => {
+  describe("policy-driven forwarding", () => {
     it("alwaysOn policy forwards all root spans to inner exporter", () => {
       const inner = createMockExporter();
-      const exporter = new TailSamplingExporter(inner, alwaysOn());
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, alwaysOn(), tm);
       const span = fakeSpan();
 
-      // extractTraceSummary may fail without MLflow init — that's expected
-      // in unit tests. We're testing the structural behavior.
-      try {
-        exporter.export([span], () => {});
-      } catch {
-        // InMemoryTraceManager not initialized — acceptable in unit test
-      }
+      exporter.export([span], () => {});
 
-      // If it didn't throw, check forwarding
-      if (inner.exportCalls.length > 0) {
-        expect(inner.exportCalls.length).toBe(1);
-        expect(exporter.exported).toBe(1);
-        expect(exporter.dropped).toBe(0);
-      }
+      expect(inner.exportCalls.length).toBe(1);
+      expect(exporter.exported).toBe(1);
+      expect(exporter.dropped).toBe(0);
+    });
+
+    it("errorOnly policy drops ok spans and cleans up trace manager", () => {
+      const inner = createMockExporter();
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, errorOnly(), tm);
+      const span = fakeSpan({ statusCode: 0 });
+
+      exporter.export([span], () => {});
+
+      expect(inner.exportCalls.length).toBe(0);
+      expect(exporter.exported).toBe(0);
+      expect(exporter.dropped).toBe(1);
+      expect(tm.poppedTraceIds).toEqual(["abc123"]);
+    });
+
+    it("errorOnly policy forwards error spans", () => {
+      const inner = createMockExporter();
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, errorOnly(), tm);
+      const span = fakeSpan({ statusCode: 2 }); // 2 = ERROR in OTel
+
+      exporter.export([span], () => {});
+
+      expect(inner.exportCalls.length).toBe(1);
+      expect(exporter.exported).toBe(1);
     });
 
     it("skips child spans (with parentSpanId)", () => {
       const inner = createMockExporter();
-      const exporter = new TailSamplingExporter(inner, alwaysOn());
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, alwaysOn(), tm);
       const child = fakeSpan({ parentSpanId: "parent1" });
 
-      try {
-        exporter.export([child], () => {});
-      } catch {
-        // expected
-      }
+      exporter.export([child], () => {});
 
-      // Child spans should be skipped regardless of InMemoryTraceManager
       expect(inner.exportCalls.length).toBe(0);
       expect(exporter.exported).toBe(0);
       expect(exporter.dropped).toBe(0);
@@ -108,81 +125,100 @@ describe("TailSamplingExporter", () => {
 
     it("shutdown delegates to inner exporter", async () => {
       const inner = createMockExporter();
-      const exporter = new TailSamplingExporter(inner, alwaysOn());
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, alwaysOn(), tm);
       await exporter.shutdown();
       expect(inner.shutdownCalled).toBe(true);
     });
 
     it("counters start at zero", () => {
       const inner = createMockExporter();
-      const exporter = new TailSamplingExporter(inner, alwaysOn());
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, alwaysOn(), tm);
       expect(exporter.exported).toBe(0);
       expect(exporter.dropped).toBe(0);
+    });
+
+    it("logs error when inner export throws", () => {
+      const inner = createMockExporter();
+      inner.export = () => { throw new Error("network down"); };
+      const tm = createStubTraceManager();
+      const exporter = new TailSamplingExporter(inner, alwaysOn(), tm);
+      let callbackCode = -1;
+
+      exporter.export([fakeSpan()], (result) => { callbackCode = result.code; });
+
+      expect(callbackCode).toBe(1);
+    });
+  });
+
+  describe("extractRunSummary", () => {
+    it("extracts summary from root span with trace manager data", () => {
+      const spans = new Map<string, { name: string; getAttribute(key: string): unknown }>();
+      spans.set("s1", { name: "node:fetch", getAttribute: (k) => k === "cost_usd" ? 0.05 : undefined });
+      spans.set("s2", { name: "node:llm", getAttribute: (k) => k === "cost_usd" ? 0.10 : undefined });
+      spans.set("s3", { name: "node:fetch", getAttribute: () => undefined }); // duplicate name = retry
+
+      const tm = createStubTraceManager({ spans });
+      const span = fakeSpan({ statusCode: 2, startTime: [1000, 0], endTime: [1002, 500000000] });
+
+      const summary = extractRunSummary(span, tm);
+
+      expect(summary.status).toBe("error");
+      expect(summary.nodeCount).toBe(3);
+      expect(summary.retryCount).toBe(1); // "node:fetch" appeared twice
+      expect(summary.totalCostUsd).toBeCloseTo(0.15);
+      expect(summary.totalDuration).toBeCloseTo(2500);
+    });
+
+    it("returns defaults when trace manager has no data", () => {
+      const tm = createStubTraceManager();
+      const span = fakeSpan({ statusCode: 0, startTime: [1000, 0], endTime: [1001, 0] });
+
+      const summary = extractRunSummary(span, tm);
+
+      expect(summary.status).toBe("ok");
+      expect(summary.nodeCount).toBe(1);
+      expect(summary.retryCount).toBe(0);
+      expect(summary.totalCostUsd).toBe(0);
+      expect(summary.totalDuration).toBeCloseTo(1000);
     });
   });
 
   describe("policy logic (isolated)", () => {
-    // Test policies independently of the exporter — these don't need MLflow
     it("errorOnly policy returns false for ok runs", () => {
       const policy = errorOnly();
       expect(policy.shouldFlush({
-        runId: "r1",
-        status: "ok",
-        totalDuration: 100,
-        nodeCount: 3,
-        retryCount: 0,
-        cacheHitCount: 0,
-        totalCostUsd: 0.01,
+        runId: "r1", status: "ok", totalDuration: 100,
+        nodeCount: 3, retryCount: 0, cacheHitCount: 0, totalCostUsd: 0.01,
       })).toBe(false);
     });
 
     it("errorOnly policy returns true for error runs", () => {
       const policy = errorOnly();
       expect(policy.shouldFlush({
-        runId: "r1",
-        status: "error",
-        totalDuration: 100,
-        nodeCount: 3,
-        retryCount: 0,
-        cacheHitCount: 0,
-        totalCostUsd: 0.01,
+        runId: "r1", status: "error", totalDuration: 100,
+        nodeCount: 3, retryCount: 0, cacheHitCount: 0, totalCostUsd: 0.01,
       })).toBe(true);
     });
 
     it("hadRetry policy returns true when retryCount > 0", () => {
       const policy = hadRetry();
       expect(policy.shouldFlush({
-        runId: "r1",
-        status: "ok",
-        totalDuration: 100,
-        nodeCount: 3,
-        retryCount: 1,
-        cacheHitCount: 0,
-        totalCostUsd: 0.01,
+        runId: "r1", status: "ok", totalDuration: 100,
+        nodeCount: 3, retryCount: 1, cacheHitCount: 0, totalCostUsd: 0.01,
       })).toBe(true);
     });
 
     it("anyOf combines policies", () => {
       const policy = anyOf(errorOnly(), hadRetry());
-      // ok run, no retry → false
       expect(policy.shouldFlush({
-        runId: "r1",
-        status: "ok",
-        totalDuration: 100,
-        nodeCount: 3,
-        retryCount: 0,
-        cacheHitCount: 0,
-        totalCostUsd: 0.01,
+        runId: "r1", status: "ok", totalDuration: 100,
+        nodeCount: 3, retryCount: 0, cacheHitCount: 0, totalCostUsd: 0.01,
       })).toBe(false);
-      // ok run, has retry → true
       expect(policy.shouldFlush({
-        runId: "r1",
-        status: "ok",
-        totalDuration: 100,
-        nodeCount: 3,
-        retryCount: 1,
-        cacheHitCount: 0,
-        totalCostUsd: 0.01,
+        runId: "r1", status: "ok", totalDuration: 100,
+        nodeCount: 3, retryCount: 1, cacheHitCount: 0, totalCostUsd: 0.01,
       })).toBe(true);
     });
   });

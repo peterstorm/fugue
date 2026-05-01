@@ -12,11 +12,7 @@
 import * as mlflow from "@mlflow/core";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { trace } from "@opentelemetry/api";
-// Deep imports — pinned at @mlflow/core@0.2.0
-// @ts-ignore — internal path
-import { MlflowSpanProcessor, MlflowSpanExporter } from "@mlflow/core/dist/exporters/mlflow";
-// @ts-ignore — internal path
-import { createAuthProvider } from "@mlflow/core/dist/auth";
+import { MlflowSpanProcessor, MlflowSpanExporter, createAuthProvider, InMemoryTraceManager } from "./mlflow-internals.js";
 import { TailSamplingExporter } from "./tail-sampling-exporter.js";
 import type { PersistencePolicy } from "./policy.js";
 
@@ -69,7 +65,7 @@ export function initTracing(config: TracingConfig): TracingHandle {
   });
 
   const realExporter = new MlflowSpanExporter(client);
-  const tailExporter = new TailSamplingExporter(realExporter, config.policy);
+  const tailExporter = new TailSamplingExporter(realExporter, config.policy, InMemoryTraceManager.getInstance());
   const processor = new MlflowSpanProcessor(tailExporter);
 
   // Step 3: Replace the global TracerProvider registered by mlflow.init() with ours.
@@ -80,7 +76,9 @@ export function initTracing(config: TracingConfig): TracingHandle {
   const proxy = trace.getTracerProvider() as any;
   const existingDelegate = proxy.getDelegate?.();
   if (existingDelegate?.shutdown) {
-    existingDelegate.shutdown().catch(() => {});
+    existingDelegate.shutdown().catch((e: unknown) => {
+      console.warn(`[initTracing] Previous tracer delegate shutdown failed: ${e instanceof Error ? e.message : e}`);
+    });
   }
   trace.disable();
 
