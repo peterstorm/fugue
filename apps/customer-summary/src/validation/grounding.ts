@@ -27,6 +27,7 @@ const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
   account: ["account", "profile", "settings", "cancel", "upgrade", "downgrade", "plan"],
   shipping: ["shipping", "delivery", "tracking", "package", "order", "return", "address"],
   product: ["feature", "product", "release", "version", "documentation", "tutorial", "guide"],
+  general: ["help", "question", "support", "information", "inquiry", "request", "assistance"],
 };
 
 const POSITIVE_KEYWORDS = [

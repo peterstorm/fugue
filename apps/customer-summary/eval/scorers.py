@@ -17,6 +17,7 @@ import json as _json
 import os
 import re
 import sys
+import threading
 from pathlib import Path as _Path
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -31,7 +32,6 @@ LLM_SCORER_NAMES = ["factuality", "completeness", "conciseness"]
 DETERMINISTIC_SCORER_NAMES = ["grounding"]
 SCORER_NAMES = LLM_SCORER_NAMES + DETERMINISTIC_SCORER_NAMES
 
-PASS_THRESHOLD = 4.0
 
 # --- Flow Judge prompt template ---
 # Flow Judge expects this exact format with evaluation criteria + 5-Likert rubric.
@@ -136,18 +136,23 @@ def _parse_feedback(response_text: str) -> str:
 # --- Shared Ollama client ---
 
 _client: Optional["OpenAI"] = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> "OpenAI":
-    """Get or create a shared OpenAI client pointing at Ollama."""
+    """Get or create a shared OpenAI client pointing at Ollama. Thread-safe."""
     global _client
-    if _client is None:
-        from openai import OpenAI
-        _client = OpenAI(
-            base_url=f"{OLLAMA_BASE_URL}/v1",
-            api_key="ollama",  # Ollama doesn't require a real key
-            timeout=OLLAMA_TIMEOUT_SEC,
-        )
+    if _client is not None:
+        return _client
+    with _client_lock:
+        # Double-check after acquiring lock
+        if _client is None:
+            from openai import OpenAI
+            _client = OpenAI(
+                base_url=f"{OLLAMA_BASE_URL}/v1",
+                api_key="ollama",  # Ollama doesn't require a real key
+                timeout=OLLAMA_TIMEOUT_SEC,
+            )
     return _client
 
 
@@ -180,7 +185,11 @@ def _call_flow_judge(
         print(f"ERROR: Flow Judge call failed for {scorer_name}: {e}", file=sys.stderr)
         return {"score": None, "feedback": f"Flow Judge call failed: {e}", "raw_response": ""}
 
-    text = response.choices[0].message.content or ""
+    try:
+        text = response.choices[0].message.content or ""
+    except (IndexError, AttributeError) as e:
+        print(f"ERROR: Unexpected response structure for {scorer_name}: {e}", file=sys.stderr)
+        return {"score": None, "feedback": f"Unexpected response structure: {e}", "raw_response": str(response)}
     score = _parse_score(text)
     feedback = _parse_feedback(text)
 
@@ -387,13 +396,11 @@ def score_grounding(inputs: dict, outputs: dict, expectations: dict) -> dict[str
 
 # --- Fixture validation ---
 
-def validate_fixtures(cases_path: str) -> list[str]:
+def validate_fixtures(customer_ids: list[str]) -> list[str]:
     """Check that fixture files exist for all eval case customer IDs. Returns list of warnings."""
     warnings = []
-    raw = _json.loads(_Path(cases_path).read_text())
     fixtures_dir = _Path(__file__).parent.parent / "fixtures" / "customers"
-    for item in raw:
-        cid = item.get("customer_id", "")
+    for cid in customer_ids:
         fixture_path = fixtures_dir / f"{cid}.json"
         if not fixture_path.exists():
             warnings.append(f"Missing fixture file for {cid}: {fixture_path}")
@@ -417,6 +424,7 @@ def get_scorers(mode: str = "full") -> list:
         from mlflow.genai.scorers import scorer as mlflow_scorer
     except ImportError:
         # Fallback: return raw functions if mlflow scorer decorator unavailable
+        print("WARNING: mlflow.genai.scorers not available, using raw scorer functions", file=sys.stderr)
         fns = []
         for name in scorer_names:
             if name == "grounding":

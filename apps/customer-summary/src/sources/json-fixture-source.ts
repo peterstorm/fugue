@@ -8,6 +8,14 @@ export class JsonFixtureSource implements ConversationSource {
   constructor(private readonly fixturesDir: string) {}
 
   async fetchCustomer(customerId: string): Promise<Result<CrmRecord | null, FrameworkError>> {
+    // Sanitize customerId to prevent path traversal
+    if (!/^[a-zA-Z0-9_-]+$/.test(customerId)) {
+      return err({
+        kind: "validation",
+        nodeId: "json-fixture-source",
+        message: `Invalid customer ID format: ${customerId}`,
+      });
+    }
     const filePath = join(this.fixturesDir, `${customerId}.json`);
     try {
       const raw = await readFile(filePath, "utf-8");

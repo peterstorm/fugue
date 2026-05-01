@@ -40,7 +40,7 @@ export interface TracingHandle {
   readonly shutdown: () => Promise<void>;
 }
 
-export function initTracing(config: TracingConfig): TracingHandle {
+export async function initTracing(config: TracingConfig): Promise<TracingHandle> {
   // Step 1: Call mlflow.init() to set globalConfig
   // This creates a throwaway NodeSDK that we'll overwrite
   mlflow.init({
@@ -76,9 +76,11 @@ export function initTracing(config: TracingConfig): TracingHandle {
   const proxy = trace.getTracerProvider() as any;
   const existingDelegate = proxy.getDelegate?.();
   if (existingDelegate?.shutdown) {
-    existingDelegate.shutdown().catch((e: unknown) => {
+    try {
+      await existingDelegate.shutdown();
+    } catch (e: unknown) {
       console.warn(`[initTracing] Previous tracer delegate shutdown failed: ${e instanceof Error ? e.message : e}`);
-    });
+    }
   }
   trace.disable();
 

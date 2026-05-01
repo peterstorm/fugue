@@ -34,7 +34,7 @@ export const bootstrap = async () => {
   let tracing: TracingHandle | null = null;
   try {
     const policy = anyOf(errorOnly(), hadRetry(), ratio(0.1));
-    tracing = initTracing({
+    tracing = await initTracing({
       trackingUri: config.MLFLOW_TRACKING_URI,
       experimentId: config.MLFLOW_EXPERIMENT_ID,
       policy,
@@ -46,6 +46,7 @@ export const bootstrap = async () => {
 
   // --- Redis (cache + checkpointer) ---
   let contextCache: ContextCache | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ioredis CJS/ESM interop requires dynamic handling
   let redis: any = null;
   try {
     const RedisClient = (Redis as any).default ?? Redis;
@@ -60,14 +61,22 @@ export const bootstrap = async () => {
     const cache = new RedisCache(redis);
     const checkpointer = new RedisCheckpointer(redis);
 
-    // Adapter: NodeContext.cache expects simple get/set/writeCheckpoint
+    // Adapter: NodeContext.cache expects get/set/writeCheckpoint
+    // get() must return { ok: true, value } to match what llm.ts checks
     contextCache = {
       get: async (key: string) => {
         const r = await cache.get(key);
-        return r.ok ? r.value : null;
+        if (!r.ok) {
+          console.warn(`[cache] get failed for key=${key}: ${r.error.kind}`);
+          return null;
+        }
+        return r.value;
       },
       set: async (key: string, value: unknown) => {
-        await cache.set(key, value, LLM_CACHE_TTL);
+        const r = await cache.set(key, value, LLM_CACHE_TTL);
+        if (!r.ok) {
+          console.warn(`[cache] set failed for key=${key}: ${r.error.kind}`);
+        }
       },
       writeCheckpoint: async (runId: string, nodeId: string, value: unknown) => {
         await checkpointer.saveNode(runId, nodeId, {
@@ -157,7 +166,7 @@ export const bootstrap = async () => {
       await tracing.shutdown();
     }
     if (redis) {
-      redis.disconnect();
+      await redis.disconnect();
     }
   };
 

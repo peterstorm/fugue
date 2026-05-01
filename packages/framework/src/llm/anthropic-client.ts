@@ -6,7 +6,11 @@ import type { FrameworkError } from "../types/errors.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "./client.js";
 
 export class AnthropicLlmClient implements LlmClient {
-  constructor(private readonly anthropic: Anthropic) {}
+  private readonly requestTimeoutMs: number;
+
+  constructor(private readonly anthropic: Anthropic, opts?: { requestTimeoutMs?: number }) {
+    this.requestTimeoutMs = opts?.requestTimeoutMs ?? 120_000;
+  }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
     try {
@@ -33,7 +37,7 @@ export class AnthropicLlmClient implements LlmClient {
         // Extended thinking integration will be refined in a future task
       }
 
-      const response = await this.anthropic.messages.create(params);
+      const response = await this.anthropic.messages.create(params, { signal: AbortSignal.timeout(this.requestTimeoutMs) });
 
       // Extract thinking content if present
       const thinkingBlock = response.content.find((b) => b.type === "thinking");

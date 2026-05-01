@@ -262,10 +262,10 @@ const runDagInner = async <I, O>(
     status: "ok",
   });
 
-  // Return last node's output
+  // Return output of explicit output node, or last node in last wave
   const lastWave = waves[waves.length - 1];
-  const lastNodeId = lastWave[lastWave.length - 1];
-  return ok(outputs.get(lastNodeId) as O);
+  const outputNodeId = dag.outputNodeId ?? lastWave[lastWave.length - 1];
+  return ok(outputs.get(outputNodeId) as O);
 };
 
 export const resumeRun = async <O>(

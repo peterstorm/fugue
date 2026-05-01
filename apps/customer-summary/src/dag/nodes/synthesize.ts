@@ -4,8 +4,9 @@ import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 import type { Message } from "../../schemas/crm.js";
 
-// Input is the ExtractionResult from the extract-features node
-const InputSchema: z.ZodType<ExtractionResult> = z.any();
+// Input is the ExtractionResult from the extract-features node — reuse the proper schema
+import { ExtractionResultSchema } from "./extract-features.js";
+const InputSchema = ExtractionResultSchema;
 
 const NullableSynthesisOutputSchema = SynthesisOutputSchema.optional();
 

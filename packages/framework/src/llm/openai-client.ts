@@ -25,7 +25,11 @@ function addAdditionalPropertiesFalse(schema: Record<string, unknown>): void {
 }
 
 export class OpenAILlmClient implements LlmClient {
-  constructor(private readonly openai: OpenAI) {}
+  private readonly requestTimeoutMs: number;
+
+  constructor(private readonly openai: OpenAI, opts?: { requestTimeoutMs?: number }) {
+    this.requestTimeoutMs = opts?.requestTimeoutMs ?? 120_000;
+  }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
     try {
@@ -49,7 +53,7 @@ export class OpenAILlmClient implements LlmClient {
             schema: schema as Record<string, unknown>,
           },
         },
-      });
+      }, { signal: AbortSignal.timeout(this.requestTimeoutMs) });
 
       const choice = response.choices[0];
       if (!choice?.message?.content) {

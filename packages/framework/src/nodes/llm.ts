@@ -4,6 +4,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { LlmClient, LlmRequest } from "../llm/client.js";
 import { type Result, ok, err } from "../types/result.js";
 import { computeCostUsd } from "../llm/cost.js";
+import { stableHash } from "../cache/hash.js";
 
 // Lazy-load @mlflow/core for span enrichment
 let _getCurrentActiveSpan: (() => any) | null = null;
@@ -70,16 +71,16 @@ export const createLlmNode = <I, O>(
     const vars = config.buildInput(input);
     const userMessage = interpolatePrompt(promptTemplate, vars);
 
-    // Cache check
-    const cacheKey = config.computeCacheKey?.(input) ?? `${config.id}:${JSON.stringify(input)}`;
+    // Cache check — ctx.cache.get() returns the raw value or null
+    const cacheKey = config.computeCacheKey?.(input) ?? `${config.id}:${stableHash(input)}`;
     if (ctx.cache?.get) {
-      const cacheResult = await ctx.cache.get(cacheKey);
-      // Cache.get() returns Result<T|null, FrameworkError> — unwrap it
-      if (cacheResult?.ok && cacheResult.value !== undefined && cacheResult.value !== null) {
-        return ok(cacheResult.value as O);
-      }
-      if (cacheResult && !cacheResult.ok) {
-        const msg = `[${config.id}] Cache read failed: ${cacheResult.error?.kind ?? "unknown"}`;
+      try {
+        const cached = await ctx.cache.get(cacheKey);
+        if (cached !== undefined && cached !== null) {
+          return ok(cached as O);
+        }
+      } catch (e) {
+        const msg = `[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`;
         (ctx.logger?.warn ?? console.warn)(msg);
       }
     }

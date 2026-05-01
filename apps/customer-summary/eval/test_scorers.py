@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from scorers import (
     _parse_score, _parse_feedback, RUBRICS, SCORER_NAMES,
     LLM_SCORER_NAMES, DETERMINISTIC_SCORER_NAMES,
-    score_grounding, get_scorers,
+    score_grounding, get_scorers, validate_fixtures, _call_flow_judge,
 )
 
 
@@ -99,18 +99,16 @@ class TestGroundingScorer:
         assert "FAIL" in result["justification"]
 
     def test_sentiment_contradiction_penalized(self):
-        # This test requires a fixture with strong negative sentiment keywords.
-        # cust-011 doesn't have enough sentiment keywords to trigger contradiction.
-        # Use a direct grounding check instead: claim positive on a neutral fixture.
+        # cust-004 has strong positive sentiment (3 positive, 0 negative keywords).
+        # Claiming negative sentiment should trigger contradiction penalty.
         result = score_grounding(
-            inputs={"customer_id": "cust-011"},
-            outputs={"summary": "Generally positive sentiment. The customer is very satisfied and happy with the service."},
+            inputs={"customer_id": "cust-004"},
+            outputs={"summary": "Negative sentiment. The customer is dissatisfied and frustrated with the service."},
             expectations={},
         )
-        # Without strong sentiment signals in the fixture, sentiment check passes.
-        # The score should still be reasonable (no contradiction detected).
-        assert result["score"] >= 1
+        assert result["score"] < 5
         assert "sentiment_consistency" in result["justification"]
+        assert "FAIL" in result["justification"]
 
     def test_missing_fixture_returns_neutral(self):
         result = score_grounding(
@@ -140,3 +138,40 @@ class TestGetScorers:
     def test_full_mode_returns_all(self):
         scorers = get_scorers(mode="full")
         assert len(scorers) == len(SCORER_NAMES)
+
+
+class TestValidateFixtures:
+    def test_existing_fixtures_no_warnings(self):
+        warnings = validate_fixtures(["cust-001", "cust-002"])
+        assert warnings == []
+
+    def test_missing_fixture_returns_warning(self):
+        warnings = validate_fixtures(["nonexistent-999"])
+        assert len(warnings) == 1
+        assert "nonexistent-999" in warnings[0]
+
+    def test_empty_list(self):
+        assert validate_fixtures([]) == []
+
+
+class TestCallFlowJudgeErrorHandling:
+    def test_returns_none_score_on_api_failure(self):
+        """When Ollama is unreachable, _call_flow_judge should return score=None, not crash."""
+        pytest.importorskip("openai", reason="openai SDK not installed")
+        import scorers
+        # Save original and point at unreachable URL
+        orig_client = scorers._client
+        orig_url = scorers.OLLAMA_BASE_URL
+        try:
+            scorers._client = None  # Force re-creation
+            scorers.OLLAMA_BASE_URL = "http://localhost:1"  # unreachable
+            result = _call_flow_judge(
+                output="test summary",
+                reference_summary="test ref",
+                scorer_name="factuality",
+            )
+            assert result["score"] is None
+            assert "failed" in result["feedback"].lower() or "Flow Judge call failed" in result["feedback"]
+        finally:
+            scorers._client = orig_client
+            scorers.OLLAMA_BASE_URL = orig_url

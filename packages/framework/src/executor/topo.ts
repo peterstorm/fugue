@@ -17,6 +17,20 @@ export const topoSort = (dag: DagDef): Result<string[][], FrameworkError> => {
   }
 
   for (const edge of dag.edges) {
+    if (!nodeIds.has(edge.from)) {
+      return err({
+        kind: "validation" as const,
+        nodeId: edge.from,
+        message: `Edge references unknown source node '${edge.from}'`,
+      });
+    }
+    if (!nodeIds.has(edge.to)) {
+      return err({
+        kind: "validation" as const,
+        nodeId: edge.to,
+        message: `Edge references unknown target node '${edge.to}'`,
+      });
+    }
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
     successors.get(edge.from)!.push(edge.to);
   }

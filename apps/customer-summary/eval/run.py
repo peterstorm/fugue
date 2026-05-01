@@ -252,16 +252,24 @@ def main() -> int:
 
     base_url = os.environ.get("APP_BASE_URL", "http://host.containers.internal:3000")
     cases_path = os.environ.get("EVAL_CASES_PATH", "fixtures/eval/cases.json")
-    max_workers = int(os.environ.get("EVAL_WORKERS", "4"))
+    try:
+        max_workers = int(os.environ.get("EVAL_WORKERS", "4"))
+    except ValueError:
+        print("ERROR: EVAL_WORKERS must be a numeric value", file=sys.stderr)
+        return 1
 
     print(f"Eval mode: {mode}")
     print(f"Loading eval cases from: {cases_path}")
-    cases = load_cases(cases_path)
+    try:
+        cases = load_cases(cases_path)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+        print(f"ERROR: Failed to load eval cases from {cases_path}: {e}", file=sys.stderr)
+        return 1
     print(f"Loaded {len(cases)} eval cases")
 
     # Validate fixtures exist for grounding scorer
     from scorers import validate_fixtures
-    fixture_warnings = validate_fixtures(cases_path)
+    fixture_warnings = validate_fixtures([c.customer_id for c in cases])
     if fixture_warnings:
         print(f"WARNING: {len(fixture_warnings)} fixture issues:", file=sys.stderr)
         for w in fixture_warnings:

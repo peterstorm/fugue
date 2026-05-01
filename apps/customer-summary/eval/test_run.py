@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
 from run import (
     parse_cases, build_eval_data, format_results_table, compute_aggregate,
-    EvalCase, EvalResult, AggregateResult,
+    EvalCase, EvalResult, AggregateResult, collect_results,
 )
 
 
@@ -119,3 +119,44 @@ class TestComputeAggregate:
         agg = compute_aggregate(FakeResult(), ["factuality"])
         assert agg.overall_mean == 0.0
         assert agg.passed is False
+
+
+class TestCollectResults:
+    def test_attaches_reference_summaries(self):
+        """collect_results should attach reference_summary from cases to results."""
+        from unittest.mock import patch
+
+        cases = [
+            EvalCase(customer_id="c1", reference_summary="ref1"),
+            EvalCase(customer_id="c2", reference_summary="ref2"),
+        ]
+
+        def fake_summarize(base_url, customer_id):
+            return EvalResult(customer_id=customer_id, summary=f"summary-{customer_id}", reference_summary="")
+
+        with patch("run.call_summarize", side_effect=fake_summarize):
+            results = collect_results("http://fake", cases, max_workers=1)
+
+        assert len(results) == 2
+        # Results are sorted by customer_id
+        assert results[0].customer_id == "c1"
+        assert results[0].reference_summary == "ref1"
+        assert results[0].summary == "summary-c1"
+        assert results[1].customer_id == "c2"
+        assert results[1].reference_summary == "ref2"
+
+    def test_handles_exception_from_future(self):
+        """If call_summarize raises, collect_results should capture the error."""
+        from unittest.mock import patch
+
+        cases = [EvalCase(customer_id="c1", reference_summary="ref1")]
+
+        def exploding_summarize(base_url, customer_id):
+            raise ConnectionError("server down")
+
+        with patch("run.call_summarize", side_effect=exploding_summarize):
+            results = collect_results("http://fake", cases, max_workers=1)
+
+        assert len(results) == 1
+        assert results[0].error is not None
+        assert "server down" in results[0].error

@@ -61,6 +61,10 @@ export const createAssembleResponseNode = (customerId: string) =>
             groundingWarnings,
           });
         }
+        default: {
+          const _exhaustive: never = extraction;
+          return ok({ status: "degraded" as const, customerId, message: `Unknown extraction branch: ${(extraction as any).branch}` });
+        }
       }
     },
   });

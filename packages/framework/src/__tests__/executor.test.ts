@@ -365,6 +365,8 @@ describe("runDag", () => {
     };
 
     const cache = {
+      get: async () => null,
+      set: async () => {},
       writeCheckpoint: async (runId: string, nodeId: string, output: unknown) => {
         checkpoints.push({ runId, nodeId, output });
       },
@@ -444,6 +446,8 @@ describe("runDag", () => {
 
   it("checkpoint write failure does not crash DAG execution", async () => {
     const failingCache = {
+      get: async () => null,
+      set: async () => {},
       writeCheckpoint: async () => { throw new Error("Redis timeout"); },
     };
     const dag: DagDef = {

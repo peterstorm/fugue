@@ -29,7 +29,7 @@ const MLFLOW_URI = process.env.MLFLOW_TRACKING_URI ?? "http://localhost:5000";
 const fixturesDir = resolve(import.meta.dir, "../fixtures/customers");
 
 // 1. Init tracing with alwaysOn so every span exports
-const tracing = initTracing({
+const tracing = await initTracing({
   trackingUri: MLFLOW_URI,
   experimentId: "0",
   policy: alwaysOn(),

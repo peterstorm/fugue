@@ -27,28 +27,36 @@ export interface AggregateCounters {
 }
 
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
-  switch (event.type) {
-    case "run-start":
-      observer.onRunStart(event);
-      break;
-    case "node-start":
-      observer.onNodeStart(event);
-      break;
-    case "node-end":
-      observer.onNodeEnd(event);
-      break;
-    case "node-skipped":
-      observer.onNodeSkipped(event);
-      break;
-    case "node-error":
-      observer.onNodeError(event);
-      break;
-    case "sub-span":
-      observer.onSubSpan(event);
-      break;
-    case "run-end":
-      observer.onRunEnd(event);
-      break;
+  try {
+    switch (event.type) {
+      case "run-start":
+        observer.onRunStart(event);
+        break;
+      case "node-start":
+        observer.onNodeStart(event);
+        break;
+      case "node-end":
+        observer.onNodeEnd(event);
+        break;
+      case "node-skipped":
+        observer.onNodeSkipped(event);
+        break;
+      case "node-error":
+        observer.onNodeError(event);
+        break;
+      case "sub-span":
+        observer.onSubSpan(event);
+        break;
+      case "run-end":
+        observer.onRunEnd(event);
+        break;
+      default: {
+        const _exhaustive: never = event;
+        break;
+      }
+    }
+  } catch (e) {
+    console.warn(`[observer] dispatchEvent failed for ${event.type}: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -151,9 +159,13 @@ export class BufferedObserver implements Observer {
     this.aggregates.totalCostUsd += summary.totalCostUsd;
 
     if (this.policy.shouldFlush(summary)) {
-      // Replay buffered events + the run-end event
+      // Replay buffered events + the run-end event; continue on individual failures
       for (const buffered of events) {
-        dispatchEvent(this.inner, buffered);
+        try {
+          dispatchEvent(this.inner, buffered);
+        } catch (err) {
+          console.warn(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+        }
       }
       dispatchEvent(this.inner, e);
     }

@@ -1,6 +1,15 @@
 import { bootstrap } from "./bootstrap.js";
 
-const { app, config, shutdown } = await bootstrap();
+let bootstrapResult: Awaited<ReturnType<typeof bootstrap>>;
+
+try {
+  bootstrapResult = await bootstrap();
+} catch (e) {
+  console.error("Fatal: bootstrap failed", e);
+  process.exit(1);
+}
+
+const { app, config, shutdown } = bootstrapResult;
 
 // Graceful shutdown — flush pending traces on SIGTERM/SIGINT
 for (const sig of ["SIGTERM", "SIGINT"] as const) {

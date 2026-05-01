@@ -7,6 +7,7 @@ import type { CrmRecord, Message } from "../../schemas/crm.js";
 import { scoreByRecency } from "../../extraction/recency.js";
 import type { ScoredConversation } from "../../extraction/recency.js";
 import { selectWithinBudget } from "../tokens.js";
+import { MessageSchema, ConversationSchema } from "../../schemas/crm.js";
 
 export type ExtractionResult =
   | {
@@ -21,7 +22,21 @@ export type ExtractionResult =
 const InputSchema = z.object({ customer: CrmRecordSchema.nullable() });
 type Input = z.infer<typeof InputSchema>;
 
-const ExtractionResultSchema: z.ZodType<ExtractionResult> = z.any();
+const ScoredConversationSchema = z.object({
+  conversation: ConversationSchema,
+  score: z.number(),
+});
+
+export const ExtractionResultSchema: z.ZodType<ExtractionResult> = z.discriminatedUnion("branch", [
+  z.object({
+    branch: z.literal("ok"),
+    recentUtterances: z.array(MessageSchema),
+    scoredConversations: z.array(ScoredConversationSchema),
+  }),
+  z.object({ branch: z.literal("not_found") }),
+  z.object({ branch: z.literal("no_history") }),
+  z.object({ branch: z.literal("insufficient_data") }),
+]);
 
 export const extractFeatures = (input: { customer: CrmRecord | null }): ExtractionResult => {
   if (input.customer === null) return { branch: "not_found" };
