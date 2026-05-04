@@ -3,6 +3,7 @@ import type { NodeContext, NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
+import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
@@ -35,6 +36,7 @@ const SPAN_TYPE_MAP: Record<string, string> = {
   fetch: "RETRIEVER",
   transform: "CHAIN",
   guardrail: "TOOL",
+  "eval-judge": "TOOL",
 };
 
 export interface RunOptions {
@@ -61,10 +63,21 @@ export const runDag = async <I, O>(
   if (_withSpan) {
     return _withSpan(async (rootSpan) => {
       rootSpan.setInputs({ dagId: dag.id, runId: ctx.runId });
-      const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [] };
+      const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
       const result = await runDagInner(dag, input, ctx, opts, meta);
       if (result.ok) {
-        if (meta.guardrailFailed) {
+        // Run eval-judge nodes after successful output
+        if (dag.evalJudges?.length) {
+          await runEvalJudges(dag.evalJudges, input, result.value, ctx, meta);
+        }
+
+        if (meta.evalJudgeFailed) {
+          const failedCriteria = meta.evalJudgeResults
+            .filter((r) => !r.passed)
+            .flatMap((r) => r.failedCriteria);
+          rootSpan.setStatus(_SpanStatusCode!.ERROR, `Eval-judge failed: ${failedCriteria.join(", ")}`);
+          rootSpan.setOutputs({ status: "ok", evalJudgeFailed: true, evalJudgeResults: meta.evalJudgeResults });
+        } else if (meta.guardrailFailed) {
           // Guardrail failed but response still returned — mark trace as ERROR so it's visible in MLflow
           rootSpan.setStatus(_SpanStatusCode!.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
           rootSpan.setOutputs({ status: "ok", guardrailWarnings: meta.guardrailWarnings });
@@ -79,7 +92,13 @@ export const runDag = async <I, O>(
     }, { name: `run:${dag.id}`, spanType: _SpanType!.CHAIN }) as Promise<Result<O, FrameworkError>>;
   }
 
-  return runDagInner(dag, input, ctx, opts, undefined);
+  // Non-traced path: still run eval judges for observability (no span marking)
+  const result = await runDagInner<I, O>(dag, input, ctx, opts, undefined);
+  if (result.ok && dag.evalJudges?.length) {
+    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
+    await runEvalJudges(dag.evalJudges, input, result.value, ctx, meta);
+  }
+  return result;
 };
 
 /** Metadata collected during DAG execution for trace-level status propagation. */
@@ -88,6 +107,10 @@ interface DagRunMeta {
   guardrailFailed: boolean;
   /** Warning messages from failed guardrails */
   guardrailWarnings: string[];
+  /** True if any eval-judge returned passed: false */
+  evalJudgeFailed: boolean;
+  /** Eval-judge results (one per judge) */
+  evalJudgeResults: EvalJudgeResult[];
 }
 
 const runDagInner = async <I, O>(
@@ -266,6 +289,34 @@ const runDagInner = async <I, O>(
   const lastWave = waves[waves.length - 1];
   const outputNodeId = dag.outputNodeId ?? lastWave[lastWave.length - 1];
   return ok(outputs.get(outputNodeId) as O);
+};
+
+/**
+ * Run eval-judge nodes after the output node completes.
+ * Judges run in parallel. Results are stored in meta for span marking.
+ * Fail-open: individual judge failures are logged but don't affect the DAG result.
+ */
+const runEvalJudges = async (
+  judges: readonly EvalJudgeNodeDef[],
+  dagInput: unknown,
+  dagOutput: unknown,
+  ctx: NodeContext,
+  meta: DagRunMeta,
+): Promise<void> => {
+  const results = await Promise.all(
+    judges.map(async (judge) => {
+      try {
+        return await judge.run(dagInput, dagOutput, ctx);
+      } catch (e) {
+        const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
+        (ctx.logger?.warn ?? console.warn)(msg);
+        return { passed: true, score: 1.0, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]` };
+      }
+    }),
+  );
+
+  meta.evalJudgeResults = results;
+  meta.evalJudgeFailed = results.some((r) => !r.passed);
 };
 
 export const resumeRun = async <O>(

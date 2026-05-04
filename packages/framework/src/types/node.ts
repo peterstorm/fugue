@@ -3,7 +3,7 @@ import type { Result } from "./result.js";
 import type { Observer } from "../observer/observer.js";
 import type { LlmClient } from "../llm/client.js";
 
-export type NodeKind = "fetch" | "transform" | "llm" | "guardrail";
+export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge";
 
 export interface NodeDef<I, O, E> {
   readonly id: string;
@@ -42,6 +42,8 @@ export interface NodeContext {
   readonly cache: ContextCacheAdapter | null;
   readonly prompts: PromptAccess | null;
   readonly llm: LlmClient | null;
+  /** Optional cheaper LLM client for eval-judge nodes. Falls back to `llm` if not set. */
+  readonly judgeLlm?: LlmClient | null;
   readonly logger: Logger | null;
   readonly tracer?: Tracer | null;
   readonly signal?: AbortSignal;

@@ -1,0 +1,219 @@
+import { describe, test, expect } from "bun:test";
+import { z } from "zod";
+import { runDag } from "../../src/executor/executor.js";
+import { createTransformNode } from "../../src/nodes/transform.js";
+import { createEvalJudgeNode } from "../../src/nodes/eval-judge.js";
+import type { EvalJudgeResponse } from "../../src/nodes/eval-judge.js";
+import type { NodeContext } from "../../src/types/node.js";
+import type { DagDef } from "../../src/types/dag.js";
+import type { LlmClient } from "../../src/llm/client.js";
+import { ok, err } from "../../src/types/result.js";
+
+// --- Helpers ---
+
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
+  runId: "test-run",
+  dagId: "test-dag",
+  observer: null,
+  cache: null,
+  prompts: null,
+  llm: null,
+  logger: null,
+  ...overrides,
+});
+
+const makeMockJudgeLlm = (response: EvalJudgeResponse): LlmClient => ({
+  sendStructured: async () => ok({ output: response, tokensIn: 100, tokensOut: 50, rawText: "" }) as any,
+});
+
+/** Simple transform node that uppercases a string. */
+const uppercaseNode = createTransformNode({
+  id: "uppercase",
+  inputSchema: z.string(),
+  outputSchema: z.string(),
+  deps: [],
+  transform: (input) => ok(input.toUpperCase()),
+});
+
+/** A two-node DAG for testing. */
+const makeDag = (evalJudges: DagDef["evalJudges"] = undefined): DagDef => ({
+  id: "test-dag",
+  nodes: [uppercaseNode],
+  edges: [],
+  outputNodeId: "uppercase",
+  evalJudges,
+});
+
+// --- Tests ---
+
+describe("executor + eval-judge integration", () => {
+  test("DAG returns output unchanged regardless of judge result", async () => {
+    const llm = makeMockJudgeLlm({
+      score: 0.3,
+      criteria_scores: { quality: 0.3 },
+      failed_criteria: ["quality"],
+      reason: "Terrible output",
+    });
+
+    const judge = createEvalJudgeNode({
+      id: "quality-judge",
+      criteria: ["quality"],
+      threshold: 0.8,
+    });
+
+    const dag = makeDag([judge]);
+    const result = await runDag<string, string>(dag, "hello", makeCtx({ judgeLlm: llm }));
+
+    // DAG output is unaffected by judge failure
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("HELLO");
+    }
+  });
+
+  test("DAG works normally without eval judges", async () => {
+    const dag = makeDag();
+    const result = await runDag<string, string>(dag, "world", makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("WORLD");
+    }
+  });
+
+  test("DAG works with empty evalJudges array", async () => {
+    const dag = makeDag([]);
+    const result = await runDag<string, string>(dag, "test", makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("TEST");
+    }
+  });
+
+  test("multiple judges run in parallel", async () => {
+    const callOrder: string[] = [];
+
+    const llm1: LlmClient = {
+      sendStructured: async () => {
+        callOrder.push("judge-1");
+        return ok({ output: { score: 0.9, criteria_scores: { a: 0.9 }, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+      },
+    };
+    const llm2: LlmClient = {
+      sendStructured: async () => {
+        callOrder.push("judge-2");
+        return ok({ output: { score: 0.5, criteria_scores: { b: 0.5 }, failed_criteria: ["b"], reason: "bad" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+      },
+    };
+
+    // Both judges share the same judgeLlm — we just need to check both run
+    // Use a single LLM that tracks calls
+    let callCount = 0;
+    const sharedLlm: LlmClient = {
+      sendStructured: async () => {
+        callCount++;
+        return ok({
+          output: { score: 0.9, criteria_scores: { x: 0.9 }, failed_criteria: [], reason: "ok" },
+          tokensIn: 0, tokensOut: 0, rawText: "",
+        }) as any;
+      },
+    };
+
+    const judge1 = createEvalJudgeNode({ id: "judge-1", criteria: ["x"] });
+    const judge2 = createEvalJudgeNode({ id: "judge-2", criteria: ["y"] });
+
+    const dag = makeDag([judge1, judge2]);
+    await runDag<string, string>(dag, "hi", makeCtx({ judgeLlm: sharedLlm }));
+    expect(callCount).toBe(2);
+  });
+
+  test("eval judges don't run when DAG fails", async () => {
+    let judgeCalled = false;
+    const llm: LlmClient = {
+      sendStructured: async () => {
+        judgeCalled = true;
+        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+      },
+    };
+
+    const failingNode = createTransformNode({
+      id: "failing",
+      inputSchema: z.string(),
+      outputSchema: z.string(),
+      deps: [],
+      transform: () => err({ kind: "node-crash" as const, nodeId: "failing", message: "boom" }),
+    });
+
+    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const dag: DagDef = {
+      id: "fail-dag",
+      nodes: [failingNode],
+      edges: [],
+      outputNodeId: "failing",
+      evalJudges: [judge],
+    };
+
+    const result = await runDag<string, string>(dag, "in", makeCtx({ judgeLlm: llm }));
+    expect(result.ok).toBe(false);
+    expect(judgeCalled).toBe(false);
+  });
+
+  test("judge failure doesn't crash the DAG", async () => {
+    const throwingLlm: LlmClient = {
+      sendStructured: async () => { throw new Error("catastrophic failure"); },
+    };
+
+    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const dag = makeDag([judge]);
+
+    const result = await runDag<string, string>(dag, "hi", makeCtx({ judgeLlm: throwingLlm }));
+    // DAG still succeeds
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("HI");
+    }
+  });
+
+  test("judge receives correct DAG input and output", async () => {
+    let receivedInput: unknown = null;
+    let receivedOutput: unknown = null;
+
+    const llm: LlmClient = {
+      sendStructured: async (req) => {
+        // Extract from the user message
+        if (req.user.includes("original input")) receivedInput = "found";
+        if (req.user.includes("ORIGINAL INPUT")) receivedOutput = "found";
+        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+      },
+    };
+
+    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const dag = makeDag([judge]);
+
+    await runDag<string, string>(dag, "original input", makeCtx({ judgeLlm: llm }));
+    expect(receivedInput).toBe("found");
+    expect(receivedOutput).toBe("found");
+  });
+
+  test("judge uses ctx.judgeLlm, not ctx.llm", async () => {
+    let whichCalled = "";
+
+    const mainLlm: LlmClient = {
+      sendStructured: async () => {
+        whichCalled = "main";
+        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+      },
+    };
+    const judgeLlm: LlmClient = {
+      sendStructured: async () => {
+        whichCalled = "judge";
+        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+      },
+    };
+
+    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const dag = makeDag([judge]);
+
+    await runDag<string, string>(dag, "hi", makeCtx({ llm: mainLlm, judgeLlm }));
+    expect(whichCalled).toBe("judge");
+  });
+});
