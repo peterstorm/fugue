@@ -38,6 +38,7 @@ export interface AppDeps {
   readonly prompts?: Map<string, string>;
   readonly model?: string;
   readonly judgeModel?: string;
+  readonly thinking?: { type: "enabled"; budgetTokens: number };
   readonly observer?: Observer | null;
   readonly cache?: ContextCache | null;
 }
@@ -63,7 +64,11 @@ export const createApp = (deps: AppDeps): Hono => {
     const { customer_id, resume_run_id } = parsed.data;
 
     try {
-      const dag = createSummaryDag(deps.source, customer_id, deps.model, deps.judgeModel);
+      const dag = createSummaryDag(deps.source, customer_id, {
+        model: deps.model,
+        judgeModel: deps.judgeModel,
+        thinking: deps.thinking,
+      });
       const runId = resume_run_id ?? randomUUID();
 
       const ctx: NodeContext = {

@@ -39,7 +39,7 @@ export class OpenAILlmClient implements LlmClient {
       // Ensure additionalProperties: false everywhere for Azure strict mode
       addAdditionalPropertiesFalse(schema);
 
-      const response = await this.openai.chat.completions.create({
+      const params: any = {
         model: req.model,
         messages: [
           { role: "system", content: req.system },
@@ -53,7 +53,17 @@ export class OpenAILlmClient implements LlmClient {
             schema: schema as Record<string, unknown>,
           },
         },
-      }, { signal: AbortSignal.timeout(this.requestTimeoutMs) });
+      };
+
+      // Enable reasoning for models that support it (e.g., gpt-5.1)
+      if (req.thinking?.type === "enabled") {
+        params.reasoning = { effort: "medium" };
+      }
+
+      const response = await this.openai.chat.completions.create(
+        params,
+        { signal: AbortSignal.timeout(this.requestTimeoutMs) },
+      );
 
       const choice = response.choices[0];
       if (!choice?.message?.content) {
@@ -65,6 +75,9 @@ export class OpenAILlmClient implements LlmClient {
       }
 
       const rawText = choice.message.content;
+
+      // Extract reasoning content if present (GPT-5.1, o-series models)
+      const thinking = (choice.message as any).reasoning_content ?? undefined;
 
       // Parse JSON
       let raw: unknown;
@@ -95,6 +108,7 @@ export class OpenAILlmClient implements LlmClient {
         output: parsed.data as O,
         tokensIn,
         tokensOut,
+        thinking,
         rawText,
       });
     } catch (error) {

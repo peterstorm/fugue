@@ -31,6 +31,8 @@ export interface LlmNodeConfig<I, O> {
   readonly buildInput: (input: I) => Record<string, unknown>;
   readonly skipWhen?: (input: I) => boolean;
   readonly computeCacheKey?: (input: I) => string;
+  /** Enable reasoning/thinking for models that support it (e.g., GPT-5.1, o-series) */
+  readonly thinking?: { type: "enabled"; budgetTokens: number };
 }
 
 /**
@@ -97,6 +99,7 @@ export const createLlmNode = <I, O>(
       user: userMessage,
       model: config.model,
       schema: config.outputSchema,
+      ...(config.thinking ? { thinking: config.thinking } : {}),
     };
 
     const attempt = async () => {

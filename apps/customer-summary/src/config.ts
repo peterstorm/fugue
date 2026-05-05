@@ -14,6 +14,8 @@ const ConfigSchema = z.object({
   AZURE_OPENAI_API_VERSION: z.string().default("2025-04-01-preview"),
   AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
   EVAL_JUDGE_MODEL: z.string().optional(),
+  ENABLE_THINKING: z.string().default("false").transform((v) => v === "true" || v === "1"),
+  THINKING_BUDGET_TOKENS: z.coerce.number().default(4096),
   FIXTURES_DIR: z.string().default("./fixtures/customers"),
   PROMPTS_DIR: z.string().default("./prompts"),
 });

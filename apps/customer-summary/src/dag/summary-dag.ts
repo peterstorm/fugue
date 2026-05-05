@@ -7,10 +7,16 @@ import { createSynthesizeNode } from "./nodes/synthesize.js";
 import { createGroundingGuardrailNode } from "./nodes/grounding-guardrail.js";
 import { createAssembleResponseNode } from "./nodes/assemble-response.js";
 
-export const createSummaryDag = (source: ConversationSource, customerId: string, model?: string, judgeModel?: string): DagDef => {
+export interface SummaryDagOpts {
+  readonly model?: string;
+  readonly judgeModel?: string;
+  readonly thinking?: { type: "enabled"; budgetTokens: number };
+}
+
+export const createSummaryDag = (source: ConversationSource, customerId: string, opts: SummaryDagOpts = {}): DagDef => {
   const fetchCustomer = createFetchCustomerNode(source);
   const extractFeatures = createExtractFeaturesNode();
-  const synthesize = createSynthesizeNode(model);
+  const synthesize = createSynthesizeNode(opts.model, { thinking: opts.thinking });
   const groundingGuardrail = createGroundingGuardrailNode();
   const assembleResponse = createAssembleResponseNode(customerId);
 
@@ -19,7 +25,7 @@ export const createSummaryDag = (source: ConversationSource, customerId: string,
     criteria: ["factuality", "completeness", "relevance", "coherence"],
     threshold: 0.8,
     rubricTemplateId: "summary-eval-rubric",
-    model: judgeModel,
+    model: opts.judgeModel,
   });
 
   return {

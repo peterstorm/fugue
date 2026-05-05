@@ -151,6 +151,7 @@ export const bootstrap = async () => {
     prompts,
     model,
     judgeModel: config.EVAL_JUDGE_MODEL ?? model,
+    thinking: config.ENABLE_THINKING ? { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS } : undefined,
     cache: contextCache,
     health: {
       checkRedis: redis ? async () => {
