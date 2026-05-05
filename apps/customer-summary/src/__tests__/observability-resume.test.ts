@@ -8,7 +8,7 @@ import { JsonFixtureSource } from "../sources/json-fixture-source.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
 import { join } from "node:path";
 
-const FIXTURES_DIR = join(process.cwd(), "fixtures/customers");
+const FIXTURES_DIR = join(import.meta.dir, "../../fixtures/customers");
 
 // --- Helpers ---
 
@@ -270,6 +270,8 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
 
     const checkpoints: Map<string, unknown> = new Map();
     const cache = {
+      get: async (_key: string) => null,
+      set: async (_key: string, _value: unknown) => {},
       writeCheckpoint: async (_runId: string, nodeId: string, output: unknown) => {
         checkpoints.set(nodeId, output);
       },

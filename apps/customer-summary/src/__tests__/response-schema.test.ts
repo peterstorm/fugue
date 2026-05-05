@@ -5,7 +5,7 @@ import { SummaryResponseSchema } from "../schemas/response.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
 import { join } from "node:path";
 
-const fixturesDir = join(process.cwd(), "fixtures/customers");
+const fixturesDir = join(import.meta.dir, "../../fixtures/customers");
 
 describe("SummaryResponseSchema", () => {
   test("parses 'ok' status", () => {

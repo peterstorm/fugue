@@ -5,7 +5,7 @@ import { FakeLlmClient } from "@ai-summary/framework";
 import { SummaryResponseSchema } from "../schemas/response.js";
 import { join } from "node:path";
 
-const fixturesDir = join(process.cwd(), "fixtures/customers");
+const fixturesDir = join(import.meta.dir, "../../fixtures/customers");
 
 const makeSynthesisOutput = () => ({
   overallSentiment: "mixed" as const,
