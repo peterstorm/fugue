@@ -15,20 +15,8 @@
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
 import type { LlmClient, LlmRequest } from "../llm/client.js";
-import { computeCostUsd } from "../llm/cost.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
-
-// Lazy-load @mlflow/core for span enrichment
-let _getCurrentActiveSpan: (() => any) | null = null;
-const loadMlflow = async () => {
-  if (_getCurrentActiveSpan) return;
-  try {
-    const mlflow = await import("@mlflow/core");
-    _getCurrentActiveSpan = mlflow.getCurrentActiveSpan;
-  } catch {
-    // Not available — no-op
-  }
-};
+import { loadMlflow, enrichLlmSpan } from "../tracing/index.js";
 
 /** Output of the eval-judge node. */
 export interface EvalJudgeResult {
@@ -174,30 +162,15 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         }
 
         // Enrich active span with LLM details
-        if (_getCurrentActiveSpan) {
-          const span = _getCurrentActiveSpan();
-          if (span && typeof span.setAttribute === "function") {
-            span.setInputs({
-              model,
-              system_prompt: JUDGE_SYSTEM_FRAME,
-              user_prompt: userMessage,
-              criteria: config.criteria,
-              threshold,
-            });
-            span.setAttribute("mlflow.chat.tokenUsage", {
-              input_tokens: result.value.tokensIn,
-              output_tokens: result.value.tokensOut,
-              total_tokens: result.value.tokensIn + result.value.tokensOut,
-            });
-            span.setAttribute("llm.model", model);
-            span.setAttribute("llm.tokens_in", result.value.tokensIn);
-            span.setAttribute("llm.tokens_out", result.value.tokensOut);
-            span.setAttribute("cost_usd", computeCostUsd(model, result.value.tokensIn, result.value.tokensOut));
-            if (result.value.thinking) {
-              span.setAttribute("llm.thinking", result.value.thinking);
-            }
-          }
-        }
+        enrichLlmSpan({
+          model,
+          system: JUDGE_SYSTEM_FRAME,
+          user: userMessage,
+          tokensIn: result.value.tokensIn,
+          tokensOut: result.value.tokensOut,
+          thinking: result.value.thinking,
+          extraInputs: { criteria: config.criteria as unknown as Record<string, unknown>, threshold },
+        });
 
         // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)
         const parsed = EvalJudgeResponseSchema.safeParse(result.value.output);

@@ -7,3 +7,4 @@ export * from "./checkpoint/index.js";
 export * from "./cache/index.js";
 export * from "./prompts/index.js";
 export * from "./llm/index.js";
+export * from "./tracing/index.js";

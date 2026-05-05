@@ -3,23 +3,8 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { LlmClient, LlmRequest } from "../llm/client.js";
 import { type Result, ok, err } from "../types/result.js";
-import { computeCostUsd } from "../llm/cost.js";
 import { stableHash } from "../cache/hash.js";
-
-// Lazy-load @mlflow/core for span enrichment
-let _getCurrentActiveSpan: (() => any) | null = null;
-const loadMlflow = async () => {
-  if (_getCurrentActiveSpan) return;
-  try {
-    const mlflow = await import("@mlflow/core");
-    _getCurrentActiveSpan = mlflow.getCurrentActiveSpan;
-  } catch (e: any) {
-    const code = e?.code;
-    if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") {
-      console.warn(`[llm] @mlflow/core import failed unexpectedly: ${e?.message}`);
-    }
-  }
-};
+import { loadMlflow, enrichLlmSpan } from "../tracing/index.js";
 
 export interface LlmNodeConfig<I, O> {
   readonly id: string;
@@ -73,7 +58,7 @@ export const createLlmNode = <I, O>(
     const vars = config.buildInput(input);
     const userMessage = interpolatePrompt(promptTemplate, vars);
 
-    // Cache check — ctx.cache.get() returns the raw value or null
+    // Cache check
     const cacheKey = config.computeCacheKey?.(input) ?? `${config.id}:${stableHash(input)}`;
     if (ctx.cache?.get) {
       try {
@@ -87,13 +72,12 @@ export const createLlmNode = <I, O>(
       }
     }
 
-    // LLM call — uses LlmClient.sendStructured with correct shape
+    // LLM call
     if (!ctx.llm?.sendStructured) {
       return err({ kind: "node-crash" as const, nodeId: config.id, message: "llm not available on context" });
     }
 
     const llmClient = ctx.llm as LlmClient;
-
     const req: LlmRequest<O> = {
       system: `You are an AI assistant. Follow the instructions in the user message and return structured output.`,
       user: userMessage,
@@ -106,7 +90,6 @@ export const createLlmNode = <I, O>(
       const result = await llmClient.sendStructured(req);
       if (!result.ok) return result;
 
-      // Validate output against schema (LLM may return non-conforming data)
       const parsed = config.outputSchema.safeParse(result.value.output);
       if (!parsed.success) {
         return err({
@@ -115,7 +98,6 @@ export const createLlmNode = <I, O>(
           message: `LLM output validation failed: ${parsed.error.message}`,
         });
       }
-      // Return full LlmResponse so we can extract tokens/thinking for span enrichment
       return ok(result.value);
     };
 
@@ -139,39 +121,22 @@ export const createLlmNode = <I, O>(
 
     const llmResponse = result.value;
 
-    // Enrich active OTel span with LLM details (prompt, tokens, cost, thinking)
-    if (_getCurrentActiveSpan) {
-      const span = _getCurrentActiveSpan();
-      if (span && typeof span.setAttribute === "function") {
-        // Override executor's generic setInputs with LLM-specific prompt details
-        span.setInputs({
-          model: config.model,
-          prompt_name: config.promptName,
-          system_prompt: req.system,
-          user_prompt: userMessage,
-        });
-        // Use MLflow's expected attribute for token usage (renders in UI)
-        span.setAttribute("mlflow.chat.tokenUsage", {
-          input_tokens: llmResponse.tokensIn,
-          output_tokens: llmResponse.tokensOut,
-          total_tokens: llmResponse.tokensIn + llmResponse.tokensOut,
-        });
-        // Custom attributes for filtering/cost tracking
-        span.setAttribute("llm.model", config.model);
-        span.setAttribute("llm.tokens_in", llmResponse.tokensIn);
-        span.setAttribute("llm.tokens_out", llmResponse.tokensOut);
-        span.setAttribute("cost_usd", computeCostUsd(config.model, llmResponse.tokensIn, llmResponse.tokensOut));
-        if (llmResponse.thinking) {
-          span.setAttribute("llm.thinking", llmResponse.thinking);
-        }
-      }
-    }
+    // Enrich active span
+    enrichLlmSpan({
+      model: config.model,
+      promptName: config.promptName,
+      system: req.system,
+      user: userMessage,
+      tokensIn: llmResponse.tokensIn,
+      tokensOut: llmResponse.tokensOut,
+      thinking: llmResponse.thinking,
+    });
 
     const output = llmResponse.output as O;
 
-    // Cache result (best-effort — failure is non-fatal)
+    // Cache result (best-effort)
     if (ctx.cache?.set) {
-      const DEFAULT_CACHE_TTL_SEC = 86400; // 24 hours, matching FR-052
+      const DEFAULT_CACHE_TTL_SEC = 86400;
       try {
         await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
       } catch (e) {

@@ -37,10 +37,23 @@ export class OpenAILlmClient implements LlmClient {
 
   constructor(private readonly openai: OpenAI, opts?: { requestTimeoutMs?: number }) {
     this.requestTimeoutMs = opts?.requestTimeoutMs ?? 120_000;
-    // Extract connection details from the OpenAI client for raw fetch calls
     this.baseUrl = (openai as any).baseURL ?? (openai as any)._options?.baseURL ?? "";
     this.apiKey = (openai as any).apiKey ?? (openai as any)._options?.apiKey ?? "";
     this.apiVersion = (openai as any)._options?.defaultQuery?.["api-version"] ?? undefined;
+  }
+
+  private buildRequestConfig(): { url: string; headers: Record<string, string> } {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    let url: string;
+    if (this.apiVersion) {
+      const base = this.baseUrl.replace(/\/openai(\/deployments\/[^/]+)?$/, "");
+      url = `${base}/openai/responses?api-version=${this.apiVersion}`;
+      headers["api-key"] = this.apiKey;
+    } else {
+      url = `${this.baseUrl}/responses`;
+      headers["Authorization"] = `Bearer ${this.apiKey}`;
+    }
+    return { url, headers };
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
@@ -71,25 +84,7 @@ export class OpenAILlmClient implements LlmClient {
         body.reasoning = { effort: "high", summary: "auto" };
       }
 
-      // Build URL — use /openai/responses (not deployment-scoped)
-      let url: string;
-      if (this.apiVersion) {
-        // Azure: baseUrl is like https://xxx.cognitiveservices.azure.com/openai
-        const base = this.baseUrl.replace(/\/openai(\/deployments\/[^/]+)?$/, "");
-        url = `${base}/openai/responses?api-version=${this.apiVersion}`;
-      } else {
-        // Direct OpenAI
-        url = `${this.baseUrl}/responses`;
-      }
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (this.apiVersion) {
-        headers["api-key"] = this.apiKey;
-      } else {
-        headers["Authorization"] = `Bearer ${this.apiKey}`;
-      }
+      const { url, headers } = this.buildRequestConfig();
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);

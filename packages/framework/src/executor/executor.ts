@@ -8,28 +8,7 @@ import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
 import { dispatchEvent } from "../observer/buffered.js";
-
-// OTel span integration — optional, gracefully no-ops if tracing not initialized
-let _withSpan: typeof import("@mlflow/core").withSpan | null = null;
-let _SpanType: typeof import("@mlflow/core").SpanType | null = null;
-let _SpanStatusCode: typeof import("@mlflow/core").SpanStatusCode | null = null;
-
-// Lazy-load @mlflow/core to avoid hard dependency
-const loadMlflow = async () => {
-  if (_withSpan) return;
-  try {
-    const mlflow = await import("@mlflow/core");
-    _withSpan = mlflow.withSpan;
-    _SpanType = mlflow.SpanType;
-    _SpanStatusCode = mlflow.SpanStatusCode;
-  } catch (e) {
-    // Distinguish "not installed" (expected) from "installed but broken" (bug)
-    const code = (e as NodeJS.ErrnoException)?.code;
-    if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") {
-      console.warn(`[executor] @mlflow/core import failed unexpectedly: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-};
+import { loadMlflow, mlflow } from "../tracing/index.js";
 
 const SPAN_TYPE_MAP: Record<string, string> = {
   llm: "LLM",
@@ -52,6 +31,10 @@ const emit = (ctx: NodeContext, event: ObserverEvent) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export const runDag = async <I, O>(
   dag: DagDef,
   input: I,
@@ -60,58 +43,68 @@ export const runDag = async <I, O>(
 ): Promise<Result<O, FrameworkError>> => {
   await loadMlflow();
 
-  if (_withSpan) {
-    return _withSpan(async (rootSpan) => {
-      rootSpan.setInputs({ dagId: dag.id, runId: ctx.runId });
-      const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
-      const result = await runDagInner(dag, input, ctx, opts, meta);
-      if (result.ok) {
-        const { output, nodeOutputs } = result.value;
-        // Run eval-judge nodes after successful output
-        if (dag.evalJudges?.length) {
-          await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
-        }
+  const execute = async (rootSpan?: any): Promise<Result<O, FrameworkError>> => {
+    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
+    rootSpan?.setInputs({ dagId: dag.id, runId: ctx.runId });
 
+    const result = await runDagInner(dag, input, ctx, opts, meta);
+
+    if (result.ok) {
+      const { output, nodeOutputs } = result.value;
+      if (dag.evalJudges?.length) {
+        await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
+      }
+
+      if (rootSpan) {
+        const sc = mlflow().SpanStatusCode!;
         if (meta.evalJudgeFailed) {
-          const failedCriteria = meta.evalJudgeResults
-            .filter((r) => !r.passed)
-            .flatMap((r) => r.failedCriteria);
-          rootSpan.setStatus(_SpanStatusCode!.ERROR, `Eval-judge failed: ${failedCriteria.join(", ")}`);
+          const failed = meta.evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
+          rootSpan.setStatus(sc.ERROR, `Eval-judge failed: ${failed.join(", ")}`);
           rootSpan.setOutputs({ status: "ok", evalJudgeFailed: true, evalJudgeResults: meta.evalJudgeResults });
         } else if (meta.guardrailFailed) {
-          // Guardrail failed but response still returned — mark trace as ERROR so it's visible in MLflow
-          rootSpan.setStatus(_SpanStatusCode!.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
+          rootSpan.setStatus(sc.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
           rootSpan.setOutputs({ status: "ok", guardrailWarnings: meta.guardrailWarnings });
         } else {
           rootSpan.setOutputs({ status: "ok" });
         }
-        return ok(output) as Result<O, FrameworkError>;
-      } else {
-        rootSpan.setStatus(_SpanStatusCode!.ERROR, String(result.error));
-        rootSpan.setOutputs({ status: "error", error: result.error });
-        return err(result.error) as Result<O, FrameworkError>;
       }
-    }, { name: `run:${dag.id}`, spanType: _SpanType!.CHAIN }) as Promise<Result<O, FrameworkError>>;
-  }
+      return ok(output) as Result<O, FrameworkError>;
+    }
 
-  // Non-traced path: still run eval judges for observability (no span marking)
-  const result = await runDagInner<I, O>(dag, input, ctx, opts, undefined);
-  if (result.ok && dag.evalJudges?.length) {
-    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
-    await runEvalJudges(dag.evalJudges, input, result.value.output, result.value.nodeOutputs, ctx, meta);
+    if (rootSpan) {
+      rootSpan.setStatus(mlflow().SpanStatusCode!.ERROR, String(result.error));
+      rootSpan.setOutputs({ status: "error", error: result.error });
+    }
+    return err(result.error) as Result<O, FrameworkError>;
+  };
+
+  const { withSpan, SpanType } = mlflow();
+  if (withSpan && SpanType) {
+    return withSpan(
+      (span: any) => execute(span),
+      { name: `run:${dag.id}`, spanType: SpanType.CHAIN },
+    ) as Promise<Result<O, FrameworkError>>;
   }
-  return result.ok ? ok(result.value.output) : result;
+  return execute();
 };
 
-/** Metadata collected during DAG execution for trace-level status propagation. */
+export const resumeRun = async <O>(
+  runId: string,
+  dag: DagDef,
+  ctx: NodeContext,
+  checkpoint: Map<string, unknown>,
+): Promise<Result<O, FrameworkError>> => {
+  return runDag(dag, undefined, ctx, { resume: { runId, checkpoint } });
+};
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
 interface DagRunMeta {
-  /** True if any guardrail node returned passed: false */
   guardrailFailed: boolean;
-  /** Warning messages from failed guardrails */
   guardrailWarnings: string[];
-  /** True if any eval-judge returned passed: false */
   evalJudgeFailed: boolean;
-  /** Eval-judge results (one per judge) */
   evalJudgeResults: EvalJudgeResult[];
 }
 
@@ -122,182 +115,146 @@ const runDagInner = async <I, O>(
   opts?: RunOptions,
   meta?: DagRunMeta,
 ): Promise<Result<{ output: O; nodeOutputs: Map<string, unknown> }, FrameworkError>> => {
-  // 1. Topo sort (cycle detection)
   const sortResult = topoSort(dag);
   if (!sortResult.ok) return sortResult;
 
   const waves = sortResult.value;
-  const nodeMap = new Map<string, NodeDef<any, any, any>>(
-    dag.nodes.map((n) => [n.id, n]),
-  );
+  const nodeMap = new Map<string, NodeDef<any, any, any>>(dag.nodes.map((n) => [n.id, n]));
   const outputs = new Map<string, unknown>();
   const checkpoint = opts?.resume?.checkpoint;
-
   const runStart = Date.now();
+
   emit(ctx, { type: "run-start", runId: ctx.runId, dagId: dag.id, timestamp: new Date() });
 
   for (const wave of waves) {
     const results = await Promise.all(
-      wave.map(async (nodeId) => {
-        const node = nodeMap.get(nodeId)!;
-
-        // Check checkpoint for resume
-        if (checkpoint?.has(nodeId)) {
-          const cached = checkpoint.get(nodeId);
-          emit(ctx, {
-            type: "node-skipped",
-            runId: ctx.runId,
-            dagId: dag.id,
-            nodeId,
-            timestamp: new Date(),
-            reason: "checkpoint",
-          });
-          outputs.set(nodeId, cached);
-          return ok(cached);
-        }
-
-        // Build node input from deps
-        const nodeInput = node.deps.length === 0
-          ? input
-          : node.deps.length === 1
-            ? outputs.get(node.deps[0])
-            : Object.fromEntries(node.deps.map((d) => [d, outputs.get(d)]));
-
-        // Validate input
-        const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
-        if (!inputResult.ok) return inputResult;
-
-        // Execute node — optionally wrapped in an OTel span
-        const executeNode = async (): Promise<Result<any, FrameworkError>> => {
-          const nodeStart = Date.now();
-          emit(ctx, {
-            type: "node-start",
-            runId: ctx.runId,
-            dagId: dag.id,
-            nodeId,
-            timestamp: new Date(),
-          });
-
-          let runResult: Result<any, any>;
-          try {
-            runResult = await node.run(inputResult.value, ctx);
-          } catch (e) {
-            const error: FrameworkError = {
-              kind: "node-crash",
-              nodeId,
-              message: e instanceof Error ? e.message : String(e),
-              stack: e instanceof Error ? e.stack : undefined,
-            };
-            return err(error);
-          }
-
-          if (!runResult.ok) {
-            emit(ctx, {
-              type: "node-error",
-              runId: ctx.runId,
-              dagId: dag.id,
-              nodeId,
-              timestamp: new Date(),
-              error: String(runResult.error),
-            });
-            return runResult as Result<never, FrameworkError>;
-          }
-
-          // Validate output
-          const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
-          if (!outputResult.ok) return outputResult;
-
-          const duration = Date.now() - nodeStart;
-          outputs.set(nodeId, outputResult.value);
-
-          // Write checkpoint if available (best-effort — don't crash DAG on cache failure)
-          if (ctx.cache?.writeCheckpoint) {
-            try {
-              await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
-            } catch (e) {
-              const msg = `Checkpoint write failed for ${nodeId}: ${e instanceof Error ? e.message : e}`;
-              (ctx.logger?.warn ?? console.warn)(msg);
-            }
-          }
-
-          emit(ctx, {
-            type: "node-end",
-            runId: ctx.runId,
-            dagId: dag.id,
-            nodeId,
-            timestamp: new Date(),
-            duration,
-            output: outputResult.value,
-          });
-
-          return ok(outputResult.value);
-        };
-
-        // Wrap in OTel span if tracing is available
-        if (_withSpan && _SpanType) {
-          const spanType = (SPAN_TYPE_MAP[node.kind] ?? "CHAIN") as keyof typeof _SpanType;
-          return _withSpan(async (span) => {
-            span.setInputs(inputResult.value);
-            const result = await executeNode();
-            if (result.ok) {
-              span.setOutputs(result.value);
-              // Guardrail nodes: set span to ERROR when validation fails
-              if (node.kind === "guardrail" && result.value && typeof result.value === "object" && "passed" in result.value && !(result.value as any).passed) {
-                const warnings = (result.value as any).warnings ?? [];
-                span.setStatus(_SpanStatusCode!.ERROR, `Guardrail failed: ${warnings.join("; ")}`);
-                // Propagate to trace-level meta
-                if (meta) {
-                  meta.guardrailFailed = true;
-                  meta.guardrailWarnings.push(...warnings);
-                }
-              }
-            } else {
-              span.setStatus(_SpanStatusCode!.ERROR, String(result.error));
-            }
-            return result;
-          }, { name: `node:${nodeId}`, spanType: (_SpanType as any)[spanType] ?? _SpanType.CHAIN }) as Promise<Result<any, FrameworkError>>;
-        }
-
-        return executeNode();
-      }),
+      wave.map((nodeId) => runNode(nodeMap.get(nodeId)!, input, ctx, dag.id, outputs, checkpoint, meta)),
     );
 
-    // Check for any errors in this wave
     for (const r of results) {
       if (!r.ok) {
-        emit(ctx, {
-          type: "run-end",
-          runId: ctx.runId,
-          dagId: dag.id,
-          timestamp: new Date(),
-          duration: Date.now() - runStart,
-          status: "error",
-        });
+        emit(ctx, { type: "run-end", runId: ctx.runId, dagId: dag.id, timestamp: new Date(), duration: Date.now() - runStart, status: "error" });
         return r as Result<any, FrameworkError>;
       }
     }
   }
 
-  emit(ctx, {
-    type: "run-end",
-    runId: ctx.runId,
-    dagId: dag.id,
-    timestamp: new Date(),
-    duration: Date.now() - runStart,
-    status: "ok",
-  });
+  emit(ctx, { type: "run-end", runId: ctx.runId, dagId: dag.id, timestamp: new Date(), duration: Date.now() - runStart, status: "ok" });
 
-  // Return output of explicit output node, or last node in last wave
   const lastWave = waves[waves.length - 1];
   const outputNodeId = dag.outputNodeId ?? lastWave[lastWave.length - 1];
   return ok({ output: outputs.get(outputNodeId) as O, nodeOutputs: outputs });
 };
 
-/**
- * Run eval-judge nodes after the output node completes.
- * Judges run in parallel. Results are stored in meta for span marking.
- * Fail-open: individual judge failures are logged but don't affect the DAG result.
- */
+// ---------------------------------------------------------------------------
+// Node execution
+// ---------------------------------------------------------------------------
+
+const runNode = async (
+  node: NodeDef<any, any, any>,
+  dagInput: unknown,
+  ctx: NodeContext,
+  dagId: string,
+  outputs: Map<string, unknown>,
+  checkpoint: Map<string, unknown> | undefined,
+  meta: DagRunMeta | undefined,
+): Promise<Result<any, FrameworkError>> => {
+  const nodeId = node.id;
+
+  // Resume from checkpoint
+  if (checkpoint?.has(nodeId)) {
+    const cached = checkpoint.get(nodeId);
+    emit(ctx, { type: "node-skipped", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), reason: "checkpoint" });
+    outputs.set(nodeId, cached);
+    return ok(cached);
+  }
+
+  // Build node input from deps
+  const nodeInput = node.deps.length === 0
+    ? dagInput
+    : node.deps.length === 1
+      ? outputs.get(node.deps[0])
+      : Object.fromEntries(node.deps.map((d) => [d, outputs.get(d)]));
+
+  const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
+  if (!inputResult.ok) return inputResult;
+
+  // Core execution logic
+  const executeNode = async (): Promise<Result<any, FrameworkError>> => {
+    const nodeStart = Date.now();
+    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
+
+    let runResult: Result<any, any>;
+    try {
+      runResult = await node.run(inputResult.value, ctx);
+    } catch (e) {
+      return err({ kind: "node-crash", nodeId, message: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined });
+    }
+
+    if (!runResult.ok) {
+      emit(ctx, { type: "node-error", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), error: String(runResult.error) });
+      return runResult as Result<never, FrameworkError>;
+    }
+
+    const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
+    if (!outputResult.ok) return outputResult;
+
+    const duration = Date.now() - nodeStart;
+    outputs.set(nodeId, outputResult.value);
+
+    if (ctx.cache?.writeCheckpoint) {
+      try {
+        await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
+      } catch (e) {
+        (ctx.logger?.warn ?? console.warn)(`Checkpoint write failed for ${nodeId}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+
+    emit(ctx, { type: "node-end", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), duration, output: outputResult.value });
+    return ok(outputResult.value);
+  };
+
+  // Wrap in OTel span if available
+  return withNodeSpan(nodeId, node.kind, inputResult.value, meta, executeNode);
+};
+
+/** Wrap execution in an OTel span if tracing is available; otherwise just call fn. */
+const withNodeSpan = async (
+  nodeId: string,
+  kind: string,
+  input: unknown,
+  meta: DagRunMeta | undefined,
+  fn: () => Promise<Result<any, FrameworkError>>,
+): Promise<Result<any, FrameworkError>> => {
+  const { withSpan, SpanType, SpanStatusCode } = mlflow();
+  if (!withSpan || !SpanType) return fn();
+
+  const spanType = (SpanType as any)[SPAN_TYPE_MAP[kind] ?? "CHAIN"] ?? SpanType.CHAIN;
+  return withSpan(async (span: any) => {
+    span.setInputs(input);
+    const result = await fn();
+    if (result.ok) {
+      span.setOutputs(result.value);
+      // Guardrail nodes: propagate failure to trace-level meta
+      if (kind === "guardrail" && result.value && typeof result.value === "object" && "passed" in result.value && !(result.value as any).passed) {
+        const warnings = (result.value as any).warnings ?? [];
+        span.setStatus(SpanStatusCode!.ERROR, `Guardrail failed: ${warnings.join("; ")}`);
+        if (meta) {
+          meta.guardrailFailed = true;
+          meta.guardrailWarnings.push(...warnings);
+        }
+      }
+    } else {
+      span.setStatus(SpanStatusCode!.ERROR, String(result.error));
+    }
+    return result;
+  }, { name: `node:${nodeId}`, spanType }) as Promise<Result<any, FrameworkError>>;
+};
+
+// ---------------------------------------------------------------------------
+// Eval-judge execution
+// ---------------------------------------------------------------------------
+
 const runEvalJudges = async (
   judges: readonly EvalJudgeNodeDef[],
   dagInput: unknown,
@@ -306,43 +263,36 @@ const runEvalJudges = async (
   ctx: NodeContext,
   meta: DagRunMeta,
 ): Promise<void> => {
+  const { withSpan, SpanType, SpanStatusCode } = mlflow();
+
   const results = await Promise.all(
     judges.map(async (judge) => {
       const runJudge = async (span?: any): Promise<EvalJudgeResult> => {
         try {
-          // Build judge input: include all intermediate node outputs so the judge
-          // can verify the summary is grounded in the actual fetched data
-          const judgeInput = {
-            dagInput,
-            dagOutput,
-            nodeOutputs: Object.fromEntries(nodeOutputs),
-          };
+          const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
           if (span) {
             span.setInputs({ ...judgeInput, criteria: judge.config.criteria });
           }
           const result = await judge.run(judgeInput, dagOutput, ctx);
           if (span) {
             span.setOutputs(result);
-            if (!result.passed && _SpanStatusCode) {
-              span.setStatus(_SpanStatusCode.ERROR, `Score ${result.score} below threshold. ${result.reason}`);
+            if (!result.passed && SpanStatusCode) {
+              span.setStatus(SpanStatusCode.ERROR, `Score ${result.score} below threshold. ${result.reason}`);
             }
           }
           return result;
         } catch (e) {
           const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
           (ctx.logger?.warn ?? console.warn)(msg);
-          if (span && _SpanStatusCode) {
-            span.setStatus(_SpanStatusCode.ERROR, msg);
+          if (span && SpanStatusCode) {
+            span.setStatus(SpanStatusCode.ERROR, msg);
           }
           return { passed: true, score: 1.0, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]` };
         }
       };
 
-      if (_withSpan && _SpanType) {
-        return _withSpan(
-          (span: any) => runJudge(span),
-          { name: `eval-judge:${judge.id}`, spanType: _SpanType!.TOOL },
-        );
+      if (withSpan && SpanType) {
+        return withSpan((span: any) => runJudge(span), { name: `eval-judge:${judge.id}`, spanType: SpanType.TOOL });
       }
       return runJudge();
     }),
@@ -350,13 +300,4 @@ const runEvalJudges = async (
 
   meta.evalJudgeResults = results;
   meta.evalJudgeFailed = results.some((r) => !r.passed);
-};
-
-export const resumeRun = async <O>(
-  runId: string,
-  dag: DagDef,
-  ctx: NodeContext,
-  checkpoint: Map<string, unknown>,
-): Promise<Result<O, FrameworkError>> => {
-  return runDag(dag, undefined, ctx, { resume: { runId, checkpoint } });
 };
