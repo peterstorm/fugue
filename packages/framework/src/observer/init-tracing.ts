@@ -1,19 +1,23 @@
 /**
- * Initialize the OTel + MLflow tracing pipeline with tail-based sampling.
+ * Initialize the OTel + MLflow tracing pipeline with tail-based sampling via OTLP.
  *
- * Flow:
- * 1. Call mlflow.init() to set globalConfig (required by MlflowSpanProcessor)
- * 2. Construct our own pipeline: MlflowSpanProcessor → TailSamplingExporter → MlflowSpanExporter
- * 3. Start a new NodeSDK that overwrites the throwaway one from init()
+ * Architecture:
+ * 1. Call mlflow.init() to configure experiment + enable mlflow.withSpan() API
+ * 2. Keep MlflowSpanProcessor for InMemoryTraceManager (enables getCurrentActiveSpan, setInputs, etc.)
+ *    but with a NoOp exporter (we don't use MlflowSpanExporter's artifact upload path)
+ * 3. Add TailSamplingProcessor → MlflowOtlpExporter as a SECOND processor
+ *    This exports ALL spans via OTLP to /v1/traces, which populates span_metrics for cost breakdown
  *
- * After this, @mlflow/core's withSpan/startSpan and @mlflow/anthropic's tracedAnthropic
- * all route through our tail-sampling pipeline.
+ * After this, mlflow.withSpan() creates OTel spans that flow through both processors:
+ * - MlflowSpanProcessor: maintains InMemoryTraceManager for MLflow span API (setInputs, etc.)
+ * - TailSamplingProcessor: buffers spans, applies policy, exports via OTLP on root span end
  */
 import * as mlflow from "@mlflow/core";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { trace } from "@opentelemetry/api";
-import { MlflowSpanProcessor, MlflowSpanExporter, createAuthProvider, InMemoryTraceManager } from "./mlflow-internals.js";
-import { TailSamplingExporter } from "./tail-sampling-exporter.js";
+import { MlflowSpanProcessor } from "./mlflow-internals.js";
+import { TailSamplingProcessor } from "./tail-sampling-processor.js";
+import { MlflowOtlpExporter } from "./mlflow-otlp-exporter.js";
 import type { PersistencePolicy } from "./policy.js";
 
 export interface TracingConfig {
@@ -32,17 +36,23 @@ export interface TracingConfig {
 }
 
 export interface TracingHandle {
-  /** The tail-sampling exporter (for monitoring exported/dropped counts) */
-  readonly exporter: TailSamplingExporter;
+  /** The tail-sampling processor (for monitoring exported/dropped counts) */
+  readonly processor: TailSamplingProcessor;
   /** Flush all pending traces to MLflow */
   readonly flush: () => Promise<void>;
   /** Shut down the tracing pipeline */
   readonly shutdown: () => Promise<void>;
 }
 
+/** No-op exporter used for MlflowSpanProcessor (we don't want it to export). */
+const noopExporter = {
+  export(_spans: unknown[], cb: (r: { code: number }) => void) { cb({ code: 0 }); },
+  shutdown() { return Promise.resolve(); },
+};
+
 export async function initTracing(config: TracingConfig): Promise<TracingHandle> {
-  // Step 1: Call mlflow.init() to set globalConfig
-  // This creates a throwaway NodeSDK that we'll overwrite
+  // Step 1: Call mlflow.init() to configure globalConfig (experimentId, auth, etc.)
+  // This also starts an internal SDK with MlflowSpanExporter — we immediately shut it down.
   mlflow.init({
     trackingUri: config.trackingUri,
     experimentId: config.experimentId,
@@ -51,28 +61,8 @@ export async function initTracing(config: TracingConfig): Promise<TracingHandle>
     trackingServerToken: config.token,
   });
 
-  // Step 2: Build our custom pipeline
-  const authProvider = createAuthProvider({
-    trackingUri: config.trackingUri,
-    trackingServerUsername: config.username,
-    trackingServerPassword: config.password,
-    trackingServerToken: config.token,
-  });
-
-  const client = new mlflow.MlflowClient({
-    trackingUri: config.trackingUri,
-    authProvider,
-  });
-
-  const realExporter = new MlflowSpanExporter(client);
-  const tailExporter = new TailSamplingExporter(realExporter, config.policy, InMemoryTraceManager.getInstance());
-  const processor = new MlflowSpanProcessor(tailExporter);
-
-  // Step 3: Replace the global TracerProvider registered by mlflow.init() with ours.
-  // OTel's setGlobalTracerProvider is a no-op if already set, so we must:
-  //   a) Shut down the existing delegate provider from mlflow.init()
-  //   b) Call trace.disable() to clear the global registration
-  //   c) Start our SDK which re-registers with the tail-sampling pipeline
+  // Step 2: Immediately shut down mlflow.init()'s internal SDK to prevent
+  // MlflowSpanExporter from firing (we use OTLP instead).
   const proxy = trace.getTracerProvider() as any;
   const existingDelegate = proxy.getDelegate?.();
   if (existingDelegate?.shutdown) {
@@ -84,12 +74,25 @@ export async function initTracing(config: TracingConfig): Promise<TracingHandle>
   }
   trace.disable();
 
-  const sdk = new NodeSDK({ spanProcessors: [processor] });
+  // Step 3: Build our processors
+  // Processor 1: MlflowSpanProcessor with NoOp exporter — maintains InMemoryTraceManager
+  // so that getCurrentActiveSpan(), setInputs(), setAttribute() work on MLflow spans
+  const mlflowProcessor = new MlflowSpanProcessor(noopExporter as any);
+
+  // Processor 2: TailSamplingProcessor → MlflowOtlpExporter
+  // Buffers all spans, applies policy on root span end, exports full trace via OTLP
+  const otlpExporter = new MlflowOtlpExporter({
+    url: config.trackingUri,
+    experimentId: config.experimentId,
+  });
+  const tailProcessor = new TailSamplingProcessor(otlpExporter, config.policy);
+
+  const sdk = new NodeSDK({ spanProcessors: [mlflowProcessor, tailProcessor] });
   sdk.start();
 
   return {
-    exporter: tailExporter,
-    flush: async () => processor.forceFlush(),
+    processor: tailProcessor,
+    flush: async () => tailProcessor.forceFlush(),
     shutdown: async () => sdk.shutdown(),
   };
 }

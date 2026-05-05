@@ -13,7 +13,8 @@ export {
   allOf,
   custom,
 } from "./policy.js";
-export type { TraceManager } from "./tail-sampling-exporter.js";
-export { TailSamplingExporter, extractRunSummary } from "./tail-sampling-exporter.js";
+export { TailSamplingProcessor } from "./tail-sampling-processor.js";
+export { MlflowOtlpExporter } from "./mlflow-otlp-exporter.js";
+export { SpanAttributeRegistry } from "./span-attribute-registry.js";
 export type { TracingConfig, TracingHandle } from "./init-tracing.js";
 export { initTracing } from "./init-tracing.js";

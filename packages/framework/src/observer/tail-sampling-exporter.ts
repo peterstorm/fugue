@@ -97,6 +97,8 @@ export class TailSamplingExporter implements SpanExporter {
       const shouldFlush = this.policy.shouldFlush(summary);
 
       if (shouldFlush) {
+        // Inject mlflow.trace.cost metadata before forwarding
+        this.injectCostMetadata(span);
         toForward.push(span);
         this.exported++;
       } else {
@@ -125,5 +127,39 @@ export class TailSamplingExporter implements SpanExporter {
 
   async forceFlush(): Promise<void> {
     return (this.inner as any).forceFlush?.();
+  }
+
+  /** Aggregate mlflow.llm.cost from all spans and set mlflow.trace.cost on the trace metadata. */
+  private injectCostMetadata(rootSpan: ReadableSpan): void {
+    const otelTraceId = rootSpan.spanContext().traceId;
+    const mlflowTraceId = this.traceManager.getMlflowTraceIdFromOtelId(otelTraceId);
+    if (!mlflowTraceId) return;
+    const trace = this.traceManager.getTrace(mlflowTraceId) as any;
+    if (!trace?.info?.traceMetadata) return;
+
+    let totalInputCost = 0;
+    let totalOutputCost = 0;
+    for (const span of trace.spanDict.values()) {
+      const costAttr = span.getAttribute("mlflow.llm.cost");
+      if (costAttr && typeof costAttr === "object") {
+        const cost = costAttr as Record<string, number>;
+        totalInputCost += cost.input_cost ?? 0;
+        totalOutputCost += cost.output_cost ?? 0;
+      } else if (typeof costAttr === "string") {
+        try {
+          const cost = JSON.parse(costAttr);
+          totalInputCost += cost.input_cost ?? 0;
+          totalOutputCost += cost.output_cost ?? 0;
+        } catch { /* ignore */ }
+      }
+    }
+
+    if (totalInputCost > 0 || totalOutputCost > 0) {
+      trace.info.traceMetadata["mlflow.trace.cost"] = JSON.stringify({
+        input_cost: totalInputCost,
+        output_cost: totalOutputCost,
+        total_cost: totalInputCost + totalOutputCost,
+      });
+    }
   }
 }
