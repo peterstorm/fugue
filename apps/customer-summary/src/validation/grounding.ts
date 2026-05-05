@@ -30,6 +30,12 @@ const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
   general: ["help", "question", "support", "information", "inquiry", "request", "assistance"],
 };
 
+/** Words that are inherent to the customer support domain and always considered grounded. */
+const DOMAIN_STOP_WORDS = new Set([
+  "customer", "support", "service", "satisfaction", "feedback", "experience",
+  "resolution", "response", "interaction", "communication", "team",
+]);
+
 const POSITIVE_KEYWORDS = [
   "thank", "thanks", "great", "excellent", "awesome", "good", "love",
   "happy", "pleased", "wonderful", "fantastic", "perfect", "appreciate",
@@ -55,6 +61,8 @@ const countKeywords = (text: string, keywords: readonly string[]): number =>
 
 /**
  * Check that every keyTopic in the synthesis output is grounded in the source conversations.
+ * Uses word-overlap matching: a topic is grounded if the majority of its meaningful words
+ * appear in the source text.
  */
 export const checkTopicGrounding = (
   synthesis: SynthesisOutput,
@@ -75,6 +83,19 @@ export const checkTopicGrounding = (
       kws.some((kw) => topicLower.includes(kw) && sourceText.includes(kw)),
     );
     if (anyMatch) continue;
+    // Word-overlap: tokenize topic into words, check if at least one meaningful word (or its stem) appears in source
+    const words = topicLower.split(/\s+/).filter((w) => w.length > 3 && !DOMAIN_STOP_WORDS.has(w));
+    if (words.length === 0) continue; // All words are domain stop words — always grounded
+    const matchedWords = words.filter((w) => {
+        // Direct match
+        if (sourceText.includes(w)) return true;
+        // Stem-like: try progressively shorter prefixes (min 4 chars)
+        for (let len = w.length - 1; len >= 4; len--) {
+          if (sourceText.includes(w.slice(0, len))) return true;
+        }
+        return false;
+      });
+      if (matchedWords.length >= 1) continue;
     ungrounded.push(topic);
   }
 

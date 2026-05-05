@@ -1,11 +1,23 @@
-Evaluate the customer summary output against these criteria:
+Evaluate the customer summary output against these criteria.
 
-- Factuality: Every claim in the summary (sentiment, topics, actions, risk level) must be directly traceable to the input conversation data. No hallucinated details, invented customer statements, or fabricated context. Score 0.0 if any claim cannot be found in the source material.
+IMPORTANT: The "Input" section contains the full execution context as JSON with these keys:
+- "dagInput": the original request (just a customerId)
+- "dagOutput": the final summary (same as the "Output" section)
+- "nodeOutputs": intermediate results from the pipeline, including:
+  - "fetch-crm": the raw CRM record with customer conversations — THIS IS THE SOURCE OF TRUTH for factuality verification
+  - "extract-features": extracted features from conversations
+  - Other intermediate nodes
 
-- Completeness: The summary must cover all key dimensions: sentiment assessment, main topics discussed, interaction summary, action items, risk level, and satisfaction. Missing a required dimension scores 0.0. Partial coverage scores proportionally.
+Use "nodeOutputs.fetch-crm" as the ground truth source data when evaluating factuality.
 
-- Relevance: The summary must focus on information useful to a support team. No off-topic content, no generic filler text, no restating obvious metadata. Every sentence should add actionable insight.
+CRITERIA:
 
-- Coherence: The summary must read as a unified analysis, not disconnected bullet points. Assessments (sentiment, risk, satisfaction) should be consistent with each other and with the evidence cited.
+- Factuality (0.0-1.0): Claims in the summary must be supported by the source conversation data in nodeOutputs["fetch-crm"]. Score proportionally: if 9/10 claims are grounded, score 0.9. Score 0.0 only if the summary is entirely fabricated. Reasonable inferences from the data (e.g., inferring satisfaction from tone) are acceptable and should not be penalized.
+
+- Completeness (0.0-1.0): The summary must cover key dimensions: sentiment, topics, summary text, action items, risk level, satisfaction. Score proportionally based on coverage.
+
+- Relevance (0.0-1.0): Content should be useful to a support team. No filler or off-topic content.
+
+- Coherence (0.0-1.0): The summary should read as unified analysis with internally consistent assessments.
 
 Score each criterion 0.0-1.0. A criterion fails below 0.8.

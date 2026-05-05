@@ -8,7 +8,7 @@ Recent Conversations ({{conversationCount}} total):
 
 Produce a structured analysis including:
 - Overall sentiment assessment (analyze the tone and language of the conversations directly)
-- Key topics discussed (identify the main subjects from the conversation content)
+- Key topics discussed — use specific phrases and terminology from the conversations themselves. Do NOT use generic category names like "billing adjustments" or "customer satisfaction". Instead use the actual subjects mentioned, e.g. "prorated charges", "API migration", "seat addition".
 - Concise summary of interactions
 - Action items for the support team
 - Risk level assessment

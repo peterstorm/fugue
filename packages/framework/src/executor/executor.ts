@@ -23,6 +23,8 @@ export interface RunOptions {
     readonly runId: string;
     readonly checkpoint: Map<string, unknown>;
   };
+  /** Called with a promise that resolves when background work (eval-judge) completes. */
+  readonly onBackground?: (p: Promise<void>) => void;
 }
 
 const emit = (ctx: NodeContext, event: ObserverEvent) => {
@@ -43,49 +45,67 @@ export const runDag = async <I, O>(
 ): Promise<Result<O, FrameworkError>> => {
   await loadMlflow();
 
-  const execute = async (rootSpan?: any): Promise<Result<O, FrameworkError>> => {
-    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
-    rootSpan?.setInputs({ dagId: dag.id, runId: ctx.runId });
-
-    const result = await runDagInner(dag, input, ctx, opts, meta);
-
-    if (result.ok) {
-      const { output, nodeOutputs } = result.value;
-      if (dag.evalJudges?.length) {
-        await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
-      }
-
-      if (rootSpan) {
-        const sc = mlflow().SpanStatusCode!;
-        if (meta.evalJudgeFailed) {
-          const failed = meta.evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
-          rootSpan.setStatus(sc.ERROR, `Eval-judge failed: ${failed.join(", ")}`);
-          rootSpan.setOutputs({ status: "ok", evalJudgeFailed: true, evalJudgeResults: meta.evalJudgeResults });
-        } else if (meta.guardrailFailed) {
-          rootSpan.setStatus(sc.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
-          rootSpan.setOutputs({ status: "ok", guardrailWarnings: meta.guardrailWarnings });
-        } else {
-          rootSpan.setOutputs({ status: "ok" });
-        }
-      }
-      return ok(output) as Result<O, FrameworkError>;
-    }
-
-    if (rootSpan) {
-      rootSpan.setStatus(mlflow().SpanStatusCode!.ERROR, String(result.error));
-      rootSpan.setOutputs({ status: "error", error: result.error });
-    }
-    return err(result.error) as Result<O, FrameworkError>;
-  };
-
   const { withSpan, SpanType } = mlflow();
-  if (withSpan && SpanType) {
-    return withSpan(
-      (span: any) => execute(span),
-      { name: `run:${dag.id}`, spanType: SpanType.CHAIN },
-    ) as Promise<Result<O, FrameworkError>>;
+
+  // No tracing path
+  if (!withSpan || !SpanType) {
+    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
+    const innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
+    const result = innerResult.ok ? ok(innerResult.value.output) as Result<O, FrameworkError> : innerResult;
+
+    // Run eval-judge in background (fire-and-forget)
+    if (innerResult.ok && dag.evalJudges?.length) {
+      const bg = runEvalJudges(dag.evalJudges, input, innerResult.value.output, innerResult.value.nodeOutputs, ctx, meta).then(() => {});
+      opts?.onBackground?.(bg);
+    }
+
+    return result;
   }
-  return execute();
+
+  // Traced path — span stays open until judge completes
+  let resolveResult!: (r: Result<O, FrameworkError>) => void;
+  const resultPromise = new Promise<Result<O, FrameworkError>>((resolve) => { resolveResult = resolve; });
+
+  const background = withSpan(async (rootSpan) => {
+    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
+    rootSpan.setInputs({ dagId: dag.id, runId: ctx.runId });
+
+    const innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
+
+    if (!innerResult.ok) {
+      rootSpan.setStatus(mlflow().SpanStatusCode!.ERROR, String(innerResult.error));
+      rootSpan.setOutputs({ status: "error", error: innerResult.error });
+      resolveResult(err(innerResult.error) as Result<O, FrameworkError>);
+      return;
+    }
+
+    const { output, nodeOutputs } = innerResult.value;
+
+    // Release the result to the caller immediately
+    resolveResult(ok(output) as Result<O, FrameworkError>);
+
+    // Run eval-judge (still inside the span — appears in trace)
+    if (dag.evalJudges?.length) {
+      await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
+    }
+
+    // Finalize span status based on judge + guardrail results
+    const sc = mlflow().SpanStatusCode!;
+    if (meta.evalJudgeFailed) {
+      const failed = meta.evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
+      rootSpan.setStatus(sc.ERROR, `Eval-judge failed: ${failed.join(", ")}`);
+      rootSpan.setOutputs({ status: "ok", evalJudgeFailed: true, evalJudgeResults: meta.evalJudgeResults });
+    } else if (meta.guardrailFailed) {
+      rootSpan.setStatus(sc.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
+      rootSpan.setOutputs({ status: "ok", guardrailWarnings: meta.guardrailWarnings });
+    } else {
+      rootSpan.setOutputs({ status: "ok" });
+    }
+  }, { name: `run:${dag.id}`, spanType: SpanType.CHAIN }) as Promise<void>;
+
+  opts?.onBackground?.(background);
+  const result = await resultPromise;
+  return result;
 };
 
 export const resumeRun = async <O>(

@@ -86,6 +86,9 @@ export const createApp = (deps: AppDeps): Hono => {
         dag,
         { customerId: customer_id },
         ctx,
+        {
+          onBackground: (p) => p.catch((e: unknown) => console.warn("[background] eval-judge error:", e)),
+        },
       );
 
       if (!result.ok) {
