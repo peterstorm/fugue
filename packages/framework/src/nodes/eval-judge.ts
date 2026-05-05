@@ -14,8 +14,21 @@
  */
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
-import type { LlmClient } from "../llm/client.js";
+import type { LlmClient, LlmRequest } from "../llm/client.js";
+import { computeCostUsd } from "../llm/cost.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
+
+// Lazy-load @mlflow/core for span enrichment
+let _getCurrentActiveSpan: (() => any) | null = null;
+const loadMlflow = async () => {
+  if (_getCurrentActiveSpan) return;
+  try {
+    const mlflow = await import("@mlflow/core");
+    _getCurrentActiveSpan = mlflow.getCurrentActiveSpan;
+  } catch {
+    // Not available — no-op
+  }
+};
 
 /** Output of the eval-judge node. */
 export interface EvalJudgeResult {
@@ -146,6 +159,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
       // Make LLM call
       const model = config.model ?? DEFAULT_JUDGE_MODEL;
       try {
+        await loadMlflow();
         const result = await llm.sendStructured({
           system: JUDGE_SYSTEM_FRAME,
           user: userMessage,
@@ -157,6 +171,29 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           const msg = `LLM call failed: ${"message" in result.error ? result.error.message : String(result.error)}`;
           (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);
           return failOpenResult(msg);
+        }
+
+        // Enrich active span with LLM details
+        if (_getCurrentActiveSpan) {
+          const span = _getCurrentActiveSpan();
+          if (span && typeof span.setAttribute === "function") {
+            span.setInputs({
+              model,
+              system_prompt: JUDGE_SYSTEM_FRAME,
+              user_prompt: userMessage,
+              criteria: config.criteria,
+              threshold,
+            });
+            span.setAttribute("mlflow.chat.tokenUsage", {
+              input_tokens: result.value.tokensIn,
+              output_tokens: result.value.tokensOut,
+              total_tokens: result.value.tokensIn + result.value.tokensOut,
+            });
+            span.setAttribute("llm.model", model);
+            span.setAttribute("llm.tokens_in", result.value.tokensIn);
+            span.setAttribute("llm.tokens_out", result.value.tokensOut);
+            span.setAttribute("cost_usd", computeCostUsd(model, result.value.tokensIn, result.value.tokensOut));
+          }
         }
 
         // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)

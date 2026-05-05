@@ -148,11 +148,11 @@ export const createLlmNode = <I, O>(
           user_prompt: userMessage,
         });
         // Use MLflow's expected attribute for token usage (renders in UI)
-        span.setAttribute("mlflow.chat.tokenUsage", JSON.stringify({
+        span.setAttribute("mlflow.chat.tokenUsage", {
           input_tokens: llmResponse.tokensIn,
           output_tokens: llmResponse.tokensOut,
           total_tokens: llmResponse.tokensIn + llmResponse.tokensOut,
-        }));
+        });
         // Custom attributes for filtering/cost tracking
         span.setAttribute("llm.model", config.model);
         span.setAttribute("llm.tokens_in", llmResponse.tokensIn);
