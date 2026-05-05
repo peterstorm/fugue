@@ -85,14 +85,14 @@ export const failOpenResult = (reason: string): EvalJudgeResult => ({
  * Convert raw LLM response to EvalJudgeResult, applying threshold.
  */
 export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number, criteria: readonly string[]): EvalJudgeResult => {
-  // Convert array format to record for internal use
+  // Convert array format to record, normalizing keys to lowercase for case-insensitive matching
   const scoresMap: Record<string, number> = {};
   for (const { name, score } of response.criteria_scores) {
-    scoresMap[name] = score;
+    scoresMap[name.toLowerCase()] = score;
   }
 
   const failedCriteria = criteria.filter((c) => {
-    const score = scoresMap[c];
+    const score = scoresMap[c.toLowerCase()];
     return score !== undefined && score < threshold;
   });
 

@@ -305,13 +305,36 @@ const runEvalJudges = async (
 ): Promise<void> => {
   const results = await Promise.all(
     judges.map(async (judge) => {
-      try {
-        return await judge.run(dagInput, dagOutput, ctx);
-      } catch (e) {
-        const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
-        (ctx.logger?.warn ?? console.warn)(msg);
-        return { passed: true, score: 1.0, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]` };
+      const runJudge = async (span?: any): Promise<EvalJudgeResult> => {
+        try {
+          if (span) {
+            span.setInputs({ dagInput, dagOutput, criteria: judge.config.criteria });
+          }
+          const result = await judge.run(dagInput, dagOutput, ctx);
+          if (span) {
+            span.setOutputs(result);
+            if (!result.passed && _SpanStatusCode) {
+              span.setStatus(_SpanStatusCode.ERROR, `Score ${result.score} below threshold. ${result.reason}`);
+            }
+          }
+          return result;
+        } catch (e) {
+          const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
+          (ctx.logger?.warn ?? console.warn)(msg);
+          if (span && _SpanStatusCode) {
+            span.setStatus(_SpanStatusCode.ERROR, msg);
+          }
+          return { passed: true, score: 1.0, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]` };
+        }
+      };
+
+      if (_withSpan && _SpanType) {
+        return _withSpan(
+          (span: any) => runJudge(span),
+          { name: `eval-judge:${judge.id}`, spanType: _SpanType!.TOOL },
+        );
       }
+      return runJudge();
     }),
   );
 
