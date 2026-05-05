@@ -33,6 +33,7 @@ export interface ContextCache {
 export interface AppDeps {
   readonly source: ConversationSource;
   readonly llm: LlmClient;
+  readonly judgeLlm?: LlmClient | null;
   readonly health?: HealthDeps;
   readonly prompts?: Map<string, string>;
   readonly model?: string;
@@ -72,6 +73,7 @@ export const createApp = (deps: AppDeps): Hono => {
         logger: null,
         prompts: { get: (name: string) => deps.prompts?.get(name) ?? null },
         llm: deps.llm,
+        judgeLlm: deps.judgeLlm ?? null,
       };
 
       const result = await runDag<{ customerId: string }, SummaryResponse>(

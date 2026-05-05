@@ -82,8 +82,8 @@ describe("summary-dag", () => {
       expect(result.value.customerId).toBe("nonexistent-999");
     }
 
-    // No LLM call for not_found
-    expect(callCount).toBe(0);
+    // No synthesis LLM call for not_found (1 call is the eval-judge, which fails open)
+    expect(callCount).toBe(1);
   });
 
   test("no_history branch for customer with no conversations", async () => {

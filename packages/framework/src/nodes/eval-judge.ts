@@ -153,7 +153,15 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           return failOpenResult(msg);
         }
 
-        return toEvalJudgeResult(result.value.output, threshold, config.criteria);
+        // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)
+        const parsed = EvalJudgeResponseSchema.safeParse(result.value.output);
+        if (!parsed.success) {
+          const msg = `Invalid judge response: ${parsed.error.message}`;
+          (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);
+          return failOpenResult(msg);
+        }
+
+        return toEvalJudgeResult(parsed.data, threshold, config.criteria);
       } catch (e) {
         const msg = `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
         (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);

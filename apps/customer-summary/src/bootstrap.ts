@@ -105,6 +105,12 @@ export const bootstrap = async () => {
   } else {
     console.error("Failed to load synthesis prompt:", synthesisPrompt.error);
   }
+  const evalRubricPrompt = await promptRegistry.load("summary-eval-rubric");
+  if (evalRubricPrompt.ok) {
+    prompts.set("summary-eval-rubric", evalRubricPrompt.value.text);
+  } else {
+    console.warn("Failed to load eval rubric prompt (eval-judge will use auto-generated rubric):", evalRubricPrompt.error);
+  }
 
   // LLM client
   let llm: LlmClient;
@@ -141,6 +147,7 @@ export const bootstrap = async () => {
   const deps: AppDeps = {
     source,
     llm,
+    judgeLlm: llm, // Uses same client for eval-judge; swap for a cheaper deployment later
     prompts,
     model,
     cache: contextCache,
