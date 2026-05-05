@@ -150,6 +150,7 @@ export const bootstrap = async () => {
     judgeLlm: llm, // Uses same client for eval-judge; swap for a cheaper deployment later
     prompts,
     model,
+    judgeModel: config.EVAL_JUDGE_MODEL ?? model,
     cache: contextCache,
     health: {
       checkRedis: redis ? async () => {

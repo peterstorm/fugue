@@ -7,19 +7,20 @@ import { createSynthesizeNode } from "./nodes/synthesize.js";
 import { createGroundingGuardrailNode } from "./nodes/grounding-guardrail.js";
 import { createAssembleResponseNode } from "./nodes/assemble-response.js";
 
-const summaryEvalJudge = createEvalJudgeNode({
-  id: "summary-quality-judge",
-  criteria: ["factuality", "completeness", "relevance", "coherence"],
-  threshold: 0.8,
-  rubricTemplateId: "summary-eval-rubric",
-});
-
-export const createSummaryDag = (source: ConversationSource, customerId: string, model?: string): DagDef => {
+export const createSummaryDag = (source: ConversationSource, customerId: string, model?: string, judgeModel?: string): DagDef => {
   const fetchCustomer = createFetchCustomerNode(source);
   const extractFeatures = createExtractFeaturesNode();
   const synthesize = createSynthesizeNode(model);
   const groundingGuardrail = createGroundingGuardrailNode();
   const assembleResponse = createAssembleResponseNode(customerId);
+
+  const summaryEvalJudge = createEvalJudgeNode({
+    id: "summary-quality-judge",
+    criteria: ["factuality", "completeness", "relevance", "coherence"],
+    threshold: 0.8,
+    rubricTemplateId: "summary-eval-rubric",
+    model: judgeModel,
+  });
 
   return {
     id: "customer-summary",
