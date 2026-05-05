@@ -193,6 +193,9 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             span.setAttribute("llm.tokens_in", result.value.tokensIn);
             span.setAttribute("llm.tokens_out", result.value.tokensOut);
             span.setAttribute("cost_usd", computeCostUsd(model, result.value.tokensIn, result.value.tokensOut));
+            if (result.value.thinking) {
+              span.setAttribute("llm.thinking", result.value.thinking);
+            }
           }
         }
 
