@@ -13,10 +13,10 @@ const loadMlflow = async () => {
   try {
     const mlflow = await import("@mlflow/core");
     _getCurrentActiveSpan = mlflow.getCurrentActiveSpan;
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException)?.code;
+  } catch (e: any) {
+    const code = e?.code;
     if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") {
-      console.warn(`[llm] @mlflow/core import failed unexpectedly: ${e instanceof Error ? e.message : e}`);
+      console.warn(`[llm] @mlflow/core import failed unexpectedly: ${e?.message}`);
     }
   }
 };
@@ -140,19 +140,26 @@ export const createLlmNode = <I, O>(
     if (_getCurrentActiveSpan) {
       const span = _getCurrentActiveSpan();
       if (span && typeof span.setAttribute === "function") {
+        // Override executor's generic setInputs with LLM-specific prompt details
+        span.setInputs({
+          model: config.model,
+          prompt_name: config.promptName,
+          system_prompt: req.system,
+          user_prompt: userMessage,
+        });
+        // Use MLflow's expected attribute for token usage (renders in UI)
+        span.setAttribute("mlflow.chat.tokenUsage", JSON.stringify({
+          input_tokens: llmResponse.tokensIn,
+          output_tokens: llmResponse.tokensOut,
+          total_tokens: llmResponse.tokensIn + llmResponse.tokensOut,
+        }));
+        // Custom attributes for filtering/cost tracking
         span.setAttribute("llm.model", config.model);
-        span.setAttribute("llm.prompt_name", config.promptName);
-        span.setAttribute("llm.system_prompt", req.system);
-        span.setAttribute("llm.user_prompt", userMessage);
         span.setAttribute("llm.tokens_in", llmResponse.tokensIn);
         span.setAttribute("llm.tokens_out", llmResponse.tokensOut);
-        const cost = computeCostUsd(config.model, llmResponse.tokensIn, llmResponse.tokensOut);
-        span.setAttribute("cost_usd", cost);
+        span.setAttribute("cost_usd", computeCostUsd(config.model, llmResponse.tokensIn, llmResponse.tokensOut));
         if (llmResponse.thinking) {
           span.setAttribute("llm.thinking", llmResponse.thinking);
-        }
-        if (llmResponse.rawText) {
-          span.setAttribute("llm.raw_response", llmResponse.rawText);
         }
       }
     }
