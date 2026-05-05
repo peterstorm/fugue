@@ -50,7 +50,7 @@ describe("executor + eval-judge integration", () => {
   test("DAG returns output unchanged regardless of judge result", async () => {
     const llm = makeMockJudgeLlm({
       score: 0.3,
-      criteria_scores: { quality: 0.3 },
+      criteria_scores: [{ name: "quality", score: 0.3 }],
       failed_criteria: ["quality"],
       reason: "Terrible output",
     });
@@ -95,13 +95,13 @@ describe("executor + eval-judge integration", () => {
     const llm1: LlmClient = {
       sendStructured: async () => {
         callOrder.push("judge-1");
-        return ok({ output: { score: 0.9, criteria_scores: { a: 0.9 }, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+        return ok({ output: { score: 0.9, criteria_scores: [{ name: "a", score: 0.9 }], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
     const llm2: LlmClient = {
       sendStructured: async () => {
         callOrder.push("judge-2");
-        return ok({ output: { score: 0.5, criteria_scores: { b: 0.5 }, failed_criteria: ["b"], reason: "bad" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+        return ok({ output: { score: 0.5, criteria_scores: [{ name: "b", score: 0.5 }], failed_criteria: ["b"], reason: "bad" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
 
@@ -112,7 +112,7 @@ describe("executor + eval-judge integration", () => {
       sendStructured: async () => {
         callCount++;
         return ok({
-          output: { score: 0.9, criteria_scores: { x: 0.9 }, failed_criteria: [], reason: "ok" },
+          output: { score: 0.9, criteria_scores: [{ name: "x", score: 0.9 }], failed_criteria: [], reason: "ok" },
           tokensIn: 0, tokensOut: 0, rawText: "",
         }) as any;
       },
@@ -131,7 +131,7 @@ describe("executor + eval-judge integration", () => {
     const llm: LlmClient = {
       sendStructured: async () => {
         judgeCalled = true;
-        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+        return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
 
@@ -182,7 +182,7 @@ describe("executor + eval-judge integration", () => {
         // Extract from the user message
         if (req.user.includes("original input")) receivedInput = "found";
         if (req.user.includes("ORIGINAL INPUT")) receivedOutput = "found";
-        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+        return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
 
@@ -200,13 +200,13 @@ describe("executor + eval-judge integration", () => {
     const mainLlm: LlmClient = {
       sendStructured: async () => {
         whichCalled = "main";
-        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+        return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
     const judgeLlm: LlmClient = {
       sendStructured: async () => {
         whichCalled = "judge";
-        return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+        return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
 

@@ -29,7 +29,7 @@ export interface EvalJudgeResult {
 /** Internal schema for LLM structured output parsing. */
 export const EvalJudgeResponseSchema = z.object({
   score: z.number().min(0).max(1),
-  criteria_scores: z.record(z.string(), z.number().min(0).max(1)),
+  criteria_scores: z.array(z.object({ name: z.string(), score: z.number().min(0).max(1) })),
   failed_criteria: z.array(z.string()),
   reason: z.string(),
 });
@@ -85,15 +85,21 @@ export const failOpenResult = (reason: string): EvalJudgeResult => ({
  * Convert raw LLM response to EvalJudgeResult, applying threshold.
  */
 export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number, criteria: readonly string[]): EvalJudgeResult => {
+  // Convert array format to record for internal use
+  const scoresMap: Record<string, number> = {};
+  for (const { name, score } of response.criteria_scores) {
+    scoresMap[name] = score;
+  }
+
   const failedCriteria = criteria.filter((c) => {
-    const score = response.criteria_scores[c];
+    const score = scoresMap[c];
     return score !== undefined && score < threshold;
   });
 
   return {
     passed: response.score >= threshold && failedCriteria.length === 0,
     score: response.score,
-    criteriaScores: response.criteria_scores,
+    criteriaScores: scoresMap,
     failedCriteria,
     reason: response.reason,
   };

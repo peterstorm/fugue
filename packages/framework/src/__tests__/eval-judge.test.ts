@@ -41,7 +41,7 @@ describe("EvalJudgeResponseSchema", () => {
   test("validates correct response", () => {
     const valid = {
       score: 0.85,
-      criteria_scores: { factuality: 0.9, relevance: 0.8 },
+      criteria_scores: [{ name: "factuality", score: 0.9 }, { name: "relevance", score: 0.8 }],
       failed_criteria: [],
       reason: "Good output",
     };
@@ -49,22 +49,22 @@ describe("EvalJudgeResponseSchema", () => {
   });
 
   test("rejects score below 0", () => {
-    const invalid = { score: -0.1, criteria_scores: {}, failed_criteria: [], reason: "x" };
+    const invalid = { score: -0.1, criteria_scores: [], failed_criteria: [], reason: "x" };
     expect(EvalJudgeResponseSchema.safeParse(invalid).success).toBe(false);
   });
 
   test("rejects score above 1", () => {
-    const invalid = { score: 1.1, criteria_scores: {}, failed_criteria: [], reason: "x" };
+    const invalid = { score: 1.1, criteria_scores: [], failed_criteria: [], reason: "x" };
     expect(EvalJudgeResponseSchema.safeParse(invalid).success).toBe(false);
   });
 
   test("rejects missing reason", () => {
-    const invalid = { score: 0.5, criteria_scores: {}, failed_criteria: [] };
+    const invalid = { score: 0.5, criteria_scores: [], failed_criteria: [] };
     expect(EvalJudgeResponseSchema.safeParse(invalid).success).toBe(false);
   });
 
   test("rejects criteria_scores with non-numeric values", () => {
-    const invalid = { score: 0.5, criteria_scores: { x: "bad" }, failed_criteria: [], reason: "x" };
+    const invalid = { score: 0.5, criteria_scores: [{ name: "x", score: "bad" }], failed_criteria: [], reason: "x" };
     expect(EvalJudgeResponseSchema.safeParse(invalid).success).toBe(false);
   });
 });
@@ -73,7 +73,7 @@ describe("toEvalJudgeResult", () => {
   test("passes when score >= threshold and no criteria fail", () => {
     const response: EvalJudgeResponse = {
       score: 0.9,
-      criteria_scores: { factuality: 0.95, relevance: 0.85 },
+      criteria_scores: [{ name: "factuality", score: 0.95 }, { name: "relevance", score: 0.85 }],
       failed_criteria: [],
       reason: "Good",
     };
@@ -86,7 +86,7 @@ describe("toEvalJudgeResult", () => {
   test("fails when score < threshold", () => {
     const response: EvalJudgeResponse = {
       score: 0.6,
-      criteria_scores: { factuality: 0.6, relevance: 0.6 },
+      criteria_scores: [{ name: "factuality", score: 0.6 }, { name: "relevance", score: 0.6 }],
       failed_criteria: ["factuality", "relevance"],
       reason: "Poor quality",
     };
@@ -98,7 +98,7 @@ describe("toEvalJudgeResult", () => {
   test("fails when individual criterion below threshold even if aggregate passes", () => {
     const response: EvalJudgeResponse = {
       score: 0.85,
-      criteria_scores: { factuality: 0.95, relevance: 0.75 },
+      criteria_scores: [{ name: "factuality", score: 0.95 }, { name: "relevance", score: 0.75 }],
       failed_criteria: [],
       reason: "Mostly good",
     };
@@ -111,7 +111,7 @@ describe("toEvalJudgeResult", () => {
   test("ignores criteria not in the config list", () => {
     const response: EvalJudgeResponse = {
       score: 0.9,
-      criteria_scores: { factuality: 0.9, extra: 0.1 },
+      criteria_scores: [{ name: "factuality", score: 0.9 }, { name: "extra", score: 0.1 }],
       failed_criteria: ["extra"],
       reason: "Fine",
     };
@@ -124,7 +124,7 @@ describe("toEvalJudgeResult", () => {
   test("handles edge case: score exactly at threshold", () => {
     const response: EvalJudgeResponse = {
       score: 0.8,
-      criteria_scores: { clarity: 0.8 },
+      criteria_scores: [{ name: "clarity", score: 0.8 }],
       failed_criteria: [],
       reason: "Borderline",
     };
@@ -135,7 +135,7 @@ describe("toEvalJudgeResult", () => {
   test("handles edge case: criterion score exactly at threshold", () => {
     const response: EvalJudgeResponse = {
       score: 0.9,
-      criteria_scores: { clarity: 0.8 },
+      criteria_scores: [{ name: "clarity", score: 0.8 }],
       failed_criteria: [],
       reason: "OK",
     };
@@ -147,7 +147,7 @@ describe("toEvalJudgeResult", () => {
   test("preserves reason from response", () => {
     const response: EvalJudgeResponse = {
       score: 0.5,
-      criteria_scores: {},
+      criteria_scores: [],
       failed_criteria: [],
       reason: "The output lacks coherence",
     };
@@ -188,7 +188,7 @@ describe("createEvalJudgeNode", () => {
     test("returns passing result when LLM scores above threshold", async () => {
       const llm = makeMockLlm({
         score: 0.9,
-        criteria_scores: { factuality: 0.95, relevance: 0.85 },
+        criteria_scores: [{ name: "factuality", score: 0.95 }, { name: "relevance", score: 0.85 }],
         failed_criteria: [],
         reason: "Good summary",
       });
@@ -207,7 +207,7 @@ describe("createEvalJudgeNode", () => {
     test("returns failing result when LLM scores below threshold", async () => {
       const llm = makeMockLlm({
         score: 0.5,
-        criteria_scores: { factuality: 0.3, relevance: 0.7 },
+        criteria_scores: [{ name: "factuality", score: 0.3 }, { name: "relevance", score: 0.7 }],
         failed_criteria: ["factuality"],
         reason: "Contains hallucinations",
       });
@@ -229,13 +229,13 @@ describe("createEvalJudgeNode", () => {
       const judgeLlm: LlmClient = {
         sendStructured: async (req) => {
           calledWith = "judgeLlm";
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
       const mainLlm: LlmClient = {
         sendStructured: async () => {
           calledWith = "mainLlm";
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -249,7 +249,7 @@ describe("createEvalJudgeNode", () => {
       const mainLlm: LlmClient = {
         sendStructured: async () => {
           calledWith = "mainLlm";
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -286,7 +286,7 @@ describe("createEvalJudgeNode", () => {
       const llm: LlmClient = {
         sendStructured: async (req) => {
           capturedUser = req.user;
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -304,7 +304,7 @@ describe("createEvalJudgeNode", () => {
       const llm: LlmClient = {
         sendStructured: async (req) => {
           capturedUser = req.user;
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -323,7 +323,7 @@ describe("createEvalJudgeNode", () => {
       const llm: LlmClient = {
         sendStructured: async (req) => {
           capturedUser = req.user;
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -343,7 +343,7 @@ describe("createEvalJudgeNode", () => {
       const llm: LlmClient = {
         sendStructured: async (req) => {
           capturedUser = req.user;
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -358,7 +358,7 @@ describe("createEvalJudgeNode", () => {
       const llm: LlmClient = {
         sendStructured: async (req) => {
           capturedSystem = req.system;
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 
@@ -372,7 +372,7 @@ describe("createEvalJudgeNode", () => {
       const llm: LlmClient = {
         sendStructured: async (req) => {
           capturedModel = req.model;
-          return ok({ output: { score: 1, criteria_scores: {}, failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
+          return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
 

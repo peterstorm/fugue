@@ -13,7 +13,7 @@ export const JUDGE_SYSTEM_FRAME = `You are a quality evaluation judge. You will 
 You MUST respond with valid JSON matching this exact schema:
 {
   "score": <float 0.0 to 1.0, average of all criteria scores>,
-  "criteria_scores": { "<criterion_name>": <float 0.0 to 1.0>, ... },
+  "criteria_scores": [{ "name": "<criterion_name>", "score": <float 0.0 to 1.0> }, ...],
   "failed_criteria": ["<criterion_name>", ...],
   "reason": "<1-2 sentence explanation of the overall evaluation>"
 }
