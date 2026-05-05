@@ -66,9 +66,10 @@ export const runDag = async <I, O>(
       const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
       const result = await runDagInner(dag, input, ctx, opts, meta);
       if (result.ok) {
+        const { output, nodeOutputs } = result.value;
         // Run eval-judge nodes after successful output
         if (dag.evalJudges?.length) {
-          await runEvalJudges(dag.evalJudges, input, result.value, ctx, meta);
+          await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
         }
 
         if (meta.evalJudgeFailed) {
@@ -84,11 +85,12 @@ export const runDag = async <I, O>(
         } else {
           rootSpan.setOutputs({ status: "ok" });
         }
+        return ok(output) as Result<O, FrameworkError>;
       } else {
         rootSpan.setStatus(_SpanStatusCode!.ERROR, String(result.error));
         rootSpan.setOutputs({ status: "error", error: result.error });
+        return err(result.error) as Result<O, FrameworkError>;
       }
-      return result;
     }, { name: `run:${dag.id}`, spanType: _SpanType!.CHAIN }) as Promise<Result<O, FrameworkError>>;
   }
 
@@ -96,9 +98,9 @@ export const runDag = async <I, O>(
   const result = await runDagInner<I, O>(dag, input, ctx, opts, undefined);
   if (result.ok && dag.evalJudges?.length) {
     const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
-    await runEvalJudges(dag.evalJudges, input, result.value, ctx, meta);
+    await runEvalJudges(dag.evalJudges, input, result.value.output, result.value.nodeOutputs, ctx, meta);
   }
-  return result;
+  return result.ok ? ok(result.value.output) : result;
 };
 
 /** Metadata collected during DAG execution for trace-level status propagation. */
@@ -119,7 +121,7 @@ const runDagInner = async <I, O>(
   ctx: NodeContext,
   opts?: RunOptions,
   meta?: DagRunMeta,
-): Promise<Result<O, FrameworkError>> => {
+): Promise<Result<{ output: O; nodeOutputs: Map<string, unknown> }, FrameworkError>> => {
   // 1. Topo sort (cycle detection)
   const sortResult = topoSort(dag);
   if (!sortResult.ok) return sortResult;
@@ -271,7 +273,7 @@ const runDagInner = async <I, O>(
           duration: Date.now() - runStart,
           status: "error",
         });
-        return r as Result<O, FrameworkError>;
+        return r as Result<any, FrameworkError>;
       }
     }
   }
@@ -288,7 +290,7 @@ const runDagInner = async <I, O>(
   // Return output of explicit output node, or last node in last wave
   const lastWave = waves[waves.length - 1];
   const outputNodeId = dag.outputNodeId ?? lastWave[lastWave.length - 1];
-  return ok(outputs.get(outputNodeId) as O);
+  return ok({ output: outputs.get(outputNodeId) as O, nodeOutputs: outputs });
 };
 
 /**
@@ -300,6 +302,7 @@ const runEvalJudges = async (
   judges: readonly EvalJudgeNodeDef[],
   dagInput: unknown,
   dagOutput: unknown,
+  nodeOutputs: Map<string, unknown>,
   ctx: NodeContext,
   meta: DagRunMeta,
 ): Promise<void> => {
@@ -307,10 +310,17 @@ const runEvalJudges = async (
     judges.map(async (judge) => {
       const runJudge = async (span?: any): Promise<EvalJudgeResult> => {
         try {
+          // Build judge input: include all intermediate node outputs so the judge
+          // can verify the summary is grounded in the actual fetched data
+          const judgeInput = {
+            dagInput,
+            dagOutput,
+            nodeOutputs: Object.fromEntries(nodeOutputs),
+          };
           if (span) {
-            span.setInputs({ dagInput, dagOutput, criteria: judge.config.criteria });
+            span.setInputs({ ...judgeInput, criteria: judge.config.criteria });
           }
-          const result = await judge.run(dagInput, dagOutput, ctx);
+          const result = await judge.run(judgeInput, dagOutput, ctx);
           if (span) {
             span.setOutputs(result);
             if (!result.passed && _SpanStatusCode) {
