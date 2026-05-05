@@ -24,60 +24,113 @@ function addAdditionalPropertiesFalse(schema: Record<string, unknown>): void {
   }
 }
 
+/**
+ * OpenAI LLM client using the Responses API (/openai/responses).
+ * Works with all models (gpt-4o-mini, gpt-5-mini, gpt-5.2-codex) and
+ * provides native reasoning support on capable models.
+ */
 export class OpenAILlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly apiVersion: string | undefined;
 
   constructor(private readonly openai: OpenAI, opts?: { requestTimeoutMs?: number }) {
     this.requestTimeoutMs = opts?.requestTimeoutMs ?? 120_000;
+    // Extract connection details from the OpenAI client for raw fetch calls
+    this.baseUrl = (openai as any).baseURL ?? (openai as any)._options?.baseURL ?? "";
+    this.apiKey = (openai as any).apiKey ?? (openai as any)._options?.apiKey ?? "";
+    this.apiVersion = (openai as any)._options?.defaultQuery?.["api-version"] ?? undefined;
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
     try {
       const schema = z.toJSONSchema(req.schema as any) as Record<string, unknown>;
-      // Remove $schema key — OpenAI/Azure don't want it
       delete schema.$schema;
-      // Ensure additionalProperties: false everywhere for Azure strict mode
       addAdditionalPropertiesFalse(schema);
 
-      const params: any = {
+      // Build Responses API request body
+      const body: Record<string, unknown> = {
         model: req.model,
-        messages: [
-          { role: "system", content: req.system },
+        input: [
+          { role: "developer", content: req.system },
           { role: "user", content: req.user },
         ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
+        text: {
+          format: {
+            type: "json_schema",
             name: "structured_output",
             strict: true,
-            schema: schema as Record<string, unknown>,
+            schema,
           },
         },
       };
 
-      // Enable reasoning for models that support it (e.g., gpt-5.1)
+      // Configure reasoning effort
       if (req.thinking?.type === "enabled") {
-        params.reasoning = { effort: "medium" };
+        body.reasoning = { effort: "high", summary: "auto" };
       }
 
-      const response = await this.openai.chat.completions.create(
-        params,
-        { signal: AbortSignal.timeout(this.requestTimeoutMs) },
-      );
+      // Build URL — use /openai/responses (not deployment-scoped)
+      let url: string;
+      if (this.apiVersion) {
+        // Azure: baseUrl is like https://xxx.cognitiveservices.azure.com/openai
+        const base = this.baseUrl.replace(/\/openai(\/deployments\/[^/]+)?$/, "");
+        url = `${base}/openai/responses?api-version=${this.apiVersion}`;
+      } else {
+        // Direct OpenAI
+        url = `${this.baseUrl}/responses`;
+      }
 
-      const choice = response.choices[0];
-      if (!choice?.message?.content) {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (this.apiVersion) {
+        headers["api-key"] = this.apiKey;
+      } else {
+        headers["Authorization"] = `Bearer ${this.apiKey}`;
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+
+      const httpRes = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!httpRes.ok) {
+        const errBody = await httpRes.text();
         return err({
           kind: "node-crash",
           nodeId: req.model,
-          message: "OpenAI response contained no content",
+          message: `${httpRes.status} ${errBody}`,
         });
       }
 
-      const rawText = choice.message.content;
+      const response: any = await httpRes.json();
 
-      // Extract reasoning content if present (GPT-5.1, o-series models)
-      const thinking = (choice.message as any).reasoning_content ?? undefined;
+      // Extract text content from output blocks
+      const messageBlock = response.output?.find((b: any) => b.type === "message");
+      const textContent = messageBlock?.content?.find((c: any) => c.type === "output_text");
+      const rawText = textContent?.text ?? "";
+
+      if (!rawText) {
+        return err({
+          kind: "node-crash",
+          nodeId: req.model,
+          message: "Responses API returned no text output",
+        });
+      }
+
+      // Extract reasoning summary if present
+      const reasoningBlock = response.output?.find((b: any) => b.type === "reasoning");
+      const thinking = reasoningBlock?.summary?.length
+        ? reasoningBlock.summary.map((s: any) => s.text ?? s).join("\n")
+        : undefined;
 
       // Parse JSON
       let raw: unknown;
@@ -87,7 +140,7 @@ export class OpenAILlmClient implements LlmClient {
         return err({
           kind: "node-crash",
           nodeId: req.model,
-          message: `OpenAI response was not valid JSON: ${rawText.slice(0, 200)}`,
+          message: `Response was not valid JSON: ${rawText.slice(0, 200)}`,
         });
       }
 
@@ -101,8 +154,8 @@ export class OpenAILlmClient implements LlmClient {
         });
       }
 
-      const tokensIn = response.usage?.prompt_tokens ?? 0;
-      const tokensOut = response.usage?.completion_tokens ?? 0;
+      const tokensIn = response.usage?.input_tokens ?? 0;
+      const tokensOut = response.usage?.output_tokens ?? 0;
 
       return ok({
         output: parsed.data as O,
