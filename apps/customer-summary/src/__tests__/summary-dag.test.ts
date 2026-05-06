@@ -61,7 +61,7 @@ describe("summary-dag", () => {
       }
     }
 
-    // FR-103: one synthesis LLM call + one eval-judge call on happy path
+    // FR-103: one synthesis LLM call + one eval-judge LLM call on happy path
     expect(callCount).toBe(2);
   });
 
@@ -82,7 +82,7 @@ describe("summary-dag", () => {
       expect(result.value.customerId).toBe("nonexistent-999");
     }
 
-    // No synthesis LLM call for not_found (1 call is the eval-judge, which fails open)
+    // No synthesis LLM call for not_found, but eval-judge still fires (fail-open)
     expect(callCount).toBe(1);
   });
 
@@ -103,7 +103,7 @@ describe("summary-dag", () => {
       expect(result.value.customerId).toBe("cust-019");
     }
 
-    // No synthesis LLM call for no_history (1 call is the eval-judge, which fails open)
+    // No synthesis LLM call for no_history, but eval-judge still fires (fail-open)
     expect(callCount).toBe(1);
   });
 
@@ -124,7 +124,7 @@ describe("summary-dag", () => {
       expect(result.value.customerId).toBe("cust-017");
     }
 
-    // No synthesis LLM call for insufficient_data (1 call is the eval-judge, which fails open)
+    // No synthesis LLM call for insufficient_data, but eval-judge still fires (fail-open)
     expect(callCount).toBe(1);
   });
 });

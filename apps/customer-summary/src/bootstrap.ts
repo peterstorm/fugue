@@ -17,7 +17,6 @@ import {
   RedisCheckpointer,
 } from "@ai-summary/framework";
 import type { LlmClient, TracingHandle } from "@ai-summary/framework";
-import { tracedAnthropic } from "@mlflow/anthropic";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS } from "./config.js";
@@ -108,9 +107,9 @@ export const bootstrap = async () => {
   const evalRubricPrompt = await promptRegistry.load("summary-eval-rubric");
   if (evalRubricPrompt.ok) {
     prompts.set("summary-eval-rubric", evalRubricPrompt.value.text);
-  } else {
-    console.warn("Failed to load eval rubric prompt (eval-judge will use auto-generated rubric):", evalRubricPrompt.error);
   }
+  // Note: eval rubric kept in prompts registry for reference but no longer used in-pipeline.
+  // Quality evaluation is handled by MLflow's built-in scorer (post-hoc, async).
 
   // LLM client
   let llm: LlmClient;
@@ -136,8 +135,7 @@ export const bootstrap = async () => {
     console.log(`Using OpenAI LLM client (model: ${model})`);
   } else if (provider === "anthropic" && config.ANTHROPIC_API_KEY) {
     const raw = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
-    const traced = tracing ? tracedAnthropic(raw) : raw;
-    llm = new AnthropicLlmClient(traced as any);
+    llm = new AnthropicLlmClient(raw as any);
     console.log(`Using Anthropic LLM client (model: ${model})${tracing ? " [traced]" : ""}`);
   } else {
     console.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);
@@ -147,10 +145,9 @@ export const bootstrap = async () => {
   const deps: AppDeps = {
     source,
     llm,
-    judgeLlm: llm, // Uses same client for eval-judge; swap for a cheaper deployment later
     prompts,
     model,
-    judgeModel: config.EVAL_JUDGE_MODEL ?? model,
+    judgeModel: config.EVAL_JUDGE_MODEL,
     thinking: config.ENABLE_THINKING ? { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS } : undefined,
     cache: contextCache,
     health: {

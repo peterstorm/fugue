@@ -8,7 +8,8 @@ import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
 import { dispatchEvent } from "../observer/buffered.js";
-import { loadMlflow, mlflow } from "../tracing/index.js";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { SpanAttributeRegistry } from "../observer/span-attribute-registry.js";
 
 const SPAN_TYPE_MAP: Record<string, string> = {
   llm: "LLM",
@@ -33,6 +34,8 @@ const emit = (ctx: NodeContext, event: ObserverEvent) => {
   }
 };
 
+const tracer = trace.getTracer("ai-summary-framework");
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -43,39 +46,22 @@ export const runDag = async <I, O>(
   ctx: NodeContext,
   opts?: RunOptions,
 ): Promise<Result<O, FrameworkError>> => {
-  await loadMlflow();
-
-  const { withSpan, SpanType } = mlflow();
-
-  // No tracing path
-  if (!withSpan || !SpanType) {
-    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
-    const innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
-    const result = innerResult.ok ? ok(innerResult.value.output) as Result<O, FrameworkError> : innerResult;
-
-    // Run eval-judge in background (fire-and-forget)
-    if (innerResult.ok && dag.evalJudges?.length) {
-      const bg = runEvalJudges(dag.evalJudges, input, innerResult.value.output, innerResult.value.nodeOutputs, ctx, meta).then(() => {});
-      opts?.onBackground?.(bg);
-    }
-
-    return result;
-  }
-
   // Traced path — span stays open until judge completes
   let resolveResult!: (r: Result<O, FrameworkError>) => void;
   const resultPromise = new Promise<Result<O, FrameworkError>>((resolve) => { resolveResult = resolve; });
 
-  const background = withSpan(async (rootSpan) => {
+  const background = tracer.startActiveSpan(`run:${dag.id}`, { attributes: { "mlflow.spanType": "CHAIN" } }, async (rootSpan) => {
     const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
-    rootSpan.setInputs({ dagId: dag.id, runId: ctx.runId });
+    const spanId = rootSpan.spanContext().spanId;
+    SpanAttributeRegistry.set(spanId, { "mlflow.spanInputs": { dagId: dag.id, runId: ctx.runId } });
 
     const innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
 
     if (!innerResult.ok) {
-      rootSpan.setStatus(mlflow().SpanStatusCode!.ERROR, String(innerResult.error));
-      rootSpan.setOutputs({ status: "error", error: innerResult.error });
+      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(innerResult.error) });
+      SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": { status: "error", error: innerResult.error } });
       resolveResult(err(innerResult.error) as Result<O, FrameworkError>);
+      rootSpan.end();
       return;
     }
 
@@ -90,20 +76,20 @@ export const runDag = async <I, O>(
     }
 
     // Finalize span status based on judge + guardrail results
-    const sc = mlflow().SpanStatusCode!;
     if (meta.evalJudgeFailed) {
       const failed = meta.evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
-      rootSpan.setStatus(sc.ERROR, `Eval-judge failed: ${failed.join(", ")}`);
-      rootSpan.setOutputs({ status: "ok", evalJudgeFailed: true, evalJudgeResults: meta.evalJudgeResults });
+      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Eval-judge failed: ${failed.join(", ")}` });
+      SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": { status: "ok", evalJudgeFailed: true, evalJudgeResults: meta.evalJudgeResults } });
     } else if (meta.guardrailFailed) {
-      rootSpan.setStatus(sc.ERROR, `Guardrail failed: ${meta.guardrailWarnings.join("; ")}`);
-      rootSpan.setOutputs({ status: "ok", guardrailWarnings: meta.guardrailWarnings });
+      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${meta.guardrailWarnings.join("; ")}` });
+      SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": { status: "ok", guardrailWarnings: meta.guardrailWarnings } });
     } else {
-      rootSpan.setOutputs({ status: "ok" });
+      SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": { status: "ok" } });
     }
-  }, { name: `run:${dag.id}`, spanType: SpanType.CHAIN }) as Promise<void>;
+    rootSpan.end();
+  });
 
-  opts?.onBackground?.(background);
+  opts?.onBackground?.(background as Promise<void>);
   const result = await resultPromise;
   return result;
 };
@@ -234,11 +220,11 @@ const runNode = async (
     return ok(outputResult.value);
   };
 
-  // Wrap in OTel span if available
+  // Wrap in OTel span
   return withNodeSpan(nodeId, node.kind, inputResult.value, meta, executeNode);
 };
 
-/** Wrap execution in an OTel span if tracing is available; otherwise just call fn. */
+/** Wrap execution in an OTel span. */
 const withNodeSpan = async (
   nodeId: string,
   kind: string,
@@ -246,29 +232,30 @@ const withNodeSpan = async (
   meta: DagRunMeta | undefined,
   fn: () => Promise<Result<any, FrameworkError>>,
 ): Promise<Result<any, FrameworkError>> => {
-  const { withSpan, SpanType, SpanStatusCode } = mlflow();
-  if (!withSpan || !SpanType) return fn();
+  const spanType = SPAN_TYPE_MAP[kind] ?? "CHAIN";
 
-  const spanType = (SpanType as any)[SPAN_TYPE_MAP[kind] ?? "CHAIN"] ?? SpanType.CHAIN;
-  return withSpan(async (span: any) => {
-    span.setInputs(input);
+  return tracer.startActiveSpan(`node:${nodeId}`, { attributes: { "mlflow.spanType": spanType } }, async (span) => {
+    const spanId = span.spanContext().spanId;
+    SpanAttributeRegistry.set(spanId, { "mlflow.spanInputs": input });
+
     const result = await fn();
     if (result.ok) {
-      span.setOutputs(result.value);
+    SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": result.value });
       // Guardrail nodes: propagate failure to trace-level meta
       if (kind === "guardrail" && result.value && typeof result.value === "object" && "passed" in result.value && !(result.value as any).passed) {
         const warnings = (result.value as any).warnings ?? [];
-        span.setStatus(SpanStatusCode!.ERROR, `Guardrail failed: ${warnings.join("; ")}`);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${warnings.join("; ")}` });
         if (meta) {
           meta.guardrailFailed = true;
           meta.guardrailWarnings.push(...warnings);
         }
       }
     } else {
-      span.setStatus(SpanStatusCode!.ERROR, String(result.error));
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(result.error) });
     }
+    span.end();
     return result;
-  }, { name: `node:${nodeId}`, spanType }) as Promise<Result<any, FrameworkError>>;
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -283,38 +270,29 @@ const runEvalJudges = async (
   ctx: NodeContext,
   meta: DagRunMeta,
 ): Promise<void> => {
-  const { withSpan, SpanType, SpanStatusCode } = mlflow();
-
   const results = await Promise.all(
     judges.map(async (judge) => {
-      const runJudge = async (span?: any): Promise<EvalJudgeResult> => {
+      return tracer.startActiveSpan(`eval-judge:${judge.id}`, { attributes: { "mlflow.spanType": "TOOL" } }, async (span) => {
+        const spanId = span.spanContext().spanId;
         try {
           const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
-          if (span) {
-            span.setInputs({ ...judgeInput, criteria: judge.config.criteria });
-          }
+          SpanAttributeRegistry.set(spanId, { "mlflow.spanInputs": { ...judgeInput, criteria: judge.config.criteria } });
+
           const result = await judge.run(judgeInput, dagOutput, ctx);
-          if (span) {
-            span.setOutputs(result);
-            if (!result.passed && SpanStatusCode) {
-              span.setStatus(SpanStatusCode.ERROR, `Score ${result.score} below threshold. ${result.reason}`);
-            }
+          SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": result });
+          if (!result.passed) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: `Score ${result.score} below threshold. ${result.reason}` });
           }
+          span.end();
           return result;
         } catch (e) {
           const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
           (ctx.logger?.warn ?? console.warn)(msg);
-          if (span && SpanStatusCode) {
-            span.setStatus(SpanStatusCode.ERROR, msg);
-          }
+          span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
+          span.end();
           return { passed: true, score: 1.0, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]` };
         }
-      };
-
-      if (withSpan && SpanType) {
-        return withSpan((span: any) => runJudge(span), { name: `eval-judge:${judge.id}`, spanType: SpanType.TOOL });
-      }
-      return runJudge();
+      });
     }),
   );
 

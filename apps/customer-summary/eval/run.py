@@ -3,21 +3,26 @@
 Eval sidecar for customer-summary service.
 
 Loads eval cases, calls the summarize endpoint, and evaluates responses
-using MLflow GenAI scorers (factuality, completeness, conciseness, grounding).
+using MLflow's built-in LLM-as-judge (Azure OpenAI gpt-4o-mini) and
+deterministic grounding scorer. Results are logged to the MLflow experiment
+and visible in the MLflow UI evaluation tab.
 
 Modes:
-  --mode=full  All scorers including LLM-judged via Ollama (default)
-  --mode=ci    Deterministic grounding scorer only (no Ollama, fast, CI-safe)
+  --mode=full  All scorers including LLM-judged via Azure OpenAI (default)
+  --mode=ci    Deterministic grounding scorer only (no LLM calls, fast, CI-safe)
 
 Exits with code 1 if aggregate mean score < threshold.
 
 Env vars:
-  APP_BASE_URL        - Base URL of the summary service (default: http://host.containers.internal:3000)
-  MLFLOW_TRACKING_URI - MLflow tracking server URI
-  EVAL_CASES_PATH     - Path to eval cases JSON (default: fixtures/eval/cases.json)
-  OLLAMA_BASE_URL     - Ollama API URL (default: http://localhost:11434)
-  OLLAMA_TIMEOUT_SEC  - Timeout for Ollama calls in seconds (default: 120)
-  EVAL_WORKERS        - Number of parallel workers for summarize calls (default: 4)
+  APP_BASE_URL            - Base URL of the summary service (default: http://host.containers.internal:3000)
+  MLFLOW_TRACKING_URI     - MLflow tracking server URI
+  MLFLOW_EXPERIMENT_NAME  - Experiment name for eval results (default: customer-summary-eval)
+  EVAL_CASES_PATH         - Path to eval cases JSON (default: fixtures/eval/cases.json)
+  AZURE_OPENAI_ENDPOINT   - Azure OpenAI endpoint
+  AZURE_OPENAI_API_KEY    - Azure OpenAI API key
+  AZURE_OPENAI_DEPLOYMENT - Azure OpenAI deployment name (default: gpt-4o-mini)
+  AZURE_OPENAI_API_VERSION - Azure OpenAI API version
+  EVAL_WORKERS            - Number of parallel workers for summarize calls (default: 4)
 """
 
 import argparse
@@ -27,7 +32,10 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 PASS_THRESHOLD = 4.0
@@ -71,17 +79,29 @@ def parse_cases(raw: list[dict[str, Any]]) -> list[EvalCase]:
     return cases
 
 
-def build_eval_data(results: list[EvalResult]) -> list[dict[str, Any]]:
-    """Build the data structure expected by mlflow.genai.evaluate()."""
-    return [
-        {
-            "inputs": {"customer_id": r.customer_id},
-            "outputs": {"summary": r.summary},
-            "expectations": {"reference_summary": r.reference_summary},
-        }
-        for r in results
-        if r.error is None
-    ]
+def build_eval_data(results: list[EvalResult]) -> "pd.DataFrame":
+    """Build a pandas DataFrame for mlflow.evaluate().
+
+    Columns:
+      - inputs: str (the input question/task)
+      - predictions: str (the generated summary)
+      - targets: str (reference summary for answer_correctness)
+      - context: str (reference summary used as context for faithfulness/relevance)
+      - customer_id: str (for deterministic grounding scorer)
+    """
+    import pandas as pd
+
+    rows = []
+    for r in results:
+        if r.error is None:
+            rows.append({
+                "inputs": f"Summarize conversation history for customer {r.customer_id}.",
+                "predictions": r.summary,
+                "targets": r.reference_summary,
+                "context": r.reference_summary,
+                "customer_id": r.customer_id,
+            })
+    return pd.DataFrame(rows)
 
 
 def compute_aggregate(eval_table: Any, scorer_names: list[str]) -> AggregateResult:
@@ -213,22 +233,31 @@ def collect_results(base_url: str, cases: list[EvalCase], max_workers: int = 4) 
 
 
 def run_evaluation(results: list[EvalResult], mode: str) -> AggregateResult:
-    """Run MLflow GenAI evaluation and compute aggregate."""
+    """Run MLflow evaluation with LLM-as-judge metrics.
+
+    Uses mlflow.evaluate() which stores results in the MLflow experiment,
+    visible in the MLflow UI evaluation tab.
+    """
     eval_data = build_eval_data(results)
 
-    if not eval_data:
+    if eval_data.empty:
         print("ERROR: No successful results to evaluate", file=sys.stderr)
         return AggregateResult(scorer_means={}, overall_mean=0.0, passed=False)
 
-    import mlflow.genai
+    import mlflow
     from scorers import get_scorers, SCORER_NAMES, DETERMINISTIC_SCORER_NAMES
 
     scorers = get_scorers(mode=mode)
     active_names = DETERMINISTIC_SCORER_NAMES if mode == "ci" else SCORER_NAMES
 
-    eval_result = mlflow.genai.evaluate(
+    # mlflow.evaluate() logs results to the active experiment
+    eval_result = mlflow.evaluate(
         data=eval_data,
-        scorers=scorers,
+        predictions="predictions",
+        targets="targets",
+        extra_metrics=scorers,
+        model_type="text",
+        evaluator_config={"col_mapping": {"customer_id": "customer_id"}},
     )
 
     return compute_aggregate(eval_result, active_names)
@@ -240,7 +269,7 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         choices=["full", "ci"],
         default=os.environ.get("EVAL_MODE", "full"),
-        help="full: all scorers (requires Ollama). ci: deterministic only (default: full)",
+        help="full: all scorers (requires Azure OpenAI). ci: deterministic only (default: full)",
     )
     return parser.parse_args()
 
@@ -284,7 +313,13 @@ def main() -> int:
         for r in errors:
             print(f"  {r.customer_id}: {r.error}", file=sys.stderr)
 
-    print(f"Running MLflow GenAI evaluation (mode={mode})...")
+    # Set MLflow experiment to match the app's trace experiment
+    import mlflow
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "Default")
+    mlflow.set_experiment(experiment_name)
+    print(f"MLflow experiment: {experiment_name}")
+
+    print(f"Running MLflow evaluation (mode={mode})...")
     aggregate = run_evaluation(results, mode=mode)
 
     print(format_results_table(results, aggregate, mode=mode))

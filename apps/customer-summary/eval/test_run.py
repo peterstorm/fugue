@@ -43,9 +43,11 @@ class TestBuildEvalData:
         ]
         data = build_eval_data(results)
         assert len(data) == 1
-        assert data[0]["inputs"] == {"customer_id": "c1"}
-        assert data[0]["outputs"] == {"summary": "text1"}
-        assert data[0]["expectations"] == {"reference_summary": "ref1"}
+        assert data.iloc[0]["predictions"] == "text1"
+        assert data.iloc[0]["targets"] == "ref1"
+        assert data.iloc[0]["context"] == "ref1"
+        assert data.iloc[0]["customer_id"] == "c1"
+        assert "Summarize" in data.iloc[0]["inputs"]
 
     def test_filters_errors(self):
         results = [
@@ -54,7 +56,7 @@ class TestBuildEvalData:
         ]
         data = build_eval_data(results)
         assert len(data) == 1
-        assert data[0]["inputs"]["customer_id"] == "c1"
+        assert data.iloc[0]["customer_id"] == "c1"
 
 
 class TestFormatResultsTable:
@@ -81,26 +83,26 @@ class TestComputeAggregate:
     def test_from_known_values(self):
         class FakeResult:
             metrics = {
-                "factuality/score/mean": 4.5,
-                "completeness/score/mean": 4.0,
-                "conciseness/score/mean": 5.0,
+                "answer_correctness/score/mean": 4.5,
+                "faithfulness/score/mean": 4.0,
+                "relevance/score/mean": 5.0,
                 "grounding/score/mean": 4.5,
             }
 
-        agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness", "grounding"])
+        agg = compute_aggregate(FakeResult(), ["answer_correctness", "faithfulness", "relevance", "grounding"])
         assert agg.overall_mean == pytest.approx(4.5)
         assert agg.passed is True
 
     def test_below_threshold(self):
         class FakeResult:
             metrics = {
-                "factuality/score/mean": 3.0,
-                "completeness/score/mean": 3.0,
-                "conciseness/score/mean": 3.0,
+                "answer_correctness/score/mean": 3.0,
+                "faithfulness/score/mean": 3.0,
+                "relevance/score/mean": 3.0,
                 "grounding/score/mean": 3.0,
             }
 
-        agg = compute_aggregate(FakeResult(), ["factuality", "completeness", "conciseness", "grounding"])
+        agg = compute_aggregate(FakeResult(), ["answer_correctness", "faithfulness", "relevance", "grounding"])
         assert agg.overall_mean == pytest.approx(3.0)
         assert agg.passed is False
 
@@ -116,7 +118,7 @@ class TestComputeAggregate:
         class FakeResult:
             metrics = {}
 
-        agg = compute_aggregate(FakeResult(), ["factuality"])
+        agg = compute_aggregate(FakeResult(), ["answer_correctness"])
         assert agg.overall_mean == 0.0
         assert agg.passed is False
 

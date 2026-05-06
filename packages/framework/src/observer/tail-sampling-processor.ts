@@ -59,7 +59,8 @@ export class TailSamplingProcessor implements SpanProcessor {
     buffer.spanIds.push(spanId);
 
     // If this is a root span (no parent), the trace is complete — decide now
-    if (!span.parentSpanContext?.spanId) {
+    const parentId = (span as any).parentSpanId ?? span.parentSpanContext?.spanId ?? null;
+    if (!parentId) {
       this.buffers.delete(traceId);
       this.processCompleteTrace(span, buffer);
     }

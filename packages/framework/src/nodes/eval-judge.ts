@@ -16,7 +16,7 @@ import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
 import type { LlmClient, LlmRequest } from "../llm/client.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
-import { loadMlflow, enrichLlmSpan } from "../tracing/index.js";
+import { enrichLlmSpan } from "../tracing/index.js";
 
 /** Output of the eval-judge node. */
 export interface EvalJudgeResult {
@@ -147,7 +147,6 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
       // Make LLM call
       const model = config.model ?? DEFAULT_JUDGE_MODEL;
       try {
-        await loadMlflow();
         const result = await llm.sendStructured({
           system: JUDGE_SYSTEM_FRAME,
           user: userMessage,

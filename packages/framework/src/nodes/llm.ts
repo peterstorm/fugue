@@ -4,7 +4,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { LlmClient, LlmRequest } from "../llm/client.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
-import { loadMlflow, enrichLlmSpan } from "../tracing/index.js";
+import { enrichLlmSpan } from "../tracing/index.js";
 
 export interface LlmNodeConfig<I, O> {
   readonly id: string;
@@ -38,8 +38,6 @@ export const createLlmNode = <I, O>(
   outputSchema: config.outputSchema,
   deps: config.deps as string[],
   run: async (input: I, ctx: NodeContext): Promise<Result<O, FrameworkError>> => {
-    await loadMlflow();
-
     // Skip check
     if (config.skipWhen?.(input)) {
       return ok(undefined as unknown as O);
