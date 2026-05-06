@@ -14,7 +14,10 @@ export interface LlmNodeConfig<I, O> {
   readonly promptName: string;
   readonly model: string;
   readonly buildInput: (input: I) => Record<string, unknown>;
+  /** When true, skip the LLM call and return `skipDefault` instead. */
   readonly skipWhen?: (input: I) => boolean;
+  /** Value to return when `skipWhen` is true. Required if `skipWhen` is provided. */
+  readonly skipDefault?: O;
   readonly computeCacheKey?: (input: I) => string;
   /** Enable reasoning/thinking for models that support it (e.g., GPT-5.1, o-series) */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
@@ -38,9 +41,12 @@ export const createLlmNode = <I, O>(
   outputSchema: config.outputSchema,
   deps: config.deps as string[],
   run: async (input: I, ctx: NodeContext): Promise<Result<O, FrameworkError>> => {
-    // Skip check
+    // Skip check — return explicit default value instead of undefined
     if (config.skipWhen?.(input)) {
-      return ok(undefined as unknown as O);
+      if (!("skipDefault" in config)) {
+        return err({ kind: "validation" as const, nodeId: config.id, message: "skipWhen triggered but no skipDefault provided" });
+      }
+      return ok(config.skipDefault as O);
     }
 
     // Load prompt template

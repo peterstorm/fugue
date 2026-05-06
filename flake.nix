@@ -26,14 +26,16 @@
             # Create/activate Python venv for eval dependencies
             if [ ! -d .venv ]; then
               echo "Creating Python venv..."
-              python -m venv .venv
+              python -m venv .venv || { echo "ERROR: Failed to create venv"; return 1; }
             fi
             source .venv/bin/activate
 
             # Install eval dependencies if not present
-            if ! python -c "import mlflow" 2>/dev/null; then
+            if ! python -c "import mlflow; import anthropic; import pandas" 2>/dev/null; then
               echo "Installing eval dependencies..."
-              pip install --quiet mlflow openai anthropic requests pandas
+              pip install mlflow==3.1.0 openai==1.82.0 anthropic==0.52.0 requests==2.32.3 pandas==2.2.3 || {
+                echo "WARNING: pip install failed — run manually: pip install -r requirements-eval.txt"
+              }
             fi
           '';
         };

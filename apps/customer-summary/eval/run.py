@@ -83,11 +83,11 @@ def build_eval_data(results: list[EvalResult]) -> "pd.DataFrame":
     """Build a pandas DataFrame for mlflow.evaluate().
 
     Columns:
-      - inputs: str (the input question/task)
+      - inputs: str (the customer_id, used as model input context)
       - predictions: str (the generated summary)
-      - targets: str (reference summary for answer_correctness)
-      - context: str (reference summary used as context for faithfulness/relevance)
-      - customer_id: str (for deterministic grounding scorer)
+      - targets: str (reference summary — used by grading_context_columns)
+      - reference_summary: str (alias for grading context)
+      - customer_id: str (for grounding scorer fixture lookup)
     """
     import pandas as pd
 
@@ -98,7 +98,8 @@ def build_eval_data(results: list[EvalResult]) -> "pd.DataFrame":
                 "inputs": f"Summarize conversation history for customer {r.customer_id}.",
                 "predictions": r.summary,
                 "targets": r.reference_summary,
-                "context": r.reference_summary,
+                "reference_summary": r.reference_summary,
+                # Keep customer_id for grounding scorer fixture lookup
                 "customer_id": r.customer_id,
             })
     return pd.DataFrame(rows)
@@ -251,13 +252,17 @@ def run_evaluation(results: list[EvalResult], mode: str) -> AggregateResult:
     active_names = DETERMINISTIC_SCORER_NAMES if mode == "ci" else SCORER_NAMES
 
     # mlflow.evaluate() logs results to the active experiment
+    # Disable all default metrics; only use our custom scorers
     eval_result = mlflow.evaluate(
         data=eval_data,
         predictions="predictions",
         targets="targets",
         extra_metrics=scorers,
+        evaluator_config={
+            "col_mapping": {"inputs": "inputs"},
+            "metrics": scorers,
+        },
         model_type="text",
-        evaluator_config={"col_mapping": {"customer_id": "customer_id"}},
     )
 
     return compute_aggregate(eval_result, active_names)

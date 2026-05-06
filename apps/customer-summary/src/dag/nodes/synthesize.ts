@@ -20,6 +20,7 @@ export const createSynthesizeNode = (model = "claude-sonnet-4-20250514", opts?: 
     model,
     thinking: opts?.thinking,
     skipWhen: (input) => input.branch !== "ok",
+    skipDefault: undefined,
     buildInput: (input) => {
       if (input.branch !== "ok") return {};
       return {

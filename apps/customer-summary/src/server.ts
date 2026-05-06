@@ -81,20 +81,38 @@ export const createApp = (deps: AppDeps): Hono => {
         judgeLlm: deps.llm,
       };
 
-      const result = await runDag<{ customerId: string }, SummaryResponse>(
-        dag,
-        { customerId: customer_id },
-        ctx,
-      );
+      const timeoutMs = 60_000; // 60s request timeout
+      const abortController = new AbortController();
+      const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+
+      let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;
+      try {
+        result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx);
+      } catch (e) {
+        if (abortController.signal.aborted) {
+          console.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
+          return c.json({ error: "Request timeout", requestId: runId }, 504);
+        }
+        throw e;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (abortController.signal.aborted) {
+        console.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
+        return c.json({ error: "Request timeout", requestId: runId }, 504);
+      }
 
       if (!result.ok) {
-        // Framework error — 500
-        return c.json({ error: "Internal server error", message: JSON.stringify(result.error) }, 500);
+        // Framework error — 500 (log detail server-side, return generic message)
+        console.error("[/summarize] DAG error:", JSON.stringify(result.error));
+        return c.json({ error: "Internal server error", requestId: runId }, 500);
       }
 
       return c.json(result.value, 200);
     } catch (e) {
-      return c.json({ error: "Internal server error", message: String(e) }, 500);
+      console.error("[/summarize] Unexpected error:", e);
+      return c.json({ error: "Internal server error" }, 500);
     }
   });
 
@@ -107,7 +125,8 @@ export const createApp = (deps: AppDeps): Hono => {
       : true;
 
     const status = redisOk && mlflowOk ? "healthy" : "degraded";
-    return c.json({ status, redis: redisOk, mlflow: mlflowOk }, 200);
+    const httpStatus = status === "healthy" ? 200 : 503;
+    return c.json({ status, redis: redisOk, mlflow: mlflowOk }, httpStatus);
   });
 
   return app;

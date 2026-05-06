@@ -26,25 +26,31 @@ export interface MlflowOtlpExporterConfig {
 }
 
 export class MlflowOtlpExporter implements SpanExporter {
-  private inner: SpanExporter | null = null;
+  private innerPromise: Promise<SpanExporter> | null = null;
   private readonly config: MlflowOtlpExporterConfig;
 
   constructor(config: MlflowOtlpExporterConfig) {
     this.config = config;
   }
 
-  /** Lazy-init the OTLPTraceExporter to avoid import issues at module load time. */
-  private async getInner(): Promise<SpanExporter> {
-    if (!this.inner) {
-      const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-proto");
-      this.inner = new OTLPTraceExporter({
-        url: `${this.config.url}/v1/traces`,
-        headers: {
-          "x-mlflow-experiment-id": this.config.experimentId,
-        },
+  /** Lazy-init the OTLPTraceExporter (singleton promise to avoid races). */
+  private getInner(): Promise<SpanExporter> {
+    if (!this.innerPromise) {
+      this.innerPromise = import("@opentelemetry/exporter-trace-otlp-proto").then(
+        ({ OTLPTraceExporter }) =>
+          new OTLPTraceExporter({
+            url: `${this.config.url}/v1/traces`,
+            headers: {
+              "x-mlflow-experiment-id": this.config.experimentId,
+            },
+          }),
+      ).catch((err) => {
+        // Reset so next call can retry
+        this.innerPromise = null;
+        throw err;
       });
     }
-    return this.inner;
+    return this.innerPromise;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -72,10 +78,12 @@ export class MlflowOtlpExporter implements SpanExporter {
   }
 
   async shutdown(): Promise<void> {
-    if (this.inner?.shutdown) await this.inner.shutdown();
+    const inner = await this.innerPromise?.catch(() => null);
+    if (inner?.shutdown) await inner.shutdown();
   }
 
   async forceFlush(): Promise<void> {
-    if ((this.inner as any)?.forceFlush) await (this.inner as any).forceFlush();
+    const inner = await this.innerPromise?.catch(() => null);
+    if ((inner as any)?.forceFlush) await (inner as any).forceFlush();
   }
 }

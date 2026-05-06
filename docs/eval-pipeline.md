@@ -261,7 +261,7 @@ dataset = get_dataset(name="customer-summary-eval")
 
 ### Adding Production Traces to the Dataset
 
-From the MLflow UI:
+From the MLflow UI (Databricks managed MLflow only — not available in OSS MLflow):
 1. Go to Experiments → Traces tab
 2. Select interesting traces (failures, edge cases)
 3. Actions → "Add to evaluation dataset"
@@ -269,10 +269,20 @@ From the MLflow UI:
 Or programmatically:
 ```python
 import mlflow
-traces = mlflow.search_traces(
+
+traces_df = mlflow.search_traces(
     filter_string="status = 'ERROR'",
     experiment_ids=["0"],
     max_results=20,
 )
-dataset.merge_records(traces)
+
+# Convert DataFrame rows to dataset records
+records = [
+    {
+        "inputs": row["request"],
+        "expectations": {},  # add manual labels as needed
+    }
+    for _, row in traces_df.iterrows()
+]
+dataset.merge_records(records)
 ```

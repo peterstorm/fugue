@@ -76,7 +76,21 @@ export const createGuardrailNode = <I, T>(
   outputSchema: config.outputSchema,
   deps: config.deps,
   run: async (input, ctx): Promise<Result<GuardrailResult<T>, FrameworkError>> => {
-    const result = config.validate(input);
+    let result: GuardrailResult<T>;
+    try {
+      result = config.validate(input);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[guardrail:${config.id}] validate() threw:`, msg);
+      // Return a failed validation rather than crashing the pipeline
+      result = {
+        kind: "validated",
+        value: undefined as unknown as T,
+        passed: false,
+        warnings: [`Guardrail validation threw an error: ${msg}`],
+        checks: [{ dimension: "internal-error", passed: false, detail: msg }],
+      };
+    }
 
     // Emit guardrail-specific sub-span attributes via observer
     if (ctx.observer && !result.passed) {

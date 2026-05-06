@@ -55,7 +55,17 @@ export const runDag = async <I, O>(
     const spanId = rootSpan.spanContext().spanId;
     SpanAttributeRegistry.set(spanId, { "mlflow.spanInputs": { dagId: dag.id, runId: ctx.runId } });
 
-    const innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
+    let innerResult: Result<{ output: O; nodeOutputs: Map<string, unknown> }, FrameworkError>;
+    try {
+      innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
+    } catch (e) {
+      const error: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: e instanceof Error ? e.message : String(e) };
+      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(e) });
+      SpanAttributeRegistry.set(spanId, { "mlflow.spanOutputs": { status: "error", error } });
+      resolveResult(err(error) as Result<O, FrameworkError>);
+      rootSpan.end();
+      return;
+    }
 
     if (!innerResult.ok) {
       rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(innerResult.error) });
@@ -89,7 +99,10 @@ export const runDag = async <I, O>(
     rootSpan.end();
   });
 
-  opts?.onBackground?.(background as Promise<void>);
+  const safeBackground = (background as Promise<void>).catch((e) => {
+    console.error("[runDag] background task error:", e);
+  });
+  opts?.onBackground?.(safeBackground);
   const result = await resultPromise;
   return result;
 };
@@ -290,7 +303,7 @@ const runEvalJudges = async (
           (ctx.logger?.warn ?? console.warn)(msg);
           span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
           span.end();
-          return { passed: true, score: 1.0, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]` };
+          return { passed: true, score: null as unknown as number, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]`, skipped: true };
         }
       });
     }),

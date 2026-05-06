@@ -17,6 +17,7 @@ import {
   RedisCheckpointer,
 } from "@ai-summary/framework";
 import type { LlmClient, TracingHandle } from "@ai-summary/framework";
+import { NoopObserver } from "@ai-summary/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS } from "./config.js";
@@ -78,11 +79,14 @@ export const bootstrap = async () => {
         }
       },
       writeCheckpoint: async (runId: string, nodeId: string, value: unknown) => {
-        await checkpointer.saveNode(runId, nodeId, {
+        const r = await checkpointer.saveNode(runId, nodeId, {
           nodeId,
           output: value,
           completedAt: new Date(),
         });
+        if (!r.ok) {
+          console.warn(`[checkpoint] write failed for run=${runId} node=${nodeId}: ${r.error.kind}`);
+        }
       },
     };
   } catch (e) {
@@ -150,6 +154,7 @@ export const bootstrap = async () => {
     judgeModel: config.EVAL_JUDGE_MODEL,
     thinking: config.ENABLE_THINKING ? { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS } : undefined,
     cache: contextCache,
+    observer: new NoopObserver(),
     health: {
       checkRedis: redis ? async () => {
         try { await redis!.ping(); return true; } catch { return false; }
