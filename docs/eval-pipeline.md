@@ -196,3 +196,83 @@ This is a **batch/manual** system — you run it explicitly. It does NOT automat
 Recommended cadence:
 - Run `--mode=ci` on every PR (fast, free)
 - Run `--mode=full` before releases or after prompt/model changes
+
+## MLflow Evaluation Datasets
+
+The eval cases in `fixtures/eval/cases.json` can be stored as an **MLflow Evaluation Dataset**, enabling version tracking, UI browsing, and direct integration with `mlflow.genai.evaluate()`.
+
+### Requirements
+
+- Python 3.12 (provided by the project's Nix flake)
+- MLflow client >= 3.6 (installed in `.venv` via `nix develop` / `direnv allow`)
+- MLflow server with SQL backend (already configured — `sqlite:///mlflow/mlflow.db`)
+
+### Loading Cases into MLflow
+
+```python
+import json, os
+os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
+
+from mlflow.genai.datasets import create_dataset
+
+# Create the dataset (attached to experiment 0)
+dataset = create_dataset(
+    name="customer-summary-eval",
+    experiment_id="0",
+    tags={"source": "fixtures", "version": "1.0"},
+)
+
+# Transform fixture cases into MLflow dataset records
+with open("fixtures/eval/cases.json") as f:
+    cases = json.load(f)
+
+records = [
+    {
+        "inputs": {"customer_id": case["customer_id"]},
+        "expectations": {"reference_summary": case["reference_summary"]},
+    }
+    for case in cases
+]
+
+dataset.merge_records(records)
+print(f"Loaded {len(records)} records into dataset {dataset.dataset_id}")
+```
+
+### Using the Dataset in Evaluation
+
+Once loaded, you can pass the dataset directly to `mlflow.genai.evaluate()` instead of building a DataFrame manually:
+
+```python
+from mlflow.genai.datasets import get_dataset
+
+dataset = get_dataset(name="customer-summary-eval")
+# dataset can be used as input to evaluate(), or converted: dataset.to_df()
+```
+
+### Benefits Over File-Based Cases
+
+| Aspect | `cases.json` (current) | MLflow Dataset |
+|--------|----------------------|----------------|
+| Versioning | Git only | Git + MLflow versioned records |
+| UI browsing | None | MLflow Experiments → Datasets tab |
+| Trace linking | Manual | Can link traces to dataset records |
+| Adding from production | Edit JSON | UI: select traces → "Add to dataset" |
+| Expectations/labels | Static | Can add `log_expectation()` per-trace |
+
+### Adding Production Traces to the Dataset
+
+From the MLflow UI:
+1. Go to Experiments → Traces tab
+2. Select interesting traces (failures, edge cases)
+3. Actions → "Add to evaluation dataset"
+
+Or programmatically:
+```python
+import mlflow
+traces = mlflow.search_traces(
+    filter_string="status = 'ERROR'",
+    experiment_ids=["0"],
+    max_results=20,
+)
+dataset.merge_records(traces)
+```
