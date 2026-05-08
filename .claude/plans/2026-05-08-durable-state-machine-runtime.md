@@ -445,6 +445,17 @@ Two parallel tracks; both depend on Phase 3 layer-3 interfaces and Phase 1 kerne
 - Run the full pre-existing test suite — SC-001 oracle.
 - **Files:** `packages/framework/src/index.ts`, `packages/framework/scripts/check-imports.ts`, `__tests__/boundary-imports.test.ts`
 
+> **!! T9 implementer — read me first !!**
+>
+> Wave 3 was remediated post-decompose. The plan symbol-lists below may be stale. Do NOT cherry-pick exports from this plan — instead read the *current* state of each module file directly and re-export everything declared public there. New surface added in remediation that you MUST cover:
+>
+> - `dag-runtime/types.ts`: new `retrying-hook` variant on `DagPhase`; new optional `coFailedNodeIds: ReadonlyArray<string>` field on the `node-failed` `DagEvent`; new optional `partialOutputs: ReadonlyMap<string, unknown>` field on `node-failed`.
+> - `dag-runtime/transition-helpers.ts`: new `handleHookCrash` exported helper.
+> - `queue/types.ts`: `DeadLetterOpts.getRecipients` signature is `(id: string, err: unknown) => readonly string[]` (not `(data: unknown)`).
+> - `queue/in-memory.ts`: `errorHandlers` are now wired up by `worker.onError(...)` and invoked when a `failedHandler` throws — surface the same contract from any new BullMQ adapter you reference.
+>
+> Spec FR-029a (hook-crash retry) was added during remediation — check it before touching DAG runtime types. ADR 0008 documents the decision.
+
 ---
 
 ## Testing Strategy
