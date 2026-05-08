@@ -8,4 +8,7 @@ export type FrameworkError =
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
   | { readonly kind: "cache-error"; readonly operation: string; readonly message: string }
   | { readonly kind: "node-crash"; readonly nodeId: string; readonly message: string; readonly stack?: string }
-  | { readonly kind: "cycle-detected"; readonly nodeIds: readonly string[] };
+  | { readonly kind: "cycle-detected"; readonly nodeIds: readonly string[] }
+  | { readonly kind: "aborted"; readonly reason: string }
+  | { readonly kind: "rejected"; readonly nodeId: string; readonly reason: string }
+  | { readonly kind: "invalid-reroute"; readonly targetNodeId: string; readonly message: string };

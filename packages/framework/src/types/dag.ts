@@ -14,4 +14,14 @@ export interface DagDef {
   readonly outputNodeId?: string;
   /** Eval-judge nodes — run after output node completes, mark trace ERROR on failure. */
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
+  /**
+   * Per-node retry limits — overrides `defaultRetryLimit` for a specific node.
+   * Optional for back-compat; existing callers that omit it get the legacy behavior.
+   */
+  readonly retryLimits?: Readonly<Record<string, number>>;
+  /**
+   * Default retry limit applied to all nodes without an entry in `retryLimits`.
+   * Optional for back-compat; defaults to 0 (no retries) when not supplied.
+   */
+  readonly defaultRetryLimit?: number;
 }

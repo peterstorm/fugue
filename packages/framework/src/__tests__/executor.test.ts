@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
-import type { NodeContext } from "../types/node.js";
+import type { NodeContext, NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
+import type { HumanAction } from "../dag-runtime/types.js";
 import { runDag } from "../executor/executor.js";
 import { topoSort } from "../executor/topo.js";
 import { createFetchNode } from "../nodes/fetch.js";
@@ -462,5 +463,231 @@ describe("runDag", () => {
     if (result.ok) {
       expect(result.value).toBe(42);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T6 routing / back-compat shim tests
+// ---------------------------------------------------------------------------
+
+describe("runDag routing (T6 back-compat shim)", () => {
+  const mkSimpleDag = (id = "simple"): DagDef => ({
+    id,
+    nodes: [
+      createTransformNode({
+        id: "A",
+        inputSchema: z.any(),
+        outputSchema: z.any(),
+        deps: [],
+        transform: (i) => ok(i),
+      }),
+    ],
+    edges: [],
+  });
+
+  it("resume + jobLike returns err(node-crash) — not throw", async () => {
+    const dag = mkSimpleDag("resume-jl");
+    const jobLike = {
+      data: { state: { kind: "pending" as const }, context: {} as any },
+      updateData: async () => {},
+      updateProgress: async () => {},
+      appendEvent: async () => {},
+    };
+    const result = await runDag(dag, {}, mkCtx(), {
+      resume: { runId: "r1", checkpoint: new Map() },
+      jobLike,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("incompatible");
+    }
+  });
+
+  it("resume-only routes to legacy path (not state-machine)", async () => {
+    const log: string[] = [];
+    const dag: DagDef = {
+      id: "legacy-resume",
+      nodes: [
+        createTransformNode({
+          id: "A",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          deps: [],
+          transform: (_i) => { log.push("A"); return ok(42); },
+        }),
+        createTransformNode({
+          id: "B",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          deps: ["A"],
+          transform: (i) => { log.push("B"); return ok(i); },
+        }),
+      ],
+      edges: [{ from: "A", to: "B" }],
+    };
+    // A is in checkpoint, B is not — legacy path skips A and runs B
+    const checkpoint = new Map<string, unknown>([["A", 10]]);
+    const result = await runDag(dag, {}, mkCtx(), {
+      resume: { runId: "r2", checkpoint },
+    });
+    expect(result.ok).toBe(true);
+    // Only B ran (legacy resume semantics)
+    expect(log).toEqual(["B"]);
+  });
+
+  it("onBackground-only routes to legacy path", async () => {
+    let backgroundCalled = false;
+    const dag = mkSimpleDag("onbg");
+    const result = await runDag(dag, { value: 1 }, mkCtx(), {
+      onBackground: (_p) => { backgroundCalled = true; },
+    });
+    expect(result.ok).toBe(true);
+    // onBackground is a legacy-path feature and must have been invoked
+    expect(backgroundCalled).toBe(true);
+  });
+
+  it("onHumanReview triggers state-machine path and is forwarded", async () => {
+    // Build a NodeDef manually so humanReview is preserved (createTransformNode doesn't expose it)
+    const reviewedNode: NodeDef<unknown, unknown, unknown> = {
+      id: "reviewed",
+      kind: "transform",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      deps: [],
+      run: async (_input, _ctx) => ok({ result: "needs-review" }),
+      humanReview: { prompt: "Please review" },
+    };
+    const dag: DagDef = {
+      id: "hitl-dag",
+      nodes: [reviewedNode],
+      edges: [],
+    };
+
+    let hookCalled = false;
+    const onHumanReview = async (_req: {
+      nodeId: string;
+      output: unknown;
+      prompt: string;
+    }): Promise<HumanAction> => {
+      hookCalled = true;
+      return { action: "approve" };
+    };
+
+    const result = await runDag(dag, {}, mkCtx(), { onHumanReview });
+    expect(result.ok).toBe(true);
+    expect(hookCalled).toBe(true);
+  });
+
+  it("resume + onHumanReview returns err(node-crash) with incompatibility message", async () => {
+    const dag = mkSimpleDag("resume-hr");
+    const result = await runDag(dag, {}, mkCtx(), {
+      resume: { runId: "r1", checkpoint: new Map() },
+      onHumanReview: async (_req) => ({ action: "approve" as const }),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("incompatible");
+    }
+  });
+
+  it("resume + retryLimits returns err(node-crash) with incompatibility message", async () => {
+    const dag = mkSimpleDag("resume-rl");
+    const result = await runDag(dag, {}, mkCtx(), {
+      resume: { runId: "r1", checkpoint: new Map() },
+      retryLimits: { A: 3 },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("incompatible");
+    }
+  });
+
+  it("onBackground + jobLike returns err(node-crash) — onBackground not supported on state-machine path", async () => {
+    const dag = mkSimpleDag("onbg-jl");
+    const jobLike = {
+      data: { state: { kind: "pending" as const }, context: {} as any },
+      updateData: async () => {},
+      updateProgress: async () => {},
+      appendEvent: async () => {},
+    };
+    const result = await runDag(dag, {}, mkCtx(), {
+      onBackground: (_p) => {},
+      jobLike,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("onBackground");
+    }
+  });
+
+  it("onBackground + onHumanReview returns err(node-crash)", async () => {
+    const dag = mkSimpleDag("onbg-hr");
+    const result = await runDag(dag, {}, mkCtx(), {
+      onBackground: (_p) => {},
+      onHumanReview: async (_req) => ({ action: "approve" as const }),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("onBackground");
+    }
+  });
+
+  it("onBackground + retryLimits returns err(node-crash)", async () => {
+    const dag = mkSimpleDag("onbg-rl");
+    const result = await runDag(dag, {}, mkCtx(), {
+      onBackground: (_p) => {},
+      retryLimits: { A: 2 },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("onBackground");
+    }
+  });
+
+  it("retryLimits triggers state-machine path and is forwarded — node retries on failure", async () => {
+    let callCount = 0;
+    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+      id: "flaky",
+      kind: "transform",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      deps: [],
+      run: async (_input, _ctx) => {
+        callCount += 1;
+        if (callCount < 3) {
+          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient failure" });
+        }
+        return ok("recovered");
+      },
+      retry: { backoffMs: [1, 1, 1] },
+    };
+    const dag: DagDef = {
+      id: "retry-dag",
+      nodes: [flakyNode],
+      edges: [],
+    };
+
+    const result = await runDag(dag, {}, mkCtx(), {
+      retryLimits: { flaky: 3 },
+    });
+    // Should succeed after retries
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBe("recovered");
+    }
+    // Called 3 times: 1 initial + 2 retries
+    expect(callCount).toBe(3);
   });
 });

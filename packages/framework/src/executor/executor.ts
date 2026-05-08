@@ -4,7 +4,10 @@ import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
+import type { JobLike } from "../state-machine/types.js";
+import type { DagPhase, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
 import { type Result, ok, err } from "../types/result.js";
+import { runDagStateful, type DagRunOpts } from "../dag-runtime/run-dag-stateful.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
 import { dispatchEvent } from "../observer/buffered.js";
@@ -28,6 +31,22 @@ export interface RunOptions {
   };
   /** Called with a promise that resolves when background work (eval-judge) completes. */
   readonly onBackground?: (p: Promise<void>) => void;
+  /**
+   * State-machine path: provide a persistent JobLike handle for checkpoint/resume.
+   * When set, runDag delegates to runDagStateful instead of the legacy runDagInner.
+   * INCOMPATIBLE with `resume` — provide jobLike.data.context instead.
+   */
+  readonly jobLike?: JobLike<DagPhase, DagMachineContext>;
+  /**
+   * State-machine path: human-review hook — called when a node with humanReview completes.
+   * Presence of this option triggers the state-machine path.
+   */
+  readonly onHumanReview?: (req: { nodeId: string; output: unknown; prompt: string }) => Promise<HumanAction>;
+  /**
+   * State-machine path: per-node retry limits passed at call time (overrides DagDef.retryLimits).
+   * Presence of this option triggers the state-machine path.
+   */
+  readonly retryLimits?: Readonly<Record<string, number>>;
 }
 
 const emit = (ctx: NodeContext, event: ObserverEvent) => {
@@ -48,6 +67,58 @@ export const runDag = async <I, O>(
   ctx: NodeContext,
   opts?: RunOptions,
 ): Promise<Result<O, FrameworkError>> => {
+  // ---------------------------------------------------------------------------
+  // Routing: legacy fast path vs. state-machine path (AD-7 / Gap-3)
+  //
+  // We route to the legacy runDagInner when ALL of the following hold:
+  //   - opts.jobLike is undefined (no durable checkpoint handle)
+  //   - opts.onHumanReview is undefined (no HITL gate)
+  //   - opts.retryLimits is undefined (no per-call retry override)
+  //
+  // `resume` and `onBackground` are legacy-path flags — they were part of the
+  // original RunOptions and MUST always route through runDagInner to preserve
+  // their existing semantics (checkpoint-based node skip, eval-judge background
+  // callback). Neither is wired into the state-machine path yet (Phase 5 work).
+  //
+  // Guard: resume + jobLike is explicitly unsupported — the caller should load
+  // prior state into jobLike.data.context instead of using the old checkpoint map.
+  // ---------------------------------------------------------------------------
+
+  if (opts?.resume && (opts.jobLike || opts.onHumanReview || opts.retryLimits)) {
+    return err({
+      kind: "node-crash",
+      nodeId: "__executor__",
+      message: "[runDag] `resume` is incompatible with state-machine path options (jobLike, onHumanReview, retryLimits). Use jobLike.data.context.outputs to restore prior state.",
+    });
+  }
+
+  // TODO: refactor RunOptions to a discriminated union (legacy vs state-machine)
+  const useStateMachinePath =
+    opts?.jobLike !== undefined ||
+    opts?.onHumanReview !== undefined ||
+    opts?.retryLimits !== undefined;
+
+  if (useStateMachinePath && opts?.onBackground) {
+    return err({
+      kind: "node-crash",
+      nodeId: "__executor__",
+      message: "[runDag] `onBackground` is not supported on the state-machine path (eval-judge wiring is Phase 5). Remove `onBackground` or do not pass `jobLike`/`onHumanReview`/`retryLimits`.",
+    });
+  }
+
+  if (useStateMachinePath) {
+    // Delegate to the state-machine path (T4 — run-dag-stateful.ts).
+    // Explicitly project only the fields DagRunOpts accepts to avoid silently
+    // passing legacy-only fields (resume, onBackground) into the state-machine path.
+    const stateMachineOpts: DagRunOpts = {
+      jobLike: opts?.jobLike,
+      onHumanReview: opts?.onHumanReview,
+      retryLimits: opts?.retryLimits,
+    };
+    return runDagStateful<I, O>(dag, input, ctx, stateMachineOpts);
+  }
+
+  // Legacy fast path — zero behavioral change (SC-001).
   // Traced path — span stays open until judge completes
   let resolveResult!: (r: Result<O, FrameworkError>) => void;
   const resultPromise = new Promise<Result<O, FrameworkError>>((resolve) => { resolveResult = resolve; });
