@@ -167,7 +167,7 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 ### Scheduler (Phase 4)
 
 - FR-060: The framework MUST expose `TaskConfig`, `TaskRegistry`, and `CatchUpDecision` types.
-- FR-061: The framework MUST expose pure functions `hasCycle(taskId, registry)`, `diffRegistry(active, desired)`, and `decideCatchUp(taskId, firedMarker, completedMarker, withinValidityWindow, hasDependents)`.
+- FR-061: The framework MUST expose pure functions `hasCycle(taskId, registry)`, `diffRegistry(active, desired)`, and `decideCatchUp(fired, completed, withinValidity, dependentIds: readonly string[])`. Note: the original `hasDependents: boolean` and `taskId` params were replaced by `dependentIds: readonly string[]` — this richer form lets the `enqueue-dependents` return carry the actual ids without a separate lookup, and `taskId` was removed as it was unused in the pure function.
 - FR-062: `diffRegistry` MUST return three disjoint lists (`add`, `remove`, `update`) such that applying them transforms `active` into `desired`.
 - FR-063: `decideCatchUp` MUST return `skip` when the task fired but did not complete; `enqueue-dependents` when fired, completed, within validity window, and dependents unfired; `enqueue-standalone` when not fired and within validity window; otherwise a `skip` with an explanatory reason.
 - FR-064: The framework MUST expose a `CronScheduler` factory whose `reconcile(registry)` arms/disarms timers per `diffRegistry`, whose `resolveDependents(taskId, triggeredAt)` enqueues dependents after a task completes, and whose `stop()` clears all timers.

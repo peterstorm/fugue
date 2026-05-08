@@ -303,8 +303,8 @@ type CatchUpDecision =
 declare const hasCycle: (taskId: string, reg: TaskRegistry) => boolean;
 declare const diffRegistry: (active: TaskRegistry, desired: TaskRegistry) => RegistryDiff;
 declare const decideCatchUp: (
-  taskId: string, fired: boolean, completed: boolean, withinValidity: boolean, hasDependents: boolean,
-) => CatchUpDecision;
+  fired: boolean, completed: boolean, withinValidity: boolean, dependentIds: readonly string[],
+) => CatchUpDecision; // taskId removed (unused in pure fn); hasDependents replaced by dependentIds for richer enqueue-dependents payload
 interface CronScheduler {
   reconcile(reg: TaskRegistry): void;
   resolveDependents(taskId: string, triggeredAt: Date): Promise<void>;
