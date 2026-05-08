@@ -14,7 +14,7 @@ export {
   custom,
 } from "./policy.js";
 export { TailSamplingProcessor } from "./tail-sampling-processor.js";
-export { MlflowOtlpExporter } from "./mlflow-otlp-exporter.js";
-export { SpanAttributeRegistry } from "./span-attribute-registry.js";
+export { MlflowOtlpExporter, createMlflowExporter } from "./mlflow-otlp-exporter.js";
+export type { MlflowOtlpExporterConfig } from "./mlflow-otlp-exporter.js";
 export type { TracingConfig, TracingHandle } from "./init-tracing.js";
 export { initTracing } from "./init-tracing.js";

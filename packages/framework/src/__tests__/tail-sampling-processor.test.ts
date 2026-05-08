@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { TailSamplingProcessor } from "../observer/tail-sampling-processor.js";
-import { SpanAttributeRegistry } from "../observer/span-attribute-registry.js";
 import { alwaysOn, errorOnly } from "../observer/policy.js";
+import { AI_LLM_COST_USD } from "../tracing/semantic-conventions.js";
 
 // --- Helpers ---
 
@@ -15,6 +15,7 @@ const fakeSpan = (overrides: {
   startTime?: [number, number];
   endTime?: [number, number];
   name?: string;
+  attributes?: Record<string, unknown>;
 } = {}): ReadableSpan => {
   const traceId = overrides.traceId ?? "abc123";
   const spanId = overrides.spanId ?? `span-${++spanCounter}`;
@@ -25,7 +26,7 @@ const fakeSpan = (overrides: {
     status: { code: overrides.statusCode ?? 0 },
     startTime: overrides.startTime ?? [1000, 0],
     endTime: overrides.endTime ?? [1001, 0],
-    attributes: {},
+    attributes: overrides.attributes ?? {},
     resource: { attributes: {} },
     instrumentationLibrary: { name: "test" },
     kind: 0,
@@ -53,7 +54,6 @@ const createCollector = () => {
 
 describe("TailSamplingProcessor", () => {
   beforeEach(() => {
-    SpanAttributeRegistry.clear();
     spanCounter = 0;
   });
 
@@ -61,16 +61,15 @@ describe("TailSamplingProcessor", () => {
     const { exporter, exported } = createCollector();
     const proc = new TailSamplingProcessor(exporter, alwaysOn());
 
-    // Simulate child span ending first, then root
     const child = fakeSpan({ traceId: "t1", spanId: "child1", parentSpanId: "root1", name: "llm-call" });
     const root = fakeSpan({ traceId: "t1", spanId: "root1", name: "run:dag" });
 
     proc.onEnd(child);
-    expect(exported.length).toBe(0); // Not exported yet — waiting for root
+    expect(exported.length).toBe(0);
 
     proc.onEnd(root);
     expect(exported.length).toBe(1);
-    expect(exported[0].length).toBe(2); // Both spans exported
+    expect(exported[0].length).toBe(2);
     expect(proc.exported).toBe(1);
     expect(proc.dropped).toBe(0);
   });
@@ -80,7 +79,7 @@ describe("TailSamplingProcessor", () => {
     const proc = new TailSamplingProcessor(exporter, errorOnly());
 
     const child = fakeSpan({ traceId: "t2", spanId: "c1", parentSpanId: "r1" });
-    const root = fakeSpan({ traceId: "t2", spanId: "r1", statusCode: 0 }); // OK status
+    const root = fakeSpan({ traceId: "t2", spanId: "r1", statusCode: 0 });
 
     proc.onEnd(child);
     proc.onEnd(root);
@@ -93,36 +92,25 @@ describe("TailSamplingProcessor", () => {
     const { exporter, exported } = createCollector();
     const proc = new TailSamplingProcessor(exporter, errorOnly());
 
-    const root = fakeSpan({ traceId: "t3", spanId: "r1", statusCode: 2 }); // ERROR
+    const root = fakeSpan({ traceId: "t3", spanId: "r1", statusCode: 2 });
     proc.onEnd(root);
 
     expect(exported.length).toBe(1);
     expect(proc.exported).toBe(1);
   });
 
-  it("cleans up SpanAttributeRegistry on discard", () => {
-    const { exporter } = createCollector();
-    const proc = new TailSamplingProcessor(exporter, errorOnly());
-
-    const child = fakeSpan({ traceId: "t4", spanId: "c1", parentSpanId: "r1" });
-    SpanAttributeRegistry.set("c1", { "mlflow.llm.cost": { total_cost: 0.01 } });
-
-    proc.onEnd(child);
-    proc.onEnd(fakeSpan({ traceId: "t4", spanId: "r1", statusCode: 0 }));
-
-    expect(SpanAttributeRegistry.get("c1")).toBeUndefined();
-  });
-
-  it("reads cost from SpanAttributeRegistry for RunSummary", () => {
+  it("reads cost from ai.llm.cost_usd span attribute for RunSummary", () => {
     const { exporter } = createCollector();
     const proc = new TailSamplingProcessor(exporter, alwaysOn());
 
-    const child = fakeSpan({ traceId: "t5", spanId: "c1", parentSpanId: "r1" });
-    SpanAttributeRegistry.set("c1", { "mlflow.llm.cost": { input_cost: 0.01, output_cost: 0.02, total_cost: 0.03 } });
+    const child = fakeSpan({
+      traceId: "t5",
+      spanId: "c1",
+      parentSpanId: "r1",
+      attributes: { [AI_LLM_COST_USD]: 0.03 },
+    });
 
     proc.onEnd(child);
-    // The root span triggers export — cost should be in the summary used for policy eval
-    // Since we use alwaysOn, it always exports. But the internal summary should have cost.
     proc.onEnd(fakeSpan({ traceId: "t5", spanId: "r1" }));
 
     expect(proc.exported).toBe(1);
@@ -134,12 +122,12 @@ describe("TailSamplingProcessor", () => {
 
     proc.onEnd(fakeSpan({ traceId: "t6", spanId: "c1", parentSpanId: "r1" }));
     proc.onEnd(fakeSpan({ traceId: "t7", spanId: "c2", parentSpanId: "r2" }));
-    proc.onEnd(fakeSpan({ traceId: "t6", spanId: "r1" })); // Complete trace t6
+    proc.onEnd(fakeSpan({ traceId: "t6", spanId: "r1" }));
 
     expect(exported.length).toBe(1);
-    expect(exported[0].length).toBe(2); // t6's 2 spans
+    expect(exported[0].length).toBe(2);
 
-    proc.onEnd(fakeSpan({ traceId: "t7", spanId: "r2" })); // Complete trace t7
+    proc.onEnd(fakeSpan({ traceId: "t7", spanId: "r2" }));
     expect(exported.length).toBe(2);
   });
 });

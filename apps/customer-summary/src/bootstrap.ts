@@ -8,6 +8,7 @@ import {
   FakeLlmClient,
   FilePromptRegistry,
   initTracing,
+  createMlflowExporter,
   alwaysOn,
   errorOnly,
   anyOf,
@@ -34,11 +35,11 @@ export const bootstrap = async () => {
   let tracing: TracingHandle | null = null;
   try {
     const policy = anyOf(errorOnly(), hadRetry(), ratio(1.0));
-    tracing = await initTracing({
-      trackingUri: config.MLFLOW_TRACKING_URI,
+    const exporter = createMlflowExporter({
+      url: config.MLFLOW_TRACKING_URI,
       experimentId: config.MLFLOW_EXPERIMENT_ID,
-      policy,
     });
+    tracing = await initTracing({ exporter, policy });
     console.log(`Tracing initialized — MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})`);
   } catch (e) {
     console.warn("Tracing initialization failed — continuing without tracing:", e);

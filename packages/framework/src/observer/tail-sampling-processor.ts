@@ -1,13 +1,11 @@
 /**
- * Tail-sampling span processor for MLflow OTLP export.
+ * Tail-sampling span processor for OTLP export.
  *
  * Buffers all spans per-trace in memory. When the root span ends (no parent),
  * evaluates the PersistencePolicy to decide whether to export the entire trace
  * or discard it.
  *
- * This replaces the previous TailSamplingExporter which only received root spans.
- * With OTLP export, we need ALL spans to be forwarded (the server reconstructs
- * the trace tree from parent_span_id).
+ * Vendor-neutral: reads ai.* attributes from spans, no MLflow dependency.
  *
  * Implements SpanProcessor (not SpanExporter) so it integrates directly into
  * the OTel pipeline without needing a separate BatchSpanProcessor.
@@ -16,7 +14,7 @@ import type { Context } from "@opentelemetry/api";
 import type { ReadableSpan, Span, SpanProcessor, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { PersistencePolicy } from "./policy.js";
 import type { RunSummary } from "./buffered.js";
-import { SpanAttributeRegistry } from "./span-attribute-registry.js";
+import { AI_LLM_COST_USD } from "../tracing/semantic-conventions.js";
 
 /** Maximum age (ms) for a trace buffer before it's evicted as orphaned. */
 const BUFFER_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -28,8 +26,6 @@ const MAX_BUFFERED_TRACES = 1000;
  */
 interface TraceBuffer {
   spans: ReadableSpan[];
-  /** Track span IDs for cleanup on discard */
-  spanIds: string[];
   /** Timestamp when the buffer was created (for TTL eviction) */
   createdAt: number;
 }
@@ -55,19 +51,16 @@ export class TailSamplingProcessor implements SpanProcessor {
 
   onEnd(span: ReadableSpan): void {
     const traceId = span.spanContext().traceId;
-    const spanId = span.spanContext().spanId;
 
     // Get or create buffer for this trace
     let buffer = this.buffers.get(traceId);
     if (!buffer) {
-      buffer = { spans: [], spanIds: [], createdAt: Date.now() };
+      buffer = { spans: [], createdAt: Date.now() };
       this.buffers.set(traceId, buffer);
     }
     buffer.spans.push(span);
-    buffer.spanIds.push(spanId);
 
     // If this is a root span (no parent), the trace is complete — decide now.
-    // ReadableSpan exposes parentSpanId in some SDK versions; fall back to parentSpanContext.
     const parentId = (span as any).parentSpanId
       ?? (span as any).parentSpanContext?.spanId
       ?? null;
@@ -87,7 +80,6 @@ export class TailSamplingProcessor implements SpanProcessor {
     for (const [traceId, buffer] of this.buffers) {
       if (now - buffer.createdAt > BUFFER_TTL_MS) {
         console.warn(`[TailSamplingProcessor] Evicting orphaned trace buffer ${traceId} (age: ${now - buffer.createdAt}ms, spans: ${buffer.spans.length})`);
-        SpanAttributeRegistry.deleteAll(buffer.spanIds);
         this.buffers.delete(traceId);
         this.evicted++;
       }
@@ -97,9 +89,8 @@ export class TailSamplingProcessor implements SpanProcessor {
     if (this.buffers.size > MAX_BUFFERED_TRACES) {
       const entries = [...this.buffers.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
       const toEvict = entries.slice(0, this.buffers.size - MAX_BUFFERED_TRACES);
-      for (const [traceId, buffer] of toEvict) {
+      for (const [traceId] of toEvict) {
         console.warn(`[TailSamplingProcessor] Evicting trace buffer ${traceId} (max size exceeded)`);
-        SpanAttributeRegistry.deleteAll(buffer.spanIds);
         this.buffers.delete(traceId);
         this.evicted++;
       }
@@ -116,13 +107,9 @@ export class TailSamplingProcessor implements SpanProcessor {
         if (result.code !== 0) {
           console.error("[TailSamplingProcessor] Export failed for trace", rootSpan.spanContext().traceId);
         }
-        // Clean up registry entries after export (whether successful or not)
-        SpanAttributeRegistry.deleteAll(buffer.spanIds);
       });
     } else {
       this.dropped++;
-      // Clean up registry entries for discarded spans
-      SpanAttributeRegistry.deleteAll(buffer.spanIds);
     }
   }
 
@@ -135,11 +122,10 @@ export class TailSamplingProcessor implements SpanProcessor {
     let totalCostUsd = 0;
     for (const span of buffer.spans) {
       nameCount.set(span.name, (nameCount.get(span.name) ?? 0) + 1);
-      // Read cost from registry (since it's not on the OTel span attributes)
-      const extra = SpanAttributeRegistry.get(span.spanContext().spanId);
-      if (extra?.["mlflow.llm.cost"] && typeof extra["mlflow.llm.cost"] === "object") {
-        const cost = extra["mlflow.llm.cost"] as Record<string, number>;
-        totalCostUsd += cost.total_cost ?? 0;
+      // Read cost from standard flat attribute
+      const cost = span.attributes[AI_LLM_COST_USD];
+      if (typeof cost === "number") {
+        totalCostUsd += cost;
       }
     }
     const retryCount = [...nameCount.values()].filter((c) => c > 1).length;
@@ -168,7 +154,6 @@ export class TailSamplingProcessor implements SpanProcessor {
             console.error(`[TailSamplingProcessor] forceFlush export failed for trace ${traceId}`);
           }
         });
-        SpanAttributeRegistry.deleteAll(buffer.spanIds);
       }
     }
     this.buffers.clear();

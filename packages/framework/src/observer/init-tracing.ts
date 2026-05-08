@@ -1,48 +1,56 @@
 /**
- * Initialize the OTel tracing pipeline with tail-based sampling via OTLP.
+ * Initialize the OTel tracing pipeline with tail-based sampling.
  *
- * Architecture:
- * 1. TailSamplingProcessor → MlflowOtlpExporter
- *    Buffers spans per-trace, applies policy on root span end, exports via OTLP
- *
- * No @mlflow/core dependency — uses pure OTel APIs. Span attributes like
- * mlflow.spanInputs/Outputs are handled via SpanAttributeRegistry + MlflowOtlpExporter.
+ * Vendor-neutral: accepts any SpanExporter. Use createMlflowExporter() for MLflow,
+ * or any standard OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc.
  */
+import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { TailSamplingProcessor } from "./tail-sampling-processor.js";
-import { MlflowOtlpExporter } from "./mlflow-otlp-exporter.js";
 import type { PersistencePolicy } from "./policy.js";
 
 export interface TracingConfig {
+  /** Any OTel-compatible span exporter */
+  readonly exporter: SpanExporter;
+  /** Persistence policy for tail-based sampling */
+  readonly policy: PersistencePolicy;
+}
+
+/** @deprecated Use TracingConfig with exporter param instead */
+export interface LegacyTracingConfig {
   /** MLflow tracking server URI (e.g. "http://localhost:5000") */
   readonly trackingUri: string;
   /** MLflow experiment ID */
   readonly experimentId: string;
   /** Persistence policy for tail-based sampling */
   readonly policy: PersistencePolicy;
-  /** Optional: basic auth username */
-  readonly username?: string;
-  /** Optional: basic auth password */
-  readonly password?: string;
-  /** Optional: bearer token */
-  readonly token?: string;
 }
 
 export interface TracingHandle {
   /** The tail-sampling processor (for monitoring exported/dropped counts) */
   readonly processor: TailSamplingProcessor;
-  /** Flush all pending traces to MLflow */
+  /** Flush all pending traces */
   readonly flush: () => Promise<void>;
   /** Shut down the tracing pipeline */
   readonly shutdown: () => Promise<void>;
 }
 
-export async function initTracing(config: TracingConfig): Promise<TracingHandle> {
-  const otlpExporter = new MlflowOtlpExporter({
-    url: config.trackingUri,
-    experimentId: config.experimentId,
-  });
-  const tailProcessor = new TailSamplingProcessor(otlpExporter, config.policy);
+export async function initTracing(config: TracingConfig | LegacyTracingConfig): Promise<TracingHandle> {
+  let exporter: SpanExporter;
+
+  if ("exporter" in config) {
+    // New generic path
+    exporter = config.exporter;
+  } else {
+    // Legacy path — import MLflow exporter for backwards compatibility
+    const { createMlflowExporter } = await import("./mlflow-otlp-exporter.js");
+    exporter = createMlflowExporter({
+      url: config.trackingUri,
+      experimentId: config.experimentId,
+    });
+  }
+
+  const tailProcessor = new TailSamplingProcessor(exporter, config.policy);
 
   const sdk = new NodeSDK({ spanProcessors: [tailProcessor] });
   sdk.start();
