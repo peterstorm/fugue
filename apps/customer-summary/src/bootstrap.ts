@@ -34,7 +34,7 @@ export const bootstrap = async () => {
   // --- Tracing (OTel + MLflow with tail-based sampling) ---
   let tracing: TracingHandle | null = null;
   try {
-    const policy = anyOf(errorOnly(), hadRetry(), ratio(1.0));
+    const policy = anyOf(errorOnly(), hadRetry(), ratio(config.TRACE_SAMPLE_RATIO));
     const exporter = createMlflowExporter({
       url: config.MLFLOW_TRACKING_URI,
       experimentId: config.MLFLOW_EXPERIMENT_ID,

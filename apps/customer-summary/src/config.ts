@@ -21,6 +21,10 @@ const ConfigSchema = z.object({
   THINKING_BUDGET_TOKENS: z.coerce.number().default(4096),
   FIXTURES_DIR: z.string().default("./fixtures/customers"),
   PROMPTS_DIR: z.string().default("./prompts"),
+  // Tail-sampling fallback ratio. errorOnly + hadRetry policies still apply;
+  // this gates the residual probability for traces that match neither. 1.0
+  // persists everything (dev only); 0.1 = 10% sampling for production.
+  TRACE_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(0.1),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
