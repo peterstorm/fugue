@@ -264,3 +264,38 @@ export const runDagStateful = async <I, O>(
     },
   );
 };
+
+// ---------------------------------------------------------------------------
+// runDagAsWorkerJob — queue worker entry point (codex finding #1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrapper around `runDagStateful` for use inside a queue worker's `process`
+ * callback. Re-throws on `err` so the queue (BullMQ) sees the failure and
+ * applies its retry / DLQ policy.
+ *
+ * Why this exists:
+ *   `runDagStateful` returns `Result<O, FrameworkError>`. A worker that simply
+ *   awaits it without rethrowing on `!ok` will **silently ack failed jobs**,
+ *   bypassing queue-level `attempts` and dead-letter handlers. Use this helper
+ *   from `createWorker(name, async (job) => runDagAsWorkerJob(...))` so failed
+ *   runs reach `WorkerHandle.onFailed`.
+ */
+export const runDagAsWorkerJob = async <I, O>(
+  dag: DagDef,
+  input: I,
+  nodeCtx: NodeContext,
+  opts?: DagRunOpts,
+): Promise<O> => {
+  const result = await runDagStateful<I, O>(dag, input, nodeCtx, opts);
+  if (!result.ok) {
+    const detail =
+      result.error.kind === "node-crash"
+        ? result.error.message
+        : JSON.stringify(result.error);
+    throw new Error(`runDagAsWorkerJob: DAG '${dag.id}' failed: ${detail}`, {
+      cause: result.error,
+    });
+  }
+  return result.value;
+};

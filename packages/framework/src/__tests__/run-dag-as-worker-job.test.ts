@@ -1,0 +1,133 @@
+// runDagAsWorkerJob — wraps runDagStateful so worker queues see failures
+// and apply retry/DLQ policy (codex finding #1).
+
+import { describe, expect, it } from "bun:test";
+import { z } from "zod";
+import { ok, err } from "../types/result.js";
+import type { NodeDef, NodeContext } from "../types/node.js";
+import type { DagDef } from "../types/dag.js";
+import { runDagAsWorkerJob, runDagStateful } from "../dag-runtime/run-dag-stateful.js";
+import { createInMemoryBackend } from "../queue/in-memory.js";
+
+const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unknown);
+
+const mkNode = (
+  id: string,
+  overrides: Partial<NodeDef<unknown, unknown, unknown>> = {},
+): NodeDef<unknown, unknown, unknown> => ({
+  id,
+  kind: "transform",
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown(),
+  deps: [],
+  run: noop as any,
+  ...overrides,
+});
+
+const mkCtx = (): NodeContext => ({
+  runId: "test-run",
+  dagId: "test-dag",
+  observer: null,
+  cache: null,
+  prompts: null,
+  llm: null,
+  logger: null,
+});
+
+describe("runDagAsWorkerJob", () => {
+  it("returns the DAG output on success", async () => {
+    const dag: DagDef = {
+      id: "ok",
+      nodes: [mkNode("a", { run: async () => ok("a-out") })],
+      edges: [],
+      defaultRetryLimit: 0,
+    };
+    const out = await runDagAsWorkerJob<unknown, string>(dag, null, mkCtx());
+    expect(out).toBe("a-out");
+  });
+
+  it("throws on terminal failure (queue can retry/DLQ)", async () => {
+    const dag: DagDef = {
+      id: "fail",
+      nodes: [
+        mkNode("a", {
+          retry: { backoffMs: [0], jitterRatio: 0 },
+          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+        }),
+      ],
+      edges: [],
+      defaultRetryLimit: 0,
+    };
+    await expect(runDagAsWorkerJob(dag, null, mkCtx())).rejects.toThrow(/DAG 'fail' failed/);
+  });
+
+  it("worker using runDagAsWorkerJob: onFailed fires + attempts increment", async () => {
+    const backend = createInMemoryBackend();
+    const queue = backend.createQueue<unknown, unknown>("q");
+
+    const dag: DagDef = {
+      id: "fail",
+      nodes: [
+        mkNode("a", {
+          retry: { backoffMs: [0], jitterRatio: 0 },
+          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+        }),
+      ],
+      edges: [],
+      defaultRetryLimit: 0,
+    };
+
+    const failedCalls: Array<{ attempts: number; max: number }> = [];
+    const worker = backend.createWorker("q", async (_job) => {
+      await runDagAsWorkerJob(dag, null, mkCtx());
+    });
+    worker.onFailed((_id, _err, attempts, max) => {
+      failedCalls.push({ attempts, max });
+    });
+
+    await queue.enqueue("job-1", { state: { kind: "pending" }, context: {} }, { attempts: 3 });
+    await queue.drain();
+
+    expect(failedCalls.length).toBe(3); // tried 3 times before giving up
+    expect(failedCalls[0]).toEqual({ attempts: 1, max: 3 });
+    expect(failedCalls[2]).toEqual({ attempts: 3, max: 3 });
+
+    await worker.close();
+  });
+
+  it("worker using raw runDagStateful: onFailed does NOT fire (regression guard)", async () => {
+    // This test documents the footgun: callers who skip the helper get silent
+    // ack-on-failure. If this ever changes (e.g. runDagStateful re-throws),
+    // delete this test along with the helper's necessity.
+    const backend = createInMemoryBackend();
+    const queue = backend.createQueue<unknown, unknown>("q-raw");
+
+    const dag: DagDef = {
+      id: "fail",
+      nodes: [
+        mkNode("a", {
+          retry: { backoffMs: [0], jitterRatio: 0 },
+          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+        }),
+      ],
+      edges: [],
+      defaultRetryLimit: 0,
+    };
+
+    const failedCalls: number[] = [];
+    const worker = backend.createWorker("q-raw", async (_job) => {
+      // INTENTIONALLY wrong: ignore the err Result.
+      await runDagStateful(dag, null, mkCtx());
+    });
+    worker.onFailed((_id, _err, attempts, _max) => {
+      failedCalls.push(attempts);
+    });
+
+    await queue.enqueue("job-2", { state: { kind: "pending" }, context: {} }, { attempts: 3 });
+    await queue.drain();
+
+    expect(failedCalls.length).toBe(0); // queue saw success — no retries
+
+    await worker.close();
+  });
+});

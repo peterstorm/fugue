@@ -40,7 +40,7 @@ export {
 export { compileDagToMachine } from "./dag-runtime/machine.js";
 export { topoSort } from "./executor/topo.js";
 export { buildDagExecutor } from "./dag-runtime/executor.js";
-export { runDagStateful } from "./dag-runtime/run-dag-stateful.js";
+export { runDagStateful, runDagAsWorkerJob } from "./dag-runtime/run-dag-stateful.js";
 export type { DagRunOpts } from "./dag-runtime/run-dag-stateful.js";
 
 // ---------------------------------------------------------------------------
