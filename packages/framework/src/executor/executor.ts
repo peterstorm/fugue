@@ -8,6 +8,7 @@ import type { JobLike } from "../state-machine/types.js";
 import type { DagPhase, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
 import { type Result, ok, err } from "../types/result.js";
 import { runDagStateful, type DagRunOpts } from "../dag-runtime/run-dag-stateful.js";
+import { runEvalJudges } from "../dag-runtime/eval-judges.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
 import { dispatchEvent } from "../observer/buffered.js";
@@ -174,7 +175,7 @@ export const runDag = async <I, O>(
 
     // Run eval-judge (still inside the span — appears in trace)
     if (dag.evalJudges?.length) {
-      await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
+      await runEvalJudgesAndUpdateMeta(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
     }
 
     // Finalize span status based on judge + guardrail results
@@ -340,11 +341,16 @@ const withNodeSpan = async (
   const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
 
   return tracer.startActiveSpan(`node:${nodeId}`, { attributes: { [AI_SPAN_TYPE]: spanType } }, async (span) => {
-    span.addEvent(EVENT_NODE_INPUT, { data: JSON.stringify(input) });
+    const includeContent = process.env.LLM_TRACE_PROMPTS === "true" || process.env.LLM_TRACE_PROMPTS === "1";
+    span.addEvent(EVENT_NODE_INPUT, includeContent
+      ? { data: JSON.stringify(input) }
+      : { data_redacted: "true" });
 
     const result = await fn();
     if (result.ok) {
-      span.addEvent(EVENT_NODE_OUTPUT, { data: JSON.stringify(result.value) });
+      span.addEvent(EVENT_NODE_OUTPUT, includeContent
+        ? { data: JSON.stringify(result.value) }
+        : { data_redacted: "true" });
       // Guardrail nodes: propagate failure to trace-level meta
       if (kind === "guardrail" && result.value && typeof result.value === "object" && "passed" in result.value && !(result.value as any).passed) {
         const warnings = (result.value as any).warnings ?? [];
@@ -364,10 +370,11 @@ const withNodeSpan = async (
 };
 
 // ---------------------------------------------------------------------------
-// Eval-judge execution
+// Eval-judge execution — runner extracted to ../dag-runtime/eval-judges.ts
+// so the state-machine path can share it.
 // ---------------------------------------------------------------------------
 
-const runEvalJudges = async (
+const runEvalJudgesAndUpdateMeta = async (
   judges: readonly EvalJudgeNodeDef[],
   dagInput: unknown,
   dagOutput: unknown,
@@ -375,31 +382,7 @@ const runEvalJudges = async (
   ctx: NodeContext,
   meta: DagRunMeta,
 ): Promise<void> => {
-  const results = await Promise.all(
-    judges.map(async (judge) => {
-      return tracer.startActiveSpan(`eval-judge:${judge.id}`, { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_TOOL } }, async (span) => {
-        try {
-          const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
-          span.addEvent(EVENT_NODE_INPUT, { data: JSON.stringify({ ...judgeInput, criteria: judge.config.criteria }) });
-
-          const result = await judge.run(judgeInput, dagOutput, ctx);
-          span.addEvent(EVENT_NODE_OUTPUT, { data: JSON.stringify(result) });
-          if (!result.passed) {
-            span.setStatus({ code: SpanStatusCode.ERROR, message: `Score ${result.score} below threshold. ${result.reason}` });
-          }
-          span.end();
-          return result;
-        } catch (e) {
-          const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
-          (ctx.logger?.warn ?? console.warn)(msg);
-          span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
-          span.end();
-          return { passed: true, score: null as unknown as number, criteriaScores: {}, failedCriteria: [] as string[], reason: `[skipped: ${msg}]`, skipped: true };
-        }
-      });
-    }),
-  );
-
+  const results = await runEvalJudges(judges, dagInput, dagOutput, nodeOutputs, ctx);
   meta.evalJudgeResults = results;
   meta.evalJudgeFailed = results.some((r) => !r.passed);
 };

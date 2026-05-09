@@ -402,7 +402,7 @@ describe("createCronScheduler — stop()", () => {
 // ---------------------------------------------------------------------------
 
 describe("createCronScheduler — handleFire enqueue error path", () => {
-  it("logs error, writes fired marker, and re-arms task when enqueue throws", async () => {
+  it("logs error, re-arms task, and writes fired marker on successful retry when first enqueue throws", async () => {
     const errors: string[] = [];
     const originalConsoleError = console.error;
     console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
@@ -429,11 +429,11 @@ describe("createCronScheduler — handleFire enqueue error path", () => {
     await wait(80);
 
     try {
-      // fired marker MUST be written even when enqueue throws
+      // After re-arming, the second enqueue succeeds and the fired marker is written for that successful fire.
       const firedMarkerExists = await markers.exists(markerFiredKey("A"));
       expect(firedMarkerExists).toBe(true);
 
-      // error must be logged
+      // error must be logged for the first (failed) enqueue
       const hasEnqueueError = errors.some((e) => e.includes("enqueue failed") && e.includes('"A"'));
       expect(hasEnqueueError).toBe(true);
     } finally {
@@ -536,7 +536,7 @@ describe("createCronScheduler — markers.set(completed) failure in resolveDepen
 });
 
 describe("createCronScheduler — markers.set(fired) failure in handleFire", () => {
-  it("logs error and does NOT enqueue the task when fired marker write fails", async () => {
+  it("logs error but still enqueues the task when fired marker write fails (enqueue is idempotent)", async () => {
     const errors: string[] = [];
     const originalConsoleError = console.error;
     console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
@@ -564,8 +564,8 @@ describe("createCronScheduler — markers.set(fired) failure in handleFire", () 
       const hasFiredError = errors.some((e) => e.includes('markers.set(fired) failed for task "A"'));
       expect(hasFiredError).toBe(true);
 
-      // enqueue NOT called
-      expect(enqueuedIds).toHaveLength(0);
+      // enqueue WAS called — marker write happens after enqueue in the new ordering
+      expect(enqueuedIds).toContain("A");
     } finally {
       console.error = originalConsoleError;
       scheduler.stop();
@@ -573,8 +573,8 @@ describe("createCronScheduler — markers.set(fired) failure in handleFire", () 
   }, 500);
 });
 
-describe("createCronScheduler — dependent markers.set(fired) failure skips only that dependent", () => {
-  it("skips enqueue for dependent whose fired marker write fails, still enqueues others", async () => {
+describe("createCronScheduler — dependent markers.set(fired) failure does not block enqueue", () => {
+  it("logs error but still enqueues the dependent whose fired marker write fails (enqueue is idempotent)", async () => {
     const errors: string[] = [];
     const originalConsoleError = console.error;
     console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
@@ -592,7 +592,7 @@ describe("createCronScheduler — dependent markers.set(fired) failure skips onl
       enqueue: async (task) => { enqueuedIds.push(task.id); },
     });
 
-    // A has two dependents: B and C. B's fired marker write will fail.
+    // A has two dependents: B and C. B's fired marker write will fail (after enqueue).
     const reg = makeRegistry([
       { id: "A" },
       { id: "B", dependsOn: ["A"] },
@@ -609,10 +609,10 @@ describe("createCronScheduler — dependent markers.set(fired) failure skips onl
       );
       expect(hasBFiredError).toBe(true);
 
-      // B NOT enqueued
-      expect(enqueuedIds).not.toContain("B");
+      // B IS enqueued — enqueue happens before marker write in the new ordering
+      expect(enqueuedIds).toContain("B");
 
-      // C IS enqueued (loop continues past B's failure)
+      // C is also enqueued
       expect(enqueuedIds).toContain("C");
     } finally {
       console.error = originalConsoleError;

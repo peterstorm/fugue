@@ -8,6 +8,7 @@ export interface LlmRequest<O> {
   readonly model: string;
   readonly schema: z.ZodType<O>;
   readonly thinking?: { type: "enabled"; budgetTokens: number };
+  readonly signal?: AbortSignal;
 }
 
 export interface LlmResponse<O> {

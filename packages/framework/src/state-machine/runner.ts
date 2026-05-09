@@ -90,9 +90,12 @@ export const runStateMachine = async <S, E, C>(
 
     // FR-005: checkpoint after every successful (non-failed) transition
     // FR-005: MUST NOT checkpoint when resulting state is terminal-failed
+    // Order: appendEvent FIRST so the audit/event log is never missing a transition
+    // whose post-state is already persisted. If appendEvent fails, the state is not
+    // advanced and the queue layer can retry from the prior state.
     if (!isFailed) {
-      await job.updateData({ state, context });
       await job.appendEvent(event);
+      await job.updateData({ state, context });
       // CRITICAL-3: updateProgress only when not failed (do not persist failed progress)
       await job.updateProgress(machine.stateProgress(state));
     }

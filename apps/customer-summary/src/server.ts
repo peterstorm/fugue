@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { runDag } from "@ai-summary/framework";
-import type { NodeContext, LlmClient, Observer } from "@ai-summary/framework";
+import type { NodeContext, LlmClient, Observer, Checkpointer } from "@ai-summary/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
 import { createSummaryDag } from "./dag/summary-dag.js";
@@ -40,6 +40,7 @@ export interface AppDeps {
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   readonly observer?: Observer | null;
   readonly cache?: ContextCache | null;
+  readonly checkpointer?: Checkpointer | null;
 }
 
 // --- Create Hono app ---
@@ -70,6 +71,36 @@ export const createApp = (deps: AppDeps): Hono => {
       });
       const runId = resume_run_id ?? randomUUID();
 
+      // Resume: load prior checkpoint if requested. Fresh run: write meta so future resume can load.
+      let resumeCheckpoint: Map<string, unknown> | undefined;
+      if (deps.checkpointer) {
+        if (resume_run_id) {
+          const loaded = await deps.checkpointer.load(resume_run_id);
+          if (loaded.ok && loaded.value) {
+            resumeCheckpoint = new Map(
+              Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
+            );
+          } else if (!loaded.ok) {
+            console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+          }
+          // load returning ok(null) → no prior checkpoint; treat as fresh run with the supplied id
+        }
+        if (!resumeCheckpoint) {
+          const metaResult = await deps.checkpointer.setMeta(runId, {
+            dagId: dag.id,
+            startedAt: new Date(),
+            nodeCount: dag.nodes.length,
+          });
+          if (!metaResult.ok) {
+            console.warn(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
+          }
+        }
+      }
+
+      const timeoutMs = 60_000; // 60s request timeout
+      const abortController = new AbortController();
+      const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+
       const ctx: NodeContext = {
         runId,
         dagId: dag.id,
@@ -79,15 +110,15 @@ export const createApp = (deps: AppDeps): Hono => {
         prompts: { get: (name: string) => deps.prompts?.get(name) ?? null },
         llm: deps.llm,
         judgeLlm: deps.llm,
+        signal: abortController.signal,
       };
-
-      const timeoutMs = 60_000; // 60s request timeout
-      const abortController = new AbortController();
-      const timeout = setTimeout(() => abortController.abort(), timeoutMs);
 
       let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;
       try {
-        result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx);
+        const runOpts = resumeCheckpoint
+          ? { resume: { runId, checkpoint: resumeCheckpoint } }
+          : undefined;
+        result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts);
       } catch (e) {
         if (abortController.signal.aborted) {
           console.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);

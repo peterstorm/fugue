@@ -37,7 +37,11 @@ export class AnthropicLlmClient implements LlmClient {
         // Extended thinking integration will be refined in a future task
       }
 
-      const response = await this.anthropic.messages.create(params, { signal: AbortSignal.timeout(this.requestTimeoutMs) });
+      const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
+      const signal = req.signal
+        ? AbortSignal.any([timeoutSignal, req.signal])
+        : timeoutSignal;
+      const response = await this.anthropic.messages.create(params, { signal });
 
       // Extract thinking content if present
       const thinkingBlock = response.content.find((b) => b.type === "thinking");

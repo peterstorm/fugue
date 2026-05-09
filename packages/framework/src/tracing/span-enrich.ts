@@ -21,6 +21,17 @@ import {
 
 const getCostRates = (model: string) => PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
 
+/**
+ * Whether to include prompt/output/thinking content in spans.
+ * Default OFF — these payloads frequently contain PII and should not leave the
+ * process boundary unless an operator has explicitly opted in.
+ * Read per-call so tests / runtime config changes take effect immediately.
+ */
+const tracePromptContent = (): boolean => {
+  const v = process.env.LLM_TRACE_PROMPTS;
+  return v === "true" || v === "1";
+};
+
 export interface EnrichLlmSpanOpts {
   readonly model: string;
   readonly promptName?: string;
@@ -49,13 +60,24 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   otelSpan.setAttribute(AI_LLM_TOKENS_OUT, opts.tokensOut);
   otelSpan.setAttribute(AI_LLM_COST_USD, totalCost);
 
-  // Structured event: LLM request details
-  otelSpan.addEvent(EVENT_LLM_REQUEST, {
-    model: opts.model,
-    prompt_name: opts.promptName ?? "",
-    system_prompt: opts.system,
-    user_prompt: opts.user,
-  });
+  const includeContent = tracePromptContent();
+
+  // Structured event: LLM request details. Prompts gated by LLM_TRACE_PROMPTS (PII).
+  otelSpan.addEvent(EVENT_LLM_REQUEST, includeContent
+    ? {
+        model: opts.model,
+        prompt_name: opts.promptName ?? "",
+        system_prompt: opts.system,
+        user_prompt: opts.user,
+      }
+    : {
+        model: opts.model,
+        prompt_name: opts.promptName ?? "",
+        system_prompt_redacted: "true",
+        user_prompt_redacted: "true",
+        system_prompt_chars: opts.system.length,
+        user_prompt_chars: opts.user.length,
+      });
 
   // Structured event: cost breakdown
   otelSpan.addEvent(EVENT_LLM_COST, {
@@ -64,9 +86,13 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
     total_cost: totalCost,
   });
 
-  // Thinking/reasoning (potentially large)
+  // Thinking/reasoning (potentially large + may contain PII)
   if (opts.thinking) {
     otelSpan.setAttribute(AI_LLM_HAS_THINKING, true);
-    otelSpan.addEvent(EVENT_LLM_THINKING, { content: opts.thinking });
+    if (includeContent) {
+      otelSpan.addEvent(EVENT_LLM_THINKING, { content: opts.thinking });
+    } else {
+      otelSpan.addEvent(EVENT_LLM_THINKING, { content_redacted: "true", content_chars: opts.thinking.length });
+    }
   }
 };

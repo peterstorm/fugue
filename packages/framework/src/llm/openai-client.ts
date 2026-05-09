@@ -88,14 +88,24 @@ export class OpenAILlmClient implements LlmClient {
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+      const onCallerAbort = () => controller.abort();
+      if (req.signal) {
+        if (req.signal.aborted) controller.abort();
+        else req.signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
 
-      const httpRes = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+      let httpRes: Response;
+      try {
+        httpRes = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+        req.signal?.removeEventListener("abort", onCallerAbort);
+      }
 
       if (!httpRes.ok) {
         const errBody = await httpRes.text();

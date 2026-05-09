@@ -14,6 +14,9 @@ const ConfigSchema = z.object({
   AZURE_OPENAI_API_VERSION: z.string().default("2025-04-01-preview"),
   AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
   EVAL_JUDGE_MODEL: z.string().optional(),
+  // PII gate: include LLM prompts/outputs/thinking and node inputs/outputs in OTel traces.
+  // Default off — enable only in environments where trace storage handles PII appropriately.
+  LLM_TRACE_PROMPTS: z.string().default("false").transform((v) => v === "true" || v === "1"),
   ENABLE_THINKING: z.string().default("false").transform((v) => v === "true" || v === "1"),
   THINKING_BUDGET_TOKENS: z.coerce.number().default(4096),
   FIXTURES_DIR: z.string().default("./fixtures/customers"),

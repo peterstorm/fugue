@@ -88,6 +88,7 @@ export const createLlmNode = <I, O>(
       model: config.model,
       schema: config.outputSchema,
       ...(config.thinking ? { thinking: config.thinking } : {}),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
     };
 
     const attempt = async () => {

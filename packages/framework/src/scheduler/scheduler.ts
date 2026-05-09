@@ -152,20 +152,22 @@ export function createCronScheduler(
   }
 
   async function handleFire(task: TaskConfig, triggeredAt: Date): Promise<void> {
-    // Mark as fired — guard against Redis/store failures
+    // Enqueue first — only mark as fired on success.
+    // If enqueue fails, no marker is set so catch-up logic will retry.
+    // Enqueue implementations MUST be idempotent (per CronSchedulerOpts.enqueue contract).
+    try {
+      await enqueue(task, triggeredAt);
+    } catch (err) {
+      console.error(`[CronScheduler] enqueue failed for task "${task.id}" — marker not set, catch-up will retry:`, err);
+      return;
+    }
+
     const ttlSeconds = Math.ceil(task.validForMs / 1000) + 60; // grace period
     try {
       await markers.set(markerFiredKey(task.id), ttlSeconds);
     } catch (err) {
-      console.error(`[CronScheduler] markers.set(fired) failed for task "${task.id}":`, err);
-      // Return early: catch-up logic depends on the fired marker existing when the job was actually queued
-      return;
-    }
-
-    try {
-      await enqueue(task, triggeredAt);
-    } catch (err) {
-      console.error(`[CronScheduler] enqueue failed for task "${task.id}":`, err);
+      // Job is already enqueued; marker write failure means catch-up may re-enqueue, but enqueue is idempotent.
+      console.error(`[CronScheduler] markers.set(fired) failed for task "${task.id}" (job already enqueued):`, err);
     }
   }
 
@@ -233,20 +235,21 @@ export function createCronScheduler(
         const alreadyFired = await markers.exists(markerFiredKey(dep.id));
         if (alreadyFired) continue;
 
+        // Enqueue first — only mark fired on success. enqueue is idempotent (per contract).
+        try {
+          await enqueue(dep, triggeredAt);
+        } catch (err) {
+          console.error(`[CronScheduler] enqueue failed for dependent task "${dep.id}" — marker not set:`, err);
+          continue;
+        }
         const depFiredTtl = Math.ceil(dep.validForMs / 1000) + 60;
         try {
           await markers.set(markerFiredKey(dep.id), depFiredTtl);
         } catch (err) {
           console.error(
-            `[CronScheduler] markers.set(fired) failed for dependent "${dep.id}" (upstream "${taskId}") — skipping enqueue to preserve idempotency:`,
+            `[CronScheduler] markers.set(fired) failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued):`,
             err,
           );
-          continue;
-        }
-        try {
-          await enqueue(dep, triggeredAt);
-        } catch (err) {
-          console.error(`[CronScheduler] enqueue failed for dependent task "${dep.id}":`, err);
         }
       } catch (err) {
         console.error(`[CronScheduler] resolveDependents failed for taskId="${taskId}", dep="${dep.id}":`, err);

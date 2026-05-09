@@ -2,6 +2,7 @@
 // FR-023, FR-024, FR-025, FR-027
 
 import { match } from "ts-pattern";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
 import type { JobLike, RunOptions } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import type { DagDef } from "../types/dag.js";
@@ -12,8 +13,19 @@ import { createInMemoryJob } from "../state-machine/in-memory-job.js";
 import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
+import { runEvalJudges } from "./eval-judges.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { Observer } from "../observer/observer.js";
+import {
+  AI_SPAN_TYPE,
+  AI_DAG_ID,
+  AI_RUN_ID,
+  EVENT_NODE_INPUT,
+  EVENT_NODE_OUTPUT,
+  SPAN_TYPE_CHAIN,
+} from "../tracing/semantic-conventions.js";
+
+const tracer = trace.getTracer("ai-summary-framework");
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -137,59 +149,94 @@ export const runDagStateful = async <I, O>(
     }
   };
 
-  try {
-    const { state } = await runStateMachine(job, machine, executor, runOpts);
+  return tracer.startActiveSpan(
+    `run:${dag.id}`,
+    { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN } },
+    async (rootSpan): Promise<Result<O, FrameworkError>> => {
+      rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: nodeCtx.runId });
 
-    return match(state)
-      .with({ kind: "succeeded" }, (s) => {
-        emitRunEnd("ok");
-        return ok(s.output as O);
-      })
-      // state.kind === "failed" — can happen when job was pre-loaded with a failed state
-      // (runStateMachine skips the loop entirely when already terminal)
-      .with({ kind: "failed" }, (s) => {
-        emitRunEnd("error");
-        return err(s.error);
-      })
-      // Unexpected non-terminal states — should not be reached
-      .with({ kind: "pending" }, (s) => {
-        emitRunEnd("error");
-        return err({ kind: "node-crash" as const, nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` } satisfies FrameworkError);
-      })
-      .with({ kind: "running" }, (s) => {
-        emitRunEnd("error");
-        return err({ kind: "node-crash" as const, nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` } satisfies FrameworkError);
-      })
-      .with({ kind: "retrying" }, (s) => {
-        emitRunEnd("error");
-        return err({ kind: "node-crash" as const, nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` } satisfies FrameworkError);
-      })
-      .with({ kind: "retrying-hook" }, (s) => {
-        // Should be unreachable post-loop: the kernel only exits when isTerminal.
-        // Surface as a node-crash so callers see a typed error rather than an unhandled throw.
-        emitRunEnd("error");
-        return err({ kind: "node-crash" as const, nodeId: s.nodeId, message: `runDagStateful: unexpected non-terminal state ${s.kind}` } satisfies FrameworkError);
-      })
-      .with({ kind: "awaiting-human" }, (s) => {
-        emitRunEnd("error");
-        return err({ kind: "node-crash" as const, nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` } satisfies FrameworkError);
-      })
-      .exhaustive();
-  } catch (e) {
-    // runStateMachine throws on terminal-failed (FR-007); also propagate beforeExecute abort.
-    // The failed state is NOT checkpointed (FR-005), so we capture it via onTrace above.
-    emitRunEnd("error");
+      try {
+        const { state, context } = await runStateMachine(job, machine, executor, runOpts);
 
-    if (lastFailedState !== undefined) {
-      return err(lastFailedState.error);
-    }
+        return await match(state)
+          .with({ kind: "succeeded" }, async (s) => {
+            // Run eval-judges (mirrors legacy executor behavior) — fail-open, never crashes the run.
+            let evalJudgeFailed = false;
+            let evalJudgeResults: Awaited<ReturnType<typeof runEvalJudges>> = [];
+            if (dag.evalJudges?.length) {
+              evalJudgeResults = await runEvalJudges(dag.evalJudges, input, s.output, context.outputs as Map<string, unknown>, nodeCtx);
+              evalJudgeFailed = evalJudgeResults.some((r) => !r.passed);
+            }
 
-    // beforeExecute abort or unexpected throw
-    const error: FrameworkError = {
-      kind: "node-crash",
-      nodeId: "__executor__",
-      message: e instanceof Error ? e.message : String(e),
-    };
-    return err(error);
-  }
+            if (evalJudgeFailed) {
+              const failed = evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
+              rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Eval-judge failed: ${failed.join(", ")}` });
+              rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", evalJudgeFailed: "true", evalJudgeResults: JSON.stringify(evalJudgeResults) });
+            } else {
+              rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
+            }
+            rootSpan.end();
+            emitRunEnd("ok");
+            return ok(s.output as O);
+          })
+          // state.kind === "failed" — can happen when job was pre-loaded with a failed state
+          // (runStateMachine skips the loop entirely when already terminal)
+          .with({ kind: "failed" }, async (s) => {
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(s.error) });
+            rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "error", error: JSON.stringify(s.error) });
+            rootSpan.end();
+            emitRunEnd("error");
+            return err(s.error);
+          })
+          // Unexpected non-terminal states — should not be reached
+          .with({ kind: "pending" }, async (s) => {
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            rootSpan.end();
+            emitRunEnd("error");
+            return err(e);
+          })
+          .with({ kind: "running" }, async (s) => {
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            rootSpan.end();
+            emitRunEnd("error");
+            return err(e);
+          })
+          .with({ kind: "retrying" }, async (s) => {
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            rootSpan.end();
+            emitRunEnd("error");
+            return err(e);
+          })
+          .with({ kind: "retrying-hook" }, async (s) => {
+            const e: FrameworkError = { kind: "node-crash", nodeId: s.nodeId, message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            rootSpan.end();
+            emitRunEnd("error");
+            return err(e);
+          })
+          .with({ kind: "awaiting-human" }, async (s) => {
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            rootSpan.end();
+            emitRunEnd("error");
+            return err(e);
+          })
+          .exhaustive();
+      } catch (e) {
+        // runStateMachine throws on terminal-failed (FR-007); also propagate beforeExecute abort.
+        // The failed state is NOT checkpointed (FR-005), so we capture it via onTrace above.
+        const error: FrameworkError = lastFailedState !== undefined
+          ? lastFailedState.error
+          : { kind: "node-crash", nodeId: "__executor__", message: e instanceof Error ? e.message : String(e) };
+        rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
+        rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "error", error: JSON.stringify(error) });
+        rootSpan.end();
+        emitRunEnd("error");
+        return err(error);
+      }
+    },
+  );
 };

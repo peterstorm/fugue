@@ -17,7 +17,7 @@ import {
   RedisCache,
   RedisCheckpointer,
 } from "@ai-summary/framework";
-import type { LlmClient, TracingHandle } from "@ai-summary/framework";
+import type { LlmClient, TracingHandle, Checkpointer } from "@ai-summary/framework";
 import { NoopObserver } from "@ai-summary/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
@@ -47,6 +47,7 @@ export const bootstrap = async () => {
 
   // --- Redis (cache + checkpointer) ---
   let contextCache: ContextCache | null = null;
+  let checkpointer: Checkpointer | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ioredis CJS/ESM interop requires dynamic handling
   let redis: any = null;
   try {
@@ -60,7 +61,8 @@ export const bootstrap = async () => {
     console.log(`Redis connected at ${config.REDIS_URL}`);
 
     const cache = new RedisCache(redis);
-    const checkpointer = new RedisCheckpointer(redis);
+    checkpointer = new RedisCheckpointer(redis);
+    const cp = checkpointer;
 
     // Adapter: NodeContext.cache expects get/set/writeCheckpoint
     // get() must return { ok: true, value } to match what llm.ts checks
@@ -80,7 +82,7 @@ export const bootstrap = async () => {
         }
       },
       writeCheckpoint: async (runId: string, nodeId: string, value: unknown) => {
-        const r = await checkpointer.saveNode(runId, nodeId, {
+        const r = await cp.saveNode(runId, nodeId, {
           nodeId,
           output: value,
           completedAt: new Date(),
@@ -92,6 +94,7 @@ export const bootstrap = async () => {
     };
   } catch (e) {
     console.warn("Redis connection failed — running without cache/checkpointing:", e);
+    checkpointer = null;
   }
 
   // Source
@@ -152,9 +155,10 @@ export const bootstrap = async () => {
     llm,
     prompts,
     model,
-    judgeModel: config.EVAL_JUDGE_MODEL,
+    judgeModel: config.EVAL_JUDGE_MODEL ?? model,
     thinking: config.ENABLE_THINKING ? { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS } : undefined,
     cache: contextCache,
+    checkpointer,
     observer: new NoopObserver(),
     health: {
       checkRedis: redis ? async () => {
