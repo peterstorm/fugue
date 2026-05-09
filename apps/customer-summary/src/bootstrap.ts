@@ -62,6 +62,20 @@ export const bootstrap = async () => {
       lazyConnect: true,
       connectTimeout: 3000,
     });
+    // Event-driven health: ioredis emits "error" on disconnect AND on operation
+    // failures. Without a listener, "Unhandled error event" floods stderr and
+    // readiness has to ping per request. Authoritative state lives in flags
+    // updated by ready/end/error events.
+    redis.on("error", (e: unknown) => {
+      console.error(`[redis] connection error: ${e instanceof Error ? e.message : String(e)}`);
+      redisHealthy = false;
+    });
+    redis.on("ready", () => {
+      redisHealthy = true;
+    });
+    redis.on("end", () => {
+      redisHealthy = false;
+    });
     await redis.connect();
     console.log(`Redis connected at ${config.REDIS_URL}`);
     redisHealthy = true;
@@ -183,11 +197,9 @@ export const bootstrap = async () => {
     health: {
       // Always defined: if Redis was never reachable at bootstrap, we still
       // need readiness to report not-ready (otherwise k8s leaves the pod in
-      // service while checkpointer/cache are null).
-      checkRedis: async () => {
-        if (!redisHealthy || !redis) return false;
-        try { await redis.ping(); return true; } catch { return false; }
-      },
+      // service while checkpointer/cache are null). Flag is event-driven —
+      // no per-request ping (would add round-trip on every k8s probe).
+      checkRedis: async () => redisHealthy && redis !== null,
       checkMlflow: async () => {
         try {
           const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`);
