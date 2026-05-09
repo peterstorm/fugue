@@ -692,6 +692,88 @@ describe("runDag routing (T6 back-compat shim)", () => {
     }
   });
 
+  it("DagDef.defaultRetryLimit routes to state-machine path even without opts.retryLimits", async () => {
+    let callCount = 0;
+    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+      id: "flaky",
+      kind: "transform",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      deps: [],
+      run: async (_input, _ctx) => {
+        callCount += 1;
+        if (callCount < 2) {
+          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+        }
+        return ok("ok");
+      },
+      retry: { backoffMs: [1] },
+    };
+    const dag: DagDef = {
+      id: "default-retry-dag",
+      nodes: [flakyNode],
+      edges: [],
+      defaultRetryLimit: 2,
+    };
+    const result = await runDag(dag, {}, mkCtx());
+    expect(result.ok).toBe(true);
+    expect(callCount).toBe(2);
+  });
+
+  it("DagDef.retryLimits routes to state-machine path even without opts.retryLimits", async () => {
+    let callCount = 0;
+    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+      id: "flaky",
+      kind: "transform",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      deps: [],
+      run: async (_input, _ctx) => {
+        callCount += 1;
+        if (callCount < 2) {
+          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+        }
+        return ok("ok");
+      },
+      retry: { backoffMs: [1] },
+    };
+    const dag: DagDef = {
+      id: "retry-limits-dag",
+      nodes: [flakyNode],
+      edges: [],
+      retryLimits: { flaky: 2 },
+    };
+    const result = await runDag(dag, {}, mkCtx());
+    expect(result.ok).toBe(true);
+    expect(callCount).toBe(2);
+  });
+
+  it("DagDef.retryLimits = {} (empty) does NOT route to state-machine path", async () => {
+    // Empty retryLimits is meaningless; should stay on legacy fast path.
+    let callCount = 0;
+    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+      id: "flaky",
+      kind: "transform",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      deps: [],
+      run: async (_input, _ctx) => {
+        callCount += 1;
+        return err({ kind: "node-crash" as const, nodeId: "flaky", message: "fail" });
+      },
+    };
+    const dag: DagDef = {
+      id: "empty-retry-limits-dag",
+      nodes: [flakyNode],
+      edges: [],
+      retryLimits: {},
+    };
+    const result = await runDag(dag, {}, mkCtx());
+    expect(result.ok).toBe(false);
+    // Legacy path = single attempt, no retry
+    expect(callCount).toBe(1);
+  });
+
   it("retryLimits triggers state-machine path and is forwarded — node retries on failure", async () => {
     let callCount = 0;
     const flakyNode: NodeDef<unknown, unknown, unknown> = {

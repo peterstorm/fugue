@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { TailSamplingProcessor } from "../observer/tail-sampling-processor.js";
 import { alwaysOn, errorOnly } from "../observer/policy.js";
-import { AI_LLM_COST_USD } from "../tracing/semantic-conventions.js";
+import { AI_LLM_COST_USD, AI_RUN_ID } from "../tracing/semantic-conventions.js";
+import type { RunSummary } from "../observer/buffered.js";
+import type { PersistencePolicy } from "../observer/policy.js";
 
 // --- Helpers ---
 
@@ -114,6 +116,38 @@ describe("TailSamplingProcessor", () => {
     proc.onEnd(fakeSpan({ traceId: "t5", spanId: "r1" }));
 
     expect(proc.exported).toBe(1);
+  });
+
+  it("RunSummary.runId is taken from root span ai.run.id attribute", () => {
+    const seen: RunSummary[] = [];
+    const capturePolicy: PersistencePolicy = {
+      shouldFlush(s: RunSummary) { seen.push(s); return false; },
+    };
+    const { exporter } = createCollector();
+    const proc = new TailSamplingProcessor(exporter, capturePolicy);
+
+    proc.onEnd(fakeSpan({
+      traceId: "t-runid-1",
+      spanId: "r1",
+      attributes: { [AI_RUN_ID]: "run-abc-42" },
+    }));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].runId).toBe("run-abc-42");
+  });
+
+  it("RunSummary.runId falls back to tr-<traceId> when attribute absent", () => {
+    const seen: RunSummary[] = [];
+    const capturePolicy: PersistencePolicy = {
+      shouldFlush(s: RunSummary) { seen.push(s); return false; },
+    };
+    const { exporter } = createCollector();
+    const proc = new TailSamplingProcessor(exporter, capturePolicy);
+
+    proc.onEnd(fakeSpan({ traceId: "t-runid-2", spanId: "r1" }));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].runId).toBe("tr-t-runid-2");
   });
 
   it("handles multiple traces independently", () => {

@@ -16,12 +16,13 @@ export interface DagDef {
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   /**
    * Per-node retry limits — overrides `defaultRetryLimit` for a specific node.
-   * Optional for back-compat; existing callers that omit it get the legacy behavior.
+   * Setting a non-empty value routes runDag to the state-machine path.
    */
   readonly retryLimits?: Readonly<Record<string, number>>;
   /**
    * Default retry limit applied to all nodes without an entry in `retryLimits`.
-   * Optional for back-compat; defaults to 0 (no retries) when not supplied.
+   * Setting any value routes runDag to the state-machine path; omit for the
+   * legacy fast path with no retries.
    */
   readonly defaultRetryLimit?: number;
 }

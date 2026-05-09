@@ -3,6 +3,8 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeResult } from "../nodes/eval-judge.js";
 import {
+  AI_NODE_ID,
+  AI_NODE_KIND,
   AI_SPAN_TYPE,
   AI_GUARDRAIL_PASSED,
   EVENT_NODE_INPUT,
@@ -39,7 +41,13 @@ export const withNodeSpan = async (
 
   return tracer.startActiveSpan(
     `node:${nodeId}`,
-    { attributes: { [AI_SPAN_TYPE]: spanType } },
+    {
+      attributes: {
+        [AI_SPAN_TYPE]: spanType,
+        [AI_NODE_ID]: nodeId,
+        [AI_NODE_KIND]: kind,
+      },
+    },
     async (span) => {
       const includeContent =
         process.env.LLM_TRACE_PROMPTS === "true" || process.env.LLM_TRACE_PROMPTS === "1";

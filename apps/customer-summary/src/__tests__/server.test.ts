@@ -199,18 +199,57 @@ describe("POST /summarize", () => {
   });
 });
 
-describe("GET /healthz", () => {
-  test("returns 200 with healthy status", async () => {
+describe("GET /livez", () => {
+  test("always returns 200 alive", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    // Even with all deps down, /livez stays 200 — k8s should restart only on hang.
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => false,
+        checkMlflow: async () => false,
+      },
+    });
+    const res = await get(app, "/livez");
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toBe("alive");
+  });
+});
+
+describe("GET /readyz", () => {
+  test("returns 200 ready when all deps up", async () => {
     const app = createTestApp();
-    const res = await get(app, "/healthz");
+    const res = await get(app, "/readyz");
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.status).toBe("healthy");
+    expect(json.status).toBe("ready");
     expect(json.redis).toBe(true);
     expect(json.mlflow).toBe(true);
   });
 
-  test("returns degraded when redis is down", async () => {
+  test("mlflow down does NOT gate readiness — 200 ready-degraded", async () => {
+    // Tracing outage must not pull pods out of rotation.
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => false,
+      },
+    });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.status).toBe("ready-degraded");
+    expect(json.redis).toBe(true);
+    expect(json.mlflow).toBe(false);
+  });
+
+  test("redis down returns 503 not-ready", async () => {
     const source = new JsonFixtureSource(fixturesDir);
     const llm = new FakeLlmClient(new Map());
     const app = createApp({
@@ -221,14 +260,14 @@ describe("GET /healthz", () => {
         checkMlflow: async () => true,
       },
     });
-    const res = await get(app, "/healthz");
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(503);
     const json = await res.json();
-    expect(json.status).toBe("degraded");
+    expect(json.status).toBe("not-ready");
     expect(json.redis).toBe(false);
-    expect(json.mlflow).toBe(true);
   });
 
-  test("returns degraded when health check throws", async () => {
+  test("redis check throws — treated as down (503)", async () => {
     const source = new JsonFixtureSource(fixturesDir);
     const llm = new FakeLlmClient(new Map());
     const app = createApp({
@@ -239,9 +278,25 @@ describe("GET /healthz", () => {
         checkMlflow: async () => true,
       },
     });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(503);
+    expect((await res.json()).status).toBe("not-ready");
+  });
+});
+
+describe("GET /healthz (back-compat alias of /readyz)", () => {
+  test("mlflow down does not flip status (regression for previous false-503)", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => false,
+      },
+    });
     const res = await get(app, "/healthz");
-    const json = await res.json();
-    expect(json.status).toBe("degraded");
-    expect(json.redis).toBe(false);
+    expect(res.status).toBe(200);
   });
 });

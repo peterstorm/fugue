@@ -14,7 +14,7 @@ import type { Context } from "@opentelemetry/api";
 import type { ReadableSpan, Span, SpanProcessor, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { PersistencePolicy } from "./policy.js";
 import type { RunSummary } from "./buffered.js";
-import { AI_LLM_COST_USD } from "../tracing/semantic-conventions.js";
+import { AI_LLM_COST_USD, AI_RUN_ID } from "../tracing/semantic-conventions.js";
 
 /** Maximum age (ms) for a trace buffer before it's evicted as orphaned. */
 const BUFFER_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -134,8 +134,15 @@ export class TailSamplingProcessor implements SpanProcessor {
     const startMs = rootSpan.startTime[0] * 1000 + rootSpan.startTime[1] / 1e6;
     const endMs = rootSpan.endTime[0] * 1000 + rootSpan.endTime[1] / 1e6;
 
+    // Prefer the application-level run id set on the root span; fall back to
+    // the trace id only when the producer didn't tag it (legacy / external traces).
+    const runIdAttr = rootSpan.attributes[AI_RUN_ID];
+    const runId = typeof runIdAttr === "string" && runIdAttr.length > 0
+      ? runIdAttr
+      : `tr-${traceId}`;
+
     return {
-      runId: `tr-${traceId}`,
+      runId,
       status: isError ? "error" : "ok",
       totalDuration: endMs - startMs,
       nodeCount: buffer.spans.length,

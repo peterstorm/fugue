@@ -5,6 +5,7 @@ import type { Job } from "bullmq";
 import type Redis from "ioredis";
 import type { JobLike } from "../state-machine/types.js";
 import type { EventLogOpts } from "../queue/types.js";
+import { serializeValue, deserializeValue } from "../state-machine/serialize.js";
 
 const DEFAULT_MAX_LEN = 10000;
 
@@ -44,12 +45,14 @@ export function adaptBullMQJob<S, C>(
 
   return {
     get data(): { state: S; context: C } {
-      return bullJob.data;
+      // BullMQ stores the value enqueued/written via updateData. We tag Map/Set
+      // on write (serializeValue), so reading must invert that tagging.
+      return deserializeValue(bullJob.data) as { state: S; context: C };
     },
 
     async updateData(d: { state: S; context: C }): Promise<void> {
       try {
-        await bullJob.updateData(d);
+        await bullJob.updateData(serializeValue(d) as { state: S; context: C });
       } catch (err) {
         throw new Error(
           `[BullMQ] updateData failed for queue "${queueName}" job "${bullJob.id}": ${err instanceof Error ? err.message : String(err)}`,
@@ -73,7 +76,8 @@ export function adaptBullMQJob<S, C>(
       // XADD events:{queueName}:{jobId} MAXLEN ~ <maxLen> * type <type> payload <json>
       const eventObj = event as Record<string, unknown>;
       const type = typeof eventObj?.type === "string" ? eventObj.type : "event";
-      const payload = JSON.stringify(event);
+      // Events may carry node outputs containing Map/Set; tag them for JSON.
+      const payload = JSON.stringify(serializeValue(event));
 
       try {
         if (approximate) {

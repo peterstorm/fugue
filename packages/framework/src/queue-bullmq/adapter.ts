@@ -16,6 +16,7 @@ import type {
   EventLogOpts,
 } from "../queue/types.js";
 import { adaptBullMQJob } from "./job.js";
+import { serializeValue } from "../state-machine/serialize.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -95,7 +96,9 @@ export function createBullMQBackend(
     return {
       async enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void> {
         try {
-          await queue.add(id, data, {
+          // Map/Set in state or context must be tagged for JSON; the getter on
+          // adaptBullMQJob inverts this on read.
+          await queue.add(id, serializeValue(data), {
             priority: opts?.priority,
             delay: opts?.delayMs,
             attempts: opts?.attempts,

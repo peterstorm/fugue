@@ -156,7 +156,13 @@ export const runDagStateful = async <I, O>(
 
   return tracer.startActiveSpan(
     `run:${dag.id}`,
-    { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN } },
+    {
+      attributes: {
+        [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN,
+        [AI_DAG_ID]: dag.id,
+        [AI_RUN_ID]: nodeCtx.runId,
+      },
+    },
     async (rootSpan): Promise<Result<O, FrameworkError>> => {
       rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: nodeCtx.runId });
 

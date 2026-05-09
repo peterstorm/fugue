@@ -77,6 +77,7 @@ export const runDag = async <I, O>(
   //
   // The state-machine path is selected when:
   //   - the DAG declares any `humanReview` node, OR
+  //   - the DAG declares retry policy (`defaultRetryLimit` or `retryLimits`), OR
   //   - opts.jobLike is set (durable checkpoint handle), OR
   //   - opts.retryLimits is set (per-call retry override)
   //
@@ -86,6 +87,9 @@ export const runDag = async <I, O>(
 
   const hitlNodes = dag.nodes.filter((n) => n.humanReview !== undefined);
   const dagDeclaresHITL = hitlNodes.length > 0;
+  const dagDeclaresRetries =
+    dag.defaultRetryLimit !== undefined ||
+    (dag.retryLimits !== undefined && Object.keys(dag.retryLimits).length > 0);
 
   // Bidirectional contract between node config and call-site hook.
   if (dagDeclaresHITL && !opts?.onHumanReview) {
@@ -105,6 +109,7 @@ export const runDag = async <I, O>(
 
   const useStateMachinePath =
     dagDeclaresHITL ||
+    dagDeclaresRetries ||
     opts?.jobLike !== undefined ||
     opts?.retryLimits !== undefined;
 
@@ -141,7 +146,16 @@ export const runDag = async <I, O>(
   let resolveResult!: (r: Result<O, FrameworkError>) => void;
   const resultPromise = new Promise<Result<O, FrameworkError>>((resolve) => { resolveResult = resolve; });
 
-  const background = tracer.startActiveSpan(`run:${dag.id}`, { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN } }, async (rootSpan) => {
+  const background = tracer.startActiveSpan(
+    `run:${dag.id}`,
+    {
+      attributes: {
+        [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN,
+        [AI_DAG_ID]: dag.id,
+        [AI_RUN_ID]: ctx.runId,
+      },
+    },
+    async (rootSpan) => {
     const meta: DagRunMeta = createDagRunMeta();
 
     rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: ctx.runId });
@@ -188,7 +202,8 @@ export const runDag = async <I, O>(
       rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
     }
     rootSpan.end();
-  });
+  },
+  );
 
   const safeBackground = (background as Promise<void>).catch((e) => {
     console.error("[runDag] background task error:", e);

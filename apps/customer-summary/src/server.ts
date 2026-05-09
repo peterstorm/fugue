@@ -159,6 +159,27 @@ export const createApp = (deps: AppDeps): Hono => {
     }
   });
 
+  // Liveness: process is up. Always 200 — k8s should restart only on hang/crash,
+  // not on a downstream dependency outage.
+  app.get("/livez", (c) => c.json({ status: "alive" }, 200));
+
+  // Readiness: 503 only when a dependency required to serve traffic is down.
+  // Redis (queues / checkpoints / cache) is required; MLflow (tracing) is
+  // informational and never gates readiness — losing it must not remove pods.
+  app.get("/readyz", async (c) => {
+    const redisOk = deps.health?.checkRedis
+      ? await deps.health.checkRedis().catch(() => false)
+      : true;
+    const mlflowOk = deps.health?.checkMlflow
+      ? await deps.health.checkMlflow().catch(() => false)
+      : true;
+
+    const httpStatus = redisOk ? 200 : 503;
+    const status = redisOk ? (mlflowOk ? "ready" : "ready-degraded") : "not-ready";
+    return c.json({ status, redis: redisOk, mlflow: mlflowOk }, httpStatus);
+  });
+
+  // /healthz preserved as readiness alias for back-compat with existing probes.
   app.get("/healthz", async (c) => {
     const redisOk = deps.health?.checkRedis
       ? await deps.health.checkRedis().catch(() => false)
@@ -167,8 +188,8 @@ export const createApp = (deps: AppDeps): Hono => {
       ? await deps.health.checkMlflow().catch(() => false)
       : true;
 
-    const status = redisOk && mlflowOk ? "healthy" : "degraded";
-    const httpStatus = status === "healthy" ? 200 : 503;
+    const httpStatus = redisOk ? 200 : 503;
+    const status = redisOk ? (mlflowOk ? "ready" : "ready-degraded") : "not-ready";
     return c.json({ status, redis: redisOk, mlflow: mlflowOk }, httpStatus);
   });
 

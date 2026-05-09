@@ -245,6 +245,56 @@ describe("createBullMQBackend enqueue + process", () => {
     await queue.close();
   });
 
+  redisIt("Map in context survives BullMQ Redis round-trip via updateData", async () => {
+    const backend = createBullMQBackend(REDIS_URL!);
+    const queueName = `${RUN_ID}-mapround`;
+    type MapS = { kind: "running" };
+    type MapC = { outputs: Map<string, number>; retries: Map<string, number> };
+
+    let capturedAfterUpdate: { state: MapS; context: MapC } | null = null;
+
+    const queue = backend.createQueue<MapS, MapC>(queueName);
+    const worker = backend.createWorker<MapS, MapC>(
+      queueName,
+      async (job: JobLike<MapS, MapC>) => {
+        const incoming = job.data;
+        // Confirm Maps survived the enqueue path
+        const next: MapC = {
+          outputs: new Map([...incoming.context.outputs, ["c", 3]]),
+          retries: new Map([...incoming.context.retries, ["nodeX", 1]]),
+        };
+        await job.updateData({ state: { kind: "running" }, context: next });
+        // Read-after-write should also be a live Map
+        capturedAfterUpdate = job.data;
+      },
+    );
+
+    await queue.enqueue("map-j1", {
+      state: { kind: "running" },
+      context: {
+        outputs: new Map([["a", 1], ["b", 2]]),
+        retries: new Map<string, number>(),
+      },
+    });
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (capturedAfterUpdate) { clearInterval(check); resolve(); }
+      }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+    });
+
+    expect(capturedAfterUpdate).not.toBeNull();
+    expect(capturedAfterUpdate!.context.outputs).toBeInstanceOf(Map);
+    expect(capturedAfterUpdate!.context.outputs.size).toBe(3);
+    expect(capturedAfterUpdate!.context.outputs.get("c")).toBe(3);
+    expect(capturedAfterUpdate!.context.retries).toBeInstanceOf(Map);
+    expect(capturedAfterUpdate!.context.retries.get("nodeX")).toBe(1);
+
+    await worker.close();
+    await queue.close();
+  });
+
   redisIt("updateData persists across job reload (via job.data after updateData)", async () => {
     const backend = createBullMQBackend(REDIS_URL!);
     const queueName = `${RUN_ID}-update`;
@@ -420,6 +470,40 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
 // ---------------------------------------------------------------------------
 // adaptBullMQJob — pure unit tests (no Redis needed)
 // ---------------------------------------------------------------------------
+
+describe("adaptBullMQJob — Map/Set round-trip (pure)", () => {
+  it("data getter restores Map written via updateData (round-trip)", async () => {
+    // BullMQ's real Job.updateData persists `d` to Redis; here we mimic that by
+    // capturing the last-written value in a closure and exposing it via .data.
+    let stored: unknown = { state: { kind: "pending" }, context: { value: 0 } };
+    const stubJob = {
+      id: "j-map",
+      get data() { return stored; },
+      updateData: async (d: unknown) => { stored = d; },
+      updateProgress: async () => {},
+    } as unknown as import("bullmq").Job<{ state: { k: string }; context: { outputs: Map<string, number> } }>;
+    const stubRedis = {} as import("ioredis").default;
+
+    const jobLike = adaptBullMQJob<{ k: string }, { outputs: Map<string, number> }>(
+      stubJob,
+      stubRedis,
+      "q",
+    );
+
+    const outputs = new Map<string, number>([["a", 1], ["b", 2]]);
+    await jobLike.updateData({ state: { k: "running" }, context: { outputs } });
+
+    // Storage must be JSON-safe (no live Map instance under the hood).
+    const raw = JSON.parse(JSON.stringify(stored)) as Record<string, unknown>;
+    expect(raw).toBeTruthy();
+
+    // Round-trip through the getter restores the live Map.
+    const restored = jobLike.data;
+    expect(restored.context.outputs).toBeInstanceOf(Map);
+    expect(restored.context.outputs.get("a")).toBe(1);
+    expect(restored.context.outputs.get("b")).toBe(2);
+  });
+});
 
 describe("adaptBullMQJob — pure unit tests", () => {
   it("throws when bullJob.id is undefined", () => {

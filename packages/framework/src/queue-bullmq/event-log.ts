@@ -4,6 +4,7 @@
 import type Redis from "ioredis";
 import type { EventLogOpts } from "../queue/types.js";
 import { defaultStreamKey } from "./job.js";
+import { deserializeValue } from "../state-machine/serialize.js";
 
 // ---------------------------------------------------------------------------
 // EventLogReader interface — opaque read handle used by replay
@@ -60,7 +61,8 @@ export function createRedisStreamReader(
         if (payloadIndex !== -1 && payloadIndex + 1 < fields.length) {
           const raw = fields[payloadIndex + 1];
           try {
-            return JSON.parse(raw) as unknown;
+            // Inverse of serializeValue in appendEvent — restores Map/Set.
+            return deserializeValue(JSON.parse(raw));
           } catch (parseErr) {
             console.warn(
               `[readEvents] JSON.parse failed for stream "${key}" entry "${entryId}":`,
