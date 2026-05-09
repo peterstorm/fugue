@@ -2,7 +2,7 @@
 // Covers: linear, fan-out, fan-in, diamond, retry transient, retry exhausted,
 //         HITL approve, approve-with-edit, reject, reroute-back, abort
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createInMemoryJob } from "../state-machine/in-memory-job.js";
@@ -339,8 +339,8 @@ describe("runDagStateful — HITL approve", () => {
       edges: [],
     });
 
-    const onHumanReview = vi.fn<(req: { nodeId: string; output: unknown; prompt: string }) => Promise<HumanAction>>(
-      async (_req) => ({ action: "approve" }),
+    const onHumanReview = mock(
+      async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> => ({ action: "approve" }),
     );
 
     const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });

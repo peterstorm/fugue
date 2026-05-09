@@ -72,15 +72,28 @@ export function createBullMQBackend(
   // BullMQ manages its own connection pool internally)
   const bullConnection: ConnectionOptions = { host, port };
 
-  function createQueue<J>(name: string, _opts?: QueueOpts): QueueHandle<J> {
-    // Use `any` for BullMQ internals — the public API is typed via QueueHandle<J>
+  function createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C> {
+    if (
+      opts?.defaultAttempts !== undefined &&
+      (!Number.isFinite(opts.defaultAttempts) || opts.defaultAttempts < 1)
+    ) {
+      throw new RangeError(
+        `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
+      );
+    }
+
+    // Use `any` for BullMQ internals — the public API is typed via QueueHandle<S, C>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const queue = new Queue<any, any, string>(name, {
       connection: bullConnection,
+      defaultJobOptions:
+        opts?.defaultAttempts !== undefined
+          ? { attempts: opts.defaultAttempts }
+          : undefined,
     });
 
     return {
-      async enqueue(id: string, data: J, opts?: EnqueueOpts): Promise<void> {
+      async enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void> {
         try {
           await queue.add(id, data, {
             priority: opts?.priority,
@@ -113,14 +126,6 @@ export function createBullMQBackend(
     opts?: WorkerOpts,
   ): WorkerHandle {
     if (
-      opts?.maxAttempts !== undefined &&
-      (!Number.isFinite(opts.maxAttempts) || opts.maxAttempts < 1)
-    ) {
-      throw new RangeError(
-        `maxAttempts must be a finite integer >= 1, got ${opts.maxAttempts}`,
-      );
-    }
-    if (
       opts?.concurrency !== undefined &&
       (!Number.isFinite(opts.concurrency) || opts.concurrency < 1)
     ) {
@@ -128,8 +133,6 @@ export function createBullMQBackend(
         `concurrency must be a finite integer >= 1, got ${opts.concurrency}`,
       );
     }
-
-    const maxAttempts = opts?.maxAttempts ?? 1;
 
     const worker = new Worker<{ state: S; context: C }>(
       name,
@@ -168,7 +171,10 @@ export function createBullMQBackend(
           }
           const id = job.id;
           const attemptsMade = job.attemptsMade ?? 1;
-          Promise.resolve(handler(id, error, attemptsMade, maxAttempts)).catch((handlerErr) => {
+          // Per-job max — BullMQ resolves this from EnqueueOpts.attempts ??
+          // QueueOpts.defaultAttempts (via defaultJobOptions) ?? 1.
+          const max = job.opts?.attempts ?? 1;
+          Promise.resolve(handler(id, error, attemptsMade, max)).catch((handlerErr) => {
             worker.emit(
               "error",
               handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),

@@ -11,9 +11,9 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { checkImports, type Violation } from "../../scripts/check-imports.js";
+import { checkImports, type Violation } from "../scripts/check-imports.js";
 
-const SRC_DIR = join(import.meta.dir, "../");
+const SRC_DIR = join(__dirname, "../");
 
 describe("FR-082 boundary imports", () => {
   it("state-machine/** and dag-runtime/** have zero bullmq/ioredis/queue-bullmq imports", () => {

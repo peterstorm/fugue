@@ -38,8 +38,10 @@ export interface RunOptions {
    */
   readonly jobLike?: JobLike<DagPhase, DagMachineContext>;
   /**
-   * State-machine path: human-review hook — called when a node with humanReview completes.
-   * Presence of this option triggers the state-machine path.
+   * Human-review hook — called when a node with `humanReview` set completes.
+   * Required when any node in the DAG declares `humanReview`; rejected otherwise.
+   * Routing to the state-machine path is driven by `node.humanReview`, not by
+   * the presence of this hook.
    */
   readonly onHumanReview?: (req: { nodeId: string; output: unknown; prompt: string }) => Promise<HumanAction>;
   /**
@@ -70,39 +72,56 @@ export const runDag = async <I, O>(
   // ---------------------------------------------------------------------------
   // Routing: legacy fast path vs. state-machine path (AD-7 / Gap-3)
   //
-  // We route to the legacy runDagInner when ALL of the following hold:
-  //   - opts.jobLike is undefined (no durable checkpoint handle)
-  //   - opts.onHumanReview is undefined (no HITL gate)
-  //   - opts.retryLimits is undefined (no per-call retry override)
+  // Source of truth for HITL routing is *node config*: any node that declares
+  // `humanReview` requires the state-machine path. Opts only supply hooks and
+  // toggles; they do NOT independently flip routing for HITL.
   //
-  // `resume` and `onBackground` are legacy-path flags — they were part of the
-  // original RunOptions and MUST always route through runDagInner to preserve
-  // their existing semantics (checkpoint-based node skip, eval-judge background
-  // callback). Neither is wired into the state-machine path yet (Phase 5 work).
+  // The state-machine path is selected when:
+  //   - the DAG declares any `humanReview` node, OR
+  //   - opts.jobLike is set (durable checkpoint handle), OR
+  //   - opts.retryLimits is set (per-call retry override)
   //
-  // Guard: resume + jobLike is explicitly unsupported — the caller should load
-  // prior state into jobLike.data.context instead of using the old checkpoint map.
+  // `resume` and `onBackground` are legacy-path flags and are incompatible with
+  // the state-machine path.
   // ---------------------------------------------------------------------------
 
-  if (opts?.resume && (opts.jobLike || opts.onHumanReview || opts.retryLimits)) {
+  const hitlNodes = dag.nodes.filter((n) => n.humanReview !== undefined);
+  const dagDeclaresHITL = hitlNodes.length > 0;
+
+  // Bidirectional contract between node config and call-site hook.
+  if (dagDeclaresHITL && !opts?.onHumanReview) {
     return err({
       kind: "node-crash",
       nodeId: "__executor__",
-      message: "[runDag] `resume` is incompatible with state-machine path options (jobLike, onHumanReview, retryLimits). Use jobLike.data.context.outputs to restore prior state.",
+      message: `[runDag] DAG declares humanReview node(s) [${hitlNodes.map((n) => n.id).join(", ")}] but no \`onHumanReview\` hook supplied`,
+    });
+  }
+  if (!dagDeclaresHITL && opts?.onHumanReview !== undefined) {
+    return err({
+      kind: "node-crash",
+      nodeId: "__executor__",
+      message: "[runDag] `onHumanReview` hook supplied but no node declares `humanReview`",
     });
   }
 
-  // TODO: refactor RunOptions to a discriminated union (legacy vs state-machine)
   const useStateMachinePath =
+    dagDeclaresHITL ||
     opts?.jobLike !== undefined ||
-    opts?.onHumanReview !== undefined ||
     opts?.retryLimits !== undefined;
+
+  if (opts?.resume && useStateMachinePath) {
+    return err({
+      kind: "node-crash",
+      nodeId: "__executor__",
+      message: "[runDag] `resume` is incompatible with the state-machine path (humanReview node, jobLike, or retryLimits). Use jobLike.data.context.outputs to restore prior state.",
+    });
+  }
 
   if (useStateMachinePath && opts?.onBackground) {
     return err({
       kind: "node-crash",
       nodeId: "__executor__",
-      message: "[runDag] `onBackground` is not supported on the state-machine path (eval-judge wiring is Phase 5). Remove `onBackground` or do not pass `jobLike`/`onHumanReview`/`retryLimits`.",
+      message: "[runDag] `onBackground` is not supported on the state-machine path (humanReview node, jobLike, or retryLimits). Remove `onBackground`.",
     });
   }
 

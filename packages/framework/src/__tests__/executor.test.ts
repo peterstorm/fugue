@@ -498,10 +498,11 @@ describe("runDag routing (T6 back-compat shim)", () => {
       jobLike,
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
+    if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe("__executor__");
       expect(result.error.message).toContain("incompatible");
+    } else {
+      throw new Error("expected node-crash error");
     }
   });
 
@@ -548,9 +549,11 @@ describe("runDag routing (T6 back-compat shim)", () => {
     expect(backgroundCalled).toBe(true);
   });
 
-  it("onHumanReview triggers state-machine path and is forwarded", async () => {
-    // Build a NodeDef manually so humanReview is preserved (createTransformNode doesn't expose it)
-    const reviewedNode: NodeDef<unknown, unknown, unknown> = {
+  // Shared: a DAG with a single humanReview node, used to exercise the new
+  // node-config-driven routing and validation rules.
+  const mkHitlDag = (id: string): DagDef => ({
+    id,
+    nodes: [{
       id: "reviewed",
       kind: "transform",
       inputSchema: z.any(),
@@ -558,12 +561,15 @@ describe("runDag routing (T6 back-compat shim)", () => {
       deps: [],
       run: async (_input, _ctx) => ok({ result: "needs-review" }),
       humanReview: { prompt: "Please review" },
-    };
-    const dag: DagDef = {
-      id: "hitl-dag",
-      nodes: [reviewedNode],
-      edges: [],
-    };
+    }] as readonly NodeDef<unknown, unknown, unknown>[],
+    edges: [],
+  });
+
+  const noopReview = async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> =>
+    ({ action: "approve" });
+
+  it("DAG with humanReview node + onHumanReview hook routes through state-machine path", async () => {
+    const dag = mkHitlDag("hitl-dag");
 
     let hookCalled = false;
     const onHumanReview = async (_req: {
@@ -580,17 +586,43 @@ describe("runDag routing (T6 back-compat shim)", () => {
     expect(hookCalled).toBe(true);
   });
 
-  it("resume + onHumanReview returns err(node-crash) with incompatibility message", async () => {
-    const dag = mkSimpleDag("resume-hr");
+  it("DAG with humanReview node but no onHumanReview hook returns validation error", async () => {
+    const dag = mkHitlDag("hitl-no-hook");
+    const result = await runDag(dag, {}, mkCtx(), {});
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("declares humanReview");
+      expect(result.error.message).toContain("reviewed");
+    } else {
+      throw new Error("expected node-crash error");
+    }
+  });
+
+  it("onHumanReview hook supplied but no node declares humanReview returns validation error", async () => {
+    const dag = mkSimpleDag("hook-without-node");
+    const result = await runDag(dag, {}, mkCtx(), { onHumanReview: noopReview });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.message).toContain("no node declares");
+    } else {
+      throw new Error("expected node-crash error");
+    }
+  });
+
+  it("resume + humanReview node returns err(node-crash) with incompatibility message", async () => {
+    const dag = mkHitlDag("resume-hr");
     const result = await runDag(dag, {}, mkCtx(), {
       resume: { runId: "r1", checkpoint: new Map() },
-      onHumanReview: async (_req) => ({ action: "approve" as const }),
+      onHumanReview: noopReview,
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
+    if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe("__executor__");
       expect(result.error.message).toContain("incompatible");
+    } else {
+      throw new Error("expected node-crash error");
     }
   });
 
@@ -601,10 +633,11 @@ describe("runDag routing (T6 back-compat shim)", () => {
       retryLimits: { A: 3 },
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
+    if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe("__executor__");
       expect(result.error.message).toContain("incompatible");
+    } else {
+      throw new Error("expected node-crash error");
     }
   });
 
@@ -621,24 +654,26 @@ describe("runDag routing (T6 back-compat shim)", () => {
       jobLike,
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
+    if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe("__executor__");
       expect(result.error.message).toContain("onBackground");
+    } else {
+      throw new Error("expected node-crash error");
     }
   });
 
-  it("onBackground + onHumanReview returns err(node-crash)", async () => {
-    const dag = mkSimpleDag("onbg-hr");
+  it("onBackground + humanReview node returns err(node-crash)", async () => {
+    const dag = mkHitlDag("onbg-hr");
     const result = await runDag(dag, {}, mkCtx(), {
       onBackground: (_p) => {},
-      onHumanReview: async (_req) => ({ action: "approve" as const }),
+      onHumanReview: noopReview,
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
+    if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe("__executor__");
       expect(result.error.message).toContain("onBackground");
+    } else {
+      throw new Error("expected node-crash error");
     }
   });
 
@@ -649,10 +684,11 @@ describe("runDag routing (T6 back-compat shim)", () => {
       retryLimits: { A: 2 },
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
+    if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe("__executor__");
       expect(result.error.message).toContain("onBackground");
+    } else {
+      throw new Error("expected node-crash error");
     }
   });
 

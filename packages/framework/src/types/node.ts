@@ -13,7 +13,14 @@ export interface NodeRetryConfig {
   readonly jitterRatio?: number;
 }
 
-/** Human-review gate configuration for a node. */
+/**
+ * Human-review gate configuration for a node.
+ *
+ * Setting this field on any node routes the entire DAG through the durable
+ * state-machine runtime — the call to `runDag` MUST also supply
+ * `RunOptions.onHumanReview`, otherwise it returns a validation error.
+ * See ADR 0009 for the routing contract.
+ */
 export interface NodeHumanReviewConfig {
   /** Prompt shown to the reviewer. */
   readonly prompt: string;

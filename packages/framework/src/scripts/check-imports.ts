@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * Boundary-import checker (FR-082)
  *
@@ -9,7 +8,8 @@
  *
  * Scans all .ts files (excluding .d.ts) under packages/framework/src/.
  * Detects `import`, `import type`, and dynamic `import(...)` forms.
- * Exits non-zero if any violation is found.
+ *
+ * Exposed as a library; the boundary check runs in `__tests__/boundary-imports.test.ts`.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -151,30 +151,3 @@ export function checkImports(srcDir: string): CheckResult {
   return { violations };
 }
 
-// ---------------------------------------------------------------------------
-// CLI entry point
-// ---------------------------------------------------------------------------
-
-function main(): void {
-  // Resolve src dir relative to this script (packages/framework/scripts/ -> packages/framework/src/)
-  const scriptDir = import.meta.dir;
-  const srcDir = join(scriptDir, "../src");
-
-  const { violations } = checkImports(srcDir);
-
-  if (violations.length === 0) {
-    console.log("check-imports: OK — no boundary violations found");
-    process.exit(0);
-  }
-
-  console.error(`check-imports: ${violations.length} boundary violation(s) found:`);
-  for (const v of violations) {
-    console.error(`  ${v.file}:${v.line}  imports "${v.importSpecifier}"`);
-  }
-  process.exit(1);
-}
-
-// Run when executed directly
-if (import.meta.main) {
-  main();
-}

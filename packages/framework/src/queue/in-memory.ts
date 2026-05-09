@@ -17,9 +17,9 @@ import type {
 // Internal types
 // ---------------------------------------------------------------------------
 
-interface QueueEntry<J> {
+interface QueueEntry<S, C> {
   readonly id: string;
-  readonly data: J;
+  readonly data: { state: S; context: C };
   readonly opts: EnqueueOpts;
   readonly enqueuedAt: number;
 }
@@ -54,7 +54,7 @@ export function adaptInMemoryJob<S, C>(initial: {
 
 export interface InMemoryBackend extends QueueBackend {
   /** Exposed for test introspection — map of queueName → ordered entries */
-  readonly _events: ReadonlyMap<string, readonly QueueEntry<unknown>[]>;
+  readonly _events: ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]>;
 }
 
 /**
@@ -63,25 +63,34 @@ export interface InMemoryBackend extends QueueBackend {
  */
 export function createInMemoryBackend(): InMemoryBackend {
   // mutable internal maps
-  const queues = new Map<string, QueueEntry<unknown>[]>();
+  const queues = new Map<string, QueueEntry<unknown, unknown>[]>();
+  const queueDefaults = new Map<string, { defaultAttempts: number }>();
   const workers = new Map<
     string,
     {
       process: (job: JobLike<unknown, unknown>) => Promise<void>;
-      maxAttempts: number;
     }
   >();
 
-  function getOrCreateQueue(name: string): QueueEntry<unknown>[] {
+  function getOrCreateQueue(name: string): QueueEntry<unknown, unknown>[] {
     if (!queues.has(name)) queues.set(name, []);
     return queues.get(name)!;
   }
 
-  function createQueue<J>(name: string, _opts?: QueueOpts): QueueHandle<J> {
+  function createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C> {
+    if (
+      opts?.defaultAttempts !== undefined &&
+      (!Number.isFinite(opts.defaultAttempts) || opts.defaultAttempts < 1)
+    ) {
+      throw new RangeError(
+        `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
+      );
+    }
     getOrCreateQueue(name);
+    queueDefaults.set(name, { defaultAttempts: opts?.defaultAttempts ?? 1 });
 
     return {
-      async enqueue(id: string, data: J, opts?: EnqueueOpts): Promise<void> {
+      async enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void> {
         const q = getOrCreateQueue(name);
         // dedup: if jobId specified and already present, silently ignore
         if (opts?.jobId !== undefined) {
@@ -90,7 +99,7 @@ export function createInMemoryBackend(): InMemoryBackend {
         }
         q.push({
           id: opts?.jobId ?? id,
-          data: data as unknown,
+          data: data as { state: unknown; context: unknown },
           opts: opts ?? {},
           enqueuedAt: Date.now(),
         });
@@ -100,26 +109,27 @@ export function createInMemoryBackend(): InMemoryBackend {
         const q = getOrCreateQueue(name);
         const workerDef = workers.get(name);
         if (!workerDef) return;
+        const defaults = queueDefaults.get(name) ?? { defaultAttempts: 1 };
 
-        const { process: processFn, maxAttempts } = workerDef;
+        const { process: processFn } = workerDef;
         // drain FIFO — shift from front
         while (q.length > 0) {
           const entry = q.shift()!;
+          // Per-job max: enqueue-opts.attempts ?? queue.defaultAttempts ?? 1
+          // (mirrors BullMQ semantics — max travels with the job).
+          const max = entry.opts.attempts ?? defaults.defaultAttempts;
           let attempt = 0;
           let succeeded = false;
-          while (attempt < maxAttempts && !succeeded) {
+          while (attempt < max && !succeeded) {
             attempt++;
             try {
-              const job = createInMemoryJob({
-                state: entry.data as unknown,
-                context: undefined as unknown,
-              });
+              const job = createInMemoryJob(entry.data);
               await processFn(job as unknown as JobLike<unknown, unknown>);
               succeeded = true;
             } catch (jobErr) {
               for (const handler of failedHandlers.get(name) ?? []) {
                 try {
-                  await handler(entry.id, jobErr, attempt, maxAttempts);
+                  await handler(entry.id, jobErr, attempt, max);
                 } catch (handlerErr) {
                   // Failed-handler itself threw — route to onError handlers so the
                   // exception is observable without interrupting the drain loop.
@@ -152,16 +162,11 @@ export function createInMemoryBackend(): InMemoryBackend {
     process: (job: JobLike<S, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle {
-    if (opts?.maxAttempts !== undefined && (!Number.isFinite(opts.maxAttempts) || opts.maxAttempts < 1)) {
-      throw new RangeError(`maxAttempts must be a finite integer >= 1, got ${opts.maxAttempts}`);
-    }
     if (opts?.concurrency !== undefined && (!Number.isFinite(opts.concurrency) || opts.concurrency < 1)) {
       throw new RangeError(`concurrency must be a finite integer >= 1, got ${opts.concurrency}`);
     }
-    const maxAttempts = opts?.maxAttempts ?? 1;
     workers.set(name, {
       process: process as (job: JobLike<unknown, unknown>) => Promise<void>,
-      maxAttempts,
     });
     if (!failedHandlers.has(name)) failedHandlers.set(name, []);
     if (!errorHandlers.has(name)) errorHandlers.set(name, []);
@@ -184,8 +189,8 @@ export function createInMemoryBackend(): InMemoryBackend {
   return {
     createQueue,
     createWorker,
-    get _events(): ReadonlyMap<string, readonly QueueEntry<unknown>[]> {
-      return queues as ReadonlyMap<string, readonly QueueEntry<unknown>[]>;
+    get _events(): ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]> {
+      return queues as ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]>;
     },
   };
 }

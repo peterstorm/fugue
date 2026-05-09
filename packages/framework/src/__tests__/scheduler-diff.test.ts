@@ -37,7 +37,7 @@ describe("diffRegistry", () => {
     const diff = diffRegistry(active, new Map());
 
     expect(diff.add).toEqual([]);
-    expect(diff.remove.sort()).toEqual(["A", "B"]);
+    expect([...diff.remove].sort()).toEqual(["A", "B"]);
     expect(diff.update).toEqual([]);
   });
 

@@ -19,7 +19,11 @@ export interface EnqueueOpts {
 
 /** Options for creating a queue */
 export interface QueueOpts {
-  /** Default max attempts for jobs in this queue */
+  /**
+   * Default max attempts applied to every enqueued job (overridable per-enqueue
+   * via `EnqueueOpts.attempts`). When omitted, jobs run with `attempts = 1`
+   * (no retry).
+   */
   readonly defaultAttempts?: number;
 }
 
@@ -27,8 +31,6 @@ export interface QueueOpts {
 export interface WorkerOpts {
   /** Max concurrent jobs processed by this worker */
   readonly concurrency?: number;
-  /** Queue-level max attempts; mirrors the queue default but overridable per-worker */
-  readonly maxAttempts?: number;
 }
 
 /** Options for the per-job event log (AD-3, FR-048) */
@@ -43,9 +45,15 @@ export interface EventLogOpts {
 
 // FR-040: Factory abstraction
 
-/** Backend-agnostic queue factory — FR-040 */
+/**
+ * Backend-agnostic queue factory — FR-040
+ *
+ * Producers MUST enqueue `{state, context}` envelopes; both the in-memory and
+ * BullMQ backends expose the envelope to workers via `job.data` (matches the
+ * `JobLike` contract).
+ */
 export interface QueueBackend {
-  createQueue<J>(name: string, opts?: QueueOpts): QueueHandle<J>;
+  createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C>;
   createWorker<S, C>(
     name: string,
     process: (job: JobLike<S, C>) => Promise<void>,
@@ -55,9 +63,14 @@ export interface QueueBackend {
 
 // FR-041: Runtime handles
 
-/** Enqueue API exposed to producers — FR-041 */
-export interface QueueHandle<J> {
-  enqueue(id: string, data: J, opts?: EnqueueOpts): Promise<void>;
+/**
+ * Enqueue API exposed to producers — FR-041
+ *
+ * The payload shape is fixed to `{state, context}` so both backends produce
+ * identical `job.data` (see `QueueBackend` and `JobLike`).
+ */
+export interface QueueHandle<S, C> {
+  enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void>;
   drain(): Promise<void>;
   close(): Promise<void>;
 }
@@ -69,7 +82,7 @@ export interface QueueHandle<J> {
  *   - id        — job id
  *   - err       — the error that caused failure
  *   - attempts  — number of attempts consumed so far (1-based, after the current failure)
- *   - max       — queue-level maxAttempts configured for this worker
+ *   - max       — per-job max attempts (from `EnqueueOpts.attempts` ?? `QueueOpts.defaultAttempts` ?? 1)
  *
  * When `attempts >= max` the job will NOT be retried by the queue; the dead-letter
  * handler (`attachDeadLetterHandler`) should be registered via `onFailed`.

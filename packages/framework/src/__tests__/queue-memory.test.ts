@@ -27,7 +27,7 @@ describe("createInMemoryBackend", () => {
     const backend = createInMemoryBackend();
     const received: unknown[] = [];
 
-    const queue = backend.createQueue<string>("test-queue");
+    const queue = backend.createQueue<string, undefined>("test-queue");
     backend.createWorker<unknown, unknown>(
       "test-queue",
       async (job) => {
@@ -35,7 +35,7 @@ describe("createInMemoryBackend", () => {
       },
     );
 
-    await queue.enqueue("j1", "hello");
+    await queue.enqueue("j1", { state: "hello", context: undefined });
     await queue.drain();
 
     expect(received).toEqual(["hello"]);
@@ -45,14 +45,14 @@ describe("createInMemoryBackend", () => {
     const backend = createInMemoryBackend();
     const order: string[] = [];
 
-    const queue = backend.createQueue<string>("fifo-queue");
+    const queue = backend.createQueue<string, undefined>("fifo-queue");
     backend.createWorker<unknown, unknown>("fifo-queue", async (job) => {
       order.push(job.data.state as string);
     });
 
-    await queue.enqueue("j1", "first");
-    await queue.enqueue("j2", "second");
-    await queue.enqueue("j3", "third");
+    await queue.enqueue("j1", { state: "first", context: undefined });
+    await queue.enqueue("j2", { state: "second", context: undefined });
+    await queue.enqueue("j3", { state: "third", context: undefined });
     await queue.drain();
 
     expect(order).toEqual(["first", "second", "third"]);
@@ -62,13 +62,13 @@ describe("createInMemoryBackend", () => {
     const backend = createInMemoryBackend();
     const received: unknown[] = [];
 
-    const queue = backend.createQueue<string>("dedup-queue");
+    const queue = backend.createQueue<string, undefined>("dedup-queue");
     backend.createWorker<unknown, unknown>("dedup-queue", async (job) => {
       received.push(job.data.state);
     });
 
-    await queue.enqueue("j1", "original", { jobId: "dup-key" });
-    await queue.enqueue("j2", "duplicate", { jobId: "dup-key" });
+    await queue.enqueue("j1", { state: "original", context: undefined }, { jobId: "dup-key" });
+    await queue.enqueue("j2", { state: "duplicate", context: undefined }, { jobId: "dup-key" });
     await queue.drain();
 
     expect(received).toHaveLength(1);
@@ -79,20 +79,19 @@ describe("createInMemoryBackend", () => {
     const backend = createInMemoryBackend();
     const failures: Array<{ id: string; err: unknown; attempts: number; max: number }> = [];
 
-    const queue = backend.createQueue<string>("fail-queue");
+    const queue = backend.createQueue<string, undefined>("fail-queue");
     const worker = backend.createWorker<unknown, unknown>(
       "fail-queue",
       async (_job) => {
         throw new Error("worker boom");
       },
-      { maxAttempts: 1 },
     );
 
     worker.onFailed((id, err, attempts, max) => {
       failures.push({ id, err, attempts, max });
     });
 
-    await queue.enqueue("j-fail", "data");
+    await queue.enqueue("j-fail", { state: "data", context: undefined }, { attempts: 1 });
     await queue.drain();
 
     expect(failures).toHaveLength(1);
@@ -101,26 +100,25 @@ describe("createInMemoryBackend", () => {
     expect((failures[0].err as Error).message).toBe("worker boom");
   });
 
-  it("retries up to maxAttempts before giving up", async () => {
+  it("retries up to per-job attempts before giving up", async () => {
     const backend = createInMemoryBackend();
     let callCount = 0;
     const failures: number[] = [];
 
-    const queue = backend.createQueue<string>("retry-queue");
+    const queue = backend.createQueue<string, undefined>("retry-queue");
     const worker = backend.createWorker<unknown, unknown>(
       "retry-queue",
       async (_job) => {
         callCount++;
         throw new Error("always fail");
       },
-      { maxAttempts: 3 },
     );
 
     worker.onFailed((_id, _err, attempts, _max) => {
       failures.push(attempts);
     });
 
-    await queue.enqueue("j-retry", "data");
+    await queue.enqueue("j-retry", { state: "data", context: undefined }, { attempts: 3 });
     await queue.drain();
 
     expect(callCount).toBe(3);
@@ -130,24 +128,24 @@ describe("createInMemoryBackend", () => {
 
   it("_events exposes enqueued entries per queue name", async () => {
     const backend = createInMemoryBackend();
-    const queue = backend.createQueue<number>("ev-queue");
+    const queue = backend.createQueue<number, undefined>("ev-queue");
 
-    await queue.enqueue("j1", 42);
-    await queue.enqueue("j2", 99);
+    await queue.enqueue("j1", { state: 42, context: undefined });
+    await queue.enqueue("j2", { state: 99, context: undefined });
 
     const entries = backend._events.get("ev-queue");
     expect(entries).toBeDefined();
     expect(entries).toHaveLength(2);
-    expect(entries![0].data).toBe(42);
-    expect(entries![1].data).toBe(99);
+    expect(entries![0].data).toEqual({ state: 42, context: undefined });
+    expect(entries![1].data).toEqual({ state: 99, context: undefined });
   });
 
   it("_events is empty after drain (entries consumed)", async () => {
     const backend = createInMemoryBackend();
-    const queue = backend.createQueue<string>("drain-ev-queue");
+    const queue = backend.createQueue<string, undefined>("drain-ev-queue");
     backend.createWorker<unknown, unknown>("drain-ev-queue", async () => {});
 
-    await queue.enqueue("j1", "x");
+    await queue.enqueue("j1", { state: "x", context: undefined });
     await queue.drain();
 
     const entries = backend._events.get("drain-ev-queue");
@@ -184,7 +182,7 @@ describe("adaptInMemoryJob", () => {
   it("updateProgress is observable", async () => {
     const job = adaptInMemoryJob({ state: "s", context: {} });
     await job.updateProgress(75);
-    const withProg = job as JobLike<unknown, unknown> & { progress: number };
+    const withProg = job as unknown as JobLike<unknown, unknown> & { progress: number };
     expect(withProg.progress).toBe(75);
   });
 });
@@ -298,21 +296,51 @@ describe("createInMemoryMarkerStore", () => {
 // createWorker — input validation
 // ---------------------------------------------------------------------------
 
+describe("createQueue validation", () => {
+  it("throws RangeError when defaultAttempts is 0", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: 0 }),
+    ).toThrow(RangeError);
+  });
+
+  it("throws RangeError when defaultAttempts is negative", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: -1 }),
+    ).toThrow(RangeError);
+  });
+
+  it("throws RangeError when defaultAttempts is NaN", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: NaN }),
+    ).toThrow(RangeError);
+  });
+
+  it("throws RangeError when defaultAttempts is Infinity", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: Infinity }),
+    ).toThrow(RangeError);
+  });
+
+  it("throws RangeError when defaultAttempts is -Infinity", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: -Infinity }),
+    ).toThrow(RangeError);
+  });
+
+  it("accepts defaultAttempts: 1 without throwing", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: 1 }),
+    ).not.toThrow();
+  });
+});
+
 describe("createWorker validation", () => {
-  it("throws RangeError when maxAttempts is 0", () => {
-    const backend = createInMemoryBackend();
-    expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: 0 }),
-    ).toThrow(RangeError);
-  });
-
-  it("throws RangeError when maxAttempts is negative", () => {
-    const backend = createInMemoryBackend();
-    expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: -1 }),
-    ).toThrow(RangeError);
-  });
-
   it("throws RangeError when concurrency is 0", () => {
     const backend = createInMemoryBackend();
     expect(() =>
@@ -324,27 +352,6 @@ describe("createWorker validation", () => {
     const backend = createInMemoryBackend();
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: -5 }),
-    ).toThrow(RangeError);
-  });
-
-  it("throws RangeError when maxAttempts is NaN", () => {
-    const backend = createInMemoryBackend();
-    expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: NaN }),
-    ).toThrow(RangeError);
-  });
-
-  it("throws RangeError when maxAttempts is Infinity", () => {
-    const backend = createInMemoryBackend();
-    expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: Infinity }),
-    ).toThrow(RangeError);
-  });
-
-  it("throws RangeError when maxAttempts is -Infinity", () => {
-    const backend = createInMemoryBackend();
-    expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: -Infinity }),
     ).toThrow(RangeError);
   });
 
@@ -367,13 +374,6 @@ describe("createWorker validation", () => {
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: -Infinity }),
     ).toThrow(RangeError);
-  });
-
-  it("accepts maxAttempts: 1 without throwing", () => {
-    const backend = createInMemoryBackend();
-    expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: 1 }),
-    ).not.toThrow();
   });
 
   it("accepts concurrency: 1 without throwing", () => {

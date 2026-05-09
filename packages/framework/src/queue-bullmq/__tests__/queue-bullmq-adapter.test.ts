@@ -221,7 +221,7 @@ describe("createBullMQBackend enqueue + process", () => {
     const queueName = `${RUN_ID}-basic`;
     const received: Array<{ state: unknown; context: unknown }> = [];
 
-    const queue = backend.createQueue<{ state: S; context: C }>(queueName);
+    const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
       async (job: JobLike<S, C>) => {
@@ -250,7 +250,7 @@ describe("createBullMQBackend enqueue + process", () => {
     const queueName = `${RUN_ID}-update`;
     const snapshots: Array<{ state: S; context: C }> = [];
 
-    const queue = backend.createQueue<{ state: S; context: C }>(queueName);
+    const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
       async (job: JobLike<S, C>) => {
@@ -289,7 +289,7 @@ describe("adaptBullMQJob appendEvent (XADD)", () => {
     const queueName = `${RUN_ID}-xadd`;
     let capturedEventsCopy: unknown[] = [];
 
-    const queue = backend.createQueue<{ state: S; context: C }>(queueName);
+    const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
       async (job: JobLike<S, C>) => {
@@ -339,20 +339,23 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
 
     const failedEvents: Array<{ id: string; err: unknown; attemptsMade: number }> = [];
 
-    const queue = backend.createQueue<{ state: S; context: C }>(queueName);
+    const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
       async (_job: JobLike<S, C>) => {
         throw new Error("deliberate test failure");
       },
-      { maxAttempts: 1 },
     );
 
     worker.onFailed(async (id, err, attemptsMade, _max) => {
       failedEvents.push({ id, err, attemptsMade });
     });
 
-    await queue.enqueue("fail-j1", { state: { kind: "pending" }, context: { value: 0 } });
+    await queue.enqueue(
+      "fail-j1",
+      { state: { kind: "pending" }, context: { value: 0 } },
+      { attempts: 1 },
+    );
 
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
@@ -375,13 +378,12 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
 
     const errorEvents: Error[] = [];
 
-    const queue = backend.createQueue<{ state: S; context: C }>(queueName);
+    const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
       async (_job: JobLike<S, C>) => {
         throw new Error("job process failure for onError test");
       },
-      { maxAttempts: 1 },
     );
 
     worker.onError((err) => {
@@ -393,7 +395,11 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
       throw new Error("onFailed handler async rejection");
     });
 
-    await queue.enqueue("err-j1", { state: { kind: "pending" }, context: { value: 0 } });
+    await queue.enqueue(
+      "err-j1",
+      { state: { kind: "pending" }, context: { value: 0 } },
+      { attempts: 1 },
+    );
 
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
@@ -498,75 +504,75 @@ describe("adaptBullMQJob — pure unit tests", () => {
 // createWorker — RangeError guard unit tests
 // ---------------------------------------------------------------------------
 
-describe("createWorker — RangeError guards (pure, no Redis needed)", () => {
+describe("createQueue / createWorker — RangeError guards (pure, no Redis needed)", () => {
   // These tests use a dummy connection and never actually connect to Redis.
   // They assert RangeError is thrown synchronously before any I/O.
   const dummyConn = { host: "127.0.0.1", port: 16379 };
 
-  it("throws RangeError for maxAttempts = 0", () => {
+  it("createQueue throws RangeError for defaultAttempts = 0", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: 0 }),
+      backend.createQueue("q", { defaultAttempts: 0 }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for maxAttempts = -1", () => {
+  it("createQueue throws RangeError for defaultAttempts = -1", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: -1 }),
+      backend.createQueue("q", { defaultAttempts: -1 }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for maxAttempts = NaN", () => {
+  it("createQueue throws RangeError for defaultAttempts = NaN", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: NaN }),
+      backend.createQueue("q", { defaultAttempts: NaN }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for maxAttempts = Infinity", () => {
+  it("createQueue throws RangeError for defaultAttempts = Infinity", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: Infinity }),
+      backend.createQueue("q", { defaultAttempts: Infinity }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for concurrency = 0", () => {
+  it("createWorker throws RangeError for concurrency = 0", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: 0 }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for concurrency = -5", () => {
+  it("createWorker throws RangeError for concurrency = -5", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: -5 }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for concurrency = NaN", () => {
+  it("createWorker throws RangeError for concurrency = NaN", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: NaN }),
     ).toThrow(RangeError);
   });
 
-  it("throws RangeError for concurrency = Infinity", () => {
+  it("createWorker throws RangeError for concurrency = Infinity", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: Infinity }),
     ).toThrow(RangeError);
   });
 
-  it("does not throw for maxAttempts = 1", () => {
+  it("createQueue does not throw for defaultAttempts = 1", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
-      backend.createWorker("q", async () => {}, { maxAttempts: 1 }),
+      backend.createQueue("q", { defaultAttempts: 1 }),
     ).not.toThrow();
   });
 
-  it("does not throw for concurrency = 1", () => {
+  it("createWorker does not throw for concurrency = 1", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: 1 }),
@@ -624,7 +630,7 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
 
         // --- Phase 1: run 2 steps (s0->s1->s2) then "crash" (close worker) ---
         const backend1 = createBullMQBackend(REDIS_URL!);
-        const queue1 = backend1.createQueue<{ state: LongS; context: LongC }>(queueName);
+        const queue1 = backend1.createQueue<LongS, LongC>(queueName);
 
         let phase1Done = false;
         let checkpointedJobId: string | null = null;
@@ -650,13 +656,12 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
             // "Crash" — throw so job goes back to queue for re-processing
             throw new Error("simulated crash after 2 steps");
           },
-          { maxAttempts: 2 },
         );
 
         await queue1.enqueue(
           `sc003-trial-${trial}`,
           initialData,
-          { jobId: `sc003-job-${trial}` },
+          { jobId: `sc003-job-${trial}`, attempts: 2 },
         );
 
         await new Promise<void>((resolve) => {
@@ -673,7 +678,7 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
         // --- Phase 2: fresh backend, re-process the same job to completion ---
         const checkpointedStates: Array<{ state: LongS; context: LongC }> = [];
         const backend2 = createBullMQBackend(REDIS_URL!);
-        const queue2 = backend2.createQueue<{ state: LongS; context: LongC }>(queueName);
+        const queue2 = backend2.createQueue<LongS, LongC>(queueName);
 
         const worker2 = backend2.createWorker<LongS, LongC>(
           queueName,
@@ -689,7 +694,6 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
             }
             checkpointedStates.push({ state: current.state, context: current.context });
           },
-          { maxAttempts: 2 },
         );
 
         await new Promise<void>((resolve) => {

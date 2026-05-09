@@ -2,7 +2,7 @@
 // Tests: retry within/at/over limit, sequential HITL by node-id (FR-028),
 //        approve / approve-with-edit / reject / reroute-back / reroute-forward-invalid / abort
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { dagTransition } from "../dag-runtime/transition.js";
 import {
   handleWaveDone,
