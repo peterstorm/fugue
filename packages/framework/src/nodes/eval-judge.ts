@@ -152,6 +152,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           user: userMessage,
           model,
           schema: EvalJudgeResponseSchema,
+          signal: ctx.signal,
         });
 
         if (!result.ok) {

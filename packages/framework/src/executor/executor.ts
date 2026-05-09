@@ -122,22 +122,15 @@ export const runDag = async <I, O>(
     });
   }
 
-  if (useStateMachinePath && opts?.onBackground) {
-    return err({
-      kind: "node-crash",
-      nodeId: "__executor__",
-      message: "[runDag] `onBackground` is not supported on the state-machine path (humanReview node, jobLike, or retryLimits). Remove `onBackground`.",
-    });
-  }
-
   if (useStateMachinePath) {
     // Delegate to the state-machine path (T4 — run-dag-stateful.ts).
     // Explicitly project only the fields DagRunOpts accepts to avoid silently
-    // passing legacy-only fields (resume, onBackground) into the state-machine path.
+    // passing legacy-only fields (resume) into the state-machine path.
     const stateMachineOpts: DagRunOpts = {
       jobLike: opts?.jobLike,
       onHumanReview: opts?.onHumanReview,
       retryLimits: opts?.retryLimits,
+      onBackground: opts?.onBackground,
     };
     return runDagStateful<I, O>(dag, input, ctx, stateMachineOpts);
   }

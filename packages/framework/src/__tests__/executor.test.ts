@@ -688,55 +688,19 @@ describe("runDag routing (T6 back-compat shim)", () => {
     }
   });
 
-  it("onBackground + jobLike returns err(node-crash) — onBackground not supported on state-machine path", async () => {
+  it("onBackground on state-machine path: caller resolves before background promise; promise resolves later", async () => {
+    // codex finding #3: SM path now supports onBackground for parity with the
+    // legacy fast path. Caller-bound timeouts (HTTP request signal) no longer
+    // block on judges + span finalization.
     const dag = mkSimpleDag("onbg-jl");
-    const jobLike = {
-      data: { state: { kind: "pending" as const }, context: {} as any },
-      updateData: async () => {},
-      updateProgress: async () => {},
-      appendEvent: async () => {},
-    };
+    let bgCaptured: Promise<void> | undefined;
     const result = await runDag(dag, {}, mkCtx(), {
-      onBackground: (_p) => {},
-      jobLike,
+      onBackground: (p) => { bgCaptured = p; },
+      retryLimits: { A: 2 }, // routes to SM path
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
-      expect(result.error.message).toContain("onBackground");
-    } else {
-      throw new Error("expected node-crash error");
-    }
-  });
-
-  it("onBackground + humanReview node returns err(node-crash)", async () => {
-    const dag = mkHitlDag("onbg-hr");
-    const result = await runDag(dag, {}, mkCtx(), {
-      onBackground: (_p) => {},
-      onHumanReview: noopReview,
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
-      expect(result.error.message).toContain("onBackground");
-    } else {
-      throw new Error("expected node-crash error");
-    }
-  });
-
-  it("onBackground + retryLimits returns err(node-crash)", async () => {
-    const dag = mkSimpleDag("onbg-rl");
-    const result = await runDag(dag, {}, mkCtx(), {
-      onBackground: (_p) => {},
-      retryLimits: { A: 2 },
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
-      expect(result.error.message).toContain("onBackground");
-    } else {
-      throw new Error("expected node-crash error");
-    }
+    expect(result.ok).toBe(true);
+    expect(bgCaptured).toBeDefined();
+    await bgCaptured; // resolves cleanly
   });
 
   it("DagDef.defaultRetryLimit routes to state-machine path even without opts.retryLimits", async () => {

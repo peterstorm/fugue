@@ -50,6 +50,13 @@ export interface DagRunOpts
    * DagDef.retryLimits. Allows callers to override retry budgets without mutating the DAG.
    */
   readonly retryLimits?: Readonly<Record<string, number>>;
+  /**
+   * When supplied, eval-judges run in the background after the run resolves
+   * `ok`, mirroring legacy parity (codex finding #3). The hook receives a
+   * promise that resolves once judges + span finalization complete. When
+   * omitted, judges still run before resolution (default behavior).
+   */
+  readonly onBackground?: (p: Promise<void>) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,26 +188,40 @@ export const runDagStateful = async <I, O>(
 
         return await match(state)
           .with({ kind: "succeeded" }, async (s) => {
-            // Run eval-judges (mirrors legacy executor behavior) — fail-open, never crashes the run.
-            let evalJudgeFailed = false;
-            let evalJudgeResults: Awaited<ReturnType<typeof runEvalJudges>> = [];
-            if (dag.evalJudges?.length) {
-              evalJudgeResults = await runEvalJudges(dag.evalJudges, input, s.output, context.outputs as Map<string, unknown>, nodeCtx);
-              evalJudgeFailed = evalJudgeResults.some((r) => !r.passed);
-            }
+            // Finalize: run eval-judges + close root span + emit run-end.
+            // Background mode (onBackground supplied) mirrors legacy parity
+            // (codex finding #3) — caller resolves before judges finish, so
+            // request-bound timeouts don't block on judge I/O.
+            const finalize = async (): Promise<void> => {
+              let evalJudgeFailed = false;
+              let evalJudgeResults: Awaited<ReturnType<typeof runEvalJudges>> = [];
+              if (dag.evalJudges?.length) {
+                evalJudgeResults = await runEvalJudges(dag.evalJudges, input, s.output, context.outputs as Map<string, unknown>, nodeCtx);
+                evalJudgeFailed = evalJudgeResults.some((r) => !r.passed);
+              }
 
-            if (evalJudgeFailed) {
-              const failed = evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
-              rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Eval-judge failed: ${failed.join(", ")}` });
-              rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", evalJudgeFailed: "true", evalJudgeResults: JSON.stringify(evalJudgeResults) });
-            } else if (meta.guardrailFailed) {
-              rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${meta.guardrailWarnings.join("; ")}` });
-              rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", guardrailWarnings: JSON.stringify(meta.guardrailWarnings) });
+              if (evalJudgeFailed) {
+                const failed = evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
+                rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Eval-judge failed: ${failed.join(", ")}` });
+                rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", evalJudgeFailed: "true", evalJudgeResults: JSON.stringify(evalJudgeResults) });
+              } else if (meta.guardrailFailed) {
+                rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${meta.guardrailWarnings.join("; ")}` });
+                rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", guardrailWarnings: JSON.stringify(meta.guardrailWarnings) });
+              } else {
+                rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
+              }
+              rootSpan.end();
+              emitRunEnd("ok");
+            };
+
+            if (opts?.onBackground) {
+              const p = finalize().catch((e) => {
+                console.error("[runDagStateful] background finalize failed:", e);
+              });
+              opts.onBackground(p);
             } else {
-              rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
+              await finalize();
             }
-            rootSpan.end();
-            emitRunEnd("ok");
             return ok(s.output as O);
           })
           // state.kind === "failed" — can happen when job was pre-loaded with a failed state
