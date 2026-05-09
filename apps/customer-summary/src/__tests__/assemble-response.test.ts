@@ -48,7 +48,7 @@ describe("assemble-response node", () => {
     const node = createAssembleResponseNode("cust-001");
     const result = await node.run(
       {
-        "extract-features": { branch: "ok" as const, recentUtterances: [], scoredConversations: [] },
+        "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
         "grounding-guardrail": makeGuardrailPassed(),
       },
       makeCtx(),
@@ -68,7 +68,7 @@ describe("assemble-response node", () => {
     const node = createAssembleResponseNode("cust-001");
     const result = await node.run(
       {
-        "extract-features": { branch: "ok" as const, recentUtterances: [], scoredConversations: [] },
+        "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
         "grounding-guardrail": makeGuardrailFailed(),
       },
       makeCtx(),
@@ -89,7 +89,7 @@ describe("assemble-response node", () => {
     const node = createAssembleResponseNode("cust-001");
     const result = await node.run(
       {
-        "extract-features": { branch: "ok" as const, recentUtterances: [], scoredConversations: [] },
+        "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
         "grounding-guardrail": undefined,
       },
       makeCtx(),

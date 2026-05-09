@@ -24,9 +24,9 @@ export const createSynthesizeNode = (model = "claude-sonnet-4-20250514", opts?: 
     buildInput: (input) => {
       if (input.branch !== "ok") return {};
       return {
-        customerName: "Customer",
-        customerId: "unknown",
-        accountType: "unknown",
+        customerName: input.customer.name,
+        customerId: input.customer.id,
+        accountType: input.customer.accountType,
         conversationCount: input.scoredConversations.length,
         conversations: formatConversations(input.recentUtterances),
       };

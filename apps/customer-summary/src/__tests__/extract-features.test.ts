@@ -50,6 +50,27 @@ describe("extractFeatures", () => {
     if (result.branch === "ok") {
       expect(result.recentUtterances.length).toBe(4);
       expect(result.scoredConversations.length).toBe(1);
+      expect(result.customer).toEqual({
+        id: "cust-1",
+        name: "Test User",
+        accountType: "unknown",
+      });
+    }
+  });
+
+  test("ok branch includes accountType when set on CRM", () => {
+    const msgs = [
+      makeMsg("I need help with my invoice payment"),
+      makeMsg("The error keeps happening when I login"),
+      makeMsg("Thank you for the great support"),
+    ];
+    const customer: CrmRecord = {
+      ...makeCustomer([makeConv(msgs)]),
+      accountType: "business",
+    };
+    const result = extractFeatures({ customer });
+    if (result.branch === "ok") {
+      expect(result.customer.accountType).toBe("business");
     }
   });
 

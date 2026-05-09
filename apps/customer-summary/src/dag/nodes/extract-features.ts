@@ -9,9 +9,16 @@ import type { ScoredConversation } from "../../extraction/recency.js";
 import { selectWithinBudget } from "../tokens.js";
 import { MessageSchema, ConversationSchema } from "../../schemas/crm.js";
 
+export interface CustomerIdentity {
+  readonly id: string;
+  readonly name: string;
+  readonly accountType: string;
+}
+
 export type ExtractionResult =
   | {
       readonly branch: "ok";
+      readonly customer: CustomerIdentity;
       readonly recentUtterances: readonly Message[];
       readonly scoredConversations: readonly ScoredConversation[];
     }
@@ -27,9 +34,16 @@ const ScoredConversationSchema = z.object({
   score: z.number(),
 });
 
+const CustomerIdentitySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  accountType: z.string(),
+});
+
 export const ExtractionResultSchema: z.ZodType<ExtractionResult> = z.discriminatedUnion("branch", [
   z.object({
     branch: z.literal("ok"),
+    customer: CustomerIdentitySchema,
     recentUtterances: z.array(MessageSchema),
     scoredConversations: z.array(ScoredConversationSchema),
   }),
@@ -52,6 +66,11 @@ export const extractFeatures = (input: { customer: CrmRecord | null }): Extracti
 
   return {
     branch: "ok",
+    customer: {
+      id: input.customer.customerId,
+      name: input.customer.name,
+      accountType: input.customer.accountType ?? "unknown",
+    },
     recentUtterances: selected,
     scoredConversations: scored,
   };
