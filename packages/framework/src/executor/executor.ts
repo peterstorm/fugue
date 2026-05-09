@@ -11,6 +11,7 @@ import { runDagStateful, type DagRunOpts } from "../dag-runtime/run-dag-stateful
 import { runEvalJudges } from "../dag-runtime/eval-judges.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
+import { validateDagShape } from "./validate-dag.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import {
@@ -233,6 +234,9 @@ const runDagInner = async <I, O>(
   opts?: RunOptions,
   meta?: DagRunMeta,
 ): Promise<Result<{ output: O; nodeOutputs: Map<string, unknown> }, FrameworkError>> => {
+  const shapeResult = validateDagShape(dag);
+  if (!shapeResult.ok) return shapeResult;
+
   const sortResult = topoSort(dag);
   if (!sortResult.ok) return sortResult;
 

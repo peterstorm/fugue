@@ -863,7 +863,7 @@ describe("compileDagToMachine", () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
     const cyclicDag: DagDef = {
       id: "cycle",
-      nodes: [makeNode("a"), makeNode("b")],
+      nodes: [makeNode("a", { deps: ["b"] }), makeNode("b", { deps: ["a"] })],
       edges: [
         { from: "a", to: "b" },
         { from: "b", to: "a" },
@@ -878,7 +878,7 @@ describe("compileDagToMachine", () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
     const dag: DagDef = {
       id: "linear",
-      nodes: [makeNode("a"), makeNode("b")],
+      nodes: [makeNode("a"), makeNode("b", { deps: ["a"] })],
       edges: [{ from: "a", to: "b" }],
     };
     const compiled = compileDagToMachine(dag, { input: "hello" });

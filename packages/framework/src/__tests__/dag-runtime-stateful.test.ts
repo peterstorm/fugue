@@ -757,7 +757,7 @@ describe("runDagStateful — sequential human reviews (FR-028)", () => {
 describe("runDagStateful — cycle detection", () => {
   it("cyclic DAG returns FrameworkError without throwing", async () => {
     const dag = makeDag({
-      nodes: [makeNode("a"), makeNode("b")],
+      nodes: [makeNode("a", { deps: ["b"] }), makeNode("b", { deps: ["a"] })],
       edges: [
         { from: "a", to: "b" },
         { from: "b", to: "a" },
@@ -777,7 +777,7 @@ describe("runDagStateful — cycle detection", () => {
     const ctx = { ...makeCtx(), observer };
 
     const dag = makeDag({
-      nodes: [makeNode("a"), makeNode("b")],
+      nodes: [makeNode("a", { deps: ["b"] }), makeNode("b", { deps: ["a"] })],
       edges: [
         { from: "a", to: "b" },
         { from: "b", to: "a" },

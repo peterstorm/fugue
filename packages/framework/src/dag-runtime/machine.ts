@@ -8,6 +8,7 @@ import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../executor/topo.js";
+import { validateDagShape } from "../executor/validate-dag.js";
 
 // ---------------------------------------------------------------------------
 // stateProgress — maps DagPhase to a 0–100 progress value
@@ -70,6 +71,9 @@ export const compileDagToMachine = (
   dag: DagDef,
   initialInput: unknown,
 ): Result<CompiledDagMachine, FrameworkError> => {
+  const shapeResult = validateDagShape(dag);
+  if (!shapeResult.ok) return shapeResult;
+
   const sortResult = topoSort(dag);
   if (!sortResult.ok) return sortResult;
 
