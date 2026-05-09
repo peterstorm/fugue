@@ -12,11 +12,11 @@ export * from "./tracing/index.js";
 // ---------------------------------------------------------------------------
 // State-machine kernel (NFR-021)
 // ---------------------------------------------------------------------------
-export type { Machine, Executor, JobLike, RunOptions, TraceEvent } from "./state-machine/types.js";
+export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent } from "./state-machine/types.js";
 export { runStateMachine } from "./state-machine/runner.js";
 export { createInMemoryJob } from "./state-machine/in-memory-job.js";
-export type { InMemoryJob } from "./state-machine/in-memory-job.js";
-export { replayEvents } from "./state-machine/replay.js";
+export type { InMemoryJob, InMemoryJobOptions } from "./state-machine/in-memory-job.js";
+export { replayEvents, replayEventsUntil, replayEventsBetween } from "./state-machine/replay.js";
 export { serializeValue, deserializeValue, toJson, fromJson } from "./state-machine/serialize.js";
 export { AsyncMutex } from "./state-machine/mutex.js";
 export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr } from "./types/result.js";

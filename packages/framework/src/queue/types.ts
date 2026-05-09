@@ -41,6 +41,11 @@ export interface EventLogOpts {
   readonly approximate?: boolean;
   /** Override the Redis Stream key for a given queue + job (default: `events:${queueName}:${jobId}`) */
   readonly streamKey?: (queueName: string, jobId: string) => string;
+  /**
+   * Wall-clock source stamped onto each event as `recordedAtMs` before
+   * `XADD`. Injected for deterministic tests; defaults to `Date.now`.
+   */
+  readonly now?: () => number;
 }
 
 // FR-040: Factory abstraction

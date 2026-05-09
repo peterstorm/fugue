@@ -1,7 +1,7 @@
 // State-machine kernel barrel export
 
 // Types
-export type { Machine, Executor, JobLike, RunOptions, TraceEvent } from "./types.js";
+export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent } from "./types.js";
 
 // Runner
 export { runStateMachine } from "./runner.js";
@@ -11,7 +11,7 @@ export { createInMemoryJob } from "./in-memory-job.js";
 export type { InMemoryJob } from "./in-memory-job.js";
 
 // Replay
-export { replayEvents } from "./replay.js";
+export { replayEvents, replayEventsUntil, replayEventsBetween } from "./replay.js";
 
 // Serialization helpers (FR-010)
 export { serializeValue, deserializeValue, toJson, fromJson } from "./serialize.js";

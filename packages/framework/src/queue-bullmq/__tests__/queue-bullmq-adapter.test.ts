@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
 import type { JobLike } from "../../state-machine/types.js";
 import type { Machine } from "../../state-machine/types.js";
-import { replayEvents } from "../../state-machine/replay.js";
+import { replayEvents, replayEventsUntil, replayEventsBetween } from "../../state-machine/replay.js";
 import {
   createBullMQBackend,
   createRedisMarkerStore,
@@ -155,9 +155,12 @@ describe("createRedisMarkerStore", () => {
 // ---------------------------------------------------------------------------
 
 describe("Redis Streams event log (XADD/XRANGE)", () => {
-  redisIt("appendEvent writes to stream; readEvents reads back in order", async () => {
+  redisIt("readEvents legacy fallback: bare-payload entries get synthesized envelope from stream entry ID", async () => {
+    // Pre-envelope events were written as bare payloads (no `recordedAtMs`
+    // field). The reader must still surface them as RecordedEvent envelopes,
+    // deriving the timestamp from the Redis Stream entry ID itself.
     const r = getRedis();
-    const queueName = `${RUN_ID}-evlog`;
+    const queueName = `${RUN_ID}-evlog-legacy`;
     const jobId = "j-1";
 
     const streamKey = `events:${queueName}:${jobId}`;
@@ -168,6 +171,7 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
       { type: "DONE" },
     ];
 
+    const beforeMs = Date.now();
     for (const event of events) {
       await r.xadd(
         streamKey,
@@ -178,14 +182,54 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
         "type",
         event.type,
         "payload",
-        JSON.stringify(event),
+        JSON.stringify(event), // bare payload, no envelope wrapper
+      );
+    }
+    const afterMs = Date.now();
+
+    const read = await reader.readEvents(queueName, jobId);
+    expect(read).toHaveLength(2);
+    expect(read[0].event).toEqual({ type: "START" });
+    expect(read[1].event).toEqual({ type: "DONE" });
+    // Synthesized timestamps from entry IDs fall within the test window.
+    expect(read[0].recordedAtMs).toBeGreaterThanOrEqual(beforeMs);
+    expect(read[1].recordedAtMs).toBeLessThanOrEqual(afterMs);
+
+    await r.del(streamKey);
+  });
+
+  redisIt("readEvents new envelope format: recordedAtMs round-trips via XADD/XRANGE", async () => {
+    const r = getRedis();
+    const queueName = `${RUN_ID}-evlog-envelope`;
+    const jobId = "j-2";
+    const streamKey = `events:${queueName}:${jobId}`;
+    const reader = createRedisStreamReader(r);
+
+    // Hand-write envelope-format entries to verify the read path picks them up
+    // verbatim instead of synthesizing from the entry ID.
+    const envelopes = [
+      { recordedAtMs: 1715200000000, event: { type: "START" } },
+      { recordedAtMs: 1715200001234, event: { type: "DONE" } },
+    ];
+
+    for (const env of envelopes) {
+      await r.xadd(
+        streamKey,
+        "MAXLEN",
+        "~",
+        10000,
+        "*",
+        "type",
+        (env.event as { type: string }).type,
+        "payload",
+        JSON.stringify(env),
       );
     }
 
     const read = await reader.readEvents(queueName, jobId);
     expect(read).toHaveLength(2);
-    expect(read[0]).toEqual({ type: "START" });
-    expect(read[1]).toEqual({ type: "DONE" });
+    expect(read[0]).toEqual(envelopes[0]);
+    expect(read[1]).toEqual(envelopes[1]);
 
     await r.del(streamKey);
   });
@@ -195,6 +239,47 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
     const reader = createRedisStreamReader(r);
     const result = await reader.readEvents(`${RUN_ID}-empty`, "no-job");
     expect(result).toEqual([]);
+  });
+
+  redisIt("readEventsBetween filters by recordedAtMs window via XRANGE bounds", async () => {
+    const r = getRedis();
+    const queueName = `${RUN_ID}-evlog-between`;
+    const jobId = "between-1";
+    const streamKey = `events:${queueName}:${jobId}`;
+    const reader = createRedisStreamReader(r);
+
+    // Hand-write entries with explicit ms-prefixed entry IDs so we can assert
+    // the XRANGE filter independently of clock timing.
+    const writeAt = async (ms: number, type: string) => {
+      await r.xadd(
+        streamKey,
+        `${ms}-0`,
+        "type",
+        type,
+        "payload",
+        JSON.stringify({ recordedAtMs: ms, event: { type } }),
+      );
+    };
+    await writeAt(1000, "A");
+    await writeAt(2000, "B");
+    await writeAt(3000, "C");
+    await writeAt(4000, "D");
+
+    // Half-open [2000, 4000) should match B and C but not A or D.
+    const window = await reader.readEventsBetween(queueName, jobId, 2000, 4000);
+    expect(window.map((e) => (e.event as { type: string }).type)).toEqual(["B", "C"]);
+    expect(window[0].recordedAtMs).toBe(2000);
+    expect(window[1].recordedAtMs).toBe(3000);
+
+    // Empty window returns []
+    const empty = await reader.readEventsBetween(queueName, jobId, 5000, 6000);
+    expect(empty).toEqual([]);
+
+    // Equal bounds also return []
+    const equal = await reader.readEventsBetween(queueName, jobId, 2000, 2000);
+    expect(equal).toEqual([]);
+
+    await r.del(streamKey);
   });
 
   redisIt("readEvents throws on corrupt JSON payload", async () => {
@@ -370,8 +455,14 @@ describe("adaptBullMQJob appendEvent (XADD)", () => {
     await processed;
 
     expect(capturedEventsCopy).toHaveLength(2);
-    expect(capturedEventsCopy[0]).toEqual({ type: "START" });
-    expect(capturedEventsCopy[1]).toEqual({ type: "DONE" });
+    // appendEvent now wraps each event in a RecordedEvent envelope.
+    const env0 = capturedEventsCopy[0] as { recordedAtMs: number; event: unknown };
+    const env1 = capturedEventsCopy[1] as { recordedAtMs: number; event: unknown };
+    expect(env0.event).toEqual({ type: "START" });
+    expect(env1.event).toEqual({ type: "DONE" });
+    expect(typeof env0.recordedAtMs).toBe("number");
+    expect(typeof env1.recordedAtMs).toBe("number");
+    expect(env1.recordedAtMs).toBeGreaterThanOrEqual(env0.recordedAtMs);
 
     await worker.close();
     await queue.close();
@@ -581,6 +672,78 @@ describe("adaptBullMQJob — pure unit tests", () => {
       expect(err).toBeInstanceOf(Error);
       expect((err as Error & { cause?: unknown }).cause).toBe(boom);
     }
+  });
+
+  it("appendEvent stamps recordedAtMs from injected now() and wraps event in envelope", async () => {
+    const captured: { args: unknown[] }[] = [];
+    const stubJob = {
+      id: "j-now",
+      data: { state: {}, context: {} },
+      updateData: async () => {},
+      updateProgress: async () => {},
+    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+    const stubRedis = {
+      xadd: async (...args: unknown[]) => {
+        captured.push({ args });
+        return "0-0";
+      },
+    } as unknown as import("ioredis").default;
+
+    const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-now", {
+      maxLen: 100,
+      approximate: true,
+      now: () => 1715200000123,
+    });
+
+    await jobLike.appendEvent({ type: "X", v: 42 });
+
+    expect(captured).toHaveLength(1);
+    // XADD args: [streamKey, "MAXLEN", "~", maxLen, "${recordedAtMs}-*", "type", type, "payload", payload]
+    const args = captured[0].args;
+    const payloadIdx = args.indexOf("payload");
+    expect(payloadIdx).toBeGreaterThan(-1);
+    const parsed = JSON.parse(args[payloadIdx + 1] as string);
+    expect(parsed).toEqual({
+      recordedAtMs: 1715200000123,
+      event: { type: "X", v: 42 },
+    });
+    // Entry ID's ms portion is pinned to recordedAtMs so XRANGE bounds align.
+    expect(args[4]).toBe("1715200000123-*");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createRedisStreamReader — pure argument-validation tests (no Redis needed)
+// ---------------------------------------------------------------------------
+
+describe("createRedisStreamReader — readEventsBetween argument validation", () => {
+  // Stub redis where XRANGE returns []; we only assert errors thrown before I/O.
+  const stubRedis = {
+    xrange: async () => [],
+  } as unknown as import("ioredis").default;
+  const reader = createRedisStreamReader(stubRedis);
+
+  it("throws RangeError when fromMs is NaN", async () => {
+    await expect(reader.readEventsBetween("q", "j", NaN, 100)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("throws RangeError when toMs is Infinity", async () => {
+    await expect(reader.readEventsBetween("q", "j", 0, Infinity)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("throws RangeError when toMs < fromMs", async () => {
+    await expect(reader.readEventsBetween("q", "j", 1000, 500)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("returns empty array immediately when toMs === fromMs (no XRANGE issued)", async () => {
+    let called = false;
+    const traceRedis = {
+      xrange: async () => { called = true; return []; },
+    } as unknown as import("ioredis").default;
+    const r = createRedisStreamReader(traceRedis);
+    const result = await r.readEventsBetween("q", "j", 1000, 1000);
+    expect(result).toEqual([]);
+    expect(called).toBe(false);
   });
 });
 
@@ -1026,7 +1189,8 @@ describe("XADD + replayEvents integration via Redis", () => {
     const readBack = await reader.readEvents(queueName, jobId);
 
     const initial = { state: { kind: "idle" } as SimpleS, context: { count: 0 } };
-    const replayed = replayEvents(readBack as SimpleE[], simpleMachine, initial);
+    const rawEvents = readBack.map((e) => e.event as SimpleE);
+    const replayed = replayEvents(rawEvents, simpleMachine, initial);
     const live = replayEvents(eventsToWrite, simpleMachine, initial);
 
     expect(replayed.state).toEqual(live.state);
@@ -1036,4 +1200,129 @@ describe("XADD + replayEvents integration via Redis", () => {
 
     await r.del(streamKey);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Forensic-query integration: "what was the state at wall-clock T?"
+// Exercises appendEvent → readEvents → replayEventsUntil/Between end-to-end.
+// ---------------------------------------------------------------------------
+
+describe("Forensic replay-to-timestamp via Redis Streams", () => {
+  type ForS =
+    | { kind: "idle" }
+    | { kind: "wave"; n: number }
+    | { kind: "done" };
+  type ForE = { type: "STEP" } | { type: "FINISH" };
+  type ForC = { steps: number };
+
+  const forMachine: Machine<ForS, ForE, ForC> = {
+    transition(state, event, context) {
+      if (event.type === "STEP") {
+        const n = state.kind === "wave" ? state.n + 1 : 1;
+        return { state: { kind: "wave", n }, context: { steps: context.steps + 1 } };
+      }
+      if (event.type === "FINISH") {
+        return { state: { kind: "done" }, context };
+      }
+      return { state, context };
+    },
+    isTerminal: (s) => s.kind === "done",
+    isFailed: () => false,
+    stateProgress: (s) => (s.kind === "done" ? 100 : 0),
+    maxRetries: {},
+  };
+
+  redisIt(
+    "events written via appendEvent can be replayed up to a wall-clock timestamp to recover historical state",
+    async () => {
+      const r = getRedis();
+      const queueName = `${RUN_ID}-forensic`;
+      const jobId = "forensic-job-1";
+      const streamKey = `events:${queueName}:${jobId}`;
+      const reader = createRedisStreamReader(r);
+
+      // Build a job-less adaptBullMQJob using a minimal Job stub. We're testing
+      // the appendEvent → readEvents pipeline, not full BullMQ orchestration.
+      const stubJob = {
+        id: jobId,
+        data: { state: { kind: "idle" } as ForS, context: { steps: 0 } as ForC },
+        updateData: async () => {},
+        updateProgress: async () => {},
+      } as unknown as import("bullmq").Job<{ state: ForS; context: ForC }>;
+
+      // Inject a controlled clock so the forensic timestamps are deterministic.
+      let nowMs = 1_700_000_000_000;
+      const tick = (deltaMs: number): number => {
+        nowMs += deltaMs;
+        return nowMs;
+      };
+
+      const jobLike = adaptBullMQJob<ForS, ForC>(stubJob, r, queueName, {
+        maxLen: 100,
+        approximate: false,
+        now: () => nowMs,
+      });
+
+      // Three transitions, each at a distinct, separable wall-clock time.
+      // T1: 1_700_000_000_000  → STEP (wave 1)
+      // T2: 1_700_000_005_000  → STEP (wave 2)
+      // T3: 1_700_000_010_000  → FINISH
+      const T1 = nowMs;
+      await jobLike.appendEvent({ type: "STEP" });
+
+      tick(5_000);
+      const T2 = nowMs;
+      await jobLike.appendEvent({ type: "STEP" });
+
+      tick(5_000);
+      const T3 = nowMs;
+      await jobLike.appendEvent({ type: "FINISH" });
+
+      const events = await reader.readEvents(queueName, jobId);
+      expect(events).toHaveLength(3);
+      expect(events.map((e) => e.recordedAtMs)).toEqual([T1, T2, T3]);
+
+      const initial = {
+        state: { kind: "idle" } as ForS,
+        context: { steps: 0 } as ForC,
+      };
+
+      // Forensic Q: "what was the state right before T1?" → still initial
+      const before = replayEventsUntil(events, forMachine, initial, T1);
+      expect(before.state).toEqual({ kind: "idle" });
+      expect(before.context.steps).toBe(0);
+
+      // Forensic Q: "what was the state right before T2?" → after exactly 1 STEP
+      const afterFirstStep = replayEventsUntil(events, forMachine, initial, T2);
+      expect(afterFirstStep.state).toEqual({ kind: "wave", n: 1 });
+      expect(afterFirstStep.context.steps).toBe(1);
+
+      // Forensic Q: "what was the state right before T3 (the FINISH)?" → wave 2, not done
+      const beforeFinish = replayEventsUntil(events, forMachine, initial, T3);
+      expect(beforeFinish.state).toEqual({ kind: "wave", n: 2 });
+      expect(beforeFinish.context.steps).toBe(2);
+
+      // After everything → terminal
+      const final = replayEventsUntil(events, forMachine, initial, T3 + 1);
+      expect(final.state).toEqual({ kind: "done" });
+
+      // Slice [T2, T3+1) → fold of just (STEP at T2) and (FINISH at T3) starting from `initial`
+      // Note: this starts from `initial` (kind: "idle"), not from the prior state at T2.
+      // STEP from idle → { wave: 1 }, then FINISH → done.
+      const slice = replayEventsBetween(events, forMachine, initial, T2, T3 + 1);
+      expect(slice.state).toEqual({ kind: "done" });
+      expect(slice.context.steps).toBe(1); // only one STEP folded into the slice
+
+      // Server-side filter: readEventsBetween yields the same slice as the
+      // client-side filter would, but only sends matching entries over the wire.
+      const serverSide = await reader.readEventsBetween(queueName, jobId, T2, T3 + 1);
+      expect(serverSide.map((e) => e.recordedAtMs)).toEqual([T2, T3]);
+
+      const sliceFromServer = replayEvents(serverSide, forMachine, initial);
+      expect(sliceFromServer.state).toEqual(slice.state);
+      expect(sliceFromServer.context).toEqual(slice.context);
+
+      await r.del(streamKey);
+    },
+  );
 });

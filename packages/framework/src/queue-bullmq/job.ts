@@ -3,7 +3,7 @@
 
 import type { Job } from "bullmq";
 import type Redis from "ioredis";
-import type { JobLike } from "../state-machine/types.js";
+import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 import type { EventLogOpts } from "../queue/types.js";
 import { serializeValue, deserializeValue } from "../state-machine/serialize.js";
 
@@ -42,6 +42,7 @@ export function adaptBullMQJob<S, C>(
   const approximate = opts?.approximate ?? true;
   const streamKeyFn = opts?.streamKey ?? defaultStreamKey;
   const streamKey = streamKeyFn(queueName, bullJob.id);
+  const now = opts?.now ?? Date.now;
 
   return {
     get data(): { state: S; context: C } {
@@ -73,21 +74,31 @@ export function adaptBullMQJob<S, C>(
     },
 
     async appendEvent(event: unknown): Promise<void> {
-      // XADD events:{queueName}:{jobId} MAXLEN ~ <maxLen> * type <type> payload <json>
+      // XADD events:{queueName}:{jobId} MAXLEN ~ <maxLen> ${recordedAtMs}-* type <type> payload <json>
       const eventObj = event as Record<string, unknown>;
       const type = typeof eventObj?.type === "string" ? eventObj.type : "event";
+      // Wrap the event in a RecordedEvent envelope so wall-clock time is
+      // captured at the durable-write boundary, transport-independent.
       // Events may carry node outputs containing Map/Set; tag them for JSON.
-      const payload = JSON.stringify(serializeValue(event));
+      const recordedAtMs = now();
+      const envelope: RecordedEvent<unknown> = { recordedAtMs, event };
+      const payload = JSON.stringify(serializeValue(envelope));
+      // Pin the entry ID's ms portion to recordedAtMs so XRANGE bounds (used
+      // by readEventsBetween) align with the envelope timestamp. Redis
+      // auto-increments the seq portion on collision (`${ms}-*`).
+      // Monotonic constraint: each XADD must produce an ID strictly greater
+      // than the previous; non-decreasing now() satisfies this. If a caller
+      // injects a now() that goes backwards, Redis rejects with an error.
+      const id = `${recordedAtMs}-*`;
 
       try {
         if (approximate) {
-          // XADD key MAXLEN ~ maxLen * field value ...
           await redis.xadd(
             streamKey,
             "MAXLEN",
             "~",
             maxLen,
-            "*",
+            id,
             "type",
             type,
             "payload",
@@ -98,7 +109,7 @@ export function adaptBullMQJob<S, C>(
             streamKey,
             "MAXLEN",
             maxLen,
-            "*",
+            id,
             "type",
             type,
             "payload",

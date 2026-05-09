@@ -351,8 +351,8 @@ describe("runStateMachine", () => {
     const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
     await runStateMachine(job, simpleMachine, executor, opts);
     expect(job.events).toHaveLength(2);
-    expect((job.events[0] as Event).type).toBe("START");
-    expect((job.events[1] as Event).type).toBe("DONE");
+    expect((job.events[0].event as Event).type).toBe("START");
+    expect((job.events[1].event as Event).type).toBe("DONE");
   });
 
   it("resets retry counters on each invocation — fresh run does not inherit state (FR-011)", async () => {

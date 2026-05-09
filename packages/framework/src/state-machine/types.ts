@@ -21,6 +21,22 @@ export interface JobLike<S, C> {
   appendEvent(event: unknown): Promise<void>;
 }
 
+/**
+ * Event-log envelope. Wraps a domain event with the wall-clock time at which
+ * it was committed to the durable log. Captured by `JobLike.appendEvent`
+ * implementations, so it is transport-independent (Redis Streams, in-memory,
+ * Postgres, etc. all stamp the same way).
+ *
+ * The domain event itself is unchanged; the envelope is metadata only. The
+ * pure `Machine.transition` consumes raw `event`s, not envelopes.
+ */
+export interface RecordedEvent<E> {
+  /** ms-since-epoch when the event was appended to the durable log. */
+  readonly recordedAtMs: number;
+  /** The domain event itself. */
+  readonly event: E;
+}
+
 // FR-012: beforeExecute hook — returning false aborts the run
 // FR-006: classifyError + errorEventOf for typed error wrapping
 export interface RunOptions<S, C, E> {

@@ -1,8 +1,8 @@
 // In-memory QueueBackend, adaptInMemoryJob, and MarkerStore — FR-040, FR-043, Gap-4
 // MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
 
-import type { JobLike } from "../state-machine/types.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import type { JobLike, RecordedEvent } from "../state-machine/types.js";
+import { createInMemoryJob, type InMemoryJobOptions } from "../state-machine/in-memory-job.js";
 import type {
   QueueBackend,
   QueueHandle,
@@ -41,11 +41,11 @@ type FailedHandler = (
  * Delegates to `createInMemoryJob`; exists so queue-layer consumers do not
  * import from `state-machine/`.
  */
-export function adaptInMemoryJob<S, C>(initial: {
-  state: S;
-  context: C;
-}): JobLike<S, C> & { readonly events: readonly unknown[] } {
-  return createInMemoryJob(initial);
+export function adaptInMemoryJob<S, C>(
+  initial: { state: S; context: C },
+  opts?: InMemoryJobOptions,
+): JobLike<S, C> & { readonly events: readonly RecordedEvent<unknown>[] } {
+  return createInMemoryJob(initial, opts);
 }
 
 // ---------------------------------------------------------------------------

@@ -163,14 +163,22 @@ describe("adaptInMemoryJob", () => {
     expect(job.data).toEqual({ state: "idle", context: { n: 0 } });
   });
 
-  it("appendEvent stores events in order and is observable via .events", async () => {
+  it("appendEvent stores events in order, wrapped in RecordedEvent envelopes", async () => {
     const job = adaptInMemoryJob({ state: "start", context: {} });
     await job.appendEvent({ type: "A" });
     await job.appendEvent({ type: "B" });
     await job.appendEvent({ type: "C" });
 
-    const withEvents = job as JobLike<unknown, unknown> & { events: readonly unknown[] };
-    expect(withEvents.events).toEqual([{ type: "A" }, { type: "B" }, { type: "C" }]);
+    const withEvents = job as JobLike<unknown, unknown> & {
+      events: readonly { recordedAtMs: number; event: unknown }[];
+    };
+    expect(withEvents.events.map((e) => e.event)).toEqual([
+      { type: "A" },
+      { type: "B" },
+      { type: "C" },
+    ]);
+    // Every entry has a numeric recordedAtMs stamped at append time.
+    expect(withEvents.events.every((e) => typeof e.recordedAtMs === "number")).toBe(true);
   });
 
   it("updateData mutates snapshot and data reflects new value", async () => {
