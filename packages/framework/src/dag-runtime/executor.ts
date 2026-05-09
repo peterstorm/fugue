@@ -12,6 +12,7 @@ import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
 import { type Result, ok, err } from "../types/result.js";
 import { validateInput, validateOutput } from "../executor/validate.js";
+import { withNodeSpan, type DagRunMeta } from "../executor/node-span.js";
 import { dispatchEvent } from "../observer/buffered.js";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ const runNode = async (
   ctx: NodeContext,
   dagId: string,
   outputs: Map<string, unknown>,
+  meta: DagRunMeta | undefined,
 ): Promise<Result<unknown, FrameworkError>> => {
   const nodeId = node.id;
 
@@ -65,84 +67,84 @@ const runNode = async (
   const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
   if (!inputResult.ok) return inputResult;
 
-  const nodeStart = Date.now();
-  emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
+  return withNodeSpan(nodeId, node.kind, inputResult.value, meta, async () => {
+    const nodeStart = Date.now();
+    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
 
-  let runResult: Result<any, any>;
-  try {
-    runResult = await node.run(inputResult.value, ctx);
-  } catch (e) {
+    let runResult: Result<any, any>;
+    try {
+      runResult = await node.run(inputResult.value, ctx);
+    } catch (e) {
+      emit(ctx, {
+        type: "node-error",
+        runId: ctx.runId,
+        dagId,
+        nodeId,
+        timestamp: new Date(),
+        error: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined,
+      });
+      return err({
+        kind: "node-crash" as const,
+        nodeId,
+        message: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined,
+      });
+    }
+
+    if (!runResult.ok) {
+      const frameworkError: FrameworkError =
+        runResult.error !== null &&
+        typeof runResult.error === "object" &&
+        "kind" in runResult.error
+          ? (runResult.error as FrameworkError)
+          : { kind: "node-crash" as const, nodeId, message: String(runResult.error) };
+
+      const errorMsg =
+        frameworkError.kind === "node-crash"
+          ? frameworkError.message
+          : JSON.stringify(frameworkError);
+
+      emit(ctx, {
+        type: "node-error",
+        runId: ctx.runId,
+        dagId,
+        nodeId,
+        timestamp: new Date(),
+        error: errorMsg,
+      });
+      return err(frameworkError);
+    }
+
+    // FR-025: validate output
+    const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
+    if (!outputResult.ok) {
+      emit(ctx, {
+        type: "node-error",
+        runId: ctx.runId,
+        dagId,
+        nodeId,
+        timestamp: new Date(),
+        error: `output validation failed: ${JSON.stringify((outputResult.error as FrameworkError))}`,
+      });
+      return outputResult;
+    }
+
+    const duration = Date.now() - nodeStart;
+    outputs.set(nodeId, outputResult.value);
+
     emit(ctx, {
-      type: "node-error",
+      type: "node-end",
       runId: ctx.runId,
       dagId,
       nodeId,
       timestamp: new Date(),
-      error: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
+      duration,
+      output: outputResult.value,
     });
-    return err({
-      kind: "node-crash" as const,
-      nodeId,
-      message: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
-    });
-  }
 
-  if (!runResult.ok) {
-    // Ensure the error is a proper FrameworkError. If it lacks a `kind` field,
-    // wrap it as a node-crash rather than casting blindly.
-    const frameworkError: FrameworkError =
-      runResult.error !== null &&
-      typeof runResult.error === "object" &&
-      "kind" in runResult.error
-        ? (runResult.error as FrameworkError)
-        : { kind: "node-crash" as const, nodeId, message: String(runResult.error) };
-
-    const errorMsg =
-      frameworkError.kind === "node-crash"
-        ? frameworkError.message
-        : JSON.stringify(frameworkError);
-
-    emit(ctx, {
-      type: "node-error",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      timestamp: new Date(),
-      error: errorMsg,
-    });
-    return err(frameworkError);
-  }
-
-  // FR-025: validate output
-  const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
-  if (!outputResult.ok) {
-    emit(ctx, {
-      type: "node-error",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      timestamp: new Date(),
-      error: `output validation failed: ${JSON.stringify((outputResult.error as FrameworkError))}`,
-    });
-    return outputResult;
-  }
-
-  const duration = Date.now() - nodeStart;
-  outputs.set(nodeId, outputResult.value);
-
-  emit(ctx, {
-    type: "node-end",
-    runId: ctx.runId,
-    dagId,
-    nodeId,
-    timestamp: new Date(),
-    duration,
-    output: outputResult.value,
+    return ok(outputResult.value);
   });
-
-  return ok(outputResult.value);
 };
 
 // ---------------------------------------------------------------------------
@@ -173,11 +175,13 @@ export const buildDagExecutor = (
       output: unknown;
       prompt: string;
     }) => Promise<import("./types.js").HumanAction>;
+    meta?: DagRunMeta;
   },
 ): Executor<DagPhase, DagMachineContext, DagEvent> => {
   const nodeMap = new Map<string, NodeDef<any, any, any>>(
     dag.nodes.map((n) => [n.id, n]),
   );
+  const meta = hooks?.meta;
 
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
@@ -199,13 +203,13 @@ export const buildDagExecutor = (
         // Re-run the whole wave (other nodes in the wave may have already
         // succeeded on previous attempt; outputs are in machineCtx.outputs).
         // We only re-run the failed node, then run the rest that haven't completed yet.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx);
+        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, meta);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, meta))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
@@ -335,6 +339,7 @@ const runWave = async (
   dag: DagDef,
   nodeMap: Map<string, NodeDef<any, any, any>>,
   nodeCtx: NodeContext,
+  meta: DagRunMeta | undefined,
 ): Promise<DagEvent> => {
   const waveNodeIds = machineCtx.waves[waveIndex] ?? [];
 
@@ -372,7 +377,7 @@ const runWave = async (
         };
       }
 
-      const result = await runNode(node, machineCtx.initialInput, nodeCtx, dag.id, outputs);
+      const result = await runNode(node, machineCtx.initialInput, nodeCtx, dag.id, outputs, meta);
       return { nodeId, result };
     }),
   );

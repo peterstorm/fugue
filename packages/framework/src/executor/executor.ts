@@ -3,7 +3,7 @@ import type { NodeContext, NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
-import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
+import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { JobLike } from "../state-machine/types.js";
 import type { DagPhase, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -17,13 +17,11 @@ import {
   AI_SPAN_TYPE,
   AI_DAG_ID,
   AI_RUN_ID,
-  AI_GUARDRAIL_PASSED,
   EVENT_NODE_INPUT,
   EVENT_NODE_OUTPUT,
-  NODE_KIND_TO_SPAN_TYPE,
   SPAN_TYPE_CHAIN,
-  SPAN_TYPE_TOOL,
 } from "../tracing/semantic-conventions.js";
+import { withNodeSpan, createDagRunMeta, type DagRunMeta } from "./node-span.js";
 
 export interface RunOptions {
   readonly resume?: {
@@ -144,7 +142,7 @@ export const runDag = async <I, O>(
   const resultPromise = new Promise<Result<O, FrameworkError>>((resolve) => { resolveResult = resolve; });
 
   const background = tracer.startActiveSpan(`run:${dag.id}`, { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN } }, async (rootSpan) => {
-    const meta: DagRunMeta = { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: false, evalJudgeResults: [] };
+    const meta: DagRunMeta = createDagRunMeta();
 
     rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: ctx.runId });
 
@@ -212,13 +210,6 @@ export const resumeRun = async <O>(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-interface DagRunMeta {
-  guardrailFailed: boolean;
-  guardrailWarnings: string[];
-  evalJudgeFailed: boolean;
-  evalJudgeResults: EvalJudgeResult[];
-}
 
 const runDagInner = async <I, O>(
   dag: DagDef,
@@ -328,45 +319,6 @@ const runNode = async (
 
   // Wrap in OTel span
   return withNodeSpan(nodeId, node.kind, inputResult.value, meta, executeNode);
-};
-
-/** Wrap execution in an OTel span with vendor-neutral attributes. */
-const withNodeSpan = async (
-  nodeId: string,
-  kind: string,
-  input: unknown,
-  meta: DagRunMeta | undefined,
-  fn: () => Promise<Result<any, FrameworkError>>,
-): Promise<Result<any, FrameworkError>> => {
-  const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
-
-  return tracer.startActiveSpan(`node:${nodeId}`, { attributes: { [AI_SPAN_TYPE]: spanType } }, async (span) => {
-    const includeContent = process.env.LLM_TRACE_PROMPTS === "true" || process.env.LLM_TRACE_PROMPTS === "1";
-    span.addEvent(EVENT_NODE_INPUT, includeContent
-      ? { data: JSON.stringify(input) }
-      : { data_redacted: "true" });
-
-    const result = await fn();
-    if (result.ok) {
-      span.addEvent(EVENT_NODE_OUTPUT, includeContent
-        ? { data: JSON.stringify(result.value) }
-        : { data_redacted: "true" });
-      // Guardrail nodes: propagate failure to trace-level meta
-      if (kind === "guardrail" && result.value && typeof result.value === "object" && "passed" in result.value && !(result.value as any).passed) {
-        const warnings = (result.value as any).warnings ?? [];
-        span.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${warnings.join("; ")}` });
-        span.setAttribute(AI_GUARDRAIL_PASSED, false);
-        if (meta) {
-          meta.guardrailFailed = true;
-          meta.guardrailWarnings.push(...warnings);
-        }
-      }
-    } else {
-      span.setStatus({ code: SpanStatusCode.ERROR, message: String(result.error) });
-    }
-    span.end();
-    return result;
-  });
 };
 
 // ---------------------------------------------------------------------------

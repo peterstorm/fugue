@@ -14,6 +14,7 @@ import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { runEvalJudges } from "./eval-judges.js";
+import { createDagRunMeta } from "../executor/node-span.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { Observer } from "../observer/observer.js";
 import {
@@ -82,9 +83,13 @@ export const runDagStateful = async <I, O>(
   // Compile the DAG into a Machine + initial state
   const { machine, initialContext, initialState } = compileDagToMachine(effectiveDag, input);
 
+  // Per-run meta — carries guardrail/eval-judge state for rootSpan finalization (parity with legacy)
+  const meta = createDagRunMeta();
+
   // Build the executor closure
   const executor = buildDagExecutor(effectiveDag, nodeCtx, {
     onHumanReview: opts?.onHumanReview,
+    meta,
   });
 
   // Resolve the job handle — caller-supplied or fresh in-memory
@@ -172,6 +177,9 @@ export const runDagStateful = async <I, O>(
               const failed = evalJudgeResults.filter((r) => !r.passed).flatMap((r) => r.failedCriteria);
               rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Eval-judge failed: ${failed.join(", ")}` });
               rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", evalJudgeFailed: "true", evalJudgeResults: JSON.stringify(evalJudgeResults) });
+            } else if (meta.guardrailFailed) {
+              rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${meta.guardrailWarnings.join("; ")}` });
+              rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok", guardrailWarnings: JSON.stringify(meta.guardrailWarnings) });
             } else {
               rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
             }
