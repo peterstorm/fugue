@@ -46,10 +46,15 @@ export const bootstrap = async () => {
   }
 
   // --- Redis (cache + checkpointer) ---
+  // Redis is a hard dependency: it backs the checkpointer (durable resume) and
+  // the response cache. If it's unavailable at bootstrap, we still construct
+  // the app, but readiness MUST report not-ready so traffic does not land here.
+  // The /summarize handler also rejects requests when checkpointer is null.
   let contextCache: ContextCache | null = null;
   let checkpointer: Checkpointer | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ioredis CJS/ESM interop requires dynamic handling
   let redis: any = null;
+  let redisHealthy = false;
   try {
     const RedisClient = (Redis as any).default ?? Redis;
     redis = new RedisClient(config.REDIS_URL, {
@@ -59,6 +64,7 @@ export const bootstrap = async () => {
     });
     await redis.connect();
     console.log(`Redis connected at ${config.REDIS_URL}`);
+    redisHealthy = true;
 
     const cache = new RedisCache(redis);
     checkpointer = new RedisCheckpointer(redis);
@@ -150,20 +156,38 @@ export const bootstrap = async () => {
     llm = new FakeLlmClient(new Map());
   }
 
+  // ENABLE_THINKING is only honored by providers whose client implements reasoning.
+  // Anthropic client currently ignores `req.thinking` (extended-thinking integration
+  // pending), so passing it through would be a silent no-op visible only in the trace
+  // attribute. Refuse it explicitly here so config matches behavior.
+  const providerSupportsThinking = provider === "openai" || provider === "azure";
+  let thinkingDep: { type: "enabled"; budgetTokens: number } | undefined;
+  if (config.ENABLE_THINKING) {
+    if (providerSupportsThinking) {
+      thinkingDep = { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS };
+    } else {
+      console.warn(`[config] ENABLE_THINKING ignored: not implemented for provider "${provider}"`);
+    }
+  }
+
   const deps: AppDeps = {
     source,
     llm,
     prompts,
     model,
     judgeModel: config.EVAL_JUDGE_MODEL ?? model,
-    thinking: config.ENABLE_THINKING ? { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS } : undefined,
+    thinking: thinkingDep,
     cache: contextCache,
     checkpointer,
     observer: new NoopObserver(),
     health: {
-      checkRedis: redis ? async () => {
-        try { await redis!.ping(); return true; } catch { return false; }
-      } : undefined,
+      // Always defined: if Redis was never reachable at bootstrap, we still
+      // need readiness to report not-ready (otherwise k8s leaves the pod in
+      // service while checkpointer/cache are null).
+      checkRedis: async () => {
+        if (!redisHealthy || !redis) return false;
+        try { await redis.ping(); return true; } catch { return false; }
+      },
       checkMlflow: async () => {
         try {
           const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`);

@@ -12,6 +12,8 @@ interface StoredMeta {
   readonly nodeCount: number;
   readonly createdAt: string;
   readonly subject?: string;
+  readonly dagFingerprint?: string;
+  readonly frameworkVersion?: string;
 }
 
 interface StoredNodeState {
@@ -30,6 +32,8 @@ const serializeMeta = (meta: RunMeta): string =>
     nodeCount: meta.nodeCount,
     createdAt: new Date().toISOString(),
     ...(meta.subject !== undefined ? { subject: meta.subject } : {}),
+    ...(meta.dagFingerprint !== undefined ? { dagFingerprint: meta.dagFingerprint } : {}),
+    ...(meta.frameworkVersion !== undefined ? { frameworkVersion: meta.frameworkVersion } : {}),
   } satisfies StoredMeta);
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
@@ -40,6 +44,8 @@ const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
       startedAt: new Date(stored.startedAt),
       nodeCount: stored.nodeCount,
       ...(stored.subject !== undefined ? { subject: stored.subject } : {}),
+      ...(stored.dagFingerprint !== undefined ? { dagFingerprint: stored.dagFingerprint } : {}),
+      ...(stored.frameworkVersion !== undefined ? { frameworkVersion: stored.frameworkVersion } : {}),
     },
     createdAt: new Date(stored.createdAt),
   };

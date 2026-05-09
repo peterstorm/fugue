@@ -279,12 +279,21 @@ const runNode = async (
 ): Promise<Result<any, FrameworkError>> => {
   const nodeId = node.id;
 
-  // Resume from checkpoint
+  // Resume from checkpoint. Validate the cached value against the current
+  // node's outputSchema before reusing it — a deploy may have tightened the
+  // schema since the checkpoint was written, and the server-side fingerprint
+  // check only catches structural drift (added/removed nodes), not schema
+  // evolution within an unchanged node.
   if (checkpoint?.has(nodeId)) {
     const cached = checkpoint.get(nodeId);
+    const validated = validateOutput(node.outputSchema, cached, nodeId);
+    if (!validated.ok) {
+      emit(ctx, { type: "node-error", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), error: `checkpoint replay rejected: ${String(validated.error)}` });
+      return validated;
+    }
     emit(ctx, { type: "node-skipped", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), reason: "checkpoint" });
-    outputs.set(nodeId, cached);
-    return ok(cached);
+    outputs.set(nodeId, validated.value);
+    return ok(validated.value);
   }
 
   // Build node input from deps

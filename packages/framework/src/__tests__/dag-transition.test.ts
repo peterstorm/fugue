@@ -859,7 +859,7 @@ describe("waveNodes / waveIndexOf", () => {
 // ---------------------------------------------------------------------------
 
 describe("compileDagToMachine", () => {
-  it("throws on cyclic DAG", async () => {
+  it("returns err on cyclic DAG", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
     const cyclicDag: DagDef = {
       id: "cycle",
@@ -869,7 +869,9 @@ describe("compileDagToMachine", () => {
         { from: "b", to: "a" },
       ],
     };
-    expect(() => compileDagToMachine(cyclicDag, null)).toThrow();
+    const r = compileDagToMachine(cyclicDag, null);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("cycle-detected");
   });
 
   it("compiles a valid DAG and returns machine with correct terminal predicates", async () => {
@@ -879,7 +881,9 @@ describe("compileDagToMachine", () => {
       nodes: [makeNode("a"), makeNode("b")],
       edges: [{ from: "a", to: "b" }],
     };
-    const { machine, initialContext, initialState } = compileDagToMachine(dag, { input: "hello" });
+    const compiled = compileDagToMachine(dag, { input: "hello" });
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    const { machine, initialContext, initialState } = compiled.value;
     expect(initialState).toEqual({ kind: "pending" });
     expect(machine.isTerminal({ kind: "pending" })).toBe(false);
     expect(machine.isTerminal({ kind: "running", wave: 0 })).toBe(false);
@@ -894,8 +898,9 @@ describe("compileDagToMachine", () => {
   it("threads initialInput into context", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
     const dag: DagDef = { id: "d", nodes: [makeNode("a")], edges: [] };
-    const { initialContext } = compileDagToMachine(dag, "my-input");
-    expect(initialContext.initialInput).toBe("my-input");
+    const compiled = compileDagToMachine(dag, "my-input");
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    expect(compiled.value.initialContext.initialInput).toBe("my-input");
   });
 
   it("stateProgress maps phases to expected values", async () => {
@@ -905,7 +910,9 @@ describe("compileDagToMachine", () => {
       nodes: [makeNode("a")],
       edges: [],
     };
-    const { machine } = compileDagToMachine(dag, null);
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    const { machine } = compiled.value;
     expect(machine.stateProgress({ kind: "pending" })).toBe(0);
     expect(machine.stateProgress({ kind: "running", wave: 0 })).toBe(10);
     expect(machine.stateProgress({ kind: "retrying", wave: 0, nodeId: "a", attempt: 1, nextDelayMs: 1000 })).toBe(10);
@@ -1239,7 +1246,9 @@ describe("compileDagToMachine — retrying-hook predicates", () => {
   it("retrying-hook is not terminal and not failed, progress=50", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
     const dag: DagDef = { id: "d", nodes: [makeNode("a")], edges: [] };
-    const { machine } = compileDagToMachine(dag, null);
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    const { machine } = compiled.value;
     const phase: DagPhase = {
       kind: "retrying-hook",
       nodeId: "a",

@@ -1,8 +1,9 @@
 import { describe, test, expect } from "bun:test";
 import { createApp } from "../server.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
-import { FakeLlmClient, InMemoryCheckpointer } from "@ai-summary/framework";
+import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION } from "@ai-summary/framework";
 import { SummaryResponseSchema } from "../schemas/response.js";
+import { createSummaryDag } from "../dag/summary-dag.js";
 import { join } from "node:path";
 
 const fixturesDir = join(import.meta.dir, "../../fixtures/customers");
@@ -17,14 +18,30 @@ const makeSynthesisOutput = () => ({
   customerSatisfaction: "satisfied" as const,
 });
 
-const createTestApp = () => {
+const createTestApp = (cp: InMemoryCheckpointer = new InMemoryCheckpointer()) => {
   const source = new JsonFixtureSource(fixturesDir);
   // FakeLlmClient keyed by model name used in synthesize node
   const llm = new FakeLlmClient(
     new Map([["claude-sonnet-4-20250514", makeSynthesisOutput()]]),
   );
   const prompts = new Map([["synthesis", "Summarize customer {{customerId}}"]]);
-  return createApp({ source, llm, prompts });
+  // /summarize requires a checkpointer (durability is part of the contract).
+  // Tests that intentionally exercise the null-checkpointer path should pass null explicitly.
+  return createApp({ source, llm, prompts, checkpointer: cp });
+};
+
+// Compute the DAG identity that /summarize will compare against on resume.
+// Tests that pre-seed checkpoints must store the same fingerprint, otherwise
+// the identity check in server.ts rejects with 409.
+const currentDagIdentity = () => {
+  const source = new JsonFixtureSource(fixturesDir);
+  const dag = createSummaryDag(source, "cust-001");
+  return {
+    dagId: dag.id,
+    nodeCount: dag.nodes.length,
+    dagFingerprint: dagFingerprint(dag),
+    frameworkVersion: FRAMEWORK_VERSION,
+  };
 };
 
 const post = (app: ReturnType<typeof createApp>, path: string, body: unknown) =>
@@ -87,14 +104,7 @@ describe("POST /summarize", () => {
   });
 
   describe("resume_run_id principal binding", () => {
-    const createAppWithCheckpointer = (cp: InMemoryCheckpointer) => {
-      const source = new JsonFixtureSource(fixturesDir);
-      const llm = new FakeLlmClient(
-        new Map([["claude-sonnet-4-20250514", makeSynthesisOutput()]]),
-      );
-      const prompts = new Map([["synthesis", "Summarize customer {{customerId}}"]]);
-      return createApp({ source, llm, prompts, checkpointer: cp });
-    };
+    const createAppWithCheckpointer = (cp: InMemoryCheckpointer) => createTestApp(cp);
 
     test("fresh run writes meta with subject = customer_id", async () => {
       const cp = new InMemoryCheckpointer();
@@ -148,11 +158,14 @@ describe("POST /summarize", () => {
     test("resume with matching subject succeeds", async () => {
       const cp = new InMemoryCheckpointer();
       const runId = "owner-run-id";
+      const id = currentDagIdentity();
       await cp.setMeta(runId, {
-        dagId: "customer-summary",
+        dagId: id.dagId,
         startedAt: new Date(),
-        nodeCount: 5,
+        nodeCount: id.nodeCount,
         subject: "cust-001",
+        dagFingerprint: id.dagFingerprint,
+        frameworkVersion: id.frameworkVersion,
       });
 
       const app = createAppWithCheckpointer(cp);
@@ -161,6 +174,99 @@ describe("POST /summarize", () => {
         resume_run_id: runId,
       });
       expect(res.status).toBe(200);
+    });
+
+    test("resume rejects with 409 on dagFingerprint mismatch (codex finding #2)", async () => {
+      const cp = new InMemoryCheckpointer();
+      const runId = "fp-mismatch-run";
+      const id = currentDagIdentity();
+      await cp.setMeta(runId, {
+        dagId: id.dagId,
+        startedAt: new Date(),
+        nodeCount: id.nodeCount,
+        subject: "cust-001",
+        dagFingerprint: "deadbeef-stale-fingerprint",
+        frameworkVersion: id.frameworkVersion,
+      });
+
+      const app = createAppWithCheckpointer(cp);
+      const res = await post(app, "/summarize", {
+        customer_id: "cust-001",
+        resume_run_id: runId,
+      });
+      expect(res.status).toBe(409);
+      const json = await res.json();
+      expect(json.error).toBe("Checkpoint incompatible with current DAG");
+    });
+
+    test("resume rejects with 409 on frameworkVersion mismatch", async () => {
+      const cp = new InMemoryCheckpointer();
+      const runId = "fwver-mismatch-run";
+      const id = currentDagIdentity();
+      await cp.setMeta(runId, {
+        dagId: id.dagId,
+        startedAt: new Date(),
+        nodeCount: id.nodeCount,
+        subject: "cust-001",
+        dagFingerprint: id.dagFingerprint,
+        frameworkVersion: "0", // older framework version
+      });
+
+      const app = createAppWithCheckpointer(cp);
+      const res = await post(app, "/summarize", {
+        customer_id: "cust-001",
+        resume_run_id: runId,
+      });
+      expect(res.status).toBe(409);
+    });
+
+    test("resume rejects with 409 when meta predates fingerprint binding", async () => {
+      // Pre-fingerprint checkpoints have subject set but no dagFingerprint or
+      // frameworkVersion. They must not be replayed against the current DAG.
+      const cp = new InMemoryCheckpointer();
+      const runId = "preFp-run";
+      await cp.setMeta(runId, {
+        dagId: "customer-summary",
+        startedAt: new Date(),
+        nodeCount: 5,
+        subject: "cust-001",
+        // no dagFingerprint, no frameworkVersion
+      });
+
+      const app = createAppWithCheckpointer(cp);
+      const res = await post(app, "/summarize", {
+        customer_id: "cust-001",
+        resume_run_id: runId,
+      });
+      expect(res.status).toBe(409);
+    });
+
+    test("/summarize returns 503 when checkpointer is null (codex finding #1)", async () => {
+      const source = new JsonFixtureSource(fixturesDir);
+      const llm = new FakeLlmClient(
+        new Map([["claude-sonnet-4-20250514", makeSynthesisOutput()]]),
+      );
+      const prompts = new Map([["synthesis", "Summarize customer {{customerId}}"]]);
+      const app = createApp({ source, llm, prompts, checkpointer: null });
+      const res = await post(app, "/summarize", { customer_id: "cust-001" });
+      expect(res.status).toBe(503);
+      const json = await res.json();
+      expect(json.error).toBe("Checkpoint store unavailable");
+    });
+
+    test("/summarize returns 503 even when resume_run_id is provided but checkpointer null", async () => {
+      // Belt-and-suspenders: prior bug let this through with a generated runId.
+      const source = new JsonFixtureSource(fixturesDir);
+      const llm = new FakeLlmClient(
+        new Map([["claude-sonnet-4-20250514", makeSynthesisOutput()]]),
+      );
+      const prompts = new Map([["synthesis", "Summarize customer {{customerId}}"]]);
+      const app = createApp({ source, llm, prompts, checkpointer: null });
+      const res = await post(app, "/summarize", {
+        customer_id: "cust-001",
+        resume_run_id: "any-id",
+      });
+      expect(res.status).toBe(503);
     });
 
     test("resume against legacy meta (no subject) returns 404", async () => {

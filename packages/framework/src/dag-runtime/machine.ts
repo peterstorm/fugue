@@ -3,6 +3,8 @@
 
 import type { Machine } from "../state-machine/types.js";
 import type { DagDef } from "../types/dag.js";
+import type { FrameworkError } from "../types/errors.js";
+import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../executor/topo.js";
@@ -45,6 +47,12 @@ const isFailed = (phase: DagPhase): boolean => phase.kind === "failed";
 // compileDagToMachine
 // ---------------------------------------------------------------------------
 
+export interface CompiledDagMachine {
+  readonly machine: Machine<DagPhase, DagEvent, DagMachineContext>;
+  readonly initialContext: DagMachineContext;
+  readonly initialState: DagPhase;
+}
+
 /**
  * Compile a DagDef into a Machine<DagPhase, DagEvent, DagMachineContext>.
  *
@@ -52,22 +60,18 @@ const isFailed = (phase: DagPhase): boolean => phase.kind === "failed";
  * topoSort is called eagerly and embedded in the returned context factory so the
  * executor can reference waves without re-sorting.
  *
- * Throws on cycle-detected (non-recoverable misconfiguration).
+ * Returns `err` on topological failure (cycle, dangling edge). Callers must
+ * propagate this through their normal error path so the caller-visible
+ * behavior matches the legacy fast path — a malformed DAG must produce a
+ * `FrameworkError`, an emitted `run-end` event, and a closed root span,
+ * never an unhandled promise rejection.
  */
 export const compileDagToMachine = (
   dag: DagDef,
   initialInput: unknown,
-): {
-  machine: Machine<DagPhase, DagEvent, DagMachineContext>;
-  initialContext: DagMachineContext;
-  initialState: DagPhase;
-} => {
+): Result<CompiledDagMachine, FrameworkError> => {
   const sortResult = topoSort(dag);
-  if (!sortResult.ok) {
-    throw new Error(
-      `compileDagToMachine: cannot compile DAG '${dag.id}' — ${JSON.stringify(sortResult.error)}`,
-    );
-  }
+  if (!sortResult.ok) return sortResult;
 
   const waves: readonly (readonly string[])[] = sortResult.value;
 
@@ -87,5 +91,5 @@ export const compileDagToMachine = (
     maxRetries: {}, // retry budget is tracked inside the context.retries map; kernel maxRetries not used
   };
 
-  return { machine, initialContext, initialState: { kind: "pending" } };
+  return ok({ machine, initialContext, initialState: { kind: "pending" } });
 };

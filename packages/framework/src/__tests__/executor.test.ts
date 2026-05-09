@@ -264,6 +264,53 @@ describe("runDag", () => {
     expect((nodeEnds[0] as any).nodeId).toBe("C");
   });
 
+  it("checkpoint replay validates cached output against current outputSchema (codex finding #2)", async () => {
+    // A deploy may tighten or change a node's outputSchema between writes
+    // and resume. The cached value must be re-validated, otherwise stale
+    // outputs propagate unchecked into the rest of the DAG (and, in the
+    // last-wave case, straight back to the caller).
+    const log: string[] = [];
+
+    const dag: DagDef = {
+      id: "schema-evolved",
+      nodes: [
+        createTransformNode({
+          id: "A",
+          inputSchema: z.unknown(),
+          // Current schema requires `value: number` AND a new field `version: 2`.
+          outputSchema: z.object({ value: z.number(), version: z.literal(2) }),
+          deps: [],
+          transform: () => { log.push("A"); return ok({ value: 1, version: 2 as const }); },
+        }),
+      ],
+      edges: [],
+    };
+
+    // Old checkpoint persisted under previous schema (no `version` field).
+    const stale = new Map<string, unknown>([["A", { value: 99 }]]);
+
+    const observer = new RecordingObserver();
+    const ctx = mkCtx({ observer, runId: "stale-run", dagId: "schema-evolved" });
+
+    const result = await runDag(dag, undefined, ctx, {
+      resume: { runId: "stale-run", checkpoint: stale },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe("A");
+      }
+    }
+    // Stale value must NOT be silently passed through.
+    expect(log).toEqual([]);
+
+    const errs = observer.events.filter((e) => e.type === "node-error");
+    expect(errs.length).toBe(1);
+    expect((errs[0] as any).nodeId).toBe("A");
+  });
+
   it("observability: full run emits correct event sequence", async () => {
     const dag: DagDef = {
       id: "obs-test",

@@ -80,58 +80,11 @@ export const runDagStateful = async <I, O>(
       ? { ...dag, retryLimits: { ...dag.retryLimits, ...opts.retryLimits } }
       : dag;
 
-  // Compile the DAG into a Machine + initial state
-  const { machine, initialContext, initialState } = compileDagToMachine(effectiveDag, input);
-
-  // Per-run meta — carries guardrail/eval-judge state for rootSpan finalization (parity with legacy)
-  const meta = createDagRunMeta();
-
-  // Build the executor closure
-  const executor = buildDagExecutor(effectiveDag, nodeCtx, {
-    onHumanReview: opts?.onHumanReview,
-    meta,
-  });
-
-  // Resolve the job handle — caller-supplied or fresh in-memory
-  const job: JobLike<DagPhase, DagMachineContext> =
-    opts?.jobLike ??
-    createInMemoryJob<DagPhase, DagMachineContext>({
-      state: initialState,
-      context: initialContext,
-    });
-
-  // errorEventOf adapter — converts classified errors to DagEvent ERROR
-  const errorEventOf = (classified: {
-    retriable: boolean;
-    message: string;
-  }): DagEvent => ({
-    type: "ERROR",
-    retriable: classified.retriable,
-    error: classified.message,
-  });
-
-  // Capture the last failed state via onTrace so we can extract the error
-  // even though the failed state is not checkpointed (FR-005)
-  let lastFailedState: Extract<DagPhase, { kind: "failed" }> | undefined;
-
-  const onTrace = (t: import("../state-machine/types.js").TraceEvent<DagPhase, DagEvent>): void => {
-    if (t.nextState.kind === "failed") {
-      lastFailedState = t.nextState as Extract<DagPhase, { kind: "failed" }>;
-    }
-    opts?.onTrace?.(t);
-  };
-
-  // Assemble RunOptions for the kernel loop
-  const runOpts: RunOptions<DagPhase, DagMachineContext, DagEvent> = {
-    beforeExecute: opts?.beforeExecute,
-    classifyError: opts?.classifyError,
-    onTrace,
-    errorEventOf,
-  };
-
   const runStart = Date.now();
 
-  // Emit run-start observer event
+  // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
+  // run-start/run-end pair. Otherwise observers see neither and the failure is
+  // invisible from the event stream.
   if (nodeCtx.observer) {
     dispatchEvent(nodeCtx.observer as Observer, {
       type: "run-start",
@@ -165,6 +118,63 @@ export const runDagStateful = async <I, O>(
     },
     async (rootSpan): Promise<Result<O, FrameworkError>> => {
       rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: nodeCtx.runId });
+
+      // Compile inside the span so topo errors are funneled through the same
+      // observer/trace path as runtime failures (codex finding #3).
+      const compiled = compileDagToMachine(effectiveDag, input);
+      if (!compiled.ok) {
+        rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(compiled.error) });
+        rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "error", error: JSON.stringify(compiled.error) });
+        rootSpan.end();
+        emitRunEnd("error");
+        return err(compiled.error);
+      }
+      const { machine, initialContext, initialState } = compiled.value;
+
+      // Per-run meta — carries guardrail/eval-judge state for rootSpan finalization (parity with legacy)
+      const meta = createDagRunMeta();
+
+      // Build the executor closure
+      const executor = buildDagExecutor(effectiveDag, nodeCtx, {
+        onHumanReview: opts?.onHumanReview,
+        meta,
+      });
+
+      // Resolve the job handle — caller-supplied or fresh in-memory
+      const job: JobLike<DagPhase, DagMachineContext> =
+        opts?.jobLike ??
+        createInMemoryJob<DagPhase, DagMachineContext>({
+          state: initialState,
+          context: initialContext,
+        });
+
+      // errorEventOf adapter — converts classified errors to DagEvent ERROR
+      const errorEventOf = (classified: {
+        retriable: boolean;
+        message: string;
+      }): DagEvent => ({
+        type: "ERROR",
+        retriable: classified.retriable,
+        error: classified.message,
+      });
+
+      // Capture the last failed state via onTrace so we can extract the error
+      // even though the failed state is not checkpointed (FR-005)
+      let lastFailedState: Extract<DagPhase, { kind: "failed" }> | undefined;
+
+      const onTrace = (t: import("../state-machine/types.js").TraceEvent<DagPhase, DagEvent>): void => {
+        if (t.nextState.kind === "failed") {
+          lastFailedState = t.nextState as Extract<DagPhase, { kind: "failed" }>;
+        }
+        opts?.onTrace?.(t);
+      };
+
+      const runOpts: RunOptions<DagPhase, DagMachineContext, DagEvent> = {
+        beforeExecute: opts?.beforeExecute,
+        classifyError: opts?.classifyError,
+        onTrace,
+        errorEventOf,
+      };
 
       try {
         const { state, context } = await runStateMachine(job, machine, executor, runOpts);

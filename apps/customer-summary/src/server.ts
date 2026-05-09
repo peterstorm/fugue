@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag } from "@ai-summary/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION } from "@ai-summary/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer } from "@ai-summary/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -63,6 +63,15 @@ export const createApp = (deps: AppDeps): Hono => {
 
     const { customer_id, resume_run_id } = parsed.data;
 
+    // Durability is a hard contract: every run must be checkpointed so that
+    // resume works and so that retried/in-flight writes are not lost on crash.
+    // If the checkpoint store is unavailable, refuse traffic at the handler
+    // (belt-and-suspenders with /readyz reporting not-ready).
+    if (!deps.checkpointer) {
+      return c.json({ error: "Checkpoint store unavailable" }, 503);
+    }
+    const checkpointer = deps.checkpointer;
+
     try {
       const dag = createSummaryDag(deps.source, customer_id, {
         model: deps.model,
@@ -70,42 +79,67 @@ export const createApp = (deps: AppDeps): Hono => {
         thinking: deps.thinking,
       });
       const runId = resume_run_id ?? randomUUID();
+      const fingerprint = dagFingerprint(dag);
 
       // Resume: load prior checkpoint if requested. Fresh run: write meta so future resume can load.
       // Security: bind every checkpoint to `subject = customer_id`. Reject resume on
       // mismatch (or missing subject) to prevent IDOR via stolen/guessed run IDs.
+      // Identity: also reject when the persisted DAG shape differs from the running
+      // one (id mismatch, fingerprint drift, framework version skew, node-count
+      // change) — otherwise resume could inject outputs from a stale DAG into a
+      // re-shaped one and skip nodes whose schemas have evolved.
       let resumeCheckpoint: Map<string, unknown> | undefined;
-      if (deps.checkpointer) {
-        if (resume_run_id) {
-          const loaded = await deps.checkpointer.load(resume_run_id);
-          if (!loaded.ok) {
-            console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
-            return c.json({ error: "Resume failed" }, 500);
-          }
-          if (!loaded.value) {
-            // No checkpoint exists for this runId — do not silently start fresh under
-            // a caller-supplied id (could shadow a real run). 404 instead.
-            return c.json({ error: "Run not found" }, 404);
-          }
-          if (loaded.value.meta.subject !== customer_id) {
-            // Either the runId belongs to another customer, or the meta predates
-            // subject binding. Either way: refuse. 404 to avoid leaking existence.
-            return c.json({ error: "Run not found" }, 404);
-          }
-          resumeCheckpoint = new Map(
-            Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
-          );
+      if (resume_run_id) {
+        const loaded = await checkpointer.load(resume_run_id);
+        if (!loaded.ok) {
+          console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+          return c.json({ error: "Resume failed" }, 500);
         }
-        if (!resumeCheckpoint) {
-          const metaResult = await deps.checkpointer.setMeta(runId, {
-            dagId: dag.id,
-            startedAt: new Date(),
-            nodeCount: dag.nodes.length,
-            subject: customer_id,
-          });
-          if (!metaResult.ok) {
-            console.warn(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
-          }
+        if (!loaded.value) {
+          // No checkpoint exists for this runId — do not silently start fresh under
+          // a caller-supplied id (could shadow a real run). 404 instead.
+          return c.json({ error: "Run not found" }, 404);
+        }
+        const meta = loaded.value.meta;
+        if (meta.subject !== customer_id) {
+          // Either the runId belongs to another customer, or the meta predates
+          // subject binding. Either way: refuse. 404 to avoid leaking existence.
+          return c.json({ error: "Run not found" }, 404);
+        }
+        if (
+          meta.dagId !== dag.id ||
+          meta.nodeCount !== dag.nodes.length ||
+          meta.dagFingerprint !== fingerprint ||
+          meta.frameworkVersion !== FRAMEWORK_VERSION
+        ) {
+          // DAG shape or framework semantics changed since the checkpoint was
+          // written. Replaying cached node outputs into the current shape would
+          // skip validation against evolved schemas. 409 so callers know to
+          // start a fresh run, not retry the same id.
+          console.warn(
+            `[/summarize] checkpoint identity mismatch run=${resume_run_id} ` +
+            `meta.dagId=${meta.dagId} dag.id=${dag.id} ` +
+            `meta.nodeCount=${meta.nodeCount} dag.nodeCount=${dag.nodes.length} ` +
+            `meta.fingerprint=${meta.dagFingerprint} expected=${fingerprint} ` +
+            `meta.frameworkVersion=${meta.frameworkVersion} expected=${FRAMEWORK_VERSION}`,
+          );
+          return c.json({ error: "Checkpoint incompatible with current DAG" }, 409);
+        }
+        resumeCheckpoint = new Map(
+          Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
+        );
+      }
+      if (!resumeCheckpoint) {
+        const metaResult = await checkpointer.setMeta(runId, {
+          dagId: dag.id,
+          startedAt: new Date(),
+          nodeCount: dag.nodes.length,
+          subject: customer_id,
+          dagFingerprint: fingerprint,
+          frameworkVersion: FRAMEWORK_VERSION,
+        });
+        if (!metaResult.ok) {
+          console.warn(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
         }
       }
 

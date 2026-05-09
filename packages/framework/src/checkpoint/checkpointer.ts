@@ -14,6 +14,19 @@ export interface RunMeta {
    * cross-principal IDOR via stolen/guessed runIds.
    */
   readonly subject?: string;
+  /**
+   * Stable hash of the DAG's structural shape (node IDs, kinds, edges).
+   * Computed via `dagFingerprint(dag)`. Resume must reject when this differs
+   * from the current DAG's fingerprint — replaying cached outputs into a
+   * re-shaped DAG would skip validation against evolved node schemas.
+   */
+  readonly dagFingerprint?: string;
+  /**
+   * Framework version that produced the checkpoint. Resume must reject on
+   * mismatch — semantics of validation, retry, or output coercion may have
+   * changed between framework releases.
+   */
+  readonly frameworkVersion?: string;
 }
 
 export interface NodeState {

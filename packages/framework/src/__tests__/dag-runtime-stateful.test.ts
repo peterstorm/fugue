@@ -489,7 +489,9 @@ describe("runDagStateful — abort", () => {
       edges: [],
     });
 
-    const { machine, initialContext } = compileDagToMachine(dag, null);
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    const { initialContext } = compiled.value;
 
     // Create a job that is already in failed/aborted state
     const abortedJob = createInMemoryJob<
@@ -670,7 +672,9 @@ describe("runDagStateful — durable job checkpointing", () => {
       edges: [{ from: "a", to: "b" }],
     });
 
-    const { machine, initialContext, initialState } = compileDagToMachine(dag, null);
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    const { initialContext, initialState } = compiled.value;
     const job = createInMemoryJob({ state: initialState, context: initialContext });
 
     await runDagStateful(dag, null, makeCtx(), { jobLike: job });
@@ -694,7 +698,9 @@ describe("runDagStateful — durable job checkpointing", () => {
       // defaultRetryLimit = 0 => fails immediately
     });
 
-    const { machine, initialContext, initialState } = compileDagToMachine(dag, null);
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    const { initialContext, initialState } = compiled.value;
     const job = createInMemoryJob({ state: initialState, context: initialContext });
 
     const result = await runDagStateful(dag, null, makeCtx(), { jobLike: job });
@@ -749,7 +755,7 @@ describe("runDagStateful — sequential human reviews (FR-028)", () => {
 // ---------------------------------------------------------------------------
 
 describe("runDagStateful — cycle detection", () => {
-  it("cyclic DAG throws during compileDagToMachine", async () => {
+  it("cyclic DAG returns FrameworkError without throwing", async () => {
     const dag = makeDag({
       nodes: [makeNode("a"), makeNode("b")],
       edges: [
@@ -758,7 +764,33 @@ describe("runDagStateful — cycle detection", () => {
       ],
     });
 
-    await expect(runDagStateful(dag, null, makeCtx())).rejects.toThrow();
+    const result = await runDagStateful(dag, null, makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("cycle-detected");
+    }
+  });
+
+  it("cyclic DAG emits balanced run-start/run-end observer events", async () => {
+    const { RecordingObserver } = await import("../observer/observer.js");
+    const observer = new RecordingObserver();
+    const ctx = { ...makeCtx(), observer };
+
+    const dag = makeDag({
+      nodes: [makeNode("a"), makeNode("b")],
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "a" },
+      ],
+    });
+
+    const result = await runDagStateful(dag, null, ctx);
+    expect(result.ok).toBe(false);
+
+    const types = observer.events.map((e) => e.type);
+    expect(types).toContain("run-start");
+    const runEnd = observer.events.find((e) => e.type === "run-end");
+    expect(runEnd && "status" in runEnd ? runEnd.status : undefined).toBe("error");
   });
 });
 
