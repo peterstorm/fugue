@@ -8,6 +8,12 @@ export interface RunMeta {
   readonly dagId: string;
   readonly startedAt: Date;
   readonly nodeCount: number;
+  /**
+   * Caller-supplied principal (e.g. customer_id, tenant_id, user_id).
+   * Apps that expose resume should set this and verify it on resume to prevent
+   * cross-principal IDOR via stolen/guessed runIds.
+   */
+  readonly subject?: string;
 }
 
 export interface NodeState {

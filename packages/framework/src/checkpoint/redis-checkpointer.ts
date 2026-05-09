@@ -11,6 +11,7 @@ interface StoredMeta {
   readonly startedAt: string;
   readonly nodeCount: number;
   readonly createdAt: string;
+  readonly subject?: string;
 }
 
 interface StoredNodeState {
@@ -28,6 +29,7 @@ const serializeMeta = (meta: RunMeta): string =>
     startedAt: meta.startedAt.toISOString(),
     nodeCount: meta.nodeCount,
     createdAt: new Date().toISOString(),
+    ...(meta.subject !== undefined ? { subject: meta.subject } : {}),
   } satisfies StoredMeta);
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
@@ -37,6 +39,7 @@ const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
       dagId: stored.dagId,
       startedAt: new Date(stored.startedAt),
       nodeCount: stored.nodeCount,
+      ...(stored.subject !== undefined ? { subject: stored.subject } : {}),
     },
     createdAt: new Date(stored.createdAt),
   };

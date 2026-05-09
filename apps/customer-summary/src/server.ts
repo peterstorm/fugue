@@ -72,24 +72,36 @@ export const createApp = (deps: AppDeps): Hono => {
       const runId = resume_run_id ?? randomUUID();
 
       // Resume: load prior checkpoint if requested. Fresh run: write meta so future resume can load.
+      // Security: bind every checkpoint to `subject = customer_id`. Reject resume on
+      // mismatch (or missing subject) to prevent IDOR via stolen/guessed run IDs.
       let resumeCheckpoint: Map<string, unknown> | undefined;
       if (deps.checkpointer) {
         if (resume_run_id) {
           const loaded = await deps.checkpointer.load(resume_run_id);
-          if (loaded.ok && loaded.value) {
-            resumeCheckpoint = new Map(
-              Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
-            );
-          } else if (!loaded.ok) {
+          if (!loaded.ok) {
             console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+            return c.json({ error: "Resume failed" }, 500);
           }
-          // load returning ok(null) → no prior checkpoint; treat as fresh run with the supplied id
+          if (!loaded.value) {
+            // No checkpoint exists for this runId — do not silently start fresh under
+            // a caller-supplied id (could shadow a real run). 404 instead.
+            return c.json({ error: "Run not found" }, 404);
+          }
+          if (loaded.value.meta.subject !== customer_id) {
+            // Either the runId belongs to another customer, or the meta predates
+            // subject binding. Either way: refuse. 404 to avoid leaking existence.
+            return c.json({ error: "Run not found" }, 404);
+          }
+          resumeCheckpoint = new Map(
+            Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
+          );
         }
         if (!resumeCheckpoint) {
           const metaResult = await deps.checkpointer.setMeta(runId, {
             dagId: dag.id,
             startedAt: new Date(),
             nodeCount: dag.nodes.length,
+            subject: customer_id,
           });
           if (!metaResult.ok) {
             console.warn(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
