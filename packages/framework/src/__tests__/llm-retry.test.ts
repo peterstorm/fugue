@@ -6,6 +6,7 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 import { createLlmNode } from "../nodes/llm.js";
+import { stubSendWithTools } from "./_llm-mocks.js";
 
 const OutputSchema = z.object({ greeting: z.string() });
 
@@ -19,6 +20,7 @@ const mkLlmCtx = (outputs: unknown[]): NodeContext => {
     logger: null,
     prompts: { get: (_name: string) => "prompt template" },
     llm: {
+      sendWithTools: stubSendWithTools,
       sendStructured: async (_req: LlmRequest<any>): Promise<Result<LlmResponse<any>, FrameworkError>> => {
         const output = outputs[callCount++];
         return ok({

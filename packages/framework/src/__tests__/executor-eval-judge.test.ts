@@ -8,6 +8,7 @@ import type { NodeContext } from "../../src/types/node.js";
 import type { DagDef } from "../../src/types/dag.js";
 import type { LlmClient } from "../../src/llm/client.js";
 import { ok, err } from "../../src/types/result.js";
+import { stubSendWithTools } from "./_llm-mocks.js";
 
 // --- Helpers ---
 
@@ -23,6 +24,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
 });
 
 const makeMockJudgeLlm = (response: EvalJudgeResponse): LlmClient => ({
+  sendWithTools: stubSendWithTools,
   sendStructured: async () => ok({ output: response, tokensIn: 100, tokensOut: 50, rawText: "" }) as any,
 });
 
@@ -93,12 +95,14 @@ describe("executor + eval-judge integration", () => {
     const callOrder: string[] = [];
 
     const llm1: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => {
         callOrder.push("judge-1");
         return ok({ output: { score: 0.9, criteria_scores: [{ name: "a", score: 0.9 }], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
     const llm2: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => {
         callOrder.push("judge-2");
         return ok({ output: { score: 0.5, criteria_scores: [{ name: "b", score: 0.5 }], failed_criteria: ["b"], reason: "bad" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -109,6 +113,7 @@ describe("executor + eval-judge integration", () => {
     // Use a single LLM that tracks calls
     let callCount = 0;
     const sharedLlm: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => {
         callCount++;
         return ok({
@@ -129,6 +134,7 @@ describe("executor + eval-judge integration", () => {
   test("eval judges don't run when DAG fails", async () => {
     let judgeCalled = false;
     const llm: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => {
         judgeCalled = true;
         return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -159,6 +165,7 @@ describe("executor + eval-judge integration", () => {
 
   test("judge failure doesn't crash the DAG", async () => {
     const throwingLlm: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => { throw new Error("catastrophic failure"); },
     };
 
@@ -178,6 +185,7 @@ describe("executor + eval-judge integration", () => {
     let receivedOutput: unknown = null;
 
     const llm: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async (req) => {
         // Extract from the user message
         if (req.user.includes("original input")) receivedInput = "found";
@@ -198,12 +206,14 @@ describe("executor + eval-judge integration", () => {
     let whichCalled = "";
 
     const mainLlm: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => {
         whichCalled = "main";
         return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
       },
     };
     const judgeLlm: LlmClient = {
+      sendWithTools: stubSendWithTools,
       sendStructured: async () => {
         whichCalled = "judge";
         return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;

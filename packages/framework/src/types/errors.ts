@@ -11,4 +11,5 @@ export type FrameworkError =
   | { readonly kind: "cycle-detected"; readonly nodeIds: readonly string[] }
   | { readonly kind: "aborted"; readonly reason: string }
   | { readonly kind: "rejected"; readonly nodeId: string; readonly reason: string }
-  | { readonly kind: "invalid-reroute"; readonly targetNodeId: string; readonly message: string };
+  | { readonly kind: "invalid-reroute"; readonly targetNodeId: string; readonly message: string }
+  | { readonly kind: "transient"; readonly message: string };

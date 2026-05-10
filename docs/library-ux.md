@@ -23,6 +23,10 @@ const node: NodeDef<I, O, E> = {
   retry?: { backoffMs: [1000, 2000, 4000], jitterRatio: 0.2 },
 };
 
+// LLM nodes can also declare tools the model may call mid-completion.
+// See §7 for details — the framework owns the LLM↔TOOL loop and emits the
+// trace tree automatically.
+
 const dag: DagDef = {
   id: "summarize",
   nodes: [...],
@@ -1072,3 +1076,157 @@ observer events, same root-span structure* — the difference is purely in
 how state and failures are persisted and replayed. The legacy path is a
 degenerate special case of the durable one, kept as a fast path for SC-001
 (no behavioral change for trivial DAGs).
+
+---
+
+## 7. Tool calls in LLM nodes
+
+`LlmClient.sendWithTools` lets an LLM node declare tools the model can call
+mid-completion. The framework owns the `LLM → TOOL → LLM → TOOL → …` loop:
+tool calls are dispatched, results re-fed to the model, and the loop ends
+when the model emits a parseable answer matching the request schema. The
+full trace tree appears in MLflow (or any OTel consumer) automatically —
+no per-tool span wiring on the caller's side.
+
+### 7.1 The shape of a tool
+
+```ts
+import { z } from "zod";
+import type { ToolDef } from "@ai-summary/framework";
+
+const lookupDealsByCustomer: ToolDef<
+  { customerId: string; limit?: number },
+  { deals: Array<{ id: string; amount: number; closedAt: string }> }
+> = {
+  name: "lookup_deals_by_customer",          // ^[A-Za-z0-9_-]{1,64}$
+  description: "Fetch closed deals for a customer (most recent first).",
+  inputSchema: z.object({
+    customerId: z.string(),
+    limit: z.number().int().positive().max(50).default(20),
+  }),
+  outputSchema: z.object({
+    deals: z.array(z.object({
+      id: z.string(),
+      amount: z.number(),
+      closedAt: z.string(),
+    })),
+  }),
+  run: async ({ customerId, limit }, ctx) => {
+    // Any async I/O. ctx.cache, ctx.logger, ctx.signal are all in scope.
+    const deals = await crm.deals(customerId, limit);
+    return { deals };
+  },
+};
+```
+
+`inputSchema` translates to JSON Schema for the provider; `outputSchema`
+is validated *after* `run` returns. Validation failures and thrown errors
+both become `is_error: true` results that the model sees and can react to
+— they don't crash the node.
+
+### 7.2 Calling `sendWithTools` from an LLM node
+
+```ts
+import { z } from "zod";
+import { createLlmNode } from "@ai-summary/framework";
+
+const Summary = z.object({
+  summary: z.string(),
+  totalDealValue: z.number(),
+});
+
+const enrichSummaryNode = createLlmNode({
+  id: "enrich-summary",
+  inputSchema: z.object({ customerId: z.string() }),
+  outputSchema: Summary,
+  deps: ["fetch-customer"],
+  promptName: "enrich-summary",
+  model: "claude-sonnet-4-5",
+  buildInput: (i) => i,
+  // Custom run override — uses the framework's tool surface directly.
+  run: async (input, ctx) => {
+    if (!ctx.llm) return err({ kind: "node-crash", nodeId: "enrich-summary", message: "no llm" });
+    const result = await ctx.llm.sendWithTools(
+      {
+        system: "You are a CRM analyst. Use tools to gather facts before summarizing.",
+        user: `Summarize customer ${input.customerId}.`,
+        model: "claude-sonnet-4-5",
+        tools: [lookupDealsByCustomer],
+        schema: Summary,
+        maxIterations: 5,
+      },
+      ctx,
+    );
+    if (!result.ok) return result;
+    return ok(result.value.output);
+  },
+});
+```
+
+Two argument shapes deserve attention:
+
+- `req` — data the *caller* curated (prompts, tools, schema, iteration cap).
+- `ctx` — the *node-runtime* surface (tracer, logger, cache, signal). Tools
+  receive this same `ctx` so they can memoize via `ctx.cache.set` or honor
+  `ctx.signal` for long I/O.
+
+### 7.3 What gets traced
+
+The trace tree under the parent node span looks like:
+
+```
+node:enrich-summary [CHAIN]
+├── chat claude-sonnet-4-5 [CHAT_MODEL]
+│       gen_ai.system="anthropic"
+│       gen_ai.usage.input_tokens=412
+│       gen_ai.usage.output_tokens=87
+├── execute_tool lookup_deals_by_customer [TOOL]
+│       gen_ai.tool.name="lookup_deals_by_customer"
+│       gen_ai.tool.call.id="toolu_01..."
+│       gen_ai.tool.is_error=false
+├── chat claude-sonnet-4-5 [CHAT_MODEL]
+│       gen_ai.usage.input_tokens=520
+│       gen_ai.usage.output_tokens=140
+└── (final answer parsed against schema)
+```
+
+All attributes follow OpenTelemetry GenAI semantic conventions, so MLflow's
+typed-span renderer picks them up natively.
+
+### 7.4 Error policy
+
+| What                                         | What the model sees             | What the caller sees              |
+| -------------------------------------------- | ------------------------------- | --------------------------------- |
+| Tool body throws                             | `tool_result` with `is_error`   | Loop continues; final answer Ok   |
+| Tool returns Zod-invalid output              | `tool_result` with `is_error`   | Loop continues; final answer Ok   |
+| Model calls a tool name that wasn't declared | `tool_result` with `is_error`   | Loop continues; final answer Ok   |
+| Iteration cap (`maxIterations`) reached      | n/a                             | `Err({ kind: "transient" })`      |
+| `req.signal` aborted between turns           | n/a                             | `Err({ kind: "aborted" })`        |
+| Final answer not valid JSON for `schema`     | n/a                             | `Err({ kind: "node-crash" })`     |
+
+The `transient` error variant is meant to be retried by the LLM-node retry
+policy (per ADR 0005); `node-crash` is treated as terminal unless the
+node's retry config says otherwise.
+
+### 7.5 Idempotency
+
+Same advice as §4: **the loop runs all tools at least once per node retry**.
+If a node retries (because the final answer failed schema validation, or
+because of a queue-level retry), every tool inside the loop runs again
+with the same inputs. For tools whose result isn't already memoized
+upstream, use `ctx.cache` to deduplicate:
+
+```ts
+run: async (input, ctx) => {
+  const key = `crm:deals:${input.customerId}:${input.limit}`;
+  const cached = await ctx.cache?.get(key);
+  if (cached) return cached as { deals: ... };
+  const fresh = await crm.deals(input.customerId, input.limit);
+  await ctx.cache?.set(key, fresh, 300);
+  return fresh;
+},
+```
+
+`maxIterations` is a hard stop — defaults to 10. Lower it for trivial
+flows, raise it for agentic ones, but always bound it. A buggy tool that
+never converges is the simplest way to burn an unbounded number of tokens.

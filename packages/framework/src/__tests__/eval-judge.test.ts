@@ -9,6 +9,7 @@ import type { EvalJudgeResponse } from "../../src/nodes/eval-judge.js";
 import type { NodeContext } from "../../src/types/node.js";
 import type { LlmClient } from "../../src/llm/client.js";
 import { ok, err } from "../../src/types/result.js";
+import { stubSendWithTools } from "./_llm-mocks.js";
 
 // --- Helpers ---
 
@@ -24,14 +25,17 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
 });
 
 const makeMockLlm = (response: EvalJudgeResponse): LlmClient => ({
+  sendWithTools: stubSendWithTools,
   sendStructured: async () => ok({ output: response, tokensIn: 100, tokensOut: 50, rawText: "" }) as any,
 });
 
 const makeFailingLlm = (message: string): LlmClient => ({
+  sendWithTools: stubSendWithTools,
   sendStructured: async () => err({ kind: "node-crash", nodeId: "judge", message }) as any,
 });
 
 const makeThrowingLlm = (): LlmClient => ({
+  sendWithTools: stubSendWithTools,
   sendStructured: async () => { throw new Error("network timeout"); },
 });
 
@@ -227,12 +231,14 @@ describe("createEvalJudgeNode", () => {
     test("uses ctx.judgeLlm over ctx.llm", async () => {
       let calledWith = "";
       const judgeLlm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           calledWith = "judgeLlm";
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
       };
       const mainLlm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async () => {
           calledWith = "mainLlm";
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -247,6 +253,7 @@ describe("createEvalJudgeNode", () => {
     test("falls back to ctx.llm when judgeLlm not set", async () => {
       let calledWith = "";
       const mainLlm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async () => {
           calledWith = "mainLlm";
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -284,6 +291,7 @@ describe("createEvalJudgeNode", () => {
     test("uses rubricInline in the prompt", async () => {
       let capturedUser = "";
       const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           capturedUser = req.user;
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -302,6 +310,7 @@ describe("createEvalJudgeNode", () => {
     test("uses rubricTemplateId from prompts", async () => {
       let capturedUser = "";
       const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           capturedUser = req.user;
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -321,6 +330,7 @@ describe("createEvalJudgeNode", () => {
     test("auto-generates rubric from criteria when no rubric provided", async () => {
       let capturedUser = "";
       const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           capturedUser = req.user;
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -341,6 +351,7 @@ describe("createEvalJudgeNode", () => {
     test("includes DAG input and output in the prompt", async () => {
       let capturedUser = "";
       const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           capturedUser = req.user;
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -356,6 +367,7 @@ describe("createEvalJudgeNode", () => {
     test("uses JUDGE_SYSTEM_FRAME as system prompt", async () => {
       let capturedSystem = "";
       const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           capturedSystem = req.system;
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
@@ -370,6 +382,7 @@ describe("createEvalJudgeNode", () => {
     test("uses configured model or defaults to gpt-4o-mini", async () => {
       let capturedModel = "";
       const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
         sendStructured: async (req) => {
           capturedModel = req.model;
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
