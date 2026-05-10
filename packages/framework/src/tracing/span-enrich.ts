@@ -21,17 +21,6 @@ import {
 
 const getCostRates = (model: string) => PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
 
-/**
- * Whether to include prompt/output/thinking content in spans.
- * Default OFF — these payloads frequently contain PII and should not leave the
- * process boundary unless an operator has explicitly opted in.
- * Read per-call so tests / runtime config changes take effect immediately.
- */
-const tracePromptContent = (): boolean => {
-  const v = process.env.LLM_TRACE_PROMPTS;
-  return v === "true" || v === "1";
-};
-
 export interface EnrichLlmSpanOpts {
   readonly model: string;
   readonly promptName?: string;
@@ -42,6 +31,13 @@ export interface EnrichLlmSpanOpts {
   readonly thinking?: string;
   readonly provider?: string;
   readonly extraInputs?: Record<string, unknown>;
+  /**
+   * When `true`, include prompt/output/thinking content in spans.
+   * Default OFF — these payloads frequently contain PII and should not leave
+   * the process boundary unless an operator has explicitly opted in. Caller
+   * (typically a node) reads this from `NodeContext.includeContent`.
+   */
+  readonly includeContent?: boolean;
 }
 
 /** Enrich the currently-active OTel span with LLM request/response details. */
@@ -60,7 +56,7 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   otelSpan.setAttribute(AI_LLM_TOKENS_OUT, opts.tokensOut);
   otelSpan.setAttribute(AI_LLM_COST_USD, totalCost);
 
-  const includeContent = tracePromptContent();
+  const includeContent = opts.includeContent ?? false;
 
   // Structured event: LLM request details. Prompts gated by LLM_TRACE_PROMPTS (PII).
   otelSpan.addEvent(EVENT_LLM_REQUEST, includeContent

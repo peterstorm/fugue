@@ -6,6 +6,7 @@ import type { DagDef } from "../types/dag.js";
 import { runDag } from "../executor/executor.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
+import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 
 /**
  * SC-007: A simple "hello world" DAG using only public framework primitives.
@@ -20,7 +21,6 @@ describe("second-dag (SC-007): hello world DAG", () => {
     id: "fetchGreeting",
     inputSchema: GreetingInput,
     outputSchema: RawGreeting,
-    deps: [],
     fetch: async (input) => ok({ raw: `Hello, ${input.name}` }),
   });
 
@@ -28,15 +28,14 @@ describe("second-dag (SC-007): hello world DAG", () => {
     id: "formatGreeting",
     inputSchema: RawGreeting,
     outputSchema: FormattedGreeting,
-    deps: ["fetchGreeting"],
     transform: (input) => ok({ message: `${input.raw}!` }),
   });
 
-  const dag: DagDef = {
+  const dag = defineDagFromArray({
     id: "hello-world",
-    nodes: [fetchGreeting, formatGreeting],
+    nodes: ([fetchGreeting, formatGreeting]),
     edges: [{ from: "fetchGreeting", to: "formatGreeting" }],
-  };
+  });
 
   const mkCtx = (): NodeContext => ({
     runId: "hw-run",

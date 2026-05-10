@@ -77,7 +77,7 @@ export const runDag = (opts: RunDagOpts) => {
 
 - A caller passing none of `{jobLike, onHumanReview, retryLimits}` runs the exact pre-refactor code. No transition overhead, no checkpoint round-trip, no behavior delta.
 - Observer/span ordering for legacy callers is bit-for-bit identical to pre-refactor.
-- New-feature callers (HITL, retries, durability) get the full state-machine semantics — including resumability, FR-028 sequential-HITL ordering, and FR-029a hook-crash retry (ADR 0008).
+- New-feature callers (HITL, retries, durability) get the full state-machine semantics — including resumability, FR-028 sequential-HITL ordering, and FR-029a hook-crash retry (ADR 0013).
 
 **Scope explicitly deferred:** Phase 5 — migrating all consumers to always pass a `JobLike` and removing the fast path — is a separate future PR. When that lands, this ADR should be **superseded** by the ADR that documents the unified path.
 

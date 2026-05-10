@@ -164,7 +164,9 @@ describe("failOpenResult", () => {
   test("returns passed: true with reason", () => {
     const result = failOpenResult("LLM unavailable");
     expect(result.passed).toBe(true);
-    expect(result.score).toBe(1.0);
+    // Score is null when the judge couldn't run — distinct from a 1.0 verdict.
+    expect(result.score).toBeNull();
+    expect(result.skipped).toBe(true);
     expect(result.reason).toContain("LLM unavailable");
     expect(result.failedCriteria).toHaveLength(0);
   });

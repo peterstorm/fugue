@@ -3,6 +3,7 @@
 
 import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { IncomingSources } from "./conditional.js";
 
 // ---------------------------------------------------------------------------
 // HumanAction — the payload a reviewer sends back
@@ -76,7 +77,7 @@ export type DagEvent =
       /**
        * Outputs from sibling nodes that completed successfully in the same wave before
        * this failure. Carried so the transition can persist them into `ctx.outputs` and
-       * avoid re-running succeeded siblings on retry (M2 fix).
+       * avoid re-running succeeded siblings on retry.
        */
       readonly partialOutputs?: ReadonlyMap<string, unknown>;
       /**
@@ -101,4 +102,18 @@ export interface DagMachineContext {
   readonly outputs: ReadonlyMap<string, unknown>;
   readonly retries: ReadonlyMap<string, number>;
   readonly initialInput: unknown;
+  /**
+   * Subset of node ids that should still run. Seeded at compile time to every
+   * node forward-reachable from wave 0 along unconditional edges; expanded as
+   * conditional/default edges fire after each wave. Pruned nodes never appear
+   * in `outputs` and never get dispatched.
+   */
+  readonly activeNodeIds: ReadonlySet<string>;
+  /**
+   * Precomputed `{ required, optional }` source partition per node, derived
+   * from the edges at compile time. Used by `runNode` to assemble `nodeInput`
+   * without consulting any author-supplied `deps` field (which no longer
+   * exists — edges are the single source of truth, see ADR 0017).
+   */
+  readonly incomingByNode: ReadonlyMap<string, IncomingSources>;
 }

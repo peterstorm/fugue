@@ -34,7 +34,8 @@ const setToolAttributes = (meta: ToolSpanMeta): void => {
  * Wrap an LLM call in a span emitting GenAI semantic-convention attributes.
  *
  * Span name follows `<operation> <model>` (e.g., `chat claude-3-5-sonnet`); the
- * underlying span type is `CHAT_MODEL` for downstream MLflow rendering.
+ * span type is `CHAT_MODEL` so downstream consumers can distinguish
+ * model-call spans from generic CHAIN spans.
  */
 export async function withLlmSpan<T>(
   tracer: Tracer | null | undefined,

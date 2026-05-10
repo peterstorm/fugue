@@ -21,10 +21,21 @@ import { enrichLlmSpan } from "../tracing/index.js";
 /** Output of the eval-judge node. */
 export interface EvalJudgeResult {
   readonly passed: boolean;
-  readonly score: number;
+  /**
+   * Quality score in [0, 1], or `null` when the judge could not run
+   * (`skipped: true`). Operators must distinguish "judge passed" from
+   * "judge couldn't run" — `null` makes that explicit.
+   */
+  readonly score: number | null;
   readonly criteriaScores: Record<string, number>;
   readonly failedCriteria: readonly string[];
   readonly reason: string;
+  /**
+   * `true` when the judge LLM call failed and the result is fail-open
+   * (`passed: true, score: null`). Dashboards should alert on a high
+   * skipped-rate even though `passed` stays true.
+   */
+  readonly skipped: boolean;
 }
 
 /** Internal schema for LLM structured output parsing. */
@@ -73,13 +84,17 @@ const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 
 /**
  * Create a fail-open result (used when judge LLM call fails).
+ *
+ * `score: null` and `skipped: true` make the bypass observable; `passed: true`
+ * preserves fail-open semantics so the run does not abort.
  */
 export const failOpenResult = (reason: string): EvalJudgeResult => ({
   passed: true,
-  score: 1.0,
+  score: null,
   criteriaScores: {},
   failedCriteria: [],
   reason: `[eval-judge skipped: ${reason}]`,
+  skipped: true,
 });
 
 /**
@@ -103,6 +118,7 @@ export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number
     criteriaScores: scoresMap,
     failedCriteria,
     reason: response.reason,
+    skipped: false,
   };
 };
 
@@ -153,6 +169,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           model,
           schema: EvalJudgeResponseSchema,
           signal: ctx.signal,
+          nodeId: config.id,
         });
 
         if (!result.ok) {
@@ -170,6 +187,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           tokensOut: result.value.tokensOut,
           thinking: result.value.thinking,
           extraInputs: { criteria: config.criteria as unknown as Record<string, unknown>, threshold },
+          includeContent: ctx.includeContent ?? false,
         });
 
         // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)

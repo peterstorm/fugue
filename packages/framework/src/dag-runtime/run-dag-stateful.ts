@@ -1,4 +1,4 @@
-// runDagStateful — orchestrates the DAG executor with the state-machine runner (Phase 3a)
+// runDagStateful — orchestrates the DAG executor with the state-machine runner
 // FR-023, FR-024, FR-025, FR-027
 
 import { match } from "ts-pattern";
@@ -14,7 +14,7 @@ import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { runEvalJudges } from "./eval-judges.js";
-import { createDagRunMeta } from "../executor/node-span.js";
+import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "../executor/node-span.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { Observer } from "../observer/observer.js";
 import {
@@ -52,7 +52,7 @@ export interface DagRunOpts
   readonly retryLimits?: Readonly<Record<string, number>>;
   /**
    * When supplied, eval-judges run in the background after the run resolves
-   * `ok`, mirroring legacy parity (codex finding #3). The hook receives a
+   * `ok`, mirroring legacy parity. The hook receives a
    * promise that resolves once judges + span finalization complete. When
    * omitted, judges still run before resolution (default behavior).
    */
@@ -127,7 +127,7 @@ export const runDagStateful = async <I, O>(
       rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: nodeCtx.runId });
 
       // Compile inside the span so topo errors are funneled through the same
-      // observer/trace path as runtime failures (codex finding #3).
+      // observer/trace path as runtime failures.
       const compiled = compileDagToMachine(effectiveDag, input);
       if (!compiled.ok) {
         rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(compiled.error) });
@@ -139,12 +139,17 @@ export const runDagStateful = async <I, O>(
       const { machine, initialContext, initialState } = compiled.value;
 
       // Per-run meta — carries guardrail/eval-judge state for rootSpan finalization (parity with legacy)
-      const meta = createDagRunMeta();
+      // Held in `let` so each wave can fold in its outcomes via recordOutcomes;
+      // the inner DagRunMeta value remains immutable.
+      let meta: DagRunMeta = createDagRunMeta();
+      const recordOutcomes = (outcomes: readonly NodeSpanOutcome[]): void => {
+        meta = foldOutcomes(meta, outcomes);
+      };
 
       // Build the executor closure
       const executor = buildDagExecutor(effectiveDag, nodeCtx, {
         onHumanReview: opts?.onHumanReview,
-        meta,
+        recordOutcomes,
       });
 
       // Resolve the job handle — caller-supplied or fresh in-memory
@@ -189,15 +194,17 @@ export const runDagStateful = async <I, O>(
         return await match(state)
           .with({ kind: "succeeded" }, async (s) => {
             // Finalize: run eval-judges + close root span + emit run-end.
-            // Background mode (onBackground supplied) mirrors legacy parity
-            // (codex finding #3) — caller resolves before judges finish, so
-            // request-bound timeouts don't block on judge I/O.
+            // Background mode (onBackground supplied) mirrors legacy parity:
+            // caller resolves before judges finish, so request-bound timeouts
+            // don't block on judge I/O.
             const finalize = async (): Promise<void> => {
               let evalJudgeFailed = false;
               let evalJudgeResults: Awaited<ReturnType<typeof runEvalJudges>> = [];
               if (dag.evalJudges?.length) {
                 evalJudgeResults = await runEvalJudges(dag.evalJudges, input, s.output, context.outputs as Map<string, unknown>, nodeCtx);
                 evalJudgeFailed = evalJudgeResults.some((r) => !r.passed);
+                // Fold judge results into meta (immutable update).
+                meta = { ...meta, evalJudgeResults, evalJudgeFailed };
               }
 
               if (evalJudgeFailed) {
@@ -287,7 +294,7 @@ export const runDagStateful = async <I, O>(
 };
 
 // ---------------------------------------------------------------------------
-// runDagAsWorkerJob — queue worker entry point (codex finding #1)
+// runDagAsWorkerJob — queue worker entry point
 // ---------------------------------------------------------------------------
 
 /**

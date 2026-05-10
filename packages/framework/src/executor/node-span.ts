@@ -13,12 +13,23 @@ import {
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
 
-export interface DagRunMeta {
-  guardrailFailed: boolean;
-  guardrailWarnings: string[];
-  evalJudgeFailed: boolean;
-  evalJudgeResults: EvalJudgeResult[];
+/** Per-node guardrail outcome produced by `withNodeSpan`. */
+export interface NodeSpanOutcome {
+  readonly guardrailFailed: boolean;
+  readonly guardrailWarnings: readonly string[];
 }
+
+export interface DagRunMeta {
+  readonly guardrailFailed: boolean;
+  readonly guardrailWarnings: readonly string[];
+  readonly evalJudgeFailed: boolean;
+  readonly evalJudgeResults: readonly EvalJudgeResult[];
+}
+
+const EMPTY_OUTCOME: NodeSpanOutcome = {
+  guardrailFailed: false,
+  guardrailWarnings: [],
+};
 
 export const createDagRunMeta = (): DagRunMeta => ({
   guardrailFailed: false,
@@ -27,16 +38,42 @@ export const createDagRunMeta = (): DagRunMeta => ({
   evalJudgeResults: [],
 });
 
+/**
+ * Fold a batch of per-node outcomes into a fresh, immutable `DagRunMeta`.
+ * Concurrent siblings each return their own outcome; the wave caller folds
+ * them after `Promise.all` so no two callbacks ever write the same field.
+ */
+export const foldOutcomes = (
+  meta: DagRunMeta,
+  outcomes: readonly NodeSpanOutcome[],
+): DagRunMeta => {
+  if (outcomes.length === 0) return meta;
+  const newWarnings = outcomes.flatMap((o) => o.guardrailWarnings);
+  const anyFailed = outcomes.some((o) => o.guardrailFailed);
+  if (!anyFailed && newWarnings.length === 0) return meta;
+  return {
+    ...meta,
+    guardrailFailed: meta.guardrailFailed || anyFailed,
+    guardrailWarnings: [...meta.guardrailWarnings, ...newWarnings],
+  };
+};
+
 const tracer = trace.getTracer("ai-summary-framework");
 
-/** Wrap node execution in an OTel span; propagate guardrail failure to meta + span. */
+/**
+ * Wrap node execution in an OTel span. Returns the node `result` paired with a
+ * `NodeSpanOutcome` describing any guardrail failure observed inside the span.
+ * Outcomes are *returned*, not mutated onto a shared meta — the wave caller
+ * folds them after `Promise.all`, eliminating concurrent writes to shared
+ * accumulator state.
+ */
 export const withNodeSpan = async (
   nodeId: string,
   kind: string,
   input: unknown,
-  meta: DagRunMeta | undefined,
-  fn: () => Promise<Result<any, FrameworkError>>,
-): Promise<Result<any, FrameworkError>> => {
+  includeContent: boolean,
+  fn: () => Promise<Result<unknown, FrameworkError>>,
+): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
 
   return tracer.startActiveSpan(
@@ -49,13 +86,12 @@ export const withNodeSpan = async (
       },
     },
     async (span) => {
-      const includeContent =
-        process.env.LLM_TRACE_PROMPTS === "true" || process.env.LLM_TRACE_PROMPTS === "1";
       span.addEvent(
         EVENT_NODE_INPUT,
         includeContent ? { data: JSON.stringify(input) } : { data_redacted: "true" },
       );
 
+      let outcome: NodeSpanOutcome = EMPTY_OUTCOME;
       const result = await fn();
       if (result.ok) {
         span.addEvent(
@@ -72,16 +108,13 @@ export const withNodeSpan = async (
           const warnings = ((result.value as { warnings?: string[] }).warnings) ?? [];
           span.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${warnings.join("; ")}` });
           span.setAttribute(AI_GUARDRAIL_PASSED, false);
-          if (meta) {
-            meta.guardrailFailed = true;
-            meta.guardrailWarnings.push(...warnings);
-          }
+          outcome = { guardrailFailed: true, guardrailWarnings: warnings };
         }
       } else {
         span.setStatus({ code: SpanStatusCode.ERROR, message: String(result.error) });
       }
       span.end();
-      return result;
+      return { result, outcome };
     },
   );
 };

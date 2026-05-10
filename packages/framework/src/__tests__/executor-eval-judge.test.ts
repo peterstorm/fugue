@@ -9,6 +9,7 @@ import type { DagDef } from "../../src/types/dag.js";
 import type { LlmClient } from "../../src/llm/client.js";
 import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
+import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 
 // --- Helpers ---
 
@@ -33,18 +34,18 @@ const uppercaseNode = createTransformNode({
   id: "uppercase",
   inputSchema: z.string(),
   outputSchema: z.string(),
-  deps: [],
   transform: (input) => ok(input.toUpperCase()),
 });
 
 /** A two-node DAG for testing. */
-const makeDag = (evalJudges: DagDef["evalJudges"] = undefined): DagDef => ({
-  id: "test-dag",
-  nodes: [uppercaseNode],
-  edges: [],
-  outputNodeId: "uppercase",
-  evalJudges,
-});
+const makeDag = (evalJudges: DagDef["evalJudges"] = undefined): DagDef =>
+  defineDagFromArray({
+    id: "test-dag",
+    nodes: [uppercaseNode],
+    edges: [],
+    outputNodeId: "uppercase",
+    evalJudges,
+  });
 
 // --- Tests ---
 
@@ -145,18 +146,17 @@ describe("executor + eval-judge integration", () => {
       id: "failing",
       inputSchema: z.string(),
       outputSchema: z.string(),
-      deps: [],
       transform: () => err({ kind: "node-crash" as const, nodeId: "failing", message: "boom" }),
     });
 
     const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "fail-dag",
       nodes: [failingNode],
       edges: [],
       outputNodeId: "failing",
       evalJudges: [judge],
-    };
+    });
 
     const result = await runDag<string, string>(dag, "in", makeCtx({ judgeLlm: llm }));
     expect(result.ok).toBe(false);

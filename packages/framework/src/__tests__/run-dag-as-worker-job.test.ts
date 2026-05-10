@@ -8,6 +8,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import { runDagAsWorkerJob, runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createInMemoryBackend } from "../queue/in-memory.js";
+import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 
 const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unknown);
 
@@ -19,7 +20,6 @@ const mkNode = (
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
-  deps: [],
   run: noop as any,
   ...overrides,
 });
@@ -36,18 +36,18 @@ const mkCtx = (): NodeContext => ({
 
 describe("runDagAsWorkerJob", () => {
   it("returns the DAG output on success", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "ok",
       nodes: [mkNode("a", { run: async () => ok("a-out") })],
       edges: [],
       defaultRetryLimit: 0,
-    };
+    });
     const out = await runDagAsWorkerJob<unknown, string>(dag, null, mkCtx());
     expect(out).toBe("a-out");
   });
 
   it("throws on terminal failure (queue can retry/DLQ)", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "fail",
       nodes: [
         mkNode("a", {
@@ -57,7 +57,7 @@ describe("runDagAsWorkerJob", () => {
       ],
       edges: [],
       defaultRetryLimit: 0,
-    };
+    });
     await expect(runDagAsWorkerJob(dag, null, mkCtx())).rejects.toThrow(/DAG 'fail' failed/);
   });
 
@@ -65,7 +65,7 @@ describe("runDagAsWorkerJob", () => {
     const backend = createInMemoryBackend();
     const queue = backend.createQueue<unknown, unknown>("q");
 
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "fail",
       nodes: [
         mkNode("a", {
@@ -75,7 +75,7 @@ describe("runDagAsWorkerJob", () => {
       ],
       edges: [],
       defaultRetryLimit: 0,
-    };
+    });
 
     const failedCalls: Array<{ attempts: number; max: number }> = [];
     const worker = backend.createWorker("q", async (_job) => {
@@ -102,7 +102,7 @@ describe("runDagAsWorkerJob", () => {
     const backend = createInMemoryBackend();
     const queue = backend.createQueue<unknown, unknown>("q-raw");
 
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "fail",
       nodes: [
         mkNode("a", {
@@ -112,7 +112,7 @@ describe("runDagAsWorkerJob", () => {
       ],
       edges: [],
       defaultRetryLimit: 0,
-    };
+    });
 
     const failedCalls: number[] = [];
     const worker = backend.createWorker("q-raw", async (_job) => {

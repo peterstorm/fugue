@@ -7,6 +7,8 @@ import type {
   NodeErrorEvent,
   SubSpanEvent,
   RunEndEvent,
+  RouteDecidedEvent,
+  NodePrunedEvent,
 } from "../types/events.js";
 import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
@@ -49,6 +51,12 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
         break;
       case "run-end":
         observer.onRunEnd(event);
+        break;
+      case "route-decided":
+        observer.onRouteDecided?.(event);
+        break;
+      case "node-pruned":
+        observer.onNodePruned?.(event);
         break;
       default: {
         const _exhaustive: never = event;
@@ -113,22 +121,72 @@ export function computeRunSummary(
   };
 }
 
+/** Per-run buffer entry — events plus the wall-clock time it was opened. */
+interface RunBuffer {
+  events: ObserverEvent[];
+  createdAt: number;
+}
+
+export interface BufferedObserverOpts {
+  /** Drop a run buffer if `run-end` never arrived within this many ms. Default 1h. */
+  readonly ttlMs?: number;
+  /** Sweep interval for dropping stale buffers. Default 5min. */
+  readonly sweepIntervalMs?: number;
+}
+
+const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
+const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5min
+
 export class BufferedObserver implements Observer {
-  private readonly buffers = new Map<string, ObserverEvent[]>();
+  private readonly buffers = new Map<string, RunBuffer>();
   readonly aggregates: AggregateCounters = { runCount: 0, totalCostUsd: 0 };
+  /** Buffers dropped because `run-end` never arrived within TTL. Useful for monitoring. */
+  evicted = 0;
+  private readonly ttlMs: number;
+  private readonly sweepHandle: ReturnType<typeof setInterval> | null;
 
   constructor(
     private readonly inner: Observer,
     private readonly policy: PersistencePolicy,
-  ) {}
+    opts?: BufferedObserverOpts,
+  ) {
+    this.ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
+    const sweepMs = opts?.sweepIntervalMs ?? DEFAULT_SWEEP_MS;
+    if (sweepMs > 0) {
+      this.sweepHandle = setInterval(() => this.evictStale(), sweepMs);
+      // Don't keep the event loop alive purely to sweep an idle observer.
+      (this.sweepHandle as unknown as { unref?: () => void }).unref?.();
+    } else {
+      this.sweepHandle = null;
+    }
+  }
+
+  /** Stop the background sweep. Call when discarding the observer. */
+  close(): void {
+    if (this.sweepHandle) clearInterval(this.sweepHandle);
+  }
+
+  /** Drop run buffers that exceeded `ttlMs` without a run-end. */
+  private evictStale(): void {
+    const cutoff = Date.now() - this.ttlMs;
+    for (const [runId, buf] of this.buffers) {
+      if (buf.createdAt < cutoff) {
+        this.buffers.delete(runId);
+        this.evicted++;
+        console.warn(
+          `[BufferedObserver] Evicting orphaned run buffer ${runId} (age: ${Date.now() - buf.createdAt}ms, events: ${buf.events.length})`,
+        );
+      }
+    }
+  }
 
   private buffer(runId: string, event: ObserverEvent): void {
     let buf = this.buffers.get(runId);
     if (!buf) {
-      buf = [];
+      buf = { events: [], createdAt: Date.now() };
       this.buffers.set(runId, buf);
     }
-    buf.push(event);
+    buf.events.push(event);
   }
 
   onRunStart(e: RunStartEvent): void {
@@ -149,9 +207,15 @@ export class BufferedObserver implements Observer {
   onSubSpan(e: SubSpanEvent): void {
     this.buffer(e.runId, e);
   }
+  onRouteDecided(e: RouteDecidedEvent): void {
+    this.buffer(e.runId, e);
+  }
+  onNodePruned(e: NodePrunedEvent): void {
+    this.buffer(e.runId, e);
+  }
 
   onRunEnd(e: RunEndEvent): void {
-    const events = this.buffers.get(e.runId) ?? [];
+    const events = this.buffers.get(e.runId)?.events ?? [];
     const summary = computeRunSummary(events, e);
 
     // Aggregate counters always update

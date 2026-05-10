@@ -16,7 +16,6 @@ export const createFetchCustomerNode = (source: ConversationSource) =>
     id: "fetch-crm",
     inputSchema: InputSchema,
     outputSchema: OutputSchema,
-    deps: [],
     fetch: async (input, _ctx): Promise<Result<Output, FrameworkError>> => {
       const result = await source.fetchCustomer(input.customerId);
       if (!result.ok) return result;

@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-09
 **Spec ref:** NFR-021 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
-**Related:** ADR 0002 (`runDag` back-compat shim), ADR 0008 (`onHumanReview` hook-crash retry).
+**Related:** ADR 0002 (`runDag` back-compat shim), ADR 0013 (`onHumanReview` hook-crash retry).
 
 ## Context
 

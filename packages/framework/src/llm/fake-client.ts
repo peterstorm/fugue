@@ -5,6 +5,7 @@ import type {
   LlmClient,
   LlmRequest,
   LlmResponse,
+  LlmRuntime,
   SendWithToolsRequest,
 } from "./client.js";
 import type { NodeContext } from "../types/node.js";
@@ -94,7 +95,7 @@ export class FakeLlmClient implements LlmClient {
     if (raw === undefined) {
       return err({
         kind: "node-crash",
-        nodeId: req.model,
+        nodeId: req.nodeId ?? "<llm>",
         message: `FakeLlmClient: no response configured for model="${req.model}"`,
       });
     }
@@ -113,12 +114,14 @@ export class FakeLlmClient implements LlmClient {
 
   async sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    ctx: NodeContext,
+    runtime: LlmRuntime,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // See AnthropicLlmClient.sendWithTools for the LlmRuntime → NodeContext rationale.
+    const ctx = runtime as NodeContext;
     if (this.withToolsScript === undefined) {
       return err({
         kind: "node-crash",
-        nodeId: req.model,
+        nodeId: req.nodeId ?? "<llm>",
         message: "FakeLlmClient: no withToolsScript configured",
       });
     }
@@ -128,7 +131,7 @@ export class FakeLlmClient implements LlmClient {
     } catch (e) {
       return err({
         kind: "validation",
-        nodeId: req.model,
+        nodeId: req.nodeId ?? "<llm>",
         message: e instanceof Error ? e.message : String(e),
       });
     }
@@ -143,7 +146,7 @@ export class FakeLlmClient implements LlmClient {
       : null;
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted) {
+      if (req.signal?.aborted || runtime.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -157,7 +160,7 @@ export class FakeLlmClient implements LlmClient {
       if (!turnSpec) {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: req.nodeId ?? "<llm>",
           message: `FakeLlmClient: script ran out at turn ${turn}`,
         });
       }
@@ -166,7 +169,7 @@ export class FakeLlmClient implements LlmClient {
       const tokensOut = turnSpec.tokensOut ?? 5;
 
       await withLlmSpan(
-        ctx.tracer ?? null,
+        runtime.tracer ?? null,
         { provider: "fake", model: req.model, operation: "chat" },
         async () => {
           totalTokensIn += tokensIn;
@@ -181,7 +184,7 @@ export class FakeLlmClient implements LlmClient {
         if (!parsed.success) {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: req.nodeId ?? "<llm>",
             message: `Schema validation failed: ${parsed.error.message}`,
           });
         }
@@ -199,7 +202,7 @@ export class FakeLlmClient implements LlmClient {
       if (req.toolChoice === "none") {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: req.nodeId ?? "<llm>",
           message: "FakeLlmClient: tool_use turn emitted while toolChoice='none'",
         });
       }
@@ -213,6 +216,7 @@ export class FakeLlmClient implements LlmClient {
 
     return err({
       kind: "transient",
+      nodeId: req.nodeId ?? "<llm>",
       message: `Tool-call iteration limit (${maxIterations}) reached`,
     });
   }

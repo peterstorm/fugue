@@ -16,9 +16,10 @@ import {
   waveIndexOf,
 } from "../dag-runtime/transition-helpers.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -35,29 +36,60 @@ const makeNode = (
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
-  deps: [],
   run: noop as any,
   ...overrides,
 });
 
-const makeDag = (overrides: Partial<DagDef> = {}): DagDef => ({
-  id: "test-dag",
-  nodes: [makeNode("a"), makeNode("b"), makeNode("c")],
-  edges: [
-    { from: "a", to: "b" },
-    { from: "b", to: "c" },
-  ],
-  ...overrides,
-});
+interface MakeDagOverrides {
+  readonly id?: string;
+  readonly nodes?: readonly NodeDef<unknown, unknown, unknown>[];
+  readonly edges?: readonly EdgeDef[];
+  readonly outputNodeId?: string;
+  readonly retryLimits?: Readonly<Record<string, number>>;
+  readonly defaultRetryLimit?: number;
+  readonly evalJudges?: DagDef["evalJudges"];
+}
 
-const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => ({
-  dag: makeDag(),
-  waves: [["a"], ["b"], ["c"]],
-  outputs: new Map(),
-  retries: new Map(),
-  initialInput: null,
-  ...overrides,
-});
+const DEFAULT_NODES: readonly NodeDef<unknown, unknown, unknown>[] = [
+  makeNode("a"),
+  makeNode("b"),
+  makeNode("c"),
+];
+const DEFAULT_EDGES: readonly EdgeDef[] = [
+  { from: "a", to: "b" },
+  { from: "b", to: "c" },
+];
+
+const makeDag = (overrides: MakeDagOverrides = {}): DagDef => {
+  // If a test overrides `nodes` but not `edges`, default edges to `[]` so
+  // we don't leak the abc-chain default into a custom node set.
+  const nodes = overrides.nodes ?? DEFAULT_NODES;
+  const edges =
+    overrides.edges ?? (overrides.nodes ? [] : DEFAULT_EDGES);
+  return defineDag({
+    id: overrides.id ?? "test-dag",
+    nodes: Object.fromEntries(nodes.map((n) => [n.id, n])),
+    edges,
+    outputNodeId: overrides.outputNodeId,
+    evalJudges: overrides.evalJudges,
+    retryLimits: overrides.retryLimits,
+    defaultRetryLimit: overrides.defaultRetryLimit,
+  });
+};
+
+const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
+  const dag = overrides.dag ?? makeDag();
+  return {
+    dag,
+    waves: [["a"], ["b"], ["c"]],
+    outputs: new Map(),
+    retries: new Map(),
+    initialInput: null,
+    activeNodeIds: new Set(dag.nodes.map((n) => n.id)),
+    incomingByNode: new Map(),
+    ...overrides,
+  };
+};
 
 const nodeFailedError: FrameworkError = {
   kind: "node-crash",
@@ -713,7 +745,9 @@ describe("advanceToNextWave", () => {
     if (result.state.kind === "failed") {
       expect(result.state.error.kind).toBe("node-crash");
       if (result.state.error.kind === "node-crash") {
-        expect(result.state.error.message).toMatch(/output-missing: fallback node 'a'/);
+        expect(result.state.error.message).toMatch(
+          /output-missing: outputNodeId unset and no active node produced output/,
+        );
       }
     }
   });
@@ -861,14 +895,14 @@ describe("waveNodes / waveIndexOf", () => {
 describe("compileDagToMachine", () => {
   it("returns err on cyclic DAG", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const cyclicDag: DagDef = {
+    const cyclicDag = defineDagFromArray({
       id: "cycle",
-      nodes: [makeNode("a", { deps: ["b"] }), makeNode("b", { deps: ["a"] })],
+      nodes: [makeNode("a"), makeNode("b")],
       edges: [
         { from: "a", to: "b" },
         { from: "b", to: "a" },
       ],
-    };
+    });
     const r = compileDagToMachine(cyclicDag, null);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.kind).toBe("cycle-detected");
@@ -876,11 +910,11 @@ describe("compileDagToMachine", () => {
 
   it("compiles a valid DAG and returns machine with correct terminal predicates", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "linear",
-      nodes: [makeNode("a"), makeNode("b", { deps: ["a"] })],
+      nodes: [makeNode("a"), makeNode("b")],
       edges: [{ from: "a", to: "b" }],
-    };
+    });
     const compiled = compileDagToMachine(dag, { input: "hello" });
     if (!compiled.ok) throw new Error("compile failed in test setup");
     const { machine, initialContext, initialState } = compiled.value;
@@ -897,7 +931,7 @@ describe("compileDagToMachine", () => {
 
   it("threads initialInput into context", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const dag: DagDef = { id: "d", nodes: [makeNode("a")], edges: [] };
+    const dag = defineDagFromArray({ id: "d", nodes: [makeNode("a")], edges: [] });
     const compiled = compileDagToMachine(dag, "my-input");
     if (!compiled.ok) throw new Error("compile failed in test setup");
     expect(compiled.value.initialContext.initialInput).toBe("my-input");
@@ -905,11 +939,11 @@ describe("compileDagToMachine", () => {
 
   it("stateProgress maps phases to expected values", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "simple",
       nodes: [makeNode("a")],
       edges: [],
-    };
+    });
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed in test setup");
     const { machine } = compiled.value;
@@ -1245,7 +1279,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
 describe("compileDagToMachine — retrying-hook predicates", () => {
   it("retrying-hook is not terminal and not failed, progress=50", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const dag: DagDef = { id: "d", nodes: [makeNode("a")], edges: [] };
+    const dag = defineDagFromArray({ id: "d", nodes: [makeNode("a")], edges: [] });
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed in test setup");
     const { machine } = compiled.value;

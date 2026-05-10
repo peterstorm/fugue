@@ -34,22 +34,47 @@ export interface CheckResult {
 // ---------------------------------------------------------------------------
 
 interface BoundaryRule {
-  /** Directory prefix (relative to src/) that the rule applies to */
-  restrictedDir: string;
+  /**
+   * Files that the rule applies to. Each entry is either a directory prefix
+   * (interpreted as `${entry}/`) or a specific relative file path under `src/`.
+   */
+  scope: string[];
   /** Module specifiers that are forbidden. Partial prefix match is used. */
   forbiddenModules: string[];
+  /** Human-readable reason — surfaced in violation messages and lint output. */
+  reason?: string;
 }
 
 const RULES: BoundaryRule[] = [
   {
-    restrictedDir: "state-machine",
+    scope: ["state-machine"],
     forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
+    reason: "state-machine/ is the kernel; transport adapters belong outside it.",
   },
   {
-    restrictedDir: "dag-runtime",
+    scope: ["dag-runtime"],
     forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
+    reason: "dag-runtime/ is transport-agnostic; durable backends are wired by the shell.",
+  },
+  {
+    scope: [
+      "state-machine",
+      "dag-runtime/transition.ts",
+      "dag-runtime/transition-helpers.ts",
+      "dag-runtime/machine.ts",
+    ],
+    forbiddenModules: ["@opentelemetry/"],
+    reason: "Pure-core modules must not depend on OTel; tracing belongs to the imperative shell.",
   },
 ];
+
+/** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */
+function inScope(relPath: string, scope: readonly string[]): boolean {
+  return scope.some((entry) => {
+    if (entry.endsWith(".ts")) return relPath === entry;
+    return relPath.startsWith(entry + "/");
+  });
+}
 
 // ---------------------------------------------------------------------------
 // File walking
@@ -127,9 +152,7 @@ export function checkImports(srcDir: string): CheckResult {
     const relPath = relative(srcDir, file);
 
     // Determine which rules apply to this file
-    const applicableRules = RULES.filter((rule) =>
-      relPath.startsWith(rule.restrictedDir + "/"),
-    );
+    const applicableRules = RULES.filter((rule) => inScope(relPath, rule.scope));
 
     if (applicableRules.length === 0) continue;
 
@@ -139,7 +162,12 @@ export function checkImports(srcDir: string): CheckResult {
     for (const { specifier, line } of imports) {
       for (const rule of applicableRules) {
         const isForbidden = rule.forbiddenModules.some(
-          (mod) => specifier === mod || specifier.startsWith(mod + "/"),
+          (mod) =>
+            // Trailing-slash entries are interpreted as namespace prefixes
+            // (e.g., `@opentelemetry/`); bare entries match exact + child.
+            mod.endsWith("/")
+              ? specifier === mod.slice(0, -1) || specifier.startsWith(mod)
+              : specifier === mod || specifier.startsWith(mod + "/"),
         );
         if (isForbidden) {
           violations.push({ file: relPath, line, importSpecifier: specifier });

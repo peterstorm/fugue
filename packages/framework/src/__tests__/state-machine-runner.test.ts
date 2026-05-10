@@ -41,7 +41,6 @@ const simpleMachine: Machine<State, Event, Context> = {
       case "failed": return 0;
     }
   },
-  maxRetries: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -97,7 +96,6 @@ const retryMachine: Machine<RetryState, RetryEvent, RetryContext> = {
       case "failed": return 0;
     }
   },
-  maxRetries: { '{"kind":"running"}': 2 },
 };
 
 // ---------------------------------------------------------------------------

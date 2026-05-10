@@ -1,4 +1,5 @@
 import type { SpanKind } from "./span.js";
+import type { Predicate } from "./dag.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
@@ -65,6 +66,28 @@ export interface RunEndEvent {
   readonly status: "ok" | "error";
 }
 
+export interface RouteDecidedEvent {
+  readonly type: "route-decided";
+  readonly runId: string;
+  readonly dagId: string;
+  readonly fromNodeId: string;
+  readonly chosenTargets: readonly string[];
+  readonly prunedTargets: readonly string[];
+  readonly defaultTaken: boolean;
+  /** The predicate that matched, or `null` when the default fired. Serializable JSON. */
+  readonly matchedPredicate: Predicate<unknown> | null;
+  readonly timestamp: Date;
+}
+
+export interface NodePrunedEvent {
+  readonly type: "node-pruned";
+  readonly runId: string;
+  readonly dagId: string;
+  readonly nodeId: string;
+  readonly reason: "branch-not-taken";
+  readonly timestamp: Date;
+}
+
 export type ObserverEvent =
   | RunStartEvent
   | NodeStartEvent
@@ -72,4 +95,6 @@ export type ObserverEvent =
   | NodeSkippedEvent
   | NodeErrorEvent
   | SubSpanEvent
-  | RunEndEvent;
+  | RunEndEvent
+  | RouteDecidedEvent
+  | NodePrunedEvent;

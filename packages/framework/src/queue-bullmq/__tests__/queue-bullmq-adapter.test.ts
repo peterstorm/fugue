@@ -99,7 +99,6 @@ const testMachine: Machine<S, E, C> = {
   isTerminal: (s) => s.kind === "succeeded" || s.kind === "failed",
   isFailed: (s) => s.kind === "failed",
   stateProgress: (s) => (s.kind === "pending" ? 0 : s.kind === "running" ? 50 : 100),
-  maxRetries: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -713,6 +712,68 @@ describe("adaptBullMQJob — pure unit tests", () => {
 });
 
 // ---------------------------------------------------------------------------
+// adaptBullMQJob — validateData hook
+// ---------------------------------------------------------------------------
+
+describe("adaptBullMQJob — validateData hook", () => {
+  it("invokes validateData on every read of job.data", () => {
+    const calls: unknown[] = [];
+    const stubJob = {
+      id: "j-validate",
+      data: { state: { k: "running" }, context: { v: 1 } },
+      updateData: async () => {},
+      updateProgress: async () => {},
+    } as unknown as import("bullmq").Job<{ state: { k: string }; context: { v: number } }>;
+    const stubRedis = {} as import("ioredis").default;
+
+    const jobLike = adaptBullMQJob<{ k: string }, { v: number }>(
+      stubJob,
+      stubRedis,
+      "q-val",
+      {
+        validateData: (raw) => {
+          calls.push(raw);
+          const r = raw as { state: { k: string }; context: { v: number } };
+          return { ok: true, value: { state: r.state, context: r.context } };
+        },
+      },
+    );
+
+    // Three reads → three validator invocations.
+    void jobLike.data;
+    void jobLike.data;
+    void jobLike.data;
+
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toEqual({ state: { k: "running" }, context: { v: 1 } });
+  });
+
+  it("failing validator surfaces as a thrown error referencing checkpoint-corrupt", () => {
+    const stubJob = {
+      id: "j-corrupt",
+      data: { garbage: true },
+      updateData: async () => {},
+      updateProgress: async () => {},
+    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+    const stubRedis = {} as import("ioredis").default;
+
+    const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-corrupt", {
+      validateData: () => ({
+        ok: false,
+        error: {
+          kind: "checkpoint-corrupt",
+          runId: "j-corrupt",
+          message: "envelope missing state/context",
+        },
+      }),
+    });
+
+    expect(() => jobLike.data).toThrow(/envelope missing state\/context/);
+    expect(() => jobLike.data).toThrow(/q-corrupt/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createRedisStreamReader — pure argument-validation tests (no Redis needed)
 // ---------------------------------------------------------------------------
 
@@ -865,7 +926,6 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
     isTerminal: (s) => s.kind === "done" || s.kind === "failed",
     isFailed: (s) => s.kind === "failed",
     stateProgress: (s) => ({ s0: 0, s1: 25, s2: 50, s3: 75, done: 100, failed: 0 }[s.kind] ?? 0),
-    maxRetries: {},
   };
 
   redisIt(
@@ -1047,7 +1107,6 @@ describe("SC-004: 5-shape replay equivalence", () => {
     isTerminal: (s) => s.kind === "done" || s.kind === "failed" || s.kind === "rejected",
     isFailed: (s) => s.kind === "failed" || s.kind === "rejected",
     stateProgress: () => 0,
-    maxRetries: {},
   };
 
   function assertReplayEquivalence(events: ShapeE[], initial: { state: ShapeS; context: ShapeC }) {
@@ -1167,7 +1226,6 @@ describe("XADD + replayEvents integration via Redis", () => {
       isTerminal: (s) => s.kind === "done",
       isFailed: () => false,
       stateProgress: () => 0,
-      maxRetries: {},
     };
 
     const eventsToWrite: SimpleE[] = [{ type: "START" }, { type: "FINISH" }];
@@ -1229,7 +1287,6 @@ describe("Forensic replay-to-timestamp via Redis Streams", () => {
     isTerminal: (s) => s.kind === "done",
     isFailed: () => false,
     stateProgress: (s) => (s.kind === "done" ? 100 : 0),
-    maxRetries: {},
   };
 
   redisIt(

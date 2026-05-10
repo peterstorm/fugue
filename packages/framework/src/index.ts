@@ -70,7 +70,8 @@ export {
 // Queue-BullMQ adapter (NFR-021)
 // ---------------------------------------------------------------------------
 export { createBullMQBackend } from "./queue-bullmq/adapter.js";
-export { defaultStreamKey } from "./queue-bullmq/job.js";
+export { defaultStreamKey, adaptBullMQJob } from "./queue-bullmq/job.js";
+export type { AdaptBullMQJobOpts } from "./queue-bullmq/job.js";
 export { createRedisMarkerStore } from "./queue-bullmq/markers.js";
 export { createRedisStreamReader } from "./queue-bullmq/event-log.js";
 export type { EventLogReader } from "./queue-bullmq/event-log.js";

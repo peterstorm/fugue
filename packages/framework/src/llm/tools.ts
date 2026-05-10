@@ -46,3 +46,15 @@ export function ensureToolNames(tools: readonly ToolDef<unknown, unknown>[]): vo
     seen.add(tool.name);
   }
 }
+
+/**
+ * Smart constructor for `ToolDef` — validates `name` at construction so
+ * mistakes surface at definition time rather than the first dispatch. The
+ * runtime `ensureToolNames` check at the LLM-loop boundary stays as
+ * defense-in-depth (e.g., for tools assembled programmatically without
+ * going through this constructor).
+ */
+export const tool = <I, O>(def: ToolDef<I, O>): ToolDef<I, O> => {
+  assertValidToolName(def.name);
+  return def;
+};

@@ -7,6 +7,7 @@ import type {
   LlmClient,
   LlmRequest,
   LlmResponse,
+  LlmRuntime,
   SendWithToolsRequest,
 } from "./client.js";
 import type { NodeContext } from "../types/node.js";
@@ -120,6 +121,12 @@ const extractReasoning = (output: readonly any[]): string | undefined => {
   return block.summary.map((s: any) => s.text ?? s).join("\n");
 };
 
+const isAbort = (e: unknown): boolean =>
+  e instanceof Error && e.name === "AbortError";
+
+const resolveNodeId = (req: { readonly nodeId?: string }): string =>
+  req.nodeId ?? "<llm>";
+
 /**
  * OpenAI LLM client using the Responses API (/openai/responses).
  * Works with all models (gpt-4o-mini, gpt-5-mini, gpt-5.2-codex) and
@@ -214,7 +221,7 @@ export class OpenAILlmClient implements LlmClient {
       if (!httpResult.ok) {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: `${httpResult.status} ${httpResult.bodyText}`,
         });
       }
@@ -227,7 +234,7 @@ export class OpenAILlmClient implements LlmClient {
       if (!rawText) {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: "Responses API returned no text output",
         });
       }
@@ -240,7 +247,7 @@ export class OpenAILlmClient implements LlmClient {
       } catch {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: `Response was not valid JSON: ${rawText.slice(0, 200)}`,
         });
       }
@@ -249,7 +256,7 @@ export class OpenAILlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: `Schema validation failed: ${parsed.error.message}`,
         });
       }
@@ -265,9 +272,12 @@ export class OpenAILlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
+      if (isAbort(error)) {
+        return err({ kind: "aborted", reason: "signal" });
+      }
       return err({
         kind: "node-crash",
-        nodeId: req.model,
+        nodeId: resolveNodeId(req),
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
@@ -276,14 +286,16 @@ export class OpenAILlmClient implements LlmClient {
 
   async sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    ctx: NodeContext,
+    runtime: LlmRuntime,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // See AnthropicLlmClient.sendWithTools for the LlmRuntime → NodeContext rationale.
+    const ctx = runtime as NodeContext;
     try {
       ensureToolNames(req.tools);
     } catch (e) {
       return err({
         kind: "validation",
-        nodeId: req.model,
+        nodeId: resolveNodeId(req),
         message: e instanceof Error ? e.message : String(e),
       });
     }
@@ -303,7 +315,7 @@ export class OpenAILlmClient implements LlmClient {
     let lastThinking: string | undefined;
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted) {
+      if (req.signal?.aborted || runtime.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -326,24 +338,37 @@ export class OpenAILlmClient implements LlmClient {
         body.reasoning = { effort: "high", summary: "auto" };
       }
 
-      const httpResult = await withLlmSpan(
-        ctx.tracer ?? null,
-        { provider: "openai", model: req.model, operation: "chat" },
-        async () => {
-          const r = await this.postResponses(body, req.signal);
-          if (r.ok) {
-            const tokensIn = r.response.usage?.input_tokens ?? 0;
-            const tokensOut = r.response.usage?.output_tokens ?? 0;
-            setLlmUsageAttributes(tokensIn, tokensOut);
-          }
-          return r;
-        },
-      );
+      let httpResult: Awaited<ReturnType<typeof this.postResponses>>;
+      try {
+        httpResult = await withLlmSpan(
+          runtime.tracer ?? null,
+          { provider: "openai", model: req.model, operation: "chat" },
+          async () => {
+            const r = await this.postResponses(body, req.signal ?? runtime.signal);
+            if (r.ok) {
+              const tokensIn = r.response.usage?.input_tokens ?? 0;
+              const tokensOut = r.response.usage?.output_tokens ?? 0;
+              setLlmUsageAttributes(tokensIn, tokensOut);
+            }
+            return r;
+          },
+        );
+      } catch (error) {
+        if (isAbort(error)) {
+          return err({ kind: "aborted", reason: "signal" });
+        }
+        return err({
+          kind: "node-crash",
+          nodeId: resolveNodeId(req),
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+      }
 
       if (!httpResult.ok) {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: `${httpResult.status} ${httpResult.bodyText}`,
         });
       }
@@ -365,7 +390,7 @@ export class OpenAILlmClient implements LlmClient {
         if (!text) {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: resolveNodeId(req),
             message: "OpenAI final turn had no text output",
           });
         }
@@ -375,7 +400,7 @@ export class OpenAILlmClient implements LlmClient {
         } catch {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: resolveNodeId(req),
             message: `Final response was not valid JSON: ${text.slice(0, 200)}`,
           });
         }
@@ -383,7 +408,7 @@ export class OpenAILlmClient implements LlmClient {
         if (!validated.success) {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: resolveNodeId(req),
             message: `Schema validation failed: ${validated.error.message}`,
           });
         }
@@ -402,6 +427,7 @@ export class OpenAILlmClient implements LlmClient {
 
     return err({
       kind: "transient",
+      nodeId: resolveNodeId(req),
       message: `Tool-call iteration limit (${maxIterations}) reached`,
     });
   }

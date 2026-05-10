@@ -7,6 +7,7 @@ import type { SynthesisOutput } from "../schemas/summary.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
 import { join } from "node:path";
+import { defineDag, defineDagFromArray } from "@ai-summary/framework";
 
 const FIXTURES_DIR = join(import.meta.dir, "../../fixtures/customers");
 
@@ -218,60 +219,56 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
     const log: string[] = [];
     const { observer, events } = collectingObserver();
 
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "resume-3node",
-      nodes: [
+      nodes: ([
         createTransformNode({
           id: "N1",
           inputSchema: z.object({ v: z.number() }),
           outputSchema: z.object({ v: z.number() }),
-          deps: [],
           transform: (i: { v: number }) => { log.push("N1"); return ok({ v: i.v + 1 }); },
         }),
         createTransformNode({
           id: "N2",
           inputSchema: z.object({ v: z.number() }),
           outputSchema: z.object({ v: z.number() }),
-          deps: ["N1"],
           transform: (i: { v: number }) => { log.push("N2"); return ok({ v: i.v * 10 }); },
         }),
         createTransformNode({
           id: "N3",
           inputSchema: z.object({ v: z.number() }),
           outputSchema: z.object({ v: z.number() }),
-          deps: ["N2"],
           transform: (i: { v: number }) => { log.push("N3"); return ok({ v: i.v + 100 }); },
         }),
-      ],
+      ]),
       edges: [
         { from: "N1", to: "N2" },
         { from: "N2", to: "N3" },
       ],
-    };
+    });
 
     // --- First run: N1 + N2 succeed, N3 fails ---
-    const failDag: DagDef = {
+    const failDag = defineDagFromArray({
       ...dag,
-      nodes: [
+      nodes: ([
         dag.nodes[0],
         dag.nodes[1],
         createTransformNode({
           id: "N3",
           inputSchema: z.object({ v: z.number() }),
           outputSchema: z.object({ v: z.number() }),
-          deps: ["N2"],
           transform: (_i: { v: number }) => {
             log.push("N3-fail");
             return err({ kind: "node-crash" as const, nodeId: "N3", message: "transient failure" });
           },
         }),
-      ],
-    };
+      ]),
+    });
 
     const checkpoints: Map<string, unknown> = new Map();
     const cache = {
       get: async (_key: string) => null,
-      set: async (_key: string, _value: unknown) => {},
+      set: async (_key: string, _value: unknown) => ok(undefined),
       writeCheckpoint: async (_runId: string, nodeId: string, output: unknown) => {
         checkpoints.set(nodeId, output);
       },

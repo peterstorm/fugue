@@ -57,7 +57,6 @@ export const createGroundingGuardrailNode = () =>
     id: "grounding-guardrail",
     inputSchema: InputSchema as z.ZodType<GroundingInput>,
     outputSchema: OutputSchema,
-    deps: ["synthesize", "fetch-crm"],
     validate: (input): GuardrailResult<SynthesisOutput> => {
       const synthesis = input["synthesize"];
       const customer = input["fetch-crm"]?.customer;

@@ -31,7 +31,7 @@ export const runEvalJudges = async (
         async (span) => {
           try {
             const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
-            const includeContent = process.env.LLM_TRACE_PROMPTS === "true" || process.env.LLM_TRACE_PROMPTS === "1";
+            const includeContent = ctx.includeContent ?? false;
             span.addEvent(EVENT_NODE_INPUT, includeContent
               ? { data: JSON.stringify({ ...judgeInput, criteria: judge.config.criteria }) }
               : { data_redacted: "true", criteria: JSON.stringify(judge.config.criteria) });

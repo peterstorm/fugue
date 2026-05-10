@@ -7,7 +7,8 @@ import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createInMemoryJob } from "../state-machine/in-memory-job.js";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
-import type { DagDef } from "../types/dag.js";
+import { defineDag } from "../executor/define-dag.js";
+import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { HumanAction } from "../dag-runtime/types.js";
@@ -27,7 +28,6 @@ const makeNode = (
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
-  deps: [],
   run: noop as any,
   ...overrides,
 });
@@ -42,12 +42,31 @@ const makeCtx = (): NodeContext => ({
   logger: null,
 });
 
-const makeDag = (overrides: Partial<DagDef> = {}): DagDef => ({
-  id: "test-dag",
-  nodes: [],
-  edges: [],
-  ...overrides,
-});
+interface MakeDagOverrides {
+  readonly id?: string;
+  readonly nodes?: readonly NodeDef<unknown, unknown, unknown>[];
+  readonly edges?: readonly EdgeDef[];
+  readonly outputNodeId?: string;
+  readonly retryLimits?: Readonly<Record<string, number>>;
+  readonly defaultRetryLimit?: number;
+  readonly evalJudges?: DagDef["evalJudges"];
+}
+
+// Test helper: accepts the array form (legacy ergonomics) and converts to
+// the record form `defineDag` expects. Every constructed DAG passes through
+// validateDagShape so test setup errors surface at the `makeDag(...)` line.
+const makeDag = (overrides: MakeDagOverrides = {}): DagDef => {
+  const nodes = overrides.nodes ?? [];
+  return defineDag({
+    id: overrides.id ?? "test-dag",
+    nodes: Object.fromEntries(nodes.map((n) => [n.id, n])),
+    edges: overrides.edges ?? [],
+    outputNodeId: overrides.outputNodeId,
+    evalJudges: overrides.evalJudges,
+    retryLimits: overrides.retryLimits,
+    defaultRetryLimit: overrides.defaultRetryLimit,
+  });
+};
 
 // ---------------------------------------------------------------------------
 // 1. Linear DAG: A -> B -> C
@@ -61,11 +80,9 @@ describe("runDagStateful — linear DAG", () => {
           run: async () => ok("a-out"),
         }),
         makeNode("b", {
-          deps: ["a"],
           run: async (input) => ok(`b-received-${input}`),
         }),
         makeNode("c", {
-          deps: ["b"],
           run: async (input) => ok(`c-received-${input}`),
         }),
       ],
@@ -86,7 +103,7 @@ describe("runDagStateful — linear DAG", () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", { run: async () => ok("a-out") }),
-        makeNode("b", { deps: ["a"], run: async () => ok("b-out") }),
+        makeNode("b", { run: async () => ok("b-out") }),
       ],
       edges: [{ from: "a", to: "b" }],
       outputNodeId: "a",
@@ -112,14 +129,12 @@ describe("runDagStateful — fan-out DAG", () => {
       nodes: [
         makeNode("a", { run: async () => ok("a-out") }),
         makeNode("b", {
-          deps: ["a"],
           run: async (input) => {
             calls.push("b");
             return ok(`b-from-${input}`);
           },
         }),
         makeNode("c", {
-          deps: ["a"],
           run: async (input) => {
             calls.push("c");
             return ok(`c-from-${input}`);
@@ -153,7 +168,6 @@ describe("runDagStateful — fan-in DAG", () => {
         makeNode("a", { run: async () => ok("a-out") }),
         makeNode("b", { run: async () => ok("b-out") }),
         makeNode("c", {
-          deps: ["a", "b"],
           run: async (input) => {
             cInput = input;
             return ok("c-out");
@@ -183,10 +197,9 @@ describe("runDagStateful — diamond DAG", () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", { run: async () => { order.push("a"); return ok("a"); } }),
-        makeNode("b", { deps: ["a"], run: async () => { order.push("b"); return ok("b"); } }),
-        makeNode("c", { deps: ["a"], run: async () => { order.push("c"); return ok("c"); } }),
+        makeNode("b", { run: async () => { order.push("b"); return ok("b"); } }),
+        makeNode("c", { run: async () => { order.push("c"); return ok("c"); } }),
         makeNode("d", {
-          deps: ["b", "c"],
           run: async (input) => { order.push("d"); return ok("d-out"); },
         }),
       ],
@@ -433,7 +446,6 @@ describe("runDagStateful — HITL reroute-back", () => {
           },
         }),
         makeNode("b", {
-          deps: ["a"],
           humanReview: { prompt: "Review B output" },
           run: async () => {
             runCounts["b"]!++;
@@ -514,6 +526,44 @@ describe("runDagStateful — abort", () => {
         expect(result.error.reason).toBe("user cancelled");
       }
     }
+  });
+
+  it("aborting mid-run cancels the in-flight node and resolves Err(aborted)", async () => {
+    const controller = new AbortController();
+    let observedSignalAborted = false;
+    const slowNode: NodeDef<unknown, unknown, FrameworkError> = {
+      id: "slow",
+      kind: "transform",
+      inputSchema: z.unknown(),
+      outputSchema: z.unknown(),
+      run: async (_input, ctx) => {
+        const start = Date.now();
+        // Bound the loop to keep the test fast even if the signal never fires.
+        while (Date.now() - start < 5000) {
+          if (ctx.signal?.aborted) {
+            observedSignalAborted = true;
+            return err({ kind: "aborted" as const, reason: "signal" });
+          }
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return ok(undefined);
+      },
+    };
+
+    const dag = makeDag({ nodes: [slowNode as NodeDef<unknown, unknown, unknown>], edges: [] });
+
+    const ctx: NodeContext = { ...makeCtx(), signal: controller.signal };
+
+    setTimeout(() => controller.abort(), 50);
+    const result = await runDagStateful(dag, undefined, ctx);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // The classifier may wrap aborted in retry-exhausted depending on retry budget;
+      // accept either since both encode the cancellation.
+      expect(["aborted", "retry-exhausted"]).toContain(result.error.kind);
+    }
+    expect(observedSignalAborted).toBe(true);
   });
 
   it("node throw produces err(retry-exhausted) — executor wraps throw as node-failed", async () => {
@@ -645,7 +695,7 @@ describe("runDagStateful — observer events", () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", { run: async () => ok("a-out") }),
-        makeNode("b", { deps: ["a"], run: async () => ok("b-out") }),
+        makeNode("b", { run: async () => ok("b-out") }),
       ],
       edges: [{ from: "a", to: "b" }],
     });
@@ -667,7 +717,7 @@ describe("runDagStateful — durable job checkpointing", () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", { run: async () => ok("a-out") }),
-        makeNode("b", { deps: ["a"], run: async () => ok("b-out") }),
+        makeNode("b", { run: async () => ok("b-out") }),
       ],
       edges: [{ from: "a", to: "b" }],
     });
@@ -757,7 +807,7 @@ describe("runDagStateful — sequential human reviews (FR-028)", () => {
 describe("runDagStateful — cycle detection", () => {
   it("cyclic DAG returns FrameworkError without throwing", async () => {
     const dag = makeDag({
-      nodes: [makeNode("a", { deps: ["b"] }), makeNode("b", { deps: ["a"] })],
+      nodes: [makeNode("a"), makeNode("b")],
       edges: [
         { from: "a", to: "b" },
         { from: "b", to: "a" },
@@ -777,7 +827,7 @@ describe("runDagStateful — cycle detection", () => {
     const ctx = { ...makeCtx(), observer };
 
     const dag = makeDag({
-      nodes: [makeNode("a", { deps: ["b"] }), makeNode("b", { deps: ["a"] })],
+      nodes: [makeNode("a"), makeNode("b")],
       edges: [
         { from: "a", to: "b" },
         { from: "b", to: "a" },
@@ -814,7 +864,6 @@ describe("runDagStateful — per-node retry limits", () => {
           },
         }),
         makeNode("b", {
-          deps: ["a"],
           retry: { backoffMs: [0], jitterRatio: 0 },
           run: async () => {
             bAttempts++;

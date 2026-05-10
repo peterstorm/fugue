@@ -7,7 +7,6 @@ export interface Machine<S, E, C> {
   /** Distinct from isTerminal — needed for don't-checkpoint-failed invariant (FR-005) */
   readonly isFailed: (state: S) => boolean;
   readonly stateProgress: (state: S) => number; // 0..100
-  readonly maxRetries: Readonly<Record<string, number>>;
 }
 
 // FR-002: Side-effect dispatcher — returns an event, not a state
@@ -18,7 +17,16 @@ export interface JobLike<S, C> {
   readonly data: { state: S; context: C };
   updateData(d: { state: S; context: C }): Promise<void>;
   updateProgress(pct: number): Promise<void>;
-  appendEvent(event: unknown): Promise<void>;
+  /**
+   * Append an event to the durable log.
+   *
+   * `dedupKey` (optional) — when supplied, the adapter MUST guarantee that a
+   * second call with the same key is a no-op for this job's stream. Used by
+   * the runner to make appendEvent idempotent under worker crashes between
+   * `appendEvent` and `updateData`. Adapters that don't support dedup ignore
+   * the key and accept a small at-least-once window.
+   */
+  appendEvent(event: unknown, dedupKey?: string): Promise<void>;
 }
 
 /**

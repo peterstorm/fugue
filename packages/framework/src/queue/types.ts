@@ -64,6 +64,13 @@ export interface QueueBackend {
     process: (job: JobLike<S, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle;
+  /**
+   * Shut the backend down — closes every queue/worker created by this backend
+   * and disconnects the shared Redis client (BullMQ). Idempotent: calling
+   * `close()` more than once resolves without error. Call from SIGTERM/SIGINT
+   * handlers in long-lived processes to free connections cleanly.
+   */
+  close(): Promise<void>;
 }
 
 // FR-041: Runtime handles

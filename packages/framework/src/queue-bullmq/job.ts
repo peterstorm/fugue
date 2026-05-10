@@ -5,9 +5,26 @@ import type { Job } from "bullmq";
 import type Redis from "ioredis";
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 import type { EventLogOpts } from "../queue/types.js";
+import type { Result } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
 import { serializeValue, deserializeValue } from "../state-machine/serialize.js";
 
 const DEFAULT_MAX_LEN = 10000;
+
+/**
+ * Options for `adaptBullMQJob` — the existing `EventLogOpts` is extended with a
+ * data validator so the adapter remains a single-arg call (additive change).
+ *
+ * Without `validateData`, the adapter trusts that whoever wrote `bullJob.data`
+ * produced a `{ state, context }` envelope; a corrupted or schema-drifted
+ * payload surfaces only when the consumer misinterprets it. Supplying a
+ * validator surfaces drift at the read boundary as `checkpoint-corrupt`.
+ */
+export type AdaptBullMQJobOpts = EventLogOpts & {
+  readonly validateData?: (
+    raw: unknown,
+  ) => Result<{ state: unknown; context: unknown }, FrameworkError>;
+};
 
 /**
  * Returns the Redis Stream key for a given queue + job.
@@ -30,7 +47,7 @@ export function adaptBullMQJob<S, C>(
   bullJob: Job<{ state: S; context: C }>,
   redis: Redis,
   queueName: string,
-  opts?: EventLogOpts,
+  opts?: AdaptBullMQJobOpts,
 ): JobLike<S, C> {
   if (!bullJob.id) {
     throw new Error(
@@ -43,12 +60,24 @@ export function adaptBullMQJob<S, C>(
   const streamKeyFn = opts?.streamKey ?? defaultStreamKey;
   const streamKey = streamKeyFn(queueName, bullJob.id);
   const now = opts?.now ?? Date.now;
+  const validateData = opts?.validateData;
 
   return {
     get data(): { state: S; context: C } {
       // BullMQ stores the value enqueued/written via updateData. We tag Map/Set
       // on write (serializeValue), so reading must invert that tagging.
-      return deserializeValue(bullJob.data) as { state: S; context: C };
+      const raw = deserializeValue(bullJob.data);
+      if (validateData) {
+        const result = validateData(raw);
+        if (!result.ok) {
+          throw new Error(
+            `[adaptBullMQJob] data validation failed for queue "${queueName}" job "${bullJob.id}": ${result.error.kind === "checkpoint-corrupt" ? result.error.message : String(result.error)}`,
+            { cause: result.error },
+          );
+        }
+        return result.value as { state: S; context: C };
+      }
+      return raw as { state: S; context: C };
     },
 
     async updateData(d: { state: S; context: C }): Promise<void> {
@@ -73,8 +102,9 @@ export function adaptBullMQJob<S, C>(
       }
     },
 
-    async appendEvent(event: unknown): Promise<void> {
-      // XADD events:{queueName}:{jobId} MAXLEN ~ <maxLen> ${recordedAtMs}-* type <type> payload <json>
+    async appendEvent(event: unknown, dedupKey?: string): Promise<void> {
+      // XADD events:{queueName}:{jobId} MAXLEN ~ <maxLen> ${recordedAtMs}-*
+      //   type <type> payload <json> [dedupKey <key>]
       const eventObj = event as Record<string, unknown>;
       const type = typeof eventObj?.type === "string" ? eventObj.type : "event";
       // Wrap the event in a RecordedEvent envelope so wall-clock time is
@@ -92,30 +122,33 @@ export function adaptBullMQJob<S, C>(
       const id = `${recordedAtMs}-*`;
 
       try {
-        if (approximate) {
-          await redis.xadd(
-            streamKey,
-            "MAXLEN",
-            "~",
-            maxLen,
-            id,
-            "type",
-            type,
-            "payload",
-            payload,
-          );
-        } else {
-          await redis.xadd(
-            streamKey,
-            "MAXLEN",
-            maxLen,
-            id,
-            "type",
-            type,
-            "payload",
-            payload,
-          );
+        // Idempotency: if a dedupKey is supplied, look at the most recent
+        // stream entry and skip the XADD when its `dedupKey` field matches.
+        // BullMQ holds the per-job lock during processing, so this two-step
+        // check-then-write is race-free relative to other workers on the
+        // same job.
+        if (dedupKey !== undefined) {
+          const last = (await redis.xrevrange(streamKey, "+", "-", "COUNT", 1)) as
+            | Array<[string, string[]]>
+            | null;
+          if (last && last.length > 0) {
+            const fields = last[0][1];
+            for (let i = 0; i < fields.length; i += 2) {
+              if (fields[i] === "dedupKey" && fields[i + 1] === dedupKey) {
+                return; // Already appended for this transition; no-op.
+              }
+            }
+          }
         }
+
+        const args: (string | number)[] = approximate
+          ? [streamKey, "MAXLEN", "~", maxLen, id, "type", type, "payload", payload]
+          : [streamKey, "MAXLEN", maxLen, id, "type", type, "payload", payload];
+        if (dedupKey !== undefined) {
+          args.push("dedupKey", dedupKey);
+        }
+        // ioredis types are weak around xadd's variadic shape; cast at the call site.
+        await (redis.xadd as unknown as (...a: (string | number)[]) => Promise<unknown>)(...args);
       } catch (err) {
         throw new Error(
           `[BullMQ] appendEvent failed for queue "${queueName}" job "${bullJob.id}" stream "${streamKey}": ${err instanceof Error ? err.message : String(err)}`,

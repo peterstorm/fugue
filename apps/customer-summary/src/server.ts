@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { runDag, dagFingerprint, FRAMEWORK_VERSION } from "@ai-summary/framework";
-import type { NodeContext, LlmClient, Observer, Checkpointer } from "@ai-summary/framework";
+import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter } from "@ai-summary/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
 import { createSummaryDag } from "./dag/summary-dag.js";
@@ -22,11 +22,7 @@ export interface HealthDeps {
 }
 
 /** Simplified cache adapter for NodeContext — wraps Cache + Checkpointer */
-export interface ContextCache {
-  readonly get: (key: string) => Promise<unknown | null>;
-  readonly set: (key: string, value: unknown) => Promise<void>;
-  readonly writeCheckpoint?: (runId: string, nodeId: string, value: unknown) => Promise<void>;
-}
+export type ContextCache = ContextCacheAdapter;
 
 // --- App dependencies ---
 
@@ -41,6 +37,8 @@ export interface AppDeps {
   readonly observer?: Observer | null;
   readonly cache?: ContextCache | null;
   readonly checkpointer?: Checkpointer | null;
+  /** Bootstrap-seeded flag controlling whether prompt/output bodies are included in trace events. */
+  readonly includeContent?: boolean;
 }
 
 // --- Create Hono app ---
@@ -77,6 +75,7 @@ export const createApp = (deps: AppDeps): Hono => {
         model: deps.model,
         judgeModel: deps.judgeModel,
         thinking: deps.thinking,
+        synthesisSystemPrompt: deps.prompts?.get("synthesis-system"),
       });
       const runId = resume_run_id ?? randomUUID();
       const fingerprint = dagFingerprint(dag);
@@ -157,6 +156,7 @@ export const createApp = (deps: AppDeps): Hono => {
         llm: deps.llm,
         judgeLlm: deps.llm,
         signal: abortController.signal,
+        includeContent: deps.includeContent ?? false,
       };
 
       let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;

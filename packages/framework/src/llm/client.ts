@@ -1,16 +1,37 @@
 import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeContext } from "../types/node.js";
+import type { Tracer } from "../tracing/tracer.js";
 import type { ToolDef } from "./tools.js";
+
+/**
+ * Per-call runtime threaded into `LlmClient.sendWithTools`. Carries the OTel
+ * tracer + cancellation signal without forcing the client to depend on the
+ * full `NodeContext` (which would create a `types/node.ts ↔ llm/client.ts`
+ * import cycle).
+ */
+export interface LlmRuntime {
+  readonly tracer?: Tracer | null;
+  readonly signal?: AbortSignal;
+}
 
 export interface LlmRequest<O> {
   readonly system: string;
   readonly user: string;
   readonly model: string;
   readonly schema: z.ZodType<O>;
+  /**
+   * Anthropic ignores this in `sendStructured` (extended thinking requires
+   * streaming, not yet implemented). OpenAI maps it to `reasoning.effort: "high"`.
+   */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   readonly signal?: AbortSignal;
+  /**
+   * DAG node identifier for error reporting. When omitted, errors carry
+   * `"<llm>"` as nodeId. Pass the calling node's `id` so failures attribute
+   * to the right place in the DAG.
+   */
+  readonly nodeId?: string;
 }
 
 export interface LlmResponse<O> {
@@ -45,12 +66,18 @@ export interface SendWithToolsRequest<O> {
    * `any` forces a tool call on the first turn; `none` disables tools.
    */
   readonly toolChoice?: "auto" | "any" | "none";
+  /**
+   * DAG node identifier for error reporting. When omitted, errors carry
+   * `"<llm>"` as nodeId. Pass the calling node's `id` so failures attribute
+   * to the right place in the DAG.
+   */
+  readonly nodeId?: string;
 }
 
 export interface LlmClient {
   sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>>;
   sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    ctx: NodeContext,
+    runtime: LlmRuntime,
   ): Promise<Result<LlmResponse<O>, FrameworkError>>;
 }

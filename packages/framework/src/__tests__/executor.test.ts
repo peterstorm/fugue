@@ -9,6 +9,7 @@ import { topoSort } from "../executor/topo.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { RecordingObserver, NoopObserver } from "../observer/observer.js";
+import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 
 const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run",
@@ -23,18 +24,18 @@ const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
 
 describe("topoSort", () => {
   it("sorts linear DAG into sequential waves", () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "linear",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), deps: ["A"], transform: (i) => ok(i) }),
-        createTransformNode({ id: "C", inputSchema: z.any(), outputSchema: z.any(), deps: ["B"], transform: (i) => ok(i) }),
+        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: "C", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "B" },
         { from: "B", to: "C" },
       ],
-    };
+    });
     const result = topoSort(dag);
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -43,18 +44,18 @@ describe("topoSort", () => {
   });
 
   it("parallel DAG has A and B in same wave", () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "parallel",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: (i) => ok(i) }),
-        createTransformNode({ id: "C", inputSchema: z.any(), outputSchema: z.any(), deps: ["A", "B"], transform: (i) => ok(i) }),
+        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: "C", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "C" },
         { from: "B", to: "C" },
       ],
-    };
+    });
     const result = topoSort(dag);
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -64,17 +65,17 @@ describe("topoSort", () => {
   });
 
   it("detects cycles", () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "cycle",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), deps: ["B"], transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), deps: ["A"], transform: (i) => ok(i) }),
+        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "B" },
         { from: "B", to: "A" },
       ],
-    };
+    });
     const result = topoSort(dag);
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -86,36 +87,33 @@ describe("topoSort", () => {
 describe("runDag", () => {
   it("linear DAG (A→B→C) runs in order", async () => {
     const log: string[] = [];
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "linear",
-      nodes: [
+      nodes: ([
         createTransformNode({
           id: "A",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: [],
           transform: (i: { value: number }) => { log.push("A"); return ok({ value: i.value + 1 }); },
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: ["A"],
           transform: (i: { value: number }) => { log.push("B"); return ok({ value: i.value * 2 }); },
         }),
         createTransformNode({
           id: "C",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: ["B"],
           transform: (i: { value: number }) => { log.push("C"); return ok({ value: i.value + 10 }); },
         }),
-      ],
+      ]),
       edges: [
         { from: "A", to: "B" },
         { from: "B", to: "C" },
       ],
-    };
+    });
 
     const result = await runDag(dag, { value: 1 }, mkCtx());
     expect(result.ok).toBe(true);
@@ -126,19 +124,18 @@ describe("runDag", () => {
   });
 
   it("input validation failure returns Err(validation)", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "val",
-      nodes: [
+      nodes: ([
         createTransformNode({
           id: "A",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.any(),
-          deps: [],
           transform: (i) => ok(i),
         }),
-      ],
+      ]),
       edges: [],
-    };
+    });
     const result = await runDag(dag, { value: "not a number" }, mkCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -147,19 +144,18 @@ describe("runDag", () => {
   });
 
   it("output validation failure returns Err(validation)", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "val",
       nodes: [
         createTransformNode({
           id: "A",
           inputSchema: z.any(),
           outputSchema: z.object({ value: z.number() }),
-          deps: [],
           transform: (_i) => ok({ value: "wrong" } as any),
         }),
       ],
       edges: [],
-    };
+    });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -169,26 +165,24 @@ describe("runDag", () => {
 
   it("node returning Err stops execution", async () => {
     const log: string[] = [];
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "err",
       nodes: [
         createTransformNode({
           id: "A",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: [],
           transform: (_i) => { log.push("A"); return err({ kind: "node-crash" as const, nodeId: "A", message: "boom" }); },
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: ["A"],
           transform: (i) => { log.push("B"); return ok(i); },
         }),
       ],
       edges: [{ from: "A", to: "B" }],
-    };
+    });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
     expect(log).toEqual(["A"]);
@@ -197,36 +191,33 @@ describe("runDag", () => {
   it("resume skips checkpointed nodes and re-runs failed node", async () => {
     const log: string[] = [];
 
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "resume-test",
-      nodes: [
+      nodes: ([
         createTransformNode({
           id: "A",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: [],
           transform: (i: { value: number }) => { log.push("A"); return ok({ value: i.value + 1 }); },
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: ["A"],
           transform: (i: { value: number }) => { log.push("B"); return ok({ value: i.value * 2 }); },
         }),
         createTransformNode({
           id: "C",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: ["B"],
           transform: (i: { value: number }) => { log.push("C"); return ok({ value: i.value + 10 }); },
         }),
-      ],
+      ]),
       edges: [
         { from: "A", to: "B" },
         { from: "B", to: "C" },
       ],
-    };
+    });
 
     // Simulate: A and B completed, C failed. Resume with checkpoint for A and B.
     const checkpoint = new Map<string, unknown>([
@@ -271,7 +262,7 @@ describe("runDag", () => {
     // last-wave case, straight back to the caller).
     const log: string[] = [];
 
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "schema-evolved",
       nodes: [
         createTransformNode({
@@ -279,12 +270,11 @@ describe("runDag", () => {
           inputSchema: z.unknown(),
           // Current schema requires `value: number` AND a new field `version: 2`.
           outputSchema: z.object({ value: z.number(), version: z.literal(2) }),
-          deps: [],
           transform: () => { log.push("A"); return ok({ value: 1, version: 2 as const }); },
         }),
       ],
       edges: [],
-    };
+    });
 
     // Old checkpoint persisted under previous schema (no `version` field).
     const stale = new Map<string, unknown>([["A", { value: 99 }]]);
@@ -312,26 +302,24 @@ describe("runDag", () => {
   });
 
   it("observability: full run emits correct event sequence", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "obs-test",
-      nodes: [
+      nodes: ([
         createTransformNode({
           id: "A",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: [],
           transform: (i: { value: number }) => ok({ value: i.value + 1 }),
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: ["A"],
           transform: (i: { value: number }) => ok({ value: i.value * 2 }),
         }),
-      ],
+      ]),
       edges: [{ from: "A", to: "B" }],
-    };
+    });
 
     const observer = new RecordingObserver();
     const ctx = mkCtx({ observer, runId: "obs-run-1", dagId: "obs-test" });
@@ -358,26 +346,24 @@ describe("runDag", () => {
   });
 
   it("observability: failed run emits run-end with error status", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "err-obs",
       nodes: [
         createTransformNode({
           id: "A",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: [],
           transform: (_i) => ok({ v: 1 }),
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: ["A"],
           transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B", message: "boom" }),
         }),
       ],
       edges: [{ from: "A", to: "B" }],
-    };
+    });
 
     const observer = new RecordingObserver();
     const ctx = mkCtx({ observer, runId: "err-run", dagId: "err-obs" });
@@ -391,30 +377,28 @@ describe("runDag", () => {
 
   it("checkpointer: writeCheckpoint called for each successful node", async () => {
     const checkpoints: Array<{ runId: string; nodeId: string; output: unknown }> = [];
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "ckpt-test",
-      nodes: [
+      nodes: ([
         createTransformNode({
           id: "A",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: [],
           transform: (i: { value: number }) => ok({ value: i.value + 1 }),
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
-          deps: ["A"],
           transform: (i: { value: number }) => ok({ value: i.value * 2 }),
         }),
-      ],
+      ]),
       edges: [{ from: "A", to: "B" }],
-    };
+    });
 
     const cache = {
       get: async () => null,
-      set: async () => {},
+      set: async () => ok(undefined),
       writeCheckpoint: async (runId: string, nodeId: string, output: unknown) => {
         checkpoints.push({ runId, nodeId, output });
       },
@@ -430,17 +414,17 @@ describe("runDag", () => {
   });
 
   it("cycle detection returns Err(cycle-detected)", async () => {
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "cycle",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), deps: ["B"], transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), deps: ["A"], transform: (i) => ok(i) }),
+        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "B" },
         { from: "B", to: "A" },
       ],
-    };
+    });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -455,7 +439,6 @@ describe("runDag", () => {
       id: "guard",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      deps: ["source"],
       validate: (input: any) => ({
         kind: "validated" as const,
         value: input,
@@ -465,16 +448,15 @@ describe("runDag", () => {
       }),
     });
 
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "guardrail-test",
       nodes: [
-        createTransformNode({ id: "source", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: () => ok({ data: 42 }) }),
+        createTransformNode({ id: "source", inputSchema: z.any(), outputSchema: z.any(), transform: () => ok({ data: 42 }) }),
         guardrail,
         createTransformNode({
           id: "consumer",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: ["guard"],
           transform: (input: any) => ok({ received: input.passed, value: input.value }),
         }),
       ],
@@ -482,7 +464,7 @@ describe("runDag", () => {
         { from: "source", to: "guard" },
         { from: "guard", to: "consumer" },
       ],
-    };
+    });
 
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(true);
@@ -495,16 +477,16 @@ describe("runDag", () => {
   it("checkpoint write failure does not crash DAG execution", async () => {
     const failingCache = {
       get: async () => null,
-      set: async () => {},
+      set: async () => ok(undefined),
       writeCheckpoint: async () => { throw new Error("Redis timeout"); },
     };
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "checkpoint-fail",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), deps: [], transform: () => ok(42) }),
+        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: () => ok(42) }),
       ],
       edges: [],
-    };
+    });
     const result = await runDag(dag, {}, mkCtx({ cache: failingCache }));
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -518,19 +500,19 @@ describe("runDag", () => {
 // ---------------------------------------------------------------------------
 
 describe("runDag routing (T6 back-compat shim)", () => {
-  const mkSimpleDag = (id = "simple"): DagDef => ({
-    id,
-    nodes: [
-      createTransformNode({
-        id: "A",
-        inputSchema: z.any(),
-        outputSchema: z.any(),
-        deps: [],
-        transform: (i) => ok(i),
-      }),
-    ],
-    edges: [],
-  });
+  const mkSimpleDag = (id = "simple"): DagDef =>
+    defineDagFromArray({
+      id,
+      nodes: [
+        createTransformNode({
+          id: "A",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [],
+    });
 
   it("resume + jobLike returns err(node-crash) — not throw", async () => {
     const dag = mkSimpleDag("resume-jl");
@@ -555,26 +537,24 @@ describe("runDag routing (T6 back-compat shim)", () => {
 
   it("resume-only routes to legacy path (not state-machine)", async () => {
     const log: string[] = [];
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "legacy-resume",
       nodes: [
         createTransformNode({
           id: "A",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: [],
           transform: (_i) => { log.push("A"); return ok(42); },
         }),
         createTransformNode({
           id: "B",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          deps: ["A"],
           transform: (i) => { log.push("B"); return ok(i); },
         }),
       ],
       edges: [{ from: "A", to: "B" }],
-    };
+    });
     // A is in checkpoint, B is not — legacy path skips A and runs B
     const checkpoint = new Map<string, unknown>([["A", 10]]);
     const result = await runDag(dag, {}, mkCtx(), {
@@ -598,19 +578,21 @@ describe("runDag routing (T6 back-compat shim)", () => {
 
   // Shared: a DAG with a single humanReview node, used to exercise the new
   // node-config-driven routing and validation rules.
-  const mkHitlDag = (id: string): DagDef => ({
-    id,
-    nodes: [{
-      id: "reviewed",
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-      deps: [],
-      run: async (_input, _ctx) => ok({ result: "needs-review" }),
-      humanReview: { prompt: "Please review" },
-    }] as readonly NodeDef<unknown, unknown, unknown>[],
-    edges: [],
-  });
+  const mkHitlDag = (id: string): DagDef =>
+    defineDagFromArray({
+      id,
+      nodes: [
+        {
+          id: "reviewed",
+          kind: "transform",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          run: async (_input, _ctx) => ok({ result: "needs-review" }),
+          humanReview: { prompt: "Please review" },
+        } as NodeDef<unknown, unknown, unknown>,
+      ],
+      edges: [],
+    });
 
   const noopReview = async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> =>
     ({ action: "approve" });
@@ -710,7 +692,6 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      deps: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
@@ -720,12 +701,12 @@ describe("runDag routing (T6 back-compat shim)", () => {
       },
       retry: { backoffMs: [1] },
     };
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "default-retry-dag",
       nodes: [flakyNode],
       edges: [],
       defaultRetryLimit: 2,
-    };
+    });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(true);
     expect(callCount).toBe(2);
@@ -738,7 +719,6 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      deps: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
@@ -748,12 +728,12 @@ describe("runDag routing (T6 back-compat shim)", () => {
       },
       retry: { backoffMs: [1] },
     };
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "retry-limits-dag",
       nodes: [flakyNode],
       edges: [],
       retryLimits: { flaky: 2 },
-    };
+    });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(true);
     expect(callCount).toBe(2);
@@ -767,18 +747,17 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      deps: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         return err({ kind: "node-crash" as const, nodeId: "flaky", message: "fail" });
       },
     };
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "empty-retry-limits-dag",
       nodes: [flakyNode],
       edges: [],
       retryLimits: {},
-    };
+    });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
     // Legacy path = single attempt, no retry
@@ -792,7 +771,6 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      deps: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 3) {
@@ -802,11 +780,11 @@ describe("runDag routing (T6 back-compat shim)", () => {
       },
       retry: { backoffMs: [1, 1, 1] },
     };
-    const dag: DagDef = {
+    const dag = defineDagFromArray({
       id: "retry-dag",
       nodes: [flakyNode],
       edges: [],
-    };
+    });
 
     const result = await runDag(dag, {}, mkCtx(), {
       retryLimits: { flaky: 3 },

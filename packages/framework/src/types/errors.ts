@@ -5,6 +5,7 @@ export type FrameworkError =
   | { readonly kind: "retry-exhausted"; readonly nodeId: string; readonly attempts: number; readonly lastError: string }
   | { readonly kind: "checkpoint-missing"; readonly runId: string }
   | { readonly kind: "checkpoint-expired"; readonly runId: string; readonly expiredAt: Date }
+  | { readonly kind: "checkpoint-corrupt"; readonly runId: string; readonly nodeId?: string; readonly message: string }
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
   | { readonly kind: "cache-error"; readonly operation: string; readonly message: string }
   | { readonly kind: "node-crash"; readonly nodeId: string; readonly message: string; readonly stack?: string }
@@ -12,4 +13,12 @@ export type FrameworkError =
   | { readonly kind: "aborted"; readonly reason: string }
   | { readonly kind: "rejected"; readonly nodeId: string; readonly reason: string }
   | { readonly kind: "invalid-reroute"; readonly targetNodeId: string; readonly message: string }
-  | { readonly kind: "transient"; readonly message: string };
+  | { readonly kind: "transient"; readonly nodeId: string; readonly message: string }
+  | { readonly kind: "missing-default-edge"; readonly nodeId: string }
+  | {
+      readonly kind: "output-unreachable-under-routing";
+      readonly outputNodeId: string;
+      readonly missedFromNode: string;
+    }
+  | { readonly kind: "predicate-malformed"; readonly nodeId: string; readonly message: string }
+  | { readonly kind: "duplicate-edge"; readonly fromNodeId: string; readonly toNodeId: string };

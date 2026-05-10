@@ -1,12 +1,35 @@
 // runStateMachine — the durable state-machine kernel loop
 // FR-004, FR-005, FR-006, FR-007, FR-011, FR-012
 
+import { createHash } from "node:crypto";
 import type { Machine, Executor, JobLike, RunOptions } from "./types.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
   retriable: true,
   message: error instanceof Error ? error.message : String(error),
 });
+
+/**
+ * Deterministic per-transition key. Stamped on every `appendEvent` call so
+ * adapters can dedup if the worker crashes between `appendEvent` and
+ * `updateData` (and the same transition gets re-derived on restart).
+ *
+ * Inputs: the prior `stateKey`, the per-state attempt counter, and the event
+ * type tag. These three together uniquely identify a transition slot. 16 hex
+ * chars is plenty for collision resistance within a single job's stream.
+ */
+const computeDedupKey = (
+  prevStateKey: string,
+  attemptNumber: number,
+  event: unknown,
+): string => {
+  const eventType =
+    typeof (event as { type?: unknown })?.type === "string"
+      ? (event as { type: string }).type
+      : "<event>";
+  const key = `${prevStateKey}|${attemptNumber}|${eventType}`;
+  return createHash("sha256").update(key).digest("hex").slice(0, 16);
+};
 
 /**
  * Drive a machine to terminal state, checkpointing after every successful
@@ -93,8 +116,15 @@ export const runStateMachine = async <S, E, C>(
     // Order: appendEvent FIRST so the audit/event log is never missing a transition
     // whose post-state is already persisted. If appendEvent fails, the state is not
     // advanced and the queue layer can retry from the prior state.
+    //
+    // appendEvent carries a deterministic `dedupKey` so a worker crash between
+    // `appendEvent` and `updateData` does not duplicate the event on retry —
+    // the same transition re-derives the same key, and the adapter dedups.
+    // Replay consumers see at-most-once delivery.
     if (!isFailed) {
-      await job.appendEvent(event);
+      const attemptNumber = retryCounters.get(prevStateKey) ?? 0;
+      const dedupKey = computeDedupKey(prevStateKey, attemptNumber, event);
+      await job.appendEvent(event, dedupKey);
       await job.updateData({ state, context });
       // CRITICAL-3: updateProgress only when not failed (do not persist failed progress)
       await job.updateProgress(machine.stateProgress(state));

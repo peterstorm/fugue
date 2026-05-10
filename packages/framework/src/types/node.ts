@@ -1,7 +1,11 @@
 import type { z } from "zod";
 import type { Result } from "./result.js";
+import type { FrameworkError } from "./errors.js";
 import type { Observer } from "../observer/observer.js";
 import type { LlmClient } from "../llm/client.js";
+import type { Tracer } from "../tracing/tracer.js";
+
+export type { Tracer };
 
 export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge";
 
@@ -31,7 +35,6 @@ export interface NodeDef<I, O, E> {
   readonly kind: NodeKind;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
-  readonly deps: readonly string[];
   readonly run: (input: I, ctx: NodeContext) => Promise<Result<O, E>>;
   /**
    * When set, the DAG pauses after this node completes and awaits a human response.
@@ -43,11 +46,6 @@ export interface NodeDef<I, O, E> {
    * Optional for back-compat; uses DAG-level or default settings when omitted.
    */
   readonly retry?: NodeRetryConfig;
-}
-
-export interface Tracer {
-  /** Wrap execution in a traced span. Auto-instrumented child calls nest under it. */
-  withSpan<T>(name: string, spanType: string, fn: () => Promise<T>): Promise<T>;
 }
 
 export interface PromptAccess {
@@ -62,7 +60,11 @@ export interface Logger {
 /** Cache adapter expected by framework nodes (LLM cache + checkpoint). */
 export interface ContextCacheAdapter {
   readonly get: (key: string) => Promise<unknown | null>;
-  readonly set: (key: string, value: unknown, ttlSec?: number) => Promise<unknown>;
+  readonly set: (
+    key: string,
+    value: unknown,
+    ttlSec?: number,
+  ) => Promise<Result<void, FrameworkError>>;
   readonly writeCheckpoint?: (runId: string, nodeId: string, value: unknown) => Promise<void>;
 }
 
@@ -78,4 +80,11 @@ export interface NodeContext {
   readonly logger: Logger | null;
   readonly tracer?: Tracer | null;
   readonly signal?: AbortSignal;
+  /**
+   * When `true`, span events include the full prompt/response bodies. When
+   * `false` (default), bodies are redacted. Set once at bootstrap (typically
+   * from an env var) and seeded into every spawned context — the framework
+   * does not read process.env directly.
+   */
+  readonly includeContent?: boolean;
 }

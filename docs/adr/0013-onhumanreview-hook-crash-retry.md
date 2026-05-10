@@ -1,4 +1,4 @@
-# ADR 0008: `onHumanReview` hook-crash retry — distinct from node retry
+# ADR 0013: `onHumanReview` hook-crash retry — distinct from node retry
 
 **Status:** Accepted
 **Date:** 2026-05-08

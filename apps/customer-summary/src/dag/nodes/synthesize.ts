@@ -10,15 +10,18 @@ const InputSchema = ExtractionResultSchema;
 
 const NullableSynthesisOutputSchema = SynthesisOutputSchema.optional();
 
-export const createSynthesizeNode = (model = "claude-sonnet-4-20250514", opts?: { thinking?: { type: "enabled"; budgetTokens: number } }) =>
+export const createSynthesizeNode = (
+  model = "claude-sonnet-4-20250514",
+  opts?: { thinking?: { type: "enabled"; budgetTokens: number }; systemPrompt?: string },
+) =>
   createLlmNode<ExtractionResult, z.infer<typeof NullableSynthesisOutputSchema>>({
     id: "synthesize",
     inputSchema: InputSchema,
     outputSchema: NullableSynthesisOutputSchema,
-    deps: ["extract-features"],
     promptName: "synthesis",
     model,
     thinking: opts?.thinking,
+    system: opts?.systemPrompt,
     skipWhen: (input) => input.branch !== "ok",
     skipDefault: undefined,
     buildInput: (input) => {

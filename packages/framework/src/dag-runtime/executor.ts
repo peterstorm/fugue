@@ -1,4 +1,4 @@
-// buildDagExecutor — DAG executor closure (Phase 3a)
+// buildDagExecutor — DAG executor closure
 // FR-025: validate inputs/outputs; FR-027: exponential backoff with jitter
 // Returns an Executor<DagPhase, DagMachineContext, DagEvent> that runs one wave per call.
 
@@ -12,8 +12,13 @@ import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
 import { type Result, ok, err } from "../types/result.js";
 import { validateInput, validateOutput } from "../executor/validate.js";
-import { withNodeSpan, type DagRunMeta } from "../executor/node-span.js";
+import { withNodeSpan, type NodeSpanOutcome } from "../executor/node-span.js";
 import { dispatchEvent } from "../observer/buffered.js";
+import { decideRoute, outgoingOf } from "./conditional.js";
+import type { IncomingSources } from "./conditional.js";
+import { isConditionalEdge } from "../types/dag.js";
+
+const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
 // ---------------------------------------------------------------------------
 // Observer helper
@@ -46,28 +51,37 @@ const sleep = (ms: number): Promise<void> =>
 // ---------------------------------------------------------------------------
 
 const runNode = async (
-  node: NodeDef<any, any, any>,
+  node: NodeDef<unknown, unknown, unknown>,
   dagInput: unknown,
   ctx: NodeContext,
   dagId: string,
   outputs: Map<string, unknown>,
-  meta: DagRunMeta | undefined,
-): Promise<Result<unknown, FrameworkError>> => {
+  incoming: IncomingSources,
+): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const nodeId = node.id;
 
-  // Build node input from deps (same logic as legacy executor)
+  // Build node input from incoming edges (derived from edges at compile time —
+  // ADR 0017). When `optional` is non-empty the input is always an object
+  // keyed by `required ∪ optional`; pruned optional sources surface as
+  // `undefined`. Otherwise the legacy 0 → dagInput, 1 → bare, ≥2 → object
+  // shape rule applies over `required`.
+  const { required, optional } = incoming;
   const nodeInput =
-    node.deps.length === 0
-      ? dagInput
-      : node.deps.length === 1
-        ? outputs.get(node.deps[0])
-        : Object.fromEntries(node.deps.map((d) => [d, outputs.get(d)]));
+    optional.length > 0
+      ? Object.fromEntries(
+          [...required, ...optional].map((d) => [d, outputs.get(d)]),
+        )
+      : required.length === 0
+        ? dagInput
+        : required.length === 1
+          ? outputs.get(required[0]!)
+          : Object.fromEntries(required.map((d) => [d, outputs.get(d)]));
 
   // FR-025: validate input
   const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
-  if (!inputResult.ok) return inputResult;
+  if (!inputResult.ok) return { result: inputResult, outcome: EMPTY_OUTCOME };
 
-  return withNodeSpan(nodeId, node.kind, inputResult.value, meta, async () => {
+  return withNodeSpan(nodeId, node.kind, inputResult.value, ctx.includeContent ?? false, async () => {
     const nodeStart = Date.now();
     emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
 
@@ -175,13 +189,14 @@ export const buildDagExecutor = (
       output: unknown;
       prompt: string;
     }) => Promise<import("./types.js").HumanAction>;
-    meta?: DagRunMeta;
+    /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
+    recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
   },
 ): Executor<DagPhase, DagMachineContext, DagEvent> => {
-  const nodeMap = new Map<string, NodeDef<any, any, any>>(
+  const nodeMap = new Map<string, NodeDef<unknown, unknown, unknown>>(
     dag.nodes.map((n) => [n.id, n]),
   );
-  const meta = hooks?.meta;
+  const recordOutcomes = hooks?.recordOutcomes;
 
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
@@ -203,13 +218,13 @@ export const buildDagExecutor = (
         // Re-run the whole wave (other nodes in the wave may have already
         // succeeded on previous attempt; outputs are in machineCtx.outputs).
         // We only re-run the failed node, then run the rest that haven't completed yet.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, meta);
+        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, meta))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
@@ -337,18 +352,21 @@ const runWave = async (
   waveIndex: number,
   machineCtx: DagMachineContext,
   dag: DagDef,
-  nodeMap: Map<string, NodeDef<any, any, any>>,
+  nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
   nodeCtx: NodeContext,
-  meta: DagRunMeta | undefined,
+  recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
 ): Promise<DagEvent> => {
-  const waveNodeIds = machineCtx.waves[waveIndex] ?? [];
+  // Filter to active nodes only. Pruned nodes are silently skipped — they
+  // never produce outputs and their downstream `optionalDeps` see `undefined`.
+  const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
+  const waveNodeIds = allWaveNodeIds.filter((id) => machineCtx.activeNodeIds.has(id));
 
   // Build a mutable outputs map for this wave execution.
   // Pre-seed with existing outputs so deps from earlier waves resolve.
   const outputs = new Map<string, unknown>(machineCtx.outputs);
 
   // Run all wave nodes concurrently
-  const results = await Promise.all(
+  const settled = await Promise.all(
     waveNodeIds.map(async (nodeId) => {
       // Skip nodes already successfully completed in this wave
       // (they already appear in machineCtx.outputs with correct values)
@@ -362,7 +380,11 @@ const runWave = async (
           timestamp: new Date(),
           reason: "already-completed",
         });
-        return { nodeId, result: ok(machineCtx.outputs.get(nodeId)) as Result<unknown, FrameworkError> };
+        return {
+          nodeId,
+          result: ok(machineCtx.outputs.get(nodeId)) as Result<unknown, FrameworkError>,
+          outcome: EMPTY_OUTCOME,
+        };
       }
 
       const node = nodeMap.get(nodeId);
@@ -374,19 +396,36 @@ const runWave = async (
             nodeId,
             message: `node-not-found: ${nodeId}`,
           }) as Result<unknown, FrameworkError>,
+          outcome: EMPTY_OUTCOME,
         };
       }
 
-      const result = await runNode(node, machineCtx.initialInput, nodeCtx, dag.id, outputs, meta);
-      return { nodeId, result };
+      const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
+      const { result, outcome } = await runNode(
+        node,
+        machineCtx.initialInput,
+        nodeCtx,
+        dag.id,
+        outputs,
+        incoming,
+      );
+      return { nodeId, result, outcome };
     }),
   );
 
+  // Fold this wave's outcomes into run-level meta after Promise.all.
+  if (recordOutcomes) {
+    recordOutcomes(settled.map((s) => s.outcome));
+  }
+
+  // Preserve the previous local name to keep the rest of the function unchanged.
+  const results = settled.map(({ nodeId, result }) => ({ nodeId, result }));
+
   // Collect new outputs + check for failures.
-  // M2 fix: collect all succeeded sibling outputs before returning the first failure,
-  // so they can be persisted into ctx.outputs and skipped on retry.
-  // Fix 1: collect ALL failures (not just the first) so co-failed siblings get their
-  // retry counters pre-incremented, preventing off-by-one retry accounting.
+  // - Collect all succeeded sibling outputs before returning the first failure,
+  //   so they can be persisted into ctx.outputs and skipped on retry.
+  // - Collect ALL failures (not just the first) so co-failed siblings get their
+  //   retry counters pre-incremented, preventing off-by-one retry accounting.
   const newOutputs = new Map<string, unknown>();
   const failures: Array<{ nodeId: string; error: FrameworkError }> = [];
 
@@ -431,6 +470,50 @@ const runWave = async (
       partialOutputs: partialOutputs.size > 0 ? partialOutputs : undefined,
       coFailedNodeIds: coFailedNodeIds.length > 0 ? coFailedNodeIds : undefined,
     };
+  }
+
+  // Emit observer events for routing decisions taken in this wave. The
+  // transition layer recomputes the same decisions to update activeNodeIds —
+  // both calls are deterministic because guards are pure.
+  for (const nodeId of waveNodeIds) {
+    if (!newOutputs.has(nodeId)) continue;
+    const outgoing = outgoingOf(dag, nodeId);
+    if (!outgoing.some(isConditionalEdge)) continue;
+    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
+    if (decision.kind === "predicate-malformed") {
+      // The transition layer will fail the run; emit a node-error here so
+      // operators see the malformed predicate alongside the run-end event.
+      emit(nodeCtx, {
+        type: "node-error",
+        runId: nodeCtx.runId,
+        dagId: dag.id,
+        nodeId,
+        timestamp: new Date(),
+        error: `predicate-malformed: ${decision.message}`,
+      });
+      continue;
+    }
+    emit(nodeCtx, {
+      type: "route-decided",
+      runId: nodeCtx.runId,
+      dagId: dag.id,
+      fromNodeId: nodeId,
+      chosenTargets: [...decision.chosenTargets],
+      prunedTargets: [...decision.prunedTargets],
+      defaultTaken: decision.defaultTaken,
+      matchedPredicate: decision.matchedPredicate,
+      timestamp: new Date(),
+    });
+    for (const pruned of decision.prunedTargets) {
+      emit(nodeCtx, {
+        type: "node-pruned",
+        runId: nodeCtx.runId,
+        dagId: dag.id,
+        nodeId: pruned,
+        reason: "branch-not-taken",
+        timestamp: new Date(),
+      });
+    }
   }
 
   return {

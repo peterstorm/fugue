@@ -189,6 +189,12 @@ export function createInMemoryBackend(): InMemoryBackend {
   return {
     createQueue,
     createWorker,
+    // No connections to release — kept for shape parity with BullMQ.
+    async close(): Promise<void> {
+      queues.clear();
+      queueDefaults.clear();
+      workers.clear();
+    },
     get _events(): ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]> {
       return queues as ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]>;
     },

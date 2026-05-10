@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { APIUserAbortError } from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -7,6 +8,7 @@ import type {
   LlmClient,
   LlmRequest,
   LlmResponse,
+  LlmRuntime,
   SendWithToolsRequest,
 } from "./client.js";
 import type { NodeContext } from "../types/node.js";
@@ -81,6 +83,13 @@ const lastTextBlock = (response: AnthropicResponse): string | undefined => {
 const stripCodeFences = (text: string): string =>
   text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
 
+const isAbort = (e: unknown): boolean =>
+  e instanceof APIUserAbortError ||
+  (e instanceof Error && e.name === "AbortError");
+
+const resolveNodeId = (req: { readonly nodeId?: string }): string =>
+  req.nodeId ?? "<llm>";
+
 export class AnthropicLlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
 
@@ -107,12 +116,6 @@ export class AnthropicLlmClient implements LlmClient {
         tool_choice: { type: "tool", name: "structured_output" },
       };
 
-      if (req.thinking) {
-        // Anthropic extended thinking requires streaming; skip tool_choice forcing
-        // For now, we keep the tool_use approach without extended thinking params
-        // Extended thinking integration will be refined in a future task
-      }
-
       const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
       const signal = req.signal
         ? AbortSignal.any([timeoutSignal, req.signal])
@@ -128,7 +131,7 @@ export class AnthropicLlmClient implements LlmClient {
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: "Anthropic response did not contain a tool_use block",
         });
       }
@@ -138,7 +141,7 @@ export class AnthropicLlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: `Schema validation failed: ${parsed.error.message}`,
         });
       }
@@ -153,9 +156,12 @@ export class AnthropicLlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
+      if (isAbort(error)) {
+        return err({ kind: "aborted", reason: "signal" });
+      }
       return err({
         kind: "node-crash",
-        nodeId: req.model,
+        nodeId: resolveNodeId(req),
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
@@ -164,14 +170,20 @@ export class AnthropicLlmClient implements LlmClient {
 
   async sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    ctx: NodeContext,
+    runtime: LlmRuntime,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // The interface only constrains `runtime` to `{ tracer?, signal? }` to
+    // keep `llm/client.ts` independent of `types/node.ts`. The tool dispatcher
+    // still needs a full NodeContext (tools may read ctx.cache/ctx.logger),
+    // so callers in framework-internal nodes pass a NodeContext that is
+    // structurally a superset of LlmRuntime.
+    const ctx = runtime as NodeContext;
     try {
       ensureToolNames(req.tools);
     } catch (e) {
       return err({
         kind: "validation",
-        nodeId: req.model,
+        nodeId: resolveNodeId(req),
         message: e instanceof Error ? e.message : String(e),
       });
     }
@@ -188,7 +200,7 @@ export class AnthropicLlmClient implements LlmClient {
     let lastRawText = "";
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted) {
+      if (req.signal?.aborted || runtime.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -202,14 +214,15 @@ export class AnthropicLlmClient implements LlmClient {
       };
 
       const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
-      const signal = req.signal
-        ? AbortSignal.any([timeoutSignal, req.signal])
+      const callerSignal = req.signal ?? runtime.signal;
+      const signal = callerSignal
+        ? AbortSignal.any([timeoutSignal, callerSignal])
         : timeoutSignal;
 
       let response: AnthropicResponse;
       try {
         response = await withLlmSpan(
-          ctx.tracer ?? null,
+          runtime.tracer ?? null,
           { provider: "anthropic", model: req.model, operation: "chat" },
           async () => {
             const r = await this.anthropic.messages.create(params, { signal });
@@ -218,9 +231,12 @@ export class AnthropicLlmClient implements LlmClient {
           },
         );
       } catch (e) {
+        if (isAbort(e)) {
+          return err({ kind: "aborted", reason: "signal" });
+        }
         return err({
           kind: "node-crash",
-          nodeId: req.model,
+          nodeId: resolveNodeId(req),
           message: e instanceof Error ? e.message : String(e),
           stack: e instanceof Error ? e.stack : undefined,
         });
@@ -242,7 +258,7 @@ export class AnthropicLlmClient implements LlmClient {
         if (text === undefined) {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: resolveNodeId(req),
             message: "Anthropic final turn had no text block to parse",
           });
         }
@@ -253,7 +269,7 @@ export class AnthropicLlmClient implements LlmClient {
         } catch {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: resolveNodeId(req),
             message: `Final response was not valid JSON: ${text.slice(0, 200)}`,
           });
         }
@@ -261,7 +277,7 @@ export class AnthropicLlmClient implements LlmClient {
         if (!validated.success) {
           return err({
             kind: "node-crash",
-            nodeId: req.model,
+            nodeId: resolveNodeId(req),
             message: `Schema validation failed: ${validated.error.message}`,
           });
         }
@@ -280,6 +296,7 @@ export class AnthropicLlmClient implements LlmClient {
 
     return err({
       kind: "transient",
+      nodeId: resolveNodeId(req),
       message: `Tool-call iteration limit (${maxIterations}) reached`,
     });
   }

@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-09
 **Spec ref:** OQ-3, FR-007, FR-011, FR-027 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
-**Related:** ADR 0008 (`onHumanReview` hook-crash retry — a distinct retry class scoped to the HITL hook, not the node).
+**Related:** ADR 0013 (`onHumanReview` hook-crash retry — a distinct retry class scoped to the HITL hook, not the node).
 
 ## Context
 

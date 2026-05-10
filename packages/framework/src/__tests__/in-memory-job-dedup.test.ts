@@ -1,0 +1,33 @@
+import { describe, it, expect } from "bun:test";
+import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+
+describe("createInMemoryJob — appendEvent dedup", () => {
+  it("appends when no dedupKey is supplied", async () => {
+    const job = createInMemoryJob({ state: "x", context: {} });
+    await job.appendEvent({ type: "A" });
+    await job.appendEvent({ type: "A" });
+    expect(job.events).toHaveLength(2);
+  });
+
+  it("appends when dedupKeys differ", async () => {
+    const job = createInMemoryJob({ state: "x", context: {} });
+    await job.appendEvent({ type: "A" }, "k1");
+    await job.appendEvent({ type: "B" }, "k2");
+    expect(job.events).toHaveLength(2);
+  });
+
+  it("dedups two consecutive calls with the same dedupKey to one entry", async () => {
+    const job = createInMemoryJob({ state: "x", context: {} });
+    await job.appendEvent({ type: "A" }, "k1");
+    await job.appendEvent({ type: "A" }, "k1");
+    expect(job.events).toHaveLength(1);
+  });
+
+  it("a different dedupKey resets the dedup window (only the most recent matters)", async () => {
+    const job = createInMemoryJob({ state: "x", context: {} });
+    await job.appendEvent({ type: "A" }, "k1");
+    await job.appendEvent({ type: "B" }, "k2");
+    await job.appendEvent({ type: "A" }, "k1"); // older key — accepted
+    expect(job.events).toHaveLength(3);
+  });
+});

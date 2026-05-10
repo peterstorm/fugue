@@ -32,6 +32,9 @@ export const createInMemoryJob = <S, C>(
   const eventLog: RecordedEvent<unknown>[] = [];
   let currentProgress = 0;
   const now = opts.now ?? Date.now;
+  // Track last seen dedupKey so the runner can guarantee at-most-once delivery
+  // when a transition is re-derived after a crash.
+  let lastDedupKey: string | undefined;
 
   return {
     get data() {
@@ -46,8 +49,13 @@ export const createInMemoryJob = <S, C>(
       currentProgress = pct;
     },
 
-    async appendEvent(event: unknown): Promise<void> {
+    async appendEvent(event: unknown, dedupKey?: string): Promise<void> {
+      // Skip the append if the same dedupKey was just observed — indicates the
+      // runner re-derived the same transition (crash between appendEvent and
+      // updateData).
+      if (dedupKey !== undefined && dedupKey === lastDedupKey) return;
       eventLog.push({ recordedAtMs: now(), event });
+      if (dedupKey !== undefined) lastDedupKey = dedupKey;
     },
 
     get events(): readonly RecordedEvent<unknown>[] {

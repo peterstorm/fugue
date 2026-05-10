@@ -2,10 +2,11 @@ export type {
   LlmClient,
   LlmRequest,
   LlmResponse,
+  LlmRuntime,
   SendWithToolsRequest,
 } from "./client.js";
 export type { ToolDef } from "./tools.js";
-export { assertValidToolName, ensureToolNames } from "./tools.js";
+export { assertValidToolName, ensureToolNames, tool } from "./tools.js";
 export {
   withLlmSpan,
   withToolSpan,

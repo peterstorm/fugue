@@ -73,6 +73,11 @@ export function createBullMQBackend(
   // BullMQ manages its own connection pool internally)
   const bullConnection: ConnectionOptions = { host, port };
 
+  // Track every queue/worker so close() can wait on all of them.
+  const queues = new Set<Queue<any, any, string>>();
+  const workers = new Set<Worker<any>>();
+  let closed = false;
+
   function createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C> {
     if (
       opts?.defaultAttempts !== undefined &&
@@ -92,6 +97,7 @@ export function createBullMQBackend(
           ? { attempts: opts.defaultAttempts }
           : undefined,
     });
+    queues.add(queue);
 
     return {
       async enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void> {
@@ -103,7 +109,10 @@ export function createBullMQBackend(
             delay: opts?.delayMs,
             attempts: opts?.attempts,
             jobId: opts?.jobId,
-            // Dedup: BullMQ ignores duplicate jobId by default
+            // Dedup: BullMQ rejects a duplicate jobId only while the original
+            // is still in waiting/delayed/active state. Once the original
+            // completes/fails and is removed (per BullMQ retention), a
+            // re-enqueue with the same jobId is accepted as a fresh job.
           });
         } catch (err) {
           throw new Error(
@@ -148,6 +157,7 @@ export function createBullMQBackend(
         concurrency: opts?.concurrency ?? 1,
       },
     );
+    workers.add(worker);
 
     // Attach default worker error listener so internal worker errors don't crash
     // the process when callers have not registered an onError handler.
@@ -196,8 +206,30 @@ export function createBullMQBackend(
     };
   }
 
+  async function close(): Promise<void> {
+    if (closed) return;
+    closed = true;
+    // Close workers first so in-flight jobs settle before queues go away.
+    await Promise.all([...workers].map((w) => w.close().catch((e) => {
+      console.warn("[BullMQ] Worker close failed:", e);
+    })));
+    workers.clear();
+    await Promise.all([...queues].map((q) => q.close().catch((e) => {
+      console.warn("[BullMQ] Queue close failed:", e);
+    })));
+    queues.clear();
+    // ioredis: quit() flushes pending commands then closes; falls back to
+    // disconnect() if the client is already in an end state.
+    try {
+      if (redis.status !== "end") await redis.quit();
+    } catch (e) {
+      console.warn("[BullMQ] Redis quit failed:", e);
+    }
+  }
+
   return {
     createQueue,
     createWorker,
+    close,
   };
 }

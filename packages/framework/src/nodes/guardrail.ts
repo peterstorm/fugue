@@ -38,18 +38,16 @@ export interface GuardrailValidated<T> {
   readonly checks: readonly GuardrailCheck[];
 }
 
-export interface GuardrailNodeConfig<I, T> {
+export interface GuardrailNodeConfig<I, T, Id extends string = string> {
   /** Unique node ID. */
-  readonly id: string;
-  /** Zod schema for the node's input (deps output). */
+  readonly id: Id;
+  /** Zod schema for the node's assembled input. */
   readonly inputSchema: z.ZodType<I>;
   /** Zod schema for the node's output. */
   readonly outputSchema: z.ZodType<GuardrailResult<T>>;
-  /** Dependency node IDs. */
-  readonly deps: readonly string[];
   /**
    * Pure validation function.
-   * Receives the assembled input from deps, returns a GuardrailResult.
+   * Receives the assembled input (built from incoming edges), returns a GuardrailResult.
    * Must NOT perform I/O — keep it pure and testable.
    */
   readonly validate: (input: I) => GuardrailResult<T>;
@@ -67,14 +65,13 @@ export interface GuardrailNodeConfig<I, T> {
  * The executor is responsible for setting span status to ERROR when
  * `result.passed === false`. See executor.ts for span wrapping behavior.
  */
-export const createGuardrailNode = <I, T>(
-  config: GuardrailNodeConfig<I, T>,
-): NodeDef<I, GuardrailResult<T>, FrameworkError> => ({
+export const createGuardrailNode = <I, T, const Id extends string = string>(
+  config: GuardrailNodeConfig<I, T, Id>,
+): NodeDef<I, GuardrailResult<T>, FrameworkError> & { readonly id: Id } => ({
   id: config.id,
   kind: "guardrail",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
-  deps: config.deps,
   run: async (input, ctx): Promise<Result<GuardrailResult<T>, FrameworkError>> => {
     let result: GuardrailResult<T>;
     try {

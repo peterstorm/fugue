@@ -1,4 +1,11 @@
-import type { DagDef } from "../types/dag.js";
+import type {
+  DagDef,
+  DagDefInput,
+  EdgeDef,
+  NodesRecord,
+} from "../types/dag.js";
+import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
+import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 
@@ -9,74 +16,189 @@ const validationErr = (nodeId: string, message: string): FrameworkError => ({
 });
 
 /**
- * Structural validation of a DAG before topo sort. Catches shape errors that
- * topoSort + the executor would otherwise paper over (silent miscompute):
+ * Structural validation of a `DagDefInput`. On success, brands the input as
+ * a runtime-shaped `DagDef` (nodes-as-array). The brand is the only path by
+ * which `runDag` / `runDagStateful` accept a DAG, so calling this (or
+ * `defineDag`) is the single, mandatory soundness gate.
  *
- *   - empty `dag.nodes`
- *   - duplicate node IDs (would be silently deduped by Set in topoSort)
- *   - `dag.edges` ↔ `node.deps` mismatch (scheduler reads edges, executor reads
- *     deps, so a divergence runs nodes in wrong order or feeds undefined inputs)
- *   - `outputNodeId` references a non-existent node
+ * Topology rules (ADR 0015 + ADR 0017):
+ *   - Edges are the single source of truth for wiring. `deps` /
+ *     `optionalDeps` no longer exist on `NodeDef`; the runtime derives
+ *     `{ required, optional }` per node at compile time.
+ *   - Every node with at least one conditional out-edge MUST have exactly
+ *     one `kind: "default"` out-edge (else-totality).
+ *   - At most one edge per `(from, to)` pair.
+ *   - Conditional `when` must be a non-empty plain object (structural
+ *     predicate — see ADR 0016).
+ *   - `outputNodeId` (when set) must be reachable along unconditional +
+ *     default edges only — predicates may bypass nodes, never the output.
  *
- * Edge.from / edge.to existence is left to topoSort, which already enforces it.
+ * Record/key invariant:
+ *   - Every record key matches its node's `id`. This is the only discrepancy
+ *     possible when authors construct nodes via factory helpers that take
+ *     `id` explicitly.
  */
-export const validateDagShape = (dag: DagDef): Result<void, FrameworkError> => {
-  if (dag.nodes.length === 0) {
-    return err(validationErr("__dag__", `DAG '${dag.id}' has no nodes`));
+export const validateDagShape = (
+  input: DagDefInput,
+): Result<DagDef, FrameworkError> => {
+  const entries = Object.entries(input.nodes) as [
+    string,
+    NodeDef<unknown, unknown, unknown>,
+  ][];
+
+  if (entries.length === 0) {
+    return err(validationErr("__dag__", `DAG '${input.id}' has no nodes`));
   }
 
-  const seen = new Set<string>();
-  for (const n of dag.nodes) {
-    if (seen.has(n.id)) {
-      return err(validationErr(n.id, `Duplicate node id '${n.id}' in DAG '${dag.id}'`));
+  // Record-key vs node.id consistency.
+  for (const [key, node] of entries) {
+    if (node.id !== key) {
+      return err(
+        validationErr(
+          node.id,
+          `nodes['${key}'] has id '${node.id}' — record key and node.id must match`,
+        ),
+      );
     }
-    seen.add(n.id);
   }
 
-  // Build incoming-edge map from dag.edges
-  const incoming = new Map<string, Set<string>>();
-  for (const n of dag.nodes) incoming.set(n.id, new Set());
-  for (const e of dag.edges) {
-    const set = incoming.get(e.to);
-    if (!set) continue; // unknown target — topoSort handles this
-    set.add(e.from);
+  const nodeIds = new Set(entries.map(([id]) => id));
+  const edges = input.edges as readonly EdgeDef[];
+
+  // Edge endpoints reference known nodes (the literal-typed input guards
+  // this at edit time, but defensive at runtime for `as DagDefInput` casts).
+  for (const e of edges) {
+    if (!nodeIds.has(e.from)) {
+      return err(validationErr(e.from, `Edge references unknown source node '${e.from}'`));
+    }
+    if (!nodeIds.has(e.to)) {
+      return err(validationErr(e.to, `Edge references unknown target node '${e.to}'`));
+    }
   }
 
-  // Compare node.deps to incoming-edge set per node
-  for (const n of dag.nodes) {
-    const declaredDeps = new Set(n.deps);
-    const wiredDeps = incoming.get(n.id)!;
+  // Edge uniqueness: at most one EdgeDef per (from, to) pair across all variants.
+  const seenPairs = new Set<string>();
+  for (const e of edges) {
+    const key = `${e.from} ${e.to}`;
+    if (seenPairs.has(key)) {
+      return err({
+        kind: "duplicate-edge",
+        fromNodeId: e.from,
+        toNodeId: e.to,
+      });
+    }
+    seenPairs.add(key);
+  }
 
-    for (const d of declaredDeps) {
-      if (!wiredDeps.has(d)) {
+  // Conditional edges must carry a non-empty, well-formed predicate. An empty
+  // predicate `{}` matches every output and is almost always a bug — make it
+  // an unconditional edge instead.
+  for (const e of edges) {
+    if (!isConditionalEdge(e)) continue;
+    const pred = e.when;
+    if (pred === null || typeof pred !== "object" || Array.isArray(pred)) {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' has a malformed predicate — expected a plain object`,
+        ),
+      );
+    }
+    if (Object.keys(pred as Record<string, unknown>).length === 0) {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' has an empty predicate '{}' — use an unconditional edge instead`,
+        ),
+      );
+    }
+  }
+
+  // Else-totality: every node with any conditional out-edge must have exactly
+  // one default out-edge.
+  const outgoingByNode = new Map<string, EdgeDef[]>();
+  for (const id of nodeIds) outgoingByNode.set(id, []);
+  for (const e of edges) {
+    const list = outgoingByNode.get(e.from);
+    if (list) list.push(e);
+  }
+  for (const id of nodeIds) {
+    const out = outgoingByNode.get(id) ?? [];
+    const guarded = out.filter(isConditionalEdge);
+    const defaults = out.filter(isDefaultEdge);
+    if (guarded.length === 0) {
+      if (defaults.length > 0) {
         return err(
           validationErr(
-            n.id,
-            `Node '${n.id}' declares dep '${d}' but no edge '${d}' -> '${n.id}' exists`,
+            id,
+            `Node '${id}' has a default edge but no conditional out-edges — drop the default`,
           ),
         );
       }
+      continue;
     }
-    for (const d of wiredDeps) {
-      if (!declaredDeps.has(d)) {
-        return err(
-          validationErr(
-            n.id,
-            `Edge '${d}' -> '${n.id}' has no matching entry in node '${n.id}' deps`,
-          ),
-        );
-      }
+    if (defaults.length !== 1) {
+      return err({ kind: "missing-default-edge", nodeId: id });
     }
   }
 
-  if (dag.outputNodeId !== undefined && !seen.has(dag.outputNodeId)) {
+  if (input.outputNodeId !== undefined && !nodeIds.has(input.outputNodeId)) {
     return err(
       validationErr(
-        dag.outputNodeId,
-        `outputNodeId '${dag.outputNodeId}' is not a node in DAG '${dag.id}'`,
+        input.outputNodeId,
+        `outputNodeId '${input.outputNodeId}' is not a node in DAG '${input.id}'`,
       ),
     );
   }
 
-  return ok(undefined);
+  if (input.outputNodeId !== undefined) {
+    const incomingAny = new Map<string, EdgeDef[]>();
+    for (const id of nodeIds) incomingAny.set(id, []);
+    for (const e of edges) {
+      const list = incomingAny.get(e.to);
+      if (list) list.push(e);
+    }
+    const entryIds = [...nodeIds].filter(
+      (id) => (incomingAny.get(id)?.length ?? 0) === 0,
+    );
+
+    const reachable = new Set<string>(entryIds);
+    const stack = [...reachable];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      for (const e of outgoingByNode.get(cur) ?? []) {
+        if (isConditionalEdge(e)) continue;
+        if (!reachable.has(e.to)) {
+          reachable.add(e.to);
+          stack.push(e.to);
+        }
+      }
+    }
+
+    if (!reachable.has(input.outputNodeId)) {
+      return err({
+        kind: "output-unreachable-under-routing",
+        outputNodeId: input.outputNodeId,
+        missedFromNode: input.outputNodeId,
+      });
+    }
+  }
+
+  // All checks passed — brand the input as a runtime DagDef.
+  const runtimeDag = {
+    id: input.id,
+    nodes: entries.map(([, n]) => n),
+    edges,
+    outputNodeId: input.outputNodeId,
+    evalJudges: input.evalJudges,
+    retryLimits: input.retryLimits as Readonly<Record<string, number>> | undefined,
+    defaultRetryLimit: input.defaultRetryLimit,
+  } as unknown as DagDef;
+
+  return ok(runtimeDag);
 };
+
+// Re-export so test helpers building array-shape inputs can convert.
+export const recordFromNodeArray = (
+  nodes: readonly NodeDef<unknown, unknown, unknown>[],
+): NodesRecord => Object.fromEntries(nodes.map((n) => [n.id, n]));

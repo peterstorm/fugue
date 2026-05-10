@@ -8,7 +8,7 @@ the system.
 
 ## 1. The author UX — building a DAG
 
-Regardless of which execution path runs, the user always defines:
+Each node is defined the same way regardless of execution path:
 
 ```ts
 const node: NodeDef<I, O, E> = {
@@ -16,38 +16,122 @@ const node: NodeDef<I, O, E> = {
   kind: "fetch" | "transform" | "llm" | "guardrail" | "eval-judge",
   inputSchema: z.object({ /* … */ }),     // Zod, runtime-checked
   outputSchema: z.object({ /* … */ }),
-  deps: ["upstream-id"],
   run: async (input, ctx) => Result.ok(...) | Result.err(...),
   // optional, opt-in features:
   humanReview?: { prompt: "Approve?" },
   retry?: { backoffMs: [1000, 2000, 4000], jitterRatio: 0.2 },
 };
-
-// LLM nodes can also declare tools the model may call mid-completion.
-// See §7 for details — the framework owns the LLM↔TOOL loop and emits the
-// trace tree automatically.
-
-const dag: DagDef = {
-  id: "summarize",
-  nodes: [...],
-  edges: [{ from: "fetch", to: "summarize" }],
-  outputNodeId: "summarize",
-  evalJudges?: [...],
-  defaultRetryLimit?: 3,
-  retryLimits?: { summarize: 5 },
-};
 ```
 
-Then they call:
+Nodes carry no `deps` field — edges are the single source of truth for
+topology, and the framework derives each node's input wiring from incoming
+edges at compile time (ADR 0017). A `NodeDef`'s contract is "I produce O
+from I"; the same node can be reused in any DAG whose edges supply the
+right upstream outputs, with no rename required.
+
+LLM nodes can additionally declare tools the model may call mid-completion
+(see §7).
+
+### 1.1 `defineDag` — the only construction path
+
+`DagDef` is **branded**. There's exactly one way to construct one:
+
+```ts
+import { defineDag } from "@ai-summary/framework";
+
+export const summaryDag = defineDag({
+  id: "summarize",
+  nodes: {
+    fetch: fetchNode,                          // record key MUST match node.id
+    summarize: summarizeNode,
+  },
+  edges: [
+    { from: "fetch", to: "summarize" },        // from/to constrained to keyof nodes
+  ],
+  outputNodeId: "summarize",                   // also constrained
+  evalJudges: [...],                           // optional
+  defaultRetryLimit: 3,                        // optional
+  retryLimits: { summarize: 5 },               // optional, keys constrained
+});
+```
+
+Calling `defineDag` does three things:
+
+1. **Validates structural soundness** — edge endpoints reference known
+   nodes, edge uniqueness per `(from, to)`, else-totality for conditional
+   edges, predicate shape, output reachability under unconditional +
+   default edges, record-key-vs-`node.id` consistency. Cycles are caught
+   later by `topoSort`. (Per-node `deps`/`optionalDeps` no longer exist —
+   ADR 0017 — so there is no deps↔edges symmetry to check.)
+2. **Throws `DagDefinitionError`** on invalid input — like `zod.parse`. The
+   error stack points at the DAG file, surfacing the problem at *module
+   load*, not on the first production request. Importing the module runs
+   the validator; running unit tests runs the validator; CI runs the
+   validator.
+3. **Brands the result.** `runDag` / `runDagStateful` / `compileDagToMachine`
+   only accept the brand. Hand-rolled object literals typed `DagDef` are
+   rejected at the type level — there is no `as DagDef` escape hatch in
+   normal flow.
+
+Type-level wins (record-shape inference via `<const Nodes>`):
+
+- `edges[].from` and `edges[].to` are constrained to the literal union of
+  node ids in the `nodes` record. Typos fail to compile, with the squiggle
+  on the typo.
+- `outputNodeId` is similarly constrained.
+- `retryLimits` keys are constrained.
+- The `humanReview` / `onHumanReview` bidirectional contract (§2) still
+  applies but is checked at `runDag` time; `defineDag` itself doesn't
+  enforce hook presence.
+
+### 1.2 `defineDagFromArray` — for tests and dynamic constructions
+
+When the node list is computed dynamically and you don't have literal-typed
+keys, use the array variant. Same module-load validation, no edit-time
+edge typing:
+
+```ts
+import { defineDagFromArray } from "@ai-summary/framework";
+
+const dag = defineDagFromArray({
+  id: "summarize",
+  nodes: [fetchNode, summarizeNode],           // string-typed edges
+  edges: [{ from: "fetch", to: "summarize" }],
+  outputNodeId: "summarize",
+});
+```
+
+Use this only when you can't write a literal record (e.g. nodes built from
+config). Production code should prefer `defineDag` for the typo-protection
+gain.
+
+### 1.3 Running it
 
 ```ts
 const result: Result<O, FrameworkError> = await runDag(dag, input, nodeCtx, opts);
 ```
 
-`Result` is an algebraic `Ok | Err` — no thrown errors at the boundary.
+`Result` is an algebraic `Ok | Err` — no thrown errors at the boundary
+(the only thing `runDag` throws is `DagDefinitionError` if you happen to
+construct the DAG inline at the call site, which would be unusual).
+
 `nodeCtx` (`packages/framework/src/types/node.ts`) carries `runId`, `dagId`,
 observer, LLM client, prompts, logger, optional cache/checkpointer, OTel
 tracer, and an `AbortSignal`.
+
+### 1.4 When the user discovers an unsound DAG
+
+| Stage | What surfaces |
+| --- | --- |
+| Edit time / `tsc` | Edge endpoint typos, `outputNodeId` typos, `retryLimits` key typos, hand-rolled `DagDef` literals. |
+| Module load (import) | Everything `validateDagShape` checks: missing deps, missing default edges, unreachable output, duplicate edges, optionalDeps mismatches, key/id mismatch. `defineDag` throws. |
+| Test run | Same as module load — importing the DAG into a test imports through `defineDag`. CI catches it before merge. |
+| App boot | Same as module load — your wiring code calls `defineDag` at startup, the process fails fast with a stack pointing at the DAG file. |
+| First request | Cycle detection (`topoSort` runs at compile, before the first wave). |
+| Branch fire | `predicate-malformed` (defense-in-depth for `as`-cast predicates, see §8). Well-typed predicates can't reach this state. |
+
+The previous "first production request" failure mode is gone for every
+class of structural error.
 
 ---
 
@@ -210,9 +294,12 @@ hidden state.
 **`state`** — the current `DagPhase` (enumerated above). The *position*
 in the run. Two persistence rules apply on top of the enumeration:
 
-- Intermediate failure states (`node-failed`, `retrying`, `retrying-hook`)
-  *are* checkpointed — so the next worker attempt sees them and decides
-  what to do (e.g. honour the scheduled backoff).
+- The durable retry phases (`retrying`, `retrying-hook`) *are* checkpointed
+  so the next worker attempt sees them and decides what to do (e.g. honour
+  the scheduled backoff). `node-failed` is a `DagEvent` consumed by the
+  transition function, not a phase that persists on its own — by the time
+  the worker checkpoints, the machine has already moved into `retrying` (or
+  terminal `failed`, which is not persisted; see below).
 - Terminal `failed` is **never written** (FR-005). A queue retry must
   restart from the prior good state, not resume into a dead end. The
   runner throws on terminal-failed so BullMQ's retry policy fires
@@ -1230,3 +1317,222 @@ run: async (input, ctx) => {
 `maxIterations` is a hard stop — defaults to 10. Lower it for trivial
 flows, raise it for agentic ones, but always bound it. A buggy tool that
 never converges is the simplest way to burn an unbounded number of tokens.
+
+---
+
+## 8. Conditional edges
+
+LLM-outcome routing — "summarise / translate / skip" picked by a router node
+— is first-class via three edge variants. `when` carries a
+**structural-match predicate** (data, not a function): keys are top-level
+fields of the upstream output, values are the expected matches. Inside
+`defineDag`, where the node-id union and per-node output types are
+inferred, `from`/`to` are constrained to known node ids and `when` is
+type-checked against the actual upstream output schema.
+
+```ts
+import { defineDag } from "@ai-summary/framework";
+
+const dag = defineDag({
+  id: "router-demo",
+  nodes: { router, summarize, translate, skip },
+  edges: [
+    { from: "router", to: "summarize", when: { kind: "summarize" } },
+    { from: "router", to: "translate", when: { kind: "translate" } },
+    { from: "router", to: "skip", kind: "default" },
+  ],
+  outputNodeId: "summarize",  // see §8.4 for what this requires
+});
+```
+
+`oneOf` matches any of a list of values:
+
+```ts
+{ from: "router", to: "fastpath", when: { kind: { oneOf: ["a", "b"] } } }
+```
+
+Multi-key predicates require **every** key to match (logical AND across
+keys):
+
+```ts
+{ from: "router", to: "premium-fast", when: { tier: "gold", region: "eu" } }
+```
+
+The runtime variant types — written by the framework, used only when you
+need them outside `defineDag` (e.g. building edges programmatically):
+
+```ts
+type Predicate<O> = {
+  readonly [K in keyof O]?: O[K] | { readonly oneOf: readonly O[K][] };
+};
+
+type EdgeDef =
+  | { from: string; to: string }                            // unconditional
+  | { from: string; to: string; when: Predicate<unknown> }  // conditional
+  | { from: string; to: string; kind: "default" };           // else branch
+```
+
+**Predicates are pure data.** There is no closure to capture external
+state, so replay determinism is a system guarantee (not author
+discipline), predicates survive JSON / process boundaries, the DAG
+fingerprint detects predicate edits, and observer events carry the matched
+predicate verbatim (no more `[Function]` in routing decisions).
+
+**Boolean composition is deliberately absent** — no `and`/`or`/`not` /
+comparison operators. If your routing logic doesn't fit the
+field-equality + `oneOf` vocabulary, add a **classifier node** upstream
+that pre-computes a routing key:
+
+```ts
+const classifier = createTransformNode({
+  id: "classifier",
+  inputSchema: z.object({ score: z.number(), region: z.string() }),
+  outputSchema: z.object({ bucket: z.enum(["hot", "warm", "cold"]) }),
+  transform: ({ score, region }) =>
+    ok({
+      bucket:
+        score > 90 && region === "eu" ? "hot" :
+        score > 50                    ? "warm" :
+                                        "cold",
+    }),
+});
+
+// then route on the classifier's output:
+{ from: "classifier", to: "hot-path",  when: { bucket: "hot" } },
+{ from: "classifier", to: "warm-path", when: { bucket: "warm" } },
+{ from: "classifier", to: "cold-path", kind: "default" },
+```
+
+The DAG grows by one node per non-trivial decision, but routing decisions
+become first-class observable artifacts and the classifier's logic is
+testable in isolation.
+
+### 8.1 Routing semantics
+
+For each routing node, when the wave it lives in completes:
+
+1. All unconditional out-edges fire.
+2. Conditional out-edges are evaluated **in declaration order** against
+   the node's output. The first predicate matching wins; all other
+   conditional targets from this node are pruned.
+3. If no predicate matched, the `default` edge fires.
+
+A node with at least one `when` out-edge must have **exactly one**
+`kind: "default"` out-edge. The validator rejects DAGs that violate this.
+Routing is exclusive: at most one of the guarded-or-default targets fires
+per source per wave. An **empty predicate `{}`** is rejected by the
+validator — use an unconditional edge instead.
+
+### 8.2 The active set
+
+The runtime tracks `activeNodeIds` in `DagMachineContext`. It's seeded at
+compile time to every node forward-reachable from a wave-0 entry along
+**unconditional edges only**. After each wave, conditional/default
+decisions expand the active set along the chosen branch (transitively,
+through unconditional descendants).
+
+`runWave` filters to the active subset before dispatching. Pruned nodes:
+
+- never execute,
+- never appear in `outputs`,
+- never emit `node-start` / `node-end` / `node-error` spans.
+
+The framework emits two new observer events for routing visibility:
+
+- `route-decided` — `{ fromNodeId, chosenTargets, prunedTargets,
+  defaultTaken, matchedPredicate }`. `matchedPredicate` is the literal
+  predicate object that fired (e.g. `{ kind: "summarize" }`) or `null`
+  when the default was taken.
+- `node-pruned` — one per pruned target
+
+### 8.3 Derived per-node input shape
+
+Per ADR 0017, nodes carry no `deps`/`optionalDeps` fields — the framework
+derives each node's incoming wiring from the edges at compile time. For
+every node, edges resolve into two buckets:
+
+- **`required`** — upstream is guaranteed to run AND the edge always
+  fires. Concretely: the edge is unconditional AND the source is in
+  `seedInitialActiveSet(dag)` (reachable from wave-0 entries along
+  unconditional edges only).
+- **`optional`** — the upstream might be pruned or the edge might not
+  fire: a conditional `when` edge, a `default` edge, OR an unconditional
+  edge whose source itself sits behind a conditional/default.
+
+The input shape rule (`runNode`):
+
+| `required.length` / `optional.length` | `nodeInput` shape                            |
+| ------------------------------------- | -------------------------------------------- |
+| 0 required, 0 optional                | the DAG's `input` (root-level argument)      |
+| 1 required, 0 optional                | the source's output **bare**                 |
+| ≥2 required, 0 optional               | `{ [sourceId]: sourceOutput, ... }`          |
+| any optional > 0                      | `{ [sourceId]: sourceOutput, ... }` always   |
+
+When `optional` is non-empty the input is always an object keyed by
+`required ∪ optional`; pruned optional sources surface as `undefined`.
+The downstream `inputSchema` must mark those fields as `z.optional()`:
+
+```ts
+const merge: NodeDef = {
+  id: "merge",
+  inputSchema: z.object({
+    "yes-branch": z.string().optional(),
+    "no-branch": z.string().optional(),
+  }),
+  run: async (input) =>
+    ok(input["yes-branch"] ?? input["no-branch"] ?? "neither"),
+};
+```
+
+The runtime stashes the derived `{ required, optional }` per node on
+`DagMachineContext.incomingByNode` so wave dispatch is O(1) per node.
+
+### 8.4 Output reachability
+
+`outputNodeId` must be reachable from a wave-0 entry along **unconditional
++ default edges only** — guards may bypass nodes, never the output. If
+your branches need to produce different outputs, **rejoin** at a merge
+node and pick the produced value there:
+
+```ts
+const merge: NodeDef = {
+  // ...
+  optionalDeps: ["yes-branch", "no-branch"],
+  run: async (input: any) =>
+    ok(input["yes-branch"] ?? input["no-branch"] ?? null),
+};
+```
+
+### 8.5 Errors
+
+Conditional edges introduce four `FrameworkError` kinds:
+
+- `missing-default-edge` — a node has conditional out-edges but no default.
+- `output-unreachable-under-routing` — `outputNodeId` not reachable along
+  unconditional + default edges.
+- `duplicate-edge` — multiple edges with the same `(from, to)`.
+- `predicate-malformed` — defense-in-depth for predicates introduced via
+  `as`-casts (e.g. a value that's neither a literal nor `{ oneOf: [...] }`).
+  Well-typed predicates can't reach this state.
+
+The previous `guard-threw` error is gone — predicates can't throw because
+they don't execute code.
+
+### 8.6 Replay & checkpoints
+
+Replay determinism is now a **system guarantee**, not author discipline:
+predicates are pure data, the evaluator is pure, so identical events
+produce identical state. `replayEvents` reproduces live `(state, outputs,
+activeNodeIds)` exactly.
+
+The DAG fingerprint includes each conditional edge's predicate JSON, so
+editing a predicate (`{ kind: "yes" }` → `{ kind: "y" }`) changes the
+fingerprint and invalidates cached results. Previously, semantic guard
+changes were invisible to the fingerprint and required a manual
+`FRAMEWORK_VERSION` bump.
+
+### 8.7 Routing implication for `runDag`
+
+Any DAG with `when` or default edges routes through the **state-machine
+path** regardless of HITL/retry config. The legacy fast path doesn't
+implement active-set filtering. This is automatic — no opts flag needed.

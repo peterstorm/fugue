@@ -100,6 +100,7 @@ export const bootstrap = async () => {
         if (!r.ok) {
           console.warn(`[cache] set failed for key=${key}: ${r.error.kind}`);
         }
+        return r;
       },
       writeCheckpoint: async (runId: string, nodeId: string, value: unknown) => {
         const r = await cp.saveNode(runId, nodeId, {
@@ -135,6 +136,12 @@ export const bootstrap = async () => {
   const evalRubricPrompt = await promptRegistry.load("summary-eval-rubric");
   if (evalRubricPrompt.ok) {
     prompts.set("summary-eval-rubric", evalRubricPrompt.value.text);
+  }
+  const synthesisSystemPrompt = await promptRegistry.load("synthesis-system");
+  if (synthesisSystemPrompt.ok) {
+    prompts.set("synthesis-system", synthesisSystemPrompt.value.text);
+  } else {
+    console.error("Failed to load synthesis-system prompt:", synthesisSystemPrompt.error);
   }
   // Note: eval rubric kept in prompts registry for reference but no longer used in-pipeline.
   // Quality evaluation is handled by MLflow's built-in scorer (post-hoc, async).
@@ -194,6 +201,9 @@ export const bootstrap = async () => {
     cache: contextCache,
     checkpointer,
     observer: new NoopObserver(),
+    // Read the env-derived flag once at bootstrap; the framework no longer
+    // touches process.env. Spawned NodeContexts inherit this value.
+    includeContent: config.LLM_TRACE_PROMPTS,
     health: {
       // Always defined: if Redis was never reachable at bootstrap, we still
       // need readiness to report not-ready (otherwise k8s leaves the pod in

@@ -6,11 +6,10 @@ import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 
-export interface LlmNodeConfig<I, O> {
-  readonly id: string;
+export interface LlmNodeConfig<I, O, Id extends string = string> {
+  readonly id: Id;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
-  readonly deps: readonly string[];
   readonly promptName: string;
   readonly model: string;
   readonly buildInput: (input: I) => Record<string, unknown>;
@@ -21,6 +20,12 @@ export interface LlmNodeConfig<I, O> {
   readonly computeCacheKey?: (input: I) => string;
   /** Enable reasoning/thinking for models that support it (e.g., GPT-5.1, o-series) */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
+  /**
+   * Override the system prompt. When omitted, a generic default ("You are an
+   * AI assistant…") is used. Pass a domain-specific persona/frame here so the
+   * user-template prompt can stay focused on the task input.
+   */
+  readonly system?: string;
 }
 
 /**
@@ -32,14 +37,13 @@ const interpolatePrompt = (template: string, vars: Record<string, unknown>): str
     template,
   );
 
-export const createLlmNode = <I, O>(
-  config: LlmNodeConfig<I, O>,
-): NodeDef<I, O, FrameworkError> => ({
+export const createLlmNode = <I, O, const Id extends string = string>(
+  config: LlmNodeConfig<I, O, Id>,
+): NodeDef<I, O, FrameworkError> & { readonly id: Id } => ({
   id: config.id,
   kind: "llm",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
-  deps: config.deps as string[],
   run: async (input: I, ctx: NodeContext): Promise<Result<O, FrameworkError>> => {
     // Skip check — return explicit default value instead of undefined
     if (config.skipWhen?.(input)) {
@@ -83,10 +87,11 @@ export const createLlmNode = <I, O>(
 
     const llmClient = ctx.llm as LlmClient;
     const req: LlmRequest<O> = {
-      system: `You are an AI assistant. Follow the instructions in the user message and return structured output.`,
+      system: config.system ?? `You are an AI assistant. Follow the instructions in the user message and return structured output.`,
       user: userMessage,
       model: config.model,
       schema: config.outputSchema,
+      nodeId: config.id,
       ...(config.thinking ? { thinking: config.thinking } : {}),
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     };
@@ -135,17 +140,22 @@ export const createLlmNode = <I, O>(
       tokensIn: llmResponse.tokensIn,
       tokensOut: llmResponse.tokensOut,
       thinking: llmResponse.thinking,
+      includeContent: ctx.includeContent ?? false,
     });
 
     const output = llmResponse.output as O;
 
-    // Cache result (best-effort)
+    // Cache result (best-effort) — failures must never break a successful run.
     if (ctx.cache?.set) {
       const DEFAULT_CACHE_TTL_SEC = 86400;
       try {
-        await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
+        const setResult = await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
+        if (!setResult.ok) {
+          const msg = `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`;
+          (ctx.logger?.warn ?? console.warn)(msg);
+        }
       } catch (e) {
-        const msg = `[${config.id}] Cache write failed: ${e instanceof Error ? e.message : e}`;
+        const msg = `[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`;
         (ctx.logger?.warn ?? console.warn)(msg);
       }
     }

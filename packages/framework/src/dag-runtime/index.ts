@@ -25,9 +25,18 @@ export { compileDagToMachine } from "./machine.js";
 // Gap-2 fix: re-export topoSort (already returns Result on cycle) for consumers who need it
 export { topoSort } from "../executor/topo.js";
 
-// DAG executor closure (Phase 3a)
+// DAG executor closure
 export { buildDagExecutor } from "./executor.js";
 
-// runDagStateful orchestrator (Phase 3a)
+// runDagStateful orchestrator
 export { runDagStateful } from "./run-dag-stateful.js";
 export type { DagRunOpts } from "./run-dag-stateful.js";
+
+// Conditional-edge runtime helpers (ADR 0015)
+export {
+  decideRoute,
+  expandActive,
+  outgoingOf,
+  seedInitialActiveSet,
+  type Decision,
+} from "./conditional.js";

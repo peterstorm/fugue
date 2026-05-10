@@ -3,6 +3,8 @@
 
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import type { FrameworkError } from "../types/errors.js";
+import { decideRoute, expandActive, outgoingOf, seedInitialActiveSet } from "./conditional.js";
+import { isConditionalEdge } from "../types/dag.js";
 
 // ---------------------------------------------------------------------------
 // Retry config resolution (FR-026, FR-027)
@@ -41,6 +43,10 @@ export const getRetryLimit = (nodeId: string, ctx: DagMachineContext): number =>
 export const waveNodes = (ctx: DagMachineContext, wave: number): readonly string[] =>
   ctx.waves[wave] ?? [];
 
+/** Active subset of a wave (filters out pruned nodes). */
+export const activeWaveNodes = (ctx: DagMachineContext, wave: number): readonly string[] =>
+  waveNodes(ctx, wave).filter((id) => ctx.activeNodeIds.has(id));
+
 /** The index of the wave that contains a given nodeId, or -1 if not found. */
 export const waveIndexOf = (ctx: DagMachineContext, nodeId: string): number =>
   ctx.waves.findIndex((w) => w.includes(nodeId));
@@ -57,7 +63,7 @@ export const collectHumanReviewQueue = (
   ctx: DagMachineContext,
   wave: number,
 ): readonly string[] => {
-  const nodes = waveNodes(ctx, wave);
+  const nodes = activeWaveNodes(ctx, wave);
   return nodes
     .filter((id) => {
       const def = ctx.dag.nodes.find((n) => n.id === id);
@@ -89,7 +95,38 @@ export const handleWaveDone = (
   ctx: DagMachineContext,
 ): WaveDoneResult => {
   const newOutputs = new Map([...ctx.outputs, ...outputs]);
-  const newCtx: DagMachineContext = { ...ctx, outputs: newOutputs };
+
+  // Evaluate guarded out-edges for every active node that completed this wave.
+  // Each successful decision expands `activeNodeIds` along the chosen branch
+  // plus its unconditional descendants; a guard that throws fails the run.
+  let nextActive = ctx.activeNodeIds;
+  for (const nodeId of activeWaveNodes(ctx, wave)) {
+    if (!newOutputs.has(nodeId)) continue;
+    const outgoing = outgoingOf(ctx.dag, nodeId);
+    const hasGuards = outgoing.some(isConditionalEdge);
+    if (!hasGuards) continue;
+    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
+    if (decision.kind === "predicate-malformed") {
+      return {
+        state: {
+          kind: "failed",
+          error: {
+            kind: "predicate-malformed",
+            nodeId: decision.fromNodeId,
+            message: decision.message,
+          },
+        },
+        context: { ...ctx, outputs: newOutputs },
+      };
+    }
+    nextActive = expandActive(ctx.dag, nextActive, decision.chosenTargets);
+  }
+
+  const newCtx: DagMachineContext = {
+    ...ctx,
+    outputs: newOutputs,
+    activeNodeIds: nextActive,
+  };
 
   const reviewQueue = collectHumanReviewQueue(newCtx, wave);
 
@@ -139,8 +176,6 @@ export const advanceToNextWave = (
 
   if (nextWave >= ctx.waves.length) {
     // All waves done — pick the output
-    const lastWave = ctx.waves[ctx.waves.length - 1];
-
     if (ctx.dag.outputNodeId !== undefined) {
       // Explicit outputNodeId configured — require it to be present in outputs
       const outputNodeId = ctx.dag.outputNodeId;
@@ -164,30 +199,27 @@ export const advanceToNextWave = (
     }
 
     // No outputNodeId configured
-    if (!lastWave || lastWave.length === 0) {
+    // Fall back to the last active node, walking back through waves so a fully
+    // pruned final wave doesn't strand the run.
+    let fallbackNodeId: string | undefined;
+    for (let w = ctx.waves.length - 1; w >= 0 && !fallbackNodeId; w--) {
+      const wave = ctx.waves[w] ?? [];
+      for (let i = wave.length - 1; i >= 0; i--) {
+        const id = wave[i]!;
+        if (ctx.activeNodeIds.has(id) && ctx.outputs.has(id)) {
+          fallbackNodeId = id;
+          break;
+        }
+      }
+    }
+    if (!fallbackNodeId) {
       return {
         state: {
           kind: "failed",
           error: {
             kind: "node-crash",
             nodeId: "",
-            message: "output-missing: outputNodeId unset and last wave is empty",
-          },
-        },
-        context: ctx,
-      };
-    }
-
-    // Fall back to last node (deepest topo) of last wave
-    const fallbackNodeId = lastWave[lastWave.length - 1]!;
-    if (!ctx.outputs.has(fallbackNodeId)) {
-      return {
-        state: {
-          kind: "failed",
-          error: {
-            kind: "node-crash",
-            nodeId: fallbackNodeId,
-            message: `output-missing: fallback node '${fallbackNodeId}' not found in ctx.outputs`,
+            message: "output-missing: outputNodeId unset and no active node produced output",
           },
         },
         context: ctx,
@@ -217,13 +249,13 @@ export const handleNodeFailed = (
   partialOutputs?: ReadonlyMap<string, unknown>,
   coFailedNodeIds?: ReadonlyArray<string>,
 ): WaveDoneResult => {
-  // M2 fix: merge partial outputs from succeeded siblings so they are not re-run on retry.
+  // Merge partial outputs from succeeded siblings so they are not re-run on retry.
   const ctxWithPartials: DagMachineContext =
     partialOutputs && partialOutputs.size > 0
       ? { ...ctx, outputs: new Map([...ctx.outputs, ...partialOutputs]) }
       : ctx;
 
-  // Fix 1: pre-increment retry counters for co-failed siblings so they consume the same
+  // Pre-increment retry counters for co-failed siblings so they consume the same
   // retry slot as the primary failure. Without this, siblings see retries.get(id) === 0
   // on their first re-attempt, giving them retryLimit+1 total executions.
   const ctxWithCoFailed: DagMachineContext =
@@ -409,23 +441,54 @@ export const handleHumanResponse = (
         };
       }
 
-      // FR-031: backward (or current wave) reroute — reset completed and resume from target wave
+      // FR-031: backward (or current wave) reroute — reset completed and resume from target wave.
+      // Pre-build the nodeId → waveIndex map so the two filters below are O(N)
+      // per pass instead of repeating ctx.waves.findIndex per node (O(N²)).
+      const waveByNodeId = new Map<string, number>();
+      for (let w = 0; w < ctx.waves.length; w++) {
+        for (const id of ctx.waves[w]) waveByNodeId.set(id, w);
+      }
+      const beforeTargetWave = (nodeId: string): boolean =>
+        (waveByNodeId.get(nodeId) ?? -1) < targetWave;
+
+      // Recompute activeNodeIds from the seed and re-expand using outputs that
+      // survived the reroute (waves < targetWave). Guard decisions for those
+      // earlier nodes are deterministic — same outputs, same guards, same
+      // chosen targets — so the active set converges to the pre-reroute value
+      // for all nodes in waves < targetWave.
+      const survivingOutputs = new Map(
+        [...ctx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
+      );
+      let reseededActive = seedInitialActiveSet(ctx.dag);
+      for (let w = 0; w < targetWave; w++) {
+        for (const nodeId of ctx.waves[w] ?? []) {
+          if (!reseededActive.has(nodeId)) continue;
+          if (!survivingOutputs.has(nodeId)) continue;
+          const outgoing = outgoingOf(ctx.dag, nodeId);
+          if (!outgoing.some(isConditionalEdge)) continue;
+          const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing);
+          if (decision.kind === "predicate-malformed") {
+            return {
+              state: {
+                kind: "failed",
+                error: {
+                  kind: "predicate-malformed",
+                  nodeId: decision.fromNodeId,
+                  message: decision.message,
+                },
+              },
+              context: ctx,
+            };
+          }
+          reseededActive = expandActive(ctx.dag, reseededActive, decision.chosenTargets);
+        }
+      }
+
       const newCtx: DagMachineContext = {
         ...ctx,
-        // Clear outputs from targetWave onwards so the re-run is clean
-        outputs: new Map(
-          [...ctx.outputs].filter(([nodeId]) => {
-            const w = waveIndexOf(ctx, nodeId);
-            return w < targetWave;
-          }),
-        ),
-        // Reset retries for affected waves
-        retries: new Map(
-          [...ctx.retries].filter(([nodeId]) => {
-            const w = waveIndexOf(ctx, nodeId);
-            return w < targetWave;
-          }),
-        ),
+        outputs: survivingOutputs,
+        retries: new Map([...ctx.retries].filter(([nodeId]) => beforeTargetWave(nodeId))),
+        activeNodeIds: reseededActive,
       };
 
       return {

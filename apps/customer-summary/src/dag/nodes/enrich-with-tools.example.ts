@@ -6,8 +6,7 @@
  */
 import { z } from "zod";
 import {
-  ok,
-  err,
+  createLlmWithToolsNode,
   type FrameworkError,
   type NodeDef,
   type ToolDef,
@@ -54,7 +53,13 @@ const makeLookupDealsTool = (
     if (cached) return cached;
 
     const result = { deals: await deals.byCustomer(customerId, limit ?? 20) };
-    await ctx.cache?.set(cacheKey, result, 300);
+    if (ctx.cache?.set) {
+      const setResult = await ctx.cache.set(cacheKey, result, 300);
+      if (!setResult.ok) {
+        const logger = ctx.logger?.warn ?? console.warn;
+        logger(`[lookup_deals_by_customer] cache write failed for ${cacheKey}: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`);
+      }
+    }
     return result;
   },
 });
@@ -83,46 +88,22 @@ export const createEnrichWithToolsNode = (
 ): NodeDef<Input, Output, FrameworkError> => {
   const lookupDealsTool = makeLookupDealsTool(deals);
 
-  return {
+  return createLlmWithToolsNode<Input, Output>({
     id: "enrich-with-tools",
-    kind: "llm",
     inputSchema: InputSchema,
     outputSchema: EnrichedSummarySchema,
-    deps: ["fetch-crm"],
-    run: async (input, ctx) => {
-      if (!ctx.llm) {
-        return err({
-          kind: "node-crash",
-          nodeId: "enrich-with-tools",
-          message: "no llm client in context",
-        });
-      }
-
-      const result = await ctx.llm.sendWithTools(
-        {
-          system:
-            "You are a CRM analyst. Use the lookup_deals_by_customer tool " +
-            "to gather closed deals before composing a summary. Always cite " +
-            "the deal IDs you used.",
-          user:
-            `Customer ID: ${input.customer.customerId}\n` +
-            `Customer name: ${input.customer.name}\n\n` +
-            "Compose a one-paragraph summary highlighting their deal " +
-            "activity over the last 12 months.",
-          model,
-          tools: [lookupDealsTool],
-          schema: EnrichedSummarySchema,
-          maxIterations: 5,
-        },
-        ctx,
-      );
-
-      if (!result.ok) {
-        return err(result.error);
-      }
-      return ok(result.value.output);
-    },
-  };
+    model,
+    tools: [lookupDealsTool as ToolDef<unknown, unknown>],
+    maxIterations: 5,
+    system:
+      "You are a CRM analyst. Use the lookup_deals_by_customer tool to gather " +
+      "closed deals before composing a summary. Always cite the deal IDs you used.",
+    buildUser: (input) =>
+      `Customer ID: ${input.customer.customerId}\n` +
+      `Customer name: ${input.customer.name}\n\n` +
+      "Compose a one-paragraph summary highlighting their deal " +
+      "activity over the last 12 months.",
+  });
 };
 
 // --- Helpers used in tests / docs (kept exported for the example test) -------

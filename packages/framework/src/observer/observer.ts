@@ -6,6 +6,8 @@ import type {
   NodeErrorEvent,
   SubSpanEvent,
   RunEndEvent,
+  RouteDecidedEvent,
+  NodePrunedEvent,
   ObserverEvent,
 } from "../types/events.js";
 
@@ -17,6 +19,8 @@ export interface Observer {
   onNodeError(e: NodeErrorEvent): void;
   onSubSpan(e: SubSpanEvent): void;
   onRunEnd(e: RunEndEvent): void;
+  onRouteDecided?(e: RouteDecidedEvent): void;
+  onNodePruned?(e: NodePrunedEvent): void;
 }
 
 export class NoopObserver implements Observer {
@@ -27,6 +31,8 @@ export class NoopObserver implements Observer {
   onNodeError(_e: NodeErrorEvent): void {}
   onSubSpan(_e: SubSpanEvent): void {}
   onRunEnd(_e: RunEndEvent): void {}
+  onRouteDecided(_e: RouteDecidedEvent): void {}
+  onNodePruned(_e: NodePrunedEvent): void {}
 }
 
 export class RecordingObserver implements Observer {
@@ -51,6 +57,12 @@ export class RecordingObserver implements Observer {
     this.events.push(e);
   }
   onRunEnd(e: RunEndEvent): void {
+    this.events.push(e);
+  }
+  onRouteDecided(e: RouteDecidedEvent): void {
+    this.events.push(e);
+  }
+  onNodePruned(e: NodePrunedEvent): void {
     this.events.push(e);
   }
 }

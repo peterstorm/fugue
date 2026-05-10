@@ -1,17 +1,20 @@
 import type { DagDef } from "../types/dag.js";
+import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeContext, NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
-import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { JobLike } from "../state-machine/types.js";
 import type { DagPhase, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
 import { type Result, ok, err } from "../types/result.js";
 import { runDagStateful, type DagRunOpts } from "../dag-runtime/run-dag-stateful.js";
 import { runEvalJudges } from "../dag-runtime/eval-judges.js";
+import {
+  computeIncomingByNode,
+  type IncomingSources,
+} from "../dag-runtime/conditional.js";
 import { topoSort } from "./topo.js";
 import { validateInput, validateOutput } from "./validate.js";
-import { validateDagShape } from "./validate-dag.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import {
@@ -22,7 +25,13 @@ import {
   EVENT_NODE_OUTPUT,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
-import { withNodeSpan, createDagRunMeta, type DagRunMeta } from "./node-span.js";
+import {
+  withNodeSpan,
+  createDagRunMeta,
+  foldOutcomes,
+  type DagRunMeta,
+  type NodeSpanOutcome,
+} from "./node-span.js";
 
 export interface RunOptions {
   readonly resume?: {
@@ -108,9 +117,17 @@ export const runDag = async <I, O>(
     });
   }
 
+  // Conditional edges require runtime active-set filtering (ADR 0015) which
+  // only the state-machine path implements. Any DAG with `when` or default
+  // edges routes through runDagStateful regardless of HITL/retry config.
+  const dagDeclaresConditionalEdges = dag.edges.some(
+    (e) => isConditionalEdge(e) || isDefaultEdge(e),
+  );
+
   const useStateMachinePath =
     dagDeclaresHITL ||
     dagDeclaresRetries ||
+    dagDeclaresConditionalEdges ||
     opts?.jobLike !== undefined ||
     opts?.retryLimits !== undefined;
 
@@ -150,13 +167,16 @@ export const runDag = async <I, O>(
       },
     },
     async (rootSpan) => {
-    const meta: DagRunMeta = createDagRunMeta();
+    let meta: DagRunMeta = createDagRunMeta();
+    const recordOutcomes = (outcomes: readonly NodeSpanOutcome[]): void => {
+      meta = foldOutcomes(meta, outcomes);
+    };
 
     rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: ctx.runId });
 
     let innerResult: Result<{ output: O; nodeOutputs: Map<string, unknown> }, FrameworkError>;
     try {
-      innerResult = await runDagInner<I, O>(dag, input, ctx, opts, meta);
+      innerResult = await runDagInner<I, O>(dag, input, ctx, opts, recordOutcomes);
     } catch (e) {
       const error: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: e instanceof Error ? e.message : String(e) };
       rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(e) });
@@ -181,7 +201,12 @@ export const runDag = async <I, O>(
 
     // Run eval-judge (still inside the span — appears in trace)
     if (dag.evalJudges?.length) {
-      await runEvalJudgesAndUpdateMeta(dag.evalJudges, input, output, nodeOutputs, ctx, meta);
+      const results = await runEvalJudges(dag.evalJudges, input, output, nodeOutputs, ctx);
+      meta = {
+        ...meta,
+        evalJudgeResults: results,
+        evalJudgeFailed: results.some((r) => !r.passed),
+      };
     }
 
     // Finalize span status based on judge + guardrail results
@@ -225,16 +250,16 @@ const runDagInner = async <I, O>(
   input: I,
   ctx: NodeContext,
   opts?: RunOptions,
-  meta?: DagRunMeta,
+  recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void,
 ): Promise<Result<{ output: O; nodeOutputs: Map<string, unknown> }, FrameworkError>> => {
-  const shapeResult = validateDagShape(dag);
-  if (!shapeResult.ok) return shapeResult;
-
+  // Structural soundness is enforced at construction time by `defineDag`.
+  // Only topological failure (cycle) needs runtime detection here.
   const sortResult = topoSort(dag);
   if (!sortResult.ok) return sortResult;
 
   const waves = sortResult.value;
-  const nodeMap = new Map<string, NodeDef<any, any, any>>(dag.nodes.map((n) => [n.id, n]));
+  const nodeMap = new Map<string, NodeDef<unknown, unknown, unknown>>(dag.nodes.map((n) => [n.id, n]));
+  const incomingByNode = computeIncomingByNode(dag);
   const outputs = new Map<string, unknown>();
   const checkpoint = opts?.resume?.checkpoint;
   const runStart = Date.now();
@@ -242,14 +267,29 @@ const runDagInner = async <I, O>(
   emit(ctx, { type: "run-start", runId: ctx.runId, dagId: dag.id, timestamp: new Date() });
 
   for (const wave of waves) {
-    const results = await Promise.all(
-      wave.map((nodeId) => runNode(nodeMap.get(nodeId)!, input, ctx, dag.id, outputs, checkpoint, meta)),
+    const settled = await Promise.all(
+      wave.map((nodeId) =>
+        runNode(
+          nodeMap.get(nodeId)!,
+          input,
+          ctx,
+          dag.id,
+          outputs,
+          incomingByNode.get(nodeId) ?? { required: [], optional: [] },
+          checkpoint,
+        ),
+      ),
     );
 
-    for (const r of results) {
-      if (!r.ok) {
+    // Fold this wave's outcomes into the run-level meta after Promise.all.
+    if (recordOutcomes) {
+      recordOutcomes(settled.map((s) => s.outcome));
+    }
+
+    for (const { result } of settled) {
+      if (!result.ok) {
         emit(ctx, { type: "run-end", runId: ctx.runId, dagId: dag.id, timestamp: new Date(), duration: Date.now() - runStart, status: "error" });
-        return r as Result<any, FrameworkError>;
+        return result as Result<any, FrameworkError>;
       }
     }
   }
@@ -265,15 +305,17 @@ const runDagInner = async <I, O>(
 // Node execution
 // ---------------------------------------------------------------------------
 
+const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
+
 const runNode = async (
-  node: NodeDef<any, any, any>,
+  node: NodeDef<unknown, unknown, unknown>,
   dagInput: unknown,
   ctx: NodeContext,
   dagId: string,
   outputs: Map<string, unknown>,
+  incoming: IncomingSources,
   checkpoint: Map<string, unknown> | undefined,
-  meta: DagRunMeta | undefined,
-): Promise<Result<any, FrameworkError>> => {
+): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const nodeId = node.id;
 
   // Resume from checkpoint. Validate the cached value against the current
@@ -286,38 +328,47 @@ const runNode = async (
     const validated = validateOutput(node.outputSchema, cached, nodeId);
     if (!validated.ok) {
       emit(ctx, { type: "node-error", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), error: `checkpoint replay rejected: ${String(validated.error)}` });
-      return validated;
+      return { result: validated, outcome: EMPTY_OUTCOME };
     }
     emit(ctx, { type: "node-skipped", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), reason: "checkpoint" });
     outputs.set(nodeId, validated.value);
-    return ok(validated.value);
+    return { result: ok(validated.value), outcome: EMPTY_OUTCOME };
   }
 
-  // Build node input from deps
-  const nodeInput = node.deps.length === 0
-    ? dagInput
-    : node.deps.length === 1
-      ? outputs.get(node.deps[0])
-      : Object.fromEntries(node.deps.map((d) => [d, outputs.get(d)]));
+  // Build node input from derived incoming sources (ADR 0017). The legacy
+  // fast path never runs DAGs with conditional/default edges, so `optional`
+  // is always empty here — but we honor the same shape rules as the
+  // state-machine path for consistency.
+  const { required, optional } = incoming;
+  const nodeInput =
+    optional.length > 0
+      ? Object.fromEntries(
+          [...required, ...optional].map((d) => [d, outputs.get(d)]),
+        )
+      : required.length === 0
+        ? dagInput
+        : required.length === 1
+          ? outputs.get(required[0]!)
+          : Object.fromEntries(required.map((d) => [d, outputs.get(d)]));
 
   const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
-  if (!inputResult.ok) return inputResult;
+  if (!inputResult.ok) return { result: inputResult, outcome: EMPTY_OUTCOME };
 
   // Core execution logic
-  const executeNode = async (): Promise<Result<any, FrameworkError>> => {
+  const executeNode = async (): Promise<Result<unknown, FrameworkError>> => {
     const nodeStart = Date.now();
     emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
 
-    let runResult: Result<any, any>;
+    let runResult: Result<unknown, FrameworkError>;
     try {
-      runResult = await node.run(inputResult.value, ctx);
+      runResult = (await node.run(inputResult.value, ctx)) as Result<unknown, FrameworkError>;
     } catch (e) {
       return err({ kind: "node-crash", nodeId, message: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined });
     }
 
     if (!runResult.ok) {
       emit(ctx, { type: "node-error", runId: ctx.runId, dagId, nodeId, timestamp: new Date(), error: String(runResult.error) });
-      return runResult as Result<never, FrameworkError>;
+      return runResult;
     }
 
     const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
@@ -339,23 +390,5 @@ const runNode = async (
   };
 
   // Wrap in OTel span
-  return withNodeSpan(nodeId, node.kind, inputResult.value, meta, executeNode);
-};
-
-// ---------------------------------------------------------------------------
-// Eval-judge execution — runner extracted to ../dag-runtime/eval-judges.ts
-// so the state-machine path can share it.
-// ---------------------------------------------------------------------------
-
-const runEvalJudgesAndUpdateMeta = async (
-  judges: readonly EvalJudgeNodeDef[],
-  dagInput: unknown,
-  dagOutput: unknown,
-  nodeOutputs: Map<string, unknown>,
-  ctx: NodeContext,
-  meta: DagRunMeta,
-): Promise<void> => {
-  const results = await runEvalJudges(judges, dagInput, dagOutput, nodeOutputs, ctx);
-  meta.evalJudgeResults = results;
-  meta.evalJudgeFailed = results.some((r) => !r.passed);
+  return withNodeSpan(nodeId, node.kind, inputResult.value, ctx.includeContent ?? false, executeNode);
 };

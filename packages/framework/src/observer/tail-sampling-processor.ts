@@ -18,6 +18,8 @@ import { AI_LLM_COST_USD, AI_RUN_ID } from "../tracing/semantic-conventions.js";
 
 /** Maximum age (ms) for a trace buffer before it's evicted as orphaned. */
 const BUFFER_TTL_MS = 5 * 60 * 1000; // 5 minutes
+/** Minimum interval between TTL/size eviction sweeps (kept off the onEnd hot path). */
+const EVICTION_SWEEP_INTERVAL_MS = 30_000;
 /** Maximum number of buffered traces before forced eviction of oldest. */
 const MAX_BUFFERED_TRACES = 1000;
 
@@ -30,10 +32,24 @@ interface TraceBuffer {
   createdAt: number;
 }
 
+const exportAsync = (
+  exporter: SpanExporter,
+  spans: ReadableSpan[],
+): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    exporter.export(spans, (result) => {
+      if (result.code === 0) resolve();
+      else reject(result.error ?? new Error("export failed"));
+    });
+  });
+
 export class TailSamplingProcessor implements SpanProcessor {
   private readonly exporter: SpanExporter;
   private readonly policy: PersistencePolicy;
   private readonly buffers = new Map<string, TraceBuffer>();
+  /** Track in-flight exports so forceFlush/shutdown can await them. */
+  private readonly pendingExports = new Set<Promise<void>>();
+  private lastEvictedAt = 0;
 
   /** Counters for monitoring */
   exported = 0;
@@ -61,16 +77,17 @@ export class TailSamplingProcessor implements SpanProcessor {
     buffer.spans.push(span);
 
     // If this is a root span (no parent), the trace is complete — decide now.
-    const parentId = (span as any).parentSpanId
-      ?? (span as any).parentSpanContext?.spanId
-      ?? null;
-    if (!parentId) {
+    if (!span.parentSpanContext?.spanId) {
       this.buffers.delete(traceId);
       this.processCompleteTrace(span, buffer);
     }
 
-    // Periodic eviction of orphaned buffers
-    this.evictStaleBuffers();
+    // Throttled periodic eviction of orphaned buffers — keep onEnd O(1).
+    const now = Date.now();
+    if (now - this.lastEvictedAt > EVICTION_SWEEP_INTERVAL_MS) {
+      this.lastEvictedAt = now;
+      this.evictStaleBuffers();
+    }
   }
 
   private evictStaleBuffers(): void {
@@ -97,17 +114,21 @@ export class TailSamplingProcessor implements SpanProcessor {
     }
   }
 
+  private trackExport(spans: ReadableSpan[], traceId: string): void {
+    const p = exportAsync(this.exporter, spans).catch((err) => {
+      console.error(`[TailSamplingProcessor] Export failed for trace ${traceId}:`, err);
+    });
+    this.pendingExports.add(p);
+    p.finally(() => this.pendingExports.delete(p));
+  }
+
   private processCompleteTrace(rootSpan: ReadableSpan, buffer: TraceBuffer): void {
     const summary = this.extractRunSummary(rootSpan, buffer);
     const shouldFlush = this.policy.shouldFlush(summary);
 
     if (shouldFlush) {
       this.exported++;
-      this.exporter.export(buffer.spans, (result) => {
-        if (result.code !== 0) {
-          console.error("[TailSamplingProcessor] Export failed for trace", rootSpan.spanContext().traceId);
-        }
-      });
+      this.trackExport(buffer.spans, rootSpan.spanContext().traceId);
     } else {
       this.dropped++;
     }
@@ -156,14 +177,12 @@ export class TailSamplingProcessor implements SpanProcessor {
     // Flush all buffered traces — export regardless of policy (shutdown/flush scenario)
     for (const [traceId, buffer] of this.buffers) {
       if (buffer.spans.length > 0) {
-        this.exporter.export(buffer.spans, (result) => {
-          if (result.code !== 0) {
-            console.error(`[TailSamplingProcessor] forceFlush export failed for trace ${traceId}`);
-          }
-        });
+        this.trackExport(buffer.spans, traceId);
       }
     }
     this.buffers.clear();
+    // Wait for every export started so far to complete before flushing the inner.
+    await Promise.all([...this.pendingExports]);
     await this.exporter.forceFlush?.();
   }
 

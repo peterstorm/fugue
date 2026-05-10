@@ -28,7 +28,6 @@ export const createAssembleResponseNode = (customerId: string) =>
     id: "assemble-response",
     inputSchema: InputSchema as z.ZodType<AssembleInput>,
     outputSchema: SummaryResponseSchema as z.ZodType<SummaryResponse>,
-    deps: ["extract-features", "grounding-guardrail"],
     transform: (input): Result<SummaryResponse, FrameworkError> => {
       const extraction = input["extract-features"];
 

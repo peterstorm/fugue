@@ -1,0 +1,352 @@
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { z } from "zod";
+import OpenAI from "openai";
+import { OpenAILlmClient } from "../llm/openai-client.js";
+import type { ToolDef } from "../llm/tools.js";
+
+// ---------------------------------------------------------------------------
+// fetch stub
+// ---------------------------------------------------------------------------
+
+type FetchHandler = (url: string, init: RequestInit) => Promise<Response>;
+
+const originalFetch = globalThis.fetch;
+let handler: FetchHandler | null = null;
+let fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+
+beforeEach(() => {
+  fetchCalls = [];
+  handler = null;
+  globalThis.fetch = (async (url: string | URL | Request, init: RequestInit) => {
+    const u = typeof url === "string" ? url : url.toString();
+    fetchCalls.push({ url: u, init });
+    if (!handler) throw new Error("fetch handler not configured");
+    return handler(u, init);
+  }) as unknown as typeof fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const Schema = z.object({ greeting: z.string() });
+type SchemaType = z.infer<typeof Schema>;
+
+const makeClient = () => {
+  const openai = new OpenAI({ apiKey: "test-key", baseURL: "https://api.example.com/v1" });
+  return new OpenAILlmClient(openai);
+};
+
+const jsonResponse = (
+  body: Record<string, unknown>,
+  status = 200,
+): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+const RUNTIME = { tracer: null, signal: undefined } as const;
+
+const makeMessageOutput = (text: string) => ({
+  type: "message",
+  content: [{ type: "output_text", text }],
+});
+
+const makeFunctionCallOutput = (
+  callId: string,
+  name: string,
+  args: string,
+) => ({
+  type: "function_call",
+  call_id: callId,
+  name,
+  arguments: args,
+});
+
+// ---------------------------------------------------------------------------
+// sendStructured
+// ---------------------------------------------------------------------------
+
+describe("OpenAILlmClient.sendStructured", () => {
+  it("happy path: parses output_text and returns ok with token usage", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 11, output_tokens: 22 },
+      });
+
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.output).toEqual({ greeting: "hi" });
+      expect(result.value.tokensIn).toBe(11);
+      expect(result.value.tokensOut).toBe(22);
+    }
+  });
+
+  it("non-200 → node-crash with status + body and nodeId", async () => {
+    handler = async () => jsonResponse({ error: "rate limit" }, 429);
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "n",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("n");
+      expect(result.error.message).toMatch(/429/);
+      expect(result.error.message).toMatch(/rate limit/);
+    }
+  });
+
+  it("AbortError → aborted", async () => {
+    handler = async () => {
+      const e = new Error("aborted");
+      e.name = "AbortError";
+      throw e;
+    };
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  it("missing output_text → node-crash with nodeId", async () => {
+    handler = async () => jsonResponse({ output: [], usage: {} });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "missing",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("missing");
+    }
+  });
+
+  it("non-JSON output → node-crash", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput("not json at all")],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toMatch(/not valid JSON/);
+    }
+  });
+
+  it("schema validation failure → node-crash with nodeId", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "schema-node",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("schema-node");
+      expect(result.error.message).toMatch(/Schema validation failed/);
+    }
+  });
+
+  it("nodeId defaults to '<llm>' when omitted", async () => {
+    handler = async () => jsonResponse({ error: "boom" }, 500);
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("<llm>");
+    }
+  });
+
+  it("text.format is wired as json_schema with strict=true", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "x" }))],
+        usage: {},
+      });
+    await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+    });
+    const body = JSON.parse(fetchCalls[0].init.body as string);
+    expect(body.text.format.type).toBe("json_schema");
+    expect(body.text.format.strict).toBe(true);
+    expect(body.text.format.name).toBe("structured_output");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sendWithTools
+// ---------------------------------------------------------------------------
+
+const makeTool = (
+  name: string,
+  run: (input: { id: string }) => Promise<{ found: boolean }>,
+): ToolDef<unknown, unknown> => ({
+  name,
+  description: "test tool",
+  inputSchema: z.object({ id: z.string() }),
+  outputSchema: z.object({ found: z.boolean() }),
+  run: run as unknown as ToolDef<unknown, unknown>["run"],
+});
+
+describe("OpenAILlmClient.sendWithTools", () => {
+  it("pre-aborted signal → aborted", async () => {
+    handler = async () => jsonResponse({ output: [] });
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        signal: ctrl.signal,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  it("multi-turn tool dispatch loop produces final answer", async () => {
+    let turn = 0;
+    handler = async () => {
+      turn++;
+      if (turn === 1) {
+        return jsonResponse({
+          output: [makeFunctionCallOutput("c1", "lookup", JSON.stringify({ id: "abc" }))],
+          usage: { input_tokens: 5, output_tokens: 5 },
+        });
+      }
+      return jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "after-tool" }))],
+        usage: { input_tokens: 7, output_tokens: 7 },
+      });
+    };
+
+    let toolRan = 0;
+    const tool = makeTool("lookup", async () => {
+      toolRan++;
+      return { found: true };
+    });
+
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [tool],
+        schema: Schema,
+        nodeId: "multi",
+      },
+      RUNTIME,
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.output).toEqual({ greeting: "after-tool" });
+      // Tokens accumulated across both turns.
+      expect(result.value.tokensIn).toBe(12);
+      expect(result.value.tokensOut).toBe(12);
+    }
+    expect(toolRan).toBe(1);
+    expect(turn).toBe(2);
+  });
+
+  it("iteration cap exhausted → transient with nodeId", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeFunctionCallOutput("c", "looper", JSON.stringify({ id: "x" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    const tool = makeTool("looper", async () => ({ found: true }));
+
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [tool],
+        schema: Schema,
+        maxIterations: 2,
+        nodeId: "loop-node",
+      },
+      RUNTIME,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.nodeId).toBe("loop-node");
+      }
+    }
+  });
+
+  it("AbortError mid-call → aborted", async () => {
+    handler = async () => {
+      const e = new Error("aborted");
+      e.name = "AbortError";
+      throw e;
+    };
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("aborted");
+    }
+  });
+});

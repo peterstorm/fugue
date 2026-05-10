@@ -81,6 +81,5 @@ export const createExtractFeaturesNode = () =>
     id: "extract-features",
     inputSchema: InputSchema,
     outputSchema: ExtractionResultSchema,
-    deps: ["fetch-crm"],
     transform: (input): Result<ExtractionResult, FrameworkError> => ok(extractFeatures(input)),
   });
