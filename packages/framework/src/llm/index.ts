@@ -11,9 +11,16 @@ export {
   withLlmSpan,
   withToolSpan,
   setLlmUsageAttributes,
+  setLlmRequestAttributes,
+  setLlmResponseAttributes,
   setToolIoAttributes,
 } from "./spans.js";
-export type { LlmSpanMeta, ToolSpanMeta } from "./spans.js";
+export type {
+  LlmSpanMeta,
+  ToolSpanMeta,
+  LlmRequestParams,
+  LlmResponseMeta,
+} from "./spans.js";
 export { AnthropicLlmClient } from "./anthropic-client.js";
 export { OpenAILlmClient } from "./openai-client.js";
 export { FakeLlmClient } from "./fake-client.js";

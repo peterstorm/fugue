@@ -15,7 +15,11 @@ import {
   type ToolCall,
   type ToolDispatchResult,
 } from "./tool-dispatch.js";
-import { withLlmSpan, setLlmUsageAttributes } from "./spans.js";
+import {
+  withLlmSpan,
+  setLlmUsageAttributes,
+  setLlmResponseAttributes,
+} from "./spans.js";
 
 export type FakeResponseProvider =
   | Map<string, unknown | FrameworkError>
@@ -40,6 +44,9 @@ export type FakeToolUseTurn = {
   readonly calls: readonly ToolCall[];
   readonly tokensIn?: number;
   readonly tokensOut?: number;
+  readonly responseId?: string;
+  readonly responseModel?: string;
+  readonly finishReason?: string;
 };
 
 export type FakeFinalTurn = {
@@ -49,6 +56,9 @@ export type FakeFinalTurn = {
   readonly tokensIn?: number;
   readonly tokensOut?: number;
   readonly thinking?: string;
+  readonly responseId?: string;
+  readonly responseModel?: string;
+  readonly finishReason?: string;
 };
 
 export type FakeTurn = FakeToolUseTurn | FakeFinalTurn;
@@ -175,6 +185,17 @@ export class FakeLlmClient implements LlmClient {
           totalTokensIn += tokensIn;
           totalTokensOut += tokensOut;
           setLlmUsageAttributes(tokensIn, tokensOut);
+          if (
+            turnSpec.responseId ||
+            turnSpec.responseModel ||
+            turnSpec.finishReason
+          ) {
+            setLlmResponseAttributes({
+              model: turnSpec.responseModel,
+              id: turnSpec.responseId,
+              finishReasons: turnSpec.finishReason ? [turnSpec.finishReason] : undefined,
+            });
+          }
         },
       );
 

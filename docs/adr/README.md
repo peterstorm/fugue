@@ -39,6 +39,7 @@ Start with these to understand the runtime as it stands today:
 | [0020](0020-ontrace-vs-run-end-ordering.md) | `onTrace` precedes `run-end` | Accepted |
 | [0021](0021-single-path-runtime.md) | Single-path runtime | Accepted |
 | [0022](0022-legacy-path-retirement-criteria.md) | Legacy-path retirement criteria | Accepted |
+| [0023](0023-genai-semconv-source-of-truth.md) | OTel GenAI semconv as source of truth for LLM telemetry | Accepted |
 
 ## Conventions
 
@@ -50,6 +51,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-05-11: all 22 ADRs present, no gaps, no duplicates. Cross-references (`git grep "ADR 00"`) all resolve. The duplicate-0008 collision flagged in `docs/plans/2026-05-10-pr-review-remediation.md` was resolved before this index was written; only `0008-event-envelope-and-time.md` occupies slot 0008 and `0013-onhumanreview-hook-crash-retry.md` occupies slot 0013.
+Verified 2026-05-11: all 23 ADRs present, no gaps, no duplicates. Cross-references (`git grep "ADR 00"`) all resolve. The duplicate-0008 collision flagged in `docs/plans/2026-05-10-pr-review-remediation.md` was resolved before this index was written; only `0008-event-envelope-and-time.md` occupies slot 0008 and `0013-onhumanreview-hook-crash-retry.md` occupies slot 0013.
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

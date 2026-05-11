@@ -325,6 +325,7 @@ interface RecordedSpan {
   readonly name: string;
   readonly spanType: string;
   readonly attributes: Record<string, unknown>;
+  readonly statusCode?: string;
 }
 
 const makeRecordingTracer = (
@@ -332,9 +333,11 @@ const makeRecordingTracer = (
 ): Tracer => {
   // Patch the active OTel span for the duration of fn so attribute setters land somewhere.
   const otelMod = require("@opentelemetry/api") as typeof import("@opentelemetry/api");
+  const STATUS_NAMES: Record<number, string> = { 0: "UNSET", 1: "OK", 2: "ERROR" };
   return {
     withSpan: async <T,>(name: string, spanType: string, fn: () => Promise<T>) => {
       const attrs: Record<string, unknown> = {};
+      let statusCode: string | undefined;
       const fakeSpan = {
         setAttribute: (k: string, v: unknown) => {
           attrs[k] = v;
@@ -348,14 +351,17 @@ const makeRecordingTracer = (
         end: () => undefined,
         isRecording: () => true,
         recordException: () => undefined,
-        setStatus: () => fakeSpan,
+        setStatus: (s: { code: number }) => {
+          statusCode = STATUS_NAMES[s.code];
+          return fakeSpan;
+        },
         spanContext: () => ({ traceId: "0".repeat(32), spanId: "0".repeat(16), traceFlags: 0 }),
         updateName: () => fakeSpan,
       };
       const ctx = otelMod.trace.setSpan(otelMod.context.active(), fakeSpan as any);
       return otelMod.context.with(ctx, async () => {
         const result = await fn();
-        recorded.push({ name, spanType, attributes: attrs });
+        recorded.push({ name, spanType, attributes: attrs, statusCode });
         return result;
       });
     },
@@ -396,13 +402,38 @@ describe("sendWithTools span emission (GenAI semconv)", () => {
     expect(toolSpans[0]?.attributes["gen_ai.tool.name"]).toBe("add_numbers");
     expect(toolSpans[0]?.attributes["gen_ai.tool.call.id"]).toBe("c1");
     expect(toolSpans[0]?.attributes["gen_ai.tool.type"]).toBe("function");
-    expect(toolSpans[0]?.attributes["gen_ai.tool.is_error"]).toBe(false);
+    expect(toolSpans[0]?.attributes["error.type"]).toBeUndefined();
     expect(toolSpans[0]?.attributes["gen_ai.operation.name"]).toBe(
       "execute_tool",
     );
+    expect(toolSpans[0]?.attributes["gen_ai.tool.call.arguments"]).toBeDefined();
+    expect(toolSpans[0]?.attributes["gen_ai.tool.call.result"]).toBeDefined();
   });
 
-  test("tool error sets gen_ai.tool.is_error = true", async () => {
+  test("emits gen_ai.response.* attributes when fake script supplies them", async () => {
+    const recorded: RecordedSpan[] = [];
+    const tracer = makeRecordingTracer(recorded);
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [
+        {
+          type: "final",
+          content: { result: 1 },
+          tokensIn: 10,
+          tokensOut: 2,
+          responseId: "resp_123",
+          responseModel: "fake-model-actual",
+          finishReason: "end_turn",
+        },
+      ],
+    });
+    await client.sendWithTools(baseReq(), makeCtx({ tracer }));
+    const llmSpan = recorded.find((r) => r.spanType === "CHAT_MODEL");
+    expect(llmSpan?.attributes["gen_ai.response.id"]).toBe("resp_123");
+    expect(llmSpan?.attributes["gen_ai.response.model"]).toBe("fake-model-actual");
+    expect(llmSpan?.attributes["gen_ai.response.finish_reasons"]).toEqual(["end_turn"]);
+  });
+
+  test("tool error sets error.type and ERROR status", async () => {
     const recorded: RecordedSpan[] = [];
     const tracer = makeRecordingTracer(recorded);
     const tool: ToolDef<{ a: number; b: number }, { sum: number }> = {
@@ -422,7 +453,8 @@ describe("sendWithTools span emission (GenAI semconv)", () => {
     });
     await client.sendWithTools(baseReq({ tools: [tool] }), makeCtx({ tracer }));
     const toolSpan = recorded.find((r) => r.spanType === "TOOL");
-    expect(toolSpan?.attributes["gen_ai.tool.is_error"]).toBe(true);
+    expect(toolSpan?.attributes["error.type"]).toBe("tool_execution_error");
+    expect(toolSpan?.statusCode).toBe("ERROR");
   });
 });
 

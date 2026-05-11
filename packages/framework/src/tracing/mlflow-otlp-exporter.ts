@@ -9,11 +9,13 @@
  * - ai.span.type → mlflow.spanType (uppercased)
  * - ai.node.input event → mlflow.spanInputs (object attribute)
  * - ai.node.output event → mlflow.spanOutputs (object attribute)
- * - ai.llm.request event → merged into mlflow.spanInputs
+ * - gen_ai.system.message event → merged into mlflow.spanInputs.system_prompt
+ * - gen_ai.user.message event → merged into mlflow.spanInputs.user_prompt
+ * - gen_ai.assistant.message event (reasoning_content) → mlflow.spanInputs.thinking
  * - ai.llm.cost event → mlflow.llm.cost (object attribute)
- * - ai.llm.thinking event → merged into span attributes
- * - ai.llm.model → mlflow.llm.model
- * - ai.llm.tokens_in/out (legacy) or gen_ai.usage.* (preferred) → mlflow.chat.tokenUsage
+ * - gen_ai.request.model → mlflow.llm.model
+ * - gen_ai.system → mlflow.llm.provider
+ * - gen_ai.usage.input_tokens / gen_ai.usage.output_tokens → mlflow.chat.tokenUsage
  *
  * The OTel SDK drops object-valued attributes, so the derived MLflow attributes
  * are stored in `SpanAttributeRegistry` (keyed by spanId) rather than mutated
@@ -29,15 +31,16 @@ import type { ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter, TimedEvent } from "@opentelemetry/sdk-trace-base";
 import {
   AI_SPAN_TYPE,
-  AI_LLM_MODEL,
-  AI_LLM_PROVIDER,
-  AI_LLM_TOKENS_IN,
-  AI_LLM_TOKENS_OUT,
+  GEN_AI_REQUEST_MODEL,
+  GEN_AI_SYSTEM,
+  GEN_AI_USAGE_INPUT_TOKENS,
+  GEN_AI_USAGE_OUTPUT_TOKENS,
   EVENT_NODE_INPUT,
   EVENT_NODE_OUTPUT,
-  EVENT_LLM_REQUEST,
+  EVENT_GEN_AI_SYSTEM_MESSAGE,
+  EVENT_GEN_AI_USER_MESSAGE,
+  EVENT_GEN_AI_ASSISTANT_MESSAGE,
   EVENT_LLM_COST,
-  EVENT_LLM_THINKING,
 } from "./semantic-conventions.js";
 import { SpanAttributeRegistry, type SpanAttributes } from "./span-attribute-registry.js";
 
@@ -60,6 +63,100 @@ const SPAN_TYPE_TO_MLFLOW: Record<string, string> = {
   retriever: "RETRIEVER",
   tool: "TOOL",
 };
+
+// ---------------------------------------------------------------------------
+// Declarative translation tables
+//
+// The two tables below are the **single source of MLflow knowledge** for the
+// framework. Adding a new vendor adapter (Langfuse, Phoenix, Honeycomb-GenAI)
+// means writing analogous tables, not threading vendor logic through the
+// rest of the framework.
+//
+// `ATTR_MAP` covers the simple case: copy one source attribute to one target
+// attribute. `EVENT_HANDLERS` covers events whose payloads need to merge into
+// MLflow's object-valued attributes (spanInputs / spanOutputs / llm.cost) —
+// each handler mutates a shared accumulator.
+// ---------------------------------------------------------------------------
+
+/** Simple `from → to` attribute renames. Source values pass through unchanged. */
+const ATTR_MAP: ReadonlyArray<{ readonly from: string; readonly to: string }> = [
+  { from: GEN_AI_REQUEST_MODEL, to: "mlflow.llm.model" },
+];
+
+/** Accumulator threaded through event handlers as they walk a span's events. */
+interface MlflowAccumulator {
+  spanInputs: Record<string, unknown>;
+  spanOutputs: Record<string, unknown>;
+  llmCost: Record<string, number> | null;
+}
+
+interface EventHandler {
+  readonly event: string;
+  readonly apply: (
+    eventAttrs: Readonly<Record<string, unknown>>,
+    acc: MlflowAccumulator,
+    ctx: { readonly traceId: string },
+  ) => void;
+}
+
+const mergeJsonDataField = (
+  field: "spanInputs" | "spanOutputs",
+  fieldLabel: string,
+): EventHandler["apply"] => (eventAttrs, acc, ctx) => {
+  const data = eventAttrs["data"] as string | undefined;
+  if (data) {
+    try {
+      acc[field] = { ...acc[field], ...JSON.parse(data) };
+    } catch (e) {
+      logParseFailure(fieldLabel, ctx.traceId, e);
+      acc[field]["raw"] = data;
+    }
+  } else {
+    acc[field] = { ...acc[field], ...Object.fromEntries(Object.entries(eventAttrs)) };
+  }
+};
+
+const EVENT_HANDLERS: ReadonlyArray<EventHandler> = [
+  { event: EVENT_NODE_INPUT, apply: mergeJsonDataField("spanInputs", "spanInputs") },
+  { event: EVENT_NODE_OUTPUT, apply: mergeJsonDataField("spanOutputs", "spanOutputs") },
+  {
+    event: EVENT_GEN_AI_SYSTEM_MESSAGE,
+    apply: (eventAttrs, acc) => {
+      const content = eventAttrs["content"] as string | undefined;
+      const promptName = eventAttrs["ai.prompt_name"] as string | undefined;
+      if (content) acc.spanInputs["system_prompt"] = content;
+      if (promptName) acc.spanInputs["prompt_name"] = promptName;
+    },
+  },
+  {
+    event: EVENT_GEN_AI_USER_MESSAGE,
+    apply: (eventAttrs, acc) => {
+      const content = eventAttrs["content"] as string | undefined;
+      if (content) acc.spanInputs["user_prompt"] = content;
+    },
+  },
+  {
+    event: EVENT_GEN_AI_ASSISTANT_MESSAGE,
+    apply: (eventAttrs, acc) => {
+      const reasoning = eventAttrs["reasoning_content"] as string | undefined;
+      if (reasoning) acc.spanInputs["thinking"] = reasoning;
+    },
+  },
+  {
+    event: EVENT_LLM_COST,
+    apply: (eventAttrs, acc) => {
+      acc.llmCost = {
+        input_cost: Number(eventAttrs["input_cost"] ?? 0),
+        output_cost: Number(eventAttrs["output_cost"] ?? 0),
+        total_cost: Number(eventAttrs["total_cost"] ?? 0),
+      };
+    },
+  },
+];
+
+const EVENT_HANDLERS_BY_NAME: ReadonlyMap<string, EventHandler["apply"]> = new Map(
+  EVENT_HANDLERS.map((h) => [h.event, h.apply]),
+);
 
 /**
  * Wave 3 §3.7 — rate-limited JSON parse failure logging.
@@ -166,92 +263,36 @@ export class MlflowOtlpExporter implements SpanExporter {
   private indexDerivedAttrs(span: ReadableSpan): void {
     const attrs = span.attributes as Record<string, unknown>;
     const events = (span as { events?: TimedEvent[] }).events;
+    const traceId = span.spanContext().traceId;
     const out: Record<string, unknown> = {};
 
-    // 1. ai.span.type → mlflow.spanType
+    // 1. ai.span.type → mlflow.spanType (special: enum re-mapping, not a copy).
     const spanType = attrs[AI_SPAN_TYPE] as string | undefined;
     if (spanType) {
       out["mlflow.spanType"] = SPAN_TYPE_TO_MLFLOW[spanType] ?? "CHAIN";
     }
 
-    // 2. Process events → MLflow object attributes
-    let spanInputs: Record<string, unknown> = {};
-    let spanOutputs: Record<string, unknown> = {};
-    let llmCost: Record<string, number> | null = null;
-
-    if (events) {
-      for (const event of events) {
-        const eventAttrs = event.attributes ?? {};
-        switch (event.name) {
-          case EVENT_NODE_INPUT: {
-            const data = eventAttrs["data"] as string | undefined;
-            if (data) {
-              try {
-                spanInputs = { ...spanInputs, ...JSON.parse(data) };
-              } catch (e) {
-                // Wave 3 §3.7: a bare catch with a `raw` fallback is
-                // indistinguishable from a node legitimately emitting raw
-                // text. Log (rate-limited) so operators can correlate.
-                logParseFailure("spanInputs", span.spanContext().traceId, e);
-                spanInputs["raw"] = data;
-              }
-            } else {
-              spanInputs = { ...spanInputs, ...Object.fromEntries(Object.entries(eventAttrs)) };
-            }
-            break;
-          }
-          case EVENT_NODE_OUTPUT: {
-            const data = eventAttrs["data"] as string | undefined;
-            if (data) {
-              try {
-                spanOutputs = { ...spanOutputs, ...JSON.parse(data) };
-              } catch (e) {
-                logParseFailure("spanOutputs", span.spanContext().traceId, e);
-                spanOutputs["raw"] = data;
-              }
-            } else {
-              spanOutputs = { ...spanOutputs, ...Object.fromEntries(Object.entries(eventAttrs)) };
-            }
-            break;
-          }
-          case EVENT_LLM_REQUEST: {
-            spanInputs = {
-              ...spanInputs,
-              model: eventAttrs["model"],
-              prompt_name: eventAttrs["prompt_name"],
-              system_prompt: eventAttrs["system_prompt"],
-              user_prompt: eventAttrs["user_prompt"],
-            };
-            break;
-          }
-          case EVENT_LLM_COST: {
-            llmCost = {
-              input_cost: Number(eventAttrs["input_cost"] ?? 0),
-              output_cost: Number(eventAttrs["output_cost"] ?? 0),
-              total_cost: Number(eventAttrs["total_cost"] ?? 0),
-            };
-            break;
-          }
-          case EVENT_LLM_THINKING: {
-            const content = eventAttrs["content"] as string | undefined;
-            if (content) spanInputs["thinking"] = content;
-            break;
-          }
-        }
-      }
+    // 2. Simple attribute renames via ATTR_MAP.
+    for (const { from, to } of ATTR_MAP) {
+      const value = attrs[from];
+      if (value !== undefined) out[to] = value;
     }
 
-    if (Object.keys(spanInputs).length > 0) out["mlflow.spanInputs"] = spanInputs;
-    if (Object.keys(spanOutputs).length > 0) out["mlflow.spanOutputs"] = spanOutputs;
-    if (llmCost) out["mlflow.llm.cost"] = llmCost;
+    // 3. Events → object attributes via EVENT_HANDLERS.
+    const acc: MlflowAccumulator = { spanInputs: {}, spanOutputs: {}, llmCost: null };
+    if (events) {
+      for (const event of events) {
+        const handler = EVENT_HANDLERS_BY_NAME.get(event.name);
+        if (handler) handler(event.attributes ?? {}, acc, { traceId });
+      }
+    }
+    if (Object.keys(acc.spanInputs).length > 0) out["mlflow.spanInputs"] = acc.spanInputs;
+    if (Object.keys(acc.spanOutputs).length > 0) out["mlflow.spanOutputs"] = acc.spanOutputs;
+    if (acc.llmCost) out["mlflow.llm.cost"] = acc.llmCost;
 
-    // 4. Token usage — prefer modern GenAI semconv, fall back to legacy ai.llm.*.
-    const tokensIn =
-      (attrs["gen_ai.usage.input_tokens"] as number | undefined) ??
-      (attrs[AI_LLM_TOKENS_IN] as number | undefined);
-    const tokensOut =
-      (attrs["gen_ai.usage.output_tokens"] as number | undefined) ??
-      (attrs[AI_LLM_TOKENS_OUT] as number | undefined);
+    // 4. Token usage — bundle two GenAI attributes into one MLflow object.
+    const tokensIn = attrs[GEN_AI_USAGE_INPUT_TOKENS] as number | undefined;
+    const tokensOut = attrs[GEN_AI_USAGE_OUTPUT_TOKENS] as number | undefined;
     if (tokensIn !== undefined || tokensOut !== undefined) {
       out["mlflow.chat.tokenUsage"] = {
         input_tokens: tokensIn ?? 0,
@@ -260,11 +301,10 @@ export class MlflowOtlpExporter implements SpanExporter {
       };
     }
 
-    // 5. Copy model/provider to MLflow namespace
-    const model = attrs[AI_LLM_MODEL] as string | undefined;
-    if (model) {
-      out["mlflow.llm.model"] = model;
-      out["mlflow.llm.provider"] = attrs[AI_LLM_PROVIDER] ?? "unknown";
+    // 5. mlflow.llm.provider — derived from gen_ai.system, with a default.
+    //    Only emitted when a model is present (i.e. this looks like an LLM span).
+    if (attrs[GEN_AI_REQUEST_MODEL] !== undefined) {
+      out["mlflow.llm.provider"] = attrs[GEN_AI_SYSTEM] ?? "unknown";
     }
 
     if (Object.keys(out).length > 0) {

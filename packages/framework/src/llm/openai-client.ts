@@ -18,7 +18,7 @@ import {
   type ToolCall,
   type ToolDispatchResult,
 } from "./tool-dispatch.js";
-import { withLlmSpan, setLlmUsageAttributes } from "./spans.js";
+import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 
 /**
  * Recursively adds `additionalProperties: false` to all object-type schemas.
@@ -122,6 +122,9 @@ interface ResponsesUsage {
 }
 
 interface ResponsesApiResponse {
+  readonly id?: string;
+  readonly model?: string;
+  readonly status?: string;
   readonly output?: readonly ResponsesOutputItem[];
   readonly usage?: ResponsesUsage;
 }
@@ -442,6 +445,11 @@ export class OpenAILlmClient implements LlmClient {
               const tokensIn = r.response.usage?.input_tokens ?? 0;
               const tokensOut = r.response.usage?.output_tokens ?? 0;
               setLlmUsageAttributes(tokensIn, tokensOut);
+              setLlmResponseAttributes({
+                model: r.response.model,
+                id: r.response.id,
+                finishReasons: r.response.status ? [r.response.status] : undefined,
+              });
             }
             return r;
           },

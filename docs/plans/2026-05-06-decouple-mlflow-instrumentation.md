@@ -1,8 +1,10 @@
 # Design: Decouple Instrumentation from MLflow
 
 **Created:** 2026-05-06
-**Status:** Approved
+**Status:** Implemented; namespace choice **superseded by ADR 0023** (2026-05-11).
 **Goal:** Make the framework's instrumentation vendor-neutral by replacing MLflow-specific attribute names with framework-defined semantic conventions, and confining all MLflow knowledge to a single pluggable exporter.
+
+> **Note (2026-05-11):** The principle in this plan — "framework speaks generic conventions, exporter speaks vendor" — still stands. The concrete choice of a framework-owned `ai.*` namespace as the source of truth was superseded by **ADR 0023**, which made the OTel GenAI semantic conventions (`gen_ai.*`) the source of truth for everything the spec covers, retaining `ai.*` only for framework concerns the spec does not address (cost, DAG/run/node identity, guardrail outcomes). The `ai.llm.{model,provider,tokens_in,tokens_out}` attribute names listed below no longer exist; see ADR 0023 for the current namespace split.
 
 ---
 

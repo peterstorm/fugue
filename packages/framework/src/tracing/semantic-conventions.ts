@@ -1,9 +1,17 @@
 /**
  * Framework-level semantic conventions for span attributes and events.
- * Vendor-neutral — no mention of any specific backend (MLflow, Jaeger, etc.).
+ *
+ * Source of truth split (ADR-0023):
+ * - For anything covered by the OTel GenAI semantic conventions, we emit the
+ *   spec attribute (`gen_ai.*`) directly at the call site. Those names are
+ *   not re-exported here — call sites use string literals matching the spec
+ *   so a grep for `gen_ai.usage.input_tokens` lands on the emission point.
+ * - The constants below cover framework concerns the spec does NOT address:
+ *   DAG/run/node identity, cost in USD, guardrail outcomes, and the
+ *   thinking-presence boolean. These keep the framework-owned `ai.*` prefix.
  */
 
-// --- Span Attributes (flat primitives) ---
+// --- Framework-owned span attributes (not covered by OTel GenAI semconv) ---
 
 export const AI_NODE_ID = "ai.node.id";
 export const AI_NODE_KIND = "ai.node.kind";
@@ -11,22 +19,46 @@ export const AI_SPAN_TYPE = "ai.span.type";
 export const AI_DAG_ID = "ai.dag.id";
 export const AI_RUN_ID = "ai.run.id";
 
-export const AI_LLM_MODEL = "ai.llm.model";
-export const AI_LLM_PROVIDER = "ai.llm.provider";
-export const AI_LLM_TOKENS_IN = "ai.llm.tokens_in";
-export const AI_LLM_TOKENS_OUT = "ai.llm.tokens_out";
 export const AI_LLM_COST_USD = "ai.llm.cost_usd";
 export const AI_LLM_HAS_THINKING = "ai.llm.has_thinking";
 
 export const AI_GUARDRAIL_PASSED = "ai.guardrail.passed";
 
+// --- OTel GenAI semantic conventions used by the framework ---
+// Re-exported as string constants so call sites can import them by name.
+// Names mirror the OTel `@opentelemetry/semantic-conventions/incubating` exports.
+
+export const GEN_AI_SYSTEM = "gen_ai.system";
+export const GEN_AI_OPERATION_NAME = "gen_ai.operation.name";
+export const GEN_AI_REQUEST_MODEL = "gen_ai.request.model";
+export const GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature";
+export const GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p";
+export const GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens";
+export const GEN_AI_RESPONSE_MODEL = "gen_ai.response.model";
+export const GEN_AI_RESPONSE_ID = "gen_ai.response.id";
+export const GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons";
+export const GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens";
+export const GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens";
+export const GEN_AI_TOOL_NAME = "gen_ai.tool.name";
+export const GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id";
+export const GEN_AI_TOOL_TYPE = "gen_ai.tool.type";
+export const GEN_AI_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments";
+export const GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result";
+export const ERROR_TYPE = "error.type";
+
 // --- Span Event Names ---
 
 export const EVENT_NODE_INPUT = "ai.node.input";
 export const EVENT_NODE_OUTPUT = "ai.node.output";
-export const EVENT_LLM_REQUEST = "ai.llm.request";
+/** Framework-specific cost breakdown event. Not part of the GenAI spec. */
 export const EVENT_LLM_COST = "ai.llm.cost";
-export const EVENT_LLM_THINKING = "ai.llm.thinking";
+
+// OTel GenAI prompt / completion events. Names mirror
+// `@opentelemetry/semantic-conventions/incubating` events.
+export const EVENT_GEN_AI_SYSTEM_MESSAGE = "gen_ai.system.message";
+export const EVENT_GEN_AI_USER_MESSAGE = "gen_ai.user.message";
+export const EVENT_GEN_AI_ASSISTANT_MESSAGE = "gen_ai.assistant.message";
+export const EVENT_GEN_AI_CHOICE = "gen_ai.choice";
 
 // --- Span Type Values ---
 

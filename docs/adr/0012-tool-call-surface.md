@@ -100,10 +100,10 @@ Span types and attributes follow OpenTelemetry GenAI semantic conventions:
 
 | Span        | Name                      | Type          | Attributes                                                                                       |
 | ----------- | ------------------------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| LLM call    | `chat <model>`            | `CHAT_MODEL`  | `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, `gen_ai.usage.{input,output}_tokens` |
-| Tool call   | `execute_tool <name>`     | `TOOL`        | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type`, `gen_ai.tool.is_error`, `gen_ai.tool.{input,output}` |
+| LLM call    | `chat <model>`            | `CHAT_MODEL`  | `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, `gen_ai.usage.{input,output}_tokens`, `gen_ai.response.{model,id,finish_reasons}` |
+| Tool call   | `execute_tool <name>`     | `TOOL`        | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type`, `gen_ai.tool.call.{arguments,result}`, `error.type` (on failure) |
 
-Tool I/O is JSON-stringified into span attributes; payloads above 8 KiB are summarized as `{"truncated": <byte-count>}` to keep span size bounded.
+Tool I/O is JSON-stringified into span attributes; payloads above 8 KiB are summarized as `{"truncated": <byte-count>}` to keep span size bounded. Tool errors set `error.type = "tool_execution_error"` and the span status to `ERROR` (ADR 0023 updates — the original `gen_ai.tool.{input,output,is_error}` names are gone).
 
 ## Consequences
 

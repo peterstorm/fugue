@@ -2,9 +2,20 @@
 
 ## Overview
 
-The framework exports traces to MLflow via the **OpenTelemetry Protocol (OTLP)** endpoint (`POST /v1/traces`). This is MLflow's intended ingest path for non-Python SDKs and ensures that span-level metrics (cost, token usage) are correctly populated in the SQL store for the UI's Cost Breakdown card.
+The framework exports traces via the **OpenTelemetry Protocol (OTLP)**. Span attributes follow the **OTel GenAI semantic conventions** (`gen_ai.*`) wherever the spec covers what we're emitting, with a small framework-owned `ai.*` namespace for things the spec doesn't address (cost, DAG/run/node identity, guardrail outcomes). See ADR 0023.
+
+The default exporter targets MLflow's OTLP endpoint (`POST /v1/traces`); any other GenAI-aware OTLP backend (Phoenix, Langfuse, Honeycomb, Tempo) works by swapping the exporter in bootstrap — the framework emits standard names.
 
 No `@mlflow/core` dependency — uses pure `@opentelemetry/api` and `@opentelemetry/sdk-node`.
+
+## Source-of-truth split
+
+| Source of truth | Attribute / event |
+| --- | --- |
+| `gen_ai.*` (OTel GenAI semconv) | `gen_ai.system`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.request.{temperature,top_p,max_tokens}`, `gen_ai.response.{model,id,finish_reasons}`, `gen_ai.usage.{input,output}_tokens`, `gen_ai.tool.{name,call.id,type,call.arguments,call.result}`, `error.type`, events `gen_ai.{system,user,assistant}.message` |
+| `ai.*` (framework-owned) | `ai.llm.cost_usd`, `ai.llm.has_thinking`, `ai.guardrail.passed`, `ai.node.{id,kind}`, `ai.span.type`, `ai.dag.id`, `ai.run.id`, event `ai.llm.cost`, events `ai.node.{input,output}` |
+
+Constants live in `packages/framework/src/tracing/semantic-conventions.ts`. Call sites import from there rather than using string literals.
 
 ## Architecture
 
@@ -59,18 +70,29 @@ MLflow's server expects `mlflow.llm.cost` as a **structured object** (decoded fr
 
 ### Solution: SpanAttributeRegistry
 
-A side-channel registry stores object-valued attributes keyed by `spanId`:
+A side-channel registry stores object-valued attributes keyed by `spanId`. The framework emits *only* primitive `gen_ai.*` and `ai.*` attributes — the MLflow exporter derives the object-valued `mlflow.*` attributes from those primitives and stores them in the registry:
 
 ```typescript
-// In enrichLlmSpan():
+// In mlflow-otlp-exporter.ts (indexDerivedAttrs):
 SpanAttributeRegistry.set(spanId, {
-  "mlflow.llm.cost": { input_cost, output_cost, total_cost },
-  "mlflow.chat.tokenUsage": { input_tokens, output_tokens, total_tokens },
-  "mlflow.spanInputs": { model, system_prompt, user_prompt },
+  "mlflow.llm.cost":        { input_cost, output_cost, total_cost }, // from ai.llm.cost event
+  "mlflow.chat.tokenUsage": { input_tokens, output_tokens, total_tokens }, // from gen_ai.usage.*
+  "mlflow.spanInputs":      { system_prompt, user_prompt, ... }, // from gen_ai.{system,user}.message events
+  "mlflow.llm.model":       attrs[GEN_AI_REQUEST_MODEL],
+  "mlflow.llm.provider":    attrs[GEN_AI_SYSTEM],
 });
 ```
 
-The `MlflowOtlpExporter` pops from the registry and mutates `ReadableSpan.attributes` before the `otlp-transformer` serializes the protobuf. The transformer handles objects natively (emits `kvlist_value`), bypassing the SDK's validation.
+At export time the exporter wraps each `ReadableSpan` in a `Proxy` whose `attributes` getter merges the registry entry on top of the underlying primitive attributes — the original span object is never mutated. The `otlp-transformer` handles objects natively (emits `kvlist_value`), bypassing the SDK's validation.
+
+### Declarative translator tables
+
+The MLflow translation logic in `mlflow-otlp-exporter.ts` is two tables:
+
+- `ATTR_MAP` — simple `from → to` attribute renames (e.g. `gen_ai.request.model → mlflow.llm.model`).
+- `EVENT_HANDLERS` — events whose payloads merge into MLflow's object-valued attributes (`gen_ai.system.message → mlflow.spanInputs.system_prompt`, etc.).
+
+Adding a new vendor adapter (Langfuse, Phoenix) is a copy-paste-and-edit operation on these tables — no framework changes required.
 
 ## Tail-Based Sampling
 
@@ -89,12 +111,13 @@ Currently configured with `ratio(1.0)` — all traces are exported.
 
 | File | Purpose |
 |------|---------|
-| `packages/framework/src/observer/span-attribute-registry.ts` | Side-channel for object attributes |
-| `packages/framework/src/observer/mlflow-otlp-exporter.ts` | Injects attrs + forwards to OTLP |
-| `packages/framework/src/observer/tail-sampling-processor.ts` | Buffers spans, applies policy |
-| `packages/framework/src/observer/init-tracing.ts` | Wires pipeline (single processor) |
-| `packages/framework/src/tracing/span-enrich.ts` | Registers cost/tokens in registry |
-| `packages/framework/src/executor/executor.ts` | Creates spans, sets inputs/outputs via registry |
+| `packages/framework/src/tracing/semantic-conventions.ts` | Source-of-truth constants for `gen_ai.*` and `ai.*` names |
+| `packages/framework/src/tracing/span-attribute-registry.ts` | Side-channel for object-valued MLflow attributes |
+| `packages/framework/src/tracing/mlflow-otlp-exporter.ts` | Translator tables + OTLP forwarder |
+| `packages/framework/src/observer/tail-sampling-processor.ts` | Buffers spans, applies persistence policy |
+| `packages/framework/src/tracing/init.ts` | Wires pipeline (single processor) |
+| `packages/framework/src/tracing/span-enrich.ts` | Emits cost + prompt events on the active LLM span |
+| `packages/framework/src/llm/spans.ts` | `withLlmSpan`/`withToolSpan` + GenAI attribute helpers |
 
 ## Configuration
 

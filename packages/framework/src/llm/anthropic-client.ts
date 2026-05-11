@@ -19,7 +19,14 @@ import {
   type ToolCall,
   type ToolDispatchResult,
 } from "./tool-dispatch.js";
-import { withLlmSpan, setLlmUsageAttributes } from "./spans.js";
+import {
+  withLlmSpan,
+  setLlmUsageAttributes,
+  setLlmRequestAttributes,
+  setLlmResponseAttributes,
+} from "./spans.js";
+
+const ANTHROPIC_MAX_TOKENS = 16384;
 
 type AnthropicMessage = Anthropic.MessageParam;
 type AnthropicResponse = Anthropic.Message;
@@ -121,7 +128,7 @@ export class AnthropicLlmClient implements LlmClient {
 
       const params: Anthropic.MessageCreateParams = {
         model: req.model,
-        max_tokens: 16384,
+        max_tokens: ANTHROPIC_MAX_TOKENS,
         system: req.system,
         messages: [{ role: "user", content: req.user }],
         tools: [toolDef],
@@ -227,7 +234,7 @@ export class AnthropicLlmClient implements LlmClient {
 
       const params: Anthropic.MessageCreateParams = {
         model: req.model,
-        max_tokens: 16384,
+        max_tokens: ANTHROPIC_MAX_TOKENS,
         system,
         messages,
         tools: toolSpecs,
@@ -246,8 +253,14 @@ export class AnthropicLlmClient implements LlmClient {
           runtime.tracer ?? null,
           { provider: "anthropic", model: req.model, operation: "chat" },
           async () => {
+            setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
             const r = await this.anthropic.messages.create(params, { signal });
             setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
+            setLlmResponseAttributes({
+              model: r.model,
+              id: r.id,
+              finishReasons: r.stop_reason ? [r.stop_reason] : undefined,
+            });
             return r;
           },
         );
