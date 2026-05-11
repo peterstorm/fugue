@@ -49,15 +49,10 @@ export function attachDeadLetterHandler(
       return;
     }
 
-    // Coerce non-Error rejection values to a string.
-    const errMessage =
-      err instanceof Error
-        ? err.message
-        : typeof err === "string"
-          ? err
-          : String(err ?? "unknown error");
-
-    const message = opts.formatMessage(id, errMessage);
+    // formatMessage receives the raw err so implementations can pick the
+    // serialization (Error.message, JSON, a custom shape). The previous
+    // signature pre-stringified, throwing away the structured Error object.
+    const message = opts.formatMessage(id, err);
 
     // The job is already dead — notification is the only remaining action.
     // Propagate notifier failure so the worker's onFailed / onError handlers

@@ -51,9 +51,9 @@ export const runStateMachine = async <S, E, C>(
   job: JobLike<S, C, E>,
   machine: Machine<S, E, C>,
   executor: Executor<S, C, E>,
-  opts?: RunOptions<S, C, E>,
+  opts: RunOptions<S, C, E>,
 ): Promise<{ state: S; context: C }> => {
-  const classify = opts?.classifyError ?? defaultClassifyError;
+  const classify = opts.classifyError ?? defaultClassifyError;
 
   // FR-011: retry counters are per-invocation (fresh map = counters start
   // at 0 for every queue-level attempt).
@@ -63,11 +63,11 @@ export const runStateMachine = async <S, E, C>(
 
   while (!machine.isTerminal(state)) {
     // FR-012: beforeExecute hook — abort if returns false
-    if (opts?.beforeExecute !== undefined) {
+    if (opts.beforeExecute !== undefined) {
       const proceed = opts.beforeExecute(state, context);
       if (!proceed) {
         // AD-4: emit skipped trace before aborting so consumers can observe the abort
-        if (opts?.onTrace !== undefined) {
+        if (opts.onTrace !== undefined) {
           try {
             opts.onTrace({
               state,
@@ -84,22 +84,16 @@ export const runStateMachine = async <S, E, C>(
       }
     }
 
-    const start = (opts?.now ?? Date.now)();
+    const start = (opts.now ?? Date.now)();
     let event: E;
 
     try {
       event = await executor(state, context);
     } catch (raw) {
       // FR-006: ALWAYS catch executor exceptions and deliver them to the machine
-      // as a typed ERROR event. errorEventOf is required — callers must supply it.
+      // as a typed ERROR event. errorEventOf is required by the type system —
+      // callers without one cannot construct a valid `RunOptions`.
       const classified = classify(raw);
-      if (!opts?.errorEventOf) {
-        throw new Error(
-          "runStateMachine: executor threw but no errorEventOf adapter was supplied in opts. " +
-          `Cannot deliver error to machine. Original: ${classified.message}`,
-          { cause: raw },
-        );
-      }
       event = opts.errorEventOf(classified);
     }
 
@@ -108,13 +102,14 @@ export const runStateMachine = async <S, E, C>(
     state = result.state;
     context = result.context;
 
-    const durationMs = (opts?.now ?? Date.now)() - start;
+    const durationMs = (opts.now ?? Date.now)() - start;
 
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
 
-    const stateKey = JSON.stringify(state);
-    const prevStateKey = JSON.stringify(prevState);
+    const keyer = machine.stateKey ?? ((s: S) => JSON.stringify(s));
+    const stateKey = keyer(state);
+    const prevStateKey = keyer(prevState);
 
     // Trace outcome classification (AD-4). Machines may override the default
     // self-loop heuristic by implementing `isRetryTransition`; this is what
@@ -161,7 +156,7 @@ export const runStateMachine = async <S, E, C>(
       await job.updateProgress(machine.stateProgress(state));
     }
 
-    if (opts?.onTrace) {
+    if (opts.onTrace) {
       const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
       // A throwing onTrace must not escape: the transition is already persisted
       // and surfacing the throw would surface a successful transition as a fatal

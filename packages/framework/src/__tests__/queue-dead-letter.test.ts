@@ -74,10 +74,20 @@ function makeNotifier(): DeadLetterNotifier & { calls: NotifyCall[] } {
 
 const TEST_RECIPIENTS = ["oncall@example.com", "lead@example.com"] as const;
 
+// Demonstrates the new contract: formatMessage receives the raw err and
+// decides how to stringify. Implementations that want Error.message must
+// extract it themselves — the framework no longer pre-serializes.
+const stringifyErr = (err: unknown): string =>
+  err instanceof Error
+    ? err.message
+    : typeof err === "string"
+      ? err
+      : String(err ?? "unknown error");
+
 const opts = {
   getRecipients: (_id: string, _err: unknown) => TEST_RECIPIENTS,
-  formatMessage: (id: string, err: string) =>
-    `Job ${id} failed permanently: ${err}`,
+  formatMessage: (id: string, err: unknown) =>
+    `Job ${id} failed permanently: ${stringifyErr(err)}`,
 };
 
 // ---------------------------------------------------------------------------
@@ -182,8 +192,8 @@ describe("attachDeadLetterHandler", () => {
     const notifier = makeNotifier();
     const customOpts = {
       getRecipients: (_id: string, _err: unknown) => ["admin@corp.com"] as const,
-      formatMessage: (id: string, err: string) =>
-        `ALERT: ${id} crashed with: ${err}`,
+      formatMessage: (id: string, err: unknown) =>
+        `ALERT: ${id} crashed with: ${stringifyErr(err)}`,
     };
 
     attachDeadLetterHandler(worker, notifier, customOpts);
@@ -394,7 +404,7 @@ describe("attachDeadLetterHandler — F9: empty recipients short-circuit", () =>
     const notifier = makeNotifier();
     const emptyRecipientOpts = {
       getRecipients: (_id: string, _err: unknown) => [] as readonly string[],
-      formatMessage: (id: string, err: string) => `${id}: ${err}`,
+      formatMessage: (id: string, err: unknown) => `${id}: ${err}`,
     };
     attachDeadLetterHandler(worker, notifier, emptyRecipientOpts);
 

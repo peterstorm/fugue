@@ -152,8 +152,11 @@ export interface DeadLetterOpts {
    */
   readonly getRecipients: (id: string, err: unknown) => readonly string[];
   /**
-   * Format the notification message from the job id and error description.
+   * Format the notification message from the job id and the raw error value.
+   * Implementations decide how to stringify (Error.message, JSON, custom);
+   * the framework no longer pre-serializes the error to a string, since that
+   * threw away the structured `Error` object that callers may want to format.
    * Called only when `attempts >= max`.
    */
-  readonly formatMessage: (id: string, err: string) => string;
+  readonly formatMessage: (id: string, err: unknown) => string;
 }

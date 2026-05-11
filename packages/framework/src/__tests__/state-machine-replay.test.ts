@@ -47,7 +47,9 @@ describe("replayEvents", () => {
     let i = 0;
     const executor: Executor<CountState, CountCtx, CountEvent> = async () => events[i++];
 
-    const liveResult = await runStateMachine(job, counterMachine, executor);
+    const liveResult = await runStateMachine(job, counterMachine, executor, {
+      errorEventOf: (c) => ({ type: "DONE" } as CountEvent),
+    });
 
     // Replay the collected event log from initial state
     const rawEvents = job.events.map((e) => e.event as CountEvent);

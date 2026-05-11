@@ -32,7 +32,15 @@ export interface NodeSkippedEvent {
   readonly dagId: string;
   readonly nodeId: string;
   readonly timestamp: Date;
-  readonly reason: string;
+  /**
+   * Why the node was skipped. The two producers are `runNodeShared` on a
+   * checkpoint hit and `runWave` when an already-succeeded sibling is
+   * encountered on a retry pass. Narrowing the type lets observers
+   * exhaustively match — and keeps the contract aligned with
+   * `NodePrunedEvent.reason: "branch-not-taken"`, the only other narrow-reason
+   * event variant.
+   */
+  readonly reason: "checkpoint" | "already-completed";
 }
 
 export interface NodeErrorEvent {

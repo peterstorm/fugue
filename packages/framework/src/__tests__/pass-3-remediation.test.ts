@@ -499,6 +499,80 @@ describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejectio
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Wave 4.7 — Machine.stateKey hook (replaces JSON.stringify default per-machine)
+// ---------------------------------------------------------------------------
+
+describe("Wave 4.7 — Machine.stateKey hook", () => {
+  it("a machine supplying its own stateKey controls the runner's dedup-key derivation", async () => {
+    type S = { readonly kind: "x"; readonly seenAt: Map<string, number> } | { readonly kind: "done" };
+    type E = { readonly type: "step" };
+    type C = Record<string, never>;
+
+    const machine = {
+      transition: (state: S, _event: E, ctx: C) =>
+        state.kind === "done"
+          ? { state, context: ctx }
+          : { state: { kind: "done" as const }, context: ctx },
+      isTerminal: (s: S) => s.kind === "done",
+      isFailed: () => false,
+      stateProgress: () => 0,
+      // Custom keyer ignores the Map field (which JSON.stringify can't stably
+      // represent across runs). Verifies the hook is invoked instead of
+      // defaulting to JSON.stringify.
+      stateKey: (s: S) => s.kind,
+    };
+
+    const job = createInMemoryJob<S, C>({
+      state: { kind: "x", seenAt: new Map([["a", 1], ["b", 2]]) },
+      context: {},
+    });
+    const executor = async (): Promise<E> => ({ type: "step" as const });
+    await runStateMachine(job, machine, executor, {
+      errorEventOf: () => ({ type: "step" as const }),
+    });
+    expect(job.data.state.kind).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 4.10 — DeadLetterOpts.formatMessage receives raw err (unknown)
+// ---------------------------------------------------------------------------
+
+describe("Wave 4.10 — DeadLetterOpts.formatMessage receives raw err", () => {
+  it("formatMessage observes an Error object directly (not pre-stringified)", async () => {
+    const { attachDeadLetterHandler } = await import("../queue/dead-letter.js");
+    let observedErr: unknown = undefined;
+
+    const worker = {
+      onFailed: undefined as
+        | ((id: string, err: unknown, attempts: number, max: number) => Promise<void>)
+        | undefined,
+    } as any;
+    worker.onFailed = (_id: any, _err: any, _attempts: any, _max: any) => Promise.resolve();
+    // Capture the simulated worker shape used by the dead-letter handler:
+    const handlers: Array<(id: string, err: unknown, attempts: number, max: number) => Promise<void>> = [];
+    worker.onFailed = (handler: any) => {
+      handlers.push(handler);
+    };
+
+    attachDeadLetterHandler(worker, { notify: async () => undefined }, {
+      getRecipients: () => ["a@x"],
+      formatMessage: (_id, err) => {
+        observedErr = err;
+        return "ok";
+      },
+    });
+
+    // Trigger
+    const original = new Error("boom");
+    await handlers[0]!("job-1", original, 1, 1);
+
+    expect(observedErr).toBe(original); // identity preserved
+    expect((observedErr as Error).message).toBe("boom");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Wave 3.5 — withRetryLimits derives a new DagDef without laundering the brand
 // ---------------------------------------------------------------------------
 

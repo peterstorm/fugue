@@ -16,6 +16,15 @@ export interface Machine<S, E, C> {
    * must implement this to surface accurate retry telemetry.
    */
   readonly isRetryTransition?: (prevState: S, nextState: S) => boolean;
+  /**
+   * Optional structural keyer used by the runner to derive `prevStateKey` /
+   * `stateKey` for the retry-counter and dedup-key derivation. Defaults to
+   * `JSON.stringify`. Machines whose state carries `Map`, `Set`, `Date`, or
+   * any other non-JSON-stable value must implement this — otherwise the
+   * default produces keys whose stability across attempts is undefined,
+   * making dedup keys unreliable under crash-resume.
+   */
+  readonly stateKey?: (state: S) => string;
 }
 
 // FR-002: Side-effect dispatcher — returns an event, not a state
