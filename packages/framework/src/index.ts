@@ -3,9 +3,9 @@
 // Public surface: authoring-facing types, runtime entry points, and the
 // pluggable seams (Observer, Cache, LLM, JobLike, Scheduler) consumers
 // implement. Pure-internal helpers (transition primitives, JSON
-// serialization, mutex, scheduler internals) are intentionally NOT
-// re-exported here. Direct imports from their concrete paths remain
-// available for tests and any consumer that genuinely needs them.
+// serialization, scheduler internals) are intentionally NOT re-exported
+// here. Direct imports from their concrete paths remain available for tests
+// and any consumer that genuinely needs them.
 
 export * from "./types/index.js";
 export * from "./executor/index.js";
@@ -27,8 +27,8 @@ export type { InMemoryJob, InMemoryJobOptions } from "./state-machine/in-memory-
 export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machine/replay.js";
 // `toJson` / `fromJson` remain public — they're the documented serialization
 // helpers for callers building custom JobLike backends. The lower-level
-// `serializeValue` / `deserializeValue` and `AsyncMutex` are intentionally
-// internal; import from their concrete paths if you genuinely need them.
+// `serializeValue` / `deserializeValue` are intentionally internal; import
+// from their concrete paths if you genuinely need them.
 export { toJson, fromJson } from "./state-machine/serialize.js";
 export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr } from "./types/result.js";
 

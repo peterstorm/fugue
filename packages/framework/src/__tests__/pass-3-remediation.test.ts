@@ -498,6 +498,31 @@ describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejectio
 // Wave 2.4 — event-log malformed-id warning frequency
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Wave 3.5 — withRetryLimits derives a new DagDef without laundering the brand
+// ---------------------------------------------------------------------------
+
+describe("Wave 3.5 — withRetryLimits sanctioned DagDef derivation", () => {
+  it("merges call-time limits on top of dag.retryLimits with call-time taking precedence", async () => {
+    const { withRetryLimits } = await import("../types/dag.js");
+    const dag = makeDag([makeNode("a"), makeNode("b")], [{ from: "a", to: "b" }], {
+      retryLimits: { a: 2, b: 3 },
+    });
+    const out = withRetryLimits(dag, { b: 99, c: 7 });
+    expect(out.retryLimits).toEqual({ a: 2, b: 99, c: 7 });
+    // The returned value is still a branded DagDef — usable wherever DagDef is.
+    expect(out.id).toBe(dag.id);
+    expect(out.nodes.length).toBe(dag.nodes.length);
+  });
+
+  it("works when the original dag has no retryLimits set", async () => {
+    const { withRetryLimits } = await import("../types/dag.js");
+    const dag = makeDag([makeNode("a")], []);
+    const out = withRetryLimits(dag, { a: 5 });
+    expect(out.retryLimits).toEqual({ a: 5 });
+  });
+});
+
 describe("Wave 2.4 — malformed Redis Stream entry IDs log at decaying frequency", () => {
   it("logs the first 10 occurrences and every 100th thereafter (no silent suppression)", async () => {
     const { __resetEventLogState, __parseEntryIdTimestamp } = await import(

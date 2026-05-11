@@ -16,7 +16,7 @@
 
 These are non-trivial architectural calls the review surfaced as "unresolved questions." They are decided here so subsequent waves are mechanical.
 
-- **D1 — Delete `Checkpointer` + `RedisCheckpointer` + `InMemoryCheckpointer`.** ~300 LOC orphan: exported but never wired in production. Resume flows through `JobLike` (kernel state) plus `ContextCacheAdapter.writeCheckpoint` (per-node output). The `dagFingerprint` + `FRAMEWORK_VERSION` ADR-0017 enforcement moves to `AdaptBullMQJobOpts.validateData` (the existing seam at `queue-bullmq/job.ts:87`) and to a thin in-memory equivalent. Wave 3.
+- **D1 — Keep `Checkpointer` + `RedisCheckpointer` + `InMemoryCheckpointer`. (Revised 2026-05-11 during Wave 3 implementation.)** The architecture-agent's review missed that `apps/customer-summary` actively wires `RedisCheckpointer` in `bootstrap.ts` (`cp.saveNode(...)` is called from the `ContextCacheAdapter.writeCheckpoint` hook) and `server.test.ts` uses `InMemoryCheckpointer` to test resume flow. The framework runtime doesn't call Checkpointer itself — that part of the review was correct — but the interface is the documented consumer-side seam for durable per-node checkpoint storage. Keep the interface, the two implementations, and the three `checkpoint-*` error kinds. The `dagFingerprint` + `FRAMEWORK_VERSION` enforcement also stays on `Checkpointer.setMeta` rather than moving. **Net change:** no deletion; revisit only if customer-summary is also being rewritten.
 - **D2 — Delete `AsyncMutex` exports.** No production call sites. Library shipping a synchronization primitive nothing internally uses is an attractive nuisance. Wave 3.
 - **D3 — `runStateMachine` is public.** Already the documented durability core; consumers who want a non-DAG machine use it directly. Fix typing inconsistencies (Wave 4) and document the executor-determinism + JSON-stringifiable-state requirements; do not hide.
 - **D4 — Framework-level `Logger` injected at init.** Parallel to `initTracing`. Default backed by `console`. Replaces every `console.error`/`console.warn` in kernel/queue/scheduler/observer. Nodes still see it via `ctx.logger`. Wave 5.
@@ -24,7 +24,7 @@ These are non-trivial architectural calls the review surfaced as "unresolved que
 - **D6 — `BufferedObserver` and `TailSamplingProcessor` share one `PersistencePolicy` instance per run.** Currently they decide independently; if their policies diverge, events and traces also diverge. Wave 5.
 - **D7 — `runDag` is the single recommended public entry.** `runDagStateful` and `runDagAsWorkerJob` are demoted out of the main barrel into an `@ai-summary/framework/advanced` subpath export. README updated. Wave 5.
 - **D8 — Keep the `DagDef` brand, add `withRetryLimits(dag, limits): DagDef`** as the only sanctioned derivation. The current `effectiveDag = { ...dag, retryLimits }` spread in `run-dag-stateful.ts:177` is replaced. Wave 3.
-- **D9 — Collapse `Cache` into `ContextCacheAdapter`.** Single cache interface; rename `RedisCache` to implement `ContextCacheAdapter` directly. Wave 3.
+- **D9 — Defer `Cache` ↔ `ContextCacheAdapter` collapse. (Revised 2026-05-11.)** `apps/customer-summary/bootstrap.ts` constructs `RedisCache` and wraps it in an inline `ContextCacheAdapter`. Collapsing the two interfaces in the framework requires a coordinated change to the app's adapter code. The dual-interface smell is real but cleanup belongs in a coordinated framework+app pass, not in a framework-only wave. Defer to follow-up.
 
 ---
 
@@ -155,33 +155,18 @@ if (this.exporter.forceFlush) {
 
 ## 3. Wave 3 — Dead-code removal & interface consolidation
 
-### 3.1 Delete `Checkpointer` family (D1)
+### 3.1 ~~Delete `Checkpointer` family~~ — DROPPED per revised D1
 
-Files to delete:
-
-- `packages/framework/src/checkpoint/checkpointer.ts`
-- `packages/framework/src/checkpoint/redis-checkpointer.ts`
-- `packages/framework/src/__tests__/redis-checkpointer.test.ts`
-
-Files to update:
-
-- `packages/framework/src/checkpoint/index.ts` — remove re-exports of the deleted symbols; keep `dagFingerprint` and `FRAMEWORK_VERSION` (now load-bearing only via 3.1.1 below).
-- `packages/framework/src/index.ts` — drop the `checkpoint/index.js` re-exports of `Checkpointer`/`RunMeta`/`NodeState`/`RunState`/`InMemoryCheckpointer`/`RedisCheckpointer`/the three `checkpoint-*` error kinds. Note: the `FrameworkError` union variants `checkpoint-expired`, `checkpoint-corrupt`, `checkpoint-version-mismatch` are still produced by the queue-side validation in 3.1.1, so the variants stay in `types/errors.ts`; only the orphan implementations are removed.
-- `packages/framework/README.md` — delete the `### checkpoint/` section's references to `Checkpointer` / `RunMeta` / `RunState`; `dagFingerprint` and `FRAMEWORK_VERSION` move under a "Versioning" header.
-
-**3.1.1 Move fingerprint validation to the queue adapter.** Add a default `validateData` to `AdaptBullMQJobOpts` (and the in-memory equivalent in `queue/in-memory.ts`) that, when the persisted `RunMeta` carries a `frameworkVersion`/`dagFingerprint`, checks against the current values and returns `Err({ kind: "checkpoint-version-mismatch", ... })` or `Err({ kind: "checkpoint-corrupt", ... })`. Existing test `__tests__/fingerprint.test.ts` covers byte-stability and remains valid.
+The Checkpointer interface is live consumer surface (customer-summary `bootstrap.ts` and `server.test.ts`). No change to `checkpoint/**` in this wave.
 
 ### 3.2 Delete `AsyncMutex` exports (D2)
 
 - Delete `packages/framework/src/state-machine/mutex.ts` and `__tests__/state-machine-mutex.test.ts`.
 - Remove the comment in `packages/framework/README.md` listing `AsyncMutex` as intentionally-not-exported.
 
-### 3.3 Collapse cache surfaces (D9)
+### 3.3 ~~Collapse cache surfaces~~ — DEFERRED per revised D9
 
-- Delete `packages/framework/src/cache/cache.ts` (the standalone `Cache` interface).
-- Update `packages/framework/src/cache/redis-cache.ts` to implement `ContextCacheAdapter` directly. The `get` return type changes from `Promise<Result<T | null, FrameworkError>>` to `Promise<CacheLookup>` (`{ hit: true; value: T } | { hit: false }`). Errors that previously surfaced via `Err` propagate as exceptions at the boundary — wrap the Redis call sites in try/catch and return `{ hit: false }` on transient errors after logging via the framework logger (D4).
-- Update `packages/framework/src/cache/index.ts` to re-export `ContextCacheAdapter` (re-exported from `types/node.ts`) and the two implementations.
-- Update existing tests in `__tests__/redis-cache.test.ts` to the new shape.
+Requires a coordinated framework+app change (customer-summary's `bootstrap.ts` adapter would simplify by ~25 LOC after collapse). Deferred to a follow-up pass that touches the app.
 
 ### 3.4 Move `in-memory-job.ts` consumer-side
 

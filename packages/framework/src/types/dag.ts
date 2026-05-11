@@ -173,3 +173,19 @@ export type DagDefShape = Omit<DagDef, typeof __dagValidated>;
  */
 export const brandAsDagDef = (shape: DagDefShape): DagDef =>
   shape as DagDef;
+
+/**
+ * Sanctioned derivation: produce a new `DagDef` with overridden retry limits
+ * while preserving the validation brand. Use this instead of a raw spread
+ * (`{ ...dag, retryLimits: ... }`) — spread does not re-validate, and the
+ * brand was specifically introduced to prevent silent post-validation
+ * mutation. Per-node entries in `limits` override the original `dag.retryLimits`.
+ */
+export const withRetryLimits = (
+  dag: DagDef,
+  limits: Readonly<Record<string, number>>,
+): DagDef =>
+  brandAsDagDef({
+    ...(dag as DagDefShape),
+    retryLimits: { ...(dag.retryLimits ?? {}), ...limits },
+  });

@@ -95,7 +95,7 @@ NFR-021. The kernel is the foundation of the runtime; most callers reach it via 
 - `replayEvents`, `replayEventsUntil`, `replayEventSlice` — pure folds for testing and forensic replay.
 - `toJson`, `fromJson` — documented serialization helpers for custom `JobLike` backends.
 
-The transition primitives (`handleWaveDone`, `handleNodeFailed`, `advanceToNextWave`, `computeBackoffMs`, ...), `serializeValue`/`deserializeValue`, and `AsyncMutex` are intentionally not re-exported — they are internal to the kernel.
+The transition primitives (`handleWaveDone`, `handleNodeFailed`, `advanceToNextWave`, `computeBackoffMs`, ...) and `serializeValue`/`deserializeValue` are intentionally not re-exported — they are internal to the kernel.
 
 ## DAG runtime
 

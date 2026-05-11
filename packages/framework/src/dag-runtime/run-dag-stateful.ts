@@ -6,6 +6,7 @@ import { trace, SpanStatusCode } from "@opentelemetry/api";
 import type { JobLike, RunOptions } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import type { DagDef } from "../types/dag.js";
+import { withRetryLimits } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -171,10 +172,9 @@ export const runDagStateful = async <I, O>(
 ): Promise<Result<O, FrameworkError>> => {
   // Merge call-time retryLimits (takes precedence) into dag before compiling.
   // getRetryLimit reads from ctx.dag.retryLimits, so this is the correct wiring point.
+  // withRetryLimits preserves the DagDef brand instead of laundering it via spread.
   const effectiveDag: DagDef =
-    opts?.retryLimits !== undefined
-      ? { ...dag, retryLimits: { ...dag.retryLimits, ...opts.retryLimits } }
-      : dag;
+    opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
 
   const runStart = Date.now();
 
