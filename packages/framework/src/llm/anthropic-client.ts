@@ -87,6 +87,18 @@ const isAbort = (e: unknown): boolean =>
   e instanceof APIUserAbortError ||
   (e instanceof Error && e.name === "AbortError");
 
+/**
+ * Wave 6 §6.10 — detect HTTP 429 from the Anthropic SDK so callers can
+ * distinguish "transient, retry me" from "permanent crash."
+ *
+ * The SDK throws `RateLimitError extends APIError<429, ...>` whose `status`
+ * field is `429`. We duck-type on `.status === 429` so injected fakes from
+ * tests don't need to subclass the SDK's class hierarchy.
+ */
+const isRateLimit = (e: unknown): boolean =>
+  typeof (e as { status?: unknown })?.status === "number" &&
+  (e as { status: number }).status === 429;
+
 const resolveNodeId = (req: { readonly nodeId?: string }): string =>
   req.nodeId ?? "<llm>";
 
@@ -158,6 +170,13 @@ export class AnthropicLlmClient implements LlmClient {
     } catch (error) {
       if (isAbort(error)) {
         return err({ kind: "aborted", reason: "signal" });
+      }
+      if (isRateLimit(error)) {
+        return err({
+          kind: "transient",
+          nodeId: resolveNodeId(req),
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
       return err({
         kind: "node-crash",
@@ -235,6 +254,13 @@ export class AnthropicLlmClient implements LlmClient {
       } catch (e) {
         if (isAbort(e)) {
           return err({ kind: "aborted", reason: "signal" });
+        }
+        if (isRateLimit(e)) {
+          return err({
+            kind: "transient",
+            nodeId: resolveNodeId(req),
+            message: e instanceof Error ? e.message : String(e),
+          });
         }
         return err({
           kind: "node-crash",

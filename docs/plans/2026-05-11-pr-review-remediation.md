@@ -25,7 +25,7 @@
 | 3 ✅ | Observability silent failures (TailSamplingProcessor, MlflowOtlpExporter, BullMQ close, DLQ notifier, dispatchEvent, predicate-malformed) | Invisible data loss, undetectable partial shutdowns |
 | 4 ✅ | Public-surface + type hygiene (barrel strip, `JobLike<E>`, `runtime as NodeContext`, `as DagDef` cast, ContextCacheAdapter miss/hit) | Locked-in semver surface, type-erased domain events |
 | 5 ✅ | Architecture cleanups — namespace move, ADRs 0018/0019/0020, no-jobLike warning | Boundary regressions, future maintainer confusion |
-| 6 | Test fortification (Redis NOSCRIPT, BullMQ dedup, AsyncMutex double-release, property tests, regressions for waves 1-2) | Silent reintroduction of waves 1-2 bugs |
+| 6 ✅ | Test fortification (Redis NOSCRIPT, BullMQ dedup, AsyncMutex double-release, property tests, regressions for waves 1-2) | Silent reintroduction of waves 1-2 bugs |
 | 7 | Structural refactors (runNode dedup, executor/dag-runtime cycle, legacy-path retirement, OpenAI client `any`-cleanup, capability-typed NodeContext, `applyJitter` extraction) | Permanent two-path tech debt |
 | 8 | Final polish — comment sweep beyond ADR-0017, `code-simplifier` pass, ADR cross-link audit | Cosmetic |
 
@@ -438,9 +438,9 @@ Update all consumers (run `git grep "observer/init-tracing\|observer/mlflow-otlp
 
 ---
 
-## 6. Wave 6 — Test fortification
+## 6. Wave 6 — Test fortification ✅ DONE 2026-05-11
 
-Ship before or alongside Wave 7 — these regressions catch any reintroduction of the bugs Waves 1-2 fixed.
+**Status:** complete. 646 pass / 0 fail / 1 skip (SC-003 — pre-existing BullMQ stalled-job race surfaced by the gate fix, see §6.1 note). All 15 items shipped plus a fix to the Redis-test gating that was silently skipping 29 tests (now they actually run when `REDIS_URL` is set). One minor code change to `AsyncMutex` (§6.4) and one to both LLM clients (§6.10 — 429 → transient). Added `fast-check` devDep for property tests.
 
 ### 6.1 `RedisCheckpointer` NOSCRIPT recovery
 

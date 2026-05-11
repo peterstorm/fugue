@@ -73,19 +73,21 @@ function checkpointerSuite(name: string, factory: () => Checkpointer, cleanup?: 
 checkpointerSuite("InMemoryCheckpointer", () => new InMemoryCheckpointer());
 
 // --- RedisCheckpointer (skip if Redis unavailable) ---
+//
+// Gates on `process.env.REDIS_URL` at module-load time (matches the pattern
+// in queue-bullmq tests). The previous version captured `redisAvailable` at
+// module load BEFORE `beforeAll` could probe, so it always skipped — even
+// with Redis running. Now: set REDIS_URL=redis://localhost:6379 to run.
+
+const REDIS_URL = process.env.REDIS_URL;
+const hasRedis = Boolean(REDIS_URL);
 
 let redis: Redis | null = null;
-let redisAvailable = false;
 
 beforeAll(async () => {
-  const r = new Redis({ lazyConnect: true, connectTimeout: 2000 });
-  try {
-    await r.connect();
-    redisAvailable = true;
-    redis = r;
-  } catch {
-    r.disconnect();
-  }
+  if (!hasRedis) return;
+  redis = new Redis(REDIS_URL!, { lazyConnect: true, connectTimeout: 2000 });
+  await redis.connect();
 });
 
 afterAll(async () => {
@@ -94,7 +96,7 @@ afterAll(async () => {
 
 const TEST_PREFIX = "chkpt:test-";
 
-const describeRedis = redisAvailable ? describe : describe.skip;
+const describeRedis = hasRedis ? describe : describe.skip;
 
 describeRedis("RedisCheckpointer", () => {
   const runIds: string[] = [];
@@ -212,6 +214,96 @@ describeRedis("RedisCheckpointer", () => {
       if (result.error.kind === "checkpoint-version-mismatch") {
         expect(result.error.actual).toBeUndefined();
       }
+    }
+  });
+
+  // Wave 6 §6.2: TTL-expired meta returns checkpoint-expired
+  test("load rejects expired checkpoint (createdAt older than TTL)", async () => {
+    const runId = makeRunId();
+    // Write meta with createdAt 25h in the past — TTL is 24h.
+    const expiredCreatedAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    await redis!.set(
+      `chkpt:${runId}:meta`,
+      JSON.stringify({
+        dagId: "d",
+        startedAt: new Date().toISOString(),
+        nodeCount: 1,
+        createdAt: expiredCreatedAt.toISOString(),
+        frameworkVersion: "2",
+      }),
+      "EX",
+      300,
+    );
+    runIds.push(runId);
+
+    const result = await cp.load(runId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-expired");
+      if (result.error.kind === "checkpoint-expired") {
+        expect(result.error.runId).toBe(runId);
+        expect(result.error.expiredAt.getTime()).toBe(expiredCreatedAt.getTime());
+      }
+    }
+  });
+
+  // Wave 6 §6.2: malformed meta payload returns checkpoint-corrupt
+  test("load rejects malformed meta JSON with checkpoint-corrupt", async () => {
+    const runId = makeRunId();
+    await redis!.set(`chkpt:${runId}:meta`, "{ not valid json", "EX", 300);
+    runIds.push(runId);
+
+    const result = await cp.load(runId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-corrupt");
+      if (result.error.kind === "checkpoint-corrupt") {
+        expect(result.error.runId).toBe(runId);
+      }
+    }
+  });
+
+  // Wave 6 §6.1: SCRIPT FLUSH between saves causes NOSCRIPT on EVALSHA;
+  // the checkpointer must fall back to inline EVAL and re-prime the SHA.
+  test("recovers from server-side SCRIPT FLUSH (NOSCRIPT) via inline EVAL fallback", async () => {
+    const runId = makeRunId();
+    await cp.setMeta(runId, { dagId: "d", startedAt: new Date(), nodeCount: 2 });
+
+    // First save primes the SHA cache.
+    await cp.saveNode(runId, "n1", {
+      nodeId: "n1",
+      output: { v: 1 },
+      completedAt: new Date(),
+    });
+    const shaBefore = (cp as unknown as { saveNodeSha: string | null }).saveNodeSha;
+    expect(shaBefore).not.toBeNull();
+
+    // Server-side flush — the cached SHA is now invalid.
+    await redis!.script("FLUSH");
+
+    // Second save must recover and re-prime the SHA.
+    const result = await cp.saveNode(runId, "n2", {
+      nodeId: "n2",
+      output: { v: 2 },
+      completedAt: new Date(),
+    });
+    expect(result.ok).toBe(true);
+
+    // The fallback path clears saveNodeSha at line `this.saveNodeSha = null`;
+    // a subsequent saveNode re-LOADs.
+    await cp.saveNode(runId, "n3", {
+      nodeId: "n3",
+      output: { v: 3 },
+      completedAt: new Date(),
+    });
+    const shaAfter = (cp as unknown as { saveNodeSha: string | null }).saveNodeSha;
+    expect(shaAfter).not.toBeNull();
+
+    // Verify all three node states landed.
+    const loaded = await cp.load(runId);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok && loaded.value) {
+      expect(Object.keys(loaded.value.nodes).sort()).toEqual(["n1", "n2", "n3"]);
     }
   });
 });

@@ -81,4 +81,41 @@ describe("AsyncMutex", () => {
     // Each id appears exactly once
     expect(new Set(results).size).toBe(5);
   });
+
+  // Wave 6 §6.4: double-release used to silently hand the lock to the next
+  // waiter twice, corrupting FIFO ordering. Now throws.
+  it("double release throws (fast path)", async () => {
+    const m = new AsyncMutex();
+    const release = await m.acquire();
+    release();
+    expect(() => release()).toThrow("AsyncMutex: release() called twice");
+  });
+
+  it("double release throws (waiter handoff path)", async () => {
+    const m = new AsyncMutex();
+    const release1 = await m.acquire();
+    const p2 = m.acquire();
+    release1();
+    const release2 = await p2;
+    release2();
+    expect(() => release2()).toThrow("AsyncMutex: release() called twice");
+  });
+
+  it("double release does NOT advance the queue on the second call", async () => {
+    const m = new AsyncMutex();
+    const release1 = await m.acquire();
+    const order: number[] = [];
+    const p2 = m.acquire().then((r) => {
+      order.push(2);
+      r();
+    });
+    const p3 = m.acquire().then((r) => {
+      order.push(3);
+      r();
+    });
+    release1();
+    expect(() => release1()).toThrow();
+    await Promise.all([p2, p3]);
+    expect(order).toEqual([2, 3]);
+  });
 });

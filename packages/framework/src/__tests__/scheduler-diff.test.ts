@@ -1,8 +1,11 @@
 // Registry diff tests — FR-062, SC-007
 // Covers: empty active, empty desired, identical, partial-overlap, update detection,
 //         disjointness property: add ∩ remove = ∅, add ∩ update = ∅, remove ∩ update = ∅
+//         completeness property (Wave 6 §6.8): every id ∈ active ∪ desired is
+//         classified into exactly one of {add, remove, update, unchanged}
 
 import { describe, it, expect } from "bun:test";
+import fc from "fast-check";
 import { diffRegistry } from "../scheduler/diff.js";
 import type { TaskConfig, TaskRegistry } from "../scheduler/types.js";
 
@@ -153,5 +156,97 @@ describe("diffRegistry", () => {
     const active = reg(task("A"), task("B"));
     const desired = reg(task("C"), task("D"));
     assertDisjoint(active, desired);
+  });
+
+  // Wave 6 §6.8 — completeness property test
+  describe("completeness property (§6.8)", () => {
+    // Cron expressions we sample from. Two values mean "configs may differ"
+    // for the same id, which exercises the update arm.
+    const cronArb = fc.constantFrom("* * * * *", "0 * * * *", "*/5 * * * *");
+    const validForArb = fc.integer({ min: 1, max: 600_000 });
+    const idArb = fc.string({ minLength: 1, maxLength: 4 });
+
+    const taskArb = (id: string): fc.Arbitrary<TaskConfig> =>
+      fc.record({
+        id: fc.constant(id),
+        cron: cronArb,
+        validForMs: validForArb,
+        dependsOn: fc.option(fc.array(idArb, { maxLength: 3 }), { nil: undefined }) as fc.Arbitrary<readonly string[] | undefined>,
+      });
+
+    const registryArb = fc.uniqueArray(idArb, { maxLength: 8, selector: (s) => s })
+      .chain((ids) => fc.tuple(...ids.map((id) => taskArb(id))).map((tasks) => reg(...tasks)));
+
+    it("|add| + |remove| + |update| + |unchanged| = |active ∪ desired|", () => {
+      fc.assert(
+        fc.property(registryArb, registryArb, (active, desired) => {
+          const diff = diffRegistry(active, desired);
+          const unionIds = new Set<string>([...active.keys(), ...desired.keys()]);
+
+          // Compute "unchanged" as the leftover: ids in both registries that
+          // were NOT emitted as add/remove/update.
+          const classified = new Set<string>([
+            ...diff.add.map((t) => t.id),
+            ...diff.remove,
+            ...diff.update.map((t) => t.id),
+          ]);
+          const unchanged = [...unionIds].filter((id) => !classified.has(id));
+
+          const total =
+            diff.add.length + diff.remove.length + diff.update.length + unchanged.length;
+          return total === unionIds.size;
+        }),
+        { numRuns: 200 },
+      );
+    });
+
+    it("every id ∈ active ∪ desired appears in EXACTLY one of {add, remove, update, unchanged}", () => {
+      fc.assert(
+        fc.property(registryArb, registryArb, (active, desired) => {
+          const diff = diffRegistry(active, desired);
+          const unionIds = new Set<string>([...active.keys(), ...desired.keys()]);
+
+          const adds = new Set(diff.add.map((t) => t.id));
+          const removes = new Set(diff.remove);
+          const updates = new Set(diff.update.map((t) => t.id));
+          const unchanged = new Set<string>(
+            [...unionIds].filter(
+              (id) => !adds.has(id) && !removes.has(id) && !updates.has(id),
+            ),
+          );
+
+          for (const id of unionIds) {
+            const buckets = [
+              adds.has(id),
+              removes.has(id),
+              updates.has(id),
+              unchanged.has(id),
+            ].filter(Boolean).length;
+            if (buckets !== 1) return false;
+          }
+          return true;
+        }),
+        { numRuns: 200 },
+      );
+    });
+
+    it("add ⊆ desired \\ active, remove ⊆ active \\ desired, update ⊆ active ∩ desired", () => {
+      fc.assert(
+        fc.property(registryArb, registryArb, (active, desired) => {
+          const diff = diffRegistry(active, desired);
+          for (const t of diff.add) {
+            if (!desired.has(t.id) || active.has(t.id)) return false;
+          }
+          for (const id of diff.remove) {
+            if (!active.has(id) || desired.has(id)) return false;
+          }
+          for (const t of diff.update) {
+            if (!active.has(t.id) || !desired.has(t.id)) return false;
+          }
+          return true;
+        }),
+        { numRuns: 200 },
+      );
+    });
   });
 });

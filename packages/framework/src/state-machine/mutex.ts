@@ -16,11 +16,16 @@ export class AsyncMutex {
   /**
    * Acquire the lock. Returns a release function.
    * Callers are queued in submission order (FIFO).
+   *
+   * The release function is single-use: calling it twice throws. This makes
+   * double-release a hard error rather than silently handing the lock to the
+   * next waiter twice. Wave 6 §6.4 — the previous shape would corrupt FIFO
+   * ordering under double-release without any signal.
    */
   acquire(): Promise<() => void> {
     if (!this._locked) {
       this._locked = true;
-      return Promise.resolve(() => this._release());
+      return Promise.resolve(this._makeRelease());
     }
 
     // Lock is held — enqueue this waiter
@@ -29,11 +34,22 @@ export class AsyncMutex {
     });
   }
 
+  private _makeRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) {
+        throw new Error("AsyncMutex: release() called twice");
+      }
+      released = true;
+      this._release();
+    };
+  }
+
   private _release(): void {
     const next = this._queue.shift();
     if (next) {
       // Hand lock directly to the next waiter — stays locked
-      next(() => this._release());
+      next(this._makeRelease());
     } else {
       this._locked = false;
     }

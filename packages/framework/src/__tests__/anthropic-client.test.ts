@@ -373,4 +373,80 @@ describe("AnthropicLlmClient.sendWithTools", () => {
       expect(result.error.kind).toBe("aborted");
     }
   });
+
+  // Wave 6 §6.10: SDK throw with status === 429 → transient
+  it("SDK throws RateLimitError-shaped error → transient", async () => {
+    const rateLimitError = Object.assign(new Error("rate_limit_error: 429"), { status: 429 });
+    const client = new AnthropicLlmClient(
+      makeStub(async () => { throw rateLimitError; }),
+    );
+    const tool = makeTool("lookup", async () => ({ found: true }));
+
+    const result = await client.sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "claude-test",
+        tools: [tool],
+        schema: Schema,
+        nodeId: "rate-limited-node",
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.nodeId).toBe("rate-limited-node");
+        expect(result.error.message).toMatch(/429|rate_limit/);
+      }
+    }
+  });
+
+  it("SDK throws non-rate-limit error → node-crash (regression for §6.10)", async () => {
+    const client = new AnthropicLlmClient(
+      makeStub(async () => { throw new Error("connection refused"); }),
+    );
+    const tool = makeTool("lookup", async () => ({ found: true }));
+
+    const result = await client.sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "claude-test",
+        tools: [tool],
+        schema: Schema,
+        nodeId: "n",
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
+  });
+});
+
+// Wave 6 §6.10: sendStructured path also maps 429 → transient.
+describe("AnthropicLlmClient — 429 mapping (sendStructured)", () => {
+  it("SDK throws status=429 → transient", async () => {
+    const rateLimitError = Object.assign(new Error("rate_limit_error: 429"), { status: 429 });
+    const client = new AnthropicLlmClient(
+      makeStub(async () => { throw rateLimitError; }),
+    );
+    const result = await client.sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "claude-test",
+      schema: Schema,
+      nodeId: "rl-node",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.nodeId).toBe("rl-node");
+      }
+    }
+  });
 });

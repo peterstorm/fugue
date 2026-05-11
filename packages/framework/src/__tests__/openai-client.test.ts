@@ -95,7 +95,9 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("non-200 → node-crash with status + body and nodeId", async () => {
+  // Wave 6 §6.10: 429 maps to `transient`, not `node-crash`. Lets the runner
+  // distinguish "retry me" from "permanent failure" without parsing the message.
+  it("HTTP 429 → transient with status + body and nodeId", async () => {
     handler = async () => jsonResponse({ error: "rate limit" }, 429);
     const result = await makeClient().sendStructured<SchemaType>({
       system: "s",
@@ -105,10 +107,32 @@ describe("OpenAILlmClient.sendStructured", () => {
       nodeId: "n",
     });
     expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("n");
-      expect(result.error.message).toMatch(/429/);
-      expect(result.error.message).toMatch(/rate limit/);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.nodeId).toBe("n");
+        expect(result.error.message).toMatch(/429/);
+        expect(result.error.message).toMatch(/rate limit/);
+      }
+    }
+  });
+
+  it("non-429 non-200 → node-crash with status + body and nodeId", async () => {
+    handler = async () => jsonResponse({ error: "internal" }, 500);
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "n",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe("n");
+        expect(result.error.message).toMatch(/500/);
+      }
     }
   });
 
@@ -347,6 +371,30 @@ describe("OpenAILlmClient.sendWithTools", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  // Wave 6 §6.10: HTTP 429 mid-tool-loop → transient
+  it("HTTP 429 inside sendWithTools → transient", async () => {
+    handler = async () => jsonResponse({ error: "rate limit" }, 429);
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "rl",
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.nodeId).toBe("rl");
+        expect(result.error.message).toMatch(/429/);
+      }
     }
   });
 });

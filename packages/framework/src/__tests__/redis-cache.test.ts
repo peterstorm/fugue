@@ -99,19 +99,19 @@ describe("stableHash", () => {
 });
 
 // --- RedisCache (skip if Redis unavailable) ---
+//
+// Gates on `process.env.REDIS_URL` at module-load time. See the comment in
+// redis-checkpointer.test.ts for the rationale.
+
+const REDIS_URL = process.env.REDIS_URL;
+const hasRedis = Boolean(REDIS_URL);
 
 let redis: Redis | null = null;
-let redisAvailable = false;
 
 beforeAll(async () => {
-  const r = new Redis({ lazyConnect: true, connectTimeout: 2000 });
-  try {
-    await r.connect();
-    redisAvailable = true;
-    redis = r;
-  } catch {
-    r.disconnect();
-  }
+  if (!hasRedis) return;
+  redis = new Redis(REDIS_URL!, { lazyConnect: true, connectTimeout: 2000 });
+  await redis.connect();
 });
 
 afterAll(async () => {
@@ -120,7 +120,7 @@ afterAll(async () => {
 
 const TEST_PREFIX = "cache:test:";
 
-const describeRedis = redisAvailable ? describe : describe.skip;
+const describeRedis = hasRedis ? describe : describe.skip;
 
 describeRedis("RedisCache", () => {
   let cache: RedisCache;

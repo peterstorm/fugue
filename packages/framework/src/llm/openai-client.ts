@@ -124,6 +124,11 @@ const extractReasoning = (output: readonly any[]): string | undefined => {
 const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
 
+/** Wave 6 §6.10 — duck-typed 429 detection (see anthropic-client.ts for rationale). */
+const isRateLimit = (e: unknown): boolean =>
+  typeof (e as { status?: unknown })?.status === "number" &&
+  (e as { status: number }).status === 429;
+
 const resolveNodeId = (req: { readonly nodeId?: string }): string =>
   req.nodeId ?? "<llm>";
 
@@ -219,6 +224,13 @@ export class OpenAILlmClient implements LlmClient {
 
       const httpResult = await this.postResponses(body, req.signal);
       if (!httpResult.ok) {
+        if (httpResult.status === 429) {
+          return err({
+            kind: "transient",
+            nodeId: resolveNodeId(req),
+            message: `${httpResult.status} ${httpResult.bodyText}`,
+          });
+        }
         return err({
           kind: "node-crash",
           nodeId: resolveNodeId(req),
@@ -274,6 +286,13 @@ export class OpenAILlmClient implements LlmClient {
     } catch (error) {
       if (isAbort(error)) {
         return err({ kind: "aborted", reason: "signal" });
+      }
+      if (isRateLimit(error)) {
+        return err({
+          kind: "transient",
+          nodeId: resolveNodeId(req),
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
       return err({
         kind: "node-crash",
@@ -357,6 +376,13 @@ export class OpenAILlmClient implements LlmClient {
         if (isAbort(error)) {
           return err({ kind: "aborted", reason: "signal" });
         }
+        if (isRateLimit(error)) {
+          return err({
+            kind: "transient",
+            nodeId: resolveNodeId(req),
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         return err({
           kind: "node-crash",
           nodeId: resolveNodeId(req),
@@ -366,6 +392,13 @@ export class OpenAILlmClient implements LlmClient {
       }
 
       if (!httpResult.ok) {
+        if (httpResult.status === 429) {
+          return err({
+            kind: "transient",
+            nodeId: resolveNodeId(req),
+            message: `${httpResult.status} ${httpResult.bodyText}`,
+          });
+        }
         return err({
           kind: "node-crash",
           nodeId: resolveNodeId(req),
