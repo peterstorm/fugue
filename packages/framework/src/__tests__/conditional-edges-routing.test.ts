@@ -348,4 +348,44 @@ describe("conditional edges — malformed predicate at runtime", () => {
       }
     }
   });
+
+  // Wave 3 §3.6: malformed predicate is a config error — fail-fast regardless
+  // of retry budget. Previously runWave fell through to wave-done and
+  // handleWaveDone failed the run; now runWave returns node-failed and
+  // handleNodeFailed special-cases the kind to skip retry. This test pins the
+  // fail-fast behavior — without §3.6, a non-zero retry budget would have
+  // produced retry-exhausted.
+  it("predicate-malformed is non-retriable even with a retry budget", async () => {
+    const dag = defineDag({
+      id: "malformed-retries",
+      nodes: {
+        router: makeNode("router", { run: async () => ok({ kind: "x" }) }),
+        a: makeNode("a", {
+          inputSchema: z.object({ router: z.any().optional() }),
+          run: async () => ok("A"),
+        }),
+        b: makeNode("b", {
+          inputSchema: z.any(),
+          run: async () => ok("B"),
+        }),
+      },
+      edges: [
+        {
+          from: "router",
+          to: "a",
+          when: { kind: ["x", "y"] } as unknown as Record<string, never>,
+        } as any,
+        { from: "router", to: "b", kind: "default" },
+      ],
+      outputNodeId: "b",
+      defaultRetryLimit: 3,
+    });
+
+    const result = await runDagStateful<unknown, string>(dag, null, ctx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // §3.6: failure preserves the predicate-malformed kind, not wrapped in retry-exhausted.
+      expect(result.error.kind).toBe("predicate-malformed");
+    }
+  });
 });

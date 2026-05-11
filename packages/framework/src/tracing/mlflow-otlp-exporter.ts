@@ -38,7 +38,7 @@ import {
   EVENT_LLM_REQUEST,
   EVENT_LLM_COST,
   EVENT_LLM_THINKING,
-} from "../tracing/semantic-conventions.js";
+} from "./semantic-conventions.js";
 import { SpanAttributeRegistry, type SpanAttributes } from "./span-attribute-registry.js";
 
 export interface MlflowOtlpExporterConfig {
@@ -59,6 +59,25 @@ const SPAN_TYPE_TO_MLFLOW: Record<string, string> = {
   llm: "LLM",
   retriever: "RETRIEVER",
   tool: "TOOL",
+};
+
+/**
+ * Wave 3 §3.7 — rate-limited JSON parse failure logging.
+ * Logs at counts 1, 10, 100, 1000, ... to avoid spam from a misbehaving node
+ * while still surfacing the problem at first occurrence.
+ */
+let parseFailureCount = 0;
+const logParseFailure = (field: string, traceId: string, err: unknown): void => {
+  parseFailureCount++;
+  const c = parseFailureCount;
+  // Log first hit and then every order-of-magnitude milestone.
+  const shouldLog = c === 1 || (c >= 10 && c % Math.pow(10, Math.floor(Math.log10(c))) === 0);
+  if (shouldLog) {
+    console.warn(
+      `[MlflowOtlpExporter] JSON parse failed for ${field} on trace ${traceId} (occurrence ${c}):`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 };
 
 /** Wrap a span so that `attributes` reads merge an extra object on top. */
@@ -103,6 +122,14 @@ export class MlflowOtlpExporter implements SpanExporter {
       this.innerPromise = factory().catch((err) => {
         // Latch permanent failure — every future call resolves to null.
         this.failedPermanently = err instanceof Error ? err : new Error(String(err));
+        // Wave 3 §3.2: emit at the failure point so misconfiguration is
+        // visible immediately. Previously the failure was silently latched
+        // and only logged on the NEXT export() (and only if getInner threw,
+        // which it can't here because of the `.catch(() => null)` below).
+        console.error(
+          "[MlflowOtlpExporter] Permanent initialization failure — all future spans will be dropped:",
+          this.failedPermanently,
+        );
         throw this.failedPermanently;
       });
     }
@@ -159,7 +186,15 @@ export class MlflowOtlpExporter implements SpanExporter {
           case EVENT_NODE_INPUT: {
             const data = eventAttrs["data"] as string | undefined;
             if (data) {
-              try { spanInputs = { ...spanInputs, ...JSON.parse(data) }; } catch { spanInputs["raw"] = data; }
+              try {
+                spanInputs = { ...spanInputs, ...JSON.parse(data) };
+              } catch (e) {
+                // Wave 3 §3.7: a bare catch with a `raw` fallback is
+                // indistinguishable from a node legitimately emitting raw
+                // text. Log (rate-limited) so operators can correlate.
+                logParseFailure("spanInputs", span.spanContext().traceId, e);
+                spanInputs["raw"] = data;
+              }
             } else {
               spanInputs = { ...spanInputs, ...Object.fromEntries(Object.entries(eventAttrs)) };
             }
@@ -168,7 +203,12 @@ export class MlflowOtlpExporter implements SpanExporter {
           case EVENT_NODE_OUTPUT: {
             const data = eventAttrs["data"] as string | undefined;
             if (data) {
-              try { spanOutputs = { ...spanOutputs, ...JSON.parse(data) }; } catch { spanOutputs["raw"] = data; }
+              try {
+                spanOutputs = { ...spanOutputs, ...JSON.parse(data) };
+              } catch (e) {
+                logParseFailure("spanOutputs", span.spanContext().traceId, e);
+                spanOutputs["raw"] = data;
+              }
             } else {
               spanOutputs = { ...spanOutputs, ...Object.fromEntries(Object.entries(eventAttrs)) };
             }

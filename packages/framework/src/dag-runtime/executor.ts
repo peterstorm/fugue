@@ -47,6 +47,31 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
+// approve-with-edit validation (Wave 2 §2.5)
+//
+// Returns `null` on success, an error message on failure. Validation runs in
+// the imperative shell because the pure transition layer can't depend on a
+// live Zod schema (on resume, deserialized schemas are inert).
+// ---------------------------------------------------------------------------
+
+const validateApproveEdit = (
+  action: import("./types.js").HumanAction,
+  nodeId: string,
+  nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
+): string | null => {
+  if (action.action !== "approve-with-edit") return null;
+  const nodeDef = nodeMap.get(nodeId);
+  if (!nodeDef) {
+    return `approve-with-edit: node '${nodeId}' not found in DAG`;
+  }
+  const parsed = nodeDef.outputSchema.safeParse(action.newOutput);
+  if (!parsed.success) {
+    return `approve-with-edit output failed schema for node '${nodeId}': ${parsed.error.message}`;
+  }
+  return null;
+};
+
+// ---------------------------------------------------------------------------
 // Single-node execution (mirrors runNode from executor.ts — FR-025)
 // ---------------------------------------------------------------------------
 
@@ -269,6 +294,32 @@ export const buildDagExecutor = (
           } satisfies DagEvent;
         }
 
+        // Wave 2 §2.5: validate `approve-with-edit` output against the node's
+        // outputSchema before writing it into ctx.outputs. The transition layer
+        // is pure and cannot run validation (schemas may not survive resume
+        // serialization); validation belongs in the imperative shell where
+        // nodeMap holds the live Zod schema.
+        const validationFailure = validateApproveEdit(action, p.nodeId, nodeMap);
+        if (validationFailure !== null) {
+          emit(nodeCtx, {
+            type: "node-error",
+            runId: nodeCtx.runId,
+            dagId: dag.id,
+            nodeId: p.nodeId,
+            timestamp: new Date(),
+            error: validationFailure,
+          });
+          return {
+            type: "node-failed",
+            nodeId: p.nodeId,
+            error: {
+              kind: "validation",
+              nodeId: p.nodeId,
+              message: validationFailure,
+            },
+          } satisfies DagEvent;
+        }
+
         return {
           type: "human-responded",
           nodeId: p.nodeId,
@@ -324,6 +375,30 @@ export const buildDagExecutor = (
           } satisfies DagEvent;
         }
 
+        // Wave 2 §2.5: same validation as the awaiting-human path. Hook
+        // retries can also produce approve-with-edit; the reviewer's edited
+        // output must conform to the node's schema before reaching ctx.outputs.
+        const validationFailure = validateApproveEdit(action, p.nodeId, nodeMap);
+        if (validationFailure !== null) {
+          emit(nodeCtx, {
+            type: "node-error",
+            runId: nodeCtx.runId,
+            dagId: dag.id,
+            nodeId: p.nodeId,
+            timestamp: new Date(),
+            error: validationFailure,
+          });
+          return {
+            type: "node-failed",
+            nodeId: p.nodeId,
+            error: {
+              kind: "validation",
+              nodeId: p.nodeId,
+              message: validationFailure,
+            },
+          } satisfies DagEvent;
+        }
+
         return {
           type: "human-responded",
           nodeId: p.nodeId,
@@ -357,7 +432,8 @@ const runWave = async (
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
 ): Promise<DagEvent> => {
   // Filter to active nodes only. Pruned nodes are silently skipped — they
-  // never produce outputs and their downstream `optionalDeps` see `undefined`.
+  // did not fire on this routing decision; downstream consumers that list
+  // them as `optional` sources in `incomingByNode` see `undefined`.
   const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
   const waveNodeIds = allWaveNodeIds.filter((id) => machineCtx.activeNodeIds.has(id));
 
@@ -475,14 +551,20 @@ const runWave = async (
   // Emit observer events for routing decisions taken in this wave. The
   // transition layer recomputes the same decisions to update activeNodeIds —
   // both calls are deterministic because guards are pure.
+  //
+  // Wave 3 §3.6: when `decideRoute` returns `predicate-malformed`, short-
+  // circuit the wave with `node-failed` instead of letting it fall through to
+  // `wave-done` (which previously produced the confusing observer sequence
+  // node-error → wave-done → failed). `handleNodeFailed` special-cases the
+  // `predicate-malformed` error kind to fail-fast without consuming the
+  // retry budget — a malformed predicate is a config error, not a transient
+  // runtime failure.
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
     const outgoing = outgoingOf(dag, nodeId);
     if (!outgoing.some(isConditionalEdge)) continue;
     const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
     if (decision.kind === "predicate-malformed") {
-      // The transition layer will fail the run; emit a node-error here so
-      // operators see the malformed predicate alongside the run-end event.
       emit(nodeCtx, {
         type: "node-error",
         runId: nodeCtx.runId,
@@ -491,7 +573,15 @@ const runWave = async (
         timestamp: new Date(),
         error: `predicate-malformed: ${decision.message}`,
       });
-      continue;
+      return {
+        type: "node-failed",
+        nodeId,
+        error: {
+          kind: "predicate-malformed",
+          nodeId: decision.fromNodeId,
+          message: decision.message,
+        },
+      };
     }
     emit(nodeCtx, {
       type: "route-decided",

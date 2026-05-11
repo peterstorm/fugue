@@ -14,6 +14,7 @@ import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { runEvalJudges } from "./eval-judges.js";
+import { computeIncomingByNode } from "./conditional.js";
 import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "../executor/node-span.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { Observer } from "../observer/observer.js";
@@ -58,6 +59,53 @@ export interface DagRunOpts
    */
   readonly onBackground?: (p: Promise<void>) => void;
 }
+
+// ---------------------------------------------------------------------------
+// JobLike context adapter — Wave 2 §2.1
+//
+// DagMachineContext carries two fields that must NOT round-trip through
+// durable storage:
+//   - `dag`: contains `run` closures and Zod schemas that JSON-strip to `{}`
+//   - `incomingByNode`: derived from `dag.edges`, redundant with `dag`
+//
+// `wrapDagJobLike` strips both fields on `updateData` and re-injects them
+// from the live call-site values on `data` read. The persisted snapshot
+// stays compact and schema-stable; transition-time code sees a fully-formed
+// context.
+//
+// The internal type cast on the write side (Omit-then-cast-as-full) is the
+// inverse of the re-injection on read — they compose to identity from the
+// runner's perspective.
+// ---------------------------------------------------------------------------
+
+const wrapDagJobLike = (
+  inner: JobLike<DagPhase, DagMachineContext>,
+  dag: DagDef,
+): JobLike<DagPhase, DagMachineContext> => {
+  const incomingByNode = computeIncomingByNode(dag);
+  return {
+    get data(): { state: DagPhase; context: DagMachineContext } {
+      const raw = inner.data;
+      // Re-inject the live dag + incomingByNode. The persisted raw.context may
+      // be missing them (post-strip) or carry stale closure-stripped copies
+      // (from before this wrapper was used) — either way, the live values win.
+      return {
+        state: raw.state,
+        context: { ...raw.context, dag, incomingByNode },
+      };
+    },
+    async updateData(d: { state: DagPhase; context: DagMachineContext }): Promise<void> {
+      const { dag: _dag, incomingByNode: _ibn, ...rest } = d.context;
+      await inner.updateData({
+        state: d.state,
+        context: rest as DagMachineContext,
+      });
+    },
+    updateProgress: (pct: number) => inner.updateProgress(pct),
+    appendEvent: (event: unknown, dedupKey?: string) =>
+      inner.appendEvent(event, dedupKey),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // runDagStateful
@@ -152,13 +200,22 @@ export const runDagStateful = async <I, O>(
         recordOutcomes,
       });
 
-      // Resolve the job handle — caller-supplied or fresh in-memory
-      const job: JobLike<DagPhase, DagMachineContext> =
-        opts?.jobLike ??
-        createInMemoryJob<DagPhase, DagMachineContext>({
-          state: initialState,
-          context: initialContext,
-        });
+      // Resolve the job handle — caller-supplied or fresh in-memory.
+      //
+      // Wave 2 §2.2: when `opts.jobLike` is provided, the runner reads
+      // `job.data` (the checkpointed state + context) — `initialState` and
+      // `initialContext` are unused. In particular, the call-time `input`
+      // argument is intentionally ignored on resume; the resumed run's
+      // `ctx.initialInput` comes from the original enqueue's checkpoint.
+      // `compileDagToMachine` is still called above so the DAG's topology
+      // (cycle detection) is re-validated on every entry; the resulting
+      // `initialContext` is then dropped for resumed runs.
+      const job: JobLike<DagPhase, DagMachineContext> = opts?.jobLike
+        ? wrapDagJobLike(opts.jobLike, effectiveDag)
+        : createInMemoryJob<DagPhase, DagMachineContext>({
+            state: initialState,
+            context: initialContext,
+          });
 
       // errorEventOf adapter — converts classified errors to DagEvent ERROR
       const errorEventOf = (classified: {
@@ -222,8 +279,32 @@ export const runDagStateful = async <I, O>(
             };
 
             if (opts?.onBackground) {
+              // Wave 2 §2.3: finalize() rejection must still close the root
+              // span and emit `run-end` — otherwise the OTel span leaks open
+              // and BufferedObserver retains the run buffer until its TTL.
+              // Each cleanup is wrapped independently: a setStatus failure
+              // must not block end(); an end() failure must not block
+              // emitRunEnd.
               const p = finalize().catch((e) => {
                 console.error("[runDagStateful] background finalize failed:", e);
+                try {
+                  rootSpan.setStatus({
+                    code: SpanStatusCode.ERROR,
+                    message: e instanceof Error ? e.message : String(e),
+                  });
+                } catch {
+                  /* setStatus may throw if the span SDK is in a bad state */
+                }
+                try {
+                  rootSpan.end();
+                } catch {
+                  /* end() may throw if already ended */
+                }
+                try {
+                  emitRunEnd("error");
+                } catch {
+                  /* observer may throw — the run is already over */
+                }
               });
               opts.onBackground(p);
             } else {

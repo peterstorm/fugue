@@ -55,6 +55,13 @@ export class TailSamplingProcessor implements SpanProcessor {
   exported = 0;
   dropped = 0;
   evicted = 0;
+  /**
+   * Wave 3 §3.1 — count exports whose transport rejected (HTTP 4xx/5xx, TLS
+   * errors, connection refused, etc). Operators alert on this counter; the
+   * previous design swallowed the rejection inside trackExport's `.catch`,
+   * leaving `forceFlush` to resolve as if every export had succeeded.
+   */
+  exportFailed = 0;
 
   constructor(exporter: SpanExporter, policy: PersistencePolicy) {
     this.exporter = exporter;
@@ -115,7 +122,13 @@ export class TailSamplingProcessor implements SpanProcessor {
   }
 
   private trackExport(spans: ReadableSpan[], traceId: string): void {
-    const p = exportAsync(this.exporter, spans).catch((err) => {
+    // Wave 3 §3.1: track the original (rejectable) promise so forceFlush can
+    // observe failures via allSettled. The previous design eagerly absorbed
+    // rejections into resolved-`undefined`, making transport failures
+    // invisible to the SDK shutdown sequence.
+    const p = exportAsync(this.exporter, spans);
+    p.catch((err) => {
+      this.exportFailed++;
       console.error(`[TailSamplingProcessor] Export failed for trace ${traceId}:`, err);
     });
     this.pendingExports.add(p);
@@ -181,8 +194,11 @@ export class TailSamplingProcessor implements SpanProcessor {
       }
     }
     this.buffers.clear();
-    // Wait for every export started so far to complete before flushing the inner.
-    await Promise.all([...this.pendingExports]);
+    // Wait for every export started so far to settle (resolve OR reject)
+    // before flushing the inner. Individual failures are already counted in
+    // `exportFailed` and logged by trackExport; allSettled ensures we never
+    // miss waiting for an export just because it rejected.
+    await Promise.allSettled([...this.pendingExports]);
     await this.exporter.forceFlush?.();
   }
 

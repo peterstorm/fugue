@@ -23,7 +23,7 @@ describe("createLlmWithToolsNode — factory", () => {
     let toolCalls = 0;
     const cached = { greeting: "hello cached" };
     const cache = {
-      get: async () => cached,
+      get: async () => ({ hit: true, value: cached }) as const,
       set: async () => ok(undefined),
     };
     const llm: LlmClient = {
@@ -66,7 +66,10 @@ describe("createLlmWithToolsNode — factory", () => {
     const stored: Map<string, unknown> = new Map();
     let setCalls = 0;
     const cache = {
-      get: async (k: string) => stored.get(k) ?? null,
+      get: async (k: string) =>
+        stored.has(k)
+          ? ({ hit: true, value: stored.get(k) } as const)
+          : ({ hit: false } as const),
       set: async (k: string, v: unknown) => {
         setCalls++;
         stored.set(k, v);

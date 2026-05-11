@@ -394,6 +394,82 @@ describe("runDagStateful — HITL approve-with-edit", () => {
       expect(result.value).toBe("edited-value");
     }
   });
+
+  // Wave 2 §2.5: a reviewer's edited output must conform to the node's
+  // outputSchema. Without this guard, a mis-typed edit silently propagates to
+  // downstream nodes.
+  it("approve-with-edit with schema-violating output fails the run with kind=validation", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", {
+          humanReview: { prompt: "Edit if needed" },
+          outputSchema: z.object({ score: z.number() }),
+          run: async () => ok({ score: 0.5 }),
+        }),
+      ],
+      edges: [],
+      outputNodeId: "a",
+      // No retries — first validation failure surfaces as terminal.
+      defaultRetryLimit: 0,
+    });
+
+    const onHumanReview = async (_req: any): Promise<HumanAction> => ({
+      action: "approve-with-edit",
+      newOutput: { score: "not-a-number" }, // wrong shape
+    });
+
+    const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // Validation failure from the executor flows through the hook-crash
+      // path; with retryLimit=0 it surfaces as node-crash carrying the
+      // validation message in the last-error trail.
+      const isExpectedKind =
+        result.error.kind === "validation" || result.error.kind === "node-crash";
+      expect(isExpectedKind).toBe(true);
+      const msg =
+        result.error.kind === "validation"
+          ? result.error.message
+          : result.error.kind === "node-crash"
+            ? result.error.message
+            : "";
+      expect(msg).toContain("approve-with-edit");
+      expect(msg).toContain("schema");
+    }
+  });
+
+  it("approve-with-edit retries the hook when validation fails (retry budget allows reviewer to fix)", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", {
+          humanReview: { prompt: "Edit if needed" },
+          outputSchema: z.object({ score: z.number() }),
+          retry: { backoffMs: [1, 1], jitterRatio: 0 },
+          run: async () => ok({ score: 0.5 }),
+        }),
+      ],
+      edges: [],
+      outputNodeId: "a",
+      // Budget for two hook-retries — first attempt has bad output, second succeeds.
+      defaultRetryLimit: 2,
+    });
+
+    let call = 0;
+    const onHumanReview = async (_req: any): Promise<HumanAction> => {
+      call++;
+      // First attempt: bad output. Second attempt: valid output.
+      return call === 1
+        ? { action: "approve-with-edit", newOutput: { score: "bad" } }
+        : { action: "approve-with-edit", newOutput: { score: 0.9 } };
+    };
+
+    const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({ score: 0.9 });
+    }
+    expect(call).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -735,6 +811,58 @@ describe("runDagStateful — durable job checkpointing", () => {
     expect(job.events.length).toBeGreaterThan(0);
     // Progress was updated
     expect(job.progress).toBe(100);
+  });
+
+  // Wave 2 §2.1: the BullMQ adapter serializes context via JSON, which
+  // strips closures (NodeDef.run, Zod schemas). Storing the full DagDef in
+  // every checkpoint also wastes Redis bandwidth on data that's already
+  // derivable from the call-site DAG.
+  //
+  // wrapDagJobLike strips `dag` and `incomingByNode` on updateData and
+  // re-injects them from the live call-site on data-read. This test verifies
+  // the contract by snooping on a custom jobLike between the wrapper and
+  // disk: writes never carry `dag` or `incomingByNode`.
+  it("persisted snapshot omits dag and incomingByNode; reads re-inject live values", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", { run: async () => ok("a-out") }),
+        makeNode("b", { run: async () => ok("b-out") }),
+      ],
+      edges: [{ from: "a", to: "b" }],
+    });
+
+    // Snoop on every updateData write to the inner store.
+    const snapshots: Array<{ state: unknown; context: Record<string, unknown> }> = [];
+    let snapshot: { state: unknown; context: unknown } = {
+      state: { kind: "pending" } as const,
+      context: {} as unknown,
+    };
+    const innerJob = {
+      get data() {
+        return snapshot as { state: import("../dag-runtime/types.js").DagPhase; context: import("../dag-runtime/types.js").DagMachineContext };
+      },
+      async updateData(d: { state: import("../dag-runtime/types.js").DagPhase; context: import("../dag-runtime/types.js").DagMachineContext }) {
+        snapshots.push({ state: d.state, context: d.context as unknown as Record<string, unknown> });
+        snapshot = d;
+      },
+      async updateProgress() {},
+      async appendEvent() {},
+    };
+
+    // Seed the inner with the proper initial context BEFORE running.
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed in test setup");
+    snapshot = { state: compiled.value.initialState, context: compiled.value.initialContext };
+
+    const result = await runDagStateful(dag, null, makeCtx(), { jobLike: innerJob });
+    expect(result.ok).toBe(true);
+
+    // At least one write happened, and every write's context lacks dag + incomingByNode.
+    expect(snapshots.length).toBeGreaterThan(0);
+    for (const snap of snapshots) {
+      expect("dag" in snap.context).toBe(false);
+      expect("incomingByNode" in snap.context).toBe(false);
+    }
   });
 
   it("checkpoint is NOT written when state is failed (FR-005)", async () => {

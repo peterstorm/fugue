@@ -172,11 +172,13 @@ export class AnthropicLlmClient implements LlmClient {
     req: SendWithToolsRequest<O>,
     runtime: LlmRuntime,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    // The interface only constrains `runtime` to `{ tracer?, signal? }` to
-    // keep `llm/client.ts` independent of `types/node.ts`. The tool dispatcher
-    // still needs a full NodeContext (tools may read ctx.cache/ctx.logger),
-    // so callers in framework-internal nodes pass a NodeContext that is
-    // structurally a superset of LlmRuntime.
+    // Wave 4 §4.4 — `runtime`'s static type is the minimum (`LlmRuntime`)
+    // because `llm/client.ts` can't import `NodeContext` (cycle: `types/node.ts`
+    // imports `LlmClient`). At the tool-dispatch boundary, however, tools may
+    // read any `NodeContext` field. The contract documented on `LlmClient`
+    // requires callers wiring tools to pass a `NodeContext`. This cast is the
+    // single sanctioned widening — it lives here so the rest of the file uses
+    // the wider type honestly. See ADR-0012 and §4.4 of the Wave 4 plan.
     const ctx = runtime as NodeContext;
     try {
       ensureToolNames(req.tools);

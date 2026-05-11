@@ -3,6 +3,7 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
 import type { Checkpointer, RunMeta, NodeState, RunState } from "./checkpointer.js";
+import { FRAMEWORK_VERSION } from "./fingerprint.js";
 
 const TTL_SECONDS = 86400; // 24 hours
 
@@ -33,7 +34,10 @@ const serializeMeta = (meta: RunMeta): string =>
     createdAt: new Date().toISOString(),
     ...(meta.subject !== undefined ? { subject: meta.subject } : {}),
     ...(meta.dagFingerprint !== undefined ? { dagFingerprint: meta.dagFingerprint } : {}),
-    ...(meta.frameworkVersion !== undefined ? { frameworkVersion: meta.frameworkVersion } : {}),
+    // ADR-0017: always stamp the writing framework's version so load() can
+    // reject resumes that cross framework releases. Explicit caller value
+    // wins (lets tests construct stale-version payloads).
+    frameworkVersion: meta.frameworkVersion ?? FRAMEWORK_VERSION,
   } satisfies StoredMeta);
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
@@ -107,6 +111,18 @@ export class RedisCheckpointer implements Checkpointer {
         kind: "checkpoint-corrupt" as const,
         runId,
         message: `meta deserialize failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+
+    // ADR-0017: reject checkpoints produced by a different framework version.
+    // Validation, retry, and output-coercion semantics may have changed across
+    // releases; resuming v1 state under v2 code can corrupt the run silently.
+    if (meta.frameworkVersion !== FRAMEWORK_VERSION) {
+      return err({
+        kind: "checkpoint-version-mismatch" as const,
+        runId,
+        expected: FRAMEWORK_VERSION,
+        actual: meta.frameworkVersion,
       });
     }
 

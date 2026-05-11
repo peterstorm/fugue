@@ -1,4 +1,12 @@
 // @ai-summary/framework — barrel export
+//
+// Public surface: authoring-facing types, runtime entry points, and the
+// pluggable seams (Observer, Cache, LLM, JobLike, Scheduler) consumers
+// implement. Wave 4 §4.1: pure-internal helpers (transition primitives,
+// JSON serialization, mutex, scheduler internals) are intentionally NOT
+// re-exported here. Direct imports from their concrete paths remain
+// available for tests and any consumer that genuinely needs them.
+
 export * from "./types/index.js";
 export * from "./executor/index.js";
 export * from "./nodes/index.js";
@@ -10,33 +18,30 @@ export * from "./llm/index.js";
 export * from "./tracing/index.js";
 
 // ---------------------------------------------------------------------------
-// State-machine kernel (NFR-021)
+// State-machine kernel (NFR-021) — public surface only
 // ---------------------------------------------------------------------------
 export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent } from "./state-machine/types.js";
 export { runStateMachine } from "./state-machine/runner.js";
 export { createInMemoryJob } from "./state-machine/in-memory-job.js";
 export type { InMemoryJob, InMemoryJobOptions } from "./state-machine/in-memory-job.js";
 export { replayEvents, replayEventsUntil, replayEventsBetween } from "./state-machine/replay.js";
-export { serializeValue, deserializeValue, toJson, fromJson } from "./state-machine/serialize.js";
-export { AsyncMutex } from "./state-machine/mutex.js";
+// `toJson` / `fromJson` remain public — they're the documented serialization
+// helpers for callers building custom JobLike backends. The lower-level
+// `serializeValue` / `deserializeValue` and `AsyncMutex` are intentionally
+// internal; import from their concrete paths if you genuinely need them.
+export { toJson, fromJson } from "./state-machine/serialize.js";
 export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr } from "./types/result.js";
 
 // ---------------------------------------------------------------------------
-// DAG runtime (NFR-021)
+// DAG runtime (NFR-021) — public surface only
 // ---------------------------------------------------------------------------
 export type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./dag-runtime/types.js";
 export { dagTransition } from "./dag-runtime/transition.js";
-export {
-  handleWaveDone,
-  handleNodeFailed,
-  handleHumanResponse,
-  advanceToNextWave,
-  collectHumanReviewQueue,
-  computeBackoffMs,
-  getRetryLimit,
-  waveNodes,
-  waveIndexOf,
-} from "./dag-runtime/transition-helpers.js";
+// Transition primitives (handleWaveDone, handleNodeFailed, advanceToNextWave,
+// computeBackoffMs, ...) are intentionally NOT re-exported. They are
+// implementation details of `dagTransition`; callers who bypass `dagTransition`
+// can skip its invariant checks. Import directly from `dag-runtime/transition-helpers.js`
+// if you have a documented need.
 export { compileDagToMachine } from "./dag-runtime/machine.js";
 export { topoSort } from "./executor/topo.js";
 export { buildDagExecutor } from "./dag-runtime/executor.js";
@@ -77,11 +82,10 @@ export { createRedisStreamReader } from "./queue-bullmq/event-log.js";
 export type { EventLogReader } from "./queue-bullmq/event-log.js";
 
 // ---------------------------------------------------------------------------
-// Scheduler (NFR-021) — internal marker helpers intentionally omitted
+// Scheduler (NFR-021) — public surface only. `hasCycle` and `diffRegistry`
+// are scheduler internals; import directly from their files if needed.
 // ---------------------------------------------------------------------------
 export type { TaskConfig, TaskRegistry, RegistryDiff, CatchUpDecision } from "./scheduler/types.js";
-export { hasCycle } from "./scheduler/cycle.js";
-export { diffRegistry } from "./scheduler/diff.js";
 export { decideCatchUp } from "./scheduler/catch-up.js";
 export type { CronScheduler, CronSchedulerOpts } from "./scheduler/scheduler.js";
 export { createCronScheduler } from "./scheduler/scheduler.js";

@@ -85,15 +85,19 @@ export const bootstrap = async () => {
     const cp = checkpointer;
 
     // Adapter: NodeContext.cache expects get/set/writeCheckpoint
-    // get() must return { ok: true, value } to match what llm.ts checks
+    // Wave 4 §4.6: get() returns a discriminated hit/miss so nullable values
+    // are no longer ambiguous with cache misses.
     contextCache = {
       get: async (key: string) => {
         const r = await cache.get(key);
         if (!r.ok) {
           console.warn(`[cache] get failed for key=${key}: ${r.error.kind}`);
-          return null;
+          return { hit: false } as const;
         }
-        return r.value;
+        // RedisCache.get returns ok(null) on miss, ok(value) on hit.
+        return r.value === null
+          ? ({ hit: false } as const)
+          : ({ hit: true, value: r.value } as const);
       },
       set: async (key: string, value: unknown) => {
         const r = await cache.set(key, value, LLM_CACHE_TTL);

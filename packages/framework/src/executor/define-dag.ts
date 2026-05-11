@@ -1,8 +1,9 @@
 // defineDag — the only sanctioned path from authored input to runtime DagDef.
 //
 // Calling defineDag at module load:
-//   - validates structural soundness (deps ↔ edges, else-totality, output
-//     reachability, edge uniqueness, optionalDeps partitioning),
+//   - validates structural soundness (edge endpoints reference known nodes,
+//     else-totality, output reachability, edge uniqueness, predicate
+//     well-formedness),
 //   - throws DagDefinitionError on invalid input — the stack points at the
 //     DAG file, surfacing the error at boot, not on the first request,
 //   - brands the result so `runDag` / `runDagStateful` / `compileDagToMachine`
@@ -21,8 +22,8 @@ import type {
   DagDef,
   DagDefInput,
   EdgeDef,
-  NodesRecord,
 } from "../types/dag.js";
+import type { NodesRecord } from "../types/dag-internals.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { FrameworkError } from "../types/errors.js";

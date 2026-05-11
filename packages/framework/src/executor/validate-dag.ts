@@ -1,9 +1,11 @@
 import type {
   DagDef,
   DagDefInput,
+  DagDefShape,
   EdgeDef,
-  NodesRecord,
 } from "../types/dag.js";
+import { brandAsDagDef } from "../types/dag.js";
+import type { NodesRecord } from "../types/dag-internals.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -184,18 +186,26 @@ export const validateDagShape = (
     }
   }
 
-  // All checks passed — brand the input as a runtime DagDef.
-  const runtimeDag = {
+  // Wave 4 §4.5: construct the unbranded shape with full field-shape
+  // checking, then apply the brand via the module-private `brandAsDagDef`
+  // helper. The previous `as unknown as DagDef` skipped structural checking
+  // entirely — adding a new required field on DagDef silently passed
+  // type-check until something tried to read it. Typing the intermediate as
+  // `DagDefShape` makes that surface a compile error.
+  const unbranded: DagDefShape = {
     id: input.id,
     nodes: entries.map(([, n]) => n),
     edges,
-    outputNodeId: input.outputNodeId,
-    evalJudges: input.evalJudges,
-    retryLimits: input.retryLimits as Readonly<Record<string, number>> | undefined,
-    defaultRetryLimit: input.defaultRetryLimit,
-  } as unknown as DagDef;
-
-  return ok(runtimeDag);
+    ...(input.outputNodeId !== undefined ? { outputNodeId: input.outputNodeId } : {}),
+    ...(input.evalJudges !== undefined ? { evalJudges: input.evalJudges } : {}),
+    ...(input.retryLimits !== undefined
+      ? { retryLimits: input.retryLimits as Readonly<Record<string, number>> }
+      : {}),
+    ...(input.defaultRetryLimit !== undefined
+      ? { defaultRetryLimit: input.defaultRetryLimit }
+      : {}),
+  };
+  return ok(brandAsDagDef(unbranded));
 };
 
 // Re-export so test helpers building array-shape inputs can convert.

@@ -397,7 +397,7 @@ describe("runDag", () => {
     });
 
     const cache = {
-      get: async () => null,
+      get: async () => ({ hit: false } as const),
       set: async () => ok(undefined),
       writeCheckpoint: async (runId: string, nodeId: string, output: unknown) => {
         checkpoints.push({ runId, nodeId, output });
@@ -474,9 +474,13 @@ describe("runDag", () => {
     }
   });
 
-  it("checkpoint write failure does not crash DAG execution", async () => {
+  // Wave 2 §2.4: checkpoint write failures must NOT be silently swallowed.
+  // Previously the failure was warn-and-continue; on the next crash-resume the
+  // node would re-execute, breaking the idempotency contract the checkpoint is
+  // supposed to provide. Now the legacy path surfaces err(checkpoint-write-failed).
+  it("checkpoint write failure surfaces as err(checkpoint-write-failed)", async () => {
     const failingCache = {
-      get: async () => null,
+      get: async () => ({ hit: false } as const),
       set: async () => ok(undefined),
       writeCheckpoint: async () => { throw new Error("Redis timeout"); },
     };
@@ -488,9 +492,13 @@ describe("runDag", () => {
       edges: [],
     });
     const result = await runDag(dag, {}, mkCtx({ cache: failingCache }));
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value).toBe(42);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-write-failed");
+      if (result.error.kind === "checkpoint-write-failed") {
+        expect(result.error.nodeId).toBe("A");
+        expect(result.error.message).toContain("Redis timeout");
+      }
     }
   });
 });

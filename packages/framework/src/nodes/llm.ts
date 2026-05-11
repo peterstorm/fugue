@@ -66,13 +66,13 @@ export const createLlmNode = <I, O, const Id extends string = string>(
     const vars = config.buildInput(input);
     const userMessage = interpolatePrompt(promptTemplate, vars);
 
-    // Cache check
+    // Cache check (Wave 4 §4.6 — hit/miss is now explicit).
     const cacheKey = config.computeCacheKey?.(input) ?? `${config.id}:${stableHash(input)}`;
     if (ctx.cache?.get) {
       try {
-        const cached = await ctx.cache.get(cacheKey);
-        if (cached !== undefined && cached !== null) {
-          return ok(cached as O);
+        const lookup = await ctx.cache.get(cacheKey);
+        if (lookup.hit) {
+          return ok(lookup.value as O);
         }
       } catch (e) {
         const msg = `[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`;

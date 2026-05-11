@@ -6,6 +6,18 @@ export type FrameworkError =
   | { readonly kind: "checkpoint-missing"; readonly runId: string }
   | { readonly kind: "checkpoint-expired"; readonly runId: string; readonly expiredAt: Date }
   | { readonly kind: "checkpoint-corrupt"; readonly runId: string; readonly nodeId?: string; readonly message: string }
+  | {
+      readonly kind: "checkpoint-version-mismatch";
+      readonly runId: string;
+      readonly expected: string;
+      readonly actual: string | undefined;
+    }
+  | {
+      readonly kind: "checkpoint-write-failed";
+      readonly runId: string;
+      readonly nodeId: string;
+      readonly message: string;
+    }
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
   | { readonly kind: "cache-error"; readonly operation: string; readonly message: string }
   | { readonly kind: "node-crash"; readonly nodeId: string; readonly message: string; readonly stack?: string }

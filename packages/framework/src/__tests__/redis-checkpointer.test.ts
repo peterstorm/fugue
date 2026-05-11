@@ -163,4 +163,55 @@ describeRedis("RedisCheckpointer", () => {
       expect(Object.keys(result.value.nodes).sort()).toEqual(["x", "y", "z"]);
     }
   });
+
+  // ADR-0017 — Wave 1 §1.3 regression
+  test("load rejects checkpoint with stale frameworkVersion", async () => {
+    const runId = makeRunId();
+    // Explicit stale version forces the writer to stamp v1 instead of the
+    // current FRAMEWORK_VERSION default.
+    await cp.setMeta(runId, {
+      dagId: "d",
+      startedAt: new Date(),
+      nodeCount: 1,
+      frameworkVersion: "1",
+    });
+
+    const result = await cp.load(runId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-version-mismatch");
+      if (result.error.kind === "checkpoint-version-mismatch") {
+        expect(result.error.runId).toBe(runId);
+        expect(result.error.expected).toBe("2");
+        expect(result.error.actual).toBe("1");
+      }
+    }
+  });
+
+  test("load rejects checkpoint missing frameworkVersion field", async () => {
+    const runId = makeRunId();
+    // Write a raw meta payload that predates the frameworkVersion field
+    // (simulates an upgrade across the boundary).
+    await redis!.set(
+      `chkpt:${runId}:meta`,
+      JSON.stringify({
+        dagId: "d",
+        startedAt: new Date().toISOString(),
+        nodeCount: 1,
+        createdAt: new Date().toISOString(),
+      }),
+      "EX",
+      300,
+    );
+    runIds.push(runId);
+
+    const result = await cp.load(runId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-version-mismatch");
+      if (result.error.kind === "checkpoint-version-mismatch") {
+        expect(result.error.actual).toBeUndefined();
+      }
+    }
+  });
 });

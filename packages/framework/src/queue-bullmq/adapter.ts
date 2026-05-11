@@ -209,21 +209,49 @@ export function createBullMQBackend(
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
+
+    // Wave 3 §3.3: collect partial-close failures into a single AggregateError
+    // rather than swallowing them at `warn` level. The previous design
+    // returned `Promise<void>` even when half the workers failed to drain,
+    // so callers couldn't distinguish clean shutdown from partial drain.
+    const errors: Error[] = [];
+
     // Close workers first so in-flight jobs settle before queues go away.
-    await Promise.all([...workers].map((w) => w.close().catch((e) => {
-      console.warn("[BullMQ] Worker close failed:", e);
-    })));
+    const workerResults = await Promise.allSettled([...workers].map((w) => w.close()));
+    for (const r of workerResults) {
+      if (r.status === "rejected") {
+        const e = r.reason instanceof Error ? r.reason : new Error(String(r.reason));
+        errors.push(new Error(`Worker close failed: ${e.message}`, { cause: e }));
+      }
+    }
     workers.clear();
-    await Promise.all([...queues].map((q) => q.close().catch((e) => {
-      console.warn("[BullMQ] Queue close failed:", e);
-    })));
+
+    const queueResults = await Promise.allSettled([...queues].map((q) => q.close()));
+    for (const r of queueResults) {
+      if (r.status === "rejected") {
+        const e = r.reason instanceof Error ? r.reason : new Error(String(r.reason));
+        errors.push(new Error(`Queue close failed: ${e.message}`, { cause: e }));
+      }
+    }
     queues.clear();
+
     // ioredis: quit() flushes pending commands then closes; falls back to
     // disconnect() if the client is already in an end state.
     try {
       if (redis.status !== "end") await redis.quit();
     } catch (e) {
-      console.warn("[BullMQ] Redis quit failed:", e);
+      errors.push(
+        new Error(`Redis quit failed: ${e instanceof Error ? e.message : String(e)}`, {
+          cause: e instanceof Error ? e : undefined,
+        }),
+      );
+    }
+
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        `[BullMQ] close() encountered ${errors.length} partial failure(s); see .errors for details`,
+      );
     }
   }
 

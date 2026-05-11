@@ -1,5 +1,16 @@
 import type { NodeDef } from "./node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
+import type {
+  NodesRecord,
+  OutputsByNodeId,
+  ConsistentNodes,
+} from "./dag-internals.js";
+
+// Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
+// are imported above but NOT re-exported. They live in `./dag-internals.ts`,
+// reachable directly when genuinely needed; keeping them off the barrel
+// (`types/index.ts` → `export * from "./dag.js"`) shrinks the public surface
+// without losing intra-framework usability (Wave 4 §4.2).
 
 /**
  * A structural-match predicate over a node's output. The predicate's keys
@@ -78,11 +89,6 @@ export const isDefaultEdge = (
 // and `outputNodeId` are constrained to known nodes at edit time. With
 // `defineDag<const Nodes>(...)`, TypeScript flags edge typos before the
 // runtime validator sees them.
-//
-// `deps` / `optionalDeps` inside each `NodeDef` remain plain `string[]` —
-// per-node cross-typing would require a builder DSL we judge non-idiomatic.
-// The runtime validator catches deps typos at module load (inside
-// `defineDag` itself), so the surface that ships is still safe.
 // ---------------------------------------------------------------------------
 
 /**
@@ -106,41 +112,8 @@ export type EdgeDefInput<
     }[Ids]
   | { readonly from: Ids; readonly to: Ids; readonly kind: "default" };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak: nodes are heterogeneous
-export type NodesRecord = { readonly [id: string]: NodeDef<any, any, any> };
-
-/** Extract the output type of a `NodeDef`, or `unknown` if it isn't one. */
-export type OutputOf<N> = N extends NodeDef<unknown, infer O, unknown> ? O : unknown;
-
-/** Map each node id in `Nodes` to its output type — feeds `EdgeDefInput`. */
-export type OutputsByNodeId<Nodes extends NodesRecord> = {
-  readonly [K in keyof Nodes & string]: OutputOf<Nodes[K]>;
-};
-
-/**
- * Mapped type that flags any record entry whose key disagrees with its
- * `node.id`. The factory helpers (`createTransformNode` etc.) preserve
- * the literal `id` via `<const Id>`, so `Nodes[K]["id"]` is a literal
- * string for any node built with a helper.
- *
- * The `string extends Nodes[K]["id"]` branch means "the id type is the
- * wide `string`, not a literal" — typically because the node was built
- * via a hand-rolled object literal or a custom helper that doesn't
- * preserve literal ids. In that case we can't compare at the type level,
- * so we accept the entry and let the runtime validator catch any
- * mismatch at module load.
- *
- * For literal ids, mismatches turn into a sentinel type that no real
- * `NodeDef` satisfies — the compiler reports the offending entry with a
- * descriptive message in its diagnostic.
- */
-export type ConsistentNodes<Nodes extends NodesRecord> = {
-  readonly [K in keyof Nodes]: string extends Nodes[K]["id"]
-    ? Nodes[K]
-    : Nodes[K] extends { readonly id: K }
-      ? Nodes[K]
-      : { readonly __error: `nodes['${K & string}'].id must equal '${K & string}'` };
-};
+// Inference machinery (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
+// lives in `./dag-internals.ts` so the public barrel doesn't leak them.
 
 export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
   readonly id: string;
@@ -183,3 +156,21 @@ export interface DagDef {
   /** Brand — present only on values that have passed `validateDagShape`. */
   readonly [__dagValidated]: true;
 }
+
+/**
+ * The structural shape of a `DagDef` minus its brand. Exposed for internal
+ * builders (`validateDagShape`) so they can construct the object with full
+ * field-shape checking, then apply the brand via `brandAsDagDef`. Wave 4 §4.5
+ * — replaces the prior `as unknown as DagDef` cast that bypassed structural
+ * checks entirely.
+ */
+export type DagDefShape = Omit<DagDef, typeof __dagValidated>;
+
+/**
+ * Apply the `DagDef` brand to a structurally-valid shape. The brand is a
+ * module-private unique symbol — only this function can construct it — so
+ * callers can NOT hand-roll a branded value by spread or cast. Intended for
+ * use by `validateDagShape` exclusively.
+ */
+export const brandAsDagDef = (shape: DagDefShape): DagDef =>
+  shape as DagDef;

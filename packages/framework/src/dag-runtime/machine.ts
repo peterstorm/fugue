@@ -44,6 +44,14 @@ const isTerminal = (phase: DagPhase): boolean =>
 // retrying-hook is not failed (it's a transient retry state)
 const isFailed = (phase: DagPhase): boolean => phase.kind === "failed";
 
+// Retry detection for trace-outcome reporting. The DAG machine signals a retry
+// by transitioning *into* a retrying variant (`running → retrying` or
+// `awaiting-human → retrying-hook`); the trace consumer sees `outcome: "retry"`
+// on that transition. The subsequent transition back to `running` is just the
+// wave re-execution and reports as `success`.
+const isRetryTransition = (_prev: DagPhase, next: DagPhase): boolean =>
+  next.kind === "retrying" || next.kind === "retrying-hook";
+
 // ---------------------------------------------------------------------------
 // compileDagToMachine
 // ---------------------------------------------------------------------------
@@ -63,8 +71,8 @@ export interface CompiledDagMachine {
  *
  * Soundness is delegated to `defineDag` at construction time — the branded
  * `DagDef` type is only constructible by the validator. Topological failure
- * (cycle) is checked here; structural shape failure (deps mismatch, missing
- * default edge, unreachable output) cannot occur on a branded value.
+ * (cycle) is checked here; structural shape failure (missing default edge,
+ * unreachable output, malformed predicate) cannot occur on a branded value.
  */
 export const compileDagToMachine = (
   dag: DagDef,
@@ -90,6 +98,7 @@ export const compileDagToMachine = (
     isTerminal,
     isFailed,
     stateProgress,
+    isRetryTransition,
   };
 
   return ok({ machine, initialContext, initialState: { kind: "pending" } });

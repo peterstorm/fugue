@@ -1,8 +1,8 @@
 /**
  * SC-005 — Boundary-import check (FR-082)
  *
- * Asserts that state-machine/** and dag-runtime/** do not import
- * from bullmq, ioredis, or queue-bullmq/**.
+ * Asserts that state-machine/**, dag-runtime/**, and scheduler/** do not
+ * import from bullmq, ioredis, or queue-bullmq/**.
  *
  * This is a hard-fail gate: any violation causes the suite to fail.
  */
@@ -16,7 +16,7 @@ import { checkImports, type Violation } from "../scripts/check-imports.js";
 const SRC_DIR = join(__dirname, "../");
 
 describe("FR-082 boundary imports", () => {
-  it("state-machine/** and dag-runtime/** have zero bullmq/ioredis/queue-bullmq imports", () => {
+  it("state-machine/**, dag-runtime/**, and scheduler/** have zero bullmq/ioredis/queue-bullmq imports", () => {
     const { violations } = checkImports(SRC_DIR);
 
     if (violations.length > 0) {
@@ -169,6 +169,46 @@ describe("FR-082 extractImports — synthetic fixtures", () => {
     expect(violations).toHaveLength(1);
     expect(violations[0].importSpecifier).toBe("ioredis");
     expect(violations[0].file).toContain("dag-runtime/bad-ioredis.ts");
+  });
+
+  // ---- scheduler symmetric coverage ----
+
+  it("detects bullmq import in scheduler/", () => {
+    const dir = setup({
+      "scheduler/bad-bullmq.ts": `import { Queue } from "bullmq";\n`,
+    });
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].importSpecifier).toBe("bullmq");
+    expect(violations[0].file).toContain("scheduler/bad-bullmq.ts");
+  });
+
+  it("detects ioredis import in scheduler/", () => {
+    const dir = setup({
+      "scheduler/bad-ioredis.ts": `import Redis from "ioredis";\n`,
+    });
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].importSpecifier).toBe("ioredis");
+    expect(violations[0].file).toContain("scheduler/bad-ioredis.ts");
+  });
+
+  it("detects queue-bullmq sub-path import in scheduler/", () => {
+    const dir = setup({
+      "scheduler/bad-qb.ts": `import x from "queue-bullmq/adapter";\n`,
+    });
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].importSpecifier).toBe("queue-bullmq/adapter");
+    expect(violations[0].file).toContain("scheduler/bad-qb.ts");
+  });
+
+  it("allows cron-parser import in scheduler/", () => {
+    const dir = setup({
+      "scheduler/ok.ts": `import { parseExpression } from "cron-parser";\n`,
+    });
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(0);
   });
 
   // ---- exact-specifier (=== mod) arm coverage ----

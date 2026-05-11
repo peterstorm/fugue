@@ -3,11 +3,18 @@
  *
  * Vendor-neutral: accepts any SpanExporter. Use createMlflowExporter() for MLflow,
  * or any standard OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc.
+ *
+ * Wave 5 §5.4: moved from `observer/init-tracing.ts`. `observer/` is the typed
+ * *domain event* bus (Observer interface + BufferedObserver + policy);
+ * `tracing/` holds OTel SDK setup, span helpers, and exporters.
+ * `TailSamplingProcessor` still lives in `observer/` because its sampling
+ * decisions are policy-driven; the cross-directory import is intentional —
+ * domain policy → infrastructure.
  */
 import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { NodeSDK } from "@opentelemetry/sdk-node";
-import { TailSamplingProcessor } from "./tail-sampling-processor.js";
-import type { PersistencePolicy } from "./policy.js";
+import { TailSamplingProcessor } from "../observer/tail-sampling-processor.js";
+import type { PersistencePolicy } from "../observer/policy.js";
 
 export interface TracingConfig {
   /** Any OTel-compatible span exporter */
@@ -43,6 +50,7 @@ export async function initTracing(config: TracingConfig | LegacyTracingConfig): 
     exporter = config.exporter;
   } else {
     // Legacy path — import MLflow exporter for backwards compatibility
+    // (post-§5.4: still in tracing/, just renamed-by-move)
     const { createMlflowExporter } = await import("./mlflow-otlp-exporter.js");
     exporter = createMlflowExporter({
       url: config.trackingUri,

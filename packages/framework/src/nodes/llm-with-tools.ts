@@ -111,9 +111,9 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
       })}`;
     if (ctx.cache?.get) {
       try {
-        const cached = await ctx.cache.get(cacheKey);
-        if (cached !== undefined && cached !== null) {
-          return ok(cached as O);
+        const lookup = await ctx.cache.get(cacheKey);
+        if (lookup.hit) {
+          return ok(lookup.value as O);
         }
       } catch (e) {
         const msg = `[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`;

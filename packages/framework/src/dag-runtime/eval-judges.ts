@@ -50,7 +50,7 @@ export const runEvalJudges = async (
             span.end();
             return {
               passed: true,
-              score: null as unknown as number,
+              score: null,
               criteriaScores: {},
               failedCriteria: [] as string[],
               reason: `[skipped: ${msg}]`,

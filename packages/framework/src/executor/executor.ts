@@ -91,8 +91,10 @@ export const runDag = async <I, O>(
   //   - opts.jobLike is set (durable checkpoint handle), OR
   //   - opts.retryLimits is set (per-call retry override)
   //
-  // `resume` and `onBackground` are legacy-path flags and are incompatible with
-  // the state-machine path.
+  // `resume` is a legacy-path flag and is incompatible with the state-machine
+  // path. `onBackground` works on both paths — it defers eval-judge / span
+  // finalization so request-bound timeouts don't block on judge I/O. See
+  // ADR-0018 for the SM-path semantics.
   // ---------------------------------------------------------------------------
 
   const hitlNodes = dag.nodes.filter((n) => n.humanReview !== undefined);
@@ -152,7 +154,10 @@ export const runDag = async <I, O>(
     return runDagStateful<I, O>(dag, input, ctx, stateMachineOpts);
   }
 
-  // Legacy fast path — zero behavioral change (SC-001).
+  // Legacy fast path: same behavior as the original single-path executor.
+  // Retained for back-compat with callers that don't declare humanReview,
+  // retry config, conditional edges, or a durable jobLike. New features
+  // must go through runDagStateful — see ADR-0007.
   // Traced path — span stays open until judge completes
   let resolveResult!: (r: Result<O, FrameworkError>) => void;
   const resultPromise = new Promise<Result<O, FrameworkError>>((resolve) => { resolveResult = resolve; });
@@ -381,7 +386,24 @@ const runNode = async (
       try {
         await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
       } catch (e) {
-        (ctx.logger?.warn ?? console.warn)(`Checkpoint write failed for ${nodeId}: ${e instanceof Error ? e.message : e}`);
+        // Wave 2 §2.4: surface checkpoint failures instead of warn-and-continue.
+        // A swallowed failure means the next resume re-runs the node, breaking the
+        // idempotency contract the checkpoint exists to provide.
+        const message = e instanceof Error ? e.message : String(e);
+        emit(ctx, {
+          type: "node-error",
+          runId: ctx.runId,
+          dagId,
+          nodeId,
+          timestamp: new Date(),
+          error: `checkpoint-write-failed: ${message}`,
+        });
+        return err({
+          kind: "checkpoint-write-failed" as const,
+          runId: ctx.runId,
+          nodeId,
+          message,
+        });
       }
     }
 

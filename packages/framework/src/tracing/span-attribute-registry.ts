@@ -1,15 +1,31 @@
 /**
  * Side-channel registry for span attributes that OTel SDK rejects.
  *
- * The OTel JS SDK silently drops non-primitive attribute values (objects, nested arrays).
- * MLflow's server expects certain attributes as structured objects (e.g. mlflow.llm.cost as a dict).
- * 
- * This registry stores those attributes keyed by spanId. Our custom OTLP exporter
- * reads from here and injects them onto ReadableSpan.attributes before serialization,
- * bypassing the SDK's validation. The otlp-transformer then serializes objects as
- * protobuf kvlist_value, which MLflow's server decodes correctly.
+ * The OTel JS SDK (@opentelemetry/sdk-trace-base 1.x / 2.x) silently drops
+ * non-primitive attribute values (objects, nested arrays). The accepted
+ * shapes are `string | number | boolean | string[] | number[] | boolean[]`
+ * — see the `AttributeValue` type and `_isAttributeValueValid()` validation
+ * inside the SDK. MLflow's server, in contrast, expects several attributes
+ * as structured objects (e.g. `mlflow.llm.cost` as a dict,
+ * `mlflow.spanInputs` as a record of input fields) — round-tripped via
+ * protobuf `kvlist_value`.
  *
- * Lifecycle: entries are cleaned up when the exporter processes them (or on trace discard).
+ * Wave 5 §5.5: the SDK's behavior is intentional — the OTel semconv treats
+ * attributes as a flat primitive bag — so this registry is a sanctioned
+ * side-channel, not a workaround for a transient SDK bug. Keep the
+ * indirection even on SDK upgrades unless the spec itself changes.
+ *
+ * Wave 5 §5.4: moved from `observer/span-attribute-registry.ts` — co-located
+ * with the rest of the OTel tracing infrastructure.
+ *
+ * This registry stores object-valued attributes keyed by spanId. Our custom
+ * OTLP exporter reads from here and injects them onto `ReadableSpan.attributes`
+ * before serialization, bypassing the SDK's validation. The otlp-transformer
+ * then serializes objects as protobuf `kvlist_value`, which MLflow's server
+ * decodes correctly.
+ *
+ * Lifecycle: entries are cleaned up when the exporter processes them (or on
+ * trace discard).
  */
 
 export interface SpanAttributes {

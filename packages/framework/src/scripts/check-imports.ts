@@ -66,6 +66,12 @@ const RULES: BoundaryRule[] = [
     forbiddenModules: ["@opentelemetry/"],
     reason: "Pure-core modules must not depend on OTel; tracing belongs to the imperative shell.",
   },
+  {
+    scope: ["scheduler"],
+    forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
+    reason:
+      "scheduler/** must remain transport-agnostic — durable backends are wired by callers.",
+  },
 ];
 
 /** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */

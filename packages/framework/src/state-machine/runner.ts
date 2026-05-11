@@ -44,7 +44,11 @@ const computeDedupKey = (
  * decides a state is terminal-failed, the runner throws regardless of counters.
  */
 export const runStateMachine = async <S, E, C>(
-  job: JobLike<S, C>,
+  // Wave 4 §4.3: tie the job's event type to the machine's event type so
+  // `appendEvent` is type-checked against the machine's event union.
+  // `JobLike<S, C, E>` is structurally compatible with the legacy
+  // `JobLike<S, C>` (third generic defaults to `unknown`).
+  job: JobLike<S, C, E>,
   machine: Machine<S, E, C>,
   executor: Executor<S, C, E>,
   opts?: RunOptions<S, C, E>,
@@ -103,13 +107,26 @@ export const runStateMachine = async <S, E, C>(
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
 
-    // FR-011: track retry counts per state key (for trace emission)
+    // FR-011: track retry counts per state key (for dedup-key continuity
+    // across self-looping retries). The counter is meaningful only for
+    // machines whose retries keep the same state — for state-changing retry
+    // cycles (e.g. the DAG machine's running → retrying → running), the
+    // dedup-key derivation is unaffected because the prev-state changes too.
     const stateKey = JSON.stringify(state);
     const prevStateKey = JSON.stringify(prevState);
-    const isRetry = stateKey === prevStateKey && !isFailed;
-    if (isRetry) {
+    const isSelfLoop = stateKey === prevStateKey && !isFailed;
+    if (isSelfLoop) {
       retryCounters.set(stateKey, (retryCounters.get(stateKey) ?? 0) + 1);
     }
+
+    // Trace outcome classification (AD-4). Machines may override the default
+    // self-loop heuristic by implementing `isRetryTransition`; this is what
+    // the DAG machine uses so `running → retrying` reports `outcome: "retry"`.
+    const isRetry =
+      !isFailed &&
+      (machine.isRetryTransition !== undefined
+        ? machine.isRetryTransition(prevState, state)
+        : isSelfLoop);
 
     // FR-005: checkpoint after every successful (non-failed) transition
     // FR-005: MUST NOT checkpoint when resulting state is terminal-failed

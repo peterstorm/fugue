@@ -15,6 +15,7 @@
     "@opentelemetry/sdk-node": "^0.215.0",
     "@opentelemetry/sdk-trace-base": "^2.7.0",
     "bullmq": "^5.76.6",
+    "cron-parser": "^4.9.0",
     "ioredis": "^5.10.1",
     "openai": "^6.35.0",
     "ts-pattern": "^5.9.0",

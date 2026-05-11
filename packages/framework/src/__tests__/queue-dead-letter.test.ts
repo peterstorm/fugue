@@ -362,11 +362,14 @@ describe("attachDeadLetterHandler — F7: non-Error rejection coercion", () => {
 });
 
 // ---------------------------------------------------------------------------
-// F8: notifier throwing does not propagate
+// F8: notifier throwing propagates (Wave 3 §3.4)
 // ---------------------------------------------------------------------------
 
-describe("attachDeadLetterHandler — F8: notifier failure does not propagate", () => {
-  it("swallows notifier throw and does not reject the handler", async () => {
+describe("attachDeadLetterHandler — F8: notifier failure propagates", () => {
+  // Wave 3 §3.4: notifier failure must propagate. At DLQ time the job is
+  // already dead — notification is the only remaining action and silent
+  // failure here removes the last observability signal an operator has.
+  it("propagates the notifier throw so worker.onError sees it", async () => {
     const worker = makeWorker();
     const throwingNotifier: DeadLetterNotifier = {
       async notify() {
@@ -375,10 +378,9 @@ describe("attachDeadLetterHandler — F8: notifier failure does not propagate", 
     };
     attachDeadLetterHandler(worker, throwingNotifier, opts);
 
-    // Should not throw
     await expect(
       worker.simulateFailed("job-boom", new Error("fail"), 1, 1),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("notification service down");
   });
 });
 

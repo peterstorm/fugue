@@ -188,14 +188,34 @@ function isEnvelope(v: unknown): v is RecordedEvent<unknown> {
 }
 
 /**
+ * Wave 3 §3.8 — track IDs we've already warned about so a corrupt stream
+ * doesn't fill the log. Bounded so a degenerate stream can't grow this
+ * indefinitely.
+ */
+const warnedMalformedIds = new Set<string>();
+const MAX_WARNED_IDS = 1000;
+
+/**
  * Parse the millisecond prefix from a Redis Stream entry ID
  * (`1715200000000-0` → `1715200000000`). Falls back to `0` if the ID is
  * malformed — that should never happen for entries Redis itself produced,
  * but we don't want a single corrupt entry to crash the reader.
+ *
+ * Wave 3 §3.8: log once per unique malformed ID. The `0` fallback maps to
+ * the Unix epoch, so silently accepting it makes forensic time-range queries
+ * unreliable; the warn gives operators a signal that the stream has been
+ * manually mutated or contains pre-envelope-format data.
  */
 function parseEntryIdTimestamp(entryId: string): number {
   const dashIdx = entryId.indexOf("-");
   const msStr = dashIdx === -1 ? entryId : entryId.slice(0, dashIdx);
   const ms = Number(msStr);
-  return Number.isFinite(ms) ? ms : 0;
+  if (Number.isFinite(ms)) return ms;
+  if (warnedMalformedIds.size < MAX_WARNED_IDS && !warnedMalformedIds.has(entryId)) {
+    warnedMalformedIds.add(entryId);
+    console.warn(
+      `[event-log] malformed Redis Stream entry ID "${entryId}" — falling back to recordedAtMs=0. Forensic time-range queries against this entry will be inaccurate.`,
+    );
+  }
+  return 0;
 }

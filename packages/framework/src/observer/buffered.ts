@@ -28,6 +28,15 @@ export interface AggregateCounters {
   totalCostUsd: number;
 }
 
+/**
+ * Wave 3 §3.5 — when `OBSERVER_STRICT=1` is set in the environment,
+ * dispatchEvent rethrows any observer failure instead of catching. Useful in
+ * tests and dev to surface programming bugs in observer impls that would
+ * otherwise be silently absorbed. Off in production by default.
+ */
+const OBSERVER_STRICT =
+  typeof process !== "undefined" && process.env?.OBSERVER_STRICT === "1";
+
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
   try {
     switch (event.type) {
@@ -64,7 +73,15 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
       }
     }
   } catch (e) {
-    console.warn(`[observer] dispatchEvent failed for ${event.type}: ${e instanceof Error ? e.message : e}`);
+    // Wave 3 §3.5: log at error level with the full stack so programming
+    // bugs in observer impls are visible. Production observers MUST be
+    // failure-tolerant (runs continue), but log silence is worse than a
+    // crash for debugging.
+    console.error(
+      `[observer] dispatchEvent failed for ${event.type}:`,
+      e instanceof Error && e.stack ? e.stack : e,
+    );
+    if (OBSERVER_STRICT) throw e;
   }
 }
 

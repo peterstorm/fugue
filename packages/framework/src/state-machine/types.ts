@@ -7,13 +7,28 @@ export interface Machine<S, E, C> {
   /** Distinct from isTerminal — needed for don't-checkpoint-failed invariant (FR-005) */
   readonly isFailed: (state: S) => boolean;
   readonly stateProgress: (state: S) => number; // 0..100
+  /**
+   * Classify a transition as a retry attempt. Used by the runner only for
+   * trace-outcome reporting (`outcome: "retry"`). When omitted, the runner
+   * falls back to detecting self-loops via state-equality — appropriate for
+   * machines whose retry semantics keep the same state. Machines whose retry
+   * cycles cross distinct phases (e.g. the DAG machine's `running → retrying`)
+   * must implement this to surface accurate retry telemetry.
+   */
+  readonly isRetryTransition?: (prevState: S, nextState: S) => boolean;
 }
 
 // FR-002: Side-effect dispatcher — returns an event, not a state
 export type Executor<S, C, E> = (state: S, context: C) => Promise<E>;
 
 // FR-003: Abstract job handle — checkpoint + progress + event-log writes
-export interface JobLike<S, C> {
+//
+// Wave 4 §4.3 — the third generic `E` defaults to `unknown` so existing
+// `JobLike<S, C>` usages remain valid. Callers that thread the runner's
+// machine event type (e.g. the DAG layer uses `DagEvent`) get type-checked
+// `appendEvent` payloads. Adapters typed for the wider `unknown` event still
+// accept any `JobLike<S, C, E>` value the runner constructs.
+export interface JobLike<S, C, E = unknown> {
   readonly data: { state: S; context: C };
   updateData(d: { state: S; context: C }): Promise<void>;
   updateProgress(pct: number): Promise<void>;
@@ -26,7 +41,7 @@ export interface JobLike<S, C> {
    * `appendEvent` and `updateData`. Adapters that don't support dedup ignore
    * the key and accept a small at-least-once window.
    */
-  appendEvent(event: unknown, dedupKey?: string): Promise<void>;
+  appendEvent(event: E, dedupKey?: string): Promise<void>;
 }
 
 /**

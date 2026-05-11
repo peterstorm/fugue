@@ -1,6 +1,7 @@
 // CronScheduler — imperative shell — FR-064
-// Uses cron-parser (already in monorepo) for next-fire-time calculation.
-// MUST NOT import bullmq, ioredis (FR-080)
+// Uses cron-parser for next-fire-time calculation.
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-080) —
+// enforced by scripts/check-imports.ts.
 
 import { parseExpression } from "cron-parser";
 import type { MarkerStore } from "../queue/types.js";
@@ -71,6 +72,9 @@ export function createCronScheduler(
 
   // Map from taskId → active timer handle
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Wave 3 §3.9: per-task consecutive unexpected-failure count for exponential
+  // backoff. Reset on any successful handleFire.
+  const consecutiveFailures = new Map<string, number>();
   // Current active registry (tasks currently armed)
   let activeRegistry: TaskRegistry = new Map();
 
@@ -104,12 +108,18 @@ export function createCronScheduler(
       const triggeredAt = now();
       handleFire(task, triggeredAt)
         .then(() => {
-          // Re-arm for the next occurrence
+          // Re-arm for the next occurrence. Reset consecutive-failure counter
+          // (Wave 3 §3.9) — only unexpected handleFire rejections increment it.
+          consecutiveFailures.delete(task.id);
           rescheduleTask(task, triggeredAt);
         })
         .catch((err) => {
           console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
-          rescheduleTask(task, triggeredAt);
+          // Wave 3 §3.9: bump consecutive-failure counter and reschedule via
+          // backoff path so a flapping `handleFire` doesn't pin the cron tick.
+          const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
+          consecutiveFailures.set(task.id, n);
+          rescheduleTaskWithBackoff(task, triggeredAt, n);
         });
     }, delayMs);
 
@@ -132,15 +142,54 @@ export function createCronScheduler(
       const triggeredAt = now();
       handleFire(task, triggeredAt)
         .then(() => {
+          consecutiveFailures.delete(task.id);
           rescheduleTask(task, triggeredAt);
         })
         .catch((err) => {
           console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
-          rescheduleTask(task, triggeredAt);
+          const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
+          consecutiveFailures.set(task.id, n);
+          rescheduleTaskWithBackoff(task, triggeredAt, n);
         });
     }, delayMs);
 
     timers.set(task.id, handle);
+  }
+
+  // Wave 3 §3.9: when handleFire fails unexpectedly, re-arm at an
+  // exponentially-growing delay (capped at 30 minutes) instead of the
+  // normal cron-tick interval. Resets to normal scheduling on first success.
+  const BACKOFF_BASE_MS = 1000;
+  const BACKOFF_CAP_MS = 30 * 60 * 1000;
+  function rescheduleTaskWithBackoff(
+    task: TaskConfig,
+    after: Date,
+    failureCount: number,
+  ): void {
+    disarmTask(task.id);
+    const backoffMs = Math.min(
+      BACKOFF_BASE_MS * Math.pow(2, failureCount - 1),
+      BACKOFF_CAP_MS,
+    );
+    console.warn(
+      `[CronScheduler] backing off task "${task.id}" by ${backoffMs}ms (consecutive failures: ${failureCount})`,
+    );
+    const handle = setTimeout(() => {
+      const triggeredAt = now();
+      handleFire(task, triggeredAt)
+        .then(() => {
+          consecutiveFailures.delete(task.id);
+          rescheduleTask(task, triggeredAt);
+        })
+        .catch((err) => {
+          console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
+          const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
+          consecutiveFailures.set(task.id, n);
+          rescheduleTaskWithBackoff(task, triggeredAt, n);
+        });
+    }, backoffMs);
+    timers.set(task.id, handle);
+    void after; // currently unused but kept for callsite parity with rescheduleTask
   }
 
   function disarmTask(id: string): void {

@@ -645,7 +645,11 @@ describe("adaptBullMQJob — pure unit tests", () => {
     await expect(jobLike.updateProgress(75)).rejects.toThrow(/job-99/);
   });
 
-  it("appendEvent wraps xadd error with queue, job id, stream key, and cause", async () => {
+  // Wave 3 §3.10: appendEvent now goes through an atomic Lua script
+  // (SCRIPT LOAD + EVALSHA, with NOSCRIPT → EVAL fallback). These tests
+  // stub the script-eval path to verify error wrapping + envelope shape.
+
+  it("appendEvent wraps eval error with queue, job id, stream key, and cause", async () => {
     const boom = new Error("boom");
     const stubJob = {
       id: "j-x",
@@ -655,7 +659,9 @@ describe("adaptBullMQJob — pure unit tests", () => {
     } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
 
     const stubRedis = {
-      xadd: async (..._args: unknown[]) => { throw boom; },
+      script: async (..._args: unknown[]) => "stub-sha",
+      evalsha: async (..._args: unknown[]) => { throw boom; },
+      eval: async (..._args: unknown[]) => { throw boom; },
     } as unknown as import("ioredis").default;
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-test", { maxLen: 100, approximate: true });
@@ -673,8 +679,8 @@ describe("adaptBullMQJob — pure unit tests", () => {
     }
   });
 
-  it("appendEvent stamps recordedAtMs from injected now() and wraps event in envelope", async () => {
-    const captured: { args: unknown[] }[] = [];
+  it("appendEvent stamps recordedAtMs and pins entryId hint to the Lua script ARGV", async () => {
+    const captured: { keys: unknown[]; argv: unknown[] }[] = [];
     const stubJob = {
       id: "j-now",
       data: { state: {}, context: {} },
@@ -682,9 +688,16 @@ describe("adaptBullMQJob — pure unit tests", () => {
       updateProgress: async () => {},
     } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
     const stubRedis = {
-      xadd: async (...args: unknown[]) => {
-        captured.push({ args });
-        return "0-0";
+      script: async (..._args: unknown[]) => "stub-sha",
+      // evalsha signature: (sha, numKeys, ...keysAndArgs)
+      evalsha: async (...args: unknown[]) => {
+        // args = [sha, numKeys, streamKey, ...argv]
+        const numKeys = args[1] as number;
+        captured.push({
+          keys: args.slice(2, 2 + numKeys),
+          argv: args.slice(2 + numKeys),
+        });
+        return "1715200000123-0";
       },
     } as unknown as import("ioredis").default;
 
@@ -697,17 +710,71 @@ describe("adaptBullMQJob — pure unit tests", () => {
     await jobLike.appendEvent({ type: "X", v: 42 });
 
     expect(captured).toHaveLength(1);
-    // XADD args: [streamKey, "MAXLEN", "~", maxLen, "${recordedAtMs}-*", "type", type, "payload", payload]
-    const args = captured[0].args;
-    const payloadIdx = args.indexOf("payload");
-    expect(payloadIdx).toBeGreaterThan(-1);
-    const parsed = JSON.parse(args[payloadIdx + 1] as string);
+    expect(captured[0].keys).toEqual(["events:q-now:j-now"]);
+    // ARGV: [maxLen, approximate, entryId, dedupKey, type, payload]
+    const argv = captured[0].argv;
+    expect(argv[0]).toBe("100");
+    expect(argv[1]).toBe("1"); // approximate
+    expect(argv[2]).toBe("1715200000123-*");
+    expect(argv[3]).toBe(""); // no dedupKey
+    expect(argv[4]).toBe("X");
+    const parsed = JSON.parse(argv[5] as string);
     expect(parsed).toEqual({
       recordedAtMs: 1715200000123,
       event: { type: "X", v: 42 },
     });
-    // Entry ID's ms portion is pinned to recordedAtMs so XRANGE bounds align.
-    expect(args[4]).toBe("1715200000123-*");
+  });
+
+  it("appendEvent passes dedupKey through to Lua script ARGV[4]", async () => {
+    const captured: { argv: unknown[] }[] = [];
+    const stubJob = {
+      id: "j-d",
+      data: { state: {}, context: {} },
+      updateData: async () => {},
+      updateProgress: async () => {},
+    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+    const stubRedis = {
+      script: async (..._args: unknown[]) => "stub-sha",
+      evalsha: async (...args: unknown[]) => {
+        const numKeys = args[1] as number;
+        captured.push({ argv: args.slice(2 + numKeys) });
+        return "0-0";
+      },
+    } as unknown as import("ioredis").default;
+
+    const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-d", { maxLen: 100, approximate: true });
+
+    await jobLike.appendEvent({ type: "X" }, "key-abc");
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].argv[3]).toBe("key-abc");
+  });
+
+  it("appendEvent falls back to inline EVAL on NOSCRIPT error", async () => {
+    let evalshaCalls = 0;
+    let evalCalls = 0;
+    const stubJob = {
+      id: "j-ns",
+      data: { state: {}, context: {} },
+      updateData: async () => {},
+      updateProgress: async () => {},
+    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+    const stubRedis = {
+      script: async (..._args: unknown[]) => "stub-sha",
+      evalsha: async () => {
+        evalshaCalls++;
+        throw new Error("NOSCRIPT No matching script. Please use EVAL.");
+      },
+      eval: async () => {
+        evalCalls++;
+        return "0-0";
+      },
+    } as unknown as import("ioredis").default;
+
+    const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-ns", { maxLen: 100, approximate: true });
+    await expect(jobLike.appendEvent({ type: "X" })).resolves.toBeUndefined();
+    expect(evalshaCalls).toBe(1);
+    expect(evalCalls).toBe(1);
   });
 });
 

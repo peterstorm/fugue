@@ -249,6 +249,16 @@ export const handleNodeFailed = (
   partialOutputs?: ReadonlyMap<string, unknown>,
   coFailedNodeIds?: ReadonlyArray<string>,
 ): WaveDoneResult => {
+  // Wave 3 §3.6: predicate-malformed is a configuration error — the predicate's
+  // shape is invalid against the upstream output. Retrying the failed node
+  // won't change the predicate; fail-fast with the original error preserved.
+  if (error.kind === "predicate-malformed") {
+    return {
+      state: { kind: "failed", error },
+      context: ctx,
+    };
+  }
+
   // Merge partial outputs from succeeded siblings so they are not re-run on retry.
   const ctxWithPartials: DagMachineContext =
     partialOutputs && partialOutputs.size > 0

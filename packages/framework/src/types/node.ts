@@ -57,9 +57,20 @@ export interface Logger {
   readonly error: (msg: string) => void;
 }
 
+/**
+ * Wave 4 §4.6 — discriminated hit/miss result from a cache lookup.
+ *
+ * The previous `Promise<unknown | null>` shape conflated "cache miss" with
+ * "cache hit with value `null`", a problem for any node that caches a
+ * nullable result. The explicit tag lets callers branch cleanly.
+ */
+export type CacheLookup =
+  | { readonly hit: true; readonly value: unknown }
+  | { readonly hit: false };
+
 /** Cache adapter expected by framework nodes (LLM cache + checkpoint). */
 export interface ContextCacheAdapter {
-  readonly get: (key: string) => Promise<unknown | null>;
+  readonly get: (key: string) => Promise<CacheLookup>;
   readonly set: (
     key: string,
     value: unknown,
