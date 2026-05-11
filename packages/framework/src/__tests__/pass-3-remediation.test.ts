@@ -499,6 +499,219 @@ describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejectio
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Wave 6.6 — BufferedObserver clears the buffer even when policy.shouldFlush
+// throws. Without the try/finally, a throwing policy strands the buffer.
+// ---------------------------------------------------------------------------
+
+describe("Wave 6.6 — BufferedObserver policy-throw still clears the run buffer", () => {
+  it("a policy whose shouldFlush throws does not leak the run's buffered events", async () => {
+    const { BufferedObserver } = await import("../observer/buffered.js");
+    const inner = new NoopObserver();
+    const policy = {
+      shouldFlush: () => {
+        throw new Error("policy exploded");
+      },
+    } as any;
+    const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0 });
+
+    buf.onRunStart({ type: "run-start", runId: "X", dagId: "d", timestamp: new Date() });
+    expect((buf as any).buffers.has("X")).toBe(true);
+
+    // shouldFlush throws — the try/finally must still drop the buffer.
+    expect(() =>
+      buf.onRunEnd({
+        type: "run-end",
+        runId: "X",
+        dagId: "d",
+        timestamp: new Date(),
+        duration: 0,
+        status: "ok",
+      } as any),
+    ).toThrow("policy exploded");
+
+    expect((buf as any).buffers.has("X")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 6.7 — BufferedObserver.evictStale drops orphaned buffers and bumps
+// the `evicted` counter.
+// ---------------------------------------------------------------------------
+
+describe("Wave 6.7 — BufferedObserver.evictStale", () => {
+  it("drops a run buffer whose age exceeds ttlMs and increments evicted", async () => {
+    const { BufferedObserver } = await import("../observer/buffered.js");
+    const inner = new NoopObserver();
+    const policy = { shouldFlush: () => true } as any;
+    const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0, ttlMs: 1 });
+
+    buf.onRunStart({ type: "run-start", runId: "orphan", dagId: "d", timestamp: new Date() });
+    // Force the buffer to look stale by hand-stamping the createdAt — avoids
+    // relying on real sleep timing.
+    const entry = (buf as any).buffers.get("orphan");
+    entry.createdAt = Date.now() - 5_000;
+
+    (buf as any).evictStale();
+
+    expect((buf as any).buffers.has("orphan")).toBe(false);
+    expect((buf as any).evicted).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 6.8 — advanceToNextWave walks back through fully-pruned waves to find
+// a fallback active node.
+// ---------------------------------------------------------------------------
+
+describe("Wave 6.8 — advanceToNextWave multi-wave fallback traversal", () => {
+  it("when the last two waves are pruned, the fallback uses an active node from an earlier wave", async () => {
+    const { advanceToNextWave } = await import("../dag-runtime/transition-helpers.js");
+    const dag = makeDag(
+      [makeNode("a"), makeNode("b"), makeNode("c")],
+      [{ from: "a", to: "b" }, { from: "b", to: "c" }],
+    );
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed");
+
+    // Construct a context where:
+    //   - 3 waves: [[a], [b], [c]]
+    //   - only `a` produced output
+    //   - b, c pruned from activeNodeIds
+    const ctx: DagMachineContext = {
+      ...compiled.value.initialContext,
+      outputs: new Map([["a", "a-result"]]),
+      activeNodeIds: new Set(["a"]),
+    };
+
+    const result = advanceToNextWave(2, ctx);
+    expect(result.state.kind).toBe("succeeded");
+    if (result.state.kind === "succeeded") {
+      expect(result.state.output).toBe("a-result");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 6.9 — handleNodeFailed merges partialOutputs from succeeded siblings
+// before evaluating retry budget.
+// ---------------------------------------------------------------------------
+
+describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", () => {
+  it("succeeded siblings carried via partialOutputs are present in the retry context", async () => {
+    const { handleNodeFailed } = await import("../dag-runtime/transition-helpers.js");
+    const dag = makeDag(
+      [makeNode("a"), makeNode("b")],
+      [],
+      { defaultRetryLimit: 2 },
+    );
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed");
+
+    const partials = new Map<string, unknown>([["b", "b-out"]]);
+    const result = handleNodeFailed(
+      0,
+      "a",
+      { kind: "node-crash", nodeId: "a", message: "boom" },
+      compiled.value.initialContext,
+      partials,
+    );
+
+    expect(result.state.kind).toBe("retrying");
+    expect(result.context.outputs.get("b")).toBe("b-out");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 6.10 — computeBackoffMs property: monotonically non-decreasing on
+// successive attempts (catches off-by-one in the Math.min clamp).
+// ---------------------------------------------------------------------------
+
+describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-monotone", () => {
+  it("for a monotone non-decreasing backoff array, delay is monotone in attempts (catches off-by-one in the Math.min clamp)", async () => {
+    const fc = await import("fast-check");
+    const { computeBackoffMs } = await import("../dag-runtime/transition-helpers.js");
+
+    fc.assert(
+      fc.property(
+        // Generate a monotone non-decreasing array — the realistic exponential-backoff shape.
+        fc
+          .array(fc.integer({ min: 1, max: 1_000 }), { minLength: 1, maxLength: 6 })
+          .map((arr) => arr.slice().sort((a, b) => a - b)),
+        fc.integer({ min: 0, max: 100 }),
+        (backoffMs, attempt) => {
+          const dag = makeDag([
+            makeNode("n", { retry: { backoffMs, jitterRatio: 0 } } as any),
+          ]);
+          const compiled = compileDagToMachine(dag, null);
+          if (!compiled.ok) return false;
+          const d0 = computeBackoffMs("n", attempt, compiled.value.initialContext.dag);
+          const d1 = computeBackoffMs("n", attempt + 1, compiled.value.initialContext.dag);
+          return d1 >= d0;
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("clamps to the last array entry when attempt exceeds array length", async () => {
+    const { computeBackoffMs } = await import("../dag-runtime/transition-helpers.js");
+    const dag = makeDag([
+      makeNode("n", { retry: { backoffMs: [100, 200, 400] as const, jitterRatio: 0 } } as any),
+    ]);
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed");
+
+    // attempt 0 → 100, attempt 1 → 200, attempt 2 → 400, attempt 3+ → 400
+    expect(computeBackoffMs("n", 0, compiled.value.initialContext.dag)).toBe(100);
+    expect(computeBackoffMs("n", 2, compiled.value.initialContext.dag)).toBe(400);
+    expect(computeBackoffMs("n", 99, compiled.value.initialContext.dag)).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 6.12 — buildDagExecutor returns node-failed when awaiting-human is
+// reached without an onHumanReview hook.
+// ---------------------------------------------------------------------------
+
+describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
+  it("when awaiting-human is reached without a hook, executor returns node-failed with the expected message", async () => {
+    const dag = makeDag(
+      [
+        makeNode("a", {
+          run: async () => ok("a-out"),
+          humanReview: { prompt: "approve?" } as any,
+        }),
+      ],
+      [],
+      { defaultRetryLimit: 0 },
+    );
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed");
+
+    const executor = buildDagExecutor(dag, makeBaseCtx());
+    const event = await executor(
+      {
+        kind: "awaiting-human",
+        nodeId: "a",
+        output: "a-out",
+        prompt: "approve?",
+        pendingReviews: [],
+        wave: 0,
+      },
+      compiled.value.initialContext,
+    );
+    expect(event.type).toBe("node-failed");
+    if (event.type === "node-failed") {
+      expect(event.nodeId).toBe("a");
+      expect(event.error.kind).toBe("node-crash");
+      if (event.error.kind === "node-crash") {
+        expect(event.error.message).toContain("no onHumanReview hook supplied");
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Wave 4.7 — Machine.stateKey hook (replaces JSON.stringify default per-machine)
 // ---------------------------------------------------------------------------
 
