@@ -1,19 +1,10 @@
-// runDag — single-path runtime entry point.
-//
-// The legacy fast-path (`runDagInner`) was retired by ADR-0021. All DAG runs
-// now flow through `runDagStateful`. The in-memory `JobLike` produced by
-// `createInMemoryJob` covers the previous legacy callers; `opts.resume` is
-// reinterpreted as a per-node checkpoint replay (`DagRunOpts.resumeCheckpoint`)
-// threaded through `runNodeShared`.
-//
-// `runDag` keeps three responsibilities that are sensible at the public API
-// surface:
-//
+// runDag — public runtime entry point. All DAG runs flow through
+// `runDagStateful` (ADR-0021). Responsibilities:
 //   1. Bidirectional HITL contract — reject if the DAG declares `humanReview`
 //      without an `onHumanReview` hook, and reject the inverse.
 //   2. Durability advisory (ADR-0019) — warn when the DAG declares retries
 //      or conditional edges but the caller did not provide a durable jobLike.
-//   3. Translate the legacy `resume: { runId, checkpoint }` shape into
+//   3. Translate the public `resume: { runId, checkpoint }` shape into
 //      `runDagStateful`'s `resumeCheckpoint`.
 
 import type { DagDef } from "../types/dag.js";

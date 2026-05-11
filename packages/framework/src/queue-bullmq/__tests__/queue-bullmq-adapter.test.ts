@@ -1181,14 +1181,11 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
     stateProgress: (s) => ({ s0: 0, s1: 25, s2: 50, s3: 75, done: 100, failed: 0 }[s.kind] ?? 0),
   };
 
-  // Wave 6 §6.1 gate fix surfaced a pre-existing race in this test: after
-  // `worker1.close()` the job is still "active" in BullMQ; `worker2` cannot
-  // pick it up until the stalled-job interval elapses (default 30s). The
-  // test was never executed before the gate fix (REDIS_URL was checked at
-  // module load but `redisAvailable` always stayed false), so the race was
-  // invisible. Skipping with a TODO until the test is reworked to use
-  // BullMQ's `removeOnFail: false` + an explicit stalled-check trigger, or
-  // re-architected to use a single worker that survives the phase-1 throw.
+  // BullMQ stall race: after `worker1.close()` the job stays "active" until
+  // the stalled-job interval elapses (default 30s), so `worker2` cannot pick
+  // it up. Re-architect required — either rely on BullMQ's `removeOnFail: false`
+  // + an explicit stalled-check trigger, or use a single worker that survives
+  // the phase-1 throw.
   it.skip(
     "real BullMQ job + adaptBullMQJob: checkpoint mid-execution then resume yields identical final state (10 iterations)",
     async () => {

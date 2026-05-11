@@ -13,24 +13,9 @@ import type {
 // without losing intra-framework usability.
 
 /**
- * A structural-match predicate over a node's output. The predicate's keys
- * are top-level field names of the upstream output; the values are the
- * expected matches. A `{ oneOf: [...] }` value matches any of the listed
- * values.
- *
- * Predicates are pure data by construction — there is no closure to capture
- * external state — so replay is deterministic by the type system, predicates
- * are serializable and hashable, and operators can read the matched
- * predicate verbatim from observer events.
- *
- * `O` is the upstream node's output type. When `O` is `unknown` (e.g. when
- * the upstream output type wasn't inferred), `keyof O` is `never` and the
- * predicate degrades to the empty object — runtime validation is the
- * fallback.
- *
- * Boolean composition (`and`/`or`/`not`/`<`/`>`) is intentionally absent.
- * Authors needing complex logic add a classifier node upstream that
- * pre-computes a routing key — see ADR 0016.
+ * Structural-match predicate over a node's output. Pure data — no closures —
+ * so serialization and replay are deterministic. Boolean composition is
+ * intentionally absent; see ADR 0016 for the classifier-node pattern.
  */
 export type Predicate<O> = {
   readonly [K in keyof O]?: O[K] | { readonly oneOf: readonly O[K][] };

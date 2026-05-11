@@ -266,19 +266,18 @@ export class MlflowOtlpExporter implements SpanExporter {
     const traceId = span.spanContext().traceId;
     const out: Record<string, unknown> = {};
 
-    // 1. ai.span.type → mlflow.spanType (special: enum re-mapping, not a copy).
+    // ai.span.type → mlflow.spanType — enum re-mapping (not a straight copy),
+    // SPAN_TYPE_TO_MLFLOW normalises our casing to MLflow's uppercase constants.
     const spanType = attrs[AI_SPAN_TYPE] as string | undefined;
     if (spanType) {
       out["mlflow.spanType"] = SPAN_TYPE_TO_MLFLOW[spanType] ?? "CHAIN";
     }
 
-    // 2. Simple attribute renames via ATTR_MAP.
     for (const { from, to } of ATTR_MAP) {
       const value = attrs[from];
       if (value !== undefined) out[to] = value;
     }
 
-    // 3. Events → object attributes via EVENT_HANDLERS.
     const acc: MlflowAccumulator = { spanInputs: {}, spanOutputs: {}, llmCost: null };
     if (events) {
       for (const event of events) {
@@ -290,7 +289,6 @@ export class MlflowOtlpExporter implements SpanExporter {
     if (Object.keys(acc.spanOutputs).length > 0) out["mlflow.spanOutputs"] = acc.spanOutputs;
     if (acc.llmCost) out["mlflow.llm.cost"] = acc.llmCost;
 
-    // 4. Token usage — bundle two GenAI attributes into one MLflow object.
     const tokensIn = attrs[GEN_AI_USAGE_INPUT_TOKENS] as number | undefined;
     const tokensOut = attrs[GEN_AI_USAGE_OUTPUT_TOKENS] as number | undefined;
     if (tokensIn !== undefined || tokensOut !== undefined) {
@@ -301,8 +299,8 @@ export class MlflowOtlpExporter implements SpanExporter {
       };
     }
 
-    // 5. mlflow.llm.provider — derived from gen_ai.system, with a default.
-    //    Only emitted when a model is present (i.e. this looks like an LLM span).
+    // Emit provider only when a model is present — keeps non-LLM spans from
+    // getting a misleading provider stamp.
     if (attrs[GEN_AI_REQUEST_MODEL] !== undefined) {
       out["mlflow.llm.provider"] = attrs[GEN_AI_SYSTEM] ?? "unknown";
     }

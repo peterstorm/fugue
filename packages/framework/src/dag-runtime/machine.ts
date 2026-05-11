@@ -63,16 +63,9 @@ export interface CompiledDagMachine {
 }
 
 /**
- * Compile a DagDef into a Machine<DagPhase, DagEvent, DagMachineContext>.
- *
- * The returned machine is consumed by runStateMachine from the state-machine kernel.
- * topoSort is called eagerly and embedded in the returned context factory so the
- * executor can reference waves without re-sorting.
- *
- * Soundness is delegated to `defineDag` at construction time — the branded
- * `DagDef` type is only constructible by the validator. Topological failure
- * (cycle) is checked here; structural shape failure (missing default edge,
- * unreachable output, malformed predicate) cannot occur on a branded value.
+ * Compile a DagDef into a Machine — eagerly sorts waves so the executor doesn't re-sort.
+ * Soundness: structural validation is delegated to `defineDag`'s brand; only topological
+ * failure (cycle detection) can fail here.
  */
 export const compileDagToMachine = (
   dag: DagDef,

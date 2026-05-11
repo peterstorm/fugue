@@ -44,9 +44,9 @@ export type FrameworkError =
       readonly stack?: string;
       /**
        * When `false`, the DAG transition fast-fails this error instead of consuming
-       * the retry budget. `undefined` and `true` preserve the legacy retriable
-       * semantics. Use for deterministic failures (tool-call iteration exhaustion,
-       * schema mismatches, prompt-defect loops) where retrying cannot succeed.
+       * the retry budget. `undefined` and `true` both retry normally. Use `false`
+       * for deterministic failures (tool-call iteration exhaustion, schema
+       * mismatches, prompt-defect loops) where retrying cannot succeed.
        */
       readonly retriable?: boolean;
     }

@@ -27,21 +27,14 @@ export function decideCatchUp(
   withinValidity: boolean,
   dependentIds: readonly string[],
 ): CatchUpDecision {
-  // Case 1: in-flight — let the worker finish
   if (fired && !completed) {
     return { kind: "skip", reason: "task is in-flight; worker will complete it" };
   }
-
-  // Case 2: completed with pending dependents within validity window
   if (fired && completed && withinValidity && dependentIds.length > 0) {
     return { kind: "enqueue-dependents", dependentIds };
   }
-
-  // Case 3: never fired, still within validity window
   if (!fired && withinValidity) {
     return { kind: "enqueue-standalone" };
   }
-
-  // Case 4: outside window, or fired+completed with no dependents, etc.
   return { kind: "skip", reason: "outside validity window or no actionable catch-up needed" };
 }

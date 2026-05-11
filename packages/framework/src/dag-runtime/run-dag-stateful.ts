@@ -54,9 +54,8 @@ export interface DagRunOpts
   readonly retryLimits?: Readonly<Record<string, number>>;
   /**
    * When supplied, eval-judges run in the background after the run resolves
-   * `ok`, mirroring legacy parity. The hook receives a
-   * promise that resolves once judges + span finalization complete. When
-   * omitted, judges still run before resolution (default behavior).
+   * `ok`. The hook receives a promise that resolves once judges + span
+   * finalization complete. When omitted, judges still run before resolution.
    */
   readonly onBackground?: (p: Promise<void>) => void;
   /**
@@ -101,9 +100,8 @@ const wrapDagJobLike = (
   return {
     get data(): { state: DagPhase; context: DagMachineContext } {
       const raw = inner.data;
-      // Re-inject the live dag + incomingByNode. The persisted raw.context may
-      // be missing them (post-strip) or carry stale closure-stripped copies
-      // (from before this wrapper was used) — either way, the live values win.
+      // Re-inject the live dag + incomingByNode. The persisted raw.context
+      // is intentionally missing them (post-strip); live values win.
       return {
         state: raw.state,
         context: { ...raw.context, dag, incomingByNode },
@@ -298,9 +296,9 @@ export const runDagStateful = async <I, O>(
         return await match(state)
           .with({ kind: "succeeded" }, async (s) => {
             // Finalize: run eval-judges + close root span + emit run-end.
-            // Background mode (onBackground supplied) mirrors legacy parity:
-            // caller resolves before judges finish, so request-bound timeouts
-            // don't block on judge I/O.
+            // Background mode (onBackground supplied) resolves the caller
+            // before judges finish, so request-bound timeouts don't block on
+            // judge I/O.
             const finalize = async (): Promise<void> => {
               let evalJudgeFailed = false;
               let evalJudgeResults: Awaited<ReturnType<typeof runEvalJudges>> = [];

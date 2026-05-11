@@ -1,10 +1,9 @@
-// Eval-judge runner — called by runDagStateful after the DAG resolves
-// successfully. Each judge runs in its own OTel span. Judge-internal failures
-// (LLM call failure, schema validation) fail open with `passed: true,
-// skipped: true` (the judge couldn't grade — don't block the run on a broken
-// model). Orchestrator-level exceptions surface as `passed: false,
-// skipped: true, crash: { ... }` so quality gates filtering on `passed` see
-// the failure rather than silently treating a broken judge as passing.
+// Eval-judge runner called by runDagStateful after a successful DAG run.
+// Each judge runs in its own OTel span. Judge-internal failures (LLM call,
+// schema mismatch) fail open with `passed: true, skipped: true` so a broken
+// model can't block a run. Orchestrator-level exceptions surface as
+// `passed: false, skipped: true, crash: { ... }` so quality gates filtering
+// on `passed` see a broken judge rather than silently treating it as passing.
 
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";

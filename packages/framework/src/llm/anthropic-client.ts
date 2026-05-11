@@ -141,11 +141,9 @@ export class AnthropicLlmClient implements LlmClient {
         : timeoutSignal;
       const response = await this.anthropic.messages.create(params, { signal });
 
-      // Extract thinking content if present
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
 
-      // Extract tool use result
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
         return err({
@@ -155,7 +153,6 @@ export class AnthropicLlmClient implements LlmClient {
         });
       }
 
-      // Parse with zod
       const parsed = req.schema.safeParse(toolUseBlock.input);
       if (!parsed.success) {
         return err({
