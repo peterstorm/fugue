@@ -69,8 +69,6 @@ export function createBullMQBackend(
     console.error("[BullMQ] Shared Redis connection error:", err);
   });
 
-  // BullMQ connection options (separate from the shared redis client above —
-  // BullMQ manages its own connection pool internally)
   const bullConnection: ConnectionOptions = { host, port };
 
   // Track every queue/worker so close() can wait on all of them.

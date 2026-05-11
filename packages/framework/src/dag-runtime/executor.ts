@@ -133,9 +133,11 @@ export const buildDagExecutor = (
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter);
 
-        // Re-run the whole wave (other nodes in the wave may have already
-        // succeeded on previous attempt; outputs are in machineCtx.outputs).
-        // We only re-run the failed node, then run the rest that haven't completed yet.
+        // `runWave` is called for the whole wave, but iterates with a
+        // succeeded-output guard (see runWave:341): siblings already present
+        // in `machineCtx.outputs` short-circuit to a `node-skipped` event with
+        // their cached value, so only the failed node (plus any sibling that
+        // co-failed and is still absent from outputs) actually re-runs.
         return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint);
       })
 
@@ -389,7 +391,6 @@ const runWave = async (
     recordOutcomes(settled.map((s) => s.outcome));
   }
 
-  // Preserve the previous local name to keep the rest of the function unchanged.
   const results = settled.map(({ nodeId, result }) => ({ nodeId, result }));
 
   // Collect new outputs + check for failures.

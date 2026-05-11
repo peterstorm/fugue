@@ -147,7 +147,6 @@ export const runStateMachine = async <S, E, C>(
       await job.updateProgress(machine.stateProgress(state));
     }
 
-    // Fire trace hook (AD-4)
     if (opts?.onTrace) {
       const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
       opts.onTrace({

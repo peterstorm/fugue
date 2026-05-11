@@ -44,6 +44,15 @@ const emit = (ctx: NodeContext, event: ObserverEvent): void => {
  * - `required.length === 0`: input is the DAG-level `dagInput`.
  * - `required.length === 1`: input is the bare upstream value.
  * - `required.length >= 2`: input is an object keyed by `required`.
+ *
+ * Why the 0/1/≥2 split rather than always passing a keyed object: with no or
+ * exactly one required source the keyed form is pure overhead — the node's
+ * `run(input)` would always destructure a one-key envelope or ignore an empty
+ * one. The bare-value forms make trivial transforms readable. With ≥2 sources
+ * a bare value is ambiguous, so we switch to the keyed object. Optional
+ * sources always force the keyed shape because their presence isn't known
+ * statically — a node can't branch on whether `input` is bare-or-keyed at
+ * runtime.
  */
 const buildNodeInput = (
   dagInput: unknown,
