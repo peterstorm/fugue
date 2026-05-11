@@ -640,9 +640,9 @@ describe("runDagStateful — abort", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // The classifier may wrap aborted in retry-exhausted depending on retry budget;
-      // accept either since both encode the cancellation.
-      expect(["aborted", "retry-exhausted"]).toContain(result.error.kind);
+      // `aborted` is a fast-fail kind — the retry budget must not be consumed
+      // when the caller cancels. See transition-helpers.ts:handleNodeFailed.
+      expect(result.error.kind).toBe("aborted");
     }
     expect(observedSignalAborted).toBe(true);
   });

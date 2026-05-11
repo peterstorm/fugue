@@ -1,4 +1,10 @@
-// Shared eval-judge runner — used by both the legacy executor and the state-machine path.
+// Eval-judge runner — called by runDagStateful after the DAG resolves
+// successfully. Each judge runs in its own OTel span. Judge-internal failures
+// (LLM call failure, schema validation) fail open with `passed: true,
+// skipped: true` (the judge couldn't grade — don't block the run on a broken
+// model). Orchestrator-level exceptions surface as `passed: false,
+// skipped: true, crash: { ... }` so quality gates filtering on `passed` see
+// the failure rather than silently treating a broken judge as passing.
 
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
@@ -12,10 +18,6 @@ import {
 
 const tracer = trace.getTracer("ai-summary-framework");
 
-/**
- * Run all configured eval-judges against the DAG output. Each judge runs in its
- * own OTel span; failures are logged but never crash the caller (fail-open).
- */
 export const runEvalJudges = async (
   judges: readonly EvalJudgeNodeDef[],
   dagInput: unknown,
@@ -44,17 +46,27 @@ export const runEvalJudges = async (
             span.end();
             return result;
           } catch (e) {
-            const msg = `[eval-judge:${judge.id}] Unexpected error: ${e instanceof Error ? e.message : e}`;
-            (ctx.logger?.warn ?? console.warn)(msg);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: msg });
+            // Orchestrator-side exception (span setup, tracer/attribute bug,
+            // or a judge whose `run` threw past its own internal fail-open).
+            // Returning `passed: true` here would silently disable quality
+            // gates filtering on `passed` — operators would see a broken
+            // judge as passing every run. Return `passed: false` with a
+            // structured `crash` payload so the failure is visible to both
+            // run-end aggregation (`evalJudgeFailed`) and any downstream
+            // gating logic.
+            const msg = e instanceof Error ? e.message : String(e);
+            const prefix = `[eval-judge:${judge.id}] Unexpected error: ${msg}`;
+            (ctx.logger?.warn ?? console.warn)(prefix);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: prefix });
             span.end();
             return {
-              passed: true,
+              passed: false,
               score: null,
               criteriaScores: {},
               failedCriteria: [] as string[],
-              reason: `[skipped: ${msg}]`,
+              reason: `[crashed: ${msg}]`,
               skipped: true,
+              crash: { kind: "judge-crash" as const, message: msg },
             };
           }
         },

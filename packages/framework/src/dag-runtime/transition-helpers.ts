@@ -253,6 +253,8 @@ export const handleNodeFailed = (
   //   - predicate-malformed: predicate shape invalid against upstream output (config error).
   //   - validation: schema mismatch — re-running produces the same shape.
   //   - checkpoint-write-failed: storage backend broken — retrying writes the same way.
+  //   - aborted: caller-initiated cancellation; retrying defeats the cancel intent and
+  //     converts the terminal error kind into retry-exhausted, hiding the cancellation.
   //   - node-crash with retriable=false: caller signalled permanent (tool-loop exhaustion,
   //     prompt-defect failures); preserve the retry budget for genuinely transient kinds.
   // Transition straight to terminal failed with the original error preserved.
@@ -260,6 +262,7 @@ export const handleNodeFailed = (
     error.kind === "predicate-malformed" ||
     error.kind === "validation" ||
     error.kind === "checkpoint-write-failed" ||
+    error.kind === "aborted" ||
     (error.kind === "node-crash" && error.retriable === false)
   ) {
     return {

@@ -31,11 +31,21 @@ export interface EvalJudgeResult {
   readonly failedCriteria: readonly string[];
   readonly reason: string;
   /**
-   * `true` when the judge LLM call failed and the result is fail-open
-   * (`passed: true, score: null`). Dashboards should alert on a high
-   * skipped-rate even though `passed` stays true.
+   * `true` when the judge could not produce a usable score (LLM call failure,
+   * schema validation failure, or judge orchestrator exception). For LLM-side
+   * failures `passed` stays `true` (fail-open: a broken model should not block
+   * a run); for orchestrator-side exceptions `passed` is `false` so quality
+   * gates filtering on `passed` see the failure. `crash` is set in the latter
+   * case to expose the structured cause.
    */
   readonly skipped: boolean;
+  /**
+   * Set when the judge orchestrator caught an exception (a broken span call,
+   * a span-attribute encoder bug, etc.). Distinct from `skipped` because it
+   * carries the structured cause and forces `passed: false` so consumers
+   * filtering on `passed` cannot silently miss a broken judge.
+   */
+  readonly crash?: { readonly kind: "judge-crash"; readonly message: string };
 }
 
 /** Internal schema for LLM structured output parsing. */

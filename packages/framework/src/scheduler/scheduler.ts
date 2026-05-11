@@ -92,6 +92,31 @@ export function createCronScheduler(
     }
   }
 
+  // On every timer fire, re-read the current task from `activeRegistry` rather
+  // than the closure-captured value. If `reconcile` updated the task between
+  // arm and fire, the live config wins — without this, a stale closure can
+  // permanently re-arm the scheduler with retired cron / validForMs values.
+  // Returns null if the task has been removed entirely; the caller should
+  // simply stop the chain in that case.
+  function onTimerFire(taskId: string): void {
+    const current = activeRegistry.get(taskId);
+    if (current === undefined) return; // task was removed mid-fire — drop the chain
+    const triggeredAt = now();
+    handleFire(current, triggeredAt)
+      .then(() => {
+        consecutiveFailures.delete(current.id);
+        const stillActive = activeRegistry.get(current.id);
+        if (stillActive !== undefined) rescheduleTask(stillActive, triggeredAt);
+      })
+      .catch((err) => {
+        console.error(`[CronScheduler] timer callback failed for "${current.id}":`, err);
+        const n = (consecutiveFailures.get(current.id) ?? 0) + 1;
+        consecutiveFailures.set(current.id, n);
+        const stillActive = activeRegistry.get(current.id);
+        if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
+      });
+  }
+
   function scheduleTask(task: TaskConfig): void {
     disarmTask(task.id); // cancel any existing timer first
 
@@ -104,25 +129,7 @@ export function createCronScheduler(
 
     const delayMs = Math.max(0, nextDate.getTime() - nowDate.getTime());
 
-    const handle = setTimeout(() => {
-      const triggeredAt = now();
-      handleFire(task, triggeredAt)
-        .then(() => {
-          // Re-arm for the next occurrence and reset the consecutive-failure
-          // counter — only unexpected handleFire rejections increment it.
-          consecutiveFailures.delete(task.id);
-          rescheduleTask(task, triggeredAt);
-        })
-        .catch((err) => {
-          console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
-          // Bump the consecutive-failure counter and reschedule via the
-          // backoff path so a flapping handleFire doesn't pin the cron tick.
-          const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
-          consecutiveFailures.set(task.id, n);
-          rescheduleTaskWithBackoff(task, triggeredAt, n);
-        });
-    }, delayMs);
-
+    const handle = setTimeout(() => onTimerFire(task.id), delayMs);
     timers.set(task.id, handle);
   }
 
@@ -138,21 +145,7 @@ export function createCronScheduler(
 
     const delayMs = Math.max(0, nextDate.getTime() - nowDate.getTime());
 
-    const handle = setTimeout(() => {
-      const triggeredAt = now();
-      handleFire(task, triggeredAt)
-        .then(() => {
-          consecutiveFailures.delete(task.id);
-          rescheduleTask(task, triggeredAt);
-        })
-        .catch((err) => {
-          console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
-          const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
-          consecutiveFailures.set(task.id, n);
-          rescheduleTaskWithBackoff(task, triggeredAt, n);
-        });
-    }, delayMs);
-
+    const handle = setTimeout(() => onTimerFire(task.id), delayMs);
     timers.set(task.id, handle);
   }
 
@@ -163,7 +156,6 @@ export function createCronScheduler(
   const BACKOFF_CAP_MS = 30 * 60 * 1000;
   function rescheduleTaskWithBackoff(
     task: TaskConfig,
-    after: Date,
     failureCount: number,
   ): void {
     disarmTask(task.id);
@@ -174,22 +166,8 @@ export function createCronScheduler(
     console.warn(
       `[CronScheduler] backing off task "${task.id}" by ${backoffMs}ms (consecutive failures: ${failureCount})`,
     );
-    const handle = setTimeout(() => {
-      const triggeredAt = now();
-      handleFire(task, triggeredAt)
-        .then(() => {
-          consecutiveFailures.delete(task.id);
-          rescheduleTask(task, triggeredAt);
-        })
-        .catch((err) => {
-          console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
-          const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
-          consecutiveFailures.set(task.id, n);
-          rescheduleTaskWithBackoff(task, triggeredAt, n);
-        });
-    }, backoffMs);
+    const handle = setTimeout(() => onTimerFire(task.id), backoffMs);
     timers.set(task.id, handle);
-    void after; // currently unused but kept for callsite parity with rescheduleTask
   }
 
   function disarmTask(id: string): void {
@@ -232,9 +210,11 @@ export function createCronScheduler(
   function reconcile(reg: TaskRegistry): void {
     const diff = diffRegistry(activeRegistry, reg);
 
-    // Disarm removed tasks
+    // Disarm removed tasks and clear any retained failure-counter state so a
+    // re-added task starts with a fresh backoff schedule.
     for (const id of diff.remove) {
       disarmTask(id);
+      consecutiveFailures.delete(id);
     }
 
     // Arm new and updated tasks (skip cyclic ones)
@@ -317,6 +297,7 @@ export function createCronScheduler(
       clearTimeout(handle);
     }
     timers.clear();
+    consecutiveFailures.clear();
     activeRegistry = new Map();
   }
 

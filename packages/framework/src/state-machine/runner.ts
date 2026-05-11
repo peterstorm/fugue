@@ -113,17 +113,8 @@ export const runStateMachine = async <S, E, C>(
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
 
-    // FR-011: track retry counts per state key (for dedup-key continuity
-    // across self-looping retries). The counter is meaningful only for
-    // machines whose retries keep the same state — for state-changing retry
-    // cycles (e.g. the DAG machine's running → retrying → running), the
-    // dedup-key derivation is unaffected because the prev-state changes too.
     const stateKey = JSON.stringify(state);
     const prevStateKey = JSON.stringify(prevState);
-    const isSelfLoop = stateKey === prevStateKey && !isFailed;
-    if (isSelfLoop) {
-      retryCounters.set(stateKey, (retryCounters.get(stateKey) ?? 0) + 1);
-    }
 
     // Trace outcome classification (AD-4). Machines may override the default
     // self-loop heuristic by implementing `isRetryTransition`; this is what
@@ -132,10 +123,25 @@ export const runStateMachine = async <S, E, C>(
       !isFailed &&
       (machine.isRetryTransition !== undefined
         ? machine.isRetryTransition(prevState, state)
-        : isSelfLoop);
+        : stateKey === prevStateKey);
 
-    // FR-005: checkpoint after every successful (non-failed) transition
-    // FR-005: MUST NOT checkpoint when resulting state is terminal-failed
+    // Retry counter keyed by (prevState, event-type) so that successive retry
+    // cycles where prevState repeats (e.g. running → retrying → running →
+    // retrying in the DAG machine) produce distinct dedup keys. Keying by
+    // stateKey alone — as the prior implementation did — collapsed cross-cycle
+    // retries onto a single dedup slot and silently suppressed the second
+    // node-failed event in the audit log.
+    const eventType =
+      typeof (event as { type?: unknown })?.type === "string"
+        ? (event as { type: string }).type
+        : "<event>";
+    const dedupSlot = `${prevStateKey}::${eventType}`;
+    if (isRetry) {
+      retryCounters.set(dedupSlot, (retryCounters.get(dedupSlot) ?? 0) + 1);
+    }
+
+    // FR-005: checkpoint after every successful (non-failed) transition.
+    // FR-005: MUST NOT checkpoint when resulting state is terminal-failed.
     // Order: appendEvent FIRST so the audit/event log is never missing a transition
     // whose post-state is already persisted. If appendEvent fails, the state is not
     // advanced and the queue layer can retry from the prior state.
@@ -145,11 +151,13 @@ export const runStateMachine = async <S, E, C>(
     // the same transition re-derives the same key, and the adapter dedups.
     // Replay consumers see at-most-once delivery.
     if (!isFailed) {
-      const attemptNumber = retryCounters.get(prevStateKey) ?? 0;
+      const attemptNumber = retryCounters.get(dedupSlot) ?? 0;
       const dedupKey = computeDedupKey(prevStateKey, attemptNumber, event);
       await job.appendEvent(event, dedupKey);
       await job.updateData({ state, context });
-      // CRITICAL-3: updateProgress only when not failed (do not persist failed progress)
+      // Do not persist progress for failed states — the runner throws below
+      // before reaching here in the failed branch, and FR-005 forbids
+      // checkpointing terminal-failed.
       await job.updateProgress(machine.stateProgress(state));
     }
 
