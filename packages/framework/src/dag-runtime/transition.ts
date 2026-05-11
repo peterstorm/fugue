@@ -57,8 +57,10 @@ export const dagTransition = (
       }
 
       if (event.type === "ERROR") {
-        // An unexpected executor-level error delivered by the kernel loop.
-        // Treat as a failed terminal state so the kernel throws and the queue retries.
+        // Executor-level error delivered by the kernel loop via classifyError.
+        // The `retriable` flag is propagated into the failed terminal so callers
+        // and queue adapters can distinguish a permanent failure (don't retry the
+        // job) from a transient one (queue may retry).
         return {
           state: {
             kind: "failed",
@@ -66,6 +68,7 @@ export const dagTransition = (
               kind: "node-crash",
               nodeId: "unknown",
               message: event.error,
+              retriable: event.retriable,
             },
           },
           context: ctx,
@@ -93,7 +96,12 @@ export const dagTransition = (
         return {
           state: {
             kind: "failed",
-            error: { kind: "node-crash", nodeId: "unknown", message: event.error },
+            error: {
+              kind: "node-crash",
+              nodeId: "unknown",
+              message: event.error,
+              retriable: event.retriable,
+            },
           },
           context: ctx,
         };

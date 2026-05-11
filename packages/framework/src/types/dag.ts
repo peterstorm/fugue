@@ -10,7 +10,7 @@ import type {
 // are imported above but NOT re-exported. They live in `./dag-internals.ts`,
 // reachable directly when genuinely needed; keeping them off the barrel
 // (`types/index.ts` → `export * from "./dag.js"`) shrinks the public surface
-// without losing intra-framework usability (Wave 4 §4.2).
+// without losing intra-framework usability.
 
 /**
  * A structural-match predicate over a node's output. The predicate's keys
@@ -160,9 +160,8 @@ export interface DagDef {
 /**
  * The structural shape of a `DagDef` minus its brand. Exposed for internal
  * builders (`validateDagShape`) so they can construct the object with full
- * field-shape checking, then apply the brand via `brandAsDagDef`. Wave 4 §4.5
- * — replaces the prior `as unknown as DagDef` cast that bypassed structural
- * checks entirely.
+ * field-shape checking, then apply the brand via `brandAsDagDef` — replacing
+ * the prior `as unknown as DagDef` cast that bypassed structural checks.
  */
 export type DagDefShape = Omit<DagDef, typeof __dagValidated>;
 

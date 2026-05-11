@@ -76,11 +76,6 @@ export const replayEventsUntil = <S, E, C>(
  * `[fromMs, toMs)`, starting from `initial`. Returns the state that results
  * from folding *only* that slice of the history through the machine.
  *
- * Wave 7 §7.7 — renamed from `replayEventsBetween`. The old name suggested
- * "fast-forward from a checkpoint at `fromMs`"; this function instead folds
- * the slice from the supplied `initial` state. The new name reflects that:
- * a fresh fold of a slice, not a continuation.
- *
  * Useful for diff-style queries ("what changed in the last 5 minutes?") when
  * paired with a known prior state, e.g.:
  *
@@ -97,8 +92,6 @@ export const replayEventsUntil = <S, E, C>(
  *
  * Pure — does not invoke any executor or perform I/O.
  */
-let warnedReplayEventSliceFromZero = false;
-
 export const replayEventSlice = <S, E, C>(
   events: readonly RecordedEvent<unknown>[],
   machine: Machine<S, E, C>,
@@ -115,27 +108,6 @@ export const replayEventSlice = <S, E, C>(
     throw new RangeError(
       `[replayEventSlice] toMs (${toMs}) must be >= fromMs (${fromMs})`,
     );
-  }
-  // Operator hint (once per process): a non-zero `fromMs` combined with a
-  // zero-shaped `initial` is almost always a misuse — the caller probably
-  // wanted `replayEventsUntil` (fold from zero up to a timestamp) rather than
-  // a fresh fold of a mid-history slice. Skip when `fromMs === 0` (no slice
-  // boundary) or when the warning has already fired.
-  if (fromMs > 0 && !warnedReplayEventSliceFromZero) {
-    const seemsZero =
-      initial.state !== undefined &&
-      ((typeof initial.state === "object" &&
-        initial.state !== null &&
-        Object.keys(initial.state as object).length === 0) ||
-        initial.state === null);
-    if (seemsZero) {
-      warnedReplayEventSliceFromZero = true;
-      console.warn(
-        "[replayEventSlice] fromMs > 0 with a zero-shaped initial state — " +
-          "did you mean replayEventsUntil(events, machine, initial, toMs)? " +
-          "This is a fresh fold of [fromMs, toMs), not a continuation from a checkpoint.",
-      );
-    }
   }
   const filtered = events.filter(
     (e) => e.recordedAtMs >= fromMs && e.recordedAtMs < toMs,

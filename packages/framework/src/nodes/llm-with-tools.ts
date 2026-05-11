@@ -16,7 +16,15 @@ import { enrichLlmSpan } from "../tracing/index.js";
  * - the FR-021 single-shot validation retry,
  * - GenAI semconv span enrichment (delegated to `LlmClient.sendWithTools`).
  */
-export interface LlmWithToolsNodeConfig<I, O, Id extends string = string> {
+/**
+ * Discriminated pairing for `skipWhen` + `skipDefault` — supplying one without
+ * the other is a compile error, not a runtime failure at first call.
+ */
+export type LlmWithToolsSkipConfig<I, O> =
+  | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
+  | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
+
+interface LlmWithToolsNodeConfigBase<I, O, Id extends string = string> {
   readonly id: Id;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
@@ -42,14 +50,14 @@ export interface LlmWithToolsNodeConfig<I, O, Id extends string = string> {
   readonly promptName?: string;
   /** Build the user message from the validated input. */
   readonly buildUser: (input: I) => string;
-  /** When true, skip the LLM call and return `skipDefault` instead. */
-  readonly skipWhen?: (input: I) => boolean;
-  readonly skipDefault?: O;
   /** Override the cache key. Default: `<id>:<stableHash(input)>`. */
   readonly computeCacheKey?: (input: I) => string;
   /** Disable the FR-021 validation retry. Default `false` (one retry). */
   readonly disableValidationRetry?: boolean;
 }
+
+export type LlmWithToolsNodeConfig<I, O, Id extends string = string> =
+  LlmWithToolsNodeConfigBase<I, O, Id> & LlmWithToolsSkipConfig<I, O>;
 
 /**
  * Build a tool-call LLM node. The factory mirrors `createLlmNode` but routes
@@ -65,14 +73,9 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
   outputSchema: config.outputSchema,
   requires: ["llm"] as const,
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
+    // Skip check — discriminated `LlmWithToolsSkipConfig` guarantees
+    // `skipDefault` is present whenever `skipWhen` is set.
     if (config.skipWhen?.(input)) {
-      if (!("skipDefault" in config)) {
-        return err({
-          kind: "validation" as const,
-          nodeId: config.id,
-          message: "skipWhen triggered but no skipDefault provided",
-        });
-      }
       return ok(config.skipDefault as O);
     }
 

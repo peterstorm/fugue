@@ -1,6 +1,18 @@
 import type { NodeContext } from "../types/node.js";
-import type { ToolDef } from "./tools.js";
+import type { ToolDef, ToolContext } from "./tools.js";
 import { withToolSpan, setToolIoAttributes } from "./spans.js";
+
+/**
+ * The dispatcher receives a wide `NodeContext` from the LLM client (cycle
+ * break at the client → NodeContext boundary), but tools are typed against
+ * `ToolContext` (= `TypedNodeContext<["llm"]>`). Cast at this single seam.
+ *
+ * Contract: callers (LLM-with-tools nodes) MUST have `llm` in their
+ * `requires` so `ctx.llm` is non-null. Tools that read `ctx.llm` and find it
+ * null get a runtime error — which correctly surfaces the violated contract
+ * rather than masking it via a null-tolerant type.
+ */
+const asToolContext = (ctx: NodeContext): ToolContext => ctx as ToolContext;
 
 export interface ToolCall {
   readonly id: string;
@@ -44,7 +56,7 @@ export async function dispatchToolCall(
   }
 
   try {
-    const output = await tool.run(inputParse.data, ctx);
+    const output = await tool.run(inputParse.data, asToolContext(ctx));
     const outputParse = tool.outputSchema.safeParse(output);
     if (!outputParse.success) {
       return errResult(call, `invalid_output: ${outputParse.error.message}`);

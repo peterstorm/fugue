@@ -59,12 +59,11 @@ export function attachDeadLetterHandler(
 
     const message = opts.formatMessage(id, errMessage);
 
-    // Wave 3 §3.4: the job is already dead — notification is the only
-    // remaining action. Propagate notifier failure so the worker's onFailed
-    // / onError handlers can surface it (escalate to a secondary channel,
-    // page operators, etc). Logging the failure and swallowing it as before
-    // turned this into a silent gap right at the moment operator visibility
-    // matters most.
+    // The job is already dead — notification is the only remaining action.
+    // Propagate notifier failure so the worker's onFailed / onError handlers
+    // can surface it (escalate to a secondary channel, page operators, etc).
+    // Logging the failure and swallowing it would turn this into a silent
+    // gap at the exact moment operator visibility matters most.
     try {
       await notifier.notify(recipients, message);
     } catch (notifyErr) {

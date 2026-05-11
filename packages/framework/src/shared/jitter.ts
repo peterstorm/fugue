@@ -1,15 +1,12 @@
 // Symmetric jitter applied to a backoff delay.
 //
-// Wave 7 §7.6 extracted this from `dag-runtime/executor.ts` and changed two
-// things:
-//
-//   1. Symmetric jitter around the base delay (`±jitterRatio`) instead of the
-//      previous always-positive bias. The old form `baseDelay * (1 + ratio *
-//      random())` added 0..ratio×delay extra time; the new form
-//      `baseDelay * (1 + (2·random()-1) * ratio)` is true random jitter.
+//   1. Symmetric jitter around the base delay (`±jitterRatio`) — the form
+//      `baseDelay * (1 + (2·random()-1) * ratio)` distributes evenly above
+//      and below the base delay (vs. `baseDelay * (1 + ratio * random())`,
+//      which only ever adds time).
 //
 //   2. The RNG is an explicit argument. Production callers pass `Math.random`;
-//      tests can pass a seeded deterministic source.
+//      tests pass a seeded deterministic source.
 
 export const applyJitter = (
   delayMs: number,

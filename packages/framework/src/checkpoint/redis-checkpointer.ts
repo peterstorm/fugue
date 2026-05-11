@@ -2,7 +2,7 @@ import Redis from "ioredis";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
-import type { Checkpointer, RunMeta, NodeState, RunState } from "./checkpointer.js";
+import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 
 const TTL_SECONDS = 86400; // 24 hours
@@ -89,7 +89,10 @@ export class RedisCheckpointer implements Checkpointer {
 
   constructor(private readonly redis: Redis) {}
 
-  async load(runId: string): Promise<Result<RunState | null, FrameworkError>> {
+  async load(
+    runId: string,
+    opts?: CheckpointerLoadOpts,
+  ): Promise<Result<RunState | null, FrameworkError>> {
     let rawMeta: string | null;
     try {
       rawMeta = await this.redis.get(metaKey(runId));
@@ -126,6 +129,23 @@ export class RedisCheckpointer implements Checkpointer {
       });
     }
 
+    // Reject when caller supplied an expected DAG fingerprint and it does not
+    // match the stored one (or no fingerprint is stored). A re-shaped DAG —
+    // added nodes, changed edges, evolved output schemas — would otherwise
+    // replay cached outputs into the new graph and skip the validations they
+    // depend on. Opt-in: callers who omit `expectedDagFingerprint` keep the
+    // legacy no-check behaviour.
+    if (opts?.expectedDagFingerprint !== undefined) {
+      if (meta.dagFingerprint !== opts.expectedDagFingerprint) {
+        return err({
+          kind: "checkpoint-version-mismatch" as const,
+          runId,
+          expected: opts.expectedDagFingerprint,
+          actual: meta.dagFingerprint,
+        });
+      }
+    }
+
     const now = new Date();
     if (now.getTime() - createdAt.getTime() > TTL_SECONDS * 1000) {
       return err({
@@ -148,7 +168,10 @@ export class RedisCheckpointer implements Checkpointer {
 
     // Per-entry deserialize: a single corrupt row must not poison the rest.
     // Missing nodes will be re-executed (DAG nodes are idempotency-safe by design).
+    // Surface dropped ids on `corruptNodeIds` so callers can distinguish
+    // "node never ran" from "node ran but checkpoint is unreadable".
     const nodes: Record<string, NodeState> = {};
+    const corruptNodeIds: string[] = [];
     for (const [nodeId, raw] of Object.entries(rawNodes)) {
       try {
         nodes[nodeId] = deserializeNode(raw);
@@ -156,10 +179,15 @@ export class RedisCheckpointer implements Checkpointer {
         console.warn(
           `[RedisCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeId=${nodeId}: ${e instanceof Error ? e.message : e}`,
         );
+        corruptNodeIds.push(nodeId);
       }
     }
 
-    return ok({ meta, nodes });
+    return ok({
+      meta,
+      nodes,
+      ...(corruptNodeIds.length > 0 ? { corruptNodeIds } : {}),
+    });
   }
 
   async saveNode(runId: string, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {

@@ -2,8 +2,8 @@
 //
 // Public surface: authoring-facing types, runtime entry points, and the
 // pluggable seams (Observer, Cache, LLM, JobLike, Scheduler) consumers
-// implement. Wave 4 §4.1: pure-internal helpers (transition primitives,
-// JSON serialization, mutex, scheduler internals) are intentionally NOT
+// implement. Pure-internal helpers (transition primitives, JSON
+// serialization, mutex, scheduler internals) are intentionally NOT
 // re-exported here. Direct imports from their concrete paths remain
 // available for tests and any consumer that genuinely needs them.
 
@@ -91,8 +91,8 @@ export type { CronScheduler, CronSchedulerOpts } from "./scheduler/scheduler.js"
 export { createCronScheduler } from "./scheduler/scheduler.js";
 
 // ---------------------------------------------------------------------------
-// Capability-typed NodeContext helpers (Wave 7 §7.5) — public surface for
-// constructing NodeContexts and the always-present field defaults.
+// Capability-typed NodeContext helpers — public surface for constructing
+// NodeContexts and the always-present field defaults.
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver } from "./shared/index.js";
 export type { Capability, CapabilityFields, BaseNodeContext, TypedNodeContext, NodeContextInit } from "./types/node.js";

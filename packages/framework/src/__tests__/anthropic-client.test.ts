@@ -287,7 +287,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     }
   });
 
-  it("iteration cap exhausted → transient with nodeId", async () => {
+  it("iteration cap exhausted → node-crash retriable:false with nodeId", async () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => makeToolUseInWithToolsResponse("looper", { id: "x" })),
     );
@@ -307,9 +307,10 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe("transient");
-      if (result.error.kind === "transient") {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
         expect(result.error.nodeId).toBe("loop-node");
+        expect(result.error.retriable).toBe(false);
       }
     }
   });

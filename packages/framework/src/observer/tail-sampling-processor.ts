@@ -56,10 +56,10 @@ export class TailSamplingProcessor implements SpanProcessor {
   dropped = 0;
   evicted = 0;
   /**
-   * Wave 3 §3.1 — count exports whose transport rejected (HTTP 4xx/5xx, TLS
-   * errors, connection refused, etc). Operators alert on this counter; the
-   * previous design swallowed the rejection inside trackExport's `.catch`,
-   * leaving `forceFlush` to resolve as if every export had succeeded.
+   * Count exports whose transport rejected (HTTP 4xx/5xx, TLS errors,
+   * connection refused, etc). Operators alert on this counter — without it,
+   * the rejection used to be swallowed in trackExport's `.catch` and
+   * `forceFlush` would resolve as if every export had succeeded.
    */
   exportFailed = 0;
 
@@ -122,10 +122,10 @@ export class TailSamplingProcessor implements SpanProcessor {
   }
 
   private trackExport(spans: ReadableSpan[], traceId: string): void {
-    // Wave 3 §3.1: track the original (rejectable) promise so forceFlush can
-    // observe failures via allSettled. The previous design eagerly absorbed
-    // rejections into resolved-`undefined`, making transport failures
-    // invisible to the SDK shutdown sequence.
+    // Track the original (rejectable) promise so forceFlush can observe
+    // failures via allSettled — eagerly absorbing rejections into
+    // resolved-`undefined` would hide transport failures from the SDK
+    // shutdown sequence.
     const p = exportAsync(this.exporter, spans);
     p.catch((err) => {
       this.exportFailed++;

@@ -29,10 +29,10 @@ export interface AggregateCounters {
 }
 
 /**
- * Wave 3 §3.5 — when `OBSERVER_STRICT=1` is set in the environment,
- * dispatchEvent rethrows any observer failure instead of catching. Useful in
- * tests and dev to surface programming bugs in observer impls that would
- * otherwise be silently absorbed. Off in production by default.
+ * When `OBSERVER_STRICT=1` is set in the environment, dispatchEvent rethrows
+ * any observer failure instead of catching. Useful in tests and dev to surface
+ * programming bugs in observer impls that would otherwise be silently absorbed.
+ * Off in production by default.
  */
 const OBSERVER_STRICT =
   typeof process !== "undefined" && process.env?.OBSERVER_STRICT === "1";
@@ -73,10 +73,9 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
       }
     }
   } catch (e) {
-    // Wave 3 §3.5: log at error level with the full stack so programming
-    // bugs in observer impls are visible. Production observers MUST be
-    // failure-tolerant (runs continue), but log silence is worse than a
-    // crash for debugging.
+    // Log at error level with full stack — production observers MUST be
+    // failure-tolerant (runs continue), but silent failure is worse than a
+    // crash when debugging an observer-impl bug.
     console.error(
       `[observer] dispatchEvent failed for ${event.type}:`,
       e instanceof Error && e.stack ? e.stack : e,
@@ -95,7 +94,6 @@ export function computeRunSummary(
   let cacheHitCount = 0;
   let totalCostUsd = 0;
 
-  // Track node-start counts per nodeId to detect retries
   const startCounts = new Map<string, number>();
 
   for (const e of events) {
@@ -122,7 +120,6 @@ export function computeRunSummary(
     }
   }
 
-  // Nodes that started more than once are retried nodes
   for (const count of startCounts.values()) {
     if (count > 1) retryCount++;
   }
@@ -235,22 +232,31 @@ export class BufferedObserver implements Observer {
     const events = this.buffers.get(e.runId)?.events ?? [];
     const summary = computeRunSummary(events, e);
 
-    // Aggregate counters always update
     this.aggregates.runCount++;
     this.aggregates.totalCostUsd += summary.totalCostUsd;
 
-    if (this.policy.shouldFlush(summary)) {
-      // Replay buffered events + the run-end event; continue on individual failures
-      for (const buffered of events) {
+    try {
+      if (this.policy.shouldFlush(summary)) {
+        for (const buffered of events) {
+          try {
+            dispatchEvent(this.inner, buffered);
+          } catch (err) {
+            console.warn(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+          }
+        }
+        // Guard the final run-end dispatch the same way as the replay loop —
+        // an unguarded throw here used to escape, skip buffer cleanup, and
+        // leak the run-id's events for the lifetime of the observer.
         try {
-          dispatchEvent(this.inner, buffered);
+          dispatchEvent(this.inner, e);
         } catch (err) {
-          console.warn(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+          console.warn(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
         }
       }
-      dispatchEvent(this.inner, e);
+    } finally {
+      // Always clear the buffer — orphaning it on a flush-time throw is what
+      // produced the leak in the first place.
+      this.buffers.delete(e.runId);
     }
-
-    this.buffers.delete(e.runId);
   }
 }

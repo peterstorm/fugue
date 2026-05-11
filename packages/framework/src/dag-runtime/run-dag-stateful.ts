@@ -59,23 +59,23 @@ export interface DagRunOpts
    */
   readonly onBackground?: (p: Promise<void>) => void;
   /**
-   * Wave 7 §7.3 — checkpoint replay for crash-resume scenarios. When provided,
-   * nodes whose ids appear in this Map are skipped on first encounter: their
-   * cached output is validated against the node's current `outputSchema` and
-   * a `node-skipped` observer event is emitted. On validation failure the
+   * Checkpoint replay for crash-resume scenarios. When provided, nodes whose
+   * ids appear in this Map are skipped on first encounter: their cached
+   * output is validated against the node's current `outputSchema` and a
+   * `node-skipped` observer event is emitted. On validation failure the
    * runtime emits `node-error` and aborts the run with `Err({kind: "validation"})`,
    * preserving the legacy `resumeRun(...)` semantics.
    */
   readonly resumeCheckpoint?: Map<string, unknown>;
   /**
-   * Wave 7 §7.6 — RNG seam for retry-backoff jitter. Defaults to
-   * `Math.random`; tests pass a seeded deterministic source.
+   * RNG seam for retry-backoff jitter. Defaults to `Math.random`; tests pass
+   * a seeded deterministic source.
    */
   readonly random?: () => number;
 }
 
 // ---------------------------------------------------------------------------
-// JobLike context adapter — Wave 2 §2.1
+// JobLike context adapter
 //
 // DagMachineContext carries two fields that must NOT round-trip through
 // durable storage:
@@ -109,16 +109,43 @@ const wrapDagJobLike = (
       };
     },
     async updateData(d: { state: DagPhase; context: DagMachineContext }): Promise<void> {
-      const { dag: _dag, incomingByNode: _ibn, ...rest } = d.context;
+      // The inner `JobLike` is typed against the full `DagMachineContext`, but
+      // we deliberately persist the stripped form; the live `dag` + `incoming`
+      // are re-injected on read. The cast is the boundary between the typed
+      // strip and the inner adapter's wider type.
+      const persistable = stripNonPersistable(d.context);
       await inner.updateData({
         state: d.state,
-        context: rest as DagMachineContext,
+        context: persistable as unknown as DagMachineContext,
       });
     },
     updateProgress: (pct: number) => inner.updateProgress(pct),
-    appendEvent: (event: unknown, dedupKey?: string) =>
+    // Tightened from `(event: unknown, ...)` so the wrapper's declared
+    // JobLike<…, DagEvent> contract is honest. Inner's E defaults to unknown,
+    // which accepts DagEvent cleanly.
+    appendEvent: (event: DagEvent, dedupKey?: string) =>
       inner.appendEvent(event, dedupKey),
   };
+};
+
+/**
+ * The closure-only fields on `DagMachineContext` that are intentionally NOT
+ * persisted by `JobLike` backends — `dag` carries Zod schemas and function
+ * predicates, `incomingByNode` is recomputed from edges. Both are re-injected
+ * on read via `wrapDagJobLike.get data()` from the live values at the call site.
+ */
+type PersistableDagMachineContext = Omit<DagMachineContext, "dag" | "incomingByNode">;
+
+/**
+ * Strip the closure-bearing fields before handing state to the durable
+ * backend. The explicit return type makes adding a new non-persistable field
+ * to `DagMachineContext` a compile error here, rather than a silent strip.
+ */
+const stripNonPersistable = (
+  ctx: DagMachineContext,
+): PersistableDagMachineContext => {
+  const { dag: _dag, incomingByNode: _ibn, ...rest } = ctx;
+  return rest;
 };
 
 // ---------------------------------------------------------------------------
@@ -172,9 +199,8 @@ export const runDagStateful = async <I, O>(
     });
   };
 
-  // Wave 7 §7.5 — capability validation at run start. Returns the first
-  // missing capability paired with the declaring node id, before any
-  // `node.run` is called.
+  // Capability validation at run start. Returns the first missing capability
+  // paired with the declaring node id, before any `node.run` is called.
   const capCheck = validateCapabilities(effectiveDag, nodeCtx);
   if (!capCheck.ok) {
     emitRunEnd("error");
@@ -223,7 +249,7 @@ export const runDagStateful = async <I, O>(
 
       // Resolve the job handle — caller-supplied or fresh in-memory.
       //
-      // Wave 2 §2.2: when `opts.jobLike` is provided, the runner reads
+      // When `opts.jobLike` is provided, the runner reads
       // `job.data` (the checkpointed state + context) — `initialState` and
       // `initialContext` are unused. In particular, the call-time `input`
       // argument is intentionally ignored on resume; the resumed run's
@@ -300,9 +326,9 @@ export const runDagStateful = async <I, O>(
             };
 
             if (opts?.onBackground) {
-              // Wave 2 §2.3: finalize() rejection must still close the root
-              // span and emit `run-end` — otherwise the OTel span leaks open
-              // and BufferedObserver retains the run buffer until its TTL.
+              // finalize() rejection must still close the root span and emit
+              // `run-end` — otherwise the OTel span leaks open and
+              // BufferedObserver retains the run buffer until its TTL.
               // Each cleanup is wrapped independently: a setStatus failure
               // must not block end(); an end() failure must not block
               // emitRunEnd.

@@ -39,13 +39,25 @@ export const FilePromptRegistry = ({
     // 2. Compute hash
     const hash = computePromptHash(text);
 
-    // 3. Read registry
+    // 3. Read registry — distinguish "file missing" (no registry deployed)
+    // from "file present but malformed" (corrupt registry, possibly a half-
+    // finished write). Collapsing them masks a recoverable operator condition.
+    let raw: string;
+    try {
+      raw = await readFile(registryPath, "utf-8");
+    } catch {
+      return err(promptNotFound(name, "registry file does not exist"));
+    }
     let registry: Record<string, { version: string; hash: string }>;
     try {
-      const raw = await readFile(registryPath, "utf-8");
       registry = JSON.parse(raw);
-    } catch {
-      return err(promptNotFound(name, "not in registry"));
+    } catch (e) {
+      return err(
+        promptNotFound(
+          name,
+          `registry file is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
     }
 
     // 4. Check registry entry

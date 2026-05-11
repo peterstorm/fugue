@@ -164,13 +164,21 @@ export const bootstrap = async () => {
       apiKey: config.AZURE_OPENAI_API_KEY,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
     });
-    llm = new OpenAILlmClient(azureClient as any);
-    // Azure uses deployment name as the "model" parameter
+    // Azure base URL: <endpoint>/openai/deployments/<deployment>
     const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? model;
+    const azureBaseUrl = `${config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${deployment}`;
+    llm = new OpenAILlmClient(azureClient as any, {
+      apiKey: config.AZURE_OPENAI_API_KEY,
+      baseUrl: azureBaseUrl,
+      apiVersion: config.AZURE_OPENAI_API_VERSION,
+    });
     console.log(`Using Azure OpenAI LLM client (deployment: ${deployment}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
   } else if (provider === "openai" && config.OPENAI_API_KEY) {
     const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
-    llm = new OpenAILlmClient(openai as any);
+    llm = new OpenAILlmClient(openai as any, {
+      apiKey: config.OPENAI_API_KEY,
+      baseUrl: "https://api.openai.com/v1",
+    });
     console.log(`Using OpenAI LLM client (model: ${model})`);
   } else if (provider === "anthropic" && config.ANTHROPIC_API_KEY) {
     const raw = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });

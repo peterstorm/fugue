@@ -69,7 +69,7 @@ const toolChoiceToOpenAi = (
 };
 
 // ---------------------------------------------------------------------------
-// Responses API output shapes (Wave 7 §7.4)
+// Responses API output shapes
 //
 // The OpenAI Responses API returns `output: ResponsesOutputItem[]`. The SDK's
 // exported types do not (yet) cover every variant we consume — define local
@@ -197,7 +197,7 @@ const extractReasoning = (
 const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
 
-/** Wave 6 §6.10 — duck-typed 429 detection (see anthropic-client.ts for rationale). */
+/** Duck-typed 429 detection (see anthropic-client.ts for rationale). */
 const isRateLimit = (e: unknown): boolean =>
   typeof (e as { status?: unknown })?.status === "number" &&
   (e as { status: number }).status === 429;
@@ -207,20 +207,38 @@ const resolveNodeId = (req: { readonly nodeId?: string }): string =>
 
 /**
  * OpenAI LLM client using the Responses API (/openai/responses).
- * Works with all models (gpt-4o-mini, gpt-5-mini, gpt-5.2-codex) and
- * provides native reasoning support on capable models.
+ *
+ * Validated against gpt-4o-mini and gpt-5-mini. Other OpenAI models work but
+ * require a `PRICE_TABLE` entry in `llm/cost.ts` for cost attribution to fire.
  */
+export interface OpenAILlmClientOpts {
+  /** API key sent on every request (Authorization header for OpenAI, `api-key` header for Azure). */
+  readonly apiKey: string;
+  /**
+   * Base URL of the OpenAI-compatible endpoint, without a trailing `/responses`
+   * segment. Examples:
+   *   - OpenAI: `"https://api.openai.com/v1"`
+   *   - Azure:  `"https://my-resource.openai.azure.com/openai/deployments/<deployment>"`
+   * Azure deployments require `apiVersion`.
+   */
+  readonly baseUrl: string;
+  /** Azure-only: when set, the request URL uses `api-version=` and `api-key` auth. */
+  readonly apiVersion?: string;
+  /** Per-request timeout in ms. Default 120s. */
+  readonly requestTimeoutMs?: number;
+}
+
 export class OpenAILlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly apiVersion: string | undefined;
 
-  constructor(private readonly openai: OpenAI, opts?: { requestTimeoutMs?: number }) {
-    this.requestTimeoutMs = opts?.requestTimeoutMs ?? 120_000;
-    this.baseUrl = (openai as any).baseURL ?? (openai as any)._options?.baseURL ?? "";
-    this.apiKey = (openai as any).apiKey ?? (openai as any)._options?.apiKey ?? "";
-    this.apiVersion = (openai as any)._options?.defaultQuery?.["api-version"] ?? undefined;
+  constructor(private readonly openai: OpenAI, opts: OpenAILlmClientOpts) {
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? 120_000;
+    this.baseUrl = opts.baseUrl;
+    this.apiKey = opts.apiKey;
+    this.apiVersion = opts.apiVersion;
   }
 
   private buildRequestConfig(): { url: string; headers: Record<string, string> } {
@@ -543,10 +561,14 @@ export class OpenAILlmClient implements LlmClient {
       for (const item of buildToolResultItems(results)) conversation.push(item);
     }
 
+    // A model that did not converge within `maxIterations` turns will not
+    // converge on retry without prompt changes — classify as permanent so the
+    // DAG fast-fails instead of consuming the retry budget.
     return err({
-      kind: "transient",
+      kind: "node-crash",
       nodeId: resolveNodeId(req),
       message: `Tool-call iteration limit (${maxIterations}) reached`,
+      retriable: false,
     });
   }
 }

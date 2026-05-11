@@ -1,5 +1,16 @@
 import type { z } from "zod";
-import type { NodeContext } from "../types/node.js";
+import type { TypedNodeContext } from "../types/node.js";
+
+/**
+ * The context shape passed to a tool body. Tools always run inside an
+ * LLM-with-tools node which declares `requires: ["llm"]`, so `ctx.llm` is
+ * guaranteed non-null — tool authors don't need to null-check it.
+ *
+ * Other capability fields (`cache`, `prompts`) remain optional and must be
+ * null-checked at use. A tool that genuinely needs `prompts` should validate
+ * at dispatch time rather than relying on the host node's declaration.
+ */
+export type ToolContext = TypedNodeContext<readonly ["llm"]>;
 
 /**
  * Provider-agnostic tool definition consumed by `LlmClient.sendWithTools`.
@@ -22,8 +33,10 @@ export interface ToolDef<I, O> {
    * Tool body. Thrown errors and invalid outputs are caught by the loop and
    * surfaced back to the model as `is_error: true` results so it can recover
    * rather than crashing the run.
+   *
+   * `ctx.llm` is non-null (tools always run inside an LLM node).
    */
-  readonly run: (input: I, ctx: NodeContext) => Promise<O>;
+  readonly run: (input: I, ctx: ToolContext) => Promise<O>;
 }
 
 const TOOL_NAME_REGEX = /^[A-Za-z0-9_-]{1,64}$/;

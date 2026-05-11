@@ -1,10 +1,10 @@
 // Run-start capability validation.
 //
-// Wave 7 §7.5 — every NodeDef declares `requires: readonly Capability[]`.
-// Before the kernel runner is invoked, the runtime walks the DAG and
-// confirms every required capability is satisfied by the wired NodeContext.
-// A missing capability fails the run with `Err({ kind: "missing-capability" })`
-// before any `node.run` is called.
+// Every NodeDef declares `requires: readonly Capability[]`. Before the kernel
+// runner is invoked, the runtime walks the DAG and confirms every required
+// capability is satisfied by the wired NodeContext. A missing capability fails
+// the run with `Err({ kind: "missing-capability" })` before any `node.run` is
+// called.
 
 import type { DagDef } from "../types/dag.js";
 import type {

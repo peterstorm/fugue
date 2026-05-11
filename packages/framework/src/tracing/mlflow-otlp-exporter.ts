@@ -159,9 +159,9 @@ const EVENT_HANDLERS_BY_NAME: ReadonlyMap<string, EventHandler["apply"]> = new M
 );
 
 /**
- * Wave 3 §3.7 — rate-limited JSON parse failure logging.
- * Logs at counts 1, 10, 100, 1000, ... to avoid spam from a misbehaving node
- * while still surfacing the problem at first occurrence.
+ * Rate-limited JSON parse failure logging. Logs at counts 1, 10, 100, 1000, …
+ * to avoid spam from a misbehaving node while still surfacing the problem at
+ * first occurrence.
  */
 let parseFailureCount = 0;
 const logParseFailure = (field: string, traceId: string, err: unknown): void => {
@@ -219,10 +219,10 @@ export class MlflowOtlpExporter implements SpanExporter {
       this.innerPromise = factory().catch((err) => {
         // Latch permanent failure — every future call resolves to null.
         this.failedPermanently = err instanceof Error ? err : new Error(String(err));
-        // Wave 3 §3.2: emit at the failure point so misconfiguration is
-        // visible immediately. Previously the failure was silently latched
-        // and only logged on the NEXT export() (and only if getInner threw,
-        // which it can't here because of the `.catch(() => null)` below).
+        // Log at the failure point so misconfiguration is visible
+        // immediately. Without this the failure was silently latched and only
+        // logged on the next export() (and only if getInner threw, which it
+        // can't here because of the `.catch(() => null)` below).
         console.error(
           "[MlflowOtlpExporter] Permanent initialization failure — all future spans will be dropped:",
           this.failedPermanently,

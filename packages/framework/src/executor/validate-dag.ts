@@ -186,12 +186,11 @@ export const validateDagShape = (
     }
   }
 
-  // Wave 4 §4.5: construct the unbranded shape with full field-shape
-  // checking, then apply the brand via the module-private `brandAsDagDef`
-  // helper. The previous `as unknown as DagDef` skipped structural checking
-  // entirely — adding a new required field on DagDef silently passed
-  // type-check until something tried to read it. Typing the intermediate as
-  // `DagDefShape` makes that surface a compile error.
+  // Construct the unbranded shape with full field-shape checking, then apply
+  // the brand via the module-private `brandAsDagDef` helper. Typing the
+  // intermediate as `DagDefShape` makes new required fields on DagDef a
+  // compile error here, rather than a silent pass-through that would only
+  // surface when something tried to read the missing field at runtime.
   const unbranded: DagDefShape = {
     id: input.id,
     nodes: entries.map(([, n]) => n),

@@ -12,7 +12,7 @@ import { serializeValue, deserializeValue } from "../state-machine/serialize.js"
 const DEFAULT_MAX_LEN = 10000;
 
 /**
- * Wave 3 §3.10 — atomic dedup-then-XADD via a single Lua script.
+ * Atomic dedup-then-XADD via a single Lua script.
  *
  * The previous two-step XREVRANGE + XADD relied on BullMQ holding the per-job
  * lock to be race-free. Long Redis latency or a lock-window exceedance could
@@ -185,10 +185,9 @@ export function adaptBullMQJob<S, C>(
       // injects a now() that goes backwards, Redis rejects with an error.
       const id = `${recordedAtMs}-*`;
 
-      // Wave 3 §3.10: atomic dedup + XADD via single Lua script. Single
-      // round-trip and truly race-free regardless of BullMQ lock-window
-      // timing. Script is SCRIPT-LOADed lazily; NOSCRIPT recovers via inline
-      // EVAL on the next call.
+      // Atomic dedup + XADD via single Lua script. Single round-trip and
+      // truly race-free regardless of BullMQ lock-window timing. Script is
+      // SCRIPT-LOADed lazily; NOSCRIPT recovers via inline EVAL on next call.
       const argv = [
         String(maxLen),
         approximate ? "1" : "0",

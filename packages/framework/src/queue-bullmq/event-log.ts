@@ -188,9 +188,8 @@ function isEnvelope(v: unknown): v is RecordedEvent<unknown> {
 }
 
 /**
- * Wave 3 §3.8 — track IDs we've already warned about so a corrupt stream
- * doesn't fill the log. Bounded so a degenerate stream can't grow this
- * indefinitely.
+ * Track IDs we've already warned about so a corrupt stream doesn't fill the
+ * log. Bounded so a degenerate stream can't grow the set indefinitely.
  */
 const warnedMalformedIds = new Set<string>();
 const MAX_WARNED_IDS = 1000;
@@ -201,10 +200,10 @@ const MAX_WARNED_IDS = 1000;
  * malformed — that should never happen for entries Redis itself produced,
  * but we don't want a single corrupt entry to crash the reader.
  *
- * Wave 3 §3.8: log once per unique malformed ID. The `0` fallback maps to
- * the Unix epoch, so silently accepting it makes forensic time-range queries
- * unreliable; the warn gives operators a signal that the stream has been
- * manually mutated or contains pre-envelope-format data.
+ * Log once per unique malformed ID. The `0` fallback maps to the Unix epoch,
+ * so silently accepting it makes forensic time-range queries unreliable;
+ * the warn gives operators a signal that the stream has been manually
+ * mutated or contains pre-envelope-format data.
  */
 function parseEntryIdTimestamp(entryId: string): number {
   const dashIdx = entryId.indexOf("-");

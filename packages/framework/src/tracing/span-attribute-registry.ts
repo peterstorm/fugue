@@ -10,13 +10,10 @@
  * `mlflow.spanInputs` as a record of input fields) — round-tripped via
  * protobuf `kvlist_value`.
  *
- * Wave 5 §5.5: the SDK's behavior is intentional — the OTel semconv treats
- * attributes as a flat primitive bag — so this registry is a sanctioned
- * side-channel, not a workaround for a transient SDK bug. Keep the
- * indirection even on SDK upgrades unless the spec itself changes.
- *
- * Wave 5 §5.4: moved from `observer/span-attribute-registry.ts` — co-located
- * with the rest of the OTel tracing infrastructure.
+ * The SDK's behavior is intentional — the OTel semconv treats attributes as
+ * a flat primitive bag — so this registry is a sanctioned side-channel, not
+ * a workaround for a transient SDK bug. Keep the indirection even on SDK
+ * upgrades unless the spec itself changes.
  *
  * This registry stores object-valued attributes keyed by spanId. Our custom
  * OTLP exporter reads from here and injects them onto `ReadableSpan.attributes`

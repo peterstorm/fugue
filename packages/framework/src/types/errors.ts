@@ -20,7 +20,19 @@ export type FrameworkError =
     }
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
   | { readonly kind: "cache-error"; readonly operation: string; readonly message: string }
-  | { readonly kind: "node-crash"; readonly nodeId: string; readonly message: string; readonly stack?: string }
+  | {
+      readonly kind: "node-crash";
+      readonly nodeId: string;
+      readonly message: string;
+      readonly stack?: string;
+      /**
+       * When `false`, the DAG transition fast-fails this error instead of consuming
+       * the retry budget. `undefined` and `true` preserve the legacy retriable
+       * semantics. Use for deterministic failures (tool-call iteration exhaustion,
+       * schema mismatches, prompt-defect loops) where retrying cannot succeed.
+       */
+      readonly retriable?: boolean;
+    }
   | { readonly kind: "cycle-detected"; readonly nodeIds: readonly string[] }
   | { readonly kind: "aborted"; readonly reason: string }
   | { readonly kind: "rejected"; readonly nodeId: string; readonly reason: string }
@@ -36,11 +48,16 @@ export type FrameworkError =
   | { readonly kind: "duplicate-edge"; readonly fromNodeId: string; readonly toNodeId: string }
   | {
       /**
-       * Wave 7 §7.5 — emitted at run start when a node declares a capability
+       * Emitted at run start when a node declares a capability
        * (`requires: ["llm"]`, etc.) but the wired NodeContext does not supply
        * it. The run aborts before any `node.run` is called.
        */
       readonly kind: "missing-capability";
       readonly nodeId: string;
-      readonly capability: string;
+      readonly capability: Capability;
     };
+
+// Imported here rather than at top of file to avoid a circular reference at
+// the type-only boundary (Capability lives in `types/node.ts` which itself
+// imports from this module only via the `FrameworkError` type alias).
+import type { Capability } from "./node.js";

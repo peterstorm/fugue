@@ -12,8 +12,12 @@ export function errorOnly(): PersistencePolicy {
   return { shouldFlush: (s) => s.status === "error" };
 }
 
-export function ratio(p: number): PersistencePolicy {
-  return { shouldFlush: () => Math.random() < p };
+/**
+ * Sample-with-probability policy. The optional `rng` lets tests assert
+ * deterministic flush decisions without monkey-patching `Math.random`.
+ */
+export function ratio(p: number, rng: () => number = Math.random): PersistencePolicy {
+  return { shouldFlush: () => rng() < p };
 }
 
 export function hadRetry(): PersistencePolicy {

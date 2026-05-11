@@ -19,8 +19,8 @@ export class AsyncMutex {
    *
    * The release function is single-use: calling it twice throws. This makes
    * double-release a hard error rather than silently handing the lock to the
-   * next waiter twice. Wave 6 §6.4 — the previous shape would corrupt FIFO
-   * ordering under double-release without any signal.
+   * next waiter twice — the previous shape would corrupt FIFO ordering under
+   * double-release without any signal.
    */
   acquire(): Promise<() => void> {
     if (!this._locked) {

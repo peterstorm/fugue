@@ -186,7 +186,6 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           tokensIn: result.value.tokensIn,
           tokensOut: result.value.tokensOut,
           thinking: result.value.thinking,
-          extraInputs: { criteria: config.criteria as unknown as Record<string, unknown>, threshold },
           includeContent: ctx.includeContent ?? false,
         });
 

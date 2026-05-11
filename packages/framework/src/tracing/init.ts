@@ -3,13 +3,6 @@
  *
  * Vendor-neutral: accepts any SpanExporter. Use createMlflowExporter() for MLflow,
  * or any standard OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc.
- *
- * Wave 5 §5.4: moved from `observer/init-tracing.ts`. `observer/` is the typed
- * *domain event* bus (Observer interface + BufferedObserver + policy);
- * `tracing/` holds OTel SDK setup, span helpers, and exporters.
- * `TailSamplingProcessor` still lives in `observer/` because its sampling
- * decisions are policy-driven; the cross-directory import is intentional —
- * domain policy → infrastructure.
  */
 import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { NodeSDK } from "@opentelemetry/sdk-node";
@@ -23,16 +16,6 @@ export interface TracingConfig {
   readonly policy: PersistencePolicy;
 }
 
-/** @deprecated Use TracingConfig with exporter param instead */
-export interface LegacyTracingConfig {
-  /** MLflow tracking server URI (e.g. "http://localhost:5000") */
-  readonly trackingUri: string;
-  /** MLflow experiment ID */
-  readonly experimentId: string;
-  /** Persistence policy for tail-based sampling */
-  readonly policy: PersistencePolicy;
-}
-
 export interface TracingHandle {
   /** The tail-sampling processor (for monitoring exported/dropped counts) */
   readonly processor: TailSamplingProcessor;
@@ -42,23 +25,8 @@ export interface TracingHandle {
   readonly shutdown: () => Promise<void>;
 }
 
-export async function initTracing(config: TracingConfig | LegacyTracingConfig): Promise<TracingHandle> {
-  let exporter: SpanExporter;
-
-  if ("exporter" in config) {
-    // New generic path
-    exporter = config.exporter;
-  } else {
-    // Legacy path — import MLflow exporter for backwards compatibility
-    // (post-§5.4: still in tracing/, just renamed-by-move)
-    const { createMlflowExporter } = await import("./mlflow-otlp-exporter.js");
-    exporter = createMlflowExporter({
-      url: config.trackingUri,
-      experimentId: config.experimentId,
-    });
-  }
-
-  const tailProcessor = new TailSamplingProcessor(exporter, config.policy);
+export async function initTracing(config: TracingConfig): Promise<TracingHandle> {
+  const tailProcessor = new TailSamplingProcessor(config.exporter, config.policy);
 
   const sdk = new NodeSDK({ spanProcessors: [tailProcessor] });
   sdk.start();

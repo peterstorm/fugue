@@ -1,9 +1,8 @@
 // Always-present defaults for NodeContext fields.
 //
-// Wave 7 §7.5 lifted `logger`, `tracer`, and `observer` out of the
-// capability set (they can't be required, only injected). The runtime
-// wraps caller-supplied contexts with these defaults so node bodies never
-// have to null-check them.
+// `logger`, `tracer`, and `observer` are NOT in the capability set — they
+// can't be required, only injected. The runtime wraps caller-supplied
+// contexts with these defaults so node bodies never have to null-check them.
 
 import type { Logger } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";

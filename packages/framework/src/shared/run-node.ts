@@ -1,7 +1,6 @@
-// runNodeShared — single implementation of per-node execution shared by both
-// the legacy executor path (executor/executor.ts) and the state-machine path
-// (dag-runtime/executor.ts). Wave 7 §7.1 of the 2026-05-11 remediation plan
-// eliminated the prior duplication.
+// runNodeShared — single implementation of per-node execution shared by
+// `executor/executor.ts` (the public `runDag` entry point) and
+// `dag-runtime/executor.ts` (the state-machine path).
 //
 // Behavioral differences between the two callers are expressed as `opts`:
 //
@@ -81,7 +80,7 @@ export interface RunNodeOpts {
   /**
    * When true, after successful run + output validation, the runtime calls
    * `ctx.cache.writeCheckpoint(runId, nodeId, output)`. A write failure
-   * surfaces as a `checkpoint-write-failed` error (Wave 2 §2.4).
+   * surfaces as a `checkpoint-write-failed` error.
    */
   readonly writeCheckpoint?: boolean;
 }
@@ -128,7 +127,20 @@ export const runNodeShared = async (
   const nodeInput = buildNodeInput(dagInput, outputs, incoming);
 
   const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
-  if (!inputResult.ok) return { result: inputResult, outcome: EMPTY_OUTCOME };
+  if (!inputResult.ok) {
+    // Emit node-error so buffered observers don't see the node simply disappear
+    // — without this, a node that fails input validation produces no event at
+    // all, making post-mortems on a buffered run impossible.
+    emit(ctx, {
+      type: "node-error",
+      runId: ctx.runId,
+      dagId,
+      nodeId,
+      timestamp: new Date(),
+      error: `input validation failed: ${JSON.stringify(inputResult.error as FrameworkError)}`,
+    });
+    return { result: inputResult, outcome: EMPTY_OUTCOME };
+  }
 
   return withNodeSpan(nodeId, node.kind, inputResult.value, ctx.includeContent ?? false, async () => {
     const nodeStart = Date.now();

@@ -44,10 +44,10 @@ const computeDedupKey = (
  * decides a state is terminal-failed, the runner throws regardless of counters.
  */
 export const runStateMachine = async <S, E, C>(
-  // Wave 4 §4.3: tie the job's event type to the machine's event type so
-  // `appendEvent` is type-checked against the machine's event union.
-  // `JobLike<S, C, E>` is structurally compatible with the legacy
-  // `JobLike<S, C>` (third generic defaults to `unknown`).
+  // The third generic `E` on `JobLike` defaults to `unknown` so callers
+  // without a typed event union remain source-compatible. Typed callers
+  // (e.g. the DAG layer threading `DagEvent`) get type-checked
+  // `appendEvent` payloads.
   job: JobLike<S, C, E>,
   machine: Machine<S, E, C>,
   executor: Executor<S, C, E>,
@@ -55,8 +55,8 @@ export const runStateMachine = async <S, E, C>(
 ): Promise<{ state: S; context: C }> => {
   const classify = opts?.classifyError ?? defaultClassifyError;
 
-  // FR-011: reset transient retry counters for this invocation
-  // Fresh map = counters start at 0 for every queue-level attempt
+  // FR-011: retry counters are per-invocation (fresh map = counters start
+  // at 0 for every queue-level attempt).
   const retryCounters = new Map<string, number>();
 
   let { state, context } = job.data;
@@ -67,18 +67,24 @@ export const runStateMachine = async <S, E, C>(
       const proceed = opts.beforeExecute(state, context);
       if (!proceed) {
         // AD-4: emit skipped trace before aborting so consumers can observe the abort
-        opts?.onTrace?.({
-          state,
-          nextState: state,
-          outcome: "skipped",
-          durationMs: 0,
-          timestamp: new Date(),
-        });
+        if (opts?.onTrace !== undefined) {
+          try {
+            opts.onTrace({
+              state,
+              nextState: state,
+              outcome: "skipped",
+              durationMs: 0,
+              timestamp: new Date(),
+            });
+          } catch (traceErr) {
+            console.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+          }
+        }
         throw new Error("runStateMachine: aborted by beforeExecute hook");
       }
     }
 
-    const start = Date.now();
+    const start = (opts?.now ?? Date.now)();
     let event: E;
 
     try {
@@ -102,7 +108,7 @@ export const runStateMachine = async <S, E, C>(
     state = result.state;
     context = result.context;
 
-    const durationMs = Date.now() - start;
+    const durationMs = (opts?.now ?? Date.now)() - start;
 
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
@@ -149,14 +155,21 @@ export const runStateMachine = async <S, E, C>(
 
     if (opts?.onTrace) {
       const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
-      opts.onTrace({
-        state: prevState,
-        event,
-        nextState: state,
-        outcome,
-        durationMs,
-        timestamp: new Date(),
-      });
+      // A throwing onTrace must not escape: the transition is already persisted
+      // and surfacing the throw would surface a successful transition as a fatal
+      // executor crash via run-dag-stateful's outer catch.
+      try {
+        opts.onTrace({
+          state: prevState,
+          event,
+          nextState: state,
+          outcome,
+          durationMs,
+          timestamp: new Date(),
+        });
+      } catch (traceErr) {
+        console.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+      }
     }
 
     // FR-007: throw after observing terminal-failed so queue can retry
@@ -165,9 +178,7 @@ export const runStateMachine = async <S, E, C>(
     }
 
     // If terminal-succeeded, fall through to return below
-    if (isTerminal) {
-      break;
-    }
+    if (isTerminal) break;
   }
 
   return { state, context };

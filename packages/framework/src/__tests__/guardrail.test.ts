@@ -38,10 +38,12 @@ describe("createGuardrailNode", () => {
 
     const result = await node.run({ value: 42 }, makeCtx());
     expect(result.ok).toBe(true);
-    if (result.ok) {
+    if (result.ok && result.value.kind === "validated") {
       expect(result.value.value).toBe(42);
       expect(result.value.passed).toBe(true);
       expect(result.value.warnings).toHaveLength(0);
+    } else {
+      throw new Error("expected validated guardrail result");
     }
   });
 
@@ -61,10 +63,12 @@ describe("createGuardrailNode", () => {
 
     const result = await node.run({ value: 9999 }, makeCtx());
     expect(result.ok).toBe(true);
-    if (result.ok) {
+    if (result.ok && result.value.kind === "validated") {
       expect(result.value.value).toBe(9999);
       expect(result.value.passed).toBe(false);
       expect(result.value.warnings).toContain("Value too high");
+    } else {
+      throw new Error("expected validated guardrail result");
     }
   });
 

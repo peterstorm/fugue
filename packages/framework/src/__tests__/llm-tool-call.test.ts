@@ -212,7 +212,7 @@ describe("FakeLlmClient.sendWithTools — loop behavior", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("iteration cap reached → Err(transient)", async () => {
+  test("iteration cap reached → Err(node-crash, retriable:false)", async () => {
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: () => ({
         type: "tool_use",
@@ -225,9 +225,10 @@ describe("FakeLlmClient.sendWithTools — loop behavior", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe("transient");
-      if (result.error.kind === "transient") {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
         expect(result.error.message).toContain("(3)");
+        expect(result.error.retriable).toBe(false);
       }
     }
   });

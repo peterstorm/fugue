@@ -6,17 +6,22 @@ import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 
-export interface LlmNodeConfig<I, O, Id extends string = string> {
+/**
+ * Discriminated pairing for `skipWhen` + `skipDefault`. Supplying `skipWhen`
+ * without `skipDefault` (or vice versa) is now a compile error rather than a
+ * runtime `validation` error at first call.
+ */
+export type LlmSkipConfig<I, O> =
+  | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
+  | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
+
+interface LlmNodeConfigBase<I, O, Id extends string = string> {
   readonly id: Id;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   readonly promptName: string;
   readonly model: string;
   readonly buildInput: (input: I) => Record<string, unknown>;
-  /** When true, skip the LLM call and return `skipDefault` instead. */
-  readonly skipWhen?: (input: I) => boolean;
-  /** Value to return when `skipWhen` is true. Required if `skipWhen` is provided. */
-  readonly skipDefault?: O;
   readonly computeCacheKey?: (input: I) => string;
   /** Enable reasoning/thinking for models that support it (e.g., GPT-5.1, o-series) */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
@@ -27,6 +32,9 @@ export interface LlmNodeConfig<I, O, Id extends string = string> {
    */
   readonly system?: string;
 }
+
+export type LlmNodeConfig<I, O, Id extends string = string> =
+  LlmNodeConfigBase<I, O, Id> & LlmSkipConfig<I, O>;
 
 /**
  * Interpolates {{placeholder}} variables in a prompt template.
@@ -46,11 +54,10 @@ export const createLlmNode = <I, O, const Id extends string = string>(
   outputSchema: config.outputSchema,
   requires: ["llm", "prompts"] as const,
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
-    // Skip check — return explicit default value instead of undefined
+    // Skip check — the discriminated `LlmSkipConfig` makes `skipDefault`
+    // statically present whenever `skipWhen` is provided, so no runtime
+    // validation hedge is needed.
     if (config.skipWhen?.(input)) {
-      if (!("skipDefault" in config)) {
-        return err({ kind: "validation" as const, nodeId: config.id, message: "skipWhen triggered but no skipDefault provided" });
-      }
       return ok(config.skipDefault as O);
     }
 

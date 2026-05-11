@@ -1,7 +1,7 @@
 // DAG runtime types — FR-020
 // DagPhase, DagEvent, DagMachineContext, HumanAction
 
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { IncomingSources } from "./conditional.js";
 
@@ -116,4 +116,11 @@ export interface DagMachineContext {
    * exists — edges are the single source of truth, see ADR 0017).
    */
   readonly incomingByNode: ReadonlyMap<string, IncomingSources>;
+  /**
+   * Precomputed adjacency: `nodeId → out-edges`. Built once at compile time so
+   * routing decisions (run per active node per wave, both in the executor's
+   * `runWave` and the transition layer's `handleWaveDone` + reroute paths)
+   * don't pay an O(edges) linear scan each call.
+   */
+  readonly outgoingByNode: ReadonlyMap<string, readonly EdgeDef[]>;
 }

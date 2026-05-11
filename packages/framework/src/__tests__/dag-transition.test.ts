@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { dagTransition } from "../dag-runtime/transition.js";
+import { computeOutgoingByNode } from "../dag-runtime/conditional.js";
 import {
   handleWaveDone,
   handleNodeFailed,
@@ -87,6 +88,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     retries: new Map(),
     initialInput: null,
     activeNodeIds: new Set(dag.nodes.map((n) => n.id)),
+    outgoingByNode: computeOutgoingByNode(dag),
     incomingByNode: new Map(),
     ...overrides,
   };

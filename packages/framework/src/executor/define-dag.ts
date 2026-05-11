@@ -66,7 +66,10 @@ const formatDetail = (e: FrameworkError): string => {
 export const defineDag = <const Nodes extends NodesRecord>(
   input: DagDefInput<Nodes>,
 ): DagDef => {
-  const result = validateDagShape(input as unknown as DagDefInput);
+  // Drop the literal-typed `Nodes` constraint at this single seam so
+  // `validateDagShape` operates on the base type. Edit-time constraints from
+  // `DagDefInput<Nodes>` were already enforced at the call site.
+  const result = validateDagShape(input as DagDefInput);
   if (!result.ok) {
     throw new DagDefinitionError(input.id, result.error);
   }

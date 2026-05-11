@@ -38,7 +38,10 @@ type SchemaType = z.infer<typeof Schema>;
 
 const makeClient = () => {
   const openai = new OpenAI({ apiKey: "test-key", baseURL: "https://api.example.com/v1" });
-  return new OpenAILlmClient(openai);
+  return new OpenAILlmClient(openai, {
+    apiKey: "test-key",
+    baseUrl: "https://api.example.com/v1",
+  });
 };
 
 const jsonResponse = (
@@ -374,7 +377,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
     expect(turn).toBe(2);
   });
 
-  it("iteration cap exhausted → transient with nodeId", async () => {
+  it("iteration cap exhausted → node-crash retriable:false with nodeId", async () => {
     handler = async () =>
       jsonResponse({
         output: [makeFunctionCallOutput("c", "looper", JSON.stringify({ id: "x" }))],
@@ -397,9 +400,10 @@ describe("OpenAILlmClient.sendWithTools", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe("transient");
-      if (result.error.kind === "transient") {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
         expect(result.error.nodeId).toBe("loop-node");
+        expect(result.error.retriable).toBe(false);
       }
     }
   });

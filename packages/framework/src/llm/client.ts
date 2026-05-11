@@ -11,13 +11,14 @@ import type { ToolDef } from "./tools.js";
  * import cycle: `types/node.ts` imports `LlmClient`, so the reverse direction
  * is closed off).
  *
- * Wave 4 §4.4 — the implementation in `AnthropicLlmClient.sendWithTools`
- * structurally widens this to `NodeContext` before passing to tool dispatch.
- * Tools may read fields beyond `tracer` / `signal` (commonly `cache`,
- * `logger`, `runId`, `dagId`); callers wiring tools MUST pass a value that
- * provides those fields — typically the calling node's `NodeContext`. The
+ * The implementation in `AnthropicLlmClient.sendWithTools` structurally
+ * widens this to `NodeContext` before passing to tool dispatch. Tools may
+ * read fields beyond `tracer` / `signal` (commonly `cache`, `logger`,
+ * `runId`, `dagId`); callers wiring tools MUST pass a value that provides
+ * those fields — typically the calling node's `NodeContext`. The
  * `LlmRuntime` type is the *minimum* the framework needs; tool authors
  * effectively constrain the actual minimum to whatever their `run` reads.
+ * See ADR-0012.
  */
 export interface LlmRuntime {
   readonly tracer?: Tracer | null;
@@ -64,8 +65,7 @@ export interface SendWithToolsRequest<O> {
   // `any` (not `unknown`) is load-bearing here: `ToolDef.run` is contravariant
   // in its input type, so an array of heterogeneous `ToolDef<I_n, O_n>` can
   // only be widened via `any`'s bivariance. `dispatchToolCall` runs Zod-based
-  // narrowing at the dispatch boundary, which is the real invariant guard;
-  // see §4.7 of the Wave 4 plan for the analysis.
+  // narrowing at the dispatch boundary — the real invariant guard.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   readonly tools: readonly ToolDef<any, any>[];
   /** Final structured-output schema. */

@@ -208,10 +208,9 @@ export function createBullMQBackend(
     if (closed) return;
     closed = true;
 
-    // Wave 3 §3.3: collect partial-close failures into a single AggregateError
-    // rather than swallowing them at `warn` level. The previous design
-    // returned `Promise<void>` even when half the workers failed to drain,
-    // so callers couldn't distinguish clean shutdown from partial drain.
+    // Collect partial-close failures into a single AggregateError rather
+    // than swallowing them at `warn` level — without this, half-failed
+    // shutdowns are indistinguishable from clean ones at the call site.
     const errors: Error[] = [];
 
     // Close workers first so in-flight jobs settle before queues go away.

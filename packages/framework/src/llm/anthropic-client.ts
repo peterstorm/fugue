@@ -95,8 +95,8 @@ const isAbort = (e: unknown): boolean =>
   (e instanceof Error && e.name === "AbortError");
 
 /**
- * Wave 6 §6.10 — detect HTTP 429 from the Anthropic SDK so callers can
- * distinguish "transient, retry me" from "permanent crash."
+ * Detect HTTP 429 from the Anthropic SDK so callers can distinguish
+ * "transient, retry me" from "permanent crash."
  *
  * The SDK throws `RateLimitError extends APIError<429, ...>` whose `status`
  * field is `429`. We duck-type on `.status === 429` so injected fakes from
@@ -198,13 +198,13 @@ export class AnthropicLlmClient implements LlmClient {
     req: SendWithToolsRequest<O>,
     runtime: LlmRuntime,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    // Wave 4 §4.4 — `runtime`'s static type is the minimum (`LlmRuntime`)
-    // because `llm/client.ts` can't import `NodeContext` (cycle: `types/node.ts`
-    // imports `LlmClient`). At the tool-dispatch boundary, however, tools may
-    // read any `NodeContext` field. The contract documented on `LlmClient`
-    // requires callers wiring tools to pass a `NodeContext`. This cast is the
-    // single sanctioned widening — it lives here so the rest of the file uses
-    // the wider type honestly. See ADR-0012 and §4.4 of the Wave 4 plan.
+    // `runtime`'s static type is the minimum (`LlmRuntime`) because
+    // `llm/client.ts` can't import `NodeContext` (cycle: `types/node.ts`
+    // imports `LlmClient`). At the tool-dispatch boundary, tools may read
+    // any `NodeContext` field; the contract on `LlmClient` requires callers
+    // wiring tools to pass a `NodeContext`. This is the single sanctioned
+    // widening, kept here so the rest of the file uses the wider type
+    // honestly. See ADR-0012.
     const ctx = runtime as NodeContext;
     try {
       ensureToolNames(req.tools);
@@ -289,8 +289,7 @@ export class AnthropicLlmClient implements LlmClient {
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       if (thinkingBlock?.type === "thinking") lastThinking = thinkingBlock.thinking;
 
-      // Mirror the assistant turn back into the conversation.
-      messages.push({ role: "assistant", content: response.content });
+        messages.push({ role: "assistant", content: response.content });
 
       const toolCalls = parseToolCalls(response);
       if (toolCalls.length === 0) {
@@ -335,10 +334,14 @@ export class AnthropicLlmClient implements LlmClient {
       messages.push(buildToolResultMessage(results));
     }
 
+    // A model that did not converge within `maxIterations` turns will not
+    // converge on retry without prompt changes — classify as permanent so the
+    // DAG fast-fails instead of consuming the retry budget.
     return err({
-      kind: "transient",
+      kind: "node-crash",
       nodeId: resolveNodeId(req),
       message: `Tool-call iteration limit (${maxIterations}) reached`,
+      retriable: false,
     });
   }
 }

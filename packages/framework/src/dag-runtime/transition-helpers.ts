@@ -3,7 +3,7 @@
 
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import type { FrameworkError } from "../types/errors.js";
-import { decideRoute, expandActive, outgoingOf, seedInitialActiveSet } from "./conditional.js";
+import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ export const handleWaveDone = (
   let nextActive = ctx.activeNodeIds;
   for (const nodeId of activeWaveNodes(ctx, wave)) {
     if (!newOutputs.has(nodeId)) continue;
-    const outgoing = outgoingOf(ctx.dag, nodeId);
+    const outgoing = ctx.outgoingByNode.get(nodeId) ?? [];
     const hasGuards = outgoing.some(isConditionalEdge);
     if (!hasGuards) continue;
     const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
@@ -249,18 +249,18 @@ export const handleNodeFailed = (
   partialOutputs?: ReadonlyMap<string, unknown>,
   coFailedNodeIds?: ReadonlyArray<string>,
 ): WaveDoneResult => {
-  // Wave 3 §3.6: predicate-malformed is a configuration error — the predicate's
-  // shape is invalid against the upstream output. Retrying the failed node
-  // won't change the predicate; fail-fast with the original error preserved.
-  //
-  // Wave 7 §7.3: validation and checkpoint-write-failed are also deterministic
-  // — a schema mismatch or a missing/broken cache backend won't resolve by
-  // re-running the node. Fail-fast preserves the original error kind so the
-  // caller's `result.error.kind` matches the legacy single-path semantics.
+  // Fast-fail kinds — deterministic failures that won't resolve on re-execution:
+  //   - predicate-malformed: predicate shape invalid against upstream output (config error).
+  //   - validation: schema mismatch — re-running produces the same shape.
+  //   - checkpoint-write-failed: storage backend broken — retrying writes the same way.
+  //   - node-crash with retriable=false: caller signalled permanent (tool-loop exhaustion,
+  //     prompt-defect failures); preserve the retry budget for genuinely transient kinds.
+  // Transition straight to terminal failed with the original error preserved.
   if (
     error.kind === "predicate-malformed" ||
     error.kind === "validation" ||
-    error.kind === "checkpoint-write-failed"
+    error.kind === "checkpoint-write-failed" ||
+    (error.kind === "node-crash" && error.retriable === false)
   ) {
     return {
       state: { kind: "failed", error },
@@ -483,7 +483,7 @@ export const handleHumanResponse = (
         for (const nodeId of ctx.waves[w] ?? []) {
           if (!reseededActive.has(nodeId)) continue;
           if (!survivingOutputs.has(nodeId)) continue;
-          const outgoing = outgoingOf(ctx.dag, nodeId);
+          const outgoing = ctx.outgoingByNode.get(nodeId) ?? [];
           if (!outgoing.some(isConditionalEdge)) continue;
           const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing);
           if (decision.kind === "predicate-malformed") {

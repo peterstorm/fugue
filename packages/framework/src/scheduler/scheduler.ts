@@ -72,8 +72,8 @@ export function createCronScheduler(
 
   // Map from taskId → active timer handle
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  // Wave 3 §3.9: per-task consecutive unexpected-failure count for exponential
-  // backoff. Reset on any successful handleFire.
+  // Per-task consecutive unexpected-failure count, drives the exponential
+  // backoff (capped at BACKOFF_CAP_MS). Reset on any successful handleFire.
   const consecutiveFailures = new Map<string, number>();
   // Current active registry (tasks currently armed)
   let activeRegistry: TaskRegistry = new Map();
@@ -108,15 +108,15 @@ export function createCronScheduler(
       const triggeredAt = now();
       handleFire(task, triggeredAt)
         .then(() => {
-          // Re-arm for the next occurrence. Reset consecutive-failure counter
-          // (Wave 3 §3.9) — only unexpected handleFire rejections increment it.
+          // Re-arm for the next occurrence and reset the consecutive-failure
+          // counter — only unexpected handleFire rejections increment it.
           consecutiveFailures.delete(task.id);
           rescheduleTask(task, triggeredAt);
         })
         .catch((err) => {
           console.error(`[CronScheduler] timer callback failed for "${task.id}":`, err);
-          // Wave 3 §3.9: bump consecutive-failure counter and reschedule via
-          // backoff path so a flapping `handleFire` doesn't pin the cron tick.
+          // Bump the consecutive-failure counter and reschedule via the
+          // backoff path so a flapping handleFire doesn't pin the cron tick.
           const n = (consecutiveFailures.get(task.id) ?? 0) + 1;
           consecutiveFailures.set(task.id, n);
           rescheduleTaskWithBackoff(task, triggeredAt, n);
@@ -156,9 +156,9 @@ export function createCronScheduler(
     timers.set(task.id, handle);
   }
 
-  // Wave 3 §3.9: when handleFire fails unexpectedly, re-arm at an
-  // exponentially-growing delay (capped at 30 minutes) instead of the
-  // normal cron-tick interval. Resets to normal scheduling on first success.
+  // When handleFire fails unexpectedly, re-arm at an exponentially-growing
+  // delay (capped at 30 minutes) instead of the normal cron-tick interval.
+  // Resets to normal scheduling on first success.
   const BACKOFF_BASE_MS = 1000;
   const BACKOFF_CAP_MS = 30 * 60 * 1000;
   function rescheduleTaskWithBackoff(
@@ -202,13 +202,18 @@ export function createCronScheduler(
 
   async function handleFire(task: TaskConfig, triggeredAt: Date): Promise<void> {
     // Enqueue first — only mark as fired on success.
-    // If enqueue fails, no marker is set so catch-up logic will retry.
     // Enqueue implementations MUST be idempotent (per CronSchedulerOpts.enqueue contract).
+    //
+    // A swallowed enqueue failure here used to drop the task back into normal
+    // cron-tick scheduling, bypassing the consecutive-failure backoff. Rethrow
+    // so the outer setTimeout `.catch` branch increments `consecutiveFailures`
+    // and calls `rescheduleTaskWithBackoff` instead — a broken enqueue backend
+    // gets exponentially-spaced retries, not a per-cron-tick hammer.
     try {
       await enqueue(task, triggeredAt);
     } catch (err) {
-      console.error(`[CronScheduler] enqueue failed for task "${task.id}" — marker not set, catch-up will retry:`, err);
-      return;
+      console.error(`[CronScheduler] enqueue failed for task "${task.id}" — backing off:`, err);
+      throw err;
     }
 
     const ttlSeconds = Math.ceil(task.validForMs / 1000) + 60; // grace period

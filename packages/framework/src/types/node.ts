@@ -59,7 +59,7 @@ export interface ContextCacheAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// Capability-typed NodeContext (Wave 7 §7.5)
+// Capability-typed NodeContext
 //
 // Design decisions:
 //

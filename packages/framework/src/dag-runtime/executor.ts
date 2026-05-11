@@ -15,7 +15,7 @@ import { runNodeShared } from "../shared/run-node.js";
 import { type NodeSpanOutcome } from "../shared/node-span.js";
 import { applyJitter } from "../shared/jitter.js";
 import { dispatchEvent } from "../observer/buffered.js";
-import { decideRoute, outgoingOf } from "./conditional.js";
+import { decideRoute } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
@@ -40,7 +40,7 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 // ---------------------------------------------------------------------------
-// approve-with-edit validation (Wave 2 §2.5)
+// approve-with-edit validation
 //
 // Returns `null` on success, an error message on failure. Validation runs in
 // the imperative shell because the pure transition layer can't depend on a
@@ -62,6 +62,89 @@ const validateApproveEdit = (
     return `approve-with-edit output failed schema for node '${nodeId}': ${parsed.error.message}`;
   }
   return null;
+};
+
+/**
+ * Shared body of the `awaiting-human` and `retrying-hook` executor branches.
+ * Both paths: check for a wired hook, invoke it, catch exceptions into a
+ * `node-failed`, validate `approve-with-edit` output against the node schema,
+ * and finally emit `human-responded`. Only the retrying-hook branch prepends
+ * a sleep — that lives at the call site.
+ */
+const callHumanReviewHook = async (
+  phaseKind: "awaiting-human" | "retrying-hook",
+  nodeId: string,
+  output: unknown,
+  prompt: string,
+  hooks: {
+    onHumanReview?: (req: {
+      nodeId: string;
+      output: unknown;
+      prompt: string;
+    }) => Promise<import("./types.js").HumanAction>;
+  } | undefined,
+  nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
+  nodeCtx: NodeContext,
+  dagId: string,
+): Promise<DagEvent> => {
+  if (!hooks?.onHumanReview) {
+    return {
+      type: "node-failed",
+      nodeId,
+      error: {
+        kind: "node-crash",
+        nodeId,
+        message: `${phaseKind}: no onHumanReview hook supplied`,
+      },
+    } satisfies DagEvent;
+  }
+
+  let action: import("./types.js").HumanAction;
+  try {
+    action = await hooks.onHumanReview({ nodeId, output, prompt });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    emit(nodeCtx, {
+      type: "node-error",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId,
+      timestamp: new Date(),
+      error: message,
+      stack,
+    });
+    return {
+      type: "node-failed",
+      nodeId,
+      error: { kind: "node-crash", nodeId, message, stack },
+    } satisfies DagEvent;
+  }
+
+  // approve-with-edit goes through the live Zod schema here in the shell —
+  // the pure transition can't validate (deserialized schemas are inert).
+  const validationFailure = validateApproveEdit(action, nodeId, nodeMap);
+  if (validationFailure !== null) {
+    emit(nodeCtx, {
+      type: "node-error",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId,
+      timestamp: new Date(),
+      error: validationFailure,
+    });
+    return {
+      type: "node-failed",
+      nodeId,
+      error: {
+        kind: "validation",
+        nodeId,
+        message: validationFailure,
+      },
+    } satisfies DagEvent;
+  }
+
+  return { type: "human-responded", nodeId, action } satisfies DagEvent;
 };
 
 
@@ -96,14 +179,14 @@ export const buildDagExecutor = (
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
     recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
     /**
-     * Wave 7 §7.3 — crash-resume checkpoint. When provided, nodes whose ids
+     * Crash-resume checkpoint. When provided, nodes whose ids
      * appear in this Map are skipped via `runNodeShared`'s checkpoint path
      * (validated against `outputSchema`, observer sees `node-skipped` with
      * `reason: "checkpoint"`).
      */
     resumeCheckpoint?: Map<string, unknown>;
     /**
-     * Wave 7 §7.6 — RNG seam for retry-backoff jitter. Defaults to
+     * RNG seam for retry-backoff jitter. Defaults to
      * `Math.random`; tests pass a seeded deterministic source.
      */
     random?: () => number;
@@ -149,78 +232,9 @@ export const buildDagExecutor = (
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
       // -----------------------------------------------------------------------
-      .with({ kind: "awaiting-human" }, async (p) => {
-        if (!hooks?.onHumanReview) {
-          // No hook registered — the DAG would be stuck. Surface an error.
-          return {
-            type: "node-failed",
-            nodeId: p.nodeId,
-            error: {
-              kind: "node-crash",
-              nodeId: p.nodeId,
-              message: "awaiting-human: no onHumanReview hook supplied",
-            },
-          } satisfies DagEvent;
-        }
-
-        let action: import("./types.js").HumanAction;
-        try {
-          action = await hooks.onHumanReview({
-            nodeId: p.nodeId,
-            output: p.output,
-            prompt: p.prompt,
-          });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          const stack = e instanceof Error ? e.stack : undefined;
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId: dag.id,
-            nodeId: p.nodeId,
-            timestamp: new Date(),
-            error: message,
-            stack,
-          });
-          return {
-            type: "node-failed",
-            nodeId: p.nodeId,
-            error: { kind: "node-crash", nodeId: p.nodeId, message, stack },
-          } satisfies DagEvent;
-        }
-
-        // Wave 2 §2.5: validate `approve-with-edit` output against the node's
-        // outputSchema before writing it into ctx.outputs. The transition layer
-        // is pure and cannot run validation (schemas may not survive resume
-        // serialization); validation belongs in the imperative shell where
-        // nodeMap holds the live Zod schema.
-        const validationFailure = validateApproveEdit(action, p.nodeId, nodeMap);
-        if (validationFailure !== null) {
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId: dag.id,
-            nodeId: p.nodeId,
-            timestamp: new Date(),
-            error: validationFailure,
-          });
-          return {
-            type: "node-failed",
-            nodeId: p.nodeId,
-            error: {
-              kind: "validation",
-              nodeId: p.nodeId,
-              message: validationFailure,
-            },
-          } satisfies DagEvent;
-        }
-
-        return {
-          type: "human-responded",
-          nodeId: p.nodeId,
-          action,
-        } satisfies DagEvent;
-      })
+      .with({ kind: "awaiting-human" }, (p) =>
+        callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id),
+      )
 
       // -----------------------------------------------------------------------
       // retrying-hook: sleep with jitter then re-call the onHumanReview hook.
@@ -231,74 +245,7 @@ export const buildDagExecutor = (
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter);
-
-        if (!hooks?.onHumanReview) {
-          return {
-            type: "node-failed",
-            nodeId: p.nodeId,
-            error: {
-              kind: "node-crash",
-              nodeId: p.nodeId,
-              message: "retrying-hook: no onHumanReview hook supplied",
-            },
-          } satisfies DagEvent;
-        }
-
-        let action: import("./types.js").HumanAction;
-        try {
-          action = await hooks.onHumanReview({
-            nodeId: p.nodeId,
-            output: p.output,
-            prompt: p.prompt,
-          });
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          const stack = e instanceof Error ? e.stack : undefined;
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId: dag.id,
-            nodeId: p.nodeId,
-            timestamp: new Date(),
-            error: message,
-            stack,
-          });
-          return {
-            type: "node-failed",
-            nodeId: p.nodeId,
-            error: { kind: "node-crash", nodeId: p.nodeId, message, stack },
-          } satisfies DagEvent;
-        }
-
-        // Wave 2 §2.5: same validation as the awaiting-human path. Hook
-        // retries can also produce approve-with-edit; the reviewer's edited
-        // output must conform to the node's schema before reaching ctx.outputs.
-        const validationFailure = validateApproveEdit(action, p.nodeId, nodeMap);
-        if (validationFailure !== null) {
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId: dag.id,
-            nodeId: p.nodeId,
-            timestamp: new Date(),
-            error: validationFailure,
-          });
-          return {
-            type: "node-failed",
-            nodeId: p.nodeId,
-            error: {
-              kind: "validation",
-              nodeId: p.nodeId,
-              message: validationFailure,
-            },
-          } satisfies DagEvent;
-        }
-
-        return {
-          type: "human-responded",
-          nodeId: p.nodeId,
-          action,
-        } satisfies DagEvent;
+        return callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id);
       })
 
       // -----------------------------------------------------------------------
@@ -330,6 +277,21 @@ const runWave = async (
   // Filter to active nodes only. Pruned nodes are silently skipped — they
   // did not fire on this routing decision; downstream consumers that list
   // them as `optional` sources in `incomingByNode` see `undefined`.
+  //
+  // An out-of-bounds waveIndex is an invariant violation (the runtime asks
+  // for a wave the compiled DAG does not have). Surface it loudly rather
+  // than emitting a `wave-done` with no outputs, which would silently advance
+  // the run and either fail with `output-missing` or — worse — succeed with
+  // stale output from a prior wave.
+  if (waveIndex < 0 || waveIndex >= machineCtx.waves.length) {
+    const message = `out-of-bounds waveIndex: ${waveIndex} (have ${machineCtx.waves.length} waves)`;
+    console.error(`[runWave] ${message}`);
+    return {
+      type: "node-failed",
+      nodeId: "__wave__",
+      error: { kind: "node-crash", nodeId: "__wave__", message, retriable: false },
+    };
+  }
   const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
   const waveNodeIds = allWaveNodeIds.filter((id) => machineCtx.activeNodeIds.has(id));
 
@@ -448,7 +410,7 @@ const runWave = async (
   // transition layer recomputes the same decisions to update activeNodeIds —
   // both calls are deterministic because guards are pure.
   //
-  // Wave 3 §3.6: when `decideRoute` returns `predicate-malformed`, short-
+  // When `decideRoute` returns `predicate-malformed`, short-
   // circuit the wave with `node-failed` instead of letting it fall through to
   // `wave-done` (which previously produced the confusing observer sequence
   // node-error → wave-done → failed). `handleNodeFailed` special-cases the
@@ -457,7 +419,7 @@ const runWave = async (
   // runtime failure.
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
-    const outgoing = outgoingOf(dag, nodeId);
+    const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
     if (!outgoing.some(isConditionalEdge)) continue;
     const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
     if (decision.kind === "predicate-malformed") {

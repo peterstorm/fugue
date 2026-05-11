@@ -8,7 +8,7 @@ import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
-import { computeIncomingByNode, seedInitialActiveSet } from "./conditional.js";
+import { computeIncomingByNode, computeOutgoingByNode, seedInitialActiveSet } from "./conditional.js";
 
 // ---------------------------------------------------------------------------
 // stateProgress — maps DagPhase to a 0–100 progress value
@@ -91,6 +91,7 @@ export const compileDagToMachine = (
     initialInput,
     activeNodeIds: seedInitialActiveSet(dag),
     incomingByNode: computeIncomingByNode(dag),
+    outgoingByNode: computeOutgoingByNode(dag),
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {

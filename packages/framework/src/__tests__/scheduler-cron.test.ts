@@ -402,42 +402,55 @@ describe("createCronScheduler — stop()", () => {
 // ---------------------------------------------------------------------------
 
 describe("createCronScheduler — handleFire enqueue error path", () => {
-  it("logs error, re-arms task, and writes fired marker on successful retry when first enqueue throws", async () => {
+  it("logs the enqueue failure, escalates into the backoff timer, and does not write the fired marker", async () => {
     const errors: string[] = [];
+    const warnings: string[] = [];
     const originalConsoleError = console.error;
+    const originalConsoleWarn = console.warn;
     console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
 
     let enqueueCallCount = 0;
     const markers = makeMarkerStore();
 
-    // Fire in 30ms real time
     const getNow = makeNowSupplierForDelay(30);
 
     const scheduler = createCronScheduler(markers, {
       now: getNow,
-      enqueue: async (task) => {
+      enqueue: async (_task) => {
         enqueueCallCount++;
-        if (enqueueCallCount === 1) {
-          throw new Error("simulated enqueue failure");
-        }
+        // Every attempt throws so the test can assert the failure-only path
+        // without racing the 1s backoff timer.
+        throw new Error("simulated enqueue failure");
       },
     });
 
     scheduler.reconcile(makeRegistry([{ id: "A" }]));
 
-    // Wait for the timer to fire
+    // Wait long enough for the first fire (30ms) plus settle.
     await wait(80);
 
     try {
-      // After re-arming, the second enqueue succeeds and the fired marker is written for that successful fire.
-      const firedMarkerExists = await markers.exists(markerFiredKey("A"));
-      expect(firedMarkerExists).toBe(true);
+      // First fire ran the failing enqueue exactly once.
+      expect(enqueueCallCount).toBe(1);
 
-      // error must be logged for the first (failed) enqueue
+      // Enqueue failure must be logged.
       const hasEnqueueError = errors.some((e) => e.includes("enqueue failed") && e.includes('"A"'));
       expect(hasEnqueueError).toBe(true);
+
+      // Failure is rethrown from handleFire → the timer .catch path fires →
+      // rescheduleTaskWithBackoff is called → the backoff warning is logged.
+      const hasBackoffWarning = warnings.some(
+        (w) => w.includes("backing off task") && w.includes('"A"'),
+      );
+      expect(hasBackoffWarning).toBe(true);
+
+      // Marker is only set on successful enqueue — not on the failure path.
+      const firedMarkerExists = await markers.exists(markerFiredKey("A"));
+      expect(firedMarkerExists).toBe(false);
     } finally {
       console.error = originalConsoleError;
+      console.warn = originalConsoleWarn;
       scheduler.stop();
     }
   }, 500);

@@ -31,7 +31,6 @@ export interface EnrichLlmSpanOpts {
   readonly tokensOut: number;
   readonly thinking?: string;
   readonly provider?: string;
-  readonly extraInputs?: Record<string, unknown>;
   /**
    * When `true`, include prompt/output/thinking content in spans.
    * Default OFF — these payloads frequently contain PII and should not leave

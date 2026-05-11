@@ -16,14 +16,16 @@ export interface GuardrailCheck {
  *
  * - `skipped`: upstream produced no data (e.g. non-ok branch); no validation was performed.
  * - `validated`: upstream data was present and validation ran; `passed` indicates outcome.
+ * - `failed`: the validator threw. No `value` is exposed; consumers must branch on `kind`.
  */
-export type GuardrailResult<T> = GuardrailSkipped | GuardrailValidated<T>;
+export type GuardrailResult<T> = GuardrailSkipped | GuardrailValidated<T> | GuardrailFailed;
 
 export interface GuardrailSkipped {
   readonly kind: "skipped";
   readonly value: undefined;
   readonly passed: true;
-  readonly warnings: readonly string[];  readonly checks: readonly GuardrailCheck[];
+  readonly warnings: readonly string[];
+  readonly checks: readonly GuardrailCheck[];
 }
 
 export interface GuardrailValidated<T> {
@@ -35,6 +37,19 @@ export interface GuardrailValidated<T> {
   /** Human-readable warnings for failed checks. */
   readonly warnings: readonly string[];
   /** Per-check details. */
+  readonly checks: readonly GuardrailCheck[];
+}
+
+/**
+ * Emitted when the `validate` function throws. Carries the error message but
+ * deliberately omits `value` — consumers that read `.value` on the error path
+ * get a compile error rather than `undefined as unknown as T` masquerading as T.
+ */
+export interface GuardrailFailed {
+  readonly kind: "failed";
+  readonly passed: false;
+  readonly error: string;
+  readonly warnings: readonly string[];
   readonly checks: readonly GuardrailCheck[];
 }
 
@@ -80,11 +95,12 @@ export const createGuardrailNode = <I, T, const Id extends string = string>(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[guardrail:${config.id}] validate() threw:`, msg);
-      // Return a failed validation rather than crashing the pipeline
+      // Emit the explicit `failed` variant so consumers reading `.value`
+      // on the error path get a compile error instead of `undefined` cast as T.
       result = {
-        kind: "validated",
-        value: undefined as unknown as T,
+        kind: "failed",
         passed: false,
+        error: msg,
         warnings: [`Guardrail validation threw an error: ${msg}`],
         checks: [{ dimension: "internal-error", passed: false, detail: msg }],
       };

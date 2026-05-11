@@ -1,8 +1,8 @@
 // shared/ — pure utilities used by both executor/ and dag-runtime/.
 //
-// Lives outside both folders so neither needs to import from the other.
-// Wave 7 §7.2 of the 2026-05-11 remediation plan moved these here to break
-// the executor/ ↔ dag-runtime/ cycle.
+// Lives outside both folders so neither needs to import from the other,
+// breaking the executor/ ↔ dag-runtime/ cycle that previously forced one
+// to import from the other to call validation/topo-sort/run-node helpers.
 
 export { topoSort } from "./topo.js";
 export { validateInput, validateOutput } from "./validate.js";

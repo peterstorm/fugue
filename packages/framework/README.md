@@ -2,7 +2,7 @@
 
 DAG-shaped, durable runtime for LLM-bearing workflows. See [`docs/adr/`](../../docs/adr/) for the decision record; this file is a reference for the public surface exported from `src/index.ts`.
 
-The barrel is deliberately narrow (Wave 4 §4.1, Wave 7 §7.5). Anything not listed below is an internal detail — import from the concrete file path if you have a documented need (tests do this routinely), but treat that as a private contract subject to change without a major bump.
+The barrel is deliberately narrow. Anything not listed below is an internal detail — import from the concrete file path if you have a documented need (tests do this routinely), but treat that as a private contract subject to change without a major bump.
 
 ## Adding to the public surface
 
@@ -23,7 +23,7 @@ Types and entry points that workflow authors touch.
 
 - `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `Predicate` — the DAG shape and edge-predicate vocabulary (ADR 0015, ADR 0016).
 - `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — node authoring contract.
-- `Capability`, `CapabilityFields`, `BaseNodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext` (Wave 7 §7.5). Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
+- `Capability`, `CapabilityFields`, `BaseNodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
 - `ContextCacheAdapter`, `CacheLookup`, `PromptAccess`, `Logger`, `Observer`, `Tracer` — pluggable seams.
 - `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `map`, `mapErr`, `unwrap`, `unwrapOr` — the `Either` shape used everywhere errors are returned (no exceptions across module boundaries).
 - `FrameworkError` (re-exported from `types/errors.js`) — discriminated error union.
@@ -51,7 +51,7 @@ Built-in node factories (each declares its capability `requires`):
 ### `llm/`
 
 - `LlmClient`, `LlmRequest`, `LlmResponse`, `LlmRuntime`, `SendWithToolsRequest` — client contracts.
-- `AnthropicLlmClient`, `OpenAILlmClient` — production clients. Both map provider-specific rate-limit errors to `Err({ kind: "transient" })` (Wave 6 §6.10).
+- `AnthropicLlmClient`, `OpenAILlmClient` — production clients. Both map provider-specific rate-limit errors to `Err({ kind: "transient" })`.
 - `FakeLlmClient` plus `FakeResponseProvider`, `FakeToolUseTurn`, `FakeFinalTurn`, `FakeWithToolsScript` — deterministic test client.
 - `ToolDef`, `tool`, `assertValidToolName`, `ensureToolNames` — typed tool-call surface (ADR 0012).
 - `withLlmSpan`, `withToolSpan`, `setLlmUsageAttributes`, `setToolIoAttributes`, `LlmSpanMeta`, `ToolSpanMeta` — span helpers for custom LLM integrations.
@@ -65,13 +65,13 @@ Built-in node factories (each declares its capability `requires`):
 
 ### `observer/`
 
-Domain event bus (typed). Re-exports (Wave 5 §5.4 moved tracing-specific concerns out of this folder — see `tracing/`):
+Domain event bus (typed). Tracing-specific concerns (OTel exporters, span helpers) live in `tracing/`:
 
 - `Observer` interface plus `NoopObserver`, `RecordingObserver`.
 - `BufferedObserver`, `computeRunSummary`, `dispatchEvent`, `RunSummary`, `AggregateCounters` — durable summary + dispatch helpers.
 - `PersistencePolicy` plus the policy combinators `alwaysOn`, `errorOnly`, `ratio`, `hadRetry`, `coldCache`, `anyOf`, `allOf`, `custom`.
 - `TailSamplingProcessor` — span tail-sampling (forwards to `tracing/`).
-- The `OBSERVER_STRICT` env toggle rethrows observer exceptions in tests (Wave 3 §3.5).
+- The `OBSERVER_STRICT` env toggle rethrows observer exceptions in tests.
 
 ### `tracing/`
 
@@ -113,13 +113,13 @@ The compilation layer between `DagDef` and the kernel.
 Transport-agnostic durable-queue contract.
 
 - `QueueBackend`, `QueueHandle`, `WorkerHandle`, `MarkerStore`, `DeadLetterNotifier`, `DeadLetterOpts`, `EnqueueOpts`, `QueueOpts`, `WorkerOpts`, `EventLogOpts` — backend contract.
-- `attachDeadLetterHandler` — DLQ wiring; rethrows on notifier failure (Wave 3 §3.4).
+- `attachDeadLetterHandler` — DLQ wiring; rethrows on notifier failure.
 - `createInMemoryBackend`, `adaptInMemoryJob`, `createInMemoryMarkerStore`, `InMemoryBackend` — in-process backend.
 
 ## Queue-BullMQ adapter
 
-- `createBullMQBackend` — production backend. Structured close (`Promise<{ ok: true } | { ok: false; errors: Error[] }>`) per Wave 3 §3.3.
-- `defaultStreamKey`, `adaptBullMQJob`, `AdaptBullMQJobOpts` — `JobLike` adapter; uses Lua-script atomic dedup (Wave 3 §3.10).
+- `createBullMQBackend` — production backend. `close()` resolves on clean shutdown and throws an `AggregateError` whose `errors` array carries the individual close failures on partial shutdown.
+- `defaultStreamKey`, `adaptBullMQJob`, `AdaptBullMQJobOpts` — `JobLike` adapter; uses Lua-script atomic dedup.
 - `createRedisMarkerStore`, `createRedisStreamReader`, `EventLogReader` — Redis-backed marker + event-log readers.
 
 ## Scheduler
@@ -128,13 +128,13 @@ NFR-021. Transport-agnostic cron scheduler (the BullMQ-or-other binding is the c
 
 - `TaskConfig`, `TaskRegistry`, `RegistryDiff`, `CatchUpDecision` — scheduler types.
 - `decideCatchUp` — pure decision helper for missed cron fires.
-- `CronScheduler`, `CronSchedulerOpts`, `createCronScheduler` — scheduler factory. Exponential backoff on consecutive failures (Wave 3 §3.9).
+- `CronScheduler`, `CronSchedulerOpts`, `createCronScheduler` — scheduler factory. Exponential backoff on consecutive failures.
 
 Internals (`hasCycle`, `diffRegistry`) are not re-exported.
 
 ## NodeContext helpers
 
-- `makeNodeContext` — capability-validated `NodeContext` constructor; declares which fields are present and which are typed-out (Wave 7 §7.5).
+- `makeNodeContext` — capability-validated `NodeContext` constructor; declares which fields are present and which are typed-out.
 - `consoleLogger`, `noopTracer`, `noopObserver` — always-present-default implementations of the non-capability seams.
 
 ## Boundary rules
@@ -142,16 +142,16 @@ Internals (`hasCycle`, `diffRegistry`) are not re-exported.
 Enforced by `scripts/check-imports.ts` and `__tests__/boundary-imports.test.ts`:
 
 - `scheduler/**` must not import `bullmq` / `ioredis` / `queue-bullmq/**`.
-- `executor/**` and `dag-runtime/**` must not import from each other (Wave 7 §7.2 — shared utilities live in `shared/`).
+- `executor/**` and `dag-runtime/**` must not import from each other (shared utilities live in `shared/`).
 
 Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 
 ## Test conventions
 
 - Redis-gated tests use `process.env.REDIS_URL` to skip cleanly when no Redis is reachable.
-- Property tests use `fast-check` (devDep added Wave 6).
+- Property tests use `fast-check`.
 - Boundary lints (`check-imports`) run in `bun run check`.
 
 ## Versioning
 
-`FRAMEWORK_VERSION` (in `src/version.ts`) is stamped into every checkpoint meta row. A mismatched value on resume returns `Err({ kind: "checkpoint-version-mismatch" })` rather than corrupting state silently (ADR 0017, Wave 1 §1.3). Bump it whenever validation, retry, or output-coercion semantics change.
+`FRAMEWORK_VERSION` (in `src/version.ts`) is stamped into every checkpoint meta row. A mismatched value on resume returns `Err({ kind: "checkpoint-version-mismatch" })` rather than corrupting state silently (ADR 0017). Bump it whenever validation, retry, or output-coercion semantics change.

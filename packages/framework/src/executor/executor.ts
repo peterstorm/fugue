@@ -1,4 +1,4 @@
-// runDag — single-path runtime entry point (Wave 7 §7.3).
+// runDag — single-path runtime entry point.
 //
 // The legacy fast-path (`runDagInner`) was retired by ADR-0021. All DAG runs
 // now flow through `runDagStateful`. The in-memory `JobLike` produced by

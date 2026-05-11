@@ -1,4 +1,4 @@
-// Internal DagDefInput inference machinery — Wave 4 §4.2
+// Internal DagDefInput inference machinery.
 //
 // These types are implementation details of how `defineDag<const Nodes>` infers
 // literal-typed edges and outputNodeId. They are referenced by `DagDefInput` /

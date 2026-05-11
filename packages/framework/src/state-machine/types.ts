@@ -23,11 +23,11 @@ export type Executor<S, C, E> = (state: S, context: C) => Promise<E>;
 
 // FR-003: Abstract job handle — checkpoint + progress + event-log writes
 //
-// Wave 4 §4.3 — the third generic `E` defaults to `unknown` so existing
-// `JobLike<S, C>` usages remain valid. Callers that thread the runner's
-// machine event type (e.g. the DAG layer uses `DagEvent`) get type-checked
-// `appendEvent` payloads. Adapters typed for the wider `unknown` event still
-// accept any `JobLike<S, C, E>` value the runner constructs.
+// The third generic `E` defaults to `unknown` so existing `JobLike<S, C>`
+// usages remain valid. Callers that thread the runner's machine event type
+// (e.g. the DAG layer uses `DagEvent`) get type-checked `appendEvent`
+// payloads. Adapters typed for the wider `unknown` event still accept any
+// `JobLike<S, C, E>` value the runner constructs.
 export interface JobLike<S, C, E = unknown> {
   readonly data: { state: S; context: C };
   updateData(d: { state: S; context: C }): Promise<void>;
@@ -68,6 +68,11 @@ export interface RunOptions<S, C, E> {
   onTrace?: (t: TraceEvent<S, E>) => void;
   /** Adapter from classified error to typed event E — REQUIRED for FR-006 wrapping */
   errorEventOf: (classified: { retriable: boolean; message: string }) => E;
+  /**
+   * Injectable clock used to stamp `TraceEvent.durationMs`. Tests that need
+   * deterministic trace durations can supply a stub; defaults to `Date.now`.
+   */
+  now?: () => number;
 }
 
 // AD-4: Post-transition trace event with FROM + TO state

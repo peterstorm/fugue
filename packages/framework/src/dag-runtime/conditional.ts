@@ -250,9 +250,30 @@ export const expandActive = (
 
 /**
  * Get all out-edges for a given source node id.
+ *
+ * Prefer `machineCtx.outgoingByNode.get(id)` from `DagMachineContext` where
+ * available — that map is precomputed once in `compileDagToMachine`. This
+ * helper is retained for non-runtime callers (validators, tests) that don't
+ * have access to a `DagMachineContext`.
  */
 export const outgoingOf = (dag: DagDef, fromNodeId: string): readonly EdgeDef[] =>
   dag.edges.filter((e) => e.from === fromNodeId);
+
+/**
+ * Compile-time adjacency builder. Walk all edges once and bucket by `from`,
+ * giving every node its outgoing list in O(E). Consumers do O(1) lookup.
+ */
+export const computeOutgoingByNode = (
+  dag: DagDef,
+): ReadonlyMap<string, readonly EdgeDef[]> => {
+  const map = new Map<string, EdgeDef[]>();
+  for (const e of dag.edges) {
+    const bucket = map.get(e.from);
+    if (bucket) bucket.push(e);
+    else map.set(e.from, [e]);
+  }
+  return map;
+};
 
 // ---------------------------------------------------------------------------
 // Per-node incoming sources — derived input-wiring contract.

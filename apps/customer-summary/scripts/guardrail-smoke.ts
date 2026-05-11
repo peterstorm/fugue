@@ -14,6 +14,7 @@
 import { resolve, join } from "node:path";
 import {
   initTracing,
+  createMlflowExporter,
   alwaysOn,
   FakeLlmClient,
   NoopObserver,
@@ -30,8 +31,10 @@ const fixturesDir = resolve(import.meta.dir, "../fixtures/customers");
 
 // 1. Init tracing with alwaysOn so every span exports
 const tracing = await initTracing({
-  trackingUri: MLFLOW_URI,
-  experimentId: "0",
+  exporter: createMlflowExporter({
+    url: MLFLOW_URI,
+    experimentId: "0",
+  }),
   policy: alwaysOn(),
 });
 

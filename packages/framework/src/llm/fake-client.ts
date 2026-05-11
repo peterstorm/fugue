@@ -236,7 +236,8 @@ export class FakeLlmClient implements LlmClient {
     }
 
     return err({
-      kind: "transient",
+      kind: "node-crash",
+      retriable: false,
       nodeId: req.nodeId ?? "<llm>",
       message: `Tool-call iteration limit (${maxIterations}) reached`,
     });

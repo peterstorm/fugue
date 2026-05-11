@@ -124,10 +124,32 @@ export function createInMemoryBackend(): InMemoryBackend {
             attempt++;
             try {
               const job = createInMemoryJob(entry.data);
+              // Generic erasure boundary: enqueue is typed `<S, C>` but the
+              // worker is registered for an erased queue. Re-injecting the
+              // generics at dispatch would require threading S/C through
+              // `getOrCreateQueue` / `workers`. The single-point erasure here
+              // is the load-bearing trade-off.
               await processFn(job as unknown as JobLike<unknown, unknown>);
               succeeded = true;
             } catch (jobErr) {
-              for (const handler of failedHandlers.get(name) ?? []) {
+              const handlers = failedHandlers.get(name) ?? [];
+              if (handlers.length === 0) {
+                // No onFailed handler registered — surface to onError so the failure
+                // is at minimum observable, and emit a console.error so the failure
+                // does not disappear in test harnesses that wired neither.
+                console.error(
+                  `[InMemoryQueue] Job "${entry.id}" failed (attempt ${attempt}/${max}) with no onFailed handler:`,
+                  jobErr,
+                );
+                for (const eh of errorHandlers.get(name) ?? []) {
+                  try {
+                    eh(jobErr instanceof Error ? jobErr : new Error(String(jobErr)));
+                  } catch {
+                    // Swallow: onError handler must not break drain.
+                  }
+                }
+              }
+              for (const handler of handlers) {
                 try {
                   await handler(entry.id, jobErr, attempt, max);
                 } catch (handlerErr) {
