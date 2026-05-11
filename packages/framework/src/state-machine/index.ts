@@ -11,7 +11,7 @@ export { createInMemoryJob } from "./in-memory-job.js";
 export type { InMemoryJob } from "./in-memory-job.js";
 
 // Replay
-export { replayEvents, replayEventsUntil, replayEventsBetween } from "./replay.js";
+export { replayEvents, replayEventsUntil, replayEventSlice } from "./replay.js";
 
 // Serialization helpers (FR-010)
 export { serializeValue, deserializeValue, toJson, fromJson } from "./serialize.js";

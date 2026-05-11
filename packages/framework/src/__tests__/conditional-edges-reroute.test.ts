@@ -1,5 +1,6 @@
 // Reroute interaction with conditional edges (ADR 0015).
 
+import { NoopObserver } from "../observer/observer.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -19,17 +20,20 @@ const makeNode = (
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   run: noop as any,
+  requires: [],
   ...overrides,
 });
 
 const makeCtx = (): NodeContext => ({
   runId: "r",
   dagId: "d",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 describe("conditional edges — reroute", () => {

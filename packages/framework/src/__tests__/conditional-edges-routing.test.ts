@@ -6,7 +6,7 @@ import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
-import { RecordingObserver } from "../observer/observer.js";
+import { NoopObserver, RecordingObserver } from "../observer/observer.js";
 import { ok } from "../types/result.js";
 
 const noop = async () => ok(undefined as unknown);
@@ -20,17 +20,20 @@ const makeNode = (
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   run: noop as any,
+  requires: [],
   ...overrides,
 });
 
-const ctx = (observer: RecordingObserver | null = null): NodeContext => ({
+const ctx = (observer?: RecordingObserver): NodeContext => ({
   runId: "r",
   dagId: "d",
-  observer,
+  observer: observer ?? new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 // Branch-target nodes whose only incoming edge is conditional MUST declare

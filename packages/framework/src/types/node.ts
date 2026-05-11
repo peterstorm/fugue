@@ -20,32 +20,13 @@ export interface NodeRetryConfig {
 /**
  * Human-review gate configuration for a node.
  *
- * Setting this field on any node routes the entire DAG through the durable
+ * Setting this field on any node routes the run through the durable
  * state-machine runtime — the call to `runDag` MUST also supply
  * `RunOptions.onHumanReview`, otherwise it returns a validation error.
- * See ADR 0009 for the routing contract.
  */
 export interface NodeHumanReviewConfig {
   /** Prompt shown to the reviewer. */
   readonly prompt: string;
-}
-
-export interface NodeDef<I, O, E> {
-  readonly id: string;
-  readonly kind: NodeKind;
-  readonly inputSchema: z.ZodType<I>;
-  readonly outputSchema: z.ZodType<O>;
-  readonly run: (input: I, ctx: NodeContext) => Promise<Result<O, E>>;
-  /**
-   * When set, the DAG pauses after this node completes and awaits a human response.
-   * Optional for back-compat; existing nodes without this field behave as before.
-   */
-  readonly humanReview?: NodeHumanReviewConfig;
-  /**
-   * Per-node retry configuration (backoff delays, jitter).
-   * Optional for back-compat; uses DAG-level or default settings when omitted.
-   */
-  readonly retry?: NodeRetryConfig;
 }
 
 export interface PromptAccess {
@@ -58,11 +39,9 @@ export interface Logger {
 }
 
 /**
- * Wave 4 §4.6 — discriminated hit/miss result from a cache lookup.
- *
- * The previous `Promise<unknown | null>` shape conflated "cache miss" with
- * "cache hit with value `null`", a problem for any node that caches a
- * nullable result. The explicit tag lets callers branch cleanly.
+ * Discriminated hit/miss result from a cache lookup. The explicit tag
+ * separates "cache miss" from "cache hit with value `null`" — a problem for
+ * any node that caches a nullable result.
  */
 export type CacheLookup =
   | { readonly hit: true; readonly value: unknown }
@@ -79,23 +58,130 @@ export interface ContextCacheAdapter {
   readonly writeCheckpoint?: (runId: string, nodeId: string, value: unknown) => Promise<void>;
 }
 
-export interface NodeContext {
+// ---------------------------------------------------------------------------
+// Capability-typed NodeContext (Wave 7 §7.5)
+//
+// Design decisions:
+//
+//  - Capabilities are the things the framework cannot synthesize a sensible
+//    no-op default for: real LLM clients, real cache backends, real prompt
+//    registries. Logger/Tracer/Observer are *always* present (no-op defaults
+//    are wired by the runtime) so they never appear as capabilities.
+//
+//  - Every `NodeDef` declares `requires: readonly Capability[]` — empty is
+//    valid (a pure transform requires nothing), but the field is mandatory.
+//    The declared set is statically reflected into the node's `ctx` type:
+//    nodes that declare `requires: ["llm"]` see `ctx.llm: LlmClient`, not
+//    `LlmClient | null`. Boilerplate null-checks at the use site disappear.
+//
+//  - At run start, the runtime walks `dag.nodes`, unions the declared
+//    capabilities, and validates the wired ctx against that set. A missing
+//    capability fails the run *before* the first `node.run` is called, with
+//    `Err({ kind: "missing-capability", capability, nodeId })`.
+// ---------------------------------------------------------------------------
+
+/**
+ * The set of capability names a node can require. Each maps to a non-null
+ * concrete type in `CapabilityFields` below.
+ */
+export type Capability = "llm" | "cache" | "prompts" | "judgeLlm";
+
+/**
+ * Concrete types injected for each capability when a node declares it in
+ * `requires`. The field name on `NodeContext` matches the capability name.
+ */
+export interface CapabilityFields {
+  readonly llm: LlmClient;
+  readonly cache: ContextCacheAdapter;
+  readonly prompts: PromptAccess;
+  readonly judgeLlm: LlmClient;
+}
+
+/**
+ * Always-present part of NodeContext — fields the runtime guarantees by
+ * injecting a no-op default when none is supplied.
+ */
+export interface BaseNodeContext {
   readonly runId: string;
   readonly dagId: string;
-  readonly observer: Observer | null;
+  readonly logger: Logger;
+  readonly tracer: Tracer;
+  readonly observer: Observer;
   readonly cache: ContextCacheAdapter | null;
-  readonly prompts: PromptAccess | null;
   readonly llm: LlmClient | null;
-  /** Optional cheaper LLM client for eval-judge nodes. Falls back to `llm` if not set. */
-  readonly judgeLlm?: LlmClient | null;
-  readonly logger: Logger | null;
-  readonly tracer?: Tracer | null;
+  readonly prompts: PromptAccess | null;
+  readonly judgeLlm: LlmClient | null;
   readonly signal?: AbortSignal;
   /**
-   * When `true`, span events include the full prompt/response bodies. When
+   * When `true`, span events include full prompt/response bodies. When
    * `false` (default), bodies are redacted. Set once at bootstrap (typically
    * from an env var) and seeded into every spawned context — the framework
    * does not read process.env directly.
    */
   readonly includeContent?: boolean;
 }
+
+/**
+ * The runtime-facing NodeContext shape (capability fields nullable). The
+ * runtime executor passes this to `runNodeShared`; each node's `run` callback
+ * sees a `TypedNodeContext<R>` derived from its own `requires`.
+ */
+export type NodeContext = BaseNodeContext;
+
+/**
+ * Narrows nullable capability fields to their non-null concrete types based
+ * on a node's declared `requires`. Used as the parameter type of `NodeDef.run`.
+ */
+export type TypedNodeContext<R extends readonly Capability[]> =
+  Omit<BaseNodeContext, R[number]> & {
+    readonly [K in R[number]]: CapabilityFields[K];
+  };
+
+export interface NodeDef<
+  I,
+  O,
+  E,
+  R extends readonly Capability[] = readonly Capability[],
+> {
+  readonly id: string;
+  readonly kind: NodeKind;
+  readonly inputSchema: z.ZodType<I>;
+  readonly outputSchema: z.ZodType<O>;
+  /**
+   * Capabilities this node requires on its `NodeContext`. The runtime
+   * validates that the wired ctx satisfies them before any node runs;
+   * each required field appears as non-null in the `ctx` parameter of `run`.
+   * Use `[] as const` for nodes that need no capabilities.
+   */
+  readonly requires: R;
+  readonly run: (input: I, ctx: TypedNodeContext<R>) => Promise<Result<O, E>>;
+  /**
+   * When set, the DAG pauses after this node completes and awaits a human
+   * response. Routing to the state-machine path is driven by this field.
+   */
+  readonly humanReview?: NodeHumanReviewConfig;
+  /**
+   * Per-node retry configuration (backoff delays, jitter). Falls back to
+   * `DagDef.retryLimits` / `DagDef.defaultRetryLimit` when omitted.
+   */
+  readonly retry?: NodeRetryConfig;
+}
+
+/**
+ * Caller-facing input shape for `makeNodeContext`. `logger`, `tracer`, and
+ * `observer` are optional — when omitted the runtime injects no-op defaults.
+ * Capability fields stay as in `BaseNodeContext`.
+ */
+export type NodeContextInit = {
+  readonly runId: string;
+  readonly dagId: string;
+  readonly logger?: Logger;
+  readonly tracer?: Tracer;
+  readonly observer?: Observer;
+  readonly cache?: ContextCacheAdapter | null;
+  readonly llm?: LlmClient | null;
+  readonly prompts?: PromptAccess | null;
+  readonly judgeLlm?: LlmClient | null;
+  readonly signal?: AbortSignal;
+  readonly includeContent?: boolean;
+};

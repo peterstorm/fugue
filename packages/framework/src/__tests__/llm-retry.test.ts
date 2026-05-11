@@ -1,3 +1,4 @@
+import { NoopObserver } from "../observer/observer.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
@@ -15,9 +16,11 @@ const mkLlmCtx = (outputs: unknown[]): NodeContext => {
   return {
     runId: "test",
     dagId: "test",
-    observer: null,
+    observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
     cache: null,
-    logger: null,
+    logger: { warn: () => {}, error: () => {} },
     prompts: { get: (_name: string) => "prompt template" },
     llm: {
       sendWithTools: stubSendWithTools,
@@ -51,7 +54,7 @@ describe("LLM node retry", () => {
       { greeting: "hello" },    // passes
     ]);
 
-    const result = await node.run({ name: "world" }, ctx);
+    const result = await node.run({ name: "world" }, ctx as any);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value).toEqual({ greeting: "hello" });
@@ -74,7 +77,7 @@ describe("LLM node retry", () => {
       { greeting: 456 },
     ]);
 
-    const result = await node.run({ name: "world" }, ctx);
+    const result = await node.run({ name: "world" }, ctx as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("retry-exhausted");

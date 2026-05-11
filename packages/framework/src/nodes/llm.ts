@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { LlmClient, LlmRequest } from "../llm/client.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -39,12 +39,13 @@ const interpolatePrompt = (template: string, vars: Record<string, unknown>): str
 
 export const createLlmNode = <I, O, const Id extends string = string>(
   config: LlmNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError> & { readonly id: Id } => ({
+): NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & { readonly id: Id } => ({
   id: config.id,
   kind: "llm",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
-  run: async (input: I, ctx: NodeContext): Promise<Result<O, FrameworkError>> => {
+  requires: ["llm", "prompts"] as const,
+  run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     // Skip check — return explicit default value instead of undefined
     if (config.skipWhen?.(input)) {
       if (!("skipDefault" in config)) {
@@ -53,10 +54,7 @@ export const createLlmNode = <I, O, const Id extends string = string>(
       return ok(config.skipDefault as O);
     }
 
-    // Load prompt template
-    if (!ctx.prompts?.get) {
-      return err({ kind: "prompt-not-found", promptName: config.promptName, reason: "prompts not available on context" });
-    }
+    // Load prompt template — ctx.prompts is guaranteed non-null by `requires`.
     const promptTemplate = ctx.prompts.get(config.promptName);
     if (!promptTemplate) {
       return err({ kind: "prompt-not-found", promptName: config.promptName, reason: "prompt not registered" });
@@ -66,26 +64,22 @@ export const createLlmNode = <I, O, const Id extends string = string>(
     const vars = config.buildInput(input);
     const userMessage = interpolatePrompt(promptTemplate, vars);
 
-    // Cache check (Wave 4 §4.6 — hit/miss is now explicit).
+    // Cache check — cache stays opt-in (not in `requires`), so null-check
+    // remains here. A wired cache that throws is treated as a miss.
     const cacheKey = config.computeCacheKey?.(input) ?? `${config.id}:${stableHash(input)}`;
-    if (ctx.cache?.get) {
+    if (ctx.cache) {
       try {
         const lookup = await ctx.cache.get(cacheKey);
         if (lookup.hit) {
           return ok(lookup.value as O);
         }
       } catch (e) {
-        const msg = `[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`;
-        (ctx.logger?.warn ?? console.warn)(msg);
+        ctx.logger.warn(`[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`);
       }
     }
 
-    // LLM call
-    if (!ctx.llm?.sendStructured) {
-      return err({ kind: "node-crash" as const, nodeId: config.id, message: "llm not available on context" });
-    }
-
-    const llmClient = ctx.llm as LlmClient;
+    // ctx.llm is guaranteed non-null by `requires`.
+    const llmClient: LlmClient = ctx.llm;
     const req: LlmRequest<O> = {
       system: config.system ?? `You are an AI assistant. Follow the instructions in the user message and return structured output.`,
       user: userMessage,
@@ -146,17 +140,17 @@ export const createLlmNode = <I, O, const Id extends string = string>(
     const output = llmResponse.output as O;
 
     // Cache result (best-effort) — failures must never break a successful run.
-    if (ctx.cache?.set) {
+    if (ctx.cache) {
       const DEFAULT_CACHE_TTL_SEC = 86400;
       try {
         const setResult = await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
         if (!setResult.ok) {
-          const msg = `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`;
-          (ctx.logger?.warn ?? console.warn)(msg);
+          ctx.logger.warn(
+            `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`,
+          );
         }
       } catch (e) {
-        const msg = `[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`;
-        (ctx.logger?.warn ?? console.warn)(msg);
+        ctx.logger.warn(`[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`);
       }
     }
 

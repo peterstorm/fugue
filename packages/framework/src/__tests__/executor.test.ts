@@ -5,7 +5,7 @@ import type { NodeContext, NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { runDag } from "../executor/executor.js";
-import { topoSort } from "../executor/topo.js";
+import { topoSort } from "../shared/topo.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { RecordingObserver, NoopObserver } from "../observer/observer.js";
@@ -14,11 +14,13 @@ import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run",
   dagId: "test-dag",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
 
@@ -504,10 +506,16 @@ describe("runDag", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T6 routing / back-compat shim tests
+// runDag routing (Wave 7 §7.3 — single-path runtime)
+//
+// Pre-§7.3 these tests asserted incompatibility between `resume` and the
+// state-machine path. Post-§7.3 there is only one path: every runDag call
+// flows through runDagStateful. `resume` is a checkpoint replay layered on
+// top of any other opt; the previous "incompatible" errors are gone by
+// design (ADR-0021).
 // ---------------------------------------------------------------------------
 
-describe("runDag routing (T6 back-compat shim)", () => {
+describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   const mkSimpleDag = (id = "simple"): DagDef =>
     defineDagFromArray({
       id,
@@ -522,31 +530,10 @@ describe("runDag routing (T6 back-compat shim)", () => {
       edges: [],
     });
 
-  it("resume + jobLike returns err(node-crash) — not throw", async () => {
-    const dag = mkSimpleDag("resume-jl");
-    const jobLike = {
-      data: { state: { kind: "pending" as const }, context: {} as any },
-      updateData: async () => {},
-      updateProgress: async () => {},
-      appendEvent: async () => {},
-    };
-    const result = await runDag(dag, {}, mkCtx(), {
-      resume: { runId: "r1", checkpoint: new Map() },
-      jobLike,
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
-      expect(result.error.message).toContain("incompatible");
-    } else {
-      throw new Error("expected node-crash error");
-    }
-  });
-
-  it("resume-only routes to legacy path (not state-machine)", async () => {
+  it("resume replays checkpoint values: A is skipped, B runs", async () => {
     const log: string[] = [];
     const dag = defineDagFromArray({
-      id: "legacy-resume",
+      id: "resume-only",
       nodes: [
         createTransformNode({
           id: "A",
@@ -563,24 +550,21 @@ describe("runDag routing (T6 back-compat shim)", () => {
       ],
       edges: [{ from: "A", to: "B" }],
     });
-    // A is in checkpoint, B is not — legacy path skips A and runs B
     const checkpoint = new Map<string, unknown>([["A", 10]]);
     const result = await runDag(dag, {}, mkCtx(), {
       resume: { runId: "r2", checkpoint },
     });
     expect(result.ok).toBe(true);
-    // Only B ran (legacy resume semantics)
     expect(log).toEqual(["B"]);
   });
 
-  it("onBackground-only routes to legacy path", async () => {
+  it("onBackground is supported (ADR-0018, single-path runtime)", async () => {
     let backgroundCalled = false;
     const dag = mkSimpleDag("onbg");
     const result = await runDag(dag, { value: 1 }, mkCtx(), {
       onBackground: (_p) => { backgroundCalled = true; },
     });
     expect(result.ok).toBe(true);
-    // onBackground is a legacy-path feature and must have been invoked
     expect(backgroundCalled).toBe(true);
   });
 
@@ -595,6 +579,7 @@ describe("runDag routing (T6 back-compat shim)", () => {
           kind: "transform",
           inputSchema: z.any(),
           outputSchema: z.any(),
+          requires: [],
           run: async (_input, _ctx) => ok({ result: "needs-review" }),
           humanReview: { prompt: "Please review" },
         } as NodeDef<unknown, unknown, unknown>,
@@ -648,34 +633,74 @@ describe("runDag routing (T6 back-compat shim)", () => {
     }
   });
 
-  it("resume + humanReview node returns err(node-crash) with incompatibility message", async () => {
-    const dag = mkHitlDag("resume-hr");
+  it("resume + humanReview compose: A's checkpoint replays, reviewed node still gates", async () => {
+    const log: string[] = [];
+    const dag = defineDagFromArray({
+      id: "resume-hr",
+      nodes: [
+        createTransformNode({
+          id: "A",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (_i) => { log.push("A"); return ok(1); },
+        }),
+        {
+          id: "reviewed",
+          kind: "transform",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          requires: [],
+          run: async (_input, _ctx) => { log.push("reviewed"); return ok({ result: "needs-review" }); },
+          humanReview: { prompt: "Please review" },
+        } as NodeDef<unknown, unknown, unknown>,
+      ],
+      edges: [{ from: "A", to: "reviewed" }],
+    });
+    const checkpoint = new Map<string, unknown>([["A", 99]]);
     const result = await runDag(dag, {}, mkCtx(), {
-      resume: { runId: "r1", checkpoint: new Map() },
+      resume: { runId: "r1", checkpoint },
       onHumanReview: noopReview,
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
-      expect(result.error.message).toContain("incompatible");
-    } else {
-      throw new Error("expected node-crash error");
-    }
+    expect(result.ok).toBe(true);
+    expect(log).toEqual(["reviewed"]); // A skipped via checkpoint
   });
 
-  it("resume + retryLimits returns err(node-crash) with incompatibility message", async () => {
-    const dag = mkSimpleDag("resume-rl");
-    const result = await runDag(dag, {}, mkCtx(), {
-      resume: { runId: "r1", checkpoint: new Map() },
-      retryLimits: { A: 3 },
+  it("resume + retryLimits compose: checkpoint replay applies alongside per-call retry overrides", async () => {
+    let attempts = 0;
+    const dag = defineDagFromArray({
+      id: "resume-rl",
+      nodes: [
+        createTransformNode({
+          id: "A",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (_i) => ok("A"),
+        }),
+        {
+          id: "flaky",
+          kind: "transform",
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          requires: [],
+          run: async () => {
+            attempts += 1;
+            if (attempts < 2) {
+              return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+            }
+            return ok("done");
+          },
+          retry: { backoffMs: [1] },
+        } as NodeDef<unknown, unknown, unknown>,
+      ],
+      edges: [{ from: "A", to: "flaky" }],
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
-      expect(result.error.message).toContain("incompatible");
-    } else {
-      throw new Error("expected node-crash error");
-    }
+    const checkpoint = new Map<string, unknown>([["A", "cached-A"]]);
+    const result = await runDag(dag, {}, mkCtx(), {
+      resume: { runId: "r1", checkpoint },
+      retryLimits: { flaky: 2 },
+    });
+    expect(result.ok).toBe(true);
+    expect(attempts).toBe(2); // flaky retried once
   });
 
   it("onBackground on state-machine path: caller resolves before background promise; promise resolves later", async () => {
@@ -700,6 +725,7 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+          requires: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
@@ -727,6 +753,7 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+          requires: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
@@ -755,6 +782,7 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+          requires: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         return err({ kind: "node-crash" as const, nodeId: "flaky", message: "fail" });
@@ -779,6 +807,7 @@ describe("runDag routing (T6 back-compat shim)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+          requires: [],
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 3) {

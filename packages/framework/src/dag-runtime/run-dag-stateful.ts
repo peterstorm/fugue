@@ -15,9 +15,9 @@ import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { runEvalJudges } from "./eval-judges.js";
 import { computeIncomingByNode } from "./conditional.js";
-import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "../executor/node-span.js";
+import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "../shared/node-span.js";
+import { validateCapabilities } from "../shared/capabilities.js";
 import { dispatchEvent } from "../observer/buffered.js";
-import type { Observer } from "../observer/observer.js";
 import {
   AI_SPAN_TYPE,
   AI_DAG_ID,
@@ -58,6 +58,20 @@ export interface DagRunOpts
    * omitted, judges still run before resolution (default behavior).
    */
   readonly onBackground?: (p: Promise<void>) => void;
+  /**
+   * Wave 7 §7.3 — checkpoint replay for crash-resume scenarios. When provided,
+   * nodes whose ids appear in this Map are skipped on first encounter: their
+   * cached output is validated against the node's current `outputSchema` and
+   * a `node-skipped` observer event is emitted. On validation failure the
+   * runtime emits `node-error` and aborts the run with `Err({kind: "validation"})`,
+   * preserving the legacy `resumeRun(...)` semantics.
+   */
+  readonly resumeCheckpoint?: Map<string, unknown>;
+  /**
+   * Wave 7 §7.6 — RNG seam for retry-backoff jitter. Defaults to
+   * `Math.random`; tests pass a seeded deterministic source.
+   */
+  readonly random?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,27 +154,32 @@ export const runDagStateful = async <I, O>(
   // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
   // run-start/run-end pair. Otherwise observers see neither and the failure is
   // invisible from the event stream.
-  if (nodeCtx.observer) {
-    dispatchEvent(nodeCtx.observer as Observer, {
-      type: "run-start",
+  dispatchEvent(nodeCtx.observer, {
+    type: "run-start",
+    runId: nodeCtx.runId,
+    dagId: dag.id,
+    timestamp: new Date(),
+  });
+
+  const emitRunEnd = (status: "ok" | "error"): void => {
+    dispatchEvent(nodeCtx.observer, {
+      type: "run-end",
       runId: nodeCtx.runId,
       dagId: dag.id,
       timestamp: new Date(),
+      duration: Date.now() - runStart,
+      status,
     });
-  }
-
-  const emitRunEnd = (status: "ok" | "error"): void => {
-    if (nodeCtx.observer) {
-      dispatchEvent(nodeCtx.observer as Observer, {
-        type: "run-end",
-        runId: nodeCtx.runId,
-        dagId: dag.id,
-        timestamp: new Date(),
-        duration: Date.now() - runStart,
-        status,
-      });
-    }
   };
+
+  // Wave 7 §7.5 — capability validation at run start. Returns the first
+  // missing capability paired with the declaring node id, before any
+  // `node.run` is called.
+  const capCheck = validateCapabilities(effectiveDag, nodeCtx);
+  if (!capCheck.ok) {
+    emitRunEnd("error");
+    return err(capCheck.error);
+  }
 
   return tracer.startActiveSpan(
     `run:${dag.id}`,
@@ -198,6 +217,8 @@ export const runDagStateful = async <I, O>(
       const executor = buildDagExecutor(effectiveDag, nodeCtx, {
         onHumanReview: opts?.onHumanReview,
         recordOutcomes,
+        resumeCheckpoint: opts?.resumeCheckpoint,
+        random: opts?.random,
       });
 
       // Resolve the job handle — caller-supplied or fresh in-memory.

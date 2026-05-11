@@ -1,9 +1,9 @@
 # ADR 0007: `runDag` legacy fast path stays one-shot; state-machine path is opt-in
 
-**Status:** Accepted (routing predicate amended by ADR 0009 and ADR 0019; `onBackground` guard superseded by ADR 0018)
+**Status:** Superseded by ADR 0021 (Wave 7 §7.3, 2026-05-11) — the legacy fast path is retired entirely. Every `runDag` call now flows through `runDagStateful`. The "stays one-shot, SM is opt-in" framing no longer applies; the SM path is the *only* path. Retained for historical context.
 **Date:** 2026-05-09
 **Spec ref:** SC-001, SC-006 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
-**Related:** ADR 0002 (back-compat shim), ADR 0009 (HITL routing), ADR 0018 (`onBackground` on SM path), ADR 0019 (current routing predicate), AD-7 in `.claude/plans/2026-05-08-durable-state-machine-runtime.md`.
+**Related:** ADR 0002 (back-compat shim — also superseded by ADR 0021), ADR 0009 (HITL routing), ADR 0018 (`onBackground` on SM path), ADR 0019 (routing predicate — rendered obsolete by ADR 0021), ADR 0021 (single-path runtime — the terminal decision), AD-7 in `.claude/plans/2026-05-08-durable-state-machine-runtime.md`.
 
 > **Amendment (ADR 0009 + ADR 0019):** the routing predicate documented in this ADR (`opts.jobLike || opts.onHumanReview || opts.retryLimits`) silently dropped HITL semantics for DAGs that declared `humanReview` nodes without an `onHumanReview` hook, and missed retries / conditional-edges entirely. The predicate has been replaced by one driven by node config plus call-site opts: `dagDeclaresHITL || dagDeclaresRetries || dagDeclaresConditionalEdges || opts.jobLike || opts.retryLimits`. See ADR 0019 for the current contract; this ADR remains as the rationale for *having* a routing shim at all.
 >

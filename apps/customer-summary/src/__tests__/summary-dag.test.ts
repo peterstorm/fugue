@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { join } from "node:path";
-import { runDag, FakeLlmClient, NoopObserver } from "@ai-summary/framework";
+import { runDag, FakeLlmClient, makeNodeContext } from "@ai-summary/framework";
 import type { NodeContext } from "@ai-summary/framework";
 import type { SummaryResponse } from "../schemas/response.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
@@ -28,15 +28,12 @@ const makeCtx = (): NodeContext => {
     return fakeSynthesisOutput;
   });
 
-  return {
+  return makeNodeContext({
     runId: "test-run",
     dagId: "customer-summary",
-    observer: new NoopObserver(),
-    cache: null,
-    logger: null,
     prompts: { get: (_name: string) => "synthesis prompt template" },
     llm,
-  };
+  });
 };
 
 describe("summary-dag", () => {

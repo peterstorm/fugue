@@ -5,6 +5,7 @@
 // is what this property test exercises by generating random predicates and
 // random outputs.
 
+import { NoopObserver } from "../observer/observer.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
@@ -32,17 +33,20 @@ const makeNode = (
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   run: noop as any,
+  requires: [],
   ...overrides,
 });
 
 const makeCtx = (): NodeContext => ({
   runId: "r",
   dagId: "d",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 const makeDag = (kind: "yes" | "no"): DagDef =>

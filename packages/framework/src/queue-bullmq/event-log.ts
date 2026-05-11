@@ -40,7 +40,7 @@ export interface EventLogReader {
    * filtering should filter post-fetch.
    *
    * Useful for forensic queries ("what was the state at T?") in
-   * combination with `replayEventsUntil` / `replayEventsBetween`.
+   * combination with `replayEventsUntil` / `replayEventSlice`.
    */
   readEventsBetween(
     queueName: string,

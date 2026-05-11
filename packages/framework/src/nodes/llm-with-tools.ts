@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { LlmClient, SendWithToolsRequest } from "../llm/client.js";
 import type { ToolDef } from "../llm/tools.js";
@@ -58,12 +58,13 @@ export interface LlmWithToolsNodeConfig<I, O, Id extends string = string> {
  */
 export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
   config: LlmWithToolsNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError> & { readonly id: Id } => ({
+): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: Id } => ({
   id: config.id,
   kind: "llm",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
-  run: async (input: I, ctx: NodeContext): Promise<Result<O, FrameworkError>> => {
+  requires: ["llm"] as const,
+  run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     if (config.skipWhen?.(input)) {
       if (!("skipDefault" in config)) {
         return err({
@@ -75,7 +76,11 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
       return ok(config.skipDefault as O);
     }
 
-    if (!ctx.llm?.sendWithTools) {
+    // ctx.llm guaranteed non-null by `requires`. `sendWithTools` is still a
+    // method-shape concern (some clients implement send-only) — leave that
+    // runtime check on the LlmClient surface.
+    const llmClient: LlmClient = ctx.llm;
+    if (!llmClient.sendWithTools) {
       return err({
         kind: "node-crash" as const,
         nodeId: config.id,
@@ -83,10 +88,11 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
       });
     }
 
-    // Resolve system + user prompts. Registry takes precedence; fall back to
-    // inline configuration when entries are missing.
+    // Resolve system + user prompts. Registry (when present) takes
+    // precedence; fall back to inline configuration when the registry entry
+    // is missing. `prompts` is opt-in (not in `requires`), so null-check it.
     let systemPrompt = config.system ?? "";
-    if (config.promptName && ctx.prompts?.get) {
+    if (config.promptName && ctx.prompts) {
       const registrySystem = ctx.prompts.get(`${config.promptName}-system`);
       if (registrySystem) systemPrompt = registrySystem;
     }
@@ -98,7 +104,7 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
     const userMessage = config.buildUser(input);
 
     // Cache check — keyed on prompt + model + input + tool-names so any of
-    // those changing invalidates the entry.
+    // those changing invalidates the entry. Cache is opt-in.
     const toolNamesHash = stableHash(config.tools.map((t) => t.name).slice().sort());
     const cacheKey =
       config.computeCacheKey?.(input) ??
@@ -109,19 +115,17 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
         toolNamesHash,
         input,
       })}`;
-    if (ctx.cache?.get) {
+    if (ctx.cache) {
       try {
         const lookup = await ctx.cache.get(cacheKey);
         if (lookup.hit) {
           return ok(lookup.value as O);
         }
       } catch (e) {
-        const msg = `[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`;
-        (ctx.logger?.warn ?? console.warn)(msg);
+        ctx.logger.warn(`[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`);
       }
     }
 
-    const llmClient = ctx.llm as LlmClient;
     const req: SendWithToolsRequest<O> = {
       system: systemPrompt,
       user: userMessage,
@@ -136,8 +140,8 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
     };
 
     const attempt = async () => {
-      const result = await llmClient.sendWithTools(req, {
-        tracer: ctx.tracer ?? null,
+      const result = await llmClient.sendWithTools!(req, {
+        tracer: ctx.tracer,
         signal: ctx.signal,
       });
       if (!result.ok) return result;
@@ -186,17 +190,17 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
 
     const output = llmResponse.output as O;
 
-    if (ctx.cache?.set) {
+    if (ctx.cache) {
       const DEFAULT_CACHE_TTL_SEC = 86400;
       try {
         const setResult = await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
         if (!setResult.ok) {
-          const msg = `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`;
-          (ctx.logger?.warn ?? console.warn)(msg);
+          ctx.logger.warn(
+            `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`,
+          );
         }
       } catch (e) {
-        const msg = `[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`;
-        (ctx.logger?.warn ?? console.warn)(msg);
+        ctx.logger.warn(`[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`);
       }
     }
 

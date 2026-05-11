@@ -12,10 +12,11 @@ export interface TransformNodeConfig<I, O, Id extends string = string> {
 
 export const createTransformNode = <I, O, const Id extends string = string>(
   config: TransformNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError> & { readonly id: Id } => ({
+): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: Id } => ({
   id: config.id,
   kind: "transform",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
+  requires: [] as const,
   run: async (input, _ctx) => config.transform(input),
 });

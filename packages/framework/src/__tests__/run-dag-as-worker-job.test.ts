@@ -1,6 +1,7 @@
 // runDagAsWorkerJob — wraps runDagStateful so worker queues see failures
 // and apply retry/DLQ policy (codex finding #1).
 
+import { NoopObserver } from "../observer/observer.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -21,17 +22,20 @@ const mkNode = (
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   run: noop as any,
+  requires: [],
   ...overrides,
 });
 
 const mkCtx = (): NodeContext => ({
   runId: "test-run",
   dagId: "test-dag",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 describe("runDagAsWorkerJob", () => {

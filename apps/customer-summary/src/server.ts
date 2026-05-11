@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION } from "@ai-summary/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext } from "@ai-summary/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter } from "@ai-summary/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -146,18 +146,17 @@ export const createApp = (deps: AppDeps): Hono => {
       const abortController = new AbortController();
       const timeout = setTimeout(() => abortController.abort(), timeoutMs);
 
-      const ctx: NodeContext = {
+      const ctx: NodeContext = makeNodeContext({
         runId,
         dagId: dag.id,
-        observer: deps.observer ?? null,
-        cache: deps.cache ?? null,
-        logger: null,
+        observer: deps.observer ?? undefined,
+        cache: deps.cache,
         prompts: { get: (name: string) => deps.prompts?.get(name) ?? null },
         llm: deps.llm,
         judgeLlm: deps.llm,
         signal: abortController.signal,
-        includeContent: deps.includeContent ?? false,
-      };
+        includeContent: deps.includeContent,
+      });
 
       let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;
       try {

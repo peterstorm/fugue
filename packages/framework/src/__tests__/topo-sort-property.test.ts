@@ -8,7 +8,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { ok } from "../types/result.js";
-import { topoSort } from "../executor/topo.js";
+import { topoSort } from "../shared/topo.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 

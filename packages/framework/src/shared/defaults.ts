@@ -1,0 +1,25 @@
+// Always-present defaults for NodeContext fields.
+//
+// Wave 7 §7.5 lifted `logger`, `tracer`, and `observer` out of the
+// capability set (they can't be required, only injected). The runtime
+// wraps caller-supplied contexts with these defaults so node bodies never
+// have to null-check them.
+
+import type { Logger } from "../types/node.js";
+import type { Tracer } from "../tracing/tracer.js";
+import type { Observer } from "../observer/observer.js";
+import { NoopObserver } from "../observer/observer.js";
+
+/** Console-backed logger — methods route to `console.warn`/`console.error`. */
+export const consoleLogger: Logger = {
+  warn: (msg) => console.warn(msg),
+  error: (msg) => console.error(msg),
+};
+
+/** Tracer that invokes the wrapped function without opening a span. */
+export const noopTracer: Tracer = {
+  withSpan: async (_name, _spanType, fn) => fn(),
+};
+
+/** Reuse the existing NoopObserver — every method is a no-op. */
+export const noopObserver: Observer = new NoopObserver();

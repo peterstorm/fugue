@@ -169,6 +169,58 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
+  // Wave 7 §7.4 — typed traversal regression: unknown output item types
+  // (e.g. a future Responses API variant we don't recognize yet) are
+  // gracefully ignored by the structural guards; the search continues past
+  // them to find the real message block. Pre-§7.4 the `any` traversal would
+  // have accepted `block.content` on an unknown item, producing `undefined`
+  // dereferences masked as "missing output_text" errors.
+  it("unknown output item type is ignored; message block still found", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [
+          { type: "unrecognized_future_variant", payload: { foo: 42 } },
+          makeMessageOutput(JSON.stringify({ greeting: "hi" })),
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.output.greeting).toBe("hi");
+    }
+  });
+
+  // Wave 7 §7.4 — typed traversal regression: a message block with a
+  // wrong-typed `content` field (string instead of array) is rejected by
+  // `isMessageBlock`; the search falls through and produces the same
+  // "missing output_text" path as a genuinely empty response. Documents
+  // the guard's structural strictness.
+  it("malformed message block (content: not array) is skipped by the guard", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [{ type: "message", content: "definitely not an array" }],
+        usage: {},
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "malformed",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.nodeId).toBe("malformed");
+      expect(result.error.message).toMatch(/no text output/);
+    }
+  });
+
   it("non-JSON output → node-crash", async () => {
     handler = async () =>
       jsonResponse({

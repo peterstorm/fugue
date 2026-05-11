@@ -48,10 +48,12 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   runId: `r-${Math.floor(Math.random() * 1e9)}`,
   dagId: "ontrace-ordering",
   observer,
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { calls: Record<string, number> }): NodeDef<unknown, unknown, unknown> => {
@@ -69,6 +71,7 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+      requires: [],
       run: async (i) => {
         state.calls[id] = (state.calls[id] ?? 0) + 1;
         if ((state.calls[id] ?? 0) < 2) {
@@ -84,6 +87,7 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
     kind: "transform",
     inputSchema: z.any(),
     outputSchema: z.any(),
+    requires: [],
     run: async () => err({ kind: "node-crash" as const, nodeId: id, message: "permanent" }),
     retry: { backoffMs: [1] },
   };

@@ -67,11 +67,12 @@ export interface GuardrailNodeConfig<I, T, Id extends string = string> {
  */
 export const createGuardrailNode = <I, T, const Id extends string = string>(
   config: GuardrailNodeConfig<I, T, Id>,
-): NodeDef<I, GuardrailResult<T>, FrameworkError> & { readonly id: Id } => ({
+): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: Id } => ({
   id: config.id,
   kind: "guardrail",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
+  requires: [] as const,
   run: async (input, ctx): Promise<Result<GuardrailResult<T>, FrameworkError>> => {
     let result: GuardrailResult<T>;
     try {

@@ -33,4 +33,14 @@ export type FrameworkError =
       readonly missedFromNode: string;
     }
   | { readonly kind: "predicate-malformed"; readonly nodeId: string; readonly message: string }
-  | { readonly kind: "duplicate-edge"; readonly fromNodeId: string; readonly toNodeId: string };
+  | { readonly kind: "duplicate-edge"; readonly fromNodeId: string; readonly toNodeId: string }
+  | {
+      /**
+       * Wave 7 §7.5 — emitted at run start when a node declares a capability
+       * (`requires: ["llm"]`, etc.) but the wired NodeContext does not supply
+       * it. The run aborts before any `node.run` is called.
+       */
+      readonly kind: "missing-capability";
+      readonly nodeId: string;
+      readonly capability: string;
+    };

@@ -24,7 +24,7 @@ export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent 
 export { runStateMachine } from "./state-machine/runner.js";
 export { createInMemoryJob } from "./state-machine/in-memory-job.js";
 export type { InMemoryJob, InMemoryJobOptions } from "./state-machine/in-memory-job.js";
-export { replayEvents, replayEventsUntil, replayEventsBetween } from "./state-machine/replay.js";
+export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machine/replay.js";
 // `toJson` / `fromJson` remain public — they're the documented serialization
 // helpers for callers building custom JobLike backends. The lower-level
 // `serializeValue` / `deserializeValue` and `AsyncMutex` are intentionally
@@ -43,7 +43,7 @@ export { dagTransition } from "./dag-runtime/transition.js";
 // can skip its invariant checks. Import directly from `dag-runtime/transition-helpers.js`
 // if you have a documented need.
 export { compileDagToMachine } from "./dag-runtime/machine.js";
-export { topoSort } from "./executor/topo.js";
+export { topoSort } from "./shared/topo.js";
 export { buildDagExecutor } from "./dag-runtime/executor.js";
 export { runDagStateful, runDagAsWorkerJob } from "./dag-runtime/run-dag-stateful.js";
 export type { DagRunOpts } from "./dag-runtime/run-dag-stateful.js";
@@ -89,3 +89,10 @@ export type { TaskConfig, TaskRegistry, RegistryDiff, CatchUpDecision } from "./
 export { decideCatchUp } from "./scheduler/catch-up.js";
 export type { CronScheduler, CronSchedulerOpts } from "./scheduler/scheduler.js";
 export { createCronScheduler } from "./scheduler/scheduler.js";
+
+// ---------------------------------------------------------------------------
+// Capability-typed NodeContext helpers (Wave 7 §7.5) — public surface for
+// constructing NodeContexts and the always-present field defaults.
+// ---------------------------------------------------------------------------
+export { makeNodeContext, consoleLogger, noopTracer, noopObserver } from "./shared/index.js";
+export type { Capability, CapabilityFields, BaseNodeContext, TypedNodeContext, NodeContextInit } from "./types/node.js";

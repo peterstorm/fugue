@@ -12,10 +12,11 @@ export interface FetchNodeConfig<I, O, Id extends string = string> {
 
 export const createFetchNode = <I, O, const Id extends string = string>(
   config: FetchNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError> & { readonly id: Id } => ({
+): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: Id } => ({
   id: config.id,
   kind: "fetch",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
+  requires: [] as const,
   run: config.fetch,
 });

@@ -1,3 +1,4 @@
+import { NoopObserver } from "../observer/observer.js";
 import { describe, test, expect } from "bun:test";
 import {
   createEvalJudgeNode,
@@ -16,11 +17,13 @@ import { stubSendWithTools } from "./_llm-mocks.js";
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run",
   dagId: "test-dag",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
 

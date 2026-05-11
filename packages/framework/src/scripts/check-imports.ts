@@ -72,6 +72,16 @@ const RULES: BoundaryRule[] = [
     reason:
       "scheduler/** must remain transport-agnostic — durable backends are wired by callers.",
   },
+  // Wave 7 §7.2 / §7.3 — the executor/ ↔ dag-runtime/ cycle is broken. Shared
+  // utilities live in shared/; executor/ wraps dag-runtime/ as the public API
+  // layer. The reverse direction (dag-runtime → executor) would re-introduce
+  // the cycle and is forbidden.
+  {
+    scope: ["dag-runtime"],
+    forbiddenModules: ["../executor"],
+    reason:
+      "dag-runtime/** must not import from executor/** — executor wraps dag-runtime, not the other way. Use shared/ for pure utilities consumed by both.",
+  },
 ];
 
 /** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */

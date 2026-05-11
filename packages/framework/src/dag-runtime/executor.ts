@@ -11,11 +11,11 @@ import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
 import { type Result, ok, err } from "../types/result.js";
-import { validateInput, validateOutput } from "../executor/validate.js";
-import { withNodeSpan, type NodeSpanOutcome } from "../executor/node-span.js";
+import { runNodeShared } from "../shared/run-node.js";
+import { type NodeSpanOutcome } from "../shared/node-span.js";
+import { applyJitter } from "../shared/jitter.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { decideRoute, outgoingOf } from "./conditional.js";
-import type { IncomingSources } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
@@ -35,13 +35,6 @@ const emit = (ctx: NodeContext, event: ObserverEvent): void => {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_JITTER_RATIO = 0.2;
-
-/**
- * Apply jitter to a base delay.
- * `baseDelay * (1 + jitterRatio * Math.random())`
- */
-const applyJitter = (baseDelayMs: number, jitterRatio: number): number =>
-  baseDelayMs * (1 + jitterRatio * Math.random());
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -71,120 +64,6 @@ const validateApproveEdit = (
   return null;
 };
 
-// ---------------------------------------------------------------------------
-// Single-node execution (mirrors runNode from executor.ts — FR-025)
-// ---------------------------------------------------------------------------
-
-const runNode = async (
-  node: NodeDef<unknown, unknown, unknown>,
-  dagInput: unknown,
-  ctx: NodeContext,
-  dagId: string,
-  outputs: Map<string, unknown>,
-  incoming: IncomingSources,
-): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
-  const nodeId = node.id;
-
-  // Build node input from incoming edges (derived from edges at compile time —
-  // ADR 0017). When `optional` is non-empty the input is always an object
-  // keyed by `required ∪ optional`; pruned optional sources surface as
-  // `undefined`. Otherwise the legacy 0 → dagInput, 1 → bare, ≥2 → object
-  // shape rule applies over `required`.
-  const { required, optional } = incoming;
-  const nodeInput =
-    optional.length > 0
-      ? Object.fromEntries(
-          [...required, ...optional].map((d) => [d, outputs.get(d)]),
-        )
-      : required.length === 0
-        ? dagInput
-        : required.length === 1
-          ? outputs.get(required[0]!)
-          : Object.fromEntries(required.map((d) => [d, outputs.get(d)]));
-
-  // FR-025: validate input
-  const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
-  if (!inputResult.ok) return { result: inputResult, outcome: EMPTY_OUTCOME };
-
-  return withNodeSpan(nodeId, node.kind, inputResult.value, ctx.includeContent ?? false, async () => {
-    const nodeStart = Date.now();
-    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
-
-    let runResult: Result<any, any>;
-    try {
-      runResult = await node.run(inputResult.value, ctx);
-    } catch (e) {
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        timestamp: new Date(),
-        error: e instanceof Error ? e.message : String(e),
-        stack: e instanceof Error ? e.stack : undefined,
-      });
-      return err({
-        kind: "node-crash" as const,
-        nodeId,
-        message: e instanceof Error ? e.message : String(e),
-        stack: e instanceof Error ? e.stack : undefined,
-      });
-    }
-
-    if (!runResult.ok) {
-      const frameworkError: FrameworkError =
-        runResult.error !== null &&
-        typeof runResult.error === "object" &&
-        "kind" in runResult.error
-          ? (runResult.error as FrameworkError)
-          : { kind: "node-crash" as const, nodeId, message: String(runResult.error) };
-
-      const errorMsg =
-        frameworkError.kind === "node-crash"
-          ? frameworkError.message
-          : JSON.stringify(frameworkError);
-
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        timestamp: new Date(),
-        error: errorMsg,
-      });
-      return err(frameworkError);
-    }
-
-    // FR-025: validate output
-    const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
-    if (!outputResult.ok) {
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        timestamp: new Date(),
-        error: `output validation failed: ${JSON.stringify((outputResult.error as FrameworkError))}`,
-      });
-      return outputResult;
-    }
-
-    const duration = Date.now() - nodeStart;
-    outputs.set(nodeId, outputResult.value);
-
-    emit(ctx, {
-      type: "node-end",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      timestamp: new Date(),
-      duration,
-      output: outputResult.value,
-    });
-
-    return ok(outputResult.value);
-  });
-};
 
 // ---------------------------------------------------------------------------
 // buildDagExecutor — FR-027 applied when state.kind === "retrying"
@@ -216,12 +95,26 @@ export const buildDagExecutor = (
     }) => Promise<import("./types.js").HumanAction>;
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
     recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
+    /**
+     * Wave 7 §7.3 — crash-resume checkpoint. When provided, nodes whose ids
+     * appear in this Map are skipped via `runNodeShared`'s checkpoint path
+     * (validated against `outputSchema`, observer sees `node-skipped` with
+     * `reason: "checkpoint"`).
+     */
+    resumeCheckpoint?: Map<string, unknown>;
+    /**
+     * Wave 7 §7.6 — RNG seam for retry-backoff jitter. Defaults to
+     * `Math.random`; tests pass a seeded deterministic source.
+     */
+    random?: () => number;
   },
 ): Executor<DagPhase, DagMachineContext, DagEvent> => {
   const nodeMap = new Map<string, NodeDef<unknown, unknown, unknown>>(
     dag.nodes.map((n) => [n.id, n]),
   );
   const recordOutcomes = hooks?.recordOutcomes;
+  const resumeCheckpoint = hooks?.resumeCheckpoint;
+  const random = hooks?.random ?? Math.random;
 
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
@@ -237,19 +130,19 @@ export const buildDagExecutor = (
       .with({ kind: "retrying" }, async (p) => {
         const nodeDef = nodeMap.get(p.nodeId);
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
-        const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio);
+        const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter);
 
         // Re-run the whole wave (other nodes in the wave may have already
         // succeeded on previous attempt; outputs are in machineCtx.outputs).
         // We only re-run the failed node, then run the rest that haven't completed yet.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes);
+        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
@@ -334,7 +227,7 @@ export const buildDagExecutor = (
       .with({ kind: "retrying-hook" }, async (p) => {
         const nodeDef = nodeMap.get(p.nodeId);
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
-        const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio);
+        const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter);
 
         if (!hooks?.onHumanReview) {
@@ -430,6 +323,7 @@ const runWave = async (
   nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
   nodeCtx: NodeContext,
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
+  resumeCheckpoint: Map<string, unknown> | undefined,
 ): Promise<DagEvent> => {
   // Filter to active nodes only. Pruned nodes are silently skipped — they
   // did not fire on this routing decision; downstream consumers that list
@@ -477,13 +371,14 @@ const runWave = async (
       }
 
       const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
-      const { result, outcome } = await runNode(
+      const { result, outcome } = await runNodeShared(
         node,
         machineCtx.initialInput,
         nodeCtx,
         dag.id,
         outputs,
         incoming,
+        { checkpoint: resumeCheckpoint, writeCheckpoint: true },
       );
       return { nodeId, result, outcome };
     }),

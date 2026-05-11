@@ -2,6 +2,7 @@
 // Covers: linear, fan-out, fan-in, diamond, retry transient, retry exhausted,
 //         HITL approve, approve-with-edit, reject, reroute-back, abort
 
+import { NoopObserver } from "../observer/observer.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -29,17 +30,20 @@ const makeNode = (
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   run: noop as any,
+  requires: [],
   ...overrides,
 });
 
 const makeCtx = (): NodeContext => ({
   runId: "test-run-id",
   dagId: "test-dag",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 interface MakeDagOverrides {
@@ -612,6 +616,7 @@ describe("runDagStateful — abort", () => {
       kind: "transform",
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),
+      requires: [],
       run: async (_input, ctx) => {
         const start = Date.now();
         // Bound the loop to keep the test fast even if the signal never fires.
@@ -683,8 +688,9 @@ describe("runDagStateful — validation (FR-025)", () => {
     const result = await runDagStateful(dag, 42, makeCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // validation error gets wrapped in retry-exhausted when retries are exhausted (0 default)
-      expect(result.error.kind).toBe("retry-exhausted");
+      // Wave 7 §7.3: validation errors fail-fast (deterministic, not transient)
+      // and surface their original kind instead of being wrapped in retry-exhausted.
+      expect(result.error.kind).toBe("validation");
     }
   });
 
@@ -702,7 +708,7 @@ describe("runDagStateful — validation (FR-025)", () => {
     const result = await runDagStateful(dag, null, makeCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe("retry-exhausted");
+      expect(result.error.kind).toBe("validation");
     }
   });
 

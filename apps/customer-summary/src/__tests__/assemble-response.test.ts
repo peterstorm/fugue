@@ -1,18 +1,10 @@
 import { describe, test, expect } from "bun:test";
 import { createAssembleResponseNode } from "../dag/nodes/assemble-response.js";
-import { NoopObserver } from "@ai-summary/framework";
+import { makeNodeContext } from "@ai-summary/framework";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { GuardrailResult } from "@ai-summary/framework";
 
-const makeCtx = () => ({
-  runId: "test",
-  dagId: "test",
-  observer: new NoopObserver(),
-  cache: null,
-  logger: null,
-  prompts: null,
-  llm: null,
-});
+const makeCtx = () => makeNodeContext({ runId: "test", dagId: "test" });
 
 const makeSynthesis = (): SynthesisOutput => ({
   overallSentiment: "positive",

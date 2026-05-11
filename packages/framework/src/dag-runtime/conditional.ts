@@ -8,6 +8,9 @@ import {
   isOneOfMatch,
   isUnconditionalEdge,
 } from "../types/dag.js";
+import type { IncomingSources } from "../shared/incoming.js";
+
+export type { IncomingSources };
 
 export type Decision =
   | {
@@ -273,10 +276,6 @@ export const outgoingOf = (dag: DagDef, fromNodeId: string): readonly EdgeDef[] 
 // `undefined` (preserving the legacy `optionalDeps` semantics).
 // ---------------------------------------------------------------------------
 
-export interface IncomingSources {
-  readonly required: readonly string[];
-  readonly optional: readonly string[];
-}
 
 const incomingSourcesFor = (
   dag: DagDef,

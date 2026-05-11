@@ -1,18 +1,10 @@
 import { describe, test, expect } from "bun:test";
 import { createGroundingGuardrailNode } from "../dag/nodes/grounding-guardrail.js";
-import { NoopObserver } from "@ai-summary/framework";
+import { makeNodeContext } from "@ai-summary/framework";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { CrmRecord } from "../schemas/crm.js";
 
-const makeCtx = () => ({
-  runId: "test",
-  dagId: "test",
-  observer: new NoopObserver(),
-  cache: null,
-  logger: null,
-  prompts: null,
-  llm: null,
-});
+const makeCtx = () => makeNodeContext({ runId: "test", dagId: "test" });
 
 const makeSynthesis = (overrides: Partial<SynthesisOutput> = {}): SynthesisOutput => ({
   overallSentiment: "positive",

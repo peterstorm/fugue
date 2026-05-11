@@ -7,7 +7,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
-import { topoSort } from "../executor/topo.js";
+import { topoSort } from "../shared/topo.js";
 import { computeIncomingByNode, seedInitialActiveSet } from "./conditional.js";
 
 // ---------------------------------------------------------------------------

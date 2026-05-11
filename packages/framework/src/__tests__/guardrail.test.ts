@@ -11,8 +11,10 @@ const makeCtx = (observer = new NoopObserver()) => ({
   runId: "test",
   dagId: "test",
   observer,
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
   prompts: null,
   llm: null,
 });

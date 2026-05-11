@@ -252,7 +252,16 @@ export const handleNodeFailed = (
   // Wave 3 §3.6: predicate-malformed is a configuration error — the predicate's
   // shape is invalid against the upstream output. Retrying the failed node
   // won't change the predicate; fail-fast with the original error preserved.
-  if (error.kind === "predicate-malformed") {
+  //
+  // Wave 7 §7.3: validation and checkpoint-write-failed are also deterministic
+  // — a schema mismatch or a missing/broken cache backend won't resolve by
+  // re-running the node. Fail-fast preserves the original error kind so the
+  // caller's `result.error.kind` matches the legacy single-path semantics.
+  if (
+    error.kind === "predicate-malformed" ||
+    error.kind === "validation" ||
+    error.kind === "checkpoint-write-failed"
+  ) {
     return {
       state: { kind: "failed", error },
       context: ctx,

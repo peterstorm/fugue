@@ -1,3 +1,4 @@
+import { NoopObserver } from "../observer/observer.js";
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { runDag } from "../../src/executor/executor.js";
@@ -16,11 +17,13 @@ import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run",
   dagId: "test-dag",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
 

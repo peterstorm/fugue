@@ -9,6 +9,7 @@
 // Property: a DAG that retries at least once emits at least one trace event
 // with `outcome: "retry"`.
 
+import { NoopObserver } from "../observer/observer.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -21,11 +22,13 @@ import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
 const mkCtx = (): NodeContext => ({
   runId: "retry-trace-run",
   dagId: "retry-trace-dag",
-  observer: null,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", () => {
@@ -36,6 +39,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+      requires: [],
       run: async () => {
         callCount += 1;
         if (callCount < 2) {
@@ -78,6 +82,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
+      requires: [],
       run: async () => ok("done"),
     };
 

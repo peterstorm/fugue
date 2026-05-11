@@ -27,6 +27,7 @@ const makeNode = (
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   run: async () => ok(undefined as unknown),
+  requires: [],
   ...overrides,
 });
 
@@ -34,10 +35,12 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   runId: "pred-malformed-run",
   dagId: "pred-malformed-dag",
   observer,
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
   cache: null,
   prompts: null,
   llm: null,
-  logger: null,
+  logger: { warn: () => {}, error: () => {} },
 });
 
 describe("§6.13 — predicate-malformed observer event sequence (regression for §3.6)", () => {

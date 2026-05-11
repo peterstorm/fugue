@@ -223,6 +223,28 @@ describe("FR-082 extractImports — synthetic fixtures", () => {
     expect(violations[0].file).toContain("state-machine/bad-exact.ts");
   });
 
+  // ---- Wave 7 §7.2 / §7.3: dag-runtime/ must not import from executor/ ----
+
+  it("detects dag-runtime/ importing from ../executor/", () => {
+    const dir = setup({
+      "dag-runtime/bad-executor-import.ts":
+        `import { runDag } from "../executor/executor.js";\n`,
+    });
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].importSpecifier).toBe("../executor/executor.js");
+    expect(violations[0].file).toContain("dag-runtime/bad-executor-import.ts");
+  });
+
+  it("allows dag-runtime/ importing from ../shared/", () => {
+    const dir = setup({
+      "dag-runtime/ok-shared.ts":
+        `import { topoSort } from "../shared/topo.js";\n`,
+    });
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(0);
+  });
+
   // ---- multi-violation test ----
 
   it("returns two violations for a file with two forbidden imports", () => {

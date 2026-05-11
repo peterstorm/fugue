@@ -23,7 +23,7 @@ export {
 export { compileDagToMachine } from "./machine.js";
 
 // Gap-2 fix: re-export topoSort (already returns Result on cycle) for consumers who need it
-export { topoSort } from "../executor/topo.js";
+export { topoSort } from "../shared/topo.js";
 
 // DAG executor closure
 export { buildDagExecutor } from "./executor.js";

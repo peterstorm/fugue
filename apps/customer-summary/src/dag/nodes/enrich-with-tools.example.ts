@@ -47,17 +47,16 @@ const makeLookupDealsTool = (
     // Memoize: the loop runs at-least-once per node retry. Without ctx.cache,
     // a node-level retry replays every tool call against the source of truth.
     const cacheKey = `crm:deals:${customerId}:${limit}`;
-    const cached = (await ctx.cache?.get(cacheKey)) as
-      | { deals: Array<{ id: string; amount: number; closedAt: string }> }
-      | null;
-    if (cached) return cached;
+    const lookup = await ctx.cache?.get(cacheKey);
+    if (lookup?.hit) {
+      return lookup.value as { deals: Array<{ id: string; amount: number; closedAt: string }> };
+    }
 
     const result = { deals: await deals.byCustomer(customerId, limit ?? 20) };
     if (ctx.cache?.set) {
       const setResult = await ctx.cache.set(cacheKey, result, 300);
       if (!setResult.ok) {
-        const logger = ctx.logger?.warn ?? console.warn;
-        logger(`[lookup_deals_by_customer] cache write failed for ${cacheKey}: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`);
+        ctx.logger.warn(`[lookup_deals_by_customer] cache write failed for ${cacheKey}: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`);
       }
     }
     return result;

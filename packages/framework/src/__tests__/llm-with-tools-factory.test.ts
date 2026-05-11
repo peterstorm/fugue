@@ -1,3 +1,4 @@
+import { NoopObserver } from "../observer/observer.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { createLlmWithToolsNode } from "../nodes/llm-with-tools.js";
@@ -49,14 +50,16 @@ describe("createLlmWithToolsNode — factory", () => {
     const ctx: NodeContext = {
       runId: "r1",
       dagId: "d1",
-      observer: null,
+      observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
       cache,
       prompts: null,
       llm,
-      logger: null,
+      logger: { warn: () => {}, error: () => {} },
     };
 
-    const result = await node.run({ customerId: "abc" }, ctx);
+    const result = await node.run({ customerId: "abc" }, ctx as any);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual(cached);
     expect(toolCalls).toBe(0); // Cache hit must short-circuit the LLM call.
@@ -104,14 +107,16 @@ describe("createLlmWithToolsNode — factory", () => {
     const ctx: NodeContext = {
       runId: "r2",
       dagId: "d2",
-      observer: null,
+      observer: new NoopObserver(),
+      tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+      judgeLlm: null,
       cache,
       prompts: null,
       llm,
-      logger: null,
+      logger: { warn: () => {}, error: () => {} },
     };
 
-    const result = await node.run({ customerId: "abc" }, ctx);
+    const result = await node.run({ customerId: "abc" }, ctx as any);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual({ greeting: "hello fresh" });
     expect(toolCalls).toBe(1);

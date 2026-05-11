@@ -1,9 +1,9 @@
 # ADR 0002: `runDag` becomes a back-compat shim, not a rewrite
 
-**Status:** Accepted (amended by ADR 0018, ADR 0019)
+**Status:** Superseded by ADR 0021 (Wave 7 §7.3, 2026-05-11) — the legacy fast path is retired. `runDag` is now a thin wrapper around `runDagStateful` rather than a router between two paths. Retained for historical context.
 **Date:** 2026-05-09
 **Spec ref:** SC-001 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
-**Related:** ADR 0001 (single-package layout), ADR 0007 (state-machine model boundary), ADR 0018 (`onBackground` on SM path — supersedes the rejection in §Consequences below), ADR 0019 (current routing predicate — supersedes the predicate sketched in §Decision below).
+**Related:** ADR 0001 (single-package layout), ADR 0007 (state-machine model boundary — also superseded by ADR 0021), ADR 0018 (`onBackground` on SM path — supersedes the rejection in §Consequences below), ADR 0019 (routing predicate — supersedes the predicate sketched in §Decision below, itself rendered obsolete by ADR 0021), ADR 0021 (single-path runtime — the terminal decision).
 
 ## Context
 

@@ -5,11 +5,12 @@
 // All redis-gated tests skip cleanly without REDIS_URL.
 // Run with: REDIS_URL=redis://localhost:6379 bun test
 
+import { NoopObserver } from "../../observer/observer.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
 import type { JobLike } from "../../state-machine/types.js";
 import type { Machine } from "../../state-machine/types.js";
-import { replayEvents, replayEventsUntil, replayEventsBetween } from "../../state-machine/replay.js";
+import { replayEvents, replayEventsUntil, replayEventSlice } from "../../state-machine/replay.js";
 import {
   createBullMQBackend,
   createRedisMarkerStore,
@@ -1045,6 +1046,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
       kind: "transform",
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),
+      requires: [],
       run: body,
       retry: { backoffMs: [1] },
     });
@@ -1076,11 +1078,13 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
     const mkCtx = (): NodeContext => ({
       runId: "dag-resume-run",
       dagId: dag.id,
-      observer: null,
+      observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
       cache: null,
       prompts: null,
       llm: null,
-      logger: null,
+      logger: { warn: () => {}, error: () => {} },
     });
 
     const backend = createBullMQBackend(REDIS_URL!);
@@ -1623,7 +1627,7 @@ describe("Forensic replay-to-timestamp via Redis Streams", () => {
       // Slice [T2, T3+1) → fold of just (STEP at T2) and (FINISH at T3) starting from `initial`
       // Note: this starts from `initial` (kind: "idle"), not from the prior state at T2.
       // STEP from idle → { wave: 1 }, then FINISH → done.
-      const slice = replayEventsBetween(events, forMachine, initial, T2, T3 + 1);
+      const slice = replayEventSlice(events, forMachine, initial, T2, T3 + 1);
       expect(slice.state).toEqual({ kind: "done" });
       expect(slice.context.steps).toBe(1); // only one STEP folded into the slice
 

@@ -68,6 +68,16 @@ const toolChoiceToOpenAi = (
   }
 };
 
+// ---------------------------------------------------------------------------
+// Responses API output shapes (Wave 7 §7.4)
+//
+// The OpenAI Responses API returns `output: ResponsesOutputItem[]`. The SDK's
+// exported types do not (yet) cover every variant we consume — define local
+// discriminated unions for the shapes we read, with structural guards. New
+// item types coming back from the API surface as `unknown` and are skipped
+// by the guards rather than being silently misinterpreted via `any`.
+// ---------------------------------------------------------------------------
+
 interface FunctionCallBlock {
   readonly type: "function_call";
   readonly id?: string;
@@ -76,10 +86,66 @@ interface FunctionCallBlock {
   readonly arguments: string;
 }
 
-const isFunctionCallBlock = (b: any): b is FunctionCallBlock =>
-  b && typeof b === "object" && b.type === "function_call";
+interface OutputTextPart {
+  readonly type: "output_text";
+  readonly text: string;
+}
 
-const parseToolCalls = (output: readonly any[]): ToolCall[] => {
+interface MessageContentPart {
+  readonly type: string;
+  readonly text?: string;
+}
+
+interface MessageBlock {
+  readonly type: "message";
+  readonly content: readonly MessageContentPart[];
+}
+
+interface ReasoningSummaryItem {
+  readonly text?: string;
+}
+
+interface ReasoningBlock {
+  readonly type: "reasoning";
+  readonly summary: readonly ReasoningSummaryItem[];
+}
+
+type ResponsesOutputItem =
+  | FunctionCallBlock
+  | MessageBlock
+  | ReasoningBlock
+  | { readonly type: string };
+
+interface ResponsesUsage {
+  readonly input_tokens?: number;
+  readonly output_tokens?: number;
+}
+
+interface ResponsesApiResponse {
+  readonly output?: readonly ResponsesOutputItem[];
+  readonly usage?: ResponsesUsage;
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === "object";
+
+const isFunctionCallBlock = (b: unknown): b is FunctionCallBlock =>
+  isObject(b) &&
+  b.type === "function_call" &&
+  typeof b.call_id === "string" &&
+  typeof b.name === "string" &&
+  typeof b.arguments === "string";
+
+const isMessageBlock = (b: unknown): b is MessageBlock =>
+  isObject(b) && b.type === "message" && Array.isArray(b.content);
+
+const isOutputTextPart = (c: unknown): c is OutputTextPart =>
+  isObject(c) && c.type === "output_text" && typeof c.text === "string";
+
+const isReasoningBlock = (b: unknown): b is ReasoningBlock =>
+  isObject(b) && b.type === "reasoning" && Array.isArray(b.summary);
+
+const parseToolCalls = (output: readonly ResponsesOutputItem[]): ToolCall[] => {
   const calls: ToolCall[] = [];
   for (const block of output) {
     if (!isFunctionCallBlock(block)) continue;
@@ -105,20 +171,24 @@ const buildToolResultItems = (
       typeof r.content === "string" ? r.content : JSON.stringify(r.content),
   }));
 
-const extractFinalText = (output: readonly any[]): string | undefined => {
+const extractFinalText = (
+  output: readonly ResponsesOutputItem[],
+): string | undefined => {
   for (let i = output.length - 1; i >= 0; i--) {
     const block = output[i];
-    if (block?.type !== "message") continue;
-    const textPart = block.content?.find((c: any) => c.type === "output_text");
-    if (textPart?.text) return textPart.text;
+    if (!isMessageBlock(block)) continue;
+    const textPart = block.content.find(isOutputTextPart);
+    if (textPart) return textPart.text;
   }
   return undefined;
 };
 
-const extractReasoning = (output: readonly any[]): string | undefined => {
-  const block = output.find((b: any) => b?.type === "reasoning");
-  if (!block?.summary?.length) return undefined;
-  return block.summary.map((s: any) => s.text ?? s).join("\n");
+const extractReasoning = (
+  output: readonly ResponsesOutputItem[],
+): string | undefined => {
+  const block = output.find(isReasoningBlock);
+  if (!block || block.summary.length === 0) return undefined;
+  return block.summary.map((s) => s.text ?? "").join("\n");
 };
 
 const isAbort = (e: unknown): boolean =>
@@ -167,7 +237,10 @@ export class OpenAILlmClient implements LlmClient {
   private async postResponses(
     body: Record<string, unknown>,
     signal: AbortSignal | undefined,
-  ): Promise<{ ok: true; response: any } | { ok: false; status: number; bodyText: string }> {
+  ): Promise<
+    | { ok: true; response: ResponsesApiResponse }
+    | { ok: false; status: number; bodyText: string }
+  > {
     const { url, headers } = this.buildRequestConfig();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
@@ -194,7 +267,7 @@ export class OpenAILlmClient implements LlmClient {
       const text = await httpRes.text();
       return { ok: false, status: httpRes.status, bodyText: text };
     }
-    const response = await httpRes.json();
+    const response = (await httpRes.json()) as ResponsesApiResponse;
     return { ok: true, response };
   }
 
@@ -238,10 +311,11 @@ export class OpenAILlmClient implements LlmClient {
         });
       }
       const response = httpResult.response;
+      const output = response.output ?? [];
 
-      const messageBlock = response.output?.find((b: any) => b.type === "message");
-      const textContent = messageBlock?.content?.find((c: any) => c.type === "output_text");
-      const rawText = textContent?.text ?? "";
+      const messageBlock = output.find(isMessageBlock);
+      const textPart = messageBlock?.content.find(isOutputTextPart);
+      const rawText = textPart?.text ?? "";
 
       if (!rawText) {
         return err({
@@ -407,14 +481,17 @@ export class OpenAILlmClient implements LlmClient {
       }
 
       const response = httpResult.response;
-      const output: any[] = response.output ?? [];
+      const output: readonly ResponsesOutputItem[] = response.output ?? [];
       totalTokensIn += response.usage?.input_tokens ?? 0;
       totalTokensOut += response.usage?.output_tokens ?? 0;
       const reasoning = extractReasoning(output);
       if (reasoning) lastThinking = reasoning;
 
-      // Echo all output items into the conversation so subsequent turns see them.
-      for (const item of output) conversation.push(item);
+      // Echo all output items into the conversation so subsequent turns see
+      // them. The cast to Record<string, unknown> is a boundary widening —
+      // the conversation array carries items of varying shapes that the API
+      // expects as opaque JSON-encoded objects.
+      for (const item of output) conversation.push(item as Record<string, unknown>);
 
       const toolCalls = parseToolCalls(output);
 

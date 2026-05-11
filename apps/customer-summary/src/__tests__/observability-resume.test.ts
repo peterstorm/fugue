@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, NoopObserver } from "@ai-summary/framework";
+import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, makeNodeContext } from "@ai-summary/framework";
 import type { NodeContext, DagDef } from "@ai-summary/framework";
 import type { SummaryResponse } from "../schemas/response.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
@@ -28,16 +28,14 @@ const fakeSynthesisOutput: SynthesisOutput = {
   customerSatisfaction: "satisfied",
 };
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
-  observer: new NoopObserver(),
-  cache: null,
-  prompts: { get: (_name: string) => "prompt template" },
-  llm: new FakeLlmClient((_req: any) => fakeSynthesisOutput),
-  logger: null,
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  makeNodeContext({
+    runId: "test-run",
+    dagId: "test-dag",
+    prompts: { get: (_name: string) => "prompt template" },
+    llm: new FakeLlmClient((_req: any) => fakeSynthesisOutput),
+    ...overrides,
+  });
 
 // --- Full observability flow ---
 
@@ -267,22 +265,18 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
 
     const checkpoints: Map<string, unknown> = new Map();
     const cache = {
-      get: async (_key: string) => null,
+      get: async (_key: string) => ({ hit: false } as const),
       set: async (_key: string, _value: unknown) => ok(undefined),
       writeCheckpoint: async (_runId: string, nodeId: string, output: unknown) => {
         checkpoints.set(nodeId, output);
       },
     };
 
-    const ctx1: NodeContext = {
+    const ctx1: NodeContext = makeNodeContext({
       runId: "run-1",
       dagId: "resume-3node",
-      observer: new NoopObserver(),
       cache,
-      prompts: null,
-      llm: null,
-      logger: null,
-    };
+    });
 
     const r1 = await runDag(failDag, { v: 1 }, ctx1);
     expect(r1.ok).toBe(false); // N3 failed
@@ -295,15 +289,12 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
     // --- Resume run ---
     log.length = 0;
 
-    const ctx2: NodeContext = {
+    const ctx2: NodeContext = makeNodeContext({
       runId: "run-1",
       dagId: "resume-3node",
       observer,
       cache,
-      prompts: null,
-      llm: null,
-      logger: null,
-    };
+    });
 
     const r2 = await runDag(dag, undefined, ctx2, {
       resume: { runId: "run-1", checkpoint: checkpoints },

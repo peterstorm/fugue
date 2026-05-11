@@ -147,7 +147,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
       const llm: LlmClient | null = ctx.judgeLlm ?? ctx.llm ?? null;
       if (!llm) {
         const msg = "No LLM client available (neither judgeLlm nor llm on context)";
-        (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);
+        ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
         return failOpenResult(msg);
       }
 
@@ -174,7 +174,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
 
         if (!result.ok) {
           const msg = `LLM call failed: ${"message" in result.error ? result.error.message : String(result.error)}`;
-          (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);
+          ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
           return failOpenResult(msg);
         }
 
@@ -194,14 +194,14 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         const parsed = EvalJudgeResponseSchema.safeParse(result.value.output);
         if (!parsed.success) {
           const msg = `Invalid judge response: ${parsed.error.message}`;
-          (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);
+          ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
           return failOpenResult(msg);
         }
 
         return toEvalJudgeResult(parsed.data, threshold, config.criteria);
       } catch (e) {
         const msg = `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
-        (ctx.logger?.warn ?? console.warn)(`[eval-judge:${config.id}] ${msg}`);
+        ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
         return failOpenResult(msg);
       }
     },
