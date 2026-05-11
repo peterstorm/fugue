@@ -173,6 +173,7 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
           nodeId: config.id,
           attempts: 2,
           lastError: "message" in result.error ? result.error.message : String(result.error),
+          rootErrorKind: result.error.kind,
         });
       }
     }

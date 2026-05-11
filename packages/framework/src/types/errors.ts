@@ -2,7 +2,24 @@
 
 export type FrameworkError =
   | { readonly kind: "validation"; readonly nodeId: string; readonly message: string; readonly path?: string }
-  | { readonly kind: "retry-exhausted"; readonly nodeId: string; readonly attempts: number; readonly lastError: string }
+  | {
+      readonly kind: "retry-exhausted";
+      readonly nodeId: string;
+      readonly attempts: number;
+      /**
+       * Human-readable summary of the final failure. For `node-crash` and
+       * `transient` this is the original `message` field; for other kinds it
+       * is `JSON.stringify(error)` so the structured payload is still
+       * legible. Prefer `rootErrorKind` for programmatic pattern-matching.
+       */
+      readonly lastError: string;
+      /**
+       * Discriminant of the underlying error that exhausted the budget.
+       * Lets consumers tell a rate-limit storm (`"transient"`) from a logic
+       * crash (`"node-crash"`) without parsing `lastError`.
+       */
+      readonly rootErrorKind: FrameworkError["kind"];
+    }
   | { readonly kind: "checkpoint-missing"; readonly runId: string }
   | { readonly kind: "checkpoint-expired"; readonly runId: string; readonly expiredAt: Date }
   | { readonly kind: "checkpoint-corrupt"; readonly runId: string; readonly nodeId?: string; readonly message: string }

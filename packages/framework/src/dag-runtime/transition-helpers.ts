@@ -315,7 +315,14 @@ export const handleNodeFailed = (
     };
   }
 
-  // Exhausted — fail the DAG with retry-exhausted error kind
+  // Exhausted — fail the DAG with retry-exhausted error kind. Preserve the
+  // underlying error's `kind` on `rootErrorKind` so consumers can tell a
+  // rate-limit storm (`transient`) from a deterministic failure (`node-crash`)
+  // without parsing `lastError`.
+  const lastError =
+    error.kind === "node-crash" || error.kind === "transient"
+      ? error.message
+      : JSON.stringify(error);
   return {
     state: {
       kind: "failed",
@@ -323,7 +330,8 @@ export const handleNodeFailed = (
         kind: "retry-exhausted",
         nodeId,
         attempts: currentAttempts + 1,
-        lastError: error.kind === "node-crash" ? error.message : JSON.stringify(error),
+        lastError,
+        rootErrorKind: error.kind,
       },
     },
     context: ctxWithCoFailed,

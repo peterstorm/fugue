@@ -188,11 +188,30 @@ function isEnvelope(v: unknown): v is RecordedEvent<unknown> {
 }
 
 /**
- * Track IDs we've already warned about so a corrupt stream doesn't fill the
- * log. Bounded so a degenerate stream can't grow the set indefinitely.
+ * Total count of malformed entry IDs seen this process. Used to log at
+ * decaying frequency so a degenerate stream cannot flood the log, but also
+ * cannot silently suppress the warning past a cap once enough unique IDs
+ * have rolled through. The first 10 occurrences always log; after that, log
+ * every `MALFORMED_LOG_INTERVAL`-th occurrence with the cumulative count.
  */
-const warnedMalformedIds = new Set<string>();
-const MAX_WARNED_IDS = 1000;
+let malformedIdCount = 0;
+const MALFORMED_LOG_FIRST_N = 10;
+const MALFORMED_LOG_INTERVAL = 100;
+
+/**
+ * Test-only reset hook. The framework barrel does not re-export this — it is
+ * for test isolation between files that share the Bun module cache.
+ */
+export function __resetEventLogState(): void {
+  malformedIdCount = 0;
+}
+
+/**
+ * Test-only re-export of the parser so unit tests can exercise the
+ * warning-frequency contract without standing up Redis.
+ */
+export const __parseEntryIdTimestamp = (entryId: string): number =>
+  parseEntryIdTimestamp(entryId);
 
 /**
  * Parse the millisecond prefix from a Redis Stream entry ID
@@ -200,20 +219,23 @@ const MAX_WARNED_IDS = 1000;
  * malformed — that should never happen for entries Redis itself produced,
  * but we don't want a single corrupt entry to crash the reader.
  *
- * Log once per unique malformed ID. The `0` fallback maps to the Unix epoch,
- * so silently accepting it makes forensic time-range queries unreliable;
- * the warn gives operators a signal that the stream has been manually
- * mutated or contains pre-envelope-format data.
+ * Logs the first 10 occurrences, then every 100th. Replaces the bounded-set
+ * approach that silently suppressed warnings once 1000 unique malformed IDs
+ * had been seen — operators need a signal even when the stream is being
+ * mutated at scale.
  */
 function parseEntryIdTimestamp(entryId: string): number {
   const dashIdx = entryId.indexOf("-");
   const msStr = dashIdx === -1 ? entryId : entryId.slice(0, dashIdx);
   const ms = Number(msStr);
   if (Number.isFinite(ms)) return ms;
-  if (warnedMalformedIds.size < MAX_WARNED_IDS && !warnedMalformedIds.has(entryId)) {
-    warnedMalformedIds.add(entryId);
+  malformedIdCount += 1;
+  const shouldLog =
+    malformedIdCount <= MALFORMED_LOG_FIRST_N ||
+    malformedIdCount % MALFORMED_LOG_INTERVAL === 0;
+  if (shouldLog) {
     console.warn(
-      `[event-log] malformed Redis Stream entry ID "${entryId}" — falling back to recordedAtMs=0. Forensic time-range queries against this entry will be inaccurate.`,
+      `[event-log] malformed Redis Stream entry ID "${entryId}" — falling back to recordedAtMs=0 (total malformed seen: ${malformedIdCount}). Forensic time-range queries against this entry will be inaccurate.`,
     );
   }
   return 0;

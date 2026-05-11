@@ -334,23 +334,35 @@ export const runDagStateful = async <I, O>(
               // emitRunEnd.
               const p = finalize().catch((e) => {
                 console.error("[runDagStateful] background finalize failed:", e);
+                // Each cleanup wrapped independently; log any secondary failure
+                // so it doesn't masquerade as the primary `finalize` error or
+                // get attributed to BufferedObserver's TTL eviction.
                 try {
                   rootSpan.setStatus({
                     code: SpanStatusCode.ERROR,
                     message: e instanceof Error ? e.message : String(e),
                   });
-                } catch {
-                  /* setStatus may throw if the span SDK is in a bad state */
+                } catch (setStatusErr) {
+                  console.error(
+                    "[runDagStateful] rootSpan.setStatus threw during background-finalize error cleanup:",
+                    setStatusErr,
+                  );
                 }
                 try {
                   rootSpan.end();
-                } catch {
-                  /* end() may throw if already ended */
+                } catch (endErr) {
+                  console.error(
+                    "[runDagStateful] rootSpan.end threw during background-finalize error cleanup (span will leak until TTL eviction):",
+                    endErr,
+                  );
                 }
                 try {
                   emitRunEnd("error");
-                } catch {
-                  /* observer may throw — the run is already over */
+                } catch (emitErr) {
+                  console.error(
+                    "[runDagStateful] emitRunEnd threw during background-finalize error cleanup:",
+                    emitErr,
+                  );
                 }
               });
               opts.onBackground(p);

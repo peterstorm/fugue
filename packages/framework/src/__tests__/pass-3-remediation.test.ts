@@ -1,5 +1,5 @@
 // Regression suite for the 2026-05-11 framework review remediation pass 3.
-// Each describe block maps to a Wave-1 fix in
+// Each describe block maps to a Wave-N fix in
 // docs/plans/2026-05-11-framework-review-remediation-pass-3.md.
 
 import { describe, it, expect } from "bun:test";
@@ -278,7 +278,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
 
     try {
       await runStateMachine(job, compiled.value.machine, executor, {
-        errorEventOf: ({ retriable, message }) => ({ type: "ERROR", retriable, error: message }),
+        errorEventOf: ({ retriable, message }) => ({ type: "ERROR" as const, retriable, error: message }),
       });
     } catch {
       /* runner throws on terminal-failed — expected */
@@ -339,9 +339,9 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
       },
     };
 
-    const executor = async (_state: S, _ctx: C): Promise<E> => ({ type: "step" });
+    const executor = async (_state: S, _ctx: C): Promise<E> => ({ type: "step" as const });
     await runStateMachine(recorder, machine, executor, {
-      errorEventOf: () => ({ type: "step" }),
+      errorEventOf: () => ({ type: "step" as const }),
     });
 
     // 5 retry-flagged step transitions x→y, y→x, x→y, y→x, x→y plus one
@@ -416,5 +416,144 @@ describe("Wave 1.4 — eval-judge orchestrator exception flips passed to false",
     expect(results[0]!.passed).toBe(false);
     expect(results[0]!.skipped).toBe(false);
     expect(results[0]!.crash).toBeUndefined(); // not an orchestrator crash — just a low score
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 2.1 — retry-exhausted carries rootErrorKind for programmatic dispatch
+// ---------------------------------------------------------------------------
+
+describe("Wave 2.1 — retry-exhausted preserves the underlying error kind", () => {
+  it("transient-driven exhaustion sets rootErrorKind=transient and unwraps message into lastError", async () => {
+    let attempts = 0;
+    const dag = makeDag(
+      [
+        makeNode("a", {
+          run: async () => {
+            attempts += 1;
+            return err({ kind: "transient" as const, nodeId: "a", message: "429 rate limited" });
+          },
+        }),
+      ],
+      [],
+      { defaultRetryLimit: 1 },
+    );
+
+    const result = await runDagStateful(dag, null, makeBaseCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "retry-exhausted") {
+      expect(result.error.rootErrorKind).toBe("transient");
+      // lastError contains the underlying message, NOT JSON.stringify(...)
+      expect(result.error.lastError).toBe("429 rate limited");
+    }
+    expect(attempts).toBe(2);
+  });
+
+  it("node-crash-driven exhaustion sets rootErrorKind=node-crash", async () => {
+    const dag = makeDag(
+      [
+        makeNode("a", {
+          run: async () =>
+            err({ kind: "node-crash" as const, nodeId: "a", message: "kaboom" }),
+        }),
+      ],
+      [],
+      { defaultRetryLimit: 0 },
+    );
+
+    const result = await runDagStateful(dag, null, makeBaseCtx());
+    if (!result.ok && result.error.kind === "retry-exhausted") {
+      expect(result.error.rootErrorKind).toBe("node-crash");
+      expect(result.error.lastError).toBe("kaboom");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 2.3 — TailSamplingProcessor.forceFlush swallows inner exporter
+// rejections rather than letting them escape into OTel SDK shutdown.
+// ---------------------------------------------------------------------------
+
+describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejection", () => {
+  it("an exporter whose forceFlush rejects bumps exportFailed and resolves cleanly", async () => {
+    const { TailSamplingProcessor } = await import("../observer/tail-sampling-processor.js");
+    const exporter = {
+      export: (_spans: any, cb: any) => cb({ code: 0 }),
+      shutdown: async () => undefined,
+      forceFlush: async () => {
+        throw new Error("transport down");
+      },
+    } as any;
+    const policy = { shouldFlush: () => true } as any;
+    const proc = new TailSamplingProcessor(exporter, policy);
+
+    // forceFlush MUST resolve, not reject — otherwise the OTel SDK shutdown
+    // sequence surfaces the rejection and a clean app stop looks like a crash.
+    await expect(proc.forceFlush()).resolves.toBeUndefined();
+    expect(proc.exportFailed).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 2.4 — event-log malformed-id warning frequency
+// ---------------------------------------------------------------------------
+
+describe("Wave 2.4 — malformed Redis Stream entry IDs log at decaying frequency", () => {
+  it("logs the first 10 occurrences and every 100th thereafter (no silent suppression)", async () => {
+    const { __resetEventLogState, __parseEntryIdTimestamp } = await import(
+      "../queue-bullmq/event-log.js"
+    );
+    __resetEventLogState();
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (msg: unknown) => {
+      if (typeof msg === "string") warnings.push(msg);
+    };
+
+    try {
+      // Drive 215 malformed parses. Contract: log occurrences 1..10 plus 100 and 200.
+      for (let i = 0; i < 215; i++) {
+        const result = __parseEntryIdTimestamp(`not-a-valid-id-${i}`);
+        expect(result).toBe(0); // fallback to epoch
+      }
+
+      // First 10 + 100th + 200th = 12 warnings.
+      expect(warnings.length).toBe(12);
+      // The 10th warning should reference the total seen so far.
+      expect(warnings[9]).toContain("total malformed seen: 10");
+      // The 11th warning is the 100th occurrence.
+      expect(warnings[10]).toContain("total malformed seen: 100");
+      // The 12th warning is the 200th occurrence.
+      expect(warnings[11]).toContain("total malformed seen: 200");
+
+      // Reset clears the count so a follow-up parse logs again.
+      __resetEventLogState();
+      warnings.length = 0;
+      __parseEntryIdTimestamp("post-reset");
+      expect(warnings.length).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it("a valid entry id returns the millisecond prefix without logging", async () => {
+    const { __resetEventLogState, __parseEntryIdTimestamp } = await import(
+      "../queue-bullmq/event-log.js"
+    );
+    __resetEventLogState();
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (msg: unknown) => {
+      if (typeof msg === "string") warnings.push(msg);
+    };
+    try {
+      expect(__parseEntryIdTimestamp("1715200000000-0")).toBe(1_715_200_000_000);
+      expect(__parseEntryIdTimestamp("1715200000123")).toBe(1_715_200_000_123);
+      expect(warnings.length).toBe(0);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });

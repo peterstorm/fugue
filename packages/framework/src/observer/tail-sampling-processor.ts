@@ -199,7 +199,17 @@ export class TailSamplingProcessor implements SpanProcessor {
     // `exportFailed` and logged by trackExport; allSettled ensures we never
     // miss waiting for an export just because it rejected.
     await Promise.allSettled([...this.pendingExports]);
-    await this.exporter.forceFlush?.();
+    // Wrap the inner exporter's forceFlush so a rejection cannot escape into
+    // the OTel SDK shutdown path. An unhandled rejection here makes a clean
+    // application stop look like a crash to process supervisors.
+    if (this.exporter.forceFlush) {
+      try {
+        await this.exporter.forceFlush();
+      } catch (err) {
+        this.exportFailed++;
+        console.error("[TailSamplingProcessor] exporter.forceFlush rejected during flush:", err);
+      }
+    }
   }
 
   async shutdown(): Promise<void> {
