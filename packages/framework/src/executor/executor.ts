@@ -58,6 +58,13 @@ export interface RunOptions {
    * Presence of this option triggers the state-machine path.
    */
   readonly retryLimits?: Readonly<Record<string, number>>;
+  /**
+   * Suppress the "DAG declares retries/conditional edges but no `jobLike`"
+   * warning (ADR 0019). Default `false`. Use when SM-path semantics in-memory
+   * is the deliberate intent (tests, fixture-driven CLI tools, transient batch
+   * jobs).
+   */
+  readonly suppressRoutingWarnings?: boolean;
 }
 
 const emit = (ctx: NodeContext, event: ObserverEvent) => {
@@ -132,6 +139,23 @@ export const runDag = async <I, O>(
     dagDeclaresConditionalEdges ||
     opts?.jobLike !== undefined ||
     opts?.retryLimits !== undefined;
+
+  // ADR 0019: warn when a DAG declares features that need SM-path semantics
+  // (retries / conditional edges) but the caller hasn't supplied a durable
+  // jobLike. The runtime semantics are intact (in-memory job handles it), but
+  // across-crash durability is not guaranteed. HITL-only is excluded — HITL
+  // DAGs without jobLike are a common test-fixture shape, and the absence is
+  // more clearly the caller's intent there.
+  if (
+    useStateMachinePath &&
+    !opts?.jobLike &&
+    !opts?.suppressRoutingWarnings &&
+    (dagDeclaresRetries || dagDeclaresConditionalEdges)
+  ) {
+    ctx.logger?.warn?.(
+      "[runDag] DAG declares retries/conditional edges but no `jobLike` provided — runtime semantics intact, but durability across worker crashes is not guaranteed.",
+    );
+  }
 
   if (opts?.resume && useStateMachinePath) {
     return err({

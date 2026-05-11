@@ -1,9 +1,9 @@
 # ADR 0002: `runDag` becomes a back-compat shim, not a rewrite
 
-**Status:** Accepted
+**Status:** Accepted (amended by ADR 0018, ADR 0019)
 **Date:** 2026-05-09
 **Spec ref:** SC-001 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
-**Related:** ADR 0001 (single-package layout), ADR 0007 (state-machine model boundary).
+**Related:** ADR 0001 (single-package layout), ADR 0007 (state-machine model boundary), ADR 0018 (`onBackground` on SM path — supersedes the rejection in §Consequences below), ADR 0019 (current routing predicate — supersedes the predicate sketched in §Decision below).
 
 ## Context
 
@@ -75,7 +75,7 @@ This shim was introduced in T6 of the implementation plan. AD-7 covers the `JobL
 - The routing predicate is implicit knowledge — a reader debugging "why didn't my retry limit apply?" needs to know that omitting `retryLimits` keeps them on the legacy path.
 - `runDagInner` accumulates the label "legacy" but is still load-bearing. We accept that it will outlive the migration and may need a deprecation plan if/when the stateful path reaches feature parity.
 - Resume + jobLike rejection is a sharp edge. Callers who want durable resume on a job-backed run get an error, not silent fallback. We prefer the loud failure.
-- `onBackground` is rejected on the state-machine path (eval-judge background scheduling is Phase 5 work). Callers that supply both `onBackground` and any state-machine opt receive an explicit error.
+- ~~`onBackground` is rejected on the state-machine path (eval-judge background scheduling is Phase 5 work). Callers that supply both `onBackground` and any state-machine opt receive an explicit error.~~ **Superseded by ADR 0018:** `onBackground` is now supported on both paths.
 
 ## Rejected alternatives
 

@@ -1,11 +1,13 @@
 # ADR 0007: `runDag` legacy fast path stays one-shot; state-machine path is opt-in
 
-**Status:** Accepted (routing predicate amended by ADR 0009)
+**Status:** Accepted (routing predicate amended by ADR 0009 and ADR 0019; `onBackground` guard superseded by ADR 0018)
 **Date:** 2026-05-09
 **Spec ref:** SC-001, SC-006 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
-**Related:** ADR 0002 (back-compat shim), ADR 0009 (current routing predicate), AD-7 in `.claude/plans/2026-05-08-durable-state-machine-runtime.md`.
+**Related:** ADR 0002 (back-compat shim), ADR 0009 (HITL routing), ADR 0018 (`onBackground` on SM path), ADR 0019 (current routing predicate), AD-7 in `.claude/plans/2026-05-08-durable-state-machine-runtime.md`.
 
-> **Amendment (ADR 0009):** the routing predicate documented in this ADR (`opts.jobLike || opts.onHumanReview || opts.retryLimits`) silently dropped HITL semantics for DAGs that declared `humanReview` nodes without an `onHumanReview` hook. The predicate has been replaced by one driven by node config: `dagDeclaresHITL || opts.jobLike || opts.retryLimits`, with bidirectional validation between node config and the hook. See ADR 0009 for the current contract; this ADR remains as the rationale for *having* a routing shim at all.
+> **Amendment (ADR 0009 + ADR 0019):** the routing predicate documented in this ADR (`opts.jobLike || opts.onHumanReview || opts.retryLimits`) silently dropped HITL semantics for DAGs that declared `humanReview` nodes without an `onHumanReview` hook, and missed retries / conditional-edges entirely. The predicate has been replaced by one driven by node config plus call-site opts: `dagDeclaresHITL || dagDeclaresRetries || dagDeclaresConditionalEdges || opts.jobLike || opts.retryLimits`. See ADR 0019 for the current contract; this ADR remains as the rationale for *having* a routing shim at all.
+>
+> **Amendment (ADR 0018):** the `onBackground` guard documented below was removed. `onBackground` is now supported on both paths and is no longer a routing trigger.
 
 ## Context
 
@@ -70,7 +72,7 @@ export const runDag = (opts: RunDagOpts) => {
 - `runDagInner` is the **byte-for-byte previous body** of `runDag`. No refactors, no "while we're here" cleanups. SC-001's oracle is the existing test suite running against unchanged code.
 - `runDagStateful` lives in `packages/framework/src/dag-runtime/run-dag-stateful.ts` and drives `runStateMachine` against a `dag-machine` definition. It calls into the same node execution helpers and observer/OTel dispatch as `runDagInner` so behavior matches at the leaf level.
 - The feature-detect predicate is a single `||` chain. Adding a new opt-in feature means adding one disjunct here and updating this ADR's predicate snippet.
-- **`onBackground` guard:** `onBackground` is a legacy fast-path-only option. If a caller opts into the state-machine path *and* passes `onBackground`, `runDag` returns `err({ kind: "invalid-input", ... })` rather than silently dropping the option. Background work belongs in a separate job under the state-machine model, not in a per-wave hook.
+- ~~**`onBackground` guard:** `onBackground` is a legacy fast-path-only option. If a caller opts into the state-machine path *and* passes `onBackground`, `runDag` returns `err({ kind: "invalid-input", ... })` rather than silently dropping the option. Background work belongs in a separate job under the state-machine model, not in a per-wave hook.~~ **Superseded by ADR 0018:** `onBackground` is now supported on both paths. `runDagStateful` schedules `finalize()` (judges + span close + `run-end`) detached when `opts.onBackground` is supplied.
 - **Resume guard:** `runDagStateful` is also the resume entry point. When `runStateMachine` rehydrates a paused DAG (HITL or hook-crash retry), it dispatches back through this same path — ensuring resumed runs and fresh runs share one code body.
 
 **Invariants preserved by this split:**

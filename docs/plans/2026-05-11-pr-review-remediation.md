@@ -24,7 +24,7 @@
 | 2 ✅ | Durability critical-path (checkpoint serialization, `finalize` span/run-end, legacy checkpoint failure, `approve-with-edit` schema) | Resume corruption, orphaned spans, output-shape corruption |
 | 3 ✅ | Observability silent failures (TailSamplingProcessor, MlflowOtlpExporter, BullMQ close, DLQ notifier, dispatchEvent, predicate-malformed) | Invisible data loss, undetectable partial shutdowns |
 | 4 ✅ | Public-surface + type hygiene (barrel strip, `JobLike<E>`, `runtime as NodeContext`, `as DagDef` cast, ContextCacheAdapter miss/hit) | Locked-in semver surface, type-erased domain events |
-| 5 ◐ | Architecture cleanups — §5.4/§5.5 done; ADRs §5.1–§5.3 pending | Boundary regressions, future maintainer confusion |
+| 5 ✅ | Architecture cleanups — namespace move, ADRs 0018/0019/0020, no-jobLike warning | Boundary regressions, future maintainer confusion |
 | 6 | Test fortification (Redis NOSCRIPT, BullMQ dedup, AsyncMutex double-release, property tests, regressions for waves 1-2) | Silent reintroduction of waves 1-2 bugs |
 | 7 | Structural refactors (runNode dedup, executor/dag-runtime cycle, legacy-path retirement, OpenAI client `any`-cleanup, capability-typed NodeContext, `applyJitter` extraction) | Permanent two-path tech debt |
 | 8 | Final polish — comment sweep beyond ADR-0017, `code-simplifier` pass, ADR cross-link audit | Cosmetic |
@@ -390,11 +390,11 @@ After §4.4, the comment near `llm/anthropic-client.ts:180` claiming the cast is
 
 ---
 
-## 5. Wave 5 — Architecture cleanups (PARTIAL — §5.4, §5.5 done; ADRs §5.1–§5.3 pending)
+## 5. Wave 5 — Architecture cleanups ✅ DONE 2026-05-11
 
-**Status:** §5.4 (namespace move) and §5.5 (SDK citation) shipped 2026-05-11. The three ADRs (§5.1, §5.2, §5.3) are pure documentation and pending. Tests: 576 pass / 0 fail / 29 Redis-gated skips.
+**Status:** complete. §5.4 (namespace move) and §5.5 (SDK citation) shipped earlier 2026-05-11. ADRs §5.1 (0018), §5.2 (0019), §5.3 (0020) shipped, plus the §5.2 no-jobLike routing warning + `opts.suppressRoutingWarnings` toggle and the §5.3 100-shape ordering property test. Typecheck clean. 580 pass / 0 fail / 29 Redis-gated skips. ADR 0002 and ADR 0007 updated with forward-links to ADR 0018 / ADR 0019.
 
-### 5.1 ADR-0018: `onBackground` on the SM path
+### 5.1 ADR-0018: `onBackground` on the SM path ✅
 
 Write `docs/adr/0018-onbackground-on-state-machine-path.md`. Document:
 
@@ -403,7 +403,7 @@ Write `docs/adr/0018-onbackground-on-state-machine-path.md`. Document:
 - The implication: eval-judge results computed in the background are *not* persisted in the durable state-machine (they ride on the same eventual-consistency boundary as ADR-0003's run-end event)
 - Update ADR-0002 and ADR-0007 with a forward-link: "Superseded by ADR-0018 regarding `onBackground`."
 
-### 5.2 ADR-0019: routing predicate for SM-vs-legacy path
+### 5.2 ADR-0019: routing predicate for SM-vs-legacy path ✅
 
 Write `docs/adr/0019-runtime-routing-predicate.md` documenting that the SM path is selected when *any* of these hold:
 
@@ -417,7 +417,7 @@ Supersedes the partial predicate in ADR-0009.
 
 Add a warning in `executor/executor.ts:100-132` when `dagDeclaresRetries || dagDeclaresConditionalEdges` triggers SM-path routing but no `jobLike` was provided: `logger?.warn?.("DAG declares retries/conditional edges but no jobLike provided — durability across crashes is not guaranteed.")`. Configurable to silent via `opts.suppressRoutingWarnings`.
 
-### 5.3 ADR-0020: `onTrace` vs `run-end` ordering
+### 5.3 ADR-0020: `onTrace` vs `run-end` ordering ✅
 
 Document the implicit ordering today (`onTrace` fires inside `runStateMachine`, `run-end` fires from `runDagStateful` afterwards). State this as a contract. Add a test that records both event streams and asserts ordering invariants over 100 random runs.
 
