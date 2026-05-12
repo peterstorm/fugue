@@ -2,7 +2,7 @@ import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect, beforeAll } from "bun:test";
 import { z } from "zod";
-import { context as otelContext } from "@opentelemetry/api";
+import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { FakeLlmClient } from "../llm/fake-client.js";
 import type { ToolDef, SendWithToolsRequest } from "../types/llm.js";
@@ -331,9 +331,17 @@ describe("FakeLlmClient.sendWithTools — loop behavior", () => {
 interface RecordedSpan {
   readonly name: string;
   readonly spanType: string;
+  readonly spanId: string;
+  readonly parentSpanId: string | undefined;
   readonly attributes: Record<string, unknown>;
   readonly statusCode?: string;
 }
+
+let spanIdCounter = 0;
+const nextSpanId = (): string => {
+  spanIdCounter += 1;
+  return spanIdCounter.toString(16).padStart(16, "0");
+};
 
 const makeRecordingTracer = (
   recorded: RecordedSpan[],
@@ -345,6 +353,14 @@ const makeRecordingTracer = (
     withSpan: async <T,>(name: string, spanType: string, fn: () => Promise<T>) => {
       const attrs: Record<string, unknown> = {};
       let statusCode: string | undefined;
+      const spanId = nextSpanId();
+      // Capture the active span at withSpan entry: this is the OTel parent the
+      // new span would inherit. ADR-0023 requires tool spans to nest under the
+      // initiating LLM span so MLflow renders the chat → tool → chat flow.
+      const parentSpan = otelTrace.getSpan(otelContext.active());
+      const parentSpanId = parentSpan?.spanContext().spanId;
+      const isPlaceholderParent =
+        parentSpanId === undefined || /^0+$/.test(parentSpanId);
       const fakeSpan = {
         setAttribute: (k: string, v: unknown) => {
           attrs[k] = v;
@@ -362,13 +378,20 @@ const makeRecordingTracer = (
           statusCode = STATUS_NAMES[s.code];
           return fakeSpan;
         },
-        spanContext: () => ({ traceId: "0".repeat(32), spanId: "0".repeat(16), traceFlags: 0 }),
+        spanContext: () => ({ traceId: "0".repeat(32), spanId, traceFlags: 0 }),
         updateName: () => fakeSpan,
       };
       const ctx = otelMod.trace.setSpan(otelMod.context.active(), fakeSpan as any);
       return otelMod.context.with(ctx, async () => {
         const result = await fn();
-        recorded.push({ name, spanType, attributes: attrs, statusCode });
+        recorded.push({
+          name,
+          spanType,
+          spanId,
+          parentSpanId: isPlaceholderParent ? undefined : parentSpanId,
+          attributes: attrs,
+          statusCode,
+        });
         return result;
       });
     },
@@ -438,6 +461,77 @@ describe("sendWithTools span emission (GenAI semconv)", () => {
     expect(llmSpan?.attributes["gen_ai.response.id"]).toBe("resp_123");
     expect(llmSpan?.attributes["gen_ai.response.model"]).toBe("fake-model-actual");
     expect(llmSpan?.attributes["gen_ai.response.finish_reasons"]).toEqual(["end_turn"]);
+  });
+
+  // ADR-0023 nesting invariant: when an outer "node" context is active —
+  // production wraps sendWithTools in withNodeSpan — every CHAT_MODEL and TOOL
+  // span produced by the loop must nest under that ambient span. Tool spans
+  // open *after* the LLM span that requested them has ended, so the correct
+  // tree is `node → {chat₁, tool₁, tool₂, chat₂, …}` (siblings under the node)
+  // rather than `chat → tool` chains. This is what MLflow renders as a single
+  // expandable node row containing the full conversation. Pass-4 W5.1.
+  test("ADR-0023: TOOL and CHAT_MODEL spans share the active parent span", async () => {
+    const recorded: RecordedSpan[] = [];
+    const tracer = makeRecordingTracer(recorded);
+
+    // Open a synthetic outer span mirroring `withNodeSpan` so the OTel
+    // context-with(...) chain has something other than the root to inherit from.
+    const otelMod = require("@opentelemetry/api") as typeof import("@opentelemetry/api");
+    const outerSpanId = nextSpanId();
+    const outerSpan = {
+      setAttribute: () => outerSpan,
+      setAttributes: () => outerSpan,
+      addEvent: () => outerSpan,
+      end: () => undefined,
+      isRecording: () => true,
+      recordException: () => undefined,
+      setStatus: () => outerSpan,
+      spanContext: () => ({ traceId: "0".repeat(32), spanId: outerSpanId, traceFlags: 0 }),
+      updateName: () => outerSpan,
+    };
+    const outerCtx = otelMod.trace.setSpan(otelMod.context.active(), outerSpan as any);
+
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: (_req, ctx) => {
+        if (ctx.turn === 0) {
+          return {
+            type: "tool_use",
+            calls: [
+              { id: "c1", name: "add_numbers", input: { a: 1, b: 2 } },
+              { id: "c2", name: "add_numbers", input: { a: 3, b: 4 } },
+            ],
+          };
+        }
+        if (ctx.turn === 1) {
+          return {
+            type: "tool_use",
+            calls: [{ id: "c3", name: "add_numbers", input: { a: 5, b: 6 } }],
+          };
+        }
+        return { type: "final", content: { result: 42 } };
+      },
+    });
+
+    const result = await otelMod.context.with(outerCtx, () =>
+      client.sendWithTools(baseReq(), makeCtx({ tracer })),
+    );
+    expect(result.ok).toBe(true);
+
+    const llmSpans = recorded.filter((r) => r.spanType === "CHAT_MODEL");
+    const toolSpans = recorded.filter((r) => r.spanType === "TOOL");
+    expect(llmSpans.length).toBeGreaterThanOrEqual(2);
+    expect(toolSpans).toHaveLength(3);
+
+    // Both span families nest directly under the outer span — they are NOT
+    // siblings of the outer (parent === undefined) and NOT children of each
+    // other. The third assertion catches a regression where withLlmSpan would
+    // accidentally swallow the surrounding context and orphan its children.
+    for (const llmSpan of llmSpans) {
+      expect(llmSpan.parentSpanId).toBe(outerSpanId);
+    }
+    for (const toolSpan of toolSpans) {
+      expect(toolSpan.parentSpanId).toBe(outerSpanId);
+    }
   });
 
   test("tool error sets error.type and ERROR status", async () => {

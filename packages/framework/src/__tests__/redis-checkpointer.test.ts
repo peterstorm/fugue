@@ -3,11 +3,33 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import Redis from "ioredis";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
+import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import type { Checkpointer, RunMeta, NodeState } from "../checkpoint/checkpointer.js";
 
 // --- Shared test suite for any Checkpointer ---
 
-function checkpointerSuite(name: string, factory: () => Checkpointer, cleanup?: () => Promise<void>) {
+/**
+ * Bypass-injection callbacks the shared ADR-0017 tests need. The two backends
+ * use different bypass paths: Redis writes raw strings with `redis.set`,
+ * in-memory mutates `__testRawMetas`. The suite is parametric over both so
+ * the contract assertions stay identical.
+ *
+ * `corrupt` is optional because in-memory has no serialization step — a
+ * "corrupt" entry in a `Map<string, StoredMeta>` is not a representable state.
+ */
+interface CheckpointerSuiteRaw {
+  setStaleVersion(cp: Checkpointer, runId: string, opts: { startedAt: Date; nodeCount: number }): Promise<void>;
+  setMissingVersion(cp: Checkpointer, runId: string, opts: { startedAt: Date; nodeCount: number }): Promise<void>;
+  setExpired(cp: Checkpointer, runId: string, opts: { startedAt: Date; nodeCount: number; expiredAt: Date }): Promise<void>;
+  setCorrupt?: (cp: Checkpointer, runId: string) => Promise<void>;
+}
+
+function checkpointerSuite(
+  name: string,
+  factory: () => Checkpointer,
+  raw: CheckpointerSuiteRaw,
+  cleanup?: () => Promise<void>,
+) {
   describe(name, () => {
     let cp: Checkpointer;
 
@@ -66,12 +88,111 @@ function checkpointerSuite(name: string, factory: () => Checkpointer, cleanup?: 
         expect(Object.keys(loadResult.value.nodes).sort()).toEqual(["a", "b", "c"]);
       }
     });
+
+    // ADR-0017 / W5.3 — both backends MUST reject mismatched frameworkVersion
+    // on load. Without this, a checkpoint produced by an older framework
+    // release can be replayed under newer validation semantics, silently
+    // skipping invariants that were tightened in the meantime.
+    test("load rejects checkpoint with stale frameworkVersion", async () => {
+      await raw.setStaleVersion(cp, "stale-1", { startedAt: new Date(), nodeCount: 1 });
+      const result = await cp.load("stale-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("checkpoint-version-mismatch");
+        if (result.error.kind === "checkpoint-version-mismatch") {
+          expect(result.error.runId).toBe("stale-1");
+          expect(result.error.expected).toBe(FRAMEWORK_VERSION);
+          expect(result.error.actual).toBe("1");
+        }
+      }
+    });
+
+    test("load rejects checkpoint missing frameworkVersion field", async () => {
+      await raw.setMissingVersion(cp, "missing-1", { startedAt: new Date(), nodeCount: 1 });
+      const result = await cp.load("missing-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("checkpoint-version-mismatch");
+        if (result.error.kind === "checkpoint-version-mismatch") {
+          expect(result.error.actual).toBeUndefined();
+        }
+      }
+    });
+
+    test("load rejects expired checkpoint (createdAt older than TTL)", async () => {
+      const expiredAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await raw.setExpired(cp, "expired-1", { startedAt: new Date(), nodeCount: 1, expiredAt });
+      const result = await cp.load("expired-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("checkpoint-expired");
+        if (result.error.kind === "checkpoint-expired") {
+          expect(result.error.runId).toBe("expired-1");
+          expect(result.error.expiredAt.getTime()).toBe(expiredAt.getTime());
+        }
+      }
+    });
+
+    // In-memory has no serialization step — a `corrupt` row cannot exist in
+    // the storage map by construction. Skip the case for backends that pass
+    // `setCorrupt: undefined`.
+    if (raw.setCorrupt !== undefined) {
+      test("load rejects malformed meta payload with checkpoint-corrupt", async () => {
+        await raw.setCorrupt!(cp, "corrupt-1");
+        const result = await cp.load("corrupt-1");
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error.kind).toBe("checkpoint-corrupt");
+          if (result.error.kind === "checkpoint-corrupt") {
+            expect(result.error.runId).toBe("corrupt-1");
+          }
+        }
+      });
+    }
   });
 }
 
 // --- InMemoryCheckpointer (always runs) ---
 
-checkpointerSuite("InMemoryCheckpointer", () => new InMemoryCheckpointer());
+checkpointerSuite(
+  "InMemoryCheckpointer",
+  () => new InMemoryCheckpointer(),
+  {
+    setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
+      // Caller-supplied frameworkVersion bypasses setMeta's default stamp;
+      // matches the Redis-side test's explicit frameworkVersion: "1".
+      await cp.setMeta(runId, {
+        dagId: "d" as DagId,
+        startedAt,
+        nodeCount,
+        frameworkVersion: "1",
+      });
+    },
+    setMissingVersion: async (cp, runId, { startedAt, nodeCount }) => {
+      // setMeta would re-stamp the version; reach into the private store the
+      // same way the Redis test reaches into `redis.set`. Same "missing
+      // field" simulation, same observable error.
+      await cp.setMeta(runId, {
+        dagId: "d" as DagId,
+        startedAt,
+        nodeCount,
+      });
+      const rawMap = (cp as InMemoryCheckpointer).__testRawMetas();
+      const stored = rawMap.get(runId)!;
+      rawMap.set(runId, {
+        ...stored,
+        meta: { dagId: stored.meta.dagId, startedAt: stored.meta.startedAt, nodeCount: stored.meta.nodeCount },
+      });
+    },
+    setExpired: async (cp, runId, { startedAt, nodeCount, expiredAt }) => {
+      await cp.setMeta(runId, { dagId: "d" as DagId, startedAt, nodeCount });
+      const rawMap = (cp as InMemoryCheckpointer).__testRawMetas();
+      const stored = rawMap.get(runId)!;
+      rawMap.set(runId, { ...stored, createdAt: expiredAt });
+    },
+    // corrupt JSON path is N/A for in-memory — no serialization layer.
+  },
+);
 
 // --- RedisCheckpointer (skip if Redis unavailable) ---
 //

@@ -189,20 +189,64 @@ describe("MlflowOtlpExporter", () => {
     expect(exporter.getRegistry().size).toBe(0);
   });
 
-  it("parseFailureCounter is per-instance", async () => {
-    // Two exporters should not share parse failure state
+  it("parseFailureCounter is per-instance (W5.5 — isolation observed via counters)", async () => {
+    // Pass-3 introduced per-instance parseFailureCounter to break a shared
+    // module-level closure, but the regression test only verified "no throw"
+    // — it never *observed* the counter to confirm isolation. A future
+    // refactor that re-installed shared state would silently slip past.
+    // Pass-4 §5.5 adds the missing assertion.
     const exporter2 = new MlflowOtlpExporter({
       url: "http://localhost:5000",
       experimentId: "2",
       createInner: async () => innerExporter,
     });
 
-    const span = fakeSpan({
-      events: [{ name: EVENT_NODE_INPUT, attributes: { data: "not-json{{{" } }],
+    expect(exporter.parseFailureCount).toBe(0);
+    expect(exporter2.parseFailureCount).toBe(0);
+
+    // Trigger one parse failure on exporter A by feeding malformed JSON on the
+    // canonical event the MLflow handler tries to JSON.parse.
+    const badSpan = fakeSpan({
+      events: [{ name: EVENT_NODE_INPUT, attributes: { data: "not valid json" } }],
     });
-    await collectExport(exporter, [span]);
-    await collectExport(exporter2, [fakeSpan({ events: [{ name: EVENT_NODE_INPUT, attributes: { data: "also-bad" } }] })]);
-    // Both should have logged (count=1 each) — no shared state. Just verify no throw.
+    const { exported: outA } = await collectExport(exporter, [badSpan]);
+    void outA;
+
+    expect(exporter.parseFailureCount).toBe(1);
+    // Exporter B saw no spans yet — its counter must stay at zero. If the
+    // counter were shared (the bug we're guarding against), this would read 1.
+    expect(exporter2.parseFailureCount).toBe(0);
+
+    // On the failed-parse path the handler falls back to stashing the raw
+    // string under `mlflow.spanInputs.raw`. `mlflow.spanInputs` itself MUST
+    // still be set (the fallback path), but it MUST NOT carry parsed-shape
+    // keys from the malformed payload.
+    const exportedAttrs = exported[0].attributes as Record<string, unknown>;
+    const inputs = exportedAttrs["mlflow.spanInputs"] as Record<string, unknown>;
+    expect(inputs).toBeDefined();
+    expect(inputs["raw"]).toBe("not valid json");
+
+    // Drive exporter B with its own parse failure — its counter advances
+    // independently of A.
+    const exported2: ReadableSpan[] = [];
+    const innerExporter2: SpanExporter = {
+      export(spans, cb) {
+        exported2.push(...spans);
+        cb({ code: 0 });
+      },
+      shutdown: async () => {},
+    };
+    const exporter2Isolated = new MlflowOtlpExporter({
+      url: "http://localhost:5000",
+      experimentId: "2-iso",
+      createInner: async () => innerExporter2,
+    });
+    await collectExport(exporter2Isolated, [
+      fakeSpan({ events: [{ name: EVENT_NODE_INPUT, attributes: { data: "also-bad" } }] }),
+    ]);
+    expect(exporter2Isolated.parseFailureCount).toBe(1);
+    // A's counter never advances from B's activity.
+    expect(exporter.parseFailureCount).toBe(1);
   });
 
   // Wave 1.2 regression — shutdown()/forceFlush() must NOT throw when init

@@ -160,17 +160,12 @@ export function createCronScheduler(
   // When handleFire fails unexpectedly, re-arm at an exponentially-growing
   // delay (capped at 30 minutes) instead of the normal cron-tick interval.
   // Resets to normal scheduling on first success.
-  const BACKOFF_BASE_MS = 1000;
-  const BACKOFF_CAP_MS = 30 * 60 * 1000;
   function rescheduleTaskWithBackoff(
     task: TaskConfig,
     failureCount: number,
   ): void {
     disarmTask(task.id);
-    const backoffMs = Math.min(
-      BACKOFF_BASE_MS * Math.pow(2, failureCount - 1),
-      BACKOFF_CAP_MS,
-    );
+    const backoffMs = computeBackoffMs(failureCount);
     fwLogger().warn(
       `[CronScheduler] backing off task "${task.id}" by ${backoffMs}ms (consecutive failures: ${failureCount})`,
     );
@@ -320,6 +315,25 @@ export function createCronScheduler(
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Base delay applied to the first consecutive failure. Subsequent failures
+ * double the delay until `BACKOFF_CAP_MS` clamps further growth.
+ */
+export const BACKOFF_BASE_MS = 1_000;
+/** Hard ceiling on backoff — keeps recovery latency bounded after long outages. */
+export const BACKOFF_CAP_MS = 30 * 60 * 1_000;
+
+/**
+ * Pure exponential-backoff formula extracted from `rescheduleTaskWithBackoff`
+ * so the curve can be unit-tested without scheduling real timers. `n` is the
+ * 1-indexed consecutive-failure count; `n=1` returns `BACKOFF_BASE_MS`. Values
+ * `n < 1` are clamped to 1 to match the caller's invariant.
+ */
+export function computeBackoffMs(failureCount: number): number {
+  const n = Math.max(1, failureCount);
+  return Math.min(BACKOFF_BASE_MS * Math.pow(2, n - 1), BACKOFF_CAP_MS);
+}
 
 function findDependents(
   taskId: string,

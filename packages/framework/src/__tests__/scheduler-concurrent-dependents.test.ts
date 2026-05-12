@@ -195,11 +195,61 @@ describe("§6.6 — Concurrent resolveDependents for the same upstream task", ()
     scheduler.stop();
   });
 
-  it("three-way concurrent resolveDependents still yields exactly one enqueue", async () => {
-    const enqueueCalls: { taskId: string }[] = [];
-    const markers = makeDelayedMarkerStore(75);
-    const scheduler = createCronScheduler(markers, {
-      enqueue: async (t) => { enqueueCalls.push({ taskId: t.id }); },
+  // W5.9 — three-way concurrent resolveDependents, barrier-driven.
+  //
+  // The previous version of this test relied on a 75ms wall-clock delay in
+  // `makeDelayedMarkerStore` to overlap the three callers' `exists(fired)`
+  // reads. Under heavy CI load (slow event-loop, GC pause) any one caller
+  // could see another's `set(fired)` complete before its own `exists()`
+  // returned, making the race never happen — the test then passed for the
+  // wrong reason. Replacing the wall-clock with an explicit three-arrival
+  // barrier on the `fired` key reproduces the race deterministically: all
+  // three reads block until all three have arrived, so they observe identical
+  // pre-set state regardless of scheduler jitter.
+  it("explicit three-way TOCTOU: all three exists(fired) observe false before any set(fired) — only one effective enqueue", async () => {
+    const enqueueCalls: { taskId: string; triggeredAt: Date }[] = [];
+    const operations: string[] = [];
+
+    let firedBarrierResolve: () => void = () => {};
+    const firedBarrier = new Promise<void>((r) => { firedBarrierResolve = r; });
+    let firedExistsCount = 0;
+
+    const storage = new Map<string, { ttlSeconds: number; setAtMs: number }>();
+    const instrumentedMarkers: MarkerStore = {
+      async set(key, ttlSeconds) {
+        operations.push(`set:${key}`);
+        storage.set(key, { ttlSeconds, setAtMs: Date.now() });
+      },
+      async exists(key) {
+        operations.push(`exists:${key}`);
+        // Three-arrival barrier on the dependent's `fired` key — the same
+        // race gate the production scheduler's three concurrent callers hit.
+        if (key === markerFiredKey("dependent")) {
+          firedExistsCount += 1;
+          if (firedExistsCount === 3) firedBarrierResolve();
+          await firedBarrier;
+        }
+        return storage.has(key);
+      },
+      async delete(key) {
+        operations.push(`delete:${key}`);
+        storage.delete(key);
+      },
+    };
+
+    // Idempotent enqueue mirror of production (BullMQ `jobId` dedup).
+    const enqueuedJobIds = new Set<string>();
+    const jobIdOf = (t: TaskConfig, triggeredAt: Date): string =>
+      `${t.id}-${triggeredAt.getTime()}`;
+
+    const scheduler = createCronScheduler(instrumentedMarkers, {
+      enqueue: async (t, triggeredAt) => {
+        operations.push(`enqueue:${t.id}`);
+        const jobId = jobIdOf(t, triggeredAt);
+        if (enqueuedJobIds.has(jobId)) return;
+        enqueuedJobIds.add(jobId);
+        enqueueCalls.push({ taskId: t.id, triggeredAt });
+      },
     });
 
     const registry: TaskRegistry = new Map<string, TaskConfig>([
@@ -215,7 +265,21 @@ describe("§6.6 — Concurrent resolveDependents for the same upstream task", ()
       scheduler.resolveDependents("upstream", triggeredAt),
     ]);
 
-    expect(enqueueCalls.filter((c) => c.taskId === "dependent").length).toBe(1);
+    const firedExistsOps = operations.filter((op) => op === `exists:${markerFiredKey("dependent")}`);
+    const firstSetIdx = operations.findIndex((op) => op === `set:${markerFiredKey("dependent")}`);
+    const lastExistsIdx = operations.lastIndexOf(`exists:${markerFiredKey("dependent")}`);
+
+    expect(firedExistsOps.length).toBe(3);
+    // Race witnessed deterministically: every read precedes the first write.
+    expect(lastExistsIdx).toBeLessThan(firstSetIdx);
+
+    // The idempotency contract (BullMQ jobId dedup; scheduler.ts:285) folds
+    // the racing enqueues into a single effective job, regardless of how
+    // many resolveDependents callers fired in parallel.
+    const dependentEnqueues = enqueueCalls.filter((c) => c.taskId === "dependent");
+    expect(dependentEnqueues.length).toBe(1);
+    expect(storage.has(markerFiredKey("dependent"))).toBe(true);
+
     scheduler.stop();
   });
 });

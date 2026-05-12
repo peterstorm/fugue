@@ -150,6 +150,80 @@ describe("TailSamplingProcessor", () => {
     expect(seen[0].runId).toBe("tr-t-runid-2");
   });
 
+  // W5.7 — forceFlush must wait for in-flight exports to settle.
+  //
+  // Tail-sampling kicks off `exporter.export(...)` asynchronously when a root
+  // span lands. If the exporter is slow (e.g. an OTLP transport over a
+  // congested link), `forceFlush()` must not resolve until those in-flight
+  // calls complete — otherwise an application shutdown can race ahead and
+  // drop spans that were already dispatched but not yet acknowledged.
+  it("forceFlush waits for in-flight slow exports to complete", async () => {
+    let exportSettled = false;
+    let exportResolve: () => void = () => {};
+    const slowExporter: SpanExporter = {
+      export(_spans, cb) {
+        // Resolve the callback only after explicit release — simulates an
+        // OTLP exporter awaiting an HTTP 200 from the collector.
+        setTimeout(() => {
+          exportResolve();
+          exportSettled = true;
+          cb({ code: 0 });
+        }, 200);
+      },
+      shutdown: () => Promise.resolve(),
+    };
+    void exportResolve;
+
+    const proc = new TailSamplingProcessor(slowExporter, alwaysOn());
+    // Root-span end kicks off the export.
+    proc.onEnd(fakeSpan({ traceId: "t-slow", spanId: "r-slow" }));
+
+    // forceFlush must NOT resolve until the slow export settles. Race
+    // forceFlush against a 50ms timer that flips a marker — if forceFlush
+    // ignored the in-flight export, the timer would win (resolve before the
+    // 200ms exporter delay completes) and `exportSettled` would still be false.
+    const flushPromise = proc.forceFlush();
+    let flushDone = false;
+    flushPromise.then(() => { flushDone = true; });
+
+    // Wait less than the export's 200ms delay — flush should still be pending.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(flushDone).toBe(false);
+    expect(exportSettled).toBe(false);
+
+    // Wait past the export's 200ms delay — flush should now resolve.
+    await flushPromise;
+    expect(flushDone).toBe(true);
+    expect(exportSettled).toBe(true);
+  });
+
+  // W5.7 — forceFlush awaits in-flight exports even when several traces are
+  // dispatching simultaneously. Without `Promise.allSettled([...pendingExports])`
+  // in forceFlush, a slow-resolving exporter on trace A would leave trace A's
+  // pending promise un-awaited while trace B's faster exporter resolved.
+  it("forceFlush awaits all in-flight exports across multiple traces", async () => {
+    const settled: string[] = [];
+    const slowExporter: SpanExporter = {
+      export(spans, cb) {
+        const traceId = spans[0]!.spanContext().traceId;
+        const delay = traceId === "fast" ? 20 : 150;
+        setTimeout(() => {
+          settled.push(traceId);
+          cb({ code: 0 });
+        }, delay);
+      },
+      shutdown: () => Promise.resolve(),
+    };
+
+    const proc = new TailSamplingProcessor(slowExporter, alwaysOn());
+    proc.onEnd(fakeSpan({ traceId: "fast", spanId: "rf" }));
+    proc.onEnd(fakeSpan({ traceId: "slow", spanId: "rs" }));
+
+    await proc.forceFlush();
+
+    expect(settled.sort()).toEqual(["fast", "slow"]);
+  });
+
   it("handles multiple traces independently", () => {
     const { exporter, exported } = createCollector();
     const proc = new TailSamplingProcessor(exporter, alwaysOn());

@@ -217,6 +217,15 @@ export class MlflowOtlpExporter implements SpanExporter {
     return this.failedPermanently;
   }
 
+  /**
+   * Cumulative JSON parse failures observed on `mlflow.spanInputs` /
+   * `mlflow.spanOutputs` data fields, per-instance. Tests assert isolation
+   * across exporters; operators can scrape it for misbehaving producers.
+   */
+  get parseFailureCount(): number {
+    return this.parseFailureCounter.count;
+  }
+
   /** Number of spans dropped due to permanent initialization failure. */
   droppedSpanCount = 0;
 

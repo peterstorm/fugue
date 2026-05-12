@@ -92,6 +92,17 @@ export const createApp = (deps: AppDeps): Hono => {
         const loaded = await checkpointer.load(resume_run_id);
         if (!loaded.ok) {
           console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+          // checkpoint-version-mismatch and checkpoint-expired are *semantic*
+          // failures (the stored checkpoint is incompatible with the current
+          // DAG / framework / TTL); callers must start fresh, not retry. 409
+          // matches the existing identity-mismatch branch below. Other load
+          // failures (cache transient, corrupt JSON) remain a server 500.
+          if (
+            loaded.error.kind === "checkpoint-version-mismatch" ||
+            loaded.error.kind === "checkpoint-expired"
+          ) {
+            return c.json({ error: "Checkpoint incompatible with current DAG" }, 409);
+          }
           return c.json({ error: "Resume failed" }, 500);
         }
         if (!loaded.value) {
