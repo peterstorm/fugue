@@ -171,7 +171,14 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
       { type: "DONE" },
     ];
 
-    const beforeMs = Date.now();
+    // Use Redis server time (not Date.now()) to avoid host/VM clock skew
+    // when Redis runs inside a Podman/Docker container.
+    const redisTimeMs = async () => {
+      const [secs, micros] = await r.time();
+      return Number(secs) * 1000 + Math.floor(Number(micros) / 1000);
+    };
+
+    const beforeMs = await redisTimeMs();
     for (const event of events) {
       await r.xadd(
         streamKey,
@@ -185,7 +192,7 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
         JSON.stringify(event), // bare payload, no envelope wrapper
       );
     }
-    const afterMs = Date.now();
+    const afterMs = await redisTimeMs();
 
     const read = await reader.readEvents(queueName, jobId);
     expect(read).toHaveLength(2);

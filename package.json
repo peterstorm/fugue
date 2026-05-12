@@ -10,7 +10,8 @@
     "eval": "podman-compose -f infra/compose.yaml --profile eval up --build eval",
     "eval:ci": "podman-compose -f infra/compose.yaml --profile eval-ci up --build eval-ci",
     "eval:pull-model": "bash scripts/pull-judge-model.sh",
-    "dev": "bun run --filter customer-summary dev"
+    "dev": "bun run --filter customer-summary dev",
+    "test:redis": "podman run --rm -d --name fugue-redis-test -p 6379:6379 redis:7-alpine && sleep 1 && REDIS_URL=redis://localhost:6379 bun run --filter '*' test; podman stop fugue-redis-test"
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",
