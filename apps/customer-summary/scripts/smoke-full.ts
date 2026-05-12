@@ -662,26 +662,26 @@ console.log("\n=== Case 5: Tool call failure (exercises error spans) ===");
   const AnswerSchema = z.object({ answer: z.string(), sources: z.array(z.string()) });
   type Answer = z.infer<typeof AnswerSchema>;
 
-  // Script: LLM calls tool (which throws), then produces answer anyway (graceful degradation)
-  const script = [
+  // Script: LLM calls tool (which throws), then tries again — but tool keeps failing.
+  // No final turn provided, so the script runs out and the node fails.
+  const failingScript = [
     {
       type: "tool_use" as const,
-      calls: [{ id: "tc-s", name: "search_knowledge_base", input: { query: "refund policy" } }],
+      calls: [{ id: "tc-s1", name: "search_knowledge_base", input: { query: "refund policy" } }],
       tokensIn: 150,
       tokensOut: 30,
     },
+    // Model sees the error and tries again
     {
-      type: "final" as const,
-      content: {
-        answer: "Based on general company policy, refunds are available within 30 days of purchase.",
-        sources: ["fallback-general-knowledge"],
-      } satisfies Answer,
-      tokensIn: 400,
-      tokensOut: 55,
+      type: "tool_use" as const,
+      calls: [{ id: "tc-s2", name: "search_knowledge_base", input: { query: "refund policy retry" } }],
+      tokensIn: 200,
+      tokensOut: 25,
     },
+    // No final turn — script exhausts, node crashes
   ];
 
-  const llm = new FakeLlmClient(() => ({}), { withToolsScript: script });
+  const llm = new FakeLlmClient(() => ({}), { withToolsScript: failingScript });
   const observer = new RecordingObserver();
 
   const node = createLlmWithToolsNode({
@@ -690,8 +690,8 @@ console.log("\n=== Case 5: Tool call failure (exercises error spans) ===");
     outputSchema: AnswerSchema,
     model: "gpt-4o",
     tools: [failingTool as ToolDef<unknown, unknown>],
-    maxIterations: 3,
-    system: "Search the knowledge base and answer the user's question. If search fails, provide best-effort answer.",
+    maxIterations: 5,
+    system: "Search the knowledge base and answer the user's question.",
     buildUser: (input) => input.question,
   });
 
@@ -717,11 +717,10 @@ console.log("\n=== Case 5: Tool call failure (exercises error spans) ===");
   );
 
   if (result.ok) {
-    console.log("  ✓ Status: ok (graceful degradation)");
-    console.log(`  Answer: ${result.value.answer}`);
-    console.log(`  Sources: ${result.value.sources.join(", ")}`);
+    console.log("  ✓ Status: ok (unexpected — should have failed)");
   } else {
-    console.log("  ✗ Error:", JSON.stringify(result.error, null, 2).slice(0, 300));
+    console.log("  ✗ Failed as expected:", result.error.kind);
+    console.log(`    Message: ${"message" in result.error ? result.error.message : ""}`);
   }
   // Check observer captured the tool error event
   const errorEvents = observer.events.filter(

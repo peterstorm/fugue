@@ -237,6 +237,7 @@ export class FakeLlmClient implements LlmClient {
         turnSpec.calls,
         req.tools,
         ctx,
+        { model: req.model },
       );
     }
 

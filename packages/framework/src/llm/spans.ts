@@ -30,6 +30,8 @@ export interface ToolSpanMeta {
   readonly toolName: string;
   readonly toolCallId: string;
   readonly toolType?: string;
+  /** The model that requested this tool call (for attribution). */
+  readonly model?: string;
 }
 
 const setLlmAttributes = (meta: LlmSpanMeta): void => {
@@ -47,6 +49,7 @@ const setToolAttributes = (meta: ToolSpanMeta): void => {
   span.setAttribute(GEN_AI_TOOL_NAME, meta.toolName);
   span.setAttribute(GEN_AI_TOOL_CALL_ID, meta.toolCallId);
   span.setAttribute(GEN_AI_TOOL_TYPE, meta.toolType ?? "function");
+  if (meta.model) span.setAttribute(GEN_AI_REQUEST_MODEL, meta.model);
 };
 
 /**

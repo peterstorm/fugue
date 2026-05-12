@@ -99,12 +99,13 @@ export async function dispatchToolCallsWithSpans(
   calls: readonly ToolCall[],
   tools: readonly ToolDef<any, any>[],
   ctx: NodeContext,
+  opts?: { readonly model?: string },
 ): Promise<ToolDispatchResult[]> {
   return Promise.all(
     calls.map((call) =>
       withToolSpan(
         ctx.tracer ?? null,
-        { toolName: call.name, toolCallId: call.id },
+        { toolName: call.name, toolCallId: call.id, model: opts?.model },
         async () => {
           const result = await dispatchToolCall(call, tools, ctx);
           setToolIoAttributes(call.input, result.content, result.isError);

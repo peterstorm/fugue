@@ -567,7 +567,7 @@ export class OpenAILlmClient implements LlmClient {
         });
       }
 
-      const results = await dispatchToolCallsWithSpans(toolCalls, req.tools, ctx);
+      const results = await dispatchToolCallsWithSpans(toolCalls, req.tools, ctx, { model: req.model });
       for (const item of buildToolResultItems(results)) conversation.push(item);
     }
 
