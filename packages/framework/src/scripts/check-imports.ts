@@ -67,7 +67,9 @@ const RULES: BoundaryRule[] = [
     scope: [
       "state-machine",
       "dag-runtime/transition.ts",
-      "dag-runtime/transition-helpers.ts",
+      "dag-runtime/wave-resolution.ts",
+      "dag-runtime/retry-policy.ts",
+      "dag-runtime/human-resolution.ts",
       "dag-runtime/machine.ts",
     ],
     forbiddenModules: ["@opentelemetry/"],

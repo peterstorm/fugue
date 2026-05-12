@@ -413,17 +413,17 @@ const runWave = async (
     };
   }
 
-  // Emit observer events for routing decisions taken in this wave. The
-  // transition layer recomputes the same decisions to update activeNodeIds —
-  // both calls are deterministic because guards are pure.
+  // Compute routing decisions exactly once per source node. The executor uses
+  // the result to emit observer events; the transition (`handleWaveDone`)
+  // reads them off the wave-done event to expand `activeNodeIds` without
+  // re-running the same predicates (W5.8).
   //
-  // When `decideRoute` returns `predicate-malformed`, short-
-  // circuit the wave with `node-failed` instead of letting it fall through to
-  // `wave-done` (which previously produced the confusing observer sequence
-  // node-error → wave-done → failed). `handleNodeFailed` special-cases the
-  // `predicate-malformed` error kind to fail-fast without consuming the
-  // retry budget — a malformed predicate is a config error, not a transient
-  // runtime failure.
+  // When `decideRoute` returns `predicate-malformed`, short-circuit the wave
+  // with `node-failed` instead of letting it fall through to `wave-done`.
+  // `handleNodeFailed` special-cases the `predicate-malformed` error kind to
+  // fail-fast without consuming the retry budget — a malformed predicate is a
+  // config error, not a transient runtime failure.
+  const routingDecisions = new Map<string, import("./conditional.js").Decision>();
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
     const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
@@ -450,6 +450,7 @@ const runWave = async (
         error: predErr,
       };
     }
+    routingDecisions.set(nodeId, decision);
     emit(nodeCtx, {
       type: "route-decided",
       runId: nodeCtx.runId,
@@ -477,5 +478,6 @@ const runWave = async (
     type: "wave-done",
     wave: waveIndex,
     outputs: newOutputs,
+    routingDecisions: routingDecisions.size > 0 ? routingDecisions : undefined,
   };
 };

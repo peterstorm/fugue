@@ -9,15 +9,13 @@ export { dagTransition } from "./transition.js";
 // Transition helpers (exported for testing / extension)
 export {
   handleWaveDone,
-  handleNodeFailed,
-  handleHumanResponse,
   advanceToNextWave,
   collectHumanReviewQueue,
-  computeBackoffMs,
-  getRetryLimit,
   waveNodes,
   waveIndexOf,
-} from "./transition-helpers.js";
+} from "./wave-resolution.js";
+export { handleNodeFailed, computeBackoffMs, getRetryLimit } from "./retry-policy.js";
+export { handleHumanResponse } from "./human-resolution.js";
 
 // Machine compiler
 export { compileDagToMachine } from "./machine.js";

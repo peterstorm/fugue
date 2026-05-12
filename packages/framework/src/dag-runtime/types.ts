@@ -3,7 +3,7 @@
 
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { IncomingSources } from "./conditional.js";
+import type { Decision, IncomingSources } from "./conditional.js";
 
 // ---------------------------------------------------------------------------
 // HumanAction — the payload a reviewer sends back
@@ -69,7 +69,24 @@ export type DagPhase =
 
 export type DagEvent =
   | { readonly type: "start" }
-  | { readonly type: "wave-done"; readonly wave: number; readonly outputs: ReadonlyMap<string, unknown> }
+  | {
+      readonly type: "wave-done";
+      readonly wave: number;
+      readonly outputs: ReadonlyMap<string, unknown>;
+      /**
+       * Per-source-node routing decision computed once by `runWave` after the
+       * wave completes (W5.8). Lets the transition expand `activeNodeIds`
+       * without re-evaluating predicates that the executor already evaluated
+       * for observer-event emission. Only nodes whose out-edges carry at
+       * least one conditional/default edge appear here; unconditional-only
+       * sources are omitted (no decision was needed).
+       *
+       * Optional for forward-compatibility with hand-crafted wave-done events
+       * (e.g. event-log replay paths); when omitted the transition falls
+       * back to inline `decideRoute` calls.
+       */
+      readonly routingDecisions?: ReadonlyMap<string, Decision>;
+    }
   | {
       readonly type: "node-failed";
       readonly nodeId: string;

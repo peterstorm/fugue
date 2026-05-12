@@ -12,7 +12,7 @@ import type { Machine } from "../state-machine/types.js";
 import { createInMemoryBackend } from "../queue/in-memory.js";
 
 import { dagTransition } from "../dag-runtime/transition.js";
-import { handleNodeFailed } from "../dag-runtime/transition-helpers.js";
+import { handleNodeFailed } from "../dag-runtime/retry-policy.js";
 import { computeOutgoingByNode } from "../dag-runtime/conditional.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 

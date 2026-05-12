@@ -11,7 +11,7 @@ import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
 import { buildDagExecutor } from "../dag-runtime/executor.js";
 import { defineDag } from "../executor/define-dag.js";
-import { handleNodeFailed } from "../dag-runtime/transition-helpers.js";
+import { handleNodeFailed } from "../dag-runtime/retry-policy.js";
 
 import { createCronScheduler } from "../scheduler/scheduler.js";
 import type { TaskConfig, TaskRegistry } from "../scheduler/types.js";
@@ -566,7 +566,7 @@ describe("Wave 6.7 — BufferedObserver.evictStale", () => {
 
 describe("Wave 6.8 — advanceToNextWave multi-wave fallback traversal", () => {
   it("when the last two waves are pruned, the fallback uses an active node from an earlier wave", async () => {
-    const { advanceToNextWave } = await import("../dag-runtime/transition-helpers.js");
+    const { advanceToNextWave } = await import("../dag-runtime/wave-resolution.js");
     const dag = makeDag(
       [makeNode("a"), makeNode("b"), makeNode("c")],
       [{ from: "a", to: "b" }, { from: "b", to: "c" }],
@@ -599,7 +599,7 @@ describe("Wave 6.8 — advanceToNextWave multi-wave fallback traversal", () => {
 
 describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", () => {
   it("succeeded siblings carried via partialOutputs are present in the retry context", async () => {
-    const { handleNodeFailed } = await import("../dag-runtime/transition-helpers.js");
+    const { handleNodeFailed } = await import("../dag-runtime/retry-policy.js");
     const dag = makeDag(
       [makeNode("a"), makeNode("b")],
       [],
@@ -630,7 +630,7 @@ describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", (
 describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-monotone", () => {
   it("for a monotone non-decreasing backoff array, delay is monotone in attempts (catches off-by-one in the Math.min clamp)", async () => {
     const fc = await import("fast-check");
-    const { computeBackoffMs } = await import("../dag-runtime/transition-helpers.js");
+    const { computeBackoffMs } = await import("../dag-runtime/retry-policy.js");
 
     fc.assert(
       fc.property(
@@ -655,7 +655,7 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
   });
 
   it("clamps to the last array entry when attempt exceeds array length", async () => {
-    const { computeBackoffMs } = await import("../dag-runtime/transition-helpers.js");
+    const { computeBackoffMs } = await import("../dag-runtime/retry-policy.js");
     const dag = makeDag([
       makeNode("n", { retry: { backoffMs: [100, 200, 400] as const, jitterRatio: 0 } } as any),
     ]);

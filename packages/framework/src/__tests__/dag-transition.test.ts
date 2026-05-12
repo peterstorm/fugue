@@ -7,15 +7,13 @@ import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode } from "../dag-runtime/conditional.js";
 import {
   handleWaveDone,
-  handleNodeFailed,
-  handleHumanResponse,
   advanceToNextWave,
   collectHumanReviewQueue,
-  computeBackoffMs,
-  getRetryLimit,
   waveNodes,
   waveIndexOf,
-} from "../dag-runtime/transition-helpers.js";
+} from "../dag-runtime/wave-resolution.js";
+import { handleNodeFailed, computeBackoffMs, getRetryLimit } from "../dag-runtime/retry-policy.js";
+import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";

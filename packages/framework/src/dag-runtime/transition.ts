@@ -1,14 +1,10 @@
 // Pure DAG transition function — FR-021
-// Covers FR-026..FR-033 via transition-helpers.ts
+// Covers FR-026..FR-033 via the wave-resolution / retry-policy / human-resolution helpers.
 
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
-import {
-  handleWaveDone,
-  handleNodeFailed,
-  handleHumanResponse,
-  handleHookCrash,
-  advanceToNextWave,
-} from "./transition-helpers.js";
+import { handleWaveDone } from "./wave-resolution.js";
+import { handleNodeFailed, handleHookCrash } from "./retry-policy.js";
+import { handleHumanResponse } from "./human-resolution.js";
 
 /**
  * Pure DAG state transition. No I/O — all branches produce the next (state, context) pair.
@@ -47,7 +43,7 @@ export const dagTransition = (
 
     case "running": {
       if (event.type === "wave-done") {
-        const result = handleWaveDone(event.wave, event.outputs, ctx);
+        const result = handleWaveDone(event.wave, event.outputs, ctx, event.routingDecisions);
         return { state: result.state, context: result.context };
       }
 
@@ -83,7 +79,7 @@ export const dagTransition = (
     case "retrying": {
       if (event.type === "wave-done") {
         // After a retry the executor retried the node and the whole wave completed
-        const result = handleWaveDone(event.wave, event.outputs, ctx);
+        const result = handleWaveDone(event.wave, event.outputs, ctx, event.routingDecisions);
         return { state: result.state, context: result.context };
       }
 
