@@ -144,10 +144,7 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
     };
 
     const attempt = async () => {
-      const result = await llmClient.sendWithTools!(req, {
-        tracer: ctx.tracer,
-        signal: ctx.signal,
-      });
+      const result = await llmClient.sendWithTools!(req, ctx);
       if (!result.ok) return result;
       const parsed = config.outputSchema.safeParse(result.value.output);
       if (!parsed.success) {
