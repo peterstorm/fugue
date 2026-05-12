@@ -23,6 +23,11 @@
  *
  * Lifecycle: entries are cleaned up when the exporter processes them (or on
  * trace discard).
+ *
+ * Instance ownership: the registry is constructed per `MlflowOtlpExporter`,
+ * not as a process-global singleton. Parallel test runs and multi-tenant
+ * worker processes therefore cannot cross-corrupt one another's state, and
+ * a `clear()` call from one exporter cannot evict entries owned by a peer.
  */
 
 export interface SpanAttributes {
@@ -30,45 +35,53 @@ export interface SpanAttributes {
 }
 
 /**
- * Global registry for object-valued span attributes.
- * Thread-safe in single-threaded JS; no locking needed.
+ * Registry for object-valued span attributes. Instance-scoped; create one
+ * via `createSpanAttributeRegistry()` and hand it to the consumer (typically
+ * an exporter constructor).
  */
-class SpanAttributeRegistryImpl {
-  private readonly store = new Map<string, SpanAttributes>();
-
+export interface SpanAttributeRegistry {
   /** Register object attributes for a span. Merges with existing if any. */
-  set(spanId: string, attrs: SpanAttributes): void {
-    const existing = this.store.get(spanId);
-    this.store.set(spanId, existing ? { ...existing, ...attrs } : attrs);
-  }
-
+  set(spanId: string, attrs: SpanAttributes): void;
   /** Get registered attributes for a span. Returns undefined if none. */
-  get(spanId: string): SpanAttributes | undefined {
-    return this.store.get(spanId);
-  }
-
+  get(spanId: string): SpanAttributes | undefined;
   /** Remove and return attributes for a span (used during export). */
-  pop(spanId: string): SpanAttributes | undefined {
-    const attrs = this.store.get(spanId);
-    if (attrs) this.store.delete(spanId);
-    return attrs;
-  }
-
+  pop(spanId: string): SpanAttributes | undefined;
   /** Remove all attributes for spans in a trace (used on discard). */
-  deleteAll(spanIds: Iterable<string>): void {
-    for (const id of spanIds) this.store.delete(id);
-  }
-
+  deleteAll(spanIds: Iterable<string>): void;
   /** Current entry count (for monitoring/testing). */
-  get size(): number {
-    return this.store.size;
-  }
-
+  readonly size: number;
   /** Clear all entries (for testing). */
-  clear(): void {
-    this.store.clear();
-  }
+  clear(): void;
 }
 
-/** Singleton instance. */
-export const SpanAttributeRegistry = new SpanAttributeRegistryImpl();
+/**
+ * Construct a fresh, isolated `SpanAttributeRegistry`. Each call returns an
+ * independent instance — no shared state between registries.
+ */
+export const createSpanAttributeRegistry = (): SpanAttributeRegistry => {
+  const store = new Map<string, SpanAttributes>();
+
+  return {
+    set(spanId, attrs) {
+      const existing = store.get(spanId);
+      store.set(spanId, existing ? { ...existing, ...attrs } : attrs);
+    },
+    get(spanId) {
+      return store.get(spanId);
+    },
+    pop(spanId) {
+      const attrs = store.get(spanId);
+      if (attrs) store.delete(spanId);
+      return attrs;
+    },
+    deleteAll(spanIds) {
+      for (const id of spanIds) store.delete(id);
+    },
+    get size() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+  };
+};

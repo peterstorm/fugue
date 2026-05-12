@@ -32,6 +32,12 @@ type FailedHandler = (
   max: number,
 ) => Promise<void> | void;
 
+type ExhaustedHandler = (
+  id: string,
+  err: unknown,
+  attempts: number,
+) => Promise<void> | void;
+
 // ---------------------------------------------------------------------------
 // adaptInMemoryJob — constructs a JobLike from plain initial data
 // (wraps createInMemoryJob; does not duplicate event-log logic)
@@ -136,13 +142,17 @@ export function createInMemoryBackend(): InMemoryBackend {
               await processFn(job as unknown as JobLike<unknown, unknown, unknown>);
               succeeded = true;
             } catch (jobErr) {
-              const handlers = failedHandlers.get(name) ?? [];
+              const isExhausted = attempt >= max;
+              const handlers = isExhausted
+                ? (exhaustedHandlers.get(name) ?? [])
+                : (failedHandlers.get(name) ?? []);
               if (handlers.length === 0) {
-                // No onFailed handler registered — surface to onError so the failure
-                // is at minimum observable, and emit a fwLogger().error so the failure
-                // does not disappear in test harnesses that wired neither.
+                // No matching handler registered — surface to onError so the
+                // failure is at minimum observable, and emit a logger.error so
+                // the failure does not disappear in test harnesses that wired
+                // neither.
                 fwLogger().error(
-                  `[InMemoryQueue] Job "${entry.id}" failed (attempt ${attempt}/${max}) with no onFailed handler:`,
+                  `[InMemoryQueue] Job "${entry.id}" failed (attempt ${attempt}/${max}, exhausted=${isExhausted}) with no handler:`,
                   jobErr,
                 );
                 for (const eh of errorHandlers.get(name) ?? []) {
@@ -155,9 +165,11 @@ export function createInMemoryBackend(): InMemoryBackend {
               }
               for (const handler of handlers) {
                 try {
-                  await handler(entry.id, jobErr, attempt, max);
+                  await (isExhausted
+                    ? (handler as ExhaustedHandler)(entry.id, jobErr, attempt)
+                    : (handler as FailedHandler)(entry.id, jobErr, attempt, max));
                 } catch (handlerErr) {
-                  // Failed-handler itself threw — route to onError handlers so the
+                  // Handler itself threw — route to onError handlers so the
                   // exception is observable without interrupting the drain loop.
                   for (const eh of errorHandlers.get(name) ?? []) {
                     try {
@@ -201,8 +213,9 @@ export function createInMemoryBackend(): InMemoryBackend {
     };
   }
 
-  // per-queue failed handlers (keyed by worker name = queue name)
+  // per-queue handlers (keyed by worker name = queue name)
   const failedHandlers = new Map<string, FailedHandler[]>();
+  const exhaustedHandlers = new Map<string, ExhaustedHandler[]>();
   const errorHandlers = new Map<string, ((err: Error) => void)[]>();
 
   function createWorker<S, C>(
@@ -218,11 +231,15 @@ export function createInMemoryBackend(): InMemoryBackend {
       concurrency: opts?.concurrency ?? 1,
     });
     if (!failedHandlers.has(name)) failedHandlers.set(name, []);
+    if (!exhaustedHandlers.has(name)) exhaustedHandlers.set(name, []);
     if (!errorHandlers.has(name)) errorHandlers.set(name, []);
 
     return {
       onFailed(handler: FailedHandler): void {
         failedHandlers.get(name)!.push(handler);
+      },
+      onExhausted(handler: ExhaustedHandler): void {
+        exhaustedHandlers.get(name)!.push(handler);
       },
       onError(handler: (err: Error) => void): void {
         errorHandlers.get(name)!.push(handler);
@@ -230,6 +247,7 @@ export function createInMemoryBackend(): InMemoryBackend {
       async close(): Promise<void> {
         workers.delete(name);
         failedHandlers.delete(name);
+        exhaustedHandlers.delete(name);
         errorHandlers.delete(name);
       },
     };

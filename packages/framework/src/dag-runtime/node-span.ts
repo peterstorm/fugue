@@ -91,7 +91,17 @@ export const withNodeSpan = async (
       );
 
       let outcome: NodeSpanOutcome = EMPTY_OUTCOME;
-      const result = await fn();
+      let result: Result<unknown, FrameworkError>;
+      // Guarantee `span.end()` runs on every path — including observer throws
+      // re-raised by `dispatchEvent` under `OBSERVER_STRICT=1`. Without the
+      // try/finally an unhandled rejection inside `fn()` would leak the span.
+      try {
+        result = await fn();
+      } catch (e) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) });
+        span.end();
+        throw e;
+      }
       if (result.ok) {
         span.addEvent(
           EVENT_NODE_OUTPUT,

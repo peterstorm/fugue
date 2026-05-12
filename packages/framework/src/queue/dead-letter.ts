@@ -2,18 +2,18 @@
 // MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
 
 import type { WorkerHandle, DeadLetterNotifier, DeadLetterOpts } from "./types.js";
+import { fwLogger } from "../logger.js";
 
 /**
  * Attach a dead-letter handler to a `WorkerHandle`.
  *
- * Fires `notifier.notify` exactly once when a job exhausts its queue-level retry
- * attempts (`attempts >= max`). Does NOT fire for jobs that:
- *   - succeed
- *   - fail but have remaining retry attempts (`attempts < max`)
+ * Fires `notifier.notify` exactly once when a job exhausts its queue-level
+ * retry attempts. Routes through `WorkerHandle.onExhausted` — the queue
+ * backend tells us directly when the budget is gone, so the prior manual
+ * `attempts >= max` check disappears.
  *
  * This is pure imperative-shell wiring: no business logic, no I/O other than
- * delegating to the supplied `notifier`. All decisions are based on the
- * `attempts` / `max` values the queue backend delivers to `onFailed`.
+ * delegating to the supplied `notifier`.
  *
  * FR-044, SC-008
  */
@@ -22,16 +22,12 @@ export function attachDeadLetterHandler(
   notifier: DeadLetterNotifier,
   opts: DeadLetterOpts,
 ): void {
-  worker.onFailed(async (id, err, attempts, max) => {
-    // Defensive validation: guard against non-numeric or non-finite values.
-    // Also short-circuit mid-retry failures (attempts < max).
+  worker.onExhausted(async (id, err, attempts) => {
+    // Defensive validation against malformed adapter inputs.
     if (
       typeof attempts !== "number" ||
-      typeof max !== "number" ||
       !Number.isFinite(attempts) ||
-      !Number.isFinite(max) ||
-      max <= 0 ||
-      attempts < max
+      attempts <= 0
     ) {
       return;
     }
@@ -40,11 +36,8 @@ export function attachDeadLetterHandler(
 
     // Guard: empty recipient list — log and skip notification.
     if (recipients.length === 0) {
-      console.warn(
-        "[dead-letter] no recipients for job %s (attempts=%d/%d) — skipping notify",
-        id,
-        attempts,
-        max,
+      fwLogger().warn(
+        `[dead-letter] no recipients for exhausted job ${id} (attempts=${attempts}) — skipping notify`,
       );
       return;
     }
@@ -62,11 +55,8 @@ export function attachDeadLetterHandler(
     try {
       await notifier.notify(recipients, message);
     } catch (notifyErr) {
-      console.error(
-        "[dead-letter] notification failed for job %s (attempts=%d/%d): %o",
-        id,
-        attempts,
-        max,
+      fwLogger().error(
+        `[dead-letter] notification failed for exhausted job ${id} (attempts=${attempts}):`,
         notifyErr,
       );
       throw notifyErr instanceof Error

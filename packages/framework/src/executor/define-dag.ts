@@ -48,11 +48,36 @@ const formatDetail = (e: FrameworkError): string => {
     case "missing-default-edge":
       return `node '${e.nodeId}' has conditional out-edges but no default edge`;
     case "output-unreachable-under-routing":
-      return `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges`;
+      return `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges (frontier at '${e.missedFromNode}')`;
     case "duplicate-edge":
       return `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`;
-    default:
+    case "predicate-malformed":
+      return `${e.message} (node '${e.nodeId}')`;
+    case "cycle-detected":
+      return `cycle detected: ${e.nodeIds.join(" -> ")}`;
+    case "retry-exhausted":
+    case "checkpoint-missing":
+    case "checkpoint-expired":
+    case "checkpoint-corrupt":
+    case "checkpoint-version-mismatch":
+    case "checkpoint-write-failed":
+    case "prompt-not-found":
+    case "cache-error":
+    case "node-crash":
+    case "aborted":
+    case "rejected":
+    case "invalid-reroute":
+    case "transient":
+    case "missing-capability":
       return JSON.stringify(e);
+    default: {
+      // Exhaustive guard — adding a new `FrameworkError.kind` without
+      // handling it here (or routing it through the catch-all list above)
+      // surfaces as a compile error at this assignment. Runtime fallback
+      // keeps callers from crashing on a malformed message.
+      const _exhaustive: never = e;
+      return `unhandled error kind: ${JSON.stringify(_exhaustive)}`;
+    }
   }
 };
 

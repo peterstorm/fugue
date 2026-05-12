@@ -5,6 +5,7 @@ import type {
   OutputsByNodeId,
   ConsistentNodes,
 } from "./dag-internals.js";
+import type { DagId, NodeId } from "./ids.js";
 
 // Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
 // are imported above but NOT re-exported. They live in `./dag-internals.ts`,
@@ -43,23 +44,23 @@ export const isOneOfMatch = (
  * validation.
  */
 export type EdgeDef =
-  | { readonly from: string; readonly to: string; readonly kind: "unconditional" }
-  | { readonly from: string; readonly to: string; readonly kind: "conditional"; readonly when: Predicate<unknown> }
-  | { readonly from: string; readonly to: string; readonly kind: "default" };
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "conditional"; readonly when: Predicate<unknown> }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "default" };
 
 export const isUnconditionalEdge = (
   e: EdgeDef,
-): e is { readonly from: string; readonly to: string; readonly kind: "unconditional" } =>
+): e is { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" } =>
   e.kind === "unconditional";
 
 export const isConditionalEdge = (
   e: EdgeDef,
-): e is { readonly from: string; readonly to: string; readonly kind: "conditional"; readonly when: Predicate<unknown> } =>
+): e is { readonly from: NodeId; readonly to: NodeId; readonly kind: "conditional"; readonly when: Predicate<unknown> } =>
   e.kind === "conditional";
 
 export const isDefaultEdge = (
   e: EdgeDef,
-): e is { readonly from: string; readonly to: string; readonly kind: "default" } =>
+): e is { readonly from: NodeId; readonly to: NodeId; readonly kind: "default" } =>
   e.kind === "default";
 
 /**
@@ -81,16 +82,16 @@ export type EdgeDefRawInput =
  * by explicit `kind === "default"`; everything else is unconditional.
  */
 export const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
-  if ("kind" in e && e.kind === "default") return e;
+  if ("kind" in e && e.kind === "default") return e as EdgeDef;
   if ("when" in e) {
     return {
-      from: e.from,
-      to: e.to,
+      from: e.from as NodeId,
+      to: e.to as NodeId,
       kind: "conditional",
       when: e.when,
     };
   }
-  return { from: e.from, to: e.to, kind: "unconditional" };
+  return { from: e.from as NodeId, to: e.to as NodeId, kind: "unconditional" };
 };
 
 // ---------------------------------------------------------------------------
@@ -163,10 +164,10 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
 declare const __dagValidated: unique symbol;
 
 export interface DagDef {
-  readonly id: string;
-  readonly nodes: readonly NodeDef<unknown, unknown, unknown>[];
+  readonly id: DagId;
+  readonly nodes: readonly NodeDef<unknown, unknown>[];
   readonly edges: readonly EdgeDef[];
-  readonly outputNodeId?: string;
+  readonly outputNodeId?: NodeId;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly retryLimits?: Readonly<Record<string, number>>;
   readonly defaultRetryLimit?: number;

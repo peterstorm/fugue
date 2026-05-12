@@ -15,7 +15,8 @@ import type { NodeDef } from "./node.js";
 export type NodesRecord = { readonly [id: string]: NodeDef<any, any, any> };
 
 /** Extract the output type of a `NodeDef`, or `unknown` if it isn't one. */
-export type OutputOf<N> = N extends NodeDef<unknown, infer O, unknown> ? O : unknown;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak: nodes are heterogeneous
+export type OutputOf<N> = N extends NodeDef<unknown, infer O, any> ? O : unknown;
 
 /** Map each node id in `Nodes` to its output type — feeds `EdgeDefInput`. */
 export type OutputsByNodeId<Nodes extends NodesRecord> = {

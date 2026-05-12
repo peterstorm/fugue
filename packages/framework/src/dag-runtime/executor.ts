@@ -56,7 +56,7 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const validateApproveEdit = (
   action: import("./types.js").HumanAction,
   nodeId: string,
-  nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
+  nodeMap: Map<string, NodeDef<unknown, unknown>>,
 ): string | null => {
   if (action.action !== "approve-with-edit") return null;
   const nodeDef = nodeMap.get(nodeId);
@@ -89,7 +89,7 @@ const callHumanReviewHook = async (
       prompt: string;
     }) => Promise<import("./types.js").HumanAction>;
   } | undefined,
-  nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
+  nodeMap: Map<string, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
   dagId: string,
 ): Promise<DagEvent> => {
@@ -203,7 +203,7 @@ export const buildDagExecutor = (
     random?: () => number;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
-  const nodeMap = new Map<string, NodeDef<unknown, unknown, unknown>>(
+  const nodeMap = new Map<string, NodeDef<unknown, unknown>>(
     dag.nodes.map((n) => [n.id, n]),
   );
   const recordOutcomes = hooks?.recordOutcomes;
@@ -280,7 +280,7 @@ const runWave = async (
   waveIndex: number,
   machineCtx: DagMachineContext,
   dag: DagDef,
-  nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
+  nodeMap: Map<string, NodeDef<unknown, unknown>>,
   nodeCtx: ValidatedNodeContext,
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
   resumeCheckpoint: Map<string, unknown> | undefined,

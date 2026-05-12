@@ -3,6 +3,7 @@
 // docs/plans/2026-05-11-framework-review-remediation-pass-2.md.
 
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 
 import { runStateMachine } from "../state-machine/runner.js";
@@ -39,8 +40,8 @@ import type { NodeContext } from "../types/node.js";
 import fc from "fast-check";
 
 const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   logger: { warn: () => {}, error: () => {} },
@@ -72,6 +73,7 @@ describe("Wave 1.1 — onTrace exceptions do not escape the kernel loop", () => 
     isTerminal: (s) => s.kind === "succeeded",
     isFailed: () => false,
     stateProgress: (s) => (s.kind === "succeeded" ? 100 : 0),
+    stateKey: (s) => JSON.stringify(s),
   };
 
   it("a throwing onTrace is caught; run still reaches terminal-succeeded", async () => {
@@ -107,8 +109,8 @@ describe("Wave 1.1 — onTrace exceptions do not escape the kernel loop", () => 
 // Wave 1.2 — InMemoryQueue surfaces failures with no `onFailed` handler
 // ===========================================================================
 
-describe("Wave 1.2 — InMemoryQueue logs to console.error when no onFailed handler", () => {
-  it("a job that throws on every attempt with no onFailed logs once per attempt", async () => {
+describe("Wave 1.2 — InMemoryQueue logs to console.error when no handler", () => {
+  it("a job that throws on every attempt with no handler logs once per attempt", async () => {
     const backend = createInMemoryBackend();
     const errors: string[] = [];
     const original = console.error;
@@ -123,8 +125,10 @@ describe("Wave 1.2 — InMemoryQueue logs to console.error when no onFailed hand
       await queue.enqueue("job-1", { state: {}, context: {} });
       await queue.drain();
 
+      // Mid-retry routes to onFailed (2 logs, neither handler registered) +
+      // final attempt routes to onExhausted (1 log).
       const matched = errors.filter(
-        (e) => e.includes("InMemoryQueue") && e.includes("job-1") && e.includes("no onFailed handler"),
+        (e) => e.includes("InMemoryQueue") && e.includes("job-1") && e.includes("no handler"),
       );
       expect(matched.length).toBe(3);
     } finally {
@@ -132,7 +136,7 @@ describe("Wave 1.2 — InMemoryQueue logs to console.error when no onFailed hand
     }
   });
 
-  it("when an onFailed handler is registered, no console.error is emitted by the queue", async () => {
+  it("when both onFailed and onExhausted are registered, no console.error is emitted", async () => {
     const backend = createInMemoryBackend();
     const errors: string[] = [];
     const original = console.error;
@@ -144,16 +148,17 @@ describe("Wave 1.2 — InMemoryQueue logs to console.error when no onFailed hand
         throw new Error("processing failed");
       });
       let handlerCalls = 0;
-      worker.onFailed(() => {
-        handlerCalls++;
-      });
+      // attempts=1, max=1 → routes to onExhausted; register both to cover
+      // either branch in case of future drift.
+      worker.onFailed(() => { handlerCalls++; });
+      worker.onExhausted(() => { handlerCalls++; });
 
       await queue.enqueue("job-2", { state: {}, context: {} });
       await queue.drain();
 
       expect(handlerCalls).toBe(1);
-      const noOnFailedLog = errors.find((e) => e.includes("no onFailed handler"));
-      expect(noOnFailedLog).toBeUndefined();
+      const noHandlerLog = errors.find((e) => e.includes("no handler"));
+      expect(noHandlerLog).toBeUndefined();
     } finally {
       console.error = original;
     }
@@ -196,7 +201,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
     const ctx = baseCtx();
     const result = handleNodeFailed(0, "a", {
       kind: "node-crash",
-      nodeId: "a",
+      nodeId: "a" as NodeId,
       message: "permanent",
       retriability: "non-retriable",
     }, ctx);
@@ -207,7 +212,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
     const ctx = baseCtx();
     const result = handleNodeFailed(0, "a", {
       kind: "node-crash",
-      nodeId: "a",
+      nodeId: "a" as NodeId,
       message: "transient",
       retriability: "retriable",
     }, ctx);
@@ -304,7 +309,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
   it("load with mismatched expectedDagFingerprint returns checkpoint-version-mismatch", async () => {
     const cp = new InMemoryCheckpointer();
     await cp.setMeta("r1", {
-      dagId: "d",
+      dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
       dagFingerprint: "fp-a",
@@ -319,7 +324,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
   it("load with matching expectedDagFingerprint returns the state", async () => {
     const cp = new InMemoryCheckpointer();
     await cp.setMeta("r2", {
-      dagId: "d",
+      dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
       dagFingerprint: "fp-match",
@@ -331,7 +336,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
   it("load without expectedDagFingerprint preserves legacy no-check behavior", async () => {
     const cp = new InMemoryCheckpointer();
     await cp.setMeta("r3", {
-      dagId: "d",
+      dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
     });
@@ -379,7 +384,7 @@ describe("Wave 6.2 — ratio() accepts an injectable RNG for deterministic tests
     const policy = ratio(0.5, () => 0);
     expect(
       policy.shouldFlush({
-        runId: "x",
+        runId: "x" as RunId,
         status: "ok",
         totalDuration: 0,
         nodeCount: 0,
@@ -394,7 +399,7 @@ describe("Wave 6.2 — ratio() accepts an injectable RNG for deterministic tests
     const policy = ratio(0.5, () => 0.99);
     expect(
       policy.shouldFlush({
-        runId: "x",
+        runId: "x" as RunId,
         status: "ok",
         totalDuration: 0,
         nodeCount: 0,
@@ -532,7 +537,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
     const result = handleNodeFailed(
       0,
       "a",
-      { kind: "transient", nodeId: "a", message: "boom" },
+      { kind: "transient", nodeId: "a" as NodeId, message: "boom" },
       ctx,
       undefined,
       ["b"],
@@ -547,7 +552,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
     const result = handleNodeFailed(
       0,
       "a",
-      { kind: "transient", nodeId: "a", message: "boom" },
+      { kind: "transient", nodeId: "a" as NodeId, message: "boom" },
       ctx,
       undefined,
       ["b"],
@@ -616,6 +621,8 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
       onNodeError: (e: { error: string }) => events.push(`node-error:${e.error.slice(0, 30)}`),
       onNodeSkipped: () => {},
       onSubSpan: () => {},
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
     };
 
     const dag = defineDag({

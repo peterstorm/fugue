@@ -63,10 +63,10 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
         observer.onRunEnd(event);
         break;
       case "route-decided":
-        observer.onRouteDecided?.(event);
+        observer.onRouteDecided(event);
         break;
       case "node-pruned":
-        observer.onNodePruned?.(event);
+        observer.onNodePruned(event);
         break;
       default: {
         const _exhaustive: never = event;
@@ -235,7 +235,15 @@ export class BufferedObserver implements Observer {
   }
 
   onRunEnd(e: RunEndEvent): void {
-    const events = this.buffers.get(e.runId)?.events ?? [];
+    const buf = this.buffers.get(e.runId);
+    if (!buf) {
+      // An unmatched run-end means the inner observer is about to see a
+      // run-end with no preceding run-start. Surface this rather than
+      // silently emitting an orphan event — it usually indicates a buggy
+      // caller or a double-finalize race.
+      fwLogger().warn(`[BufferedObserver] onRunEnd for unknown runId=${e.runId}`);
+    }
+    const events = buf?.events ?? [];
     const summary = computeRunSummary(events, e);
 
     this.aggregates.runCount++;

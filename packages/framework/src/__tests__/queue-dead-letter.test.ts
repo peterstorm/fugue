@@ -25,6 +25,12 @@ type FailedHandler = (
   max: number,
 ) => Promise<void> | void;
 
+type ExhaustedHandler = (
+  id: string,
+  err: unknown,
+  attempts: number,
+) => Promise<void> | void;
+
 /** Minimal stub that records calls and allows us to simulate job failures. */
 function makeWorker(): WorkerHandle & {
   simulateFailed(
@@ -34,10 +40,14 @@ function makeWorker(): WorkerHandle & {
     max: number,
   ): Promise<void>;
 } {
-  const handlers: FailedHandler[] = [];
+  const failed: FailedHandler[] = [];
+  const exhausted: ExhaustedHandler[] = [];
   return {
     onFailed(handler) {
-      handlers.push(handler as FailedHandler);
+      failed.push(handler as FailedHandler);
+    },
+    onExhausted(handler) {
+      exhausted.push(handler as ExhaustedHandler);
     },
     onError(_handler) {
       // not exercised in these tests
@@ -45,9 +55,12 @@ function makeWorker(): WorkerHandle & {
     async close() {
       // no-op
     },
+    // Mirrors the adapter routing: mid-retry → onFailed; exhausted → onExhausted.
     async simulateFailed(id, err, attempts, max) {
-      for (const h of handlers) {
-        await h(id, err, attempts, max);
+      if (attempts >= max) {
+        for (const h of exhausted) await h(id, err, attempts);
+      } else {
+        for (const h of failed) await h(id, err, attempts, max);
       }
     },
   };

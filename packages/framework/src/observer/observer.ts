@@ -19,8 +19,8 @@ export interface Observer {
   onNodeError(e: NodeErrorEvent): void;
   onSubSpan(e: SubSpanEvent): void;
   onRunEnd(e: RunEndEvent): void;
-  onRouteDecided?(e: RouteDecidedEvent): void;
-  onNodePruned?(e: NodePrunedEvent): void;
+  onRouteDecided(e: RouteDecidedEvent): void;
+  onNodePruned(e: NodePrunedEvent): void;
 }
 
 export class NoopObserver implements Observer {

@@ -8,6 +8,7 @@
 // "drop both" / "persist both" decisions per run.
 
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { trace } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { BufferedObserver, computeRunSummary } from "../observer/buffered.js";
@@ -62,14 +63,14 @@ const makeSpan = (traceId: string, kind: "root" | "child" = "root"): ReadableSpa
 const runStart = (runId: string): RunStartEvent => ({
   type: "run-start",
   runId,
-  dagId: "dag1",
+  dagId: "dag1" as DagId,
   timestamp: new Date(),
 });
 
 const runEnd = (runId: string, status: "ok" | "error" = "ok"): RunEndEvent => ({
   type: "run-end",
   runId,
-  dagId: "dag1",
+  dagId: "dag1" as DagId,
   timestamp: new Date(),
   duration: 100,
   status,

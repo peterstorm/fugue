@@ -1,9 +1,11 @@
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { APIUserAbortError } from "@anthropic-ai/sdk";
 import type Anthropic from "@anthropic-ai/sdk";
 import { AnthropicLlmClient } from "../llm/anthropic-client.js";
 import type { ToolDef } from "../llm/tools.js";
+import { tool } from "../llm/tools.js";
 
 // ---------------------------------------------------------------------------
 // Anthropic SDK stub
@@ -105,7 +107,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       user: "user",
       model: "claude-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
 
     expect(result.ok).toBe(true);
@@ -124,7 +126,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       user: "u",
       model: "claude-test",
       schema: Schema,
-      nodeId: "my-node",
+      nodeId: "my-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -144,7 +146,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       user: "u",
       model: "claude-test",
       schema: Schema,
-      nodeId: "schema-node",
+      nodeId: "schema-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -164,7 +166,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       user: "u",
       model: "claude-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -185,7 +187,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       user: "u",
       model: "claude-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -204,7 +206,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       user: "u",
       model: "claude-test",
       schema: Schema,
-      nodeId: "n",
+      nodeId: "n" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -224,13 +226,13 @@ const RUNTIME = { tracer: null, signal: undefined } as const;
 const makeTool = (
   name: string,
   run: (input: { id: string }) => Promise<{ found: boolean }>,
-): ToolDef<unknown, unknown> => ({
+): ToolDef<unknown, unknown> => tool({
   name,
   description: "test tool",
   inputSchema: z.object({ id: z.string() }),
   outputSchema: z.object({ found: z.boolean() }),
   run: run as unknown as ToolDef<unknown, unknown>["run"],
-});
+}) as ToolDef<unknown, unknown>;
 
 describe("AnthropicLlmClient.sendWithTools", () => {
   it("pre-aborted signal returns aborted", async () => {
@@ -246,7 +248,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         model: "claude-test",
         tools: [],
         schema: Schema,
-        nodeId: "test-node",
+        nodeId: "test-node" as NodeId,
         signal: ctrl.signal,
       },
       RUNTIME,
@@ -268,7 +270,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         model: "claude-test",
         tools: [],
         schema: Schema,
-        nodeId: "test-node",
+        nodeId: "test-node" as NodeId,
       },
       RUNTIME,
     );
@@ -292,7 +294,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         tools: [tool],
         schema: Schema,
         maxIterations: 2,
-        nodeId: "loop-node",
+        nodeId: "loop-node" as NodeId,
       },
       RUNTIME,
     );
@@ -331,7 +333,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         model: "claude-test",
         tools: [tool],
         schema: Schema,
-        nodeId: "multi",
+        nodeId: "multi" as NodeId,
       },
       RUNTIME,
     );
@@ -357,7 +359,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         model: "claude-test",
         tools: [],
         schema: Schema,
-        nodeId: "test-node",
+        nodeId: "test-node" as NodeId,
       },
       RUNTIME,
     );
@@ -382,7 +384,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         model: "claude-test",
         tools: [tool],
         schema: Schema,
-        nodeId: "rate-limited-node",
+        nodeId: "rate-limited-node" as NodeId,
       },
       RUNTIME,
     );
@@ -409,7 +411,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         model: "claude-test",
         tools: [tool],
         schema: Schema,
-        nodeId: "n",
+        nodeId: "n" as NodeId,
       },
       RUNTIME,
     );
@@ -432,7 +434,7 @@ describe("AnthropicLlmClient — 429 mapping (sendStructured)", () => {
       user: "u",
       model: "claude-test",
       schema: Schema,
-      nodeId: "rl-node",
+      nodeId: "rl-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {

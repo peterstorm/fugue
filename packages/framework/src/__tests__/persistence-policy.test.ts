@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import {
   alwaysOn,
   errorOnly,
@@ -13,7 +14,7 @@ import type { RunSummary } from "../observer/buffered.js";
 
 function makeSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
-    runId: "r1",
+    runId: "r1" as RunId,
     status: "ok",
     totalDuration: 100,
     nodeCount: 3,

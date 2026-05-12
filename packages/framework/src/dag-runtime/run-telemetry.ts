@@ -9,6 +9,7 @@
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import { match } from "ts-pattern";
 import { fwTracer } from "../tracing/global-tracer.js";
+import { fwLogger } from "../logger.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
@@ -48,23 +49,32 @@ export const beginRunTelemetry = (
   const nowFn = opts.now ?? Date.now;
   const runStart = nowFn();
 
-  dispatchEvent(nodeCtx.observer, {
-    type: "run-start",
-    runId: nodeCtx.runId,
-    dagId: dag.id,
-    timestamp: new Date(),
-  });
-
   const emitRunEnd = (status: "ok" | "error"): void => {
     dispatchEvent(nodeCtx.observer, {
       type: "run-end",
       runId: nodeCtx.runId,
       dagId: dag.id,
-      timestamp: new Date(),
+      timestamp: new Date(nowFn()),
       duration: nowFn() - runStart,
       status,
     });
   };
+
+  // Capture `emitRunEnd` BEFORE dispatching `run-start`. Otherwise an
+  // observer that throws on `run-start` propagates the error out of this
+  // function — the caller never receives the closure and the run terminates
+  // without a balanced `run-end`. The dispatch failure is logged once; the
+  // closure is always returned so the rest of the run remains observable.
+  try {
+    dispatchEvent(nodeCtx.observer, {
+      type: "run-start",
+      runId: nodeCtx.runId,
+      dagId: dag.id,
+      timestamp: new Date(nowFn()),
+    });
+  } catch (e) {
+    fwLogger().error("[runTelemetry] run-start dispatch threw:", e);
+  }
 
   return { emitRunEnd, nowFn };
 };

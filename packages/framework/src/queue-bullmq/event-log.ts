@@ -6,6 +6,7 @@ import type { EventLogOpts } from "../queue/types.js";
 import type { RecordedEvent } from "../state-machine/types.js";
 import { defaultStreamKey } from "./job.js";
 import { deserializeValue } from "../state-machine/serialize.js";
+import { fwLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // EventLogReader interface — opaque read handle used by replay
@@ -141,10 +142,10 @@ function parseEnvelope(
     // No payload field — fall back to reconstructing from all fields.
     const obj: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
-    return {
-      recordedAtMs: parseEntryIdTimestamp(entryId),
-      event: obj,
-    };
+    const { recordedAtMs, synthetic } = parseEntryIdTimestamp(entryId);
+    return synthetic
+      ? { recordedAtMs, event: obj, synthetic }
+      : { recordedAtMs, event: obj };
   }
 
   const raw = fields[payloadIndex + 1];
@@ -152,7 +153,7 @@ function parseEnvelope(
   try {
     parsed = deserializeValue(JSON.parse(raw));
   } catch (parseErr) {
-    console.warn(
+    fwLogger().warn(
       `[readEvents] JSON.parse failed for stream "${streamKey}" entry "${entryId}":`,
       parseErr,
       "raw value:",
@@ -166,10 +167,10 @@ function parseEnvelope(
 
   if (isEnvelope(parsed)) return parsed;
   // Legacy bare payload: synthesize the envelope from the entry ID timestamp.
-  return {
-    recordedAtMs: parseEntryIdTimestamp(entryId),
-    event: parsed,
-  };
+  const { recordedAtMs, synthetic } = parseEntryIdTimestamp(entryId);
+  return synthetic
+    ? { recordedAtMs, event: parsed, synthetic }
+    : { recordedAtMs, event: parsed };
 }
 
 /**
@@ -210,33 +211,39 @@ export function __resetEventLogState(): void {
  * Test-only re-export of the parser so unit tests can exercise the
  * warning-frequency contract without standing up Redis.
  */
-export const __parseEntryIdTimestamp = (entryId: string): number =>
-  parseEntryIdTimestamp(entryId);
+export const __parseEntryIdTimestamp = (
+  entryId: string,
+): { recordedAtMs: number; synthetic: boolean } => parseEntryIdTimestamp(entryId);
 
 /**
  * Parse the millisecond prefix from a Redis Stream entry ID
  * (`1715200000000-0` → `1715200000000`). Falls back to `0` if the ID is
  * malformed — that should never happen for entries Redis itself produced,
- * but we don't want a single corrupt entry to crash the reader.
+ * but we don't want a single corrupt entry to crash the reader. The
+ * malformed case is flagged via `synthetic: true` so downstream consumers
+ * (forensic queries, replay-to-timestamp) can skip these entries instead
+ * of silently including them at the epoch start.
  *
  * Logs the first 10 occurrences, then every 100th. Replaces the bounded-set
  * approach that silently suppressed warnings once 1000 unique malformed IDs
  * had been seen — operators need a signal even when the stream is being
  * mutated at scale.
  */
-function parseEntryIdTimestamp(entryId: string): number {
+function parseEntryIdTimestamp(
+  entryId: string,
+): { recordedAtMs: number; synthetic: boolean } {
   const dashIdx = entryId.indexOf("-");
   const msStr = dashIdx === -1 ? entryId : entryId.slice(0, dashIdx);
   const ms = Number(msStr);
-  if (Number.isFinite(ms)) return ms;
+  if (Number.isFinite(ms)) return { recordedAtMs: ms, synthetic: false };
   malformedIdCount += 1;
   const shouldLog =
     malformedIdCount <= MALFORMED_LOG_FIRST_N ||
     malformedIdCount % MALFORMED_LOG_INTERVAL === 0;
   if (shouldLog) {
-    console.warn(
+    fwLogger().warn(
       `[event-log] malformed Redis Stream entry ID "${entryId}" — falling back to recordedAtMs=0 (total malformed seen: ${malformedIdCount}). Forensic time-range queries against this entry will be inaccurate.`,
     );
   }
-  return 0;
+  return { recordedAtMs: 0, synthetic: true };
 }

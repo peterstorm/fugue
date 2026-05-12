@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { BufferedObserver, computeRunSummary } from "../observer/buffered.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { alwaysOn } from "../observer/policy.js";
@@ -11,18 +12,18 @@ import type {
 } from "../types/events.js";
 
 function runStart(runId = "r1"): RunStartEvent {
-  return { type: "run-start", runId, dagId: "dag1", timestamp: new Date() };
+  return { type: "run-start", runId, dagId: "dag1" as DagId, timestamp: new Date() };
 }
 
 function nodeStart(nodeId: string, runId = "r1"): NodeStartEvent {
-  return { type: "node-start", runId, dagId: "dag1", nodeId, timestamp: new Date() };
+  return { type: "node-start", runId, dagId: "dag1" as DagId, nodeId, timestamp: new Date() };
 }
 
 function nodeEnd(nodeId: string, attrs: Record<string, unknown> = {}, runId = "r1"): NodeEndEvent {
   return {
     type: "node-end",
     runId,
-    dagId: "dag1",
+    dagId: "dag1" as DagId,
     nodeId,
     timestamp: new Date(),
     duration: 50,
@@ -32,7 +33,7 @@ function nodeEnd(nodeId: string, attrs: Record<string, unknown> = {}, runId = "r
 }
 
 function runEnd(status: "ok" | "error" = "ok", runId = "r1"): RunEndEvent {
-  return { type: "run-end", runId, dagId: "dag1", timestamp: new Date(), duration: 200, status };
+  return { type: "run-end", runId, dagId: "dag1" as DagId, timestamp: new Date(), duration: 200, status };
 }
 
 describe("BufferedObserver", () => {

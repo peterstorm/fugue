@@ -4,6 +4,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
 import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
+import { fwLogger } from "../logger.js";
 
 const TTL_SECONDS = 86400; // 24 hours
 
@@ -176,7 +177,7 @@ export class RedisCheckpointer implements Checkpointer {
       try {
         nodes[nodeId] = deserializeNode(raw);
       } catch (e) {
-        console.warn(
+        fwLogger().warn(
           `[RedisCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeId=${nodeId}: ${e instanceof Error ? e.message : e}`,
         );
         corruptNodeIds.push(nodeId);

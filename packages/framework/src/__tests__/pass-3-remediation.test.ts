@@ -3,6 +3,7 @@
 // docs/plans/2026-05-11-framework-review-remediation-pass-3.md.
 
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -30,8 +31,8 @@ import { NoopObserver } from "../observer/observer.js";
 // ---------------------------------------------------------------------------
 
 const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   logger: { warn: () => {}, error: () => {} },
@@ -46,8 +47,8 @@ const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unkno
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown, unknown>> = {},
-): NodeDef<unknown, unknown, unknown> => ({
+  overrides: Partial<NodeDef<unknown, unknown>> = {},
+): NodeDef<unknown, unknown> => ({
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -58,7 +59,7 @@ const makeNode = (
 });
 
 const makeDag = (
-  nodes: readonly NodeDef<unknown, unknown, unknown>[],
+  nodes: readonly NodeDef<unknown, unknown>[],
   edges: readonly EdgeDefRawInput[] = [],
   extras: Partial<{ outputNodeId: string; defaultRetryLimit: number; retryLimits: Readonly<Record<string, number>>; evalJudges: DagDef["evalJudges"] }> = {},
 ): DagDef =>
@@ -254,7 +255,8 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
             attempts += 1;
             return err({
               kind: "node-crash" as const,
-              nodeId: "a",
+              retriability: "retriable" as const,
+              nodeId: "a" as NodeId,
               message: `attempt ${attempts}`,
             });
           },
@@ -324,6 +326,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
       // produces a strictly-increasing attempt number across cycles where
       // prevStateKey recurs.
       isRetryTransition: (_p: S, n: S) => n.kind !== "done",
+      stateKey: (s: S) => JSON.stringify(s),
     };
 
     const captured: string[] = [];
@@ -432,7 +435,7 @@ describe("Wave 2.1 — retry-exhausted preserves the underlying error kind", () 
         makeNode("a", {
           run: async () => {
             attempts += 1;
-            return err({ kind: "transient" as const, nodeId: "a", message: "429 rate limited" });
+            return err({ kind: "transient" as const, nodeId: "a" as NodeId, message: "429 rate limited" });
           },
         }),
       ],
@@ -455,7 +458,7 @@ describe("Wave 2.1 — retry-exhausted preserves the underlying error kind", () 
       [
         makeNode("a", {
           run: async () =>
-            err({ kind: "node-crash" as const, nodeId: "a", retriability: "retriable" as const, message: "kaboom" }),
+            err({ kind: "node-crash" as const, nodeId: "a" as NodeId, retriability: "retriable" as const, message: "kaboom" }),
         }),
       ],
       [],
@@ -515,15 +518,15 @@ describe("Wave 6.6 — BufferedObserver policy-throw still clears the run buffer
     } as any;
     const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0 });
 
-    buf.onRunStart({ type: "run-start", runId: "X", dagId: "d", timestamp: new Date() });
+    buf.onRunStart({ type: "run-start", runId: "X" as RunId, dagId: "d" as DagId, timestamp: new Date() });
     expect((buf as any).buffers.has("X")).toBe(true);
 
     // shouldFlush throws — the try/finally must still drop the buffer.
     expect(() =>
       buf.onRunEnd({
         type: "run-end",
-        runId: "X",
-        dagId: "d",
+        runId: "X" as RunId,
+        dagId: "d" as DagId,
         timestamp: new Date(),
         duration: 0,
         status: "ok",
@@ -546,7 +549,7 @@ describe("Wave 6.7 — BufferedObserver.evictStale", () => {
     const policy = { shouldFlush: () => true } as any;
     const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0, ttlMs: 1 });
 
-    buf.onRunStart({ type: "run-start", runId: "orphan", dagId: "d", timestamp: new Date() });
+    buf.onRunStart({ type: "run-start", runId: "orphan" as RunId, dagId: "d" as DagId, timestamp: new Date() });
     // Force the buffer to look stale by hand-stamping the createdAt — avoids
     // relying on real sleep timing.
     const entry = (buf as any).buffers.get("orphan");
@@ -612,7 +615,7 @@ describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", (
     const result = handleNodeFailed(
       0,
       "a",
-      { kind: "node-crash", nodeId: "a", retriability: "retriable", message: "boom" },
+      { kind: "node-crash", nodeId: "a" as NodeId, retriability: "retriable", message: "boom" },
       compiled.value.initialContext,
       partials,
     );
@@ -693,7 +696,7 @@ describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
     const event = await executor(
       {
         kind: "awaiting-human",
-        nodeId: "a",
+        nodeId: "a" as NodeId,
         output: "a-out",
         prompt: "approve?",
         pendingReviews: [],
@@ -757,17 +760,20 @@ describe("Wave 4.10 — DeadLetterOpts.formatMessage receives raw err", () => {
     const { attachDeadLetterHandler } = await import("../queue/dead-letter.js");
     let observedErr: unknown = undefined;
 
+    // The dead-letter handler now routes through onExhausted (the queue
+    // backend signals exhaustion directly). Capture the exhaustion handler
+    // and trigger it manually.
+    const exhaustedHandlers: Array<(id: string, err: unknown, attempts: number) => Promise<void>> = [];
     const worker = {
-      onFailed: undefined as
-        | ((id: string, err: unknown, attempts: number, max: number) => Promise<void>)
-        | undefined,
+      onFailed: (_handler: any) => {
+        // Not used by the dead-letter handler after the onExhausted split.
+      },
+      onExhausted: (handler: any) => {
+        exhaustedHandlers.push(handler);
+      },
+      onError: (_handler: any) => {},
+      close: async () => {},
     } as any;
-    worker.onFailed = (_id: any, _err: any, _attempts: any, _max: any) => Promise.resolve();
-    // Capture the simulated worker shape used by the dead-letter handler:
-    const handlers: Array<(id: string, err: unknown, attempts: number, max: number) => Promise<void>> = [];
-    worker.onFailed = (handler: any) => {
-      handlers.push(handler);
-    };
 
     attachDeadLetterHandler(worker, { notify: async () => undefined }, {
       getRecipients: () => ["a@x"],
@@ -777,9 +783,8 @@ describe("Wave 4.10 — DeadLetterOpts.formatMessage receives raw err", () => {
       },
     });
 
-    // Trigger
     const original = new Error("boom");
-    await handlers[0]!("job-1", original, 1, 1);
+    await exhaustedHandlers[0]!("job-1", original, 1);
 
     expect(observedErr).toBe(original); // identity preserved
     expect((observedErr as Error).message).toBe("boom");
@@ -828,7 +833,8 @@ describe("Wave 2.4 — malformed Redis Stream entry IDs log at decaying frequenc
       // Drive 215 malformed parses. Contract: log occurrences 1..10 plus 100 and 200.
       for (let i = 0; i < 215; i++) {
         const result = __parseEntryIdTimestamp(`not-a-valid-id-${i}`);
-        expect(result).toBe(0); // fallback to epoch
+        expect(result.recordedAtMs).toBe(0); // fallback to epoch
+        expect(result.synthetic).toBe(true);
       }
 
       // First 10 + 100th + 200th = 12 warnings.
@@ -862,8 +868,14 @@ describe("Wave 2.4 — malformed Redis Stream entry IDs log at decaying frequenc
       if (typeof msg === "string") warnings.push(msg);
     };
     try {
-      expect(__parseEntryIdTimestamp("1715200000000-0")).toBe(1_715_200_000_000);
-      expect(__parseEntryIdTimestamp("1715200000123")).toBe(1_715_200_000_123);
+      expect(__parseEntryIdTimestamp("1715200000000-0")).toEqual({
+        recordedAtMs: 1_715_200_000_000,
+        synthetic: false,
+      });
+      expect(__parseEntryIdTimestamp("1715200000123")).toEqual({
+        recordedAtMs: 1_715_200_000_123,
+        synthetic: false,
+      });
       expect(warnings.length).toBe(0);
     } finally {
       console.warn = originalWarn;

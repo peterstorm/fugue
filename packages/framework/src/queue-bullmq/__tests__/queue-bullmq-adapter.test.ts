@@ -6,6 +6,7 @@
 // Run with: REDIS_URL=redis://localhost:6379 bun test
 
 import { NoopObserver } from "../../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../../types/ids.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
 import type { JobLike } from "../../state-machine/types.js";
@@ -100,6 +101,7 @@ const testMachine: Machine<S, E, C> = {
   isTerminal: (s) => s.kind === "succeeded" || s.kind === "failed",
   isFailed: (s) => s.kind === "failed",
   stateProgress: (s) => (s.kind === "pending" ? 0 : s.kind === "running" ? 50 : 100),
+  stateKey: (s) => JSON.stringify(s),
 };
 
 // ---------------------------------------------------------------------------
@@ -902,7 +904,7 @@ describe("adaptBullMQJob — validateData hook", () => {
         ok: false,
         error: {
           kind: "checkpoint-corrupt",
-          runId: "j-corrupt",
+          runId: "j-corrupt" as RunId,
           message: "envelope missing state/context",
         },
       }),
@@ -1043,7 +1045,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
     const { z } = await import("zod");
     const { ok, err } = await import("../../types/result.js");
     type NodeContext = import("../../types/node.js").NodeContext;
-    type NodeDef = import("../../types/node.js").NodeDef<unknown, unknown, unknown>;
+    type NodeDef = import("../../types/node.js").NodeDef<unknown, unknown>;
 
     const queueName = `${RUN_ID}-dag-resume`;
     const callCount = { a: 0, b: 0, c: 0 };
@@ -1083,7 +1085,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
     });
 
     const mkCtx = (): NodeContext => ({
-      runId: "dag-resume-run",
+      runId: "dag-resume-run" as RunId,
       dagId: dag.id,
       observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
@@ -1186,6 +1188,7 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
     isTerminal: (s) => s.kind === "done" || s.kind === "failed",
     isFailed: (s) => s.kind === "failed",
     stateProgress: (s) => ({ s0: 0, s1: 25, s2: 50, s3: 75, done: 100, failed: 0 }[s.kind] ?? 0),
+    stateKey: (s) => JSON.stringify(s),
   };
 
   // BullMQ stall race: after `worker1.close()` the job stays "active" until
@@ -1372,6 +1375,7 @@ describe("SC-004: 5-shape replay equivalence", () => {
     isTerminal: (s) => s.kind === "done" || s.kind === "failed" || s.kind === "rejected",
     isFailed: (s) => s.kind === "failed" || s.kind === "rejected",
     stateProgress: () => 0,
+    stateKey: (s) => JSON.stringify(s),
   };
 
   function assertReplayEquivalence(events: ShapeE[], initial: { state: ShapeS; context: ShapeC }) {
@@ -1491,6 +1495,7 @@ describe("XADD + replayEvents integration via Redis", () => {
       isTerminal: (s) => s.kind === "done",
       isFailed: () => false,
       stateProgress: () => 0,
+      stateKey: (s) => JSON.stringify(s),
     };
 
     const eventsToWrite: SimpleE[] = [{ type: "START" }, { type: "FINISH" }];
@@ -1552,6 +1557,7 @@ describe("Forensic replay-to-timestamp via Redis Streams", () => {
     isTerminal: (s) => s.kind === "done",
     isFailed: () => false,
     stateProgress: (s) => (s.kind === "done" ? 100 : 0),
+    stateKey: (s) => JSON.stringify(s),
   };
 
   redisIt(

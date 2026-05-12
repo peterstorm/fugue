@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
@@ -14,8 +15,8 @@ const OutputSchema = z.object({ greeting: z.string() });
 const mkLlmCtx = (outputs: unknown[]): NodeContext => {
   let callCount = 0;
   return {
-    runId: "test",
-    dagId: "test",
+    runId: "test" as RunId,
+    dagId: "test" as DagId,
     observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,

@@ -15,8 +15,16 @@ export function errorOnly(): PersistencePolicy {
 /**
  * Sample-with-probability policy. The optional `rng` lets tests assert
  * deterministic flush decisions without monkey-patching `Math.random`.
+ *
+ * Throws `RangeError` if `p` is not a finite number in `[0, 1]` — invalid
+ * inputs (NaN, Infinity, negatives) used to produce a silently-broken
+ * policy whose `shouldFlush` either never fired or fired every time, which
+ * is much harder to diagnose than a constructor-time error.
  */
 export function ratio(p: number, rng: () => number = Math.random): PersistencePolicy {
+  if (!Number.isFinite(p) || p < 0 || p > 1) {
+    throw new RangeError(`ratio(p): p must be a finite number in [0, 1], got ${p}`);
+  }
   return { shouldFlush: () => rng() < p };
 }
 

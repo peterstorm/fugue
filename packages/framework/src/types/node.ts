@@ -4,6 +4,7 @@ import type { FrameworkError } from "./errors.js";
 import type { Observer } from "../observer/observer.js";
 import type { LlmClient } from "../llm/client.js";
 import type { Tracer } from "../tracing/tracer.js";
+import type { RunId, NodeId, DagId } from "./ids.js";
 
 export type { Tracer };
 
@@ -55,7 +56,7 @@ export interface ContextCacheAdapter {
     value: unknown,
     ttlSec?: number,
   ) => Promise<Result<void, FrameworkError>>;
-  readonly writeCheckpoint?: (runId: string, nodeId: string, value: unknown) => Promise<void>;
+  readonly writeCheckpoint?: (runId: RunId, nodeId: NodeId, value: unknown) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,13 +98,29 @@ export interface CapabilityFields {
   readonly judgeLlm: LlmClient;
 }
 
+// Compile-time assertion that `Capability` (the discriminator union) and
+// `keyof CapabilityFields` (the record type) match exactly. Adding an entry
+// to one without the other turns the matching `_AssertCapabilitySync`
+// position into a non-`never` type, making the trailing assignment fail to
+// compile with a message that names the offending side.
+type _AssertCapabilitySync =
+  | (Capability extends keyof CapabilityFields
+      ? never
+      : "Capability has a key missing from CapabilityFields")
+  | (keyof CapabilityFields extends Capability
+      ? never
+      : "CapabilityFields has a key missing from Capability");
+// Assignment to `never` proves the union collapsed — any drift surfaces here.
+const _capabilityCheck: _AssertCapabilitySync = undefined as never;
+void _capabilityCheck;
+
 /**
  * Always-present part of NodeContext — fields the runtime guarantees by
  * injecting a no-op default when none is supplied.
  */
 export interface BaseNodeContext {
-  readonly runId: string;
-  readonly dagId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
   readonly logger: Logger;
   readonly tracer: Tracer;
   readonly observer: Observer;
@@ -161,10 +178,10 @@ export const brandAsValidatedNodeContext = (
 export interface NodeDef<
   I,
   O,
-  E,
+  E extends FrameworkError = FrameworkError,
   R extends readonly Capability[] = readonly Capability[],
 > {
-  readonly id: string;
+  readonly id: NodeId;
   readonly kind: NodeKind;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
@@ -194,8 +211,8 @@ export interface NodeDef<
  * Capability fields stay as in `BaseNodeContext`.
  */
 export type NodeContextInit = {
-  readonly runId: string;
-  readonly dagId: string;
+  readonly runId: string | RunId;
+  readonly dagId: string | DagId;
   readonly logger?: Logger;
   readonly tracer?: Tracer;
   readonly observer?: Observer;

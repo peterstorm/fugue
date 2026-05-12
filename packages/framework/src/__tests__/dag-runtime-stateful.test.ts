@@ -3,6 +3,7 @@
 //         HITL approve, approve-with-edit, reject, reroute-back, abort
 
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -23,8 +24,8 @@ const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unkno
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown, unknown>> = {},
-): NodeDef<unknown, unknown, unknown> => ({
+  overrides: Partial<NodeDef<unknown, unknown>> = {},
+): NodeDef<unknown, unknown> => ({
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -35,8 +36,8 @@ const makeNode = (
 });
 
 const makeCtx = (): NodeContext => ({
-  runId: "test-run-id",
-  dagId: "test-dag",
+  runId: "test-run-id" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -48,7 +49,7 @@ const makeCtx = (): NodeContext => ({
 
 interface MakeDagOverrides {
   readonly id?: string;
-  readonly nodes?: readonly NodeDef<unknown, unknown, unknown>[];
+  readonly nodes?: readonly NodeDef<unknown, unknown>[];
   readonly edges?: readonly EdgeDefRawInput[];
   readonly outputNodeId?: string;
   readonly retryLimits?: Readonly<Record<string, number>>;
@@ -239,7 +240,7 @@ describe("runDagStateful — retry transient", () => {
           run: async () => {
             attempts++;
             if (attempts < 2) {
-              return err({ kind: "node-crash" as const, nodeId: "a", message: "transient" });
+              return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "transient" });
             }
             return ok("recovered");
           },
@@ -267,7 +268,7 @@ describe("runDagStateful — retry transient", () => {
           retry: { backoffMs: [10], jitterRatio: 0.5 },
           run: async () => {
             attempts++;
-            if (attempts < 2) return err({ kind: "node-crash" as const, nodeId: "a", message: "t" });
+            if (attempts < 2) return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "t" });
             return ok("ok");
           },
         }),
@@ -296,7 +297,7 @@ describe("runDagStateful — retry exhausted", () => {
           retry: { backoffMs: [0], jitterRatio: 0 },
           run: async () => {
             attempts++;
-            return err({ kind: "node-crash" as const, nodeId: "a", message: "always fails" });
+            return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "always fails" });
           },
         }),
       ],
@@ -323,7 +324,7 @@ describe("runDagStateful — retry exhausted", () => {
         makeNode("a", {
           run: async () => {
             attempts++;
-            return err({ kind: "node-crash" as const, nodeId: "a", message: "boom" });
+            return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" });
           },
         }),
       ],
@@ -631,7 +632,7 @@ describe("runDagStateful — abort", () => {
       },
     };
 
-    const dag = makeDag({ nodes: [slowNode as NodeDef<unknown, unknown, unknown>], edges: [] });
+    const dag = makeDag({ nodes: [slowNode as NodeDef<unknown, unknown>], edges: [] });
 
     const ctx: NodeContext = { ...makeCtx(), signal: controller.signal };
 
@@ -747,6 +748,8 @@ describe("runDagStateful — observer events", () => {
       onNodeError: () => events.push("node-error"),
       onSubSpan: () => {},
       onRunEnd: () => events.push("run-end"),
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
     };
 
     const dag = makeDag({
@@ -772,6 +775,8 @@ describe("runDagStateful — observer events", () => {
       onNodeError: () => events.push("node-error"),
       onSubSpan: () => {},
       onRunEnd: () => events.push("run-end"),
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
     };
 
     const dag = makeDag({
@@ -875,7 +880,7 @@ describe("runDagStateful — durable job checkpointing", () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", {
-          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+          run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
       edges: [],
@@ -993,7 +998,7 @@ describe("runDagStateful — per-node retry limits", () => {
           retry: { backoffMs: [0], jitterRatio: 0 },
           run: async () => {
             aAttempts++;
-            if (aAttempts < 3) return err({ kind: "node-crash" as const, nodeId: "a", message: "t" });
+            if (aAttempts < 3) return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "t" });
             return ok("a-ok");
           },
         }),
@@ -1032,6 +1037,8 @@ describe("runDagStateful — onHumanReview throws", () => {
       onNodeError: (e: { nodeId: string }) => nodeErrorEvents.push(e.nodeId),
       onSubSpan: () => {},
       onRunEnd: () => {},
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
     };
 
     const dag = makeDag({
@@ -1077,6 +1084,8 @@ describe("runDagStateful — onHumanReview throws", () => {
       onNodeError: (e: { nodeId: string }) => nodeErrorEvents.push(e.nodeId),
       onSubSpan: () => {},
       onRunEnd: () => {},
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
     };
 
     const dag = makeDag({
@@ -1142,7 +1151,7 @@ describe("runDagStateful — runWave partial output staleness (M2)", () => {
           run: async () => {
             bRunCount++;
             if (bRunCount < 2) {
-              return err({ kind: "node-crash" as const, nodeId: "b", message: "b transient" });
+              return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "b" as NodeId, message: "b transient" });
             }
             return ok("b-out");
           },

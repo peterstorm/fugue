@@ -1,15 +1,17 @@
 import { describe, test, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { NoopObserver } from "../observer/observer.js";
 import { dispatchToolCall, dispatchToolCallsWithSpans } from "../llm/tool-dispatch.js";
 import type { ToolDef } from "../llm/tools.js";
+import { tool } from "../llm/tools.js";
 import type { NodeContext } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { ToolCall } from "../llm/tool-dispatch.js";
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -20,21 +22,21 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   ...overrides,
 });
 
-const echoTool: ToolDef<{ msg: string }, { echo: string }> = {
+const echoTool: ToolDef<{ msg: string }, { echo: string }> = tool({
   name: "echo",
   description: "Echo input",
   inputSchema: z.object({ msg: z.string() }),
   outputSchema: z.object({ echo: z.string() }),
   run: async ({ msg }) => ({ echo: msg }),
-};
+});
 
-const failTool: ToolDef<{ msg: string }, { echo: string }> = {
+const failTool: ToolDef<{ msg: string }, { echo: string }> = tool({
   name: "fail",
   description: "Always throws",
   inputSchema: z.object({ msg: z.string() }),
   outputSchema: z.object({ echo: z.string() }),
   run: async () => { throw new Error("tool-exploded"); },
-};
+});
 
 describe("dispatchToolCall", () => {
   test("returns error result for unknown tool", async () => {

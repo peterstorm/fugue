@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import Redis from "ioredis";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
@@ -22,7 +23,7 @@ function checkpointerSuite(name: string, factory: () => Checkpointer, cleanup?: 
     });
 
     test("setMeta + load round-trips metadata", async () => {
-      const meta: RunMeta = { dagId: "dag-1", startedAt: new Date("2025-01-01T00:00:00Z"), nodeCount: 3 };
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date("2025-01-01T00:00:00Z"), nodeCount: 3 };
       const setResult = await cp.setMeta("run-1", meta);
       expect(setResult.ok).toBe(true);
 
@@ -36,10 +37,10 @@ function checkpointerSuite(name: string, factory: () => Checkpointer, cleanup?: 
     });
 
     test("saveNode + load round-trips correctly", async () => {
-      const meta: RunMeta = { dagId: "dag-1", startedAt: new Date(), nodeCount: 1 };
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
       await cp.setMeta("run-2", meta);
 
-      const nodeState: NodeState = { nodeId: "n1", output: { text: "hello" }, completedAt: new Date("2025-06-01T12:00:00Z") };
+      const nodeState: NodeState = { nodeId: "n1" as NodeId, output: { text: "hello" }, completedAt: new Date("2025-06-01T12:00:00Z") };
       const saveResult = await cp.saveNode("run-2", "n1", nodeState);
       expect(saveResult.ok).toBe(true);
 
@@ -52,7 +53,7 @@ function checkpointerSuite(name: string, factory: () => Checkpointer, cleanup?: 
     });
 
     test("multiple nodes saved, all present in load", async () => {
-      const meta: RunMeta = { dagId: "dag-2", startedAt: new Date(), nodeCount: 3 };
+      const meta: RunMeta = { dagId: "dag-2" as DagId, startedAt: new Date(), nodeCount: 3 };
       await cp.setMeta("run-3", meta);
 
       for (const id of ["a", "b", "c"]) {
@@ -129,7 +130,7 @@ describeRedis("RedisCheckpointer", () => {
 
   test("setMeta + load round-trips metadata", async () => {
     const runId = makeRunId();
-    const meta: RunMeta = { dagId: "dag-r1", startedAt: new Date("2025-01-01T00:00:00Z"), nodeCount: 5 };
+    const meta: RunMeta = { dagId: "dag-r1" as DagId, startedAt: new Date("2025-01-01T00:00:00Z"), nodeCount: 5 };
     await cp.setMeta(runId, meta);
 
     const loadResult = await cp.load(runId);
@@ -142,8 +143,8 @@ describeRedis("RedisCheckpointer", () => {
 
   test("saveNode + load round-trips correctly", async () => {
     const runId = makeRunId();
-    await cp.setMeta(runId, { dagId: "d", startedAt: new Date(), nodeCount: 1 });
-    await cp.saveNode(runId, "n1", { nodeId: "n1", output: { x: 42 }, completedAt: new Date("2025-06-01T00:00:00Z") });
+    await cp.setMeta(runId, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 1 });
+    await cp.saveNode(runId, "n1", { nodeId: "n1" as NodeId, output: { x: 42 }, completedAt: new Date("2025-06-01T00:00:00Z") });
 
     const result = await cp.load(runId);
     expect(result.ok).toBe(true);
@@ -154,7 +155,7 @@ describeRedis("RedisCheckpointer", () => {
 
   test("multiple nodes saved, all present in load", async () => {
     const runId = makeRunId();
-    await cp.setMeta(runId, { dagId: "d", startedAt: new Date(), nodeCount: 3 });
+    await cp.setMeta(runId, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 3 });
     for (const id of ["x", "y", "z"]) {
       await cp.saveNode(runId, id, { nodeId: id, output: id, completedAt: new Date() });
     }
@@ -172,7 +173,7 @@ describeRedis("RedisCheckpointer", () => {
     // Explicit stale version forces the writer to stamp v1 instead of the
     // current FRAMEWORK_VERSION default.
     await cp.setMeta(runId, {
-      dagId: "d",
+      dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
       frameworkVersion: "1",
@@ -197,7 +198,7 @@ describeRedis("RedisCheckpointer", () => {
     await redis!.set(
       `chkpt:${runId}:meta`,
       JSON.stringify({
-        dagId: "d",
+        dagId: "d" as DagId,
         startedAt: new Date().toISOString(),
         nodeCount: 1,
         createdAt: new Date().toISOString(),
@@ -225,7 +226,7 @@ describeRedis("RedisCheckpointer", () => {
     await redis!.set(
       `chkpt:${runId}:meta`,
       JSON.stringify({
-        dagId: "d",
+        dagId: "d" as DagId,
         startedAt: new Date().toISOString(),
         nodeCount: 1,
         createdAt: expiredCreatedAt.toISOString(),
@@ -267,11 +268,11 @@ describeRedis("RedisCheckpointer", () => {
   // the checkpointer must fall back to inline EVAL and re-prime the SHA.
   test("recovers from server-side SCRIPT FLUSH (NOSCRIPT) via inline EVAL fallback", async () => {
     const runId = makeRunId();
-    await cp.setMeta(runId, { dagId: "d", startedAt: new Date(), nodeCount: 2 });
+    await cp.setMeta(runId, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 2 });
 
     // First save primes the SHA cache.
     await cp.saveNode(runId, "n1", {
-      nodeId: "n1",
+      nodeId: "n1" as NodeId,
       output: { v: 1 },
       completedAt: new Date(),
     });
@@ -283,7 +284,7 @@ describeRedis("RedisCheckpointer", () => {
 
     // Second save must recover and re-prime the SHA.
     const result = await cp.saveNode(runId, "n2", {
-      nodeId: "n2",
+      nodeId: "n2" as NodeId,
       output: { v: 2 },
       completedAt: new Date(),
     });
@@ -292,7 +293,7 @@ describeRedis("RedisCheckpointer", () => {
     // The fallback path clears saveNodeSha at line `this.saveNodeSha = null`;
     // a subsequent saveNode re-LOADs.
     await cp.saveNode(runId, "n3", {
-      nodeId: "n3",
+      nodeId: "n3" as NodeId,
       output: { v: 3 },
       completedAt: new Date(),
     });

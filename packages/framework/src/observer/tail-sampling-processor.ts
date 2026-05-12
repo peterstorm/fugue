@@ -130,17 +130,20 @@ export class TailSamplingProcessor implements SpanProcessor {
   }
 
   private trackExport(spans: ReadableSpan[], traceId: string): void {
-    // Track the original (rejectable) promise so forceFlush can observe
-    // failures via allSettled — eagerly absorbing rejections into
-    // resolved-`undefined` would hide transport failures from the SDK
-    // shutdown sequence.
-    const p = exportAsync(this.exporter, spans);
-    p.catch((err) => {
+    // Chain failure tracking *into* the stored promise rather than forking a
+    // sibling `.catch`. The previous shape registered the raw rejected
+    // promise — `pendingExports.add(p)` + a separate `p.catch(...)` — which
+    // created a transient unhandled-rejection window: under slow exporters
+    // the rejection could surface before the `.catch` had been attached, and
+    // `Promise.allSettled` in `forceFlush` would see the raw rejection
+    // again. The single chain below is awaited exactly once and counted
+    // exactly once.
+    const logged = exportAsync(this.exporter, spans).catch((err) => {
       this.exportFailed++;
       fwLogger().error(`[TailSamplingProcessor] Export failed for trace ${traceId}:`, err);
     });
-    this.pendingExports.add(p);
-    p.finally(() => this.pendingExports.delete(p));
+    this.pendingExports.add(logged);
+    logged.finally(() => this.pendingExports.delete(logged));
   }
 
   private processCompleteTrace(rootSpan: ReadableSpan, buffer: TraceBuffer): void {

@@ -1,10 +1,12 @@
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect, beforeAll } from "bun:test";
 import { z } from "zod";
 import { context as otelContext } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { FakeLlmClient } from "../llm/fake-client.js";
 import type { ToolDef } from "../llm/tools.js";
+import { tool } from "../llm/tools.js";
 import type { NodeContext, Tracer } from "../types/node.js";
 import type { SendWithToolsRequest } from "../llm/client.js";
 
@@ -17,8 +19,8 @@ beforeAll(() => {
 const FinalSchema = z.object({ result: z.number() });
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -29,13 +31,13 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   ...overrides,
 });
 
-const addNumbers: ToolDef<{ a: number; b: number }, { sum: number }> = {
+const addNumbers: ToolDef<{ a: number; b: number }, { sum: number }> = tool({
   name: "add_numbers",
   description: "Add two numbers",
   inputSchema: z.object({ a: z.number(), b: z.number() }),
   outputSchema: z.object({ sum: z.number() }),
   run: async ({ a, b }) => ({ sum: a + b }),
-};
+});
 
 const baseReq = (
   overrides: Partial<SendWithToolsRequest<{ result: number }>> = {},
@@ -45,7 +47,7 @@ const baseReq = (
   model: "fake-model",
   tools: [addNumbers],
   schema: FinalSchema,
-  nodeId: "test-node",
+  nodeId: "test-node" as NodeId,
   ...overrides,
 });
 
@@ -277,13 +279,17 @@ describe("FakeLlmClient.sendWithTools — loop behavior", () => {
   });
 
   test("invalid tool name at registration → Err(validation)", async () => {
-    const bad: ToolDef<unknown, unknown> = {
+    // Bypass the smart constructor on purpose — this test exercises the
+    // runtime `ensureToolNames` defense-in-depth path, so the literal needs
+    // to slip past the type brand. The unknown→ToolDef cast is the test's
+    // way of saying "I'm constructing this without `tool()` deliberately".
+    const bad = {
       name: "bad name with spaces",
       description: "x",
       inputSchema: z.any(),
       outputSchema: z.any(),
       run: async () => ({}),
-    };
+    } as unknown as ToolDef<unknown, unknown>;
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 0 } }],
     });

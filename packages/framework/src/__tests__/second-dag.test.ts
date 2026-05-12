@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok } from "../types/result.js";
@@ -39,8 +40,8 @@ describe("second-dag (SC-007): hello world DAG", () => {
   });
 
   const mkCtx = (): NodeContext => ({
-    runId: "hw-run",
-    dagId: "hello-world",
+    runId: "hw-run" as RunId,
+    dagId: "hello-world" as DagId,
     observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,

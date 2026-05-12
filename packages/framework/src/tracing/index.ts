@@ -15,3 +15,7 @@ export { setFrameworkTracer, fwTracer } from "./global-tracer.js";
 // MLflow-specific OTLP exporter
 export { MlflowOtlpExporter, createMlflowExporter } from "./mlflow-otlp-exporter.js";
 export type { MlflowOtlpExporterConfig } from "./mlflow-otlp-exporter.js";
+
+// Side-channel registry for object-valued span attributes (advanced)
+export { createSpanAttributeRegistry } from "./span-attribute-registry.js";
+export type { SpanAttributeRegistry, SpanAttributes } from "./span-attribute-registry.js";

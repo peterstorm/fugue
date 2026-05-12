@@ -11,6 +11,7 @@
 // pipelines) depend on.
 
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { BufferedObserver } from "../observer/buffered.js";
 import { alwaysOn } from "../observer/policy.js";
 import { RecordingObserver } from "../observer/observer.js";
@@ -24,24 +25,24 @@ import type {
 
 const mkRunStart = (runId: string): RunStartEvent => ({
   type: "run-start",
-  runId,
-  dagId: "d",
+  runId: runId as RunId,
+  dagId: "d" as DagId,
   timestamp: new Date(),
 });
 
 const mkNodeStart = (runId: string, nodeId: string): NodeStartEvent => ({
   type: "node-start",
-  runId,
-  dagId: "d",
-  nodeId,
+  runId: runId as RunId,
+  dagId: "d" as DagId,
+  nodeId: nodeId as NodeId,
   timestamp: new Date(),
 });
 
 const mkNodeEnd = (runId: string, nodeId: string): NodeEndEvent => ({
   type: "node-end",
-  runId,
-  dagId: "d",
-  nodeId,
+  runId: runId as RunId,
+  dagId: "d" as DagId,
+  nodeId: nodeId as NodeId,
   timestamp: new Date(),
   duration: 1,
   output: null,
@@ -49,8 +50,8 @@ const mkNodeEnd = (runId: string, nodeId: string): NodeEndEvent => ({
 
 const mkRunEnd = (runId: string, status: "ok" | "error"): RunEndEvent => ({
   type: "run-end",
-  runId,
-  dagId: "d",
+  runId: runId as RunId,
+  dagId: "d" as DagId,
   timestamp: new Date(),
   duration: 100,
   status,

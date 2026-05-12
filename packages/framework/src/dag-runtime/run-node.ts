@@ -86,7 +86,7 @@ export interface RunNodeOpts {
 }
 
 export const runNodeShared = async (
-  node: NodeDef<unknown, unknown, unknown>,
+  node: NodeDef<unknown, unknown>,
   dagInput: unknown,
   ctx: ValidatedNodeContext,
   dagId: string,

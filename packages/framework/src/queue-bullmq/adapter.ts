@@ -186,7 +186,31 @@ export function createBullMQBackend(
           // Per-job max — BullMQ resolves this from EnqueueOpts.attempts ??
           // QueueOpts.defaultAttempts (via defaultJobOptions) ?? 1.
           const max = job.opts?.attempts ?? 1;
+          // Mid-retry only — onExhausted fires when the budget is gone.
+          if (attemptsMade >= max) return;
           Promise.resolve(handler(id, error, attemptsMade, max)).catch((handlerErr) => {
+            worker.emit(
+              "error",
+              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
+            );
+          });
+        });
+      },
+
+      onExhausted(
+        handler: (
+          id: string,
+          err: unknown,
+          attempts: number,
+        ) => Promise<void> | void,
+      ): void {
+        worker.on("failed", (job, error) => {
+          if (!job?.id) return; // onFailed already emitted the error
+          const id = job.id;
+          const attemptsMade = job.attemptsMade ?? 1;
+          const max = job.opts?.attempts ?? 1;
+          if (attemptsMade < max) return;
+          Promise.resolve(handler(id, error, attemptsMade)).catch((handlerErr) => {
             worker.emit(
               "error",
               handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),

@@ -6,6 +6,8 @@ import type { ToolDef } from "../llm/tools.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
 import { enrichLlmSpan } from "../tracing/index.js";
+import { __brandNodeId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 
 /**
  * Configuration for `createLlmWithToolsNode` — mirrors `LlmNodeConfig` but for
@@ -66,8 +68,8 @@ export type LlmWithToolsNodeConfig<I, O, Id extends string = string> =
  */
 export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
   config: LlmWithToolsNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: Id } => ({
-  id: config.id,
+): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: Id & NodeId } => ({
+  id: __brandNodeId(config.id) as Id & NodeId,
   kind: "llm",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
@@ -126,7 +128,7 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
           return ok(lookup.value as O);
         }
       } catch (e) {
-        ctx.logger.warn(`[${config.id}] Cache read failed: ${e instanceof Error ? e.message : e}`);
+        ctx.logger.warn(`[${config.id}] Cache read failed (cacheKey=${cacheKey}): ${e instanceof Error ? e.message : e}`);
       }
     }
 

@@ -5,8 +5,8 @@ export type {
   LlmRuntime,
   SendWithToolsRequest,
 } from "./client.js";
-export type { ToolDef } from "./tools.js";
-export { assertValidToolName, ensureToolNames, tool } from "./tools.js";
+export type { ToolDef, ToolDefInput, ToolName } from "./tools.js";
+export { assertValidToolName, ensureToolNames, tool, toolName } from "./tools.js";
 export {
   withLlmSpan,
   withToolSpan,

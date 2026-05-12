@@ -9,6 +9,7 @@
 //   seq(T) < seq(R).
 
 import { describe, expect, it } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import type { NodeContext, NodeDef } from "../types/node.js";
 import type { ObserverEvent } from "../types/events.js";
@@ -46,7 +47,7 @@ interface Recording {
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
   runId: `r-${Math.floor(Math.random() * 1e9)}`,
-  dagId: "ontrace-ordering",
+  dagId: "ontrace-ordering" as DagId,
   observer,
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -56,7 +57,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   logger: { warn: () => {}, error: () => {} },
 });
 
-const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { calls: Record<string, number> }): NodeDef<unknown, unknown, unknown> => {
+const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { calls: Record<string, number> }): NodeDef<unknown, unknown> => {
   if (kind === "ok") {
     return createTransformNode({
       id,
@@ -75,7 +76,7 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
       run: async (i) => {
         state.calls[id] = (state.calls[id] ?? 0) + 1;
         if ((state.calls[id] ?? 0) < 2) {
-          return err({ kind: "node-crash" as const, nodeId: id, message: "transient" });
+          return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: id, message: "transient" });
         }
         return ok(i);
       },
@@ -88,7 +89,7 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
     inputSchema: z.any(),
     outputSchema: z.any(),
     requires: [],
-    run: async () => err({ kind: "node-crash" as const, nodeId: id, message: "permanent" }),
+    run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: id, message: "permanent" }),
     retry: { backoffMs: [1] },
   };
 };

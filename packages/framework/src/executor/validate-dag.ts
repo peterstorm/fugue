@@ -46,7 +46,7 @@ export const validateDagShape = (
 ): Result<DagDef, FrameworkError> => {
   const entries = Object.entries(input.nodes) as [
     string,
-    NodeDef<unknown, unknown, unknown>,
+    NodeDef<unknown, unknown>,
   ][];
 
   if (entries.length === 0) {
@@ -120,6 +120,24 @@ export const validateDagShape = (
         ),
       );
     }
+    // Each predicate field is either a direct value or a `{ oneOf: [...] }`
+    // envelope. An empty `oneOf` array can never match — fail at validation
+    // time rather than producing a permanently-prunable conditional edge.
+    for (const [field, value] of Object.entries(pred as Record<string, unknown>)) {
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        "oneOf" in value &&
+        Array.isArray((value as { oneOf: unknown[] }).oneOf) &&
+        (value as { oneOf: unknown[] }).oneOf.length === 0
+      ) {
+        return err({
+          kind: "predicate-malformed",
+          nodeId: e.from,
+          message: `Edge '${e.from}' -> '${e.to}' has an empty 'oneOf' array on field '${field}' — predicate can never match`,
+        });
+      }
+    }
   }
 
   // Else-totality: every node with any conditional out-edge must have exactly
@@ -184,10 +202,38 @@ export const validateDagShape = (
     }
 
     if (!reachable.has(input.outputNodeId)) {
+      // Walk backward from the output along unconditional + default edges to
+      // find the first node that has no unconditional/default inbound. That
+      // node is the actual frontier — the place where routing diverged from
+      // the output. Reporting the output node itself (the prior behaviour)
+      // sent every consumer chasing the symptom rather than the cause.
+      const incomingNonConditional = new Map<string, EdgeDef[]>();
+      for (const id of nodeIds) incomingNonConditional.set(id, []);
+      for (const e of edges) {
+        if (isConditionalEdge(e)) continue;
+        const list = incomingNonConditional.get(e.to);
+        if (list) list.push(e);
+      }
+      const visited = new Set<string>();
+      const queue: string[] = [input.outputNodeId];
+      let frontier: string = input.outputNodeId;
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        const ins = incomingNonConditional.get(cur) ?? [];
+        if (ins.length === 0) {
+          frontier = cur;
+          break;
+        }
+        for (const e of ins) {
+          if (!visited.has(e.from)) queue.push(e.from);
+        }
+      }
       return err({
         kind: "output-unreachable-under-routing",
         outputNodeId: input.outputNodeId,
-        missedFromNode: input.outputNodeId,
+        missedFromNode: frontier,
       });
     }
   }
@@ -215,5 +261,5 @@ export const validateDagShape = (
 
 // Re-export so test helpers building array-shape inputs can convert.
 export const recordFromNodeArray = (
-  nodes: readonly NodeDef<unknown, unknown, unknown>[],
+  nodes: readonly NodeDef<unknown, unknown>[],
 ): NodesRecord => Object.fromEntries(nodes.map((n) => [n.id, n]));

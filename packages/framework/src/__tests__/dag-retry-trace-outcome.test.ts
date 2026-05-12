@@ -10,6 +10,7 @@
 // with `outcome: "retry"`.
 
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -20,8 +21,8 @@ import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
 
 const mkCtx = (): NodeContext => ({
-  runId: "retry-trace-run",
-  dagId: "retry-trace-dag",
+  runId: "retry-trace-run" as RunId,
+  dagId: "retry-trace-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -34,7 +35,7 @@ const mkCtx = (): NodeContext => ({
 describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", () => {
   it("flaky node that fails once emits at least one trace with outcome:'retry'", async () => {
     let callCount = 0;
-    const flaky: NodeDef<unknown, unknown, unknown> = {
+    const flaky: NodeDef<unknown, unknown> = {
       id: "flaky",
       kind: "transform",
       inputSchema: z.any(),
@@ -43,7 +44,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
       run: async () => {
         callCount += 1;
         if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+          return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "flaky" as NodeId, message: "transient" });
         }
         return ok("done");
       },
@@ -77,7 +78,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
   });
 
   it("non-flaky DAG emits zero traces with outcome:'retry'", async () => {
-    const happy: NodeDef<unknown, unknown, unknown> = {
+    const happy: NodeDef<unknown, unknown> = {
       id: "happy",
       kind: "transform",
       inputSchema: z.any(),

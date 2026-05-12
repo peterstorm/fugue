@@ -2,6 +2,8 @@ import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import { __brandNodeId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 
 export interface TransformNodeConfig<I, O, Id extends string = string> {
   readonly id: Id;
@@ -12,8 +14,8 @@ export interface TransformNodeConfig<I, O, Id extends string = string> {
 
 export const createTransformNode = <I, O, const Id extends string = string>(
   config: TransformNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: Id } => ({
-  id: config.id,
+): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: Id & NodeId } => ({
+  id: __brandNodeId(config.id) as Id & NodeId,
   kind: "transform",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,

@@ -75,9 +75,9 @@ describe("createInMemoryBackend", () => {
     expect(received[0]).toBe("original");
   });
 
-  it("fires onFailed when worker throws", async () => {
+  it("fires onExhausted when worker throws and attempts=1", async () => {
     const backend = createInMemoryBackend();
-    const failures: Array<{ id: string; err: unknown; attempts: number; max: number }> = [];
+    const exhausted: Array<{ id: string; err: unknown; attempts: number }> = [];
 
     const queue = backend.createQueue<string, undefined>("fail-queue");
     const worker = backend.createWorker<unknown, unknown>(
@@ -87,23 +87,25 @@ describe("createInMemoryBackend", () => {
       },
     );
 
-    worker.onFailed((id, err, attempts, max) => {
-      failures.push({ id, err, attempts, max });
+    // attempts === max on the first failure → onExhausted route, not onFailed.
+    worker.onExhausted((id, err, attempts) => {
+      exhausted.push({ id, err, attempts });
     });
 
     await queue.enqueue("j-fail", { state: "data", context: undefined }, { attempts: 1 });
     await queue.drain();
 
-    expect(failures).toHaveLength(1);
-    expect(failures[0].id).toBe("j-fail");
-    expect(failures[0].err).toBeInstanceOf(Error);
-    expect((failures[0].err as Error).message).toBe("worker boom");
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].id).toBe("j-fail");
+    expect(exhausted[0].err).toBeInstanceOf(Error);
+    expect((exhausted[0].err as Error).message).toBe("worker boom");
   });
 
-  it("retries up to per-job attempts before giving up", async () => {
+  it("retries up to per-job attempts; onFailed fires mid-retry, onExhausted on the final", async () => {
     const backend = createInMemoryBackend();
     let callCount = 0;
     const failures: number[] = [];
+    const exhausted: number[] = [];
 
     const queue = backend.createQueue<string, undefined>("retry-queue");
     const worker = backend.createWorker<unknown, unknown>(
@@ -117,13 +119,17 @@ describe("createInMemoryBackend", () => {
     worker.onFailed((_id, _err, attempts, _max) => {
       failures.push(attempts);
     });
+    worker.onExhausted((_id, _err, attempts) => {
+      exhausted.push(attempts);
+    });
 
     await queue.enqueue("j-retry", { state: "data", context: undefined }, { attempts: 3 });
     await queue.drain();
 
     expect(callCount).toBe(3);
-    // onFailed called once per attempt
-    expect(failures).toEqual([1, 2, 3]);
+    // Mid-retry failures route to onFailed; the final exhausted attempt to onExhausted.
+    expect(failures).toEqual([1, 2]);
+    expect(exhausted).toEqual([3]);
   });
 
   it("_events exposes enqueued entries per queue name", async () => {

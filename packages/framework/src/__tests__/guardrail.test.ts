@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { createGuardrailNode, ok } from "../../src/index.js";
 import type { GuardrailResult } from "../../src/index.js";
 import { z } from "zod";
@@ -8,8 +9,8 @@ const InputSchema = z.object({ value: z.number() });
 const OutputSchema: z.ZodType<GuardrailResult<number>> = z.any();
 
 const makeCtx = (observer = new NoopObserver()) => ({
-  runId: "test",
-  dagId: "test",
+  runId: "test" as RunId,
+  dagId: "test" as DagId,
   observer,
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,

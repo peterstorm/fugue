@@ -42,7 +42,12 @@ import {
   EVENT_GEN_AI_ASSISTANT_MESSAGE,
   EVENT_LLM_COST,
 } from "./semantic-conventions.js";
-import { SpanAttributeRegistry, type SpanAttributes } from "./span-attribute-registry.js";
+import {
+  createSpanAttributeRegistry,
+  type SpanAttributeRegistry,
+  type SpanAttributes,
+} from "./span-attribute-registry.js";
+import { fwLogger } from "../logger.js";
 
 export interface MlflowOtlpExporterConfig {
   /** MLflow tracking server URL (e.g. "http://localhost:5000") */
@@ -54,6 +59,15 @@ export interface MlflowOtlpExporterConfig {
    * exporter lazily imports `@opentelemetry/exporter-trace-otlp-proto`.
    */
   readonly createInner?: () => Promise<SpanExporter>;
+  /**
+   * Optional side-channel registry for object-valued span attributes. When
+   * omitted the exporter constructs its own private instance — parallel
+   * exporters therefore never cross-corrupt each other's state. Pass a
+   * shared registry only when an external producer (e.g. an enrichment
+   * helper running outside the exporter) writes attributes for the same
+   * spans this exporter will later export.
+   */
+  readonly registry?: SpanAttributeRegistry;
 }
 
 /** Map from our span type values to MLflow's uppercase constants */
@@ -174,9 +188,8 @@ const logParseFailure = (counter: { count: number }, field: string, traceId: str
   // Log first hit and then every order-of-magnitude milestone.
   const shouldLog = c === 1 || (c >= 10 && c % Math.pow(10, Math.floor(Math.log10(c))) === 0);
   if (shouldLog) {
-    console.warn(
-      `[MlflowOtlpExporter] JSON parse failed for ${field} on trace ${traceId} (occurrence ${c}):`,
-      err instanceof Error ? err.message : err,
+    fwLogger().warn(
+      `[MlflowOtlpExporter] JSON parse failed for ${field} on trace ${traceId} (occurrence ${c}): ${err instanceof Error ? err.message : err}`,
     );
   }
 };
@@ -197,6 +210,7 @@ export class MlflowOtlpExporter implements SpanExporter {
   private failedPermanently: Error | null = null;
   private readonly config: MlflowOtlpExporterConfig;
   private readonly parseFailureCounter = { count: 0 };
+  private readonly registry: SpanAttributeRegistry;
 
   /** Exposed for health checks — non-null when initialization failed permanently. */
   get failed(): Error | null {
@@ -208,6 +222,12 @@ export class MlflowOtlpExporter implements SpanExporter {
 
   constructor(config: MlflowOtlpExporterConfig) {
     this.config = config;
+    this.registry = config.registry ?? createSpanAttributeRegistry();
+  }
+
+  /** The side-channel registry this exporter owns or was wired with. */
+  getRegistry(): SpanAttributeRegistry {
+    return this.registry;
   }
 
   /**
@@ -236,7 +256,7 @@ export class MlflowOtlpExporter implements SpanExporter {
         // immediately. Without this the failure was silently latched and only
         // logged on the next export() (and only if getInner threw, which it
         // can't here because of the `.catch(() => null)` below).
-        console.error(
+        fwLogger().error(
           "[MlflowOtlpExporter] Permanent initialization failure — all future spans will be dropped:",
           this.failedPermanently,
         );
@@ -253,7 +273,7 @@ export class MlflowOtlpExporter implements SpanExporter {
     const wrapped = spans.map((span) => {
       const extra = this.computeDerivedAttrs(span);
       // Also merge any pre-existing registry entries (from external callers)
-      const registryExtra = SpanAttributeRegistry.pop(span.spanContext().spanId);
+      const registryExtra = this.registry.pop(span.spanContext().spanId);
       const merged = registryExtra ? { ...registryExtra, ...extra } : extra;
       return merged && Object.keys(merged).length > 0 ? withMergedAttrs(span, merged) : span;
     });
@@ -269,7 +289,7 @@ export class MlflowOtlpExporter implements SpanExporter {
         inner.export(wrapped, resultCallback);
       })
       .catch((err) => {
-        console.error("[MlflowOtlpExporter] Failed to initialize OTLP exporter:", err);
+        fwLogger().error("[MlflowOtlpExporter] Failed to initialize OTLP exporter:", err);
         this.droppedSpanCount += spans.length;
         resultCallback({ code: 1, error: err instanceof Error ? err : new Error(String(err)) });
       });
@@ -284,9 +304,17 @@ export class MlflowOtlpExporter implements SpanExporter {
 
     // ai.span.type → mlflow.spanType — enum re-mapping (not a straight copy),
     // SPAN_TYPE_TO_MLFLOW normalises our casing to MLflow's uppercase constants.
+    // Surface unknown values via fwLogger so silently coercing to CHAIN doesn't
+    // mask a producer typo.
     const spanType = attrs[AI_SPAN_TYPE] as string | undefined;
     if (spanType) {
-      out["mlflow.spanType"] = SPAN_TYPE_TO_MLFLOW[spanType] ?? "CHAIN";
+      const mlflowType = SPAN_TYPE_TO_MLFLOW[spanType];
+      if (!mlflowType) {
+        fwLogger().warn(
+          `[MlflowOtlpExporter] Unknown spanType="${spanType}" → defaulting to CHAIN`,
+        );
+      }
+      out["mlflow.spanType"] = mlflowType ?? "CHAIN";
     }
 
     for (const { from, to } of ATTR_MAP) {
@@ -325,14 +353,22 @@ export class MlflowOtlpExporter implements SpanExporter {
   }
 
   async shutdown(): Promise<void> {
-    if (this.failedPermanently) throw this.failedPermanently;
-    const inner = this.innerPromise ? await this.innerPromise.catch(() => null) : null;
+    // No-op when init failed permanently — the failure was already logged at
+    // init time. Re-throwing here aborts the OTel SDK shutdown chain and
+    // leaves sibling exporters un-closed.
+    if (this.failedPermanently) return;
+    if (!this.innerPromise) return;
+    const inner = await this.innerPromise.catch(() => null);
     if (inner?.shutdown) await inner.shutdown();
   }
 
   async forceFlush(): Promise<void> {
-    if (this.failedPermanently) throw this.failedPermanently;
-    const inner = this.innerPromise ? await this.innerPromise.catch(() => null) : null;
+    // No-op when init failed permanently. Silently resolving used to mask
+    // dropped spans; now the dropped count is surfaced via `droppedSpanCount`
+    // and the original init error via `failed`.
+    if (this.failedPermanently) return;
+    if (!this.innerPromise) return;
+    const inner = await this.innerPromise.catch(() => null);
     const flush = (inner as { forceFlush?: () => Promise<void> } | null)?.forceFlush;
     if (flush) await flush.call(inner);
   }

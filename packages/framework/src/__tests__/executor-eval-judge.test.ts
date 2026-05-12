@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { runDag } from "../../src/executor/executor.js";
@@ -15,8 +16,8 @@ import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 // --- Helpers ---
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -149,7 +150,7 @@ describe("executor + eval-judge integration", () => {
       id: "failing",
       inputSchema: z.string(),
       outputSchema: z.string(),
-      transform: () => err({ kind: "node-crash" as const, nodeId: "failing", retriability: "retriable" as const, message: "boom" }),
+      transform: () => err({ kind: "node-crash" as const, nodeId: "failing" as NodeId, retriability: "retriable" as const, message: "boom" }),
     });
 
     const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });

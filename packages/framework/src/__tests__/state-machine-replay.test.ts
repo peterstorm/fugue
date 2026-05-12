@@ -31,6 +31,7 @@ const counterMachine: Machine<CountState, CountEvent, CountCtx> = {
   isTerminal(state) { return state.kind === "done"; },
   isFailed() { return false; },
   stateProgress(state) { return state.kind === "done" ? 100 : 50; },
+  stateKey: (s) => JSON.stringify(s),
 };
 
 describe("replayEvents", () => {

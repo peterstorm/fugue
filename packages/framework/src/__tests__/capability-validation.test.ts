@@ -5,6 +5,7 @@
 // `Err({ kind: "missing-capability", capability: "llm", nodeId })`.
 
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
@@ -14,8 +15,8 @@ import type { FrameworkError } from "../types/errors.js";
 import { NoopObserver } from "../observer/observer.js";
 
 const noLlmCtx = (): NodeContext => ({
-  runId: "r",
-  dagId: "d",
+  runId: "r" as RunId,
+  dagId: "d" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -109,7 +110,7 @@ describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
   it("satisfied capability passes validation and the node runs", async () => {
     let ranBody = false;
     const fakeLlm = {
-      sendStructured: async () => err({ kind: "node-crash" as const, nodeId: "x", message: "no" }),
+      sendStructured: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "x" as NodeId, message: "no" }),
     };
     const node: NodeDef<unknown, unknown, FrameworkError, readonly ["llm"]> = {
       id: "uses-llm",

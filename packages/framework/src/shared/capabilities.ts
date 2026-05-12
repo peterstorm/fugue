@@ -34,26 +34,36 @@ const capabilityField = (
 
 /**
  * Walk `dag.nodes`, collect `union(node.requires)`, and verify each capability
- * resolves to a non-null value on `ctx`. Returns the *first* missing
- * capability (paired with the declaring node id) as an Err, or a phantom-
- * branded `ValidatedNodeContext` token when all declarations are satisfied.
- * Downstream code requires the token, so any path that bypasses this check
- * fails to typecheck.
+ * resolves to a non-null value on `ctx`. Returns all missing pairs as a
+ * single Err — callers see the full set of gaps in one pass rather than
+ * having to re-run after each fix. The first miss is also surfaced at the
+ * top-level `nodeId`/`capability` fields so existing pattern-matchers stay
+ * working unchanged.
+ *
+ * Returns a phantom-branded `ValidatedNodeContext` token when all
+ * declarations are satisfied. Downstream code requires the token, so any
+ * path that bypasses this check fails to typecheck.
  */
 export const validateCapabilities = (
   dag: DagDef,
   ctx: BaseNodeContext,
 ): Result<ValidatedNodeContext, FrameworkError> => {
+  const missing: { readonly nodeId: typeof dag.nodes[number]["id"]; readonly capability: Capability }[] = [];
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
       if (capabilityField(ctx, cap) == null) {
-        return err({
-          kind: "missing-capability" as const,
-          nodeId: node.id,
-          capability: cap,
-        });
+        missing.push({ nodeId: node.id, capability: cap });
       }
     }
+  }
+  if (missing.length > 0) {
+    const first = missing[0]!;
+    return err({
+      kind: "missing-capability" as const,
+      nodeId: first.nodeId,
+      capability: first.capability,
+      missing,
+    });
   }
   return ok(brandAsValidatedNodeContext(ctx));
 };

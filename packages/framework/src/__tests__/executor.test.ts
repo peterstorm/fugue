@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { NodeContext, NodeDef } from "../types/node.js";
@@ -12,8 +13,8 @@ import { RecordingObserver, NoopObserver } from "../observer/observer.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 
 const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -174,7 +175,7 @@ describe("runDag", () => {
           id: "A",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          transform: (_i) => { log.push("A"); return err({ kind: "node-crash" as const, nodeId: "A", retriability: "retriable" as const, message: "boom" }); },
+          transform: (_i) => { log.push("A"); return err({ kind: "node-crash" as const, nodeId: "A" as NodeId, retriability: "retriable" as const, message: "boom" }); },
         }),
         createTransformNode({
           id: "B",
@@ -228,10 +229,10 @@ describe("runDag", () => {
     ]);
 
     const observer = new RecordingObserver();
-    const ctx = mkCtx({ observer, runId: "resume-run-1", dagId: "resume-test" });
+    const ctx = mkCtx({ observer, runId: "resume-run-1" as RunId, dagId: "resume-test" as DagId });
 
     const result = await runDag(dag, undefined, ctx, {
-      resume: { runId: "resume-run-1", checkpoint },
+      resume: { runId: "resume-run-1" as RunId, checkpoint },
     });
 
     expect(result.ok).toBe(true);
@@ -282,10 +283,10 @@ describe("runDag", () => {
     const stale = new Map<string, unknown>([["A", { value: 99 }]]);
 
     const observer = new RecordingObserver();
-    const ctx = mkCtx({ observer, runId: "stale-run", dagId: "schema-evolved" });
+    const ctx = mkCtx({ observer, runId: "stale-run" as RunId, dagId: "schema-evolved" as DagId });
 
     const result = await runDag(dag, undefined, ctx, {
-      resume: { runId: "stale-run", checkpoint: stale },
+      resume: { runId: "stale-run" as RunId, checkpoint: stale },
     });
 
     expect(result.ok).toBe(false);
@@ -324,7 +325,7 @@ describe("runDag", () => {
     });
 
     const observer = new RecordingObserver();
-    const ctx = mkCtx({ observer, runId: "obs-run-1", dagId: "obs-test" });
+    const ctx = mkCtx({ observer, runId: "obs-run-1" as RunId, dagId: "obs-test" as DagId });
 
     const result = await runDag(dag, { value: 1 }, ctx);
     expect(result.ok).toBe(true);
@@ -361,14 +362,14 @@ describe("runDag", () => {
           id: "B",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B", retriability: "retriable" as const, message: "boom" }),
+          transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B" as NodeId, retriability: "retriable" as const, message: "boom" }),
         }),
       ],
       edges: [{ from: "A", to: "B" }],
     });
 
     const observer = new RecordingObserver();
-    const ctx = mkCtx({ observer, runId: "err-run", dagId: "err-obs" });
+    const ctx = mkCtx({ observer, runId: "err-run" as RunId, dagId: "err-obs" as DagId });
     const result = await runDag(dag, {}, ctx);
     expect(result.ok).toBe(false);
 
@@ -405,13 +406,13 @@ describe("runDag", () => {
         checkpoints.push({ runId, nodeId, output });
       },
     };
-    const ctx = mkCtx({ cache, runId: "ckpt-run" });
+    const ctx = mkCtx({ cache, runId: "ckpt-run" as RunId });
     const result = await runDag(dag, { value: 1 }, ctx);
     expect(result.ok).toBe(true);
 
     expect(checkpoints).toEqual([
-      { runId: "ckpt-run", nodeId: "A", output: { value: 2 } },
-      { runId: "ckpt-run", nodeId: "B", output: { value: 4 } },
+      { runId: "ckpt-run" as RunId, nodeId: "A" as NodeId, output: { value: 2 } },
+      { runId: "ckpt-run" as RunId, nodeId: "B" as NodeId, output: { value: 4 } },
     ]);
   });
 
@@ -552,7 +553,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     });
     const checkpoint = new Map<string, unknown>([["A", 10]]);
     const result = await runDag(dag, {}, mkCtx(), {
-      resume: { runId: "r2", checkpoint },
+      resume: { runId: "r2" as RunId, checkpoint },
     });
     expect(result.ok).toBe(true);
     expect(log).toEqual(["B"]);
@@ -582,7 +583,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           requires: [],
           run: async (_input, _ctx) => ok({ result: "needs-review" }),
           humanReview: { prompt: "Please review" },
-        } as NodeDef<unknown, unknown, unknown>,
+        } as NodeDef<unknown, unknown>,
       ],
       edges: [],
     });
@@ -652,13 +653,13 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           requires: [],
           run: async (_input, _ctx) => { log.push("reviewed"); return ok({ result: "needs-review" }); },
           humanReview: { prompt: "Please review" },
-        } as NodeDef<unknown, unknown, unknown>,
+        } as NodeDef<unknown, unknown>,
       ],
       edges: [{ from: "A", to: "reviewed" }],
     });
     const checkpoint = new Map<string, unknown>([["A", 99]]);
     const result = await runDag(dag, {}, mkCtx(), {
-      resume: { runId: "r1", checkpoint },
+      resume: { runId: "r1" as RunId, checkpoint },
       onHumanReview: noopReview,
     });
     expect(result.ok).toBe(true);
@@ -685,18 +686,18 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           run: async () => {
             attempts += 1;
             if (attempts < 2) {
-              return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient" });
+              return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient" });
             }
             return ok("done");
           },
           retry: { backoffMs: [1] },
-        } as NodeDef<unknown, unknown, unknown>,
+        } as NodeDef<unknown, unknown>,
       ],
       edges: [{ from: "A", to: "flaky" }],
     });
     const checkpoint = new Map<string, unknown>([["A", "cached-A"]]);
     const result = await runDag(dag, {}, mkCtx(), {
-      resume: { runId: "r1", checkpoint },
+      resume: { runId: "r1" as RunId, checkpoint },
       retryLimits: { flaky: 2 },
     });
     expect(result.ok).toBe(true);
@@ -720,7 +721,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
 
   it("DagDef.defaultRetryLimit routes to state-machine path even without opts.retryLimits", async () => {
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+    const flakyNode: NodeDef<unknown, unknown> = {
       id: "flaky",
       kind: "transform",
       inputSchema: z.any(),
@@ -729,7 +730,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient" });
+          return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient" });
         }
         return ok("ok");
       },
@@ -748,7 +749,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
 
   it("DagDef.retryLimits routes to state-machine path even without opts.retryLimits", async () => {
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+    const flakyNode: NodeDef<unknown, unknown> = {
       id: "flaky",
       kind: "transform",
       inputSchema: z.any(),
@@ -757,7 +758,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient" });
+          return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient" });
         }
         return ok("ok");
       },
@@ -777,7 +778,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   it("DagDef.retryLimits = {} (empty) does NOT route to state-machine path", async () => {
     // Empty retryLimits is meaningless; should stay on legacy fast path.
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+    const flakyNode: NodeDef<unknown, unknown> = {
       id: "flaky",
       kind: "transform",
       inputSchema: z.any(),
@@ -785,7 +786,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           requires: [],
       run: async (_input, _ctx) => {
         callCount += 1;
-        return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "fail" });
+        return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "fail" });
       },
     };
     const dag = defineDagFromArray({
@@ -802,7 +803,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
 
   it("retryLimits triggers state-machine path and is forwarded — node retries on failure", async () => {
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown, unknown> = {
+    const flakyNode: NodeDef<unknown, unknown> = {
       id: "flaky",
       kind: "transform",
       inputSchema: z.any(),
@@ -811,7 +812,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 3) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient failure" });
+          return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient failure" });
         }
         return ok("recovered");
       },

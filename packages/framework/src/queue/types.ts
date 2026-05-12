@@ -90,23 +90,41 @@ export interface QueueHandle<S, C> {
 /**
  * Worker lifecycle handle — FR-041, FR-042
  *
- * `onFailed` fires when a job fails; receives:
- *   - id        — job id
- *   - err       — the error that caused failure
- *   - attempts  — number of attempts consumed so far (1-based, after the current failure)
- *   - max       — per-job max attempts (from `EnqueueOpts.attempts` ?? `QueueOpts.defaultAttempts` ?? 1)
+ * Two failure callbacks split the prior "every failure" stream:
  *
- * When `attempts >= max` the job will NOT be retried by the queue; the dead-letter
- * handler (`attachDeadLetterHandler`) should be registered via `onFailed`.
+ *   - `onFailed`    — fires on *mid-retry* failures only (`attempts < max`).
+ *                     Use this when you want to observe each attempt.
+ *   - `onExhausted` — fires once when a job's retry budget is exhausted
+ *                     (`attempts >= max`). Use this for dead-letter routing
+ *                     and operator notifications.
+ *
+ * The split removes the manual `if (attempts >= max)` check every
+ * dead-letter caller used to perform. `attachDeadLetterHandler` now wires
+ * `onExhausted` directly.
  */
 export interface WorkerHandle {
-  /** Register a handler called on every job failure (including mid-retry failures) */
+  /**
+   * Register a handler called on **mid-retry** failures only (attempts < max).
+   * Callbacks fire after each failed attempt while the queue retries; once
+   * the retry budget is exhausted, `onExhausted` fires instead.
+   */
   onFailed(
     handler: (
       id: string,
       err: unknown,
       attempts: number,
       max: number,
+    ) => Promise<void> | void,
+  ): void;
+  /**
+   * Register a handler called exactly once when a job exhausts its retry
+   * budget. `attempts === max` at this point. Use for dead-letter routing.
+   */
+  onExhausted(
+    handler: (
+      id: string,
+      err: unknown,
+      attempts: number,
     ) => Promise<void> | void,
   ): void;
   /** Register a handler called on unhandled worker-level errors */

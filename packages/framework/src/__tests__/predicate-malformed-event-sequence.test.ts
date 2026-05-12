@@ -11,6 +11,7 @@
 // with NO intervening wave-done event.
 
 import { describe, it, expect } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -20,8 +21,8 @@ import { RecordingObserver } from "../observer/observer.js";
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown, unknown>> = {},
-): NodeDef<unknown, unknown, unknown> => ({
+  overrides: Partial<NodeDef<unknown, unknown>> = {},
+): NodeDef<unknown, unknown> => ({
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -32,8 +33,8 @@ const makeNode = (
 });
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
-  runId: "pred-malformed-run",
-  dagId: "pred-malformed-dag",
+  runId: "pred-malformed-run" as RunId,
+  dagId: "pred-malformed-dag" as DagId,
   observer,
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,

@@ -36,6 +36,7 @@ const machine: Machine<State, Event, Ctx> = {
   isTerminal(s) { return s.kind === "succeeded" || s.kind === "failed"; },
   isFailed(s) { return s.kind === "failed"; },
   stateProgress(s) { return s.kind === "succeeded" ? 100 : s.kind === "running" ? 50 : 0; },
+  stateKey: (s) => JSON.stringify(s),
 };
 
 const errorEventOf = (c: { retriable: boolean; message: string }): Event =>

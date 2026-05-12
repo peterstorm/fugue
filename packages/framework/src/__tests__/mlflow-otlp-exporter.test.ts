@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { ExportResult } from "@opentelemetry/core";
 import { MlflowOtlpExporter } from "../tracing/mlflow-otlp-exporter.js";
-import { SpanAttributeRegistry } from "../tracing/span-attribute-registry.js";
 import {
   AI_SPAN_TYPE,
   GEN_AI_REQUEST_MODEL,
@@ -61,7 +60,6 @@ describe("MlflowOtlpExporter", () => {
 
   beforeEach(() => {
     spanCounter = 0;
-    SpanAttributeRegistry.clear();
     exported = [];
     innerExporter = {
       export(spans: ReadableSpan[], cb: (result: ExportResult) => void) {
@@ -188,7 +186,7 @@ describe("MlflowOtlpExporter", () => {
   it("does not leak SpanAttributeRegistry entries on normal export", async () => {
     const span = fakeSpan({ attributes: { [AI_SPAN_TYPE]: "chain" } });
     await collectExport(exporter, [span]);
-    expect(SpanAttributeRegistry.size).toBe(0);
+    expect(exporter.getRegistry().size).toBe(0);
   });
 
   it("parseFailureCounter is per-instance", async () => {
@@ -205,5 +203,45 @@ describe("MlflowOtlpExporter", () => {
     await collectExport(exporter, [span]);
     await collectExport(exporter2, [fakeSpan({ events: [{ name: EVENT_NODE_INPUT, attributes: { data: "also-bad" } }] })]);
     // Both should have logged (count=1 each) — no shared state. Just verify no throw.
+  });
+
+  // Wave 1.2 regression — shutdown()/forceFlush() must NOT throw when init
+  // failed permanently. Re-throwing aborts the OTel SDK shutdown chain and
+  // leaves sibling exporters un-closed; silently resolving in forceFlush()
+  // used to mask dropped spans. Both methods are no-ops on permanent failure.
+  it("shutdown() is a no-op after permanent init failure", async () => {
+    const failExporter = new MlflowOtlpExporter({
+      url: "http://localhost:5000",
+      experimentId: "1",
+      createInner: async () => { throw new Error("init blew up"); },
+    });
+    // Trigger init by calling export so failedPermanently latches.
+    await collectExport(failExporter, [fakeSpan()]);
+    expect(failExporter.failed).toBeInstanceOf(Error);
+
+    // Must resolve without throwing.
+    await failExporter.shutdown();
+  });
+
+  it("forceFlush() is a no-op after permanent init failure", async () => {
+    const failExporter = new MlflowOtlpExporter({
+      url: "http://localhost:5000",
+      experimentId: "1",
+      createInner: async () => { throw new Error("init blew up"); },
+    });
+    await collectExport(failExporter, [fakeSpan()]);
+    expect(failExporter.failed).toBeInstanceOf(Error);
+
+    await failExporter.forceFlush();
+  });
+
+  it("shutdown() and forceFlush() before any export do not throw", async () => {
+    const idle = new MlflowOtlpExporter({
+      url: "http://localhost:5000",
+      experimentId: "1",
+      createInner: async () => innerExporter,
+    });
+    await idle.shutdown();
+    await idle.forceFlush();
   });
 });

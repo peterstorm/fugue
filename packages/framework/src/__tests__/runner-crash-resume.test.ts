@@ -23,6 +23,7 @@ describe("runStateMachine — appendEvent dedup across simulated crash", () => {
     isTerminal: (s) => s.kind === "succeeded",
     isFailed: () => false,
     stateProgress: (s) => (s.kind === "pending" ? 0 : 100),
+    stateKey: (s) => JSON.stringify(s),
   };
 
   /**

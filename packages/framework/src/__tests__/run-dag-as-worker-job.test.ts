@@ -2,6 +2,7 @@
 // and apply retry/DLQ policy (codex finding #1).
 
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -15,8 +16,8 @@ const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unkno
 
 const mkNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown, unknown>> = {},
-): NodeDef<unknown, unknown, unknown> => ({
+  overrides: Partial<NodeDef<unknown, unknown>> = {},
+): NodeDef<unknown, unknown> => ({
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -27,8 +28,8 @@ const mkNode = (
 });
 
 const mkCtx = (): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -56,7 +57,7 @@ describe("runDagAsWorkerJob", () => {
       nodes: [
         mkNode("a", {
           retry: { backoffMs: [0], jitterRatio: 0 },
-          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+          run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
       edges: [],
@@ -65,7 +66,7 @@ describe("runDagAsWorkerJob", () => {
     await expect(runDagAsWorkerJob(dag, null, mkCtx())).rejects.toThrow(/DAG 'fail' failed/);
   });
 
-  it("worker using runDagAsWorkerJob: onFailed fires + attempts increment", async () => {
+  it("worker using runDagAsWorkerJob: onFailed fires mid-retry, onExhausted fires on the final", async () => {
     const backend = createInMemoryBackend();
     const queue = backend.createQueue<unknown, unknown>("q");
 
@@ -74,7 +75,7 @@ describe("runDagAsWorkerJob", () => {
       nodes: [
         mkNode("a", {
           retry: { backoffMs: [0], jitterRatio: 0 },
-          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+          run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
       edges: [],
@@ -82,19 +83,26 @@ describe("runDagAsWorkerJob", () => {
     });
 
     const failedCalls: Array<{ attempts: number; max: number }> = [];
+    const exhaustedCalls: Array<{ attempts: number }> = [];
     const worker = backend.createWorker("q", async (_job) => {
       await runDagAsWorkerJob(dag, null, mkCtx());
     });
     worker.onFailed((_id, _err, attempts, max) => {
       failedCalls.push({ attempts, max });
     });
+    worker.onExhausted((_id, _err, attempts) => {
+      exhaustedCalls.push({ attempts });
+    });
 
     await queue.enqueue("job-1", { state: { kind: "pending" }, context: {} }, { attempts: 3 });
     await queue.drain();
 
-    expect(failedCalls.length).toBe(3); // tried 3 times before giving up
-    expect(failedCalls[0]).toEqual({ attempts: 1, max: 3 });
-    expect(failedCalls[2]).toEqual({ attempts: 3, max: 3 });
+    // Mid-retry (attempts 1, 2) → onFailed; exhausted attempt 3 → onExhausted.
+    expect(failedCalls).toEqual([
+      { attempts: 1, max: 3 },
+      { attempts: 2, max: 3 },
+    ]);
+    expect(exhaustedCalls).toEqual([{ attempts: 3 }]);
 
     await worker.close();
   });
@@ -111,7 +119,7 @@ describe("runDagAsWorkerJob", () => {
       nodes: [
         mkNode("a", {
           retry: { backoffMs: [0], jitterRatio: 0 },
-          run: async () => err({ kind: "node-crash" as const, nodeId: "a", message: "boom" }),
+          run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
       edges: [],

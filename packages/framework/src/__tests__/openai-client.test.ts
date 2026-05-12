@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { OpenAILlmClient } from "../llm/openai-client.js";
 import type { ToolDef } from "../llm/tools.js";
+import { tool } from "../llm/tools.js";
 
 // ---------------------------------------------------------------------------
 // fetch stub
@@ -86,7 +88,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
 
     expect(result.ok).toBe(true);
@@ -106,7 +108,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "n",
+      nodeId: "n" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -126,7 +128,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "n",
+      nodeId: "n" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -149,7 +151,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -164,7 +166,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "missing",
+      nodeId: "missing" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -192,7 +194,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -216,7 +218,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "malformed",
+      nodeId: "malformed" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -236,7 +238,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -255,7 +257,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "schema-node",
+      nodeId: "schema-node" as NodeId,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -275,7 +277,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
-      nodeId: "test-node",
+      nodeId: "test-node" as NodeId,
     });
     const body = JSON.parse(fetchCalls[0].init.body as string);
     expect(body.text.format.type).toBe("json_schema");
@@ -291,13 +293,13 @@ describe("OpenAILlmClient.sendStructured", () => {
 const makeTool = (
   name: string,
   run: (input: { id: string }) => Promise<{ found: boolean }>,
-): ToolDef<unknown, unknown> => ({
+): ToolDef<unknown, unknown> => tool({
   name,
   description: "test tool",
   inputSchema: z.object({ id: z.string() }),
   outputSchema: z.object({ found: z.boolean() }),
   run: run as unknown as ToolDef<unknown, unknown>["run"],
-});
+}) as ToolDef<unknown, unknown>;
 
 describe("OpenAILlmClient.sendWithTools", () => {
   it("pre-aborted signal → aborted", async () => {
@@ -311,7 +313,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         model: "gpt-test",
         tools: [],
         schema: Schema,
-        nodeId: "test-node",
+        nodeId: "test-node" as NodeId,
         signal: ctrl.signal,
       },
       RUNTIME,
@@ -351,7 +353,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         model: "gpt-test",
         tools: [tool],
         schema: Schema,
-        nodeId: "multi",
+        nodeId: "multi" as NodeId,
       },
       RUNTIME,
     );
@@ -383,7 +385,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         tools: [tool],
         schema: Schema,
         maxIterations: 2,
-        nodeId: "loop-node",
+        nodeId: "loop-node" as NodeId,
       },
       RUNTIME,
     );
@@ -411,7 +413,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         model: "gpt-test",
         tools: [],
         schema: Schema,
-        nodeId: "test-node",
+        nodeId: "test-node" as NodeId,
       },
       RUNTIME,
     );
@@ -431,7 +433,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         model: "gpt-test",
         tools: [],
         schema: Schema,
-        nodeId: "rl",
+        nodeId: "rl" as NodeId,
       },
       RUNTIME,
     );

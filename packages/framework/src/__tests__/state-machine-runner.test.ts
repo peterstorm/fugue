@@ -41,6 +41,7 @@ const simpleMachine: Machine<State, Event, Context> = {
       case "failed": return 0;
     }
   },
+  stateKey: (s) => JSON.stringify(s),
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,7 @@ const retryMachine: Machine<RetryState, RetryEvent, RetryContext> = {
       case "failed": return 0;
     }
   },
+  stateKey: (s) => JSON.stringify(s),
 };
 
 // ---------------------------------------------------------------------------

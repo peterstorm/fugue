@@ -1,27 +1,28 @@
 import type { SpanKind } from "./span.js";
 import type { Predicate } from "./dag.js";
 import type { FrameworkError } from "./errors.js";
+import type { RunId, NodeId, DagId } from "./ids.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
-  readonly runId: string;
-  readonly dagId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
   readonly timestamp: Date;
 }
 
 export interface NodeStartEvent {
   readonly type: "node-start";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly nodeId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
   readonly timestamp: Date;
 }
 
 export interface NodeEndEvent {
   readonly type: "node-end";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly nodeId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
   readonly timestamp: Date;
   readonly duration: number;
   readonly output: unknown;
@@ -29,9 +30,9 @@ export interface NodeEndEvent {
 
 export interface NodeSkippedEvent {
   readonly type: "node-skipped";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly nodeId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
   readonly timestamp: Date;
   /**
    * Why the node was skipped. The two producers are `runNodeShared` on a
@@ -46,9 +47,9 @@ export interface NodeSkippedEvent {
 
 export interface NodeErrorEvent {
   readonly type: "node-error";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly nodeId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
   readonly timestamp: Date;
   /** Human-readable summary for display. */
   readonly error: string;
@@ -63,9 +64,9 @@ export interface NodeErrorEvent {
 
 export interface SubSpanEvent {
   readonly type: "sub-span";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly nodeId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
   readonly parentSpanId: string;
   readonly kind: SpanKind;
   readonly timestamp: Date;
@@ -75,8 +76,8 @@ export interface SubSpanEvent {
 
 export interface RunEndEvent {
   readonly type: "run-end";
-  readonly runId: string;
-  readonly dagId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
   readonly timestamp: Date;
   readonly duration: number;
   readonly status: "ok" | "error";
@@ -84,11 +85,11 @@ export interface RunEndEvent {
 
 export interface RouteDecidedEvent {
   readonly type: "route-decided";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly fromNodeId: string;
-  readonly chosenTargets: readonly string[];
-  readonly prunedTargets: readonly string[];
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly fromNodeId: NodeId;
+  readonly chosenTargets: readonly NodeId[];
+  readonly prunedTargets: readonly NodeId[];
   readonly defaultTaken: boolean;
   /** The predicate that matched, or `null` when the default fired. Serializable JSON. */
   readonly matchedPredicate: Predicate<unknown> | null;
@@ -97,9 +98,9 @@ export interface RouteDecidedEvent {
 
 export interface NodePrunedEvent {
   readonly type: "node-pruned";
-  readonly runId: string;
-  readonly dagId: string;
-  readonly nodeId: string;
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
   readonly reason: "branch-not-taken";
   readonly timestamp: Date;
 }

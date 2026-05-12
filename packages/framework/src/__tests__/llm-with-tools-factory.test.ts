@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { createLlmWithToolsNode } from "../nodes/llm-with-tools.js";
@@ -6,18 +7,19 @@ import { ok } from "../types/result.js";
 import type { NodeContext } from "../types/node.js";
 import type { LlmClient } from "../llm/client.js";
 import type { ToolDef } from "../llm/tools.js";
+import { tool } from "../llm/tools.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 
 const InputSchema = z.object({ customerId: z.string() });
 const OutputSchema = z.object({ greeting: z.string() });
 
-const makeTool = (): ToolDef<unknown, unknown> => ({
+const makeTool = (): ToolDef<unknown, unknown> => tool({
   name: "lookup",
   description: "test tool",
   inputSchema: z.object({ id: z.string() }),
   outputSchema: z.object({ found: z.boolean() }),
   run: async () => ({ found: true }),
-});
+}) as ToolDef<unknown, unknown>;
 
 describe("createLlmWithToolsNode — factory", () => {
   it("returns cached value without calling sendWithTools when cache hit", async () => {
@@ -48,8 +50,8 @@ describe("createLlmWithToolsNode — factory", () => {
     });
 
     const ctx: NodeContext = {
-      runId: "r1",
-      dagId: "d1",
+      runId: "r1" as RunId,
+      dagId: "d1" as DagId,
       observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -105,8 +107,8 @@ describe("createLlmWithToolsNode — factory", () => {
     });
 
     const ctx: NodeContext = {
-      runId: "r2",
-      dagId: "d2",
+      runId: "r2" as RunId,
+      dagId: "d2" as DagId,
       observer: new NoopObserver(),
       tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
       judgeLlm: null,

@@ -1,4 +1,5 @@
 import type { LlmClient } from "../llm/client.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { err } from "../types/result.js";
 
 /**
@@ -9,6 +10,6 @@ export const stubSendWithTools: LlmClient["sendWithTools"] = async () =>
   err({
     kind: "node-crash",
     retriability: "retriable",
-    nodeId: "stub",
+    nodeId: "stub" as NodeId,
     message: "stub sendWithTools — test did not configure tool-use behavior",
   });

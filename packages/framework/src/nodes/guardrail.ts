@@ -3,6 +3,8 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
+import { __brandNodeId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 
 /** Individual check detail. */
 export interface GuardrailCheck {
@@ -82,8 +84,8 @@ export interface GuardrailNodeConfig<I, T, Id extends string = string> {
  */
 export const createGuardrailNode = <I, T, const Id extends string = string>(
   config: GuardrailNodeConfig<I, T, Id>,
-): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: Id } => ({
-  id: config.id,
+): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: Id & NodeId } => ({
+  id: __brandNodeId(config.id) as Id & NodeId,
   kind: "guardrail",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,

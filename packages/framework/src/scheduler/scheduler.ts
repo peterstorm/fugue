@@ -206,8 +206,13 @@ export function createCronScheduler(
     try {
       await markers.set(markerFiredKey(task.id), ttlSeconds);
     } catch (err) {
-      // Job is already enqueued; marker write failure means catch-up may re-enqueue, but enqueue is idempotent.
-      fwLogger().error(`[CronScheduler] markers.set(fired) failed for task "${task.id}" (job already enqueued):`, err);
+      // Rethrow so the outer setTimeout `.catch` branch applies the
+      // consecutive-failure backoff. Swallowing here used to spam every
+      // normal cron tick at the broken marker store — `enqueue` is
+      // idempotent at the queue level, but the scheduler's own backoff
+      // belongs in this error path, not the queue contract.
+      fwLogger().error(`[CronScheduler] markers.set(fired) failed for task "${task.id}":`, err);
+      throw err;
     }
   }
 

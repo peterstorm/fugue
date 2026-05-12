@@ -197,6 +197,15 @@ const extractReasoning = (
 const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
 
+/**
+ * Distinguish a *timeout*-induced abort from a caller-cancellation abort.
+ * `postResponses` tags timeouts with `__timedOut = true` so the outer
+ * handlers can surface them as `transient` (retriable) rather than
+ * `aborted` (terminal, user-initiated).
+ */
+const isTimeoutAbort = (e: unknown): boolean =>
+  isAbort(e) && (e as { __timedOut?: boolean }).__timedOut === true;
+
 /** Duck-typed 429 detection (see anthropic-client.ts for rationale). */
 const isRateLimit = (e: unknown): boolean =>
   typeof (e as { status?: unknown })?.status === "number" &&
@@ -264,7 +273,11 @@ export class OpenAILlmClient implements LlmClient {
   > {
     const { url, headers } = this.buildRequestConfig();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.requestTimeoutMs);
     const onCallerAbort = () => controller.abort();
     if (signal) {
       if (signal.aborted) controller.abort();
@@ -279,6 +292,17 @@ export class OpenAILlmClient implements LlmClient {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+    } catch (e) {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onCallerAbort);
+      // Distinguish caller-cancellation (caller's `signal.aborted`) from a
+      // request that timed out on our side. Both surface as AbortError at the
+      // fetch boundary; without the tag the outer handler routes both to
+      // `{ kind: "aborted" }` and a transient timeout looks like a user cancel.
+      if (e instanceof Error && e.name === "AbortError" && timedOut && !signal?.aborted) {
+        throw Object.assign(e, { __timedOut: true });
+      }
+      throw e;
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", onCallerAbort);
@@ -383,6 +407,13 @@ export class OpenAILlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
+      if (isTimeoutAbort(error)) {
+        return err({
+          kind: "transient",
+          nodeId: resolveNodeId(req),
+          message: `request timed out after ${this.requestTimeoutMs}ms`,
+        });
+      }
       if (isAbort(error)) {
         return err({ kind: "aborted", reason: "signal" });
       }
@@ -478,6 +509,13 @@ export class OpenAILlmClient implements LlmClient {
           },
         );
       } catch (error) {
+        if (isTimeoutAbort(error)) {
+          return err({
+            kind: "transient",
+            nodeId: resolveNodeId(req),
+            message: `request timed out after ${this.requestTimeoutMs}ms`,
+          });
+        }
         if (isAbort(error)) {
           return err({ kind: "aborted", reason: "signal" });
         }

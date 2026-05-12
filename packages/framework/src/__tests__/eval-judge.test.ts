@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import {
   createEvalJudgeNode,
@@ -15,8 +16,8 @@ import { stubSendWithTools } from "./_llm-mocks.js";
 // --- Helpers ---
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run",
-  dagId: "test-dag",
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -34,7 +35,7 @@ const makeMockLlm = (response: EvalJudgeResponse): LlmClient => ({
 
 const makeFailingLlm = (message: string): LlmClient => ({
   sendWithTools: stubSendWithTools,
-  sendStructured: async () => err({ kind: "node-crash", nodeId: "judge", message }) as any,
+  sendStructured: async () => err({ kind: "node-crash", nodeId: "judge" as NodeId, message }) as any,
 });
 
 const makeThrowingLlm = (): LlmClient => ({

@@ -12,6 +12,41 @@ import type { TypedNodeContext } from "../types/node.js";
  */
 export type ToolContext = TypedNodeContext<readonly ["llm"]>;
 
+// ---------------------------------------------------------------------------
+// Branded `ToolName`
+//
+// The brand is a module-level `unique symbol` — only `toolName()` /
+// `assertValidToolName()` can produce values that pass the structural check.
+// Direct object-literal construction of a `ToolDef` with a raw string `name`
+// is rejected at the type level: `name: "foo"` fails because the literal
+// `"foo"` lacks the brand witness. Authors funnel through the `tool()` smart
+// constructor which validates and brands the name in one step.
+// ---------------------------------------------------------------------------
+
+declare const __toolNameBrand: unique symbol;
+export type ToolName = string & { readonly [__toolNameBrand]: void };
+
+const TOOL_NAME_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function assertValidToolName(name: string): asserts name is ToolName {
+  if (!TOOL_NAME_REGEX.test(name)) {
+    throw new Error(
+      `Invalid tool name "${name}": must match ${TOOL_NAME_REGEX.source}`,
+    );
+  }
+}
+
+/**
+ * Smart constructor for `ToolName`. Validates `name` against the model-API
+ * regex and brands the result so it can be assigned to a `ToolName`-typed
+ * field. Throws on rejection — failures surface at definition time, not at
+ * first dispatch.
+ */
+export function toolName(name: string): ToolName {
+  assertValidToolName(name);
+  return name;
+}
+
 /**
  * Provider-agnostic tool definition consumed by `LlmClient.sendWithTools`.
  *
@@ -21,8 +56,13 @@ export type ToolContext = TypedNodeContext<readonly ["llm"]>;
  * `outputSchema` before being passed back to the model.
  */
 export interface ToolDef<I, O> {
-  /** Identifier sent to the model. Must match `^[A-Za-z0-9_-]{1,64}$`. */
-  readonly name: string;
+  /**
+   * Identifier sent to the model. Branded `ToolName` — construct via
+   * `tool({ name: ... })` (validates at definition time) or `toolName(...)`
+   * (one-shot smart constructor). Direct object-literal construction with a
+   * raw string is rejected at the type level.
+   */
+  readonly name: ToolName;
   /** Natural-language description shown to the model — drives selection. */
   readonly description: string;
   /** Zod schema for the input. Translated to JSON Schema for the provider. */
@@ -39,14 +79,12 @@ export interface ToolDef<I, O> {
   readonly run: (input: I, ctx: ToolContext) => Promise<O>;
 }
 
-const TOOL_NAME_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
-
-export function assertValidToolName(name: string): void {
-  if (!TOOL_NAME_REGEX.test(name)) {
-    throw new Error(
-      `Invalid tool name "${name}": must match ${TOOL_NAME_REGEX.source}`,
-    );
-  }
+/**
+ * Authoring shape for `tool()`. Accepts a raw `name: string` and brands it
+ * in the smart constructor; everything else mirrors `ToolDef`.
+ */
+export interface ToolDefInput<I, O> extends Omit<ToolDef<I, O>, "name"> {
+  readonly name: string;
 }
 
 export function ensureToolNames(tools: readonly ToolDef<unknown, unknown>[]): void {
@@ -67,7 +105,7 @@ export function ensureToolNames(tools: readonly ToolDef<unknown, unknown>[]): vo
  * defense-in-depth (e.g., for tools assembled programmatically without
  * going through this constructor).
  */
-export const tool = <I, O>(def: ToolDef<I, O>): ToolDef<I, O> => {
-  assertValidToolName(def.name);
-  return def;
+export const tool = <I, O>(def: ToolDefInput<I, O>): ToolDef<I, O> => {
+  const branded = toolName(def.name);
+  return { ...def, name: branded };
 };
