@@ -75,11 +75,11 @@ export type DagEvent =
       readonly outputs: ReadonlyMap<string, unknown>;
       /**
        * Per-source-node routing decision computed once by `runWave` after the
-       * wave completes (W5.8). Lets the transition expand `activeNodeIds`
-       * without re-evaluating predicates that the executor already evaluated
-       * for observer-event emission. Only nodes whose out-edges carry at
-       * least one conditional/default edge appear here; unconditional-only
-       * sources are omitted (no decision was needed).
+       * wave completes. Computed once per wave to avoid re-evaluating
+       * predicates twice — the executor already evaluates them for
+       * observer-event emission. Only nodes whose out-edges carry at least
+       * one conditional/default edge appear here; unconditional-only sources
+       * are omitted (no decision was needed).
        *
        * Optional for forward-compatibility with hand-crafted wave-done events
        * (e.g. event-log replay paths); when omitted the transition falls

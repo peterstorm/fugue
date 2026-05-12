@@ -113,9 +113,6 @@ export const wrapDagJobLike = (
       });
     },
     updateProgress: (pct: number) => inner.updateProgress(pct),
-    // Tightened from `(event: unknown, ...)` so the wrapper's declared
-    // JobLike<…, unknown, DagEvent> contract is honest. Inner's E defaults to unknown,
-    // which accepts DagEvent cleanly.
     appendEvent: (event: DagEvent, dedupKey?: string) =>
       inner.appendEvent(event, dedupKey),
   };

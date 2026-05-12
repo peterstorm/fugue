@@ -34,8 +34,16 @@ export interface CronScheduler {
 
 export interface CronSchedulerOpts {
   /**
-   * Enqueue a single task.  Implementations should be idempotent (use
-   * marker-based dedup so duplicate enqueues are no-ops).
+   * Enqueue a single task.
+   *
+   * **Contract:** `enqueue` MUST be idempotent under a stable key derived from
+   * `(taskId, triggeredAt)`. The scheduler will redeliver the same
+   * `(task, triggeredAt)` pair under failure-recovery and dependent-fan-out
+   * paths; non-idempotent implementations accept duplicate-execution risk.
+   *
+   * The BullMQ-backed adapter satisfies this by using
+   * `jobId = ${task.id}-${triggeredAt.getTime()}` so the queue itself
+   * deduplicates.
    */
   enqueue: (task: TaskConfig, triggeredAt: Date) => Promise<void>;
   /**

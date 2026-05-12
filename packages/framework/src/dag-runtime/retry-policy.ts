@@ -12,7 +12,7 @@ import type { WaveDoneResult } from "./wave-resolution.js";
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000] as const;
 
 /**
- * Returns the base delay; the DAG executor (Phase 3) applies random jitter via
+ * Returns the base delay; the DAG executor applies random jitter via
  * `baseDelay * (1 + jitterRatio * Math.random())`.
  */
 export const computeBackoffMs = (

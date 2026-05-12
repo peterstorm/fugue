@@ -1,7 +1,7 @@
 // runDagStateful — orchestrates the DAG executor with the state-machine runner.
 // FR-023, FR-024, FR-025, FR-027.
 //
-// This file is intentionally orchestration-only after the W5.7 split:
+// This file is intentionally orchestration-only. The helpers it composes:
 //   - persistence.ts        — wrapDagJobLike / stripNonPersistable
 //   - run-telemetry.ts      — root-span lifecycle + run-start/run-end emission
 //   - eval-judges.ts        — judge runner + finalizeRunWithJudges + background wrapper
@@ -59,7 +59,7 @@ export interface DagRunOpts
    * output is validated against the node's current `outputSchema` and a
    * `node-skipped` observer event is emitted. On validation failure the
    * runtime emits `node-error` and aborts the run with `Err({kind: "validation"})`,
-   * preserving the legacy `resumeRun(...)` semantics.
+   * matching `resumeRun(...)` semantics.
    */
   readonly resumeCheckpoint?: Map<string, unknown>;
   /**
@@ -82,7 +82,8 @@ export interface DagRunOpts
  * the machine ends in a `failed` terminal state.
  *
  * Observer events (run-start, node-start, node-end, node-error, run-end) are
- * emitted to preserve the existing observable behavior (AD-2).
+ * emitted here so consumers see the full run-start / node-start / node-end /
+ * run-end stream regardless of the execution path.
  */
 export const runDagStateful = async <I, O>(
   dag: DagDef,

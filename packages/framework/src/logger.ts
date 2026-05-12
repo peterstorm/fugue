@@ -1,4 +1,4 @@
-// Framework-level logger seam (D4).
+// Framework-level logger seam.
 //
 // The kernel, queue, scheduler, and observer modules all need to report
 // non-fatal failures (timer crashes, span evictions, exporter rejections,
@@ -7,8 +7,8 @@
 // them. This module is the single seam: callers use `fwLogger()` and the
 // host wires `setFrameworkLogger` (typically alongside `initTracing`).
 //
-// The default implementation forwards to `console.*`, preserving the prior
-// behaviour. Test seams replace it with a recording logger.
+// The default implementation forwards to `console.*`. Test seams replace
+// it with a recording logger.
 
 export interface FrameworkLogger {
   debug(msg: string, ...args: unknown[]): void;

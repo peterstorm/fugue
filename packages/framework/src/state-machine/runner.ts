@@ -123,12 +123,11 @@ export const runStateMachine = async <S, E, C>(
         ? machine.isRetryTransition(prevState, state)
         : stateKey === prevStateKey);
 
-    // Retry counter keyed by (prevState, event-type) so that successive retry
-    // cycles where prevState repeats (e.g. running → retrying → running →
-    // retrying in the DAG machine) produce distinct dedup keys. Keying by
-    // stateKey alone — as the prior implementation did — collapsed cross-cycle
-    // retries onto a single dedup slot and silently suppressed the second
-    // node-failed event in the audit log.
+    // Keyed by (prevState, event-type) rather than stateKey alone, so
+    // successive retry cycles where prevState repeats (running → retrying →
+    // running → retrying in the DAG machine) produce distinct dedup keys.
+    // Keying by stateKey alone collapses cross-cycle retries onto a single
+    // dedup slot and suppresses the second node-failed event in the audit log.
     const eventType =
       typeof (event as { type?: unknown })?.type === "string"
         ? (event as { type: string }).type

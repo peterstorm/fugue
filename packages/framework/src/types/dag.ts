@@ -141,15 +141,11 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
   readonly outputNodeId?: keyof Nodes & string;
   /** Eval-judge nodes — run after output node completes, mark trace ERROR on failure. */
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
-  /**
-   * Per-node retry limits — overrides `defaultRetryLimit` for a specific node.
-   * Setting a non-empty value routes runDag to the state-machine path.
-   */
+  /** Per-node retry limits — overrides `defaultRetryLimit` for a specific node. */
   readonly retryLimits?: { readonly [K in keyof Nodes]?: number };
   /**
    * Default retry limit applied to all nodes without an entry in `retryLimits`.
-   * Setting any value routes runDag to the state-machine path; omit for the
-   * legacy fast path with no retries.
+   * When `0` (the default), nodes are not retried.
    */
   readonly defaultRetryLimit?: number;
 }

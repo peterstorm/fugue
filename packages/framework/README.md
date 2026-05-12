@@ -21,10 +21,12 @@ Types and entry points that workflow authors touch.
 
 ### `types/`
 
-- `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `Predicate` — the DAG shape and edge-predicate vocabulary (ADR 0015, ADR 0016).
+- `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate`, `withRetryLimits` — the DAG shape, edge-predicate vocabulary (ADR 0015, ADR 0016), and the retry-limit helper.
 - `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — node authoring contract.
-- `Capability`, `CapabilityFields`, `BaseNodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
-- `ContextCacheAdapter`, `CacheLookup`, `PromptAccess`, `Logger`, `Observer`, `Tracer` — pluggable seams.
+- `Capability`, `CapabilityFields`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
+- `RunId`, `NodeId`, `DagId` plus the `runId`, `nodeId`, `dagId` smart constructors — branded identifiers; raw strings cross the boundary at the entry points (`defineDag`, `makeNodeContext`, `runDag`) and become branded once.
+- `ContextCacheAdapter`, `CacheLookup`, `PromptAccess`, `Logger`, `Tracer` — pluggable seams.
+- `ObserverEvent` (and the per-event types `RunStartEvent`, `NodeStartEvent`, `NodeEndEvent`, `NodeSkippedEvent`, `NodeErrorEvent`, `SubSpanEvent`, `RunEndEvent`, `RouteDecidedEvent`, `NodePrunedEvent`), `SpanKind` — the typed event envelope flowing through the `Observer` interface (which lives under `observer/`).
 - `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `map`, `mapErr`, `unwrap`, `unwrapOr` — the `Either` shape used everywhere errors are returned (no exceptions across module boundaries).
 - `FrameworkError` (re-exported from `types/errors.js`) — discriminated error union.
 
@@ -34,7 +36,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
 - `validateDagShape`, `recordFromNodeArray` — pure validation utilities.
-- `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `onTrace`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`.
+- `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is on `DagRunOpts` for the advanced kernel-mode entries — see below.)
 
 ### `nodes/`
 
@@ -82,14 +84,14 @@ Domain event bus (typed). Tracing-specific concerns (OTel exporters, span helper
 
 ### `checkpoint/`
 
-- `Checkpointer` interface plus `RunMeta`, `NodeState`, `RunState`, `InMemoryCheckpointer`, `RedisCheckpointer`. Includes ADR 0017 framework-version enforcement and the `checkpoint-expired` / `checkpoint-corrupt` / `checkpoint-version-mismatch` error kinds.
+- `Checkpointer` interface plus `RunMeta`, `NodeState`, `RunState`, `InMemoryCheckpointer`, `RedisCheckpointer`. Both backends enforce framework-version stamping on resume — see the §"Versioning" section — and the `checkpoint-expired` / `checkpoint-corrupt` / `checkpoint-version-mismatch` error kinds.
 - `dagFingerprint`, `FRAMEWORK_VERSION` — byte-stable DAG hash and the version constant stamped into checkpoint meta.
 
 ## State-machine kernel (durability core)
 
 NFR-021. The kernel is the foundation of the runtime; most callers reach it via `runDag`.
 
-- `Machine<S, C, E>`, `Executor<S, C, E>`, `JobLike<S, C, E>`, `RecordedEvent`, `RunOptions`, `TraceEvent`.
+- `Machine<S, E, C>`, `Executor<S, E, C>`, `JobLike<S, E, C>`, `RecordedEvent`, `RunOptions`, `TraceEvent`.
 - `runStateMachine` — the kernel loop. Append, transition, persist, repeat. Idempotent under crash + resume via deterministic dedup keys (ADR 0014).
 - `createInMemoryJob`, `InMemoryJob`, `InMemoryJobOptions` — non-durable `JobLike` for in-process runs.
 - `replayEvents`, `replayEventsUntil`, `replayEventSlice` — pure folds for testing and forensic replay.
@@ -132,6 +134,8 @@ NFR-021. Transport-agnostic cron scheduler (the BullMQ-or-other binding is the c
 
 Internals (`hasCycle`, `diffRegistry`) are not re-exported.
 
+**Single-process constraint.** `resolveDependents` reads the process-local `activeRegistry` to look up downstream task configs when a parent fires. Multi-process deployments must either co-locate the scheduler with workers (so every node sees the same registry) or provide a shared `TaskRegistryStore` port — not yet implemented. See `docs/plans/2026-05-12-pass-4-followups.md` for the deferred work.
+
 ## NodeContext helpers
 
 - `makeNodeContext` — capability-validated `NodeContext` constructor; declares which fields are present and which are typed-out.
@@ -143,7 +147,7 @@ Enforced by `scripts/check-imports.ts` and `__tests__/boundary-imports.test.ts`:
 
 - `state-machine/**`, `dag-runtime/**`, and `scheduler/**` must not import `bullmq` / `ioredis` / `queue-bullmq/**`. Transport adapters live in `queue-bullmq/`; the kernel and scheduler stay transport-agnostic.
 - `dag-runtime/**` must not import from `executor/**`. The reverse direction (`executor/` → `dag-runtime/`) is allowed: `executor/` is the public-API wrapper around the runtime.
-- Pure-core modules (`state-machine/**`, `dag-runtime/transition.ts`, `dag-runtime/transition-helpers.ts`, `dag-runtime/machine.ts`) must not import `@opentelemetry/*`. Tracing belongs to the imperative shell.
+- Pure-core modules (`state-machine/**`, `dag-runtime/transition.ts`, `dag-runtime/retry-policy.ts`, `dag-runtime/wave-resolution.ts`, `dag-runtime/human-resolution.ts`, `dag-runtime/machine.ts`) must not import `@opentelemetry/*`. Tracing belongs to the imperative shell.
 - `shared/**` must not import `@opentelemetry/*`, `observer/**`, or `tracing/**`. Telemetry-aware helpers (`run-node.ts`, `node-span.ts`) moved into `dag-runtime/` during pass 3 — the only legitimate consumer. The two NodeContext-stub constructors (`shared/defaults.ts`, `shared/make-node-context.ts`) are exempted by `scopeExcludes`.
 
 Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
@@ -162,4 +166,4 @@ Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 
 ## Versioning
 
-`FRAMEWORK_VERSION` (in `src/version.ts`) is stamped into every checkpoint meta row. A mismatched value on resume returns `Err({ kind: "checkpoint-version-mismatch" })` rather than corrupting state silently (ADR 0017). Bump it whenever validation, retry, or output-coercion semantics change.
+`FRAMEWORK_VERSION` (in `src/checkpoint/fingerprint.ts`) is stamped into every checkpoint meta row by `Checkpointer.write` and verified by `Checkpointer.read`. A mismatched value on resume returns `Err({ kind: "checkpoint-version-mismatch" })` rather than corrupting state silently. Bump it whenever validation, retry, or output-coercion semantics change. ADR 0017 records the most recent bump (`"1"` → `"2"`); the enforcement mechanism itself lives in `checkpoint/checkpointer.ts`.

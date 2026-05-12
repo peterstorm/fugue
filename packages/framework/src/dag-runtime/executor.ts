@@ -178,7 +178,8 @@ const callHumanReviewHook = async (
  *
  * The executor never performs state transitions — it only produces DagEvents.
  * Observer events (node-start, node-end, node-error, run-start, run-end) are
- * emitted to preserve the existing observable behavior (AD-2).
+ * emitted here so consumers see the full run-start / node-start / node-end /
+ * run-end stream regardless of the execution path.
  */
 export const buildDagExecutor = (
   dag: DagDef,
@@ -238,8 +239,8 @@ export const buildDagExecutor = (
         await sleep(delayWithJitter, nodeCtx.signal);
 
         // `runWave` is called for the whole wave, but iterates with a
-        // succeeded-output guard (see runWave:341): siblings already present
-        // in `machineCtx.outputs` short-circuit to a `node-skipped` event with
+        // succeeded-output guard: siblings already present in
+        // `machineCtx.outputs` short-circuit to a `node-skipped` event with
         // their cached value, so only the failed node (plus any sibling that
         // co-failed and is still absent from outputs) actually re-runs.
         return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn);
@@ -434,7 +435,7 @@ const runWave = async (
   // Compute routing decisions exactly once per source node. The executor uses
   // the result to emit observer events; the transition (`handleWaveDone`)
   // reads them off the wave-done event to expand `activeNodeIds` without
-  // re-running the same predicates (W5.8).
+  // re-running the same predicates.
   //
   // When `decideRoute` returns `predicate-malformed`, short-circuit the wave
   // with `node-failed` instead of letting it fall through to `wave-done`.

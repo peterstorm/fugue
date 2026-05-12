@@ -79,7 +79,7 @@ export const handleWaveDone = (
 
   // Expand `activeNodeIds` along guarded out-edges. Prefer the executor's
   // precomputed decisions to avoid re-evaluating the same predicates twice
-  // per wave (see W5.8). Fall back to in-line decideRoute when absent.
+  // per wave. Fall back to in-line decideRoute when absent.
   let nextActive = ctx.activeNodeIds;
   for (const nodeId of activeWaveNodes(ctx, wave)) {
     if (!newOutputs.has(nodeId)) continue;
