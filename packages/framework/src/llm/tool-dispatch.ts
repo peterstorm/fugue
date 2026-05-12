@@ -1,5 +1,5 @@
 import type { NodeContext } from "../types/node.js";
-import type { ToolDef, ToolContext } from "./tools.js";
+import type { ToolDef, ToolContext } from "../types/llm.js";
 import { withToolSpan, setToolIoAttributes } from "./spans.js";
 
 /**

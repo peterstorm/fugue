@@ -136,6 +136,7 @@ export const runDagStateful = async <I, O>(
       recordOutcomes,
       resumeCheckpoint: opts?.resumeCheckpoint,
       random: opts?.random,
+      now: opts?.now,
     });
 
     // Resolve the job handle — caller-supplied or fresh in-memory.
@@ -148,12 +149,22 @@ export const runDagStateful = async <I, O>(
     // `compileDagToMachine` is still called above so the DAG's topology
     // (cycle detection) is re-validated on every entry; the resulting
     // `initialContext` is then dropped for resumed runs.
-    const job: JobLike<DagPhase, unknown, DagMachineContext> = opts?.jobLike
-      ? wrapDagJobLike(opts.jobLike, effectiveDag)
-      : createInMemoryJob<DagPhase, DagMachineContext>({
-          state: initialState,
-          context: initialContext,
-        });
+    let job: JobLike<DagPhase, unknown, DagMachineContext>;
+    if (opts?.jobLike) {
+      const wrapped = wrapDagJobLike(opts.jobLike, effectiveDag, nodeCtx.runId);
+      const fingerprintCheck = wrapped.verifyDagFingerprint();
+      if (!fingerprintCheck.ok) {
+        closeRootSpan(rootSpan, { kind: "error", error: fingerprintCheck.error });
+        emitRunEnd("error");
+        return err(fingerprintCheck.error);
+      }
+      job = wrapped.job;
+    } else {
+      job = createInMemoryJob<DagPhase, DagMachineContext>({
+        state: initialState,
+        context: initialContext,
+      });
+    }
 
     // errorEventOf adapter — converts classified errors to DagEvent ERROR
     const errorEventOf = (classified: { retriable: boolean; message: string }): DagEvent => ({
@@ -180,6 +191,7 @@ export const runDagStateful = async <I, O>(
       classifyError: opts?.classifyError,
       onTrace,
       errorEventOf,
+      now: opts?.now,
     };
 
     try {

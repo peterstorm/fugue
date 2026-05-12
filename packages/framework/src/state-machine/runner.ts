@@ -55,6 +55,8 @@ export const runStateMachine = async <S, E, C>(
   opts: RunOptions<S, E, C>,
 ): Promise<{ state: S; context: C }> => {
   const classify = opts.classifyError ?? defaultClassifyError;
+  const nowFn = opts.now ?? Date.now;
+  const stamp = (): Date => new Date(nowFn());
 
   // FR-011: retry counters are per-invocation (fresh map = counters start
   // at 0 for every queue-level attempt).
@@ -75,7 +77,7 @@ export const runStateMachine = async <S, E, C>(
               nextState: state,
               outcome: "skipped",
               durationMs: 0,
-              timestamp: new Date(),
+              timestamp: stamp(),
             });
           } catch (traceErr) {
             fwLogger().error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
@@ -85,7 +87,7 @@ export const runStateMachine = async <S, E, C>(
       }
     }
 
-    const start = (opts.now ?? Date.now)();
+    const start = nowFn();
     let event: E;
 
     try {
@@ -103,7 +105,7 @@ export const runStateMachine = async <S, E, C>(
     state = result.state;
     context = result.context;
 
-    const durationMs = (opts.now ?? Date.now)() - start;
+    const durationMs = nowFn() - start;
 
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
@@ -169,7 +171,7 @@ export const runStateMachine = async <S, E, C>(
           nextState: state,
           outcome,
           durationMs,
-          timestamp: new Date(),
+          timestamp: stamp(),
         });
       } catch (traceErr) {
         fwLogger().error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);

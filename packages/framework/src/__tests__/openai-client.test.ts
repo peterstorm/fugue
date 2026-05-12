@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { OpenAILlmClient } from "../llm/openai-client.js";
-import type { ToolDef } from "../llm/tools.js";
+import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 
 // ---------------------------------------------------------------------------
@@ -53,7 +53,12 @@ const jsonResponse = (
     headers: { "Content-Type": "application/json" },
   });
 
-const RUNTIME = { tracer: null, signal: undefined } as const;
+// `sendWithTools` now takes the full `NodeContext` (ADR 0024).
+import { makeNodeContext } from "../shared/index.js";
+const RUNTIME = makeNodeContext({
+  runId: "openai-test-run" as RunId,
+  dagId: "openai-test-dag" as DagId,
+});
 
 const makeMessageOutput = (text: string) => ({
   type: "message",

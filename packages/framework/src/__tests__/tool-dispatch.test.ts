@@ -3,7 +3,7 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { NoopObserver } from "../observer/observer.js";
 import { dispatchToolCall, dispatchToolCallsWithSpans } from "../llm/tool-dispatch.js";
-import type { ToolDef } from "../llm/tools.js";
+import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import type { NodeContext } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";

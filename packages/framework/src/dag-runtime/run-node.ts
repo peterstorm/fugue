@@ -83,6 +83,13 @@ export interface RunNodeOpts {
    * surfaces as a `checkpoint-write-failed` error.
    */
   readonly writeCheckpoint?: boolean;
+  /**
+   * Wall-clock source for observer-event `timestamp` fields and node duration
+   * measurement. Threaded through from `DagRunOpts.now` / `RunOptions.now`;
+   * defaults to `Date.now` when omitted. Tests pass a synthetic clock to make
+   * event ordering deterministic.
+   */
+  readonly now?: () => number;
 }
 
 export const runNodeShared = async (
@@ -95,6 +102,8 @@ export const runNodeShared = async (
   opts: RunNodeOpts = {},
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const nodeId = node.id;
+  const nowFn = opts.now ?? Date.now;
+  const stamp = (): Date => new Date(nowFn());
 
   // Checkpoint resume hit — validate against the current output schema and
   // return the cached value without entering a span.
@@ -107,7 +116,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
-        timestamp: new Date(),
+        timestamp: stamp(),
         error: `checkpoint replay rejected: ${String(validated.error)}`,
         frameworkError: validated.error,
       });
@@ -118,7 +127,7 @@ export const runNodeShared = async (
       runId: ctx.runId,
       dagId,
       nodeId,
-      timestamp: new Date(),
+      timestamp: stamp(),
       reason: "checkpoint",
     });
     outputs.set(nodeId, validated.value);
@@ -137,7 +146,7 @@ export const runNodeShared = async (
       runId: ctx.runId,
       dagId,
       nodeId,
-      timestamp: new Date(),
+      timestamp: stamp(),
       error: `input validation failed: ${JSON.stringify(inputResult.error as FrameworkError)}`,
       frameworkError: inputResult.error,
     });
@@ -145,8 +154,8 @@ export const runNodeShared = async (
   }
 
   return withNodeSpan(nodeId, node.kind, inputResult.value, ctx.includeContent ?? false, async () => {
-    const nodeStart = Date.now();
-    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: new Date() });
+    const nodeStart = nowFn();
+    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: stamp() });
 
     let runResult: Result<unknown, FrameworkError>;
     try {
@@ -175,7 +184,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
-        timestamp: new Date(),
+        timestamp: stamp(),
         error: message,
         stack,
         frameworkError: crash,
@@ -201,7 +210,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
-        timestamp: new Date(),
+        timestamp: stamp(),
         error: errorMsg,
         frameworkError,
       });
@@ -215,7 +224,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
-        timestamp: new Date(),
+        timestamp: stamp(),
         error: `output validation failed: ${JSON.stringify(outputResult.error as FrameworkError)}`,
         frameworkError: outputResult.error,
       });
@@ -240,7 +249,7 @@ export const runNodeShared = async (
           runId: ctx.runId,
           dagId,
           nodeId,
-          timestamp: new Date(),
+          timestamp: stamp(),
           error: `checkpoint-write-failed: ${message}`,
           frameworkError: cpwError,
         });
@@ -248,13 +257,13 @@ export const runNodeShared = async (
       }
     }
 
-    const duration = Date.now() - nodeStart;
+    const duration = nowFn() - nodeStart;
     emit(ctx, {
       type: "node-end",
       runId: ctx.runId,
       dagId,
       nodeId,
-      timestamp: new Date(),
+      timestamp: stamp(),
       duration,
       output: outputResult.value,
     });

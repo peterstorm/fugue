@@ -2,54 +2,15 @@
 // Only queue-bullmq/** may import ioredis (FR-082)
 
 import type Redis from "ioredis";
-import type { EventLogOpts } from "../queue/types.js";
+import type { EventLogOpts, EventLogReader } from "../queue/types.js";
 import type { RecordedEvent } from "../state-machine/types.js";
 import { defaultStreamKey } from "./job.js";
 import { deserializeValue } from "../state-machine/serialize.js";
 import { fwLogger } from "../logger.js";
 
-// ---------------------------------------------------------------------------
-// EventLogReader interface — opaque read handle used by replay
-// ---------------------------------------------------------------------------
-
-/**
- * Read-side interface for the per-job event log.
- * The write-side (`appendEvent`) lives on `JobLike` / `adaptBullMQJob`.
- *
- * Returns `RecordedEvent<unknown>` envelopes — each entry has the
- * domain `event` plus the `recordedAtMs` wall-clock timestamp captured
- * at the original `appendEvent` call. For payloads written before the
- * envelope contract existed, `recordedAtMs` is derived from the Redis
- * Stream entry ID (which is also a millisecond timestamp).
- *
- * Implementations:
- *   - `createRedisStreamReader` (BullMQ adapter) — XRANGE-backed
- *   - In-memory: use the `.events` array on `InMemoryJob` directly
- *     (each entry is already a `RecordedEvent<unknown>` envelope).
- */
-export interface EventLogReader {
-  /**
-   * Read all events for a job in insertion order, wrapped in
-   * `RecordedEvent<unknown>` envelopes.
-   */
-  readEvents(queueName: string, jobId: string): Promise<readonly RecordedEvent<unknown>[]>;
-
-  /**
-   * Read only events recorded in the half-open interval `[fromMs, toMs)`.
-   * Backends that can push the filter down (Redis: `XRANGE` with
-   * ms-prefixed entry IDs) should do so. Backends without ID-based
-   * filtering should filter post-fetch.
-   *
-   * Useful for forensic queries ("what was the state at T?") in
-   * combination with `replayEventsUntil` / `replayEventSlice`.
-   */
-  readEventsBetween(
-    queueName: string,
-    jobId: string,
-    fromMs: number,
-    toMs: number,
-  ): Promise<readonly RecordedEvent<unknown>[]>;
-}
+// `EventLogReader` lives in `queue/types.ts` so both backends can implement it
+// without coupling to BullMQ. Re-export here for prior consumers.
+export type { EventLogReader };
 
 // ---------------------------------------------------------------------------
 // Redis Streams reader (XRANGE)

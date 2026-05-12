@@ -92,7 +92,9 @@ const callHumanReviewHook = async (
   nodeMap: Map<string, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
   dagId: string,
+  nowFn: () => number,
 ): Promise<DagEvent> => {
+  const stamp = (): Date => new Date(nowFn());
   if (!hooks?.onHumanReview) {
     return {
       type: "node-failed",
@@ -118,7 +120,7 @@ const callHumanReviewHook = async (
       runId: nodeCtx.runId,
       dagId,
       nodeId,
-      timestamp: new Date(),
+      timestamp: stamp(),
       error: message,
       stack,
       frameworkError: crash,
@@ -144,7 +146,7 @@ const callHumanReviewHook = async (
       runId: nodeCtx.runId,
       dagId,
       nodeId,
-      timestamp: new Date(),
+      timestamp: stamp(),
       error: validationFailure,
       frameworkError: valErr,
     });
@@ -201,6 +203,13 @@ export const buildDagExecutor = (
      * `Math.random`; tests pass a seeded deterministic source.
      */
     random?: () => number;
+    /**
+     * Wall-clock source for observer-event `timestamp` fields. Threaded into
+     * `runWave`, `callHumanReviewHook`, and `runNodeShared`. Defaults to
+     * `Date.now`; tests pass a deterministic clock so event ordering is
+     * checkable via property tests.
+     */
+    now?: () => number;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
   const nodeMap = new Map<string, NodeDef<unknown, unknown>>(
@@ -209,6 +218,7 @@ export const buildDagExecutor = (
   const recordOutcomes = hooks?.recordOutcomes;
   const resumeCheckpoint = hooks?.resumeCheckpoint;
   const random = hooks?.random ?? Math.random;
+  const nowFn = hooks?.now ?? Date.now;
 
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
@@ -232,19 +242,19 @@ export const buildDagExecutor = (
         // in `machineCtx.outputs` short-circuit to a `node-skipped` event with
         // their cached value, so only the failed node (plus any sibling that
         // co-failed and is still absent from outputs) actually re-runs.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint);
+        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
       // -----------------------------------------------------------------------
       .with({ kind: "awaiting-human" }, (p) =>
-        callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id),
+        callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn),
       )
 
       // -----------------------------------------------------------------------
@@ -256,7 +266,7 @@ export const buildDagExecutor = (
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter, nodeCtx.signal);
-        return callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id);
+        return callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
       })
 
       // -----------------------------------------------------------------------
@@ -284,7 +294,9 @@ const runWave = async (
   nodeCtx: ValidatedNodeContext,
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
   resumeCheckpoint: Map<string, unknown> | undefined,
+  nowFn: () => number,
 ): Promise<DagEvent> => {
+  const stamp = (): Date => new Date(nowFn());
   // Filter to active nodes only. Pruned nodes are silently skipped — they
   // did not fire on this routing decision; downstream consumers that list
   // them as `optional` sources in `incomingByNode` see `undefined`.
@@ -322,7 +334,7 @@ const runWave = async (
           runId: nodeCtx.runId,
           dagId: dag.id,
           nodeId,
-          timestamp: new Date(),
+          timestamp: stamp(),
           reason: "already-completed",
         });
         return {
@@ -354,7 +366,7 @@ const runWave = async (
         dag.id,
         outputs,
         incoming,
-        { checkpoint: resumeCheckpoint, writeCheckpoint: true },
+        { checkpoint: resumeCheckpoint, writeCheckpoint: true, now: nowFn },
       );
       return { nodeId, result, outcome };
     }),
@@ -393,7 +405,7 @@ const runWave = async (
         runId: nodeCtx.runId,
         dagId: dag.id,
         nodeId: sibling.nodeId,
-        timestamp: new Date(),
+        timestamp: stamp(),
         error: sibling.error.kind === "node-crash" ? sibling.error.message : JSON.stringify(sibling.error),
         frameworkError: sibling.error,
       });
@@ -446,7 +458,7 @@ const runWave = async (
         runId: nodeCtx.runId,
         dagId: dag.id,
         nodeId,
-        timestamp: new Date(),
+        timestamp: stamp(),
         error: `predicate-malformed: ${decision.message}`,
         frameworkError: predErr,
       });
@@ -466,7 +478,7 @@ const runWave = async (
       prunedTargets: [...decision.prunedTargets],
       defaultTaken: decision.defaultTaken,
       matchedPredicate: decision.matchedPredicate,
-      timestamp: new Date(),
+      timestamp: stamp(),
     });
     for (const pruned of decision.prunedTargets) {
       emit(nodeCtx, {
@@ -475,7 +487,7 @@ const runWave = async (
         dagId: dag.id,
         nodeId: pruned,
         reason: "branch-not-taken",
-        timestamp: new Date(),
+        timestamp: stamp(),
       });
     }
   }

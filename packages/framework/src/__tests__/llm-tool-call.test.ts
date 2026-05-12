@@ -5,10 +5,9 @@ import { z } from "zod";
 import { context as otelContext } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { FakeLlmClient } from "../llm/fake-client.js";
-import type { ToolDef } from "../llm/tools.js";
+import type { ToolDef, SendWithToolsRequest } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import type { NodeContext, Tracer } from "../types/node.js";
-import type { SendWithToolsRequest } from "../llm/client.js";
 
 beforeAll(() => {
   // Register an async-hooks context manager so trace.getActiveSpan() in span helpers

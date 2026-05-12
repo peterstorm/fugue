@@ -4,7 +4,7 @@ import { z } from "zod";
 import { APIUserAbortError } from "@anthropic-ai/sdk";
 import type Anthropic from "@anthropic-ai/sdk";
 import { AnthropicLlmClient } from "../llm/anthropic-client.js";
-import type { ToolDef } from "../llm/tools.js";
+import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,14 @@ describe("AnthropicLlmClient.sendStructured", () => {
 // sendWithTools
 // ---------------------------------------------------------------------------
 
-const RUNTIME = { tracer: null, signal: undefined } as const;
+// `sendWithTools` now takes the full `NodeContext` (ADR 0024). Use the
+// framework's sanctioned constructor so tests can't accidentally pass a
+// stub that no longer satisfies the contract.
+import { makeNodeContext } from "../shared/index.js";
+const RUNTIME = makeNodeContext({
+  runId: "anthropic-test-run" as RunId,
+  dagId: "anthropic-test-dag" as DagId,
+});
 
 const makeTool = (
   name: string,

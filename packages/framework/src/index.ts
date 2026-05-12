@@ -45,7 +45,6 @@ export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, map
 // deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
 export type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./dag-runtime/types.js";
-export { topoSort } from "./shared/topo.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer (NFR-021)
@@ -58,6 +57,7 @@ export type {
   DeadLetterNotifier,
   DeadLetterOpts,
   EnqueueOpts,
+  EventLogReader,
   QueueOpts,
   WorkerOpts,
   EventLogOpts,
@@ -65,6 +65,7 @@ export type {
 export { attachDeadLetterHandler } from "./queue/dead-letter.js";
 export {
   createInMemoryBackend,
+  createInMemoryEventLogReader,
   adaptInMemoryJob,
   createInMemoryMarkerStore,
   type InMemoryBackend,
@@ -78,7 +79,7 @@ export { defaultStreamKey, adaptBullMQJob } from "./queue-bullmq/job.js";
 export type { AdaptBullMQJobOpts } from "./queue-bullmq/job.js";
 export { createRedisMarkerStore } from "./queue-bullmq/markers.js";
 export { createRedisStreamReader } from "./queue-bullmq/event-log.js";
-export type { EventLogReader } from "./queue-bullmq/event-log.js";
+// `EventLogReader` is exported from the queue/ layer above (its canonical home).
 
 // ---------------------------------------------------------------------------
 // Scheduler (NFR-021) — public surface only. `hasCycle` and `diffRegistry`

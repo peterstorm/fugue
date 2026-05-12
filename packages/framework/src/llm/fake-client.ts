@@ -5,9 +5,8 @@ import type {
   LlmClient,
   LlmRequest,
   LlmResponse,
-  LlmRuntime,
   SendWithToolsRequest,
-} from "./client.js";
+} from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { ensureToolNames } from "./tools.js";
 import {
@@ -125,10 +124,8 @@ export class FakeLlmClient implements LlmClient {
 
   async sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    runtime: LlmRuntime,
+    ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    // See AnthropicLlmClient.sendWithTools for the LlmRuntime → NodeContext rationale.
-    const ctx = runtime as NodeContext;
     if (this.withToolsScript === undefined) {
       return err({
         kind: "node-crash",
@@ -158,7 +155,7 @@ export class FakeLlmClient implements LlmClient {
       : null;
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted || runtime.signal?.aborted) {
+      if (req.signal?.aborted || ctx.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -182,7 +179,7 @@ export class FakeLlmClient implements LlmClient {
       const tokensOut = turnSpec.tokensOut ?? 5;
 
       await withLlmSpan(
-        runtime.tracer ?? null,
+        ctx.tracer ?? null,
         { provider: "fake", model: req.model, operation: "chat" },
         async () => {
           totalTokensIn += tokensIn;

@@ -3,7 +3,7 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
-import type { LlmRequest, LlmResponse } from "../llm/client.js";
+import type { LlmRequest, LlmResponse } from "../types/llm.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";

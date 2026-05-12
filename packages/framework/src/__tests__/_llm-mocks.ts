@@ -1,4 +1,4 @@
-import type { LlmClient } from "../llm/client.js";
+import type { LlmClient } from "../types/llm.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { err } from "../types/result.js";
 

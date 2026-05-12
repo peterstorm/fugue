@@ -14,7 +14,7 @@
  */
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
-import type { LlmClient, LlmRequest } from "../llm/client.js";
+import type { LlmClient, LlmRequest } from "../types/llm.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 

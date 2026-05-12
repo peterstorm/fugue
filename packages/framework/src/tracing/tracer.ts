@@ -1,6 +1,6 @@
 /**
- * Provider-agnostic tracer abstraction. Lives in `tracing/` so neither
- * `types/node.ts` nor `llm/client.ts` need to import the other to share it.
+ * Provider-agnostic tracer abstraction. Lives in `tracing/` so any module
+ * needing it can import without crossing the `types/` ↔ `llm/` boundary.
  */
 export interface Tracer {
   /** Wrap execution in a traced span. Auto-instrumented child calls nest under it. */

@@ -1,8 +1,7 @@
 import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { LlmClient, SendWithToolsRequest } from "../llm/client.js";
-import type { ToolDef } from "../llm/tools.js";
+import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
 import { enrichLlmSpan } from "../tracing/index.js";

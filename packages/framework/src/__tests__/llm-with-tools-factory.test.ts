@@ -5,8 +5,7 @@ import { z } from "zod";
 import { createLlmWithToolsNode } from "../nodes/llm-with-tools.js";
 import { ok } from "../types/result.js";
 import type { NodeContext } from "../types/node.js";
-import type { LlmClient } from "../llm/client.js";
-import type { ToolDef } from "../llm/tools.js";
+import type { LlmClient, ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 

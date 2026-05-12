@@ -1,7 +1,7 @@
 // Queue layer interfaces — FR-040, FR-041, FR-042, FR-043
 // MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
 
-import type { JobLike } from "../state-machine/types.js";
+import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 
 // FR-041: Options types
 
@@ -31,6 +31,38 @@ export interface QueueOpts {
 export interface WorkerOpts {
   /** Max concurrent jobs processed by this worker */
   readonly concurrency?: number;
+}
+
+/**
+ * Read-side interface for the per-job event log. Symmetric across backends —
+ * BullMQ implements it over Redis Streams (`createRedisStreamReader`),
+ * in-memory implements it by reading the `events` array on the persisted
+ * `InMemoryJob` (`createInMemoryEventLogReader`). The write-side
+ * (`appendEvent`) lives on `JobLike`.
+ *
+ * Returns `RecordedEvent<unknown>` envelopes — each entry has the
+ * domain `event` plus the `recordedAtMs` wall-clock timestamp captured
+ * at the original `appendEvent` call.
+ */
+export interface EventLogReader {
+  /**
+   * Read all events for a job in insertion order, wrapped in
+   * `RecordedEvent<unknown>` envelopes.
+   */
+  readEvents(queueName: string, jobId: string): Promise<readonly RecordedEvent<unknown>[]>;
+
+  /**
+   * Read only events recorded in the half-open interval `[fromMs, toMs)`.
+   * Backends that can push the filter down (Redis: `XRANGE` with
+   * ms-prefixed entry IDs) should do so. Backends without ID-based
+   * filtering should filter post-fetch.
+   */
+  readEventsBetween(
+    queueName: string,
+    jobId: string,
+    fromMs: number,
+    toMs: number,
+  ): Promise<readonly RecordedEvent<unknown>[]>;
 }
 
 /** Options for the per-job event log (AD-3, FR-048) */

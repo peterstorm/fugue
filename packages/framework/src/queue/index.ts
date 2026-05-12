@@ -10,6 +10,7 @@ export type {
   DeadLetterNotifier,
   DeadLetterOpts,
   EnqueueOpts,
+  EventLogReader,
   QueueOpts,
   WorkerOpts,
   EventLogOpts,
@@ -19,6 +20,7 @@ export { attachDeadLetterHandler } from "./dead-letter.js";
 
 export {
   createInMemoryBackend,
+  createInMemoryEventLogReader,
   adaptInMemoryJob,
   createInMemoryMarkerStore,
   type InMemoryBackend,

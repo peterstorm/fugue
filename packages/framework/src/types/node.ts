@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { Observer } from "../observer/observer.js";
-import type { LlmClient } from "../llm/client.js";
+import type { LlmClient } from "./llm.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 

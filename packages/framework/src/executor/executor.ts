@@ -51,6 +51,14 @@ export interface RunOptions {
    * semantics are the deliberate intent (tests, transient batch jobs).
    */
   readonly suppressRoutingWarnings?: boolean;
+  /**
+   * Wall-clock source for observer-event `timestamp` fields and the kernel's
+   * `durationMs` measurement. Threaded through into every observer event
+   * (`run-start`, `node-start`, `node-end`, `run-end`, ...). Defaults to
+   * `Date.now`; tests pass a deterministic clock so event ordering is
+   * reproducible across replays.
+   */
+  readonly now?: () => number;
 }
 
 export const runDag = async <I, O>(
@@ -104,6 +112,7 @@ export const runDag = async <I, O>(
     retryLimits: opts?.retryLimits,
     onBackground: opts?.onBackground,
     resumeCheckpoint: opts?.resume?.checkpoint,
+    now: opts?.now,
   };
   return runDagStateful<I, O>(dag, input, ctx, stateMachineOpts);
 };

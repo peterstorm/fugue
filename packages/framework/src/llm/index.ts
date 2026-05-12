@@ -2,10 +2,12 @@ export type {
   LlmClient,
   LlmRequest,
   LlmResponse,
-  LlmRuntime,
   SendWithToolsRequest,
-} from "./client.js";
-export type { ToolDef, ToolDefInput, ToolName } from "./tools.js";
+  ToolDef,
+  ToolContext,
+  ToolName,
+} from "../types/llm.js";
+export type { ToolDefInput } from "./tools.js";
 export { assertValidToolName, ensureToolNames, tool, toolName } from "./tools.js";
 export {
   withLlmSpan,

@@ -6,11 +6,10 @@ import type {
   LlmClient,
   LlmRequest,
   LlmResponse,
-  LlmRuntime,
   SendWithToolsRequest,
-} from "./client.js";
+  ToolDef,
+} from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import type { ToolDef } from "./tools.js";
 import { ensureToolNames } from "./tools.js";
 import {
   dispatchToolCallsWithSpans,
@@ -436,10 +435,8 @@ export class OpenAILlmClient implements LlmClient {
 
   async sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    runtime: LlmRuntime,
+    ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    // See AnthropicLlmClient.sendWithTools for the LlmRuntime → NodeContext rationale.
-    const ctx = runtime as NodeContext;
     try {
       ensureToolNames(req.tools);
     } catch (e) {
@@ -465,7 +462,7 @@ export class OpenAILlmClient implements LlmClient {
     let lastThinking: string | undefined;
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted || runtime.signal?.aborted) {
+      if (req.signal?.aborted || ctx.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -491,10 +488,10 @@ export class OpenAILlmClient implements LlmClient {
       let httpResult: Awaited<ReturnType<typeof this.postResponses>>;
       try {
         httpResult = await withLlmSpan(
-          runtime.tracer ?? null,
+          ctx.tracer ?? null,
           { provider: "openai", model: req.model, operation: "chat" },
           async () => {
-            const r = await this.postResponses(body, req.signal ?? runtime.signal);
+            const r = await this.postResponses(body, req.signal ?? ctx.signal);
             if (r.ok) {
               const tokensIn = r.response.usage?.input_tokens ?? 0;
               const tokensOut = r.response.usage?.output_tokens ?? 0;

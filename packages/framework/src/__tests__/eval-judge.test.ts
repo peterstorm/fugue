@@ -9,7 +9,7 @@ import {
 } from "../../src/nodes/eval-judge.js";
 import type { EvalJudgeResponse } from "../../src/nodes/eval-judge.js";
 import type { NodeContext } from "../../src/types/node.js";
-import type { LlmClient } from "../../src/llm/client.js";
+import type { LlmClient } from "../../src/types/llm.js";
 import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 

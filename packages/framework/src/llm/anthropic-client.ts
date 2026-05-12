@@ -8,11 +8,10 @@ import type {
   LlmClient,
   LlmRequest,
   LlmResponse,
-  LlmRuntime,
   SendWithToolsRequest,
-} from "./client.js";
+  ToolDef,
+} from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import type { ToolDef } from "./tools.js";
 import { ensureToolNames } from "./tools.js";
 import {
   dispatchToolCallsWithSpans,
@@ -194,16 +193,8 @@ export class AnthropicLlmClient implements LlmClient {
 
   async sendWithTools<O>(
     req: SendWithToolsRequest<O>,
-    runtime: LlmRuntime,
+    ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    // `runtime`'s static type is the minimum (`LlmRuntime`) because
-    // `llm/client.ts` can't import `NodeContext` (cycle: `types/node.ts`
-    // imports `LlmClient`). At the tool-dispatch boundary, tools may read
-    // any `NodeContext` field; the contract on `LlmClient` requires callers
-    // wiring tools to pass a `NodeContext`. This is the single sanctioned
-    // widening, kept here so the rest of the file uses the wider type
-    // honestly. See ADR-0012.
-    const ctx = runtime as NodeContext;
     try {
       ensureToolNames(req.tools);
     } catch (e) {
@@ -226,7 +217,7 @@ export class AnthropicLlmClient implements LlmClient {
     let lastRawText = "";
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted || runtime.signal?.aborted) {
+      if (req.signal?.aborted || ctx.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -240,7 +231,7 @@ export class AnthropicLlmClient implements LlmClient {
       };
 
       const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
-      const callerSignal = req.signal ?? runtime.signal;
+      const callerSignal = req.signal ?? ctx.signal;
       const signal = callerSignal
         ? AbortSignal.any([timeoutSignal, callerSignal])
         : timeoutSignal;
@@ -248,7 +239,7 @@ export class AnthropicLlmClient implements LlmClient {
       let response: AnthropicResponse;
       try {
         response = await withLlmSpan(
-          runtime.tracer ?? null,
+          ctx.tracer ?? null,
           { provider: "anthropic", model: req.model, operation: "chat" },
           async () => {
             setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
