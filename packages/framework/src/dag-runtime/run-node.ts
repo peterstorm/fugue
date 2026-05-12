@@ -25,6 +25,7 @@ import type { Observer } from "../observer/observer.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
 import { withNodeSpan, type NodeSpanOutcome } from "./node-span.js";
+import { resolveContentFilter } from "../tracing/content-filter.js";
 import type { IncomingSources } from "../shared/incoming.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
@@ -153,7 +154,7 @@ export const runNodeShared = async (
     return { result: inputResult, outcome: EMPTY_OUTCOME };
   }
 
-  return withNodeSpan(nodeId, node.kind, inputResult.value, ctx.includeContent ?? false, async () => {
+  return withNodeSpan(nodeId, node.kind, inputResult.value, resolveContentFilter(ctx), async () => {
     const nodeStart = nowFn();
     emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: stamp() });
 

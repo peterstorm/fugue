@@ -7,6 +7,8 @@
  */
 import { trace } from "@opentelemetry/api";
 import { PRICE_TABLE } from "../llm/cost.js";
+import type { ContentFilter } from "./content-filter.js";
+import { resolveContentFilter } from "./content-filter.js";
 import {
   AI_LLM_COST_USD,
   AI_LLM_HAS_THINKING,
@@ -32,10 +34,13 @@ export interface EnrichLlmSpanOpts {
   readonly thinking?: string;
   readonly provider?: string;
   /**
-   * When `true`, include prompt/output/thinking content in spans.
-   * Default OFF — these payloads frequently contain PII and should not leave
-   * the process boundary unless an operator has explicitly opted in. Caller
-   * (typically a node) reads this from `NodeContext.includeContent`.
+   * Content filter applied to prompt/output/thinking before attaching to spans.
+   * When `null`/`undefined`, content is fully redacted. Use `piiScrubber` for
+   * regex-based PII removal or `IDENTITY_FILTER` for unfiltered content.
+   */
+  readonly contentFilter?: ContentFilter | null;
+  /**
+   * @deprecated Use `contentFilter` instead.
    */
   readonly includeContent?: boolean;
 }
@@ -57,18 +62,18 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   otelSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.tokensOut);
   otelSpan.setAttribute(AI_LLM_COST_USD, totalCost);
 
-  const includeContent = opts.includeContent ?? false;
+  const filter = resolveContentFilter(opts);
 
   // OTel GenAI semconv: emit prompts as `gen_ai.system.message` and
-  // `gen_ai.user.message` events. Content gated by `includeContent` (PII).
+  // `gen_ai.user.message` events. Content gated by content filter (PII).
   // The `prompt_name` framework field rides along as an extra attribute on
   // the system message — not part of the spec, but harmless and useful.
   otelSpan.addEvent(
     EVENT_GEN_AI_SYSTEM_MESSAGE,
-    includeContent
+    filter
       ? {
           role: "system",
-          content: opts.system,
+          content: filter(opts.system),
           "ai.prompt_name": opts.promptName ?? "",
         }
       : {
@@ -80,8 +85,8 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   );
   otelSpan.addEvent(
     EVENT_GEN_AI_USER_MESSAGE,
-    includeContent
-      ? { role: "user", content: opts.user }
+    filter
+      ? { role: "user", content: filter(opts.user) }
       : { role: "user", content_redacted: "true", content_chars: opts.user.length },
   );
 
@@ -100,8 +105,8 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
     otelSpan.setAttribute(AI_LLM_HAS_THINKING, true);
     otelSpan.addEvent(
       EVENT_GEN_AI_ASSISTANT_MESSAGE,
-      includeContent
-        ? { role: "assistant", reasoning_content: opts.thinking }
+      filter
+        ? { role: "assistant", reasoning_content: filter(opts.thinking) }
         : {
             role: "assistant",
             reasoning_content_redacted: "true",

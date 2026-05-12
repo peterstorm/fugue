@@ -50,7 +50,7 @@ describe("withNodeSpan span leak under thrown fn (Wave 1.1)", () => {
     setFrameworkTracer(makeFakeTracer(recorded) as unknown as Parameters<typeof setFrameworkTracer>[0]);
 
     await expect(
-      withNodeSpan("n1", "transform", { in: 1 }, false, async () => {
+      withNodeSpan("n1", "transform", { in: 1 }, null, async () => {
         throw new Error("observer-strict rethrow");
       }),
     ).rejects.toThrow("observer-strict rethrow");
@@ -64,7 +64,7 @@ describe("withNodeSpan span leak under thrown fn (Wave 1.1)", () => {
     const recorded: RecordedSpan[] = [];
     setFrameworkTracer(makeFakeTracer(recorded) as unknown as Parameters<typeof setFrameworkTracer>[0]);
 
-    const { result } = await withNodeSpan("n1", "transform", { in: 1 }, false, async () =>
+    const { result } = await withNodeSpan("n1", "transform", { in: 1 }, null, async () =>
       ok({ out: 2 }),
     );
     expect(result.ok).toBe(true);

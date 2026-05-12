@@ -19,3 +19,7 @@ export type { MlflowOtlpExporterConfig } from "./mlflow-otlp-exporter.js";
 // Side-channel registry for object-valued span attributes (advanced)
 export { createSpanAttributeRegistry } from "./span-attribute-registry.js";
 export type { SpanAttributeRegistry, SpanAttributes } from "./span-attribute-registry.js";
+
+// Content filter / PII scrubber
+export type { ContentFilter } from "./content-filter.js";
+export { piiScrubber, IDENTITY_FILTER, composeFilters, resolveContentFilter } from "./content-filter.js";

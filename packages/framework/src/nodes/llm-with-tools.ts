@@ -188,7 +188,8 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
       tokensIn: llmResponse.tokensIn,
       tokensOut: llmResponse.tokensOut,
       thinking: llmResponse.thinking,
-      includeContent: ctx.includeContent ?? false,
+      includeContent: ctx.includeContent,
+      contentFilter: ctx.contentFilter,
     });
 
     const output = llmResponse.output as O;

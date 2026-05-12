@@ -3,6 +3,7 @@ import { fwTracer } from "../tracing/global-tracer.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeResult } from "../nodes/eval-judge.js";
+import type { ContentFilter } from "../tracing/content-filter.js";
 import {
   AI_NODE_ID,
   AI_NODE_KIND,
@@ -70,7 +71,7 @@ export const withNodeSpan = async (
   nodeId: string,
   kind: string,
   input: unknown,
-  includeContent: boolean,
+  contentFilter: ContentFilter | null,
   fn: () => Promise<Result<unknown, FrameworkError>>,
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
@@ -87,7 +88,7 @@ export const withNodeSpan = async (
     async (span) => {
       span.addEvent(
         EVENT_NODE_INPUT,
-        includeContent ? { data: JSON.stringify(input) } : { data_redacted: "true" },
+        contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
       );
 
       let outcome: NodeSpanOutcome = EMPTY_OUTCOME;
@@ -105,7 +106,7 @@ export const withNodeSpan = async (
       if (result.ok) {
         span.addEvent(
           EVENT_NODE_OUTPUT,
-          includeContent ? { data: JSON.stringify(result.value) } : { data_redacted: "true" },
+          contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
         );
         if (
           kind === "guardrail" &&

@@ -11,6 +11,7 @@ import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
 import { fwTracer } from "../tracing/global-tracer.js";
+import { resolveContentFilter } from "../tracing/content-filter.js";
 import {
   AI_SPAN_TYPE,
   EVENT_NODE_INPUT,
@@ -35,9 +36,9 @@ export const runEvalJudges = async (
         async (span) => {
           try {
             const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
-            const includeContent = ctx.includeContent ?? false;
-            span.addEvent(EVENT_NODE_INPUT, includeContent
-              ? { data: JSON.stringify({ ...judgeInput, criteria: judge.config.criteria }) }
+            const filter = resolveContentFilter(ctx);
+            span.addEvent(EVENT_NODE_INPUT, filter
+              ? { data: filter(JSON.stringify({ ...judgeInput, criteria: judge.config.criteria })) }
               : { data_redacted: "true", criteria: JSON.stringify(judge.config.criteria) });
 
             const result = await judge.run(judgeInput, dagOutput, ctx);

@@ -5,6 +5,7 @@ import type { Observer } from "../observer/observer.js";
 import type { LlmClient } from "./llm.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
+import type { ContentFilter } from "../tracing/content-filter.js";
 
 export type { Tracer };
 
@@ -130,10 +131,17 @@ export interface BaseNodeContext {
   readonly judgeLlm: LlmClient | null;
   readonly signal?: AbortSignal;
   /**
-   * When `true`, span events include full prompt/response bodies. When
-   * `false` (default), bodies are redacted. Set once at bootstrap (typically
-   * from an env var) and seeded into every spawned context — the framework
-   * does not read process.env directly.
+   * Optional content filter for trace span data. When set, content (prompts,
+   * node inputs/outputs, thinking) is included in spans after being passed
+   * through this filter. When `null`/`undefined`, content is fully redacted.
+   *
+   * Use `piiScrubber` for regex-based PII removal, `IDENTITY_FILTER` for
+   * unfiltered content, or provide a custom `(s: string) => string`.
+   */
+  readonly contentFilter?: ContentFilter | null;
+  /**
+   * @deprecated Use `contentFilter` instead. When `true` and no `contentFilter`
+   * is set, content is included unfiltered (backwards-compatible).
    */
   readonly includeContent?: boolean;
 }
@@ -222,4 +230,5 @@ export type NodeContextInit = {
   readonly judgeLlm?: LlmClient | null;
   readonly signal?: AbortSignal;
   readonly includeContent?: boolean;
+  readonly contentFilter?: ContentFilter | null;
 };

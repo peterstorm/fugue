@@ -218,7 +218,8 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             tokensIn: result.value.tokensIn,
             tokensOut: result.value.tokensOut,
             thinking: result.value.thinking,
-            includeContent: ctx.includeContent ?? false,
+            includeContent: ctx.includeContent,
+            contentFilter: ctx.contentFilter,
           });
         } catch (spanErr) {
           ctx.logger.warn(`[eval-judge:${config.id}] enrichLlmSpan threw: ${spanErr instanceof Error ? spanErr.message : String(spanErr)}`);

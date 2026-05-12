@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext } from "@ai-summary/framework";
-import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter } from "@ai-summary/framework";
+import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, ContentFilter } from "@ai-summary/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
 import { createSummaryDag } from "./dag/summary-dag.js";
@@ -37,8 +37,8 @@ export interface AppDeps {
   readonly observer?: Observer | null;
   readonly cache?: ContextCache | null;
   readonly checkpointer?: Checkpointer | null;
-  /** Bootstrap-seeded flag controlling whether prompt/output bodies are included in trace events. */
-  readonly includeContent?: boolean;
+  /** Content filter for trace span data. When set, content is included after filtering. */
+  readonly contentFilter?: ContentFilter | null;
 }
 
 // --- Create Hono app ---
@@ -166,7 +166,8 @@ export const createApp = (deps: AppDeps): Hono => {
         llm: deps.llm,
         judgeLlm: deps.llm,
         signal: abortController.signal,
-        includeContent: deps.includeContent,
+        includeContent: deps.contentFilter != null,
+        contentFilter: deps.contentFilter,
       });
 
       let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;

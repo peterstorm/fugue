@@ -31,4 +31,5 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => ({
   judgeLlm: init.judgeLlm ?? null,
   ...(init.signal !== undefined ? { signal: init.signal } : {}),
   ...(init.includeContent !== undefined ? { includeContent: init.includeContent } : {}),
+  ...(init.contentFilter !== undefined ? { contentFilter: init.contentFilter } : {}),
 });

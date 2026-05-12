@@ -15,6 +15,8 @@ import {
   ratio,
   RedisCache,
   RedisCheckpointer,
+  piiScrubber,
+  IDENTITY_FILTER,
 } from "@ai-summary/framework";
 import type { LlmClient, TracingHandle, Checkpointer } from "@ai-summary/framework";
 import { NoopObserver } from "@ai-summary/framework";
@@ -207,8 +209,10 @@ export const bootstrap = async () => {
     checkpointer,
     observer: new NoopObserver(),
     // Read the env-derived flag once at bootstrap; the framework no longer
-    // touches process.env. Spawned NodeContexts inherit this value.
-    includeContent: config.LLM_TRACE_PROMPTS,
+    // touches process.env. When LLM_TRACE_PROMPTS is true, content passes
+    // through unchanged; otherwise the PII scrubber strips sensitive patterns
+    // while keeping non-PII content visible for debugging.
+    contentFilter: config.LLM_TRACE_PROMPTS ? IDENTITY_FILTER : piiScrubber,
     health: {
       // Always defined: if Redis was never reachable at bootstrap, we still
       // need readiness to report not-ready (otherwise k8s leaves the pod in
