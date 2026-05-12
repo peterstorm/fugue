@@ -17,6 +17,7 @@ import { applyJitter } from "../shared/jitter.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { decideRoute } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
+import { fwLogger } from "../logger.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
@@ -290,7 +291,7 @@ const runWave = async (
   // stale output from a prior wave.
   if (waveIndex < 0 || waveIndex >= machineCtx.waves.length) {
     const message = `out-of-bounds waveIndex: ${waveIndex} (have ${machineCtx.waves.length} waves)`;
-    console.error(`[runWave] ${message}`);
+    fwLogger().error(`[runWave] ${message}`);
     return {
       type: "node-failed",
       nodeId: "__wave__",

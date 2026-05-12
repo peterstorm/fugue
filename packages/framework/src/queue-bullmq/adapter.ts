@@ -17,6 +17,7 @@ import type {
 } from "../queue/types.js";
 import { adaptBullMQJob } from "./job.js";
 import { serializeValue } from "../state-machine/serialize.js";
+import { fwLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -66,7 +67,7 @@ export function createBullMQBackend(
 
   // FR-082: attach default error listener to prevent unhandled-rejection crashes
   redis.on("error", (err) => {
-    console.error("[BullMQ] Shared Redis connection error:", err);
+    fwLogger().error("[BullMQ] Shared Redis connection error:", err);
   });
 
   const bullConnection: ConnectionOptions = { host, port };
@@ -160,7 +161,7 @@ export function createBullMQBackend(
     // Attach default worker error listener so internal worker errors don't crash
     // the process when callers have not registered an onError handler.
     worker.on("error", (err) => {
-      console.error("[BullMQ] Worker internal error:", err);
+      fwLogger().error("[BullMQ] Worker internal error:", err);
     });
 
     return {

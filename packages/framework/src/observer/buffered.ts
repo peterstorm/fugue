@@ -12,6 +12,7 @@ import type {
 } from "../types/events.js";
 import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
+import { fwLogger } from "../logger.js";
 
 export interface RunSummary {
   readonly runId: string;
@@ -76,7 +77,7 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
     // Log at error level with full stack — production observers MUST be
     // failure-tolerant (runs continue), but silent failure is worse than a
     // crash when debugging an observer-impl bug.
-    console.error(
+    fwLogger().error(
       `[observer] dispatchEvent failed for ${event.type}:`,
       e instanceof Error && e.stack ? e.stack : e,
     );
@@ -187,7 +188,7 @@ export class BufferedObserver implements Observer {
       if (buf.createdAt < cutoff) {
         this.buffers.delete(runId);
         this.evicted++;
-        console.warn(
+        fwLogger().warn(
           `[BufferedObserver] Evicting orphaned run buffer ${runId} (age: ${Date.now() - buf.createdAt}ms, events: ${buf.events.length})`,
         );
       }
@@ -241,7 +242,7 @@ export class BufferedObserver implements Observer {
           try {
             dispatchEvent(this.inner, buffered);
           } catch (err) {
-            console.warn(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+            fwLogger().warn(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
           }
         }
         // Guard the final run-end dispatch the same way as the replay loop —
@@ -250,7 +251,7 @@ export class BufferedObserver implements Observer {
         try {
           dispatchEvent(this.inner, e);
         } catch (err) {
-          console.warn(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
+          fwLogger().warn(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
         }
       }
     } finally {

@@ -5,17 +5,17 @@
 // `passed: false, skipped: true, crash: { ... }` so quality gates filtering
 // on `passed` see a broken judge rather than silently treating it as passing.
 
-import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { SpanStatusCode } from "@opentelemetry/api";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
 import type { NodeContext } from "../types/node.js";
+import { fwLogger } from "../logger.js";
+import { fwTracer } from "../tracing/global-tracer.js";
 import {
   AI_SPAN_TYPE,
   EVENT_NODE_INPUT,
   EVENT_NODE_OUTPUT,
   SPAN_TYPE_TOOL,
 } from "../tracing/semantic-conventions.js";
-
-const tracer = trace.getTracer("ai-summary-framework");
 
 export const runEvalJudges = async (
   judges: readonly EvalJudgeNodeDef[],
@@ -26,7 +26,7 @@ export const runEvalJudges = async (
 ): Promise<EvalJudgeResult[]> => {
   return Promise.all(
     judges.map(async (judge) =>
-      tracer.startActiveSpan(
+      fwTracer().startActiveSpan(
         `eval-judge:${judge.id}`,
         { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_TOOL } },
         async (span) => {
@@ -55,7 +55,7 @@ export const runEvalJudges = async (
             // gating logic.
             const msg = e instanceof Error ? e.message : String(e);
             const prefix = `[eval-judge:${judge.id}] Unexpected error: ${msg}`;
-            (ctx.logger?.warn ?? console.warn)(prefix);
+            (ctx.logger?.warn ?? fwLogger().warn)(prefix);
             span.setStatus({ code: SpanStatusCode.ERROR, message: prefix });
             span.end();
             return {

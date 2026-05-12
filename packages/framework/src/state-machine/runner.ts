@@ -3,6 +3,7 @@
 
 import { createHash } from "node:crypto";
 import type { Machine, Executor, JobLike, RunOptions } from "./types.js";
+import { fwLogger } from "../logger.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
   retriable: true,
@@ -77,7 +78,7 @@ export const runStateMachine = async <S, E, C>(
               timestamp: new Date(),
             });
           } catch (traceErr) {
-            console.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+            fwLogger().error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
           }
         }
         throw new Error("runStateMachine: aborted by beforeExecute hook");
@@ -171,7 +172,7 @@ export const runStateMachine = async <S, E, C>(
           timestamp: new Date(),
         });
       } catch (traceErr) {
-        console.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+        fwLogger().error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
       }
     }
 

@@ -1,3 +1,4 @@
+import { fwLogger } from "../logger.js";
 const PRICE_TABLE: Record<string, { readonly inputPer1M: number; readonly outputPer1M: number }> = {
   // Anthropic
   "claude-sonnet-4-20250514": { inputPer1M: 3.0, outputPer1M: 15.0 },
@@ -22,7 +23,7 @@ export { PRICE_TABLE };
 export function computeCostUsd(model: string, tokensIn: number, tokensOut: number): number {
   const entry = PRICE_TABLE[model];
   if (!entry) {
-    console.warn(`[cost] Unknown model "${model}", returning cost 0`);
+    fwLogger().warn(`[cost] Unknown model "${model}", returning cost 0`);
     return 0;
   }
   return (tokensIn * entry.inputPer1M + tokensOut * entry.outputPer1M) / 1_000_000;

@@ -2,7 +2,8 @@
 // FR-023, FR-024, FR-025, FR-027
 
 import { match } from "ts-pattern";
-import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { fwTracer } from "../tracing/global-tracer.js";
 import type { JobLike, RunOptions } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import type { DagDef } from "../types/dag.js";
@@ -19,6 +20,7 @@ import { computeIncomingByNode } from "./conditional.js";
 import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "../shared/node-span.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { dispatchEvent } from "../observer/buffered.js";
+import { fwLogger } from "../logger.js";
 import {
   AI_SPAN_TYPE,
   AI_DAG_ID,
@@ -27,8 +29,6 @@ import {
   EVENT_NODE_OUTPUT,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
-
-const tracer = trace.getTracer("ai-summary-framework");
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -207,7 +207,7 @@ export const runDagStateful = async <I, O>(
   }
   const validatedCtx = capCheck.value;
 
-  return tracer.startActiveSpan(
+  return fwTracer().startActiveSpan(
     `run:${dag.id}`,
     {
       attributes: {
@@ -333,7 +333,7 @@ export const runDagStateful = async <I, O>(
               // must not block end(); an end() failure must not block
               // emitRunEnd.
               const p = finalize().catch((e) => {
-                console.error("[runDagStateful] background finalize failed:", e);
+                fwLogger().error("[runDagStateful] background finalize failed:", e);
                 // Each cleanup wrapped independently; log any secondary failure
                 // so it doesn't masquerade as the primary `finalize` error or
                 // get attributed to BufferedObserver's TTL eviction.
@@ -343,7 +343,7 @@ export const runDagStateful = async <I, O>(
                     message: e instanceof Error ? e.message : String(e),
                   });
                 } catch (setStatusErr) {
-                  console.error(
+                  fwLogger().error(
                     "[runDagStateful] rootSpan.setStatus threw during background-finalize error cleanup:",
                     setStatusErr,
                   );
@@ -351,7 +351,7 @@ export const runDagStateful = async <I, O>(
                 try {
                   rootSpan.end();
                 } catch (endErr) {
-                  console.error(
+                  fwLogger().error(
                     "[runDagStateful] rootSpan.end threw during background-finalize error cleanup (span will leak until TTL eviction):",
                     endErr,
                   );
@@ -359,7 +359,7 @@ export const runDagStateful = async <I, O>(
                 try {
                   emitRunEnd("error");
                 } catch (emitErr) {
-                  console.error(
+                  fwLogger().error(
                     "[runDagStateful] emitRunEnd threw during background-finalize error cleanup:",
                     emitErr,
                   );

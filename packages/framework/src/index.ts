@@ -16,6 +16,8 @@ export * from "./cache/index.js";
 export * from "./prompts/index.js";
 export * from "./llm/index.js";
 export * from "./tracing/index.js";
+export { setFrameworkLogger, fwLogger } from "./logger.js";
+export type { FrameworkLogger } from "./logger.js";
 
 // ---------------------------------------------------------------------------
 // State-machine kernel (NFR-021) — public surface only
@@ -34,19 +36,16 @@ export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, map
 
 // ---------------------------------------------------------------------------
 // DAG runtime (NFR-021) — public surface only
+//
+// `runDag` is the single sanctioned public entry. `runDagStateful`,
+// `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, and
+// `dagTransition` live on the `@ai-summary/framework/advanced` subpath
+// for callers building custom machines on the kernel — see `./advanced.ts`.
+// Keeping them off the main barrel signals that reaching for them is a
+// deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
 export type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./dag-runtime/types.js";
-export { dagTransition } from "./dag-runtime/transition.js";
-// Transition primitives (handleWaveDone, handleNodeFailed, advanceToNextWave,
-// computeBackoffMs, ...) are intentionally NOT re-exported. They are
-// implementation details of `dagTransition`; callers who bypass `dagTransition`
-// can skip its invariant checks. Import directly from `dag-runtime/transition-helpers.js`
-// if you have a documented need.
-export { compileDagToMachine } from "./dag-runtime/machine.js";
 export { topoSort } from "./shared/topo.js";
-export { buildDagExecutor } from "./dag-runtime/executor.js";
-export { runDagStateful, runDagAsWorkerJob } from "./dag-runtime/run-dag-stateful.js";
-export type { DagRunOpts } from "./dag-runtime/run-dag-stateful.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer (NFR-021)

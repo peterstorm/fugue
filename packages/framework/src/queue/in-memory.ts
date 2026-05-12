@@ -3,6 +3,7 @@
 
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 import { createInMemoryJob, type InMemoryJobOptions } from "./in-memory-job.js";
+import { fwLogger } from "../logger.js";
 import type {
   QueueBackend,
   QueueHandle,
@@ -69,6 +70,7 @@ export function createInMemoryBackend(): InMemoryBackend {
     string,
     {
       process: (job: JobLike<unknown, unknown, unknown>) => Promise<void>;
+      concurrency: number;
     }
   >();
 
@@ -111,10 +113,9 @@ export function createInMemoryBackend(): InMemoryBackend {
         if (!workerDef) return;
         const defaults = queueDefaults.get(name) ?? { defaultAttempts: 1 };
 
-        const { process: processFn } = workerDef;
-        // drain FIFO — shift from front
-        while (q.length > 0) {
-          const entry = q.shift()!;
+        const { process: processFn, concurrency } = workerDef;
+
+        const runEntry = async (entry: QueueEntry<unknown, unknown>): Promise<void> => {
           // Per-job max: enqueue-opts.attempts ?? queue.defaultAttempts ?? 1
           // (mirrors BullMQ semantics — max travels with the job).
           const max = entry.opts.attempts ?? defaults.defaultAttempts;
@@ -135,9 +136,9 @@ export function createInMemoryBackend(): InMemoryBackend {
               const handlers = failedHandlers.get(name) ?? [];
               if (handlers.length === 0) {
                 // No onFailed handler registered — surface to onError so the failure
-                // is at minimum observable, and emit a console.error so the failure
+                // is at minimum observable, and emit a fwLogger().error so the failure
                 // does not disappear in test harnesses that wired neither.
-                console.error(
+                fwLogger().error(
                   `[InMemoryQueue] Job "${entry.id}" failed (attempt ${attempt}/${max}) with no onFailed handler:`,
                   jobErr,
                 );
@@ -166,7 +167,29 @@ export function createInMemoryBackend(): InMemoryBackend {
               }
             }
           }
+        };
+
+        // Pool up to `concurrency` workers; each pulls from the front of the
+        // queue and re-pulls on completion. Aligns in-memory backend with
+        // BullMQ's `WorkerOpts.concurrency` semantics so concurrency bugs in
+        // node code surface in fast unit tests.
+        if (concurrency === 1) {
+          while (q.length > 0) {
+            const entry = q.shift()!;
+            await runEntry(entry);
+          }
+          return;
         }
+
+        const worker = async (): Promise<void> => {
+          while (q.length > 0) {
+            const entry = q.shift();
+            if (entry === undefined) return;
+            await runEntry(entry);
+          }
+        };
+        const pool = Array.from({ length: concurrency }, () => worker());
+        await Promise.all(pool);
       },
 
       async close(): Promise<void> {
@@ -189,6 +212,7 @@ export function createInMemoryBackend(): InMemoryBackend {
     }
     workers.set(name, {
       process: process as (job: JobLike<unknown, unknown, unknown>) => Promise<void>,
+      concurrency: opts?.concurrency ?? 1,
     });
     if (!failedHandlers.has(name)) failedHandlers.set(name, []);
     if (!errorHandlers.has(name)) errorHandlers.set(name, []);

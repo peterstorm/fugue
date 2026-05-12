@@ -36,6 +36,7 @@ export class JsonFixtureSource implements ConversationSource {
       return err({
         kind: "node-crash",
         nodeId: "json-fixture-source",
+        retriability: "retriable",
         message: `Failed to read fixture for ${customerId}: ${String(e)}`,
       });
     }

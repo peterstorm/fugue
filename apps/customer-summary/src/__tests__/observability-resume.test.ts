@@ -257,7 +257,7 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
           outputSchema: z.object({ v: z.number() }),
           transform: (_i: { v: number }) => {
             log.push("N3-fail");
-            return err({ kind: "node-crash" as const, nodeId: "N3", message: "transient failure" });
+            return err({ kind: "node-crash" as const, nodeId: "N3", retriability: "retriable" as const, message: "transient failure" });
           },
         }),
       ]),

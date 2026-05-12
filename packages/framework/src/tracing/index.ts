@@ -10,6 +10,7 @@ export * from "./semantic-conventions.js";
 // OTel pipeline setup
 export type { TracingConfig, TracingHandle } from "./init.js";
 export { initTracing } from "./init.js";
+export { setFrameworkTracer, fwTracer } from "./global-tracer.js";
 
 // MLflow-specific OTLP exporter
 export { MlflowOtlpExporter, createMlflowExporter } from "./mlflow-otlp-exporter.js";

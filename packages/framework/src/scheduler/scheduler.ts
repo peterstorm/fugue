@@ -8,6 +8,7 @@ import type { MarkerStore } from "../queue/types.js";
 import type { TaskConfig, TaskRegistry } from "./types.js";
 import { diffRegistry } from "./diff.js";
 import { hasCycle } from "./cycle.js";
+import { fwLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -87,7 +88,7 @@ export function createCronScheduler(
       const interval = parseExpression(cron, { currentDate: after });
       return interval.next().toDate();
     } catch (err) {
-      console.error(`[CronScheduler] Failed to parse cron "${cron}" after ${after.toISOString()}:`, err);
+      fwLogger().error(`[CronScheduler] Failed to parse cron "${cron}" after ${after.toISOString()}:`, err);
       return null;
     }
   }
@@ -109,7 +110,7 @@ export function createCronScheduler(
         if (stillActive !== undefined) rescheduleTask(stillActive, triggeredAt);
       })
       .catch((err) => {
-        console.error(`[CronScheduler] timer callback failed for "${current.id}":`, err);
+        fwLogger().error(`[CronScheduler] timer callback failed for "${current.id}":`, err);
         const n = (consecutiveFailures.get(current.id) ?? 0) + 1;
         consecutiveFailures.set(current.id, n);
         const stillActive = activeRegistry.get(current.id);
@@ -123,7 +124,7 @@ export function createCronScheduler(
     const nowDate = now();
     const nextDate = getNextDate(task.cron, nowDate);
     if (nextDate === null) {
-      console.warn(`[CronScheduler] Task "${task.id}" will NOT be armed — cron "${task.cron}" yielded no next date after ${nowDate.toISOString()}`);
+      fwLogger().warn(`[CronScheduler] Task "${task.id}" will NOT be armed — cron "${task.cron}" yielded no next date after ${nowDate.toISOString()}`);
       return;
     }
 
@@ -139,7 +140,7 @@ export function createCronScheduler(
     const nowDate = now();
     const nextDate = getNextDate(task.cron, after);
     if (nextDate === null) {
-      console.warn(`[CronScheduler] Task "${task.id}" will NOT be re-armed — cron "${task.cron}" yielded no next date after ${after.toISOString()}`);
+      fwLogger().warn(`[CronScheduler] Task "${task.id}" will NOT be re-armed — cron "${task.cron}" yielded no next date after ${after.toISOString()}`);
       return;
     }
 
@@ -163,7 +164,7 @@ export function createCronScheduler(
       BACKOFF_BASE_MS * Math.pow(2, failureCount - 1),
       BACKOFF_CAP_MS,
     );
-    console.warn(
+    fwLogger().warn(
       `[CronScheduler] backing off task "${task.id}" by ${backoffMs}ms (consecutive failures: ${failureCount})`,
     );
     const handle = setTimeout(() => onTimerFire(task.id), backoffMs);
@@ -190,7 +191,7 @@ export function createCronScheduler(
     try {
       await enqueue(task, triggeredAt);
     } catch (err) {
-      console.error(`[CronScheduler] enqueue failed for task "${task.id}" — backing off:`, err);
+      fwLogger().error(`[CronScheduler] enqueue failed for task "${task.id}" — backing off:`, err);
       throw err;
     }
 
@@ -199,7 +200,7 @@ export function createCronScheduler(
       await markers.set(markerFiredKey(task.id), ttlSeconds);
     } catch (err) {
       // Job is already enqueued; marker write failure means catch-up may re-enqueue, but enqueue is idempotent.
-      console.error(`[CronScheduler] markers.set(fired) failed for task "${task.id}" (job already enqueued):`, err);
+      fwLogger().error(`[CronScheduler] markers.set(fired) failed for task "${task.id}" (job already enqueued):`, err);
     }
   }
 
@@ -220,7 +221,7 @@ export function createCronScheduler(
     // Arm new and updated tasks (skip cyclic ones)
     for (const task of [...diff.add, ...diff.update]) {
       if (hasCycle(task.id, reg)) {
-        console.warn(`[CronScheduler] Skipping task "${task.id}" — dependency cycle detected`);
+        fwLogger().warn(`[CronScheduler] Skipping task "${task.id}" — dependency cycle detected`);
         continue;
       }
       scheduleTask(task);
@@ -241,7 +242,7 @@ export function createCronScheduler(
     try {
       await markers.set(markerCompletedKey(taskId), completedTtl);
     } catch (err) {
-      console.error(`[CronScheduler] markers.set(completed) failed for task "${taskId}":`, err);
+      fwLogger().error(`[CronScheduler] markers.set(completed) failed for task "${taskId}":`, err);
       // Return early: dependents rely on completed marker to gate their enqueue
       return;
     }
@@ -273,20 +274,20 @@ export function createCronScheduler(
         try {
           await enqueue(dep, triggeredAt);
         } catch (err) {
-          console.error(`[CronScheduler] enqueue failed for dependent task "${dep.id}" — marker not set:`, err);
+          fwLogger().error(`[CronScheduler] enqueue failed for dependent task "${dep.id}" — marker not set:`, err);
           continue;
         }
         const depFiredTtl = Math.ceil(dep.validForMs / 1000) + 60;
         try {
           await markers.set(markerFiredKey(dep.id), depFiredTtl);
         } catch (err) {
-          console.error(
+          fwLogger().error(
             `[CronScheduler] markers.set(fired) failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued):`,
             err,
           );
         }
       } catch (err) {
-        console.error(`[CronScheduler] resolveDependents failed for taskId="${taskId}", dep="${dep.id}":`, err);
+        fwLogger().error(`[CronScheduler] resolveDependents failed for taskId="${taskId}", dep="${dep.id}":`, err);
         // Continue so remaining dependents still get processed
       }
     }

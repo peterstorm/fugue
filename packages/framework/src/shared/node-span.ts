@@ -1,4 +1,5 @@
-import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { fwTracer } from "../tracing/global-tracer.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeResult } from "../nodes/eval-judge.js";
@@ -58,8 +59,6 @@ export const foldOutcomes = (
   };
 };
 
-const tracer = trace.getTracer("ai-summary-framework");
-
 /**
  * Wrap node execution in an OTel span. Returns the node `result` paired with a
  * `NodeSpanOutcome` describing any guardrail failure observed inside the span.
@@ -76,7 +75,7 @@ export const withNodeSpan = async (
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
 
-  return tracer.startActiveSpan(
+  return fwTracer().startActiveSpan(
     `node:${nodeId}`,
     {
       attributes: {

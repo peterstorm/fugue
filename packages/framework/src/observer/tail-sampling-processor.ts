@@ -15,6 +15,7 @@ import type { ReadableSpan, Span, SpanProcessor, SpanExporter } from "@opentelem
 import type { PersistencePolicy } from "./policy.js";
 import type { RunSummary } from "./buffered.js";
 import { AI_LLM_COST_USD, AI_RUN_ID } from "../tracing/semantic-conventions.js";
+import { fwLogger } from "../logger.js";
 
 /** Maximum age (ms) for a trace buffer before it's evicted as orphaned. */
 const BUFFER_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -103,7 +104,7 @@ export class TailSamplingProcessor implements SpanProcessor {
     // TTL-based eviction
     for (const [traceId, buffer] of this.buffers) {
       if (now - buffer.createdAt > BUFFER_TTL_MS) {
-        console.warn(`[TailSamplingProcessor] Evicting orphaned trace buffer ${traceId} (age: ${now - buffer.createdAt}ms, spans: ${buffer.spans.length})`);
+        fwLogger().warn(`[TailSamplingProcessor] Evicting orphaned trace buffer ${traceId} (age: ${now - buffer.createdAt}ms, spans: ${buffer.spans.length})`);
         this.buffers.delete(traceId);
         this.evicted++;
       }
@@ -114,7 +115,7 @@ export class TailSamplingProcessor implements SpanProcessor {
       const entries = [...this.buffers.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
       const toEvict = entries.slice(0, this.buffers.size - MAX_BUFFERED_TRACES);
       for (const [traceId] of toEvict) {
-        console.warn(`[TailSamplingProcessor] Evicting trace buffer ${traceId} (max size exceeded)`);
+        fwLogger().warn(`[TailSamplingProcessor] Evicting trace buffer ${traceId} (max size exceeded)`);
         this.buffers.delete(traceId);
         this.evicted++;
       }
@@ -129,7 +130,7 @@ export class TailSamplingProcessor implements SpanProcessor {
     const p = exportAsync(this.exporter, spans);
     p.catch((err) => {
       this.exportFailed++;
-      console.error(`[TailSamplingProcessor] Export failed for trace ${traceId}:`, err);
+      fwLogger().error(`[TailSamplingProcessor] Export failed for trace ${traceId}:`, err);
     });
     this.pendingExports.add(p);
     p.finally(() => this.pendingExports.delete(p));
@@ -207,7 +208,7 @@ export class TailSamplingProcessor implements SpanProcessor {
         await this.exporter.forceFlush();
       } catch (err) {
         this.exportFailed++;
-        console.error("[TailSamplingProcessor] exporter.forceFlush rejected during flush:", err);
+        fwLogger().error("[TailSamplingProcessor] exporter.forceFlush rejected during flush:", err);
       }
     }
   }
