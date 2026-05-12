@@ -139,6 +139,7 @@ export const handleWaveDone = (
           kind: "failed",
           error: {
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: firstNodeId ?? "",
             message: `node-not-found: ${firstNodeId}`,
           },
@@ -185,6 +186,7 @@ export const advanceToNextWave = (
             kind: "failed",
             error: {
               kind: "node-crash",
+              retriability: "retriable",
               nodeId: outputNodeId,
               message: `output-missing: outputNodeId '${outputNodeId}' resolved but not found in ctx.outputs`,
             },
@@ -218,6 +220,7 @@ export const advanceToNextWave = (
           kind: "failed",
           error: {
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: "",
             message: "output-missing: outputNodeId unset and no active node produced output",
           },
@@ -255,15 +258,16 @@ export const handleNodeFailed = (
   //   - checkpoint-write-failed: storage backend broken — retrying writes the same way.
   //   - aborted: caller-initiated cancellation; retrying defeats the cancel intent and
   //     converts the terminal error kind into retry-exhausted, hiding the cancellation.
-  //   - node-crash with retriable=false: caller signalled permanent (tool-loop exhaustion,
-  //     prompt-defect failures); preserve the retry budget for genuinely transient kinds.
+  //   - node-crash with retriability="non-retriable": caller signalled permanent
+  //     (tool-loop exhaustion, prompt-defect failures); preserve the retry budget
+  //     for genuinely transient kinds.
   // Transition straight to terminal failed with the original error preserved.
   if (
     error.kind === "predicate-malformed" ||
     error.kind === "validation" ||
     error.kind === "checkpoint-write-failed" ||
     error.kind === "aborted" ||
-    (error.kind === "node-crash" && error.retriable === false)
+    (error.kind === "node-crash" && error.retriability === "non-retriable")
   ) {
     return {
       state: { kind: "failed", error },
@@ -395,6 +399,7 @@ export const handleHookCrash = (
       kind: "failed",
       error: {
         kind: "node-crash",
+        retriability: "retriable",
         nodeId,
         message,
       },
@@ -534,6 +539,7 @@ export const handleHumanResponse = (
           kind: "failed",
           error: {
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: currentState.nodeId,
             message: `Unknown human action: ${(action as HumanAction).action}`,
           },
@@ -562,6 +568,7 @@ const resolveHumanApproved = (
           kind: "failed",
           error: {
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: nextNodeId ?? "",
             message: `node-not-found: ${nextNodeId}`,
           },

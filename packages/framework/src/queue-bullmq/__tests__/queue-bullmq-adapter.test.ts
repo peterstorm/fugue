@@ -309,7 +309,7 @@ describe("createBullMQBackend enqueue + process", () => {
     const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
-      async (job: JobLike<S, C>) => {
+      async (job: JobLike<S, unknown, C>) => {
         received.push({ state: job.data.state, context: job.data.context });
       },
     );
@@ -341,7 +341,7 @@ describe("createBullMQBackend enqueue + process", () => {
     const queue = backend.createQueue<MapS, MapC>(queueName);
     const worker = backend.createWorker<MapS, MapC>(
       queueName,
-      async (job: JobLike<MapS, MapC>) => {
+      async (job: JobLike<MapS, unknown, MapC>) => {
         const incoming = job.data;
         // Confirm Maps survived the enqueue path
         const next: MapC = {
@@ -388,7 +388,7 @@ describe("createBullMQBackend enqueue + process", () => {
     const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
-      async (job: JobLike<S, C>) => {
+      async (job: JobLike<S, unknown, C>) => {
         snapshots.push({ ...job.data });
         await job.updateData({ state: { kind: "running" }, context: { value: 99 } });
         snapshots.push({ ...job.data });
@@ -427,7 +427,7 @@ describe("adaptBullMQJob appendEvent (XADD)", () => {
     const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
-      async (job: JobLike<S, C>) => {
+      async (job: JobLike<S, unknown, C>) => {
         await job.appendEvent({ type: "START" });
         await job.appendEvent({ type: "DONE" });
       },
@@ -484,7 +484,7 @@ describe("adaptBullMQJob appendEvent (XADD)", () => {
     const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
-      async (job: JobLike<S, C>) => {
+      async (job: JobLike<S, unknown, C>) => {
         // First "k1" appends; second "k1" is the immediate next call → deduped.
         await job.appendEvent({ type: "e1" }, "k1");
         await job.appendEvent({ type: "e1-dup" }, "k1");
@@ -548,7 +548,7 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
     const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
-      async (_job: JobLike<S, C>) => {
+      async (_job: JobLike<S, unknown, C>) => {
         throw new Error("deliberate test failure");
       },
     );
@@ -587,7 +587,7 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
     const queue = backend.createQueue<S, C>(queueName);
     const worker = backend.createWorker<S, C>(
       queueName,
-      async (_job: JobLike<S, C>) => {
+      async (_job: JobLike<S, unknown, C>) => {
         throw new Error("job process failure for onError test");
       },
     );
@@ -1202,7 +1202,7 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
 
         const worker1 = backend1.createWorker<LongS, LongC>(
           queueName,
-          async (job: JobLike<LongS, LongC>) => {
+          async (job: JobLike<LongS, unknown, LongC>) => {
             // Run 2 NEXT transitions and checkpoint
             for (let step = 0; step < 2; step++) {
               const current = job.data;
@@ -1247,7 +1247,7 @@ describe("SC-003: crash-resume via real BullMQ job + adaptBullMQJob", () => {
 
         const worker2 = backend2.createWorker<LongS, LongC>(
           queueName,
-          async (job: JobLike<LongS, LongC>) => {
+          async (job: JobLike<LongS, unknown, LongC>) => {
             // Resume from wherever BullMQ persisted the data (should be s2, steps=2)
             let current = job.data;
             checkpointedStates.push({ state: current.state, context: current.context });

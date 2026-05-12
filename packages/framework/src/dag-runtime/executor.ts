@@ -1,12 +1,12 @@
 // buildDagExecutor — DAG executor closure
 // FR-025: validate inputs/outputs; FR-027: exponential backoff with jitter
-// Returns an Executor<DagPhase, DagMachineContext, DagEvent> that runs one wave per call.
+// Returns an Executor<DagPhase, DagEvent, DagMachineContext> that runs one wave per call.
 
 import { match } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
@@ -93,6 +93,7 @@ const callHumanReviewHook = async (
       nodeId,
       error: {
         kind: "node-crash",
+        retriability: "retriable",
         nodeId,
         message: `${phaseKind}: no onHumanReview hook supplied`,
       },
@@ -105,6 +106,7 @@ const callHumanReviewHook = async (
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;
+    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, stack };
     emit(nodeCtx, {
       type: "node-error",
       runId: nodeCtx.runId,
@@ -113,11 +115,12 @@ const callHumanReviewHook = async (
       timestamp: new Date(),
       error: message,
       stack,
+      frameworkError: crash,
     });
     return {
       type: "node-failed",
       nodeId,
-      error: { kind: "node-crash", nodeId, message, stack },
+      error: crash,
     } satisfies DagEvent;
   }
 
@@ -125,6 +128,11 @@ const callHumanReviewHook = async (
   // the pure transition can't validate (deserialized schemas are inert).
   const validationFailure = validateApproveEdit(action, nodeId, nodeMap);
   if (validationFailure !== null) {
+    const valErr: FrameworkError = {
+      kind: "validation",
+      nodeId,
+      message: validationFailure,
+    };
     emit(nodeCtx, {
       type: "node-error",
       runId: nodeCtx.runId,
@@ -132,15 +140,12 @@ const callHumanReviewHook = async (
       nodeId,
       timestamp: new Date(),
       error: validationFailure,
+      frameworkError: valErr,
     });
     return {
       type: "node-failed",
       nodeId,
-      error: {
-        kind: "validation",
-        nodeId,
-        message: validationFailure,
-      },
+      error: valErr,
     } satisfies DagEvent;
   }
 
@@ -169,7 +174,7 @@ const callHumanReviewHook = async (
  */
 export const buildDagExecutor = (
   dag: DagDef,
-  nodeCtx: NodeContext,
+  nodeCtx: ValidatedNodeContext,
   hooks?: {
     onHumanReview?: (req: {
       nodeId: string;
@@ -191,7 +196,7 @@ export const buildDagExecutor = (
      */
     random?: () => number;
   },
-): Executor<DagPhase, DagMachineContext, DagEvent> => {
+): Executor<DagPhase, DagEvent, DagMachineContext> => {
   const nodeMap = new Map<string, NodeDef<unknown, unknown, unknown>>(
     dag.nodes.map((n) => [n.id, n]),
   );
@@ -270,7 +275,7 @@ const runWave = async (
   machineCtx: DagMachineContext,
   dag: DagDef,
   nodeMap: Map<string, NodeDef<unknown, unknown, unknown>>,
-  nodeCtx: NodeContext,
+  nodeCtx: ValidatedNodeContext,
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
   resumeCheckpoint: Map<string, unknown> | undefined,
 ): Promise<DagEvent> => {
@@ -289,7 +294,7 @@ const runWave = async (
     return {
       type: "node-failed",
       nodeId: "__wave__",
-      error: { kind: "node-crash", nodeId: "__wave__", message, retriable: false },
+      error: { kind: "node-crash", nodeId: "__wave__", message, retriability: "non-retriable" },
     };
   }
   const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
@@ -383,6 +388,7 @@ const runWave = async (
         nodeId: sibling.nodeId,
         timestamp: new Date(),
         error: sibling.error.kind === "node-crash" ? sibling.error.message : JSON.stringify(sibling.error),
+        frameworkError: sibling.error,
       });
     }
 
@@ -423,6 +429,11 @@ const runWave = async (
     if (!outgoing.some(isConditionalEdge)) continue;
     const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
     if (decision.kind === "predicate-malformed") {
+      const predErr: FrameworkError = {
+        kind: "predicate-malformed",
+        nodeId: decision.fromNodeId,
+        message: decision.message,
+      };
       emit(nodeCtx, {
         type: "node-error",
         runId: nodeCtx.runId,
@@ -430,15 +441,12 @@ const runWave = async (
         nodeId,
         timestamp: new Date(),
         error: `predicate-malformed: ${decision.message}`,
+        frameworkError: predErr,
       });
       return {
         type: "node-failed",
         nodeId,
-        error: {
-          kind: "predicate-malformed",
-          nodeId: decision.fromNodeId,
-          message: decision.message,
-        },
+        error: predErr,
       };
     }
     emit(nodeCtx, {

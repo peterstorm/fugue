@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { runStateMachine } from "../state-machine/runner.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
 import { buildDagExecutor } from "../dag-runtime/executor.js";
 import { defineDag } from "../executor/define-dag.js";
@@ -18,8 +18,9 @@ import type { TaskConfig, TaskRegistry } from "../scheduler/types.js";
 import type { MarkerStore } from "../queue/types.js";
 
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
-import type { DagDef, EdgeDef } from "../types/dag.js";
+import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
+import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
@@ -58,7 +59,7 @@ const makeNode = (
 
 const makeDag = (
   nodes: readonly NodeDef<unknown, unknown, unknown>[],
-  edges: readonly EdgeDef[] = [],
+  edges: readonly EdgeDefRawInput[] = [],
   extras: Partial<{ outputNodeId: string; defaultRetryLimit: number; retryLimits: Readonly<Record<string, number>>; evalJudges: DagDef["evalJudges"] }> = {},
 ): DagDef =>
   defineDag({
@@ -274,7 +275,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
       context: compiled.value.initialContext,
     });
 
-    const executor = buildDagExecutor(dag, makeBaseCtx());
+    const executor = buildDagExecutor(dag, brandAsValidatedNodeContext(makeBaseCtx()));
 
     try {
       await runStateMachine(job, compiled.value.machine, executor, {
@@ -454,7 +455,7 @@ describe("Wave 2.1 — retry-exhausted preserves the underlying error kind", () 
       [
         makeNode("a", {
           run: async () =>
-            err({ kind: "node-crash" as const, nodeId: "a", message: "kaboom" }),
+            err({ kind: "node-crash" as const, nodeId: "a", retriability: "retriable" as const, message: "kaboom" }),
         }),
       ],
       [],
@@ -611,7 +612,7 @@ describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", (
     const result = handleNodeFailed(
       0,
       "a",
-      { kind: "node-crash", nodeId: "a", message: "boom" },
+      { kind: "node-crash", nodeId: "a", retriability: "retriable", message: "boom" },
       compiled.value.initialContext,
       partials,
     );
@@ -688,7 +689,7 @@ describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed");
 
-    const executor = buildDagExecutor(dag, makeBaseCtx());
+    const executor = buildDagExecutor(dag, brandAsValidatedNodeContext(makeBaseCtx()));
     const event = await executor(
       {
         kind: "awaiting-human",

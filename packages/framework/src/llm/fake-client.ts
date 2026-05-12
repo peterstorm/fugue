@@ -105,7 +105,8 @@ export class FakeLlmClient implements LlmClient {
     if (raw === undefined) {
       return err({
         kind: "node-crash",
-        nodeId: req.nodeId ?? "<llm>",
+        retriability: "retriable",
+        nodeId: req.nodeId,
         message: `FakeLlmClient: no response configured for model="${req.model}"`,
       });
     }
@@ -131,7 +132,8 @@ export class FakeLlmClient implements LlmClient {
     if (this.withToolsScript === undefined) {
       return err({
         kind: "node-crash",
-        nodeId: req.nodeId ?? "<llm>",
+        retriability: "retriable",
+        nodeId: req.nodeId,
         message: "FakeLlmClient: no withToolsScript configured",
       });
     }
@@ -141,7 +143,7 @@ export class FakeLlmClient implements LlmClient {
     } catch (e) {
       return err({
         kind: "validation",
-        nodeId: req.nodeId ?? "<llm>",
+        nodeId: req.nodeId,
         message: e instanceof Error ? e.message : String(e),
       });
     }
@@ -170,7 +172,8 @@ export class FakeLlmClient implements LlmClient {
       if (!turnSpec) {
         return err({
           kind: "node-crash",
-          nodeId: req.nodeId ?? "<llm>",
+          retriability: "retriable",
+          nodeId: req.nodeId,
           message: `FakeLlmClient: script ran out at turn ${turn}`,
         });
       }
@@ -205,7 +208,8 @@ export class FakeLlmClient implements LlmClient {
         if (!parsed.success) {
           return err({
             kind: "node-crash",
-            nodeId: req.nodeId ?? "<llm>",
+            retriability: "retriable",
+            nodeId: req.nodeId,
             message: `Schema validation failed: ${parsed.error.message}`,
           });
         }
@@ -223,7 +227,8 @@ export class FakeLlmClient implements LlmClient {
       if (req.toolChoice === "none") {
         return err({
           kind: "node-crash",
-          nodeId: req.nodeId ?? "<llm>",
+          retriability: "retriable",
+          nodeId: req.nodeId,
           message: "FakeLlmClient: tool_use turn emitted while toolChoice='none'",
         });
       }
@@ -237,8 +242,8 @@ export class FakeLlmClient implements LlmClient {
 
     return err({
       kind: "node-crash",
-      retriable: false,
-      nodeId: req.nodeId ?? "<llm>",
+      retriability: "non-retriable",
+      nodeId: req.nodeId,
       message: `Tool-call iteration limit (${maxIterations}) reached`,
     });
   }

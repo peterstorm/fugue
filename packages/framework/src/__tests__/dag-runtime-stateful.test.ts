@@ -6,10 +6,10 @@ import { NoopObserver } from "../observer/observer.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
 import { defineDag } from "../executor/define-dag.js";
-import type { DagDef, EdgeDef } from "../types/dag.js";
+import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { HumanAction } from "../dag-runtime/types.js";
@@ -49,7 +49,7 @@ const makeCtx = (): NodeContext => ({
 interface MakeDagOverrides {
   readonly id?: string;
   readonly nodes?: readonly NodeDef<unknown, unknown, unknown>[];
-  readonly edges?: readonly EdgeDef[];
+  readonly edges?: readonly EdgeDefRawInput[];
   readonly outputNodeId?: string;
   readonly retryLimits?: Readonly<Record<string, number>>;
   readonly defaultRetryLimit?: number;

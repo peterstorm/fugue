@@ -28,16 +28,15 @@ export interface Machine<S, E, C> {
 }
 
 // FR-002: Side-effect dispatcher — returns an event, not a state
-export type Executor<S, C, E> = (state: S, context: C) => Promise<E>;
+export type Executor<S, E, C> = (state: S, context: C) => Promise<E>;
 
 // FR-003: Abstract job handle — checkpoint + progress + event-log writes
 //
-// The third generic `E` defaults to `unknown` so existing `JobLike<S, C>`
-// usages remain valid. Callers that thread the runner's machine event type
-// (e.g. the DAG layer uses `DagEvent`) get type-checked `appendEvent`
-// payloads. Adapters typed for the wider `unknown` event still accept any
-// `JobLike<S, C, E>` value the runner constructs.
-export interface JobLike<S, C, E = unknown> {
+// Generic order `<S, E, C>` matches the rest of the kernel API surface.
+// The `E` slot defaults to `unknown` so callers that don't supply an event
+// type still compile; callers that thread the machine event type (e.g. the
+// DAG layer uses `DagEvent`) get type-checked `appendEvent` payloads.
+export interface JobLike<S, E = unknown, C = unknown> {
   readonly data: { state: S; context: C };
   updateData(d: { state: S; context: C }): Promise<void>;
   updateProgress(pct: number): Promise<void>;
@@ -71,7 +70,7 @@ export interface RecordedEvent<E> {
 
 // FR-012: beforeExecute hook — returning false aborts the run
 // FR-006: classifyError + errorEventOf for typed error wrapping
-export interface RunOptions<S, C, E> {
+export interface RunOptions<S, E, C> {
   beforeExecute?: (state: S, context: C) => boolean;
   classifyError?: (error: unknown) => { retriable: boolean; message: string };
   onTrace?: (t: TraceEvent<S, E>) => void;

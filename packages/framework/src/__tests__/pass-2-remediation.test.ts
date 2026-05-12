@@ -6,7 +6,7 @@ import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 
 import { runStateMachine } from "../state-machine/runner.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import type { Machine } from "../state-machine/types.js";
 
 import { createInMemoryBackend } from "../queue/in-memory.js";
@@ -192,23 +192,24 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
     };
   };
 
-  it("retriable: false bypasses the retry budget", () => {
+  it("retriability: non-retriable bypasses the retry budget", () => {
     const ctx = baseCtx();
     const result = handleNodeFailed(0, "a", {
       kind: "node-crash",
       nodeId: "a",
       message: "permanent",
-      retriable: false,
+      retriability: "non-retriable",
     }, ctx);
     expect(result.state.kind).toBe("failed");
   });
 
-  it("retriable: true (or undefined) consumes the retry budget", () => {
+  it("retriability: retriable consumes the retry budget", () => {
     const ctx = baseCtx();
     const result = handleNodeFailed(0, "a", {
       kind: "node-crash",
       nodeId: "a",
       message: "transient",
+      retriability: "retriable",
     }, ctx);
     expect(result.state.kind).toBe("retrying");
   });
@@ -249,7 +250,7 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
     );
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed" && result.state.error.kind === "node-crash") {
-      expect(result.state.error.retriable).toBe(false);
+      expect(result.state.error.retriability).toBe("non-retriable");
     } else {
       throw new Error("expected node-crash with retriable: false");
     }

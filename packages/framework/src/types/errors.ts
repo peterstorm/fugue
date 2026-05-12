@@ -43,12 +43,13 @@ export type FrameworkError =
       readonly message: string;
       readonly stack?: string;
       /**
-       * When `false`, the DAG transition fast-fails this error instead of consuming
-       * the retry budget. `undefined` and `true` both retry normally. Use `false`
-       * for deterministic failures (tool-call iteration exhaustion, schema
-       * mismatches, prompt-defect loops) where retrying cannot succeed.
+       * Explicit retriability discriminant. `"non-retriable"` makes the DAG
+       * transition fast-fail this error without consuming the retry budget;
+       * use it for deterministic failures (tool-call iteration exhaustion,
+       * schema mismatches, prompt-defect loops). `"retriable"` is the default
+       * and goes through the standard backoff path.
        */
-      readonly retriable?: boolean;
+      readonly retriability: "retriable" | "non-retriable";
     }
   | { readonly kind: "cycle-detected"; readonly nodeIds: readonly string[] }
   | { readonly kind: "aborted"; readonly reason: string }

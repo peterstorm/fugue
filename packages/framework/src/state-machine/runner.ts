@@ -44,14 +44,14 @@ const computeDedupKey = (
  * decides a state is terminal-failed, the runner throws regardless of counters.
  */
 export const runStateMachine = async <S, E, C>(
-  // The third generic `E` on `JobLike` defaults to `unknown` so callers
-  // without a typed event union remain source-compatible. Typed callers
-  // (e.g. the DAG layer threading `DagEvent`) get type-checked
-  // `appendEvent` payloads.
-  job: JobLike<S, C, E>,
+  // All four kernel surfaces (`JobLike`, `Machine`, `Executor`, `RunOptions`)
+  // share the `<S, E, C>` generic order. Typed callers (e.g. the DAG layer
+  // threading `DagEvent`) get type-checked `appendEvent` payloads; the `E`
+  // slot on `JobLike` defaults to `unknown` so untyped callers remain valid.
+  job: JobLike<S, E, C>,
   machine: Machine<S, E, C>,
-  executor: Executor<S, C, E>,
-  opts: RunOptions<S, C, E>,
+  executor: Executor<S, E, C>,
+  opts: RunOptions<S, E, C>,
 ): Promise<{ state: S; context: C }> => {
   const classify = opts.classifyError ?? defaultClassifyError;
 

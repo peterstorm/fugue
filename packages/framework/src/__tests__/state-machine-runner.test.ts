@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { runStateMachine } from "../state-machine/runner.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import type { Machine, Executor, RunOptions, TraceEvent } from "../state-machine/types.js";
 
 // ---------------------------------------------------------------------------
@@ -116,13 +116,13 @@ describe("runStateMachine", () => {
   it("drives machine to terminal succeeded state", async () => {
     const job = makeJob();
     let call = 0;
-    const executor: Executor<State, Context, Event> = async (state) => {
+    const executor: Executor<State, Event, Context> = async (state) => {
       call++;
       if (state.kind === "pending") return { type: "START" };
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     const result = await runStateMachine(job, simpleMachine, executor, opts);
     expect(result.state.kind).toBe("succeeded");
     expect(call).toBe(2);
@@ -130,12 +130,12 @@ describe("runStateMachine", () => {
 
   it("checkpoints after each successful transition (FR-005)", async () => {
     const job = makeJob();
-    const executor: Executor<State, Context, Event> = async (state) => {
+    const executor: Executor<State, Event, Context> = async (state) => {
       if (state.kind === "pending") return { type: "START" };
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await runStateMachine(job, simpleMachine, executor, opts);
 
     // Final checkpointed state should be succeeded
@@ -146,12 +146,12 @@ describe("runStateMachine", () => {
 
   it("does NOT checkpoint when resulting state is terminal-failed (FR-005)", async () => {
     const job = makeJob({ kind: "running" });
-    const executor: Executor<State, Context, Event> = async () => ({
+    const executor: Executor<State, Event, Context> = async () => ({
       type: "FAIL",
       reason: "oops",
     });
 
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await expect(runStateMachine(job, simpleMachine, executor, opts)).rejects.toThrow();
 
     // Checkpointed state should remain "running" (before the failure)
@@ -162,7 +162,7 @@ describe("runStateMachine", () => {
 
   it("does NOT update progress when resulting state is terminal-failed (FR-005/NFR-002)", async () => {
     const job = makeJob({ kind: "running" });
-    const executor: Executor<State, Context, Event> = async () => ({
+    const executor: Executor<State, Event, Context> = async () => ({
       type: "FAIL",
       reason: "progress-check",
     });
@@ -170,7 +170,7 @@ describe("runStateMachine", () => {
     // Progress starts at 0; running state has progress 50 (but we start from running)
     // After running->failed, progress should NOT be updated to failed's value (0)
     // Since we start from running and there's no prior updateProgress call, progress stays at 0
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await expect(runStateMachine(job, simpleMachine, executor, opts)).rejects.toThrow();
 
     // updateProgress must NOT have been called for the failed transition
@@ -179,12 +179,12 @@ describe("runStateMachine", () => {
 
   it("throws after terminal-failed state (FR-007)", async () => {
     const job = makeJob({ kind: "running" });
-    const executor: Executor<State, Context, Event> = async () => ({
+    const executor: Executor<State, Event, Context> = async () => ({
       type: "FAIL",
       reason: "boom",
     });
 
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await expect(runStateMachine(job, simpleMachine, executor, opts)).rejects.toThrow(
       /failed terminal state/i,
     );
@@ -192,11 +192,11 @@ describe("runStateMachine", () => {
 
   it("wraps executor errors via errorEventOf and delivers ERROR event to machine (FR-006 / US2 S2)", async () => {
     const job = makeJob({ kind: "running" });
-    const executor: Executor<State, Context, Event> = async () => {
+    const executor: Executor<State, Event, Context> = async () => {
       throw new Error("network timeout");
     };
 
-    const opts: RunOptions<State, Context, Event> = {
+    const opts: RunOptions<State, Event, Context> = {
       errorEventOf: (c) => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
     };
 
@@ -214,7 +214,7 @@ describe("runStateMachine", () => {
     });
 
     let callCount = 0;
-    const executor: Executor<RetryState, RetryContext, RetryEvent> = async () => {
+    const executor: Executor<RetryState, RetryEvent, RetryContext> = async () => {
       callCount++;
       if (callCount <= 1) {
         // First call: throw an error — should be wrapped and retried
@@ -224,7 +224,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<RetryState, RetryContext, RetryEvent> = {
+    const opts: RunOptions<RetryState, RetryEvent, RetryContext> = {
       errorEventOf: (c) => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
     };
 
@@ -236,9 +236,9 @@ describe("runStateMachine", () => {
 
   it("aborts when beforeExecute returns false (FR-012)", async () => {
     const job = makeJob();
-    const executor: Executor<State, Context, Event> = async () => ({ type: "START" });
+    const executor: Executor<State, Event, Context> = async () => ({ type: "START" });
 
-    const opts: RunOptions<State, Context, Event> = {
+    const opts: RunOptions<State, Event, Context> = {
       errorEventOf: defaultErrorEventOf,
       beforeExecute: () => false,
     };
@@ -252,7 +252,7 @@ describe("runStateMachine", () => {
     const job = makeJob();
     const traces: TraceEvent<State, Event>[] = [];
     let called = false;
-    const executor: Executor<State, Context, Event> = async () => ({ type: "START" });
+    const executor: Executor<State, Event, Context> = async () => ({ type: "START" });
 
     await expect(
       runStateMachine(job, simpleMachine, executor, {
@@ -272,12 +272,12 @@ describe("runStateMachine", () => {
 
   it("proceeds when beforeExecute returns true (FR-012)", async () => {
     const job = makeJob();
-    const executor: Executor<State, Context, Event> = async (state) => {
+    const executor: Executor<State, Event, Context> = async (state) => {
       if (state.kind === "pending") return { type: "START" };
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Context, Event> = {
+    const opts: RunOptions<State, Event, Context> = {
       errorEventOf: defaultErrorEventOf,
       beforeExecute: () => true,
     };
@@ -289,7 +289,7 @@ describe("runStateMachine", () => {
   it("fires onTrace after each transition (US7)", async () => {
     const job = makeJob();
     const traces: TraceEvent<State, Event>[] = [];
-    const executor: Executor<State, Context, Event> = async (state) => {
+    const executor: Executor<State, Event, Context> = async (state) => {
       if (state.kind === "pending") return { type: "START" };
       return { type: "DONE" };
     };
@@ -317,13 +317,13 @@ describe("runStateMachine", () => {
     let callCount = 0;
     const traces: TraceEvent<RetryState, RetryEvent>[] = [];
 
-    const executor: Executor<RetryState, RetryContext, RetryEvent> = async () => {
+    const executor: Executor<RetryState, RetryEvent, RetryContext> = async () => {
       callCount++;
       if (callCount <= 1) throw new Error("transient");
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<RetryState, RetryContext, RetryEvent> = {
+    const opts: RunOptions<RetryState, RetryEvent, RetryContext> = {
       errorEventOf: (c) => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
       onTrace: (t) => traces.push(t),
     };
@@ -341,12 +341,12 @@ describe("runStateMachine", () => {
 
   it("appends event on every successful transition (FR-005 + US6)", async () => {
     const job = makeJob();
-    const executor: Executor<State, Context, Event> = async (state) => {
+    const executor: Executor<State, Event, Context> = async (state) => {
       if (state.kind === "pending") return { type: "START" };
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await runStateMachine(job, simpleMachine, executor, opts);
     expect(job.events).toHaveLength(2);
     expect((job.events[0].event as Event).type).toBe("START");
@@ -356,7 +356,7 @@ describe("runStateMachine", () => {
   it("resets retry counters on each invocation — fresh run does not inherit state (FR-011)", async () => {
     // Two separate invocations from same initial state; both must behave identically
     const initial = { state: { kind: "pending" } as State, context: { count: 0 } };
-    const opts: RunOptions<State, Context, Event> = { errorEventOf: defaultErrorEventOf };
+    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
 
     const results: string[] = [];
     const traceOutcomes: Array<string[]> = [];
@@ -364,7 +364,7 @@ describe("runStateMachine", () => {
     for (let i = 0; i < 2; i++) {
       const job = createInMemoryJob(initial);
       const traces: TraceEvent<State, Event>[] = [];
-      const executor: Executor<State, Context, Event> = async (state) => {
+      const executor: Executor<State, Event, Context> = async (state) => {
         if (state.kind === "pending") return { type: "START" };
         return { type: "DONE" };
       };
@@ -385,7 +385,7 @@ describe("runStateMachine", () => {
   it("US7 S2: durationMs reflects executor wall time within tolerance", async () => {
     const job = makeJob({ kind: "running" });
     const traces: TraceEvent<State, Event>[] = [];
-    const executor: Executor<State, Context, Event> = async () => {
+    const executor: Executor<State, Event, Context> = async () => {
       await new Promise<void>((r) => setTimeout(r, 50));
       return { type: "DONE" };
     };
@@ -409,7 +409,7 @@ describe("runStateMachine", () => {
       const job1 = createInMemoryJob(initial);
 
       let executorCallCount = 0;
-      const executor: Executor<State, Context, Event> = async (state) => {
+      const executor: Executor<State, Event, Context> = async (state) => {
         executorCallCount++;
         if (state.kind === "pending") {
           // First transition: START succeeds, checkpoint is written
@@ -422,7 +422,7 @@ describe("runStateMachine", () => {
         return { type: "DONE" };
       };
 
-      const opts: RunOptions<State, Context, Event> = {
+      const opts: RunOptions<State, Event, Context> = {
         errorEventOf: defaultErrorEventOf,
       };
 
@@ -440,7 +440,7 @@ describe("runStateMachine", () => {
       // Phase 2: construct a NEW runner from the same checkpoint (simulates fresh process)
       const job2 = createInMemoryJob(crashCheckpoint);
       let freshCalls = 0;
-      const freshExecutor: Executor<State, Context, Event> = async (state) => {
+      const freshExecutor: Executor<State, Event, Context> = async (state) => {
         freshCalls++;
         if (state.kind === "running") return { type: "DONE" };
         return { type: "START" };
@@ -455,7 +455,7 @@ describe("runStateMachine", () => {
       // Verify the final state matches what an uninterrupted run would produce
       const uninterruptedJob = createInMemoryJob(initial);
       let uninterruptedCalls = 0;
-      const uninterruptedExecutor: Executor<State, Context, Event> = async (state) => {
+      const uninterruptedExecutor: Executor<State, Event, Context> = async (state) => {
         uninterruptedCalls++;
         if (state.kind === "pending") return { type: "START" };
         return { type: "DONE" };

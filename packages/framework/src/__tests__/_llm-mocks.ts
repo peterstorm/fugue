@@ -8,6 +8,7 @@ import { err } from "../types/result.js";
 export const stubSendWithTools: LlmClient["sendWithTools"] = async () =>
   err({
     kind: "node-crash",
+    retriability: "retriable",
     nodeId: "stub",
     message: "stub sendWithTools — test did not configure tool-use behavior",
   });

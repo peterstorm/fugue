@@ -87,6 +87,7 @@ export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
       return err({
         kind: "node-crash" as const,
         nodeId: config.id,
+        retriability: "non-retriable" as const,
         message: "llm.sendWithTools not available on context",
       });
     }

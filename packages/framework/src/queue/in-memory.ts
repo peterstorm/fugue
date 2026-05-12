@@ -2,7 +2,7 @@
 // MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
 
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
-import { createInMemoryJob, type InMemoryJobOptions } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob, type InMemoryJobOptions } from "./in-memory-job.js";
 import type {
   QueueBackend,
   QueueHandle,
@@ -44,7 +44,7 @@ type FailedHandler = (
 export function adaptInMemoryJob<S, C>(
   initial: { state: S; context: C },
   opts?: InMemoryJobOptions,
-): JobLike<S, C> & { readonly events: readonly RecordedEvent<unknown>[] } {
+): JobLike<S, unknown, C> & { readonly events: readonly RecordedEvent<unknown>[] } {
   return createInMemoryJob(initial, opts);
 }
 
@@ -68,7 +68,7 @@ export function createInMemoryBackend(): InMemoryBackend {
   const workers = new Map<
     string,
     {
-      process: (job: JobLike<unknown, unknown>) => Promise<void>;
+      process: (job: JobLike<unknown, unknown, unknown>) => Promise<void>;
     }
   >();
 
@@ -129,7 +129,7 @@ export function createInMemoryBackend(): InMemoryBackend {
               // generics at dispatch would require threading S/C through
               // `getOrCreateQueue` / `workers`. The single-point erasure here
               // is the load-bearing trade-off.
-              await processFn(job as unknown as JobLike<unknown, unknown>);
+              await processFn(job as unknown as JobLike<unknown, unknown, unknown>);
               succeeded = true;
             } catch (jobErr) {
               const handlers = failedHandlers.get(name) ?? [];
@@ -181,14 +181,14 @@ export function createInMemoryBackend(): InMemoryBackend {
 
   function createWorker<S, C>(
     name: string,
-    process: (job: JobLike<S, C>) => Promise<void>,
+    process: (job: JobLike<S, unknown, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle {
     if (opts?.concurrency !== undefined && (!Number.isFinite(opts.concurrency) || opts.concurrency < 1)) {
       throw new RangeError(`concurrency must be a finite integer >= 1, got ${opts.concurrency}`);
     }
     workers.set(name, {
-      process: process as (job: JobLike<unknown, unknown>) => Promise<void>,
+      process: process as (job: JobLike<unknown, unknown, unknown>) => Promise<void>,
     });
     if (!failedHandlers.has(name)) failedHandlers.set(name, []);
     if (!errorHandlers.has(name)) errorHandlers.set(name, []);

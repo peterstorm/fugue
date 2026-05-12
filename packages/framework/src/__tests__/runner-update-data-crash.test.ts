@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { runStateMachine } from "../state-machine/runner.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import type { Machine, Executor, JobLike, RunOptions } from "../state-machine/types.js";
 
 // ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ const machine: Machine<State, Event, Ctx> = {
 const errorEventOf = (c: { retriable: boolean; message: string }): Event =>
   ({ type: "ERROR", retriable: c.retriable, message: c.message });
 
-const runOpts: RunOptions<State, Ctx, Event> = { errorEventOf };
+const runOpts: RunOptions<State, Event, Ctx> = { errorEventOf };
 
 // ---------------------------------------------------------------------------
 // Fault-injecting wrapper — updateData throws on its first N invocations
@@ -50,7 +50,7 @@ const runOpts: RunOptions<State, Ctx, Event> = { errorEventOf };
 const failingUpdateData = <S, C>(
   inner: ReturnType<typeof createInMemoryJob<S, C>>,
   failuresRemaining: { count: number },
-): JobLike<S, C, Event> & { readonly inner: ReturnType<typeof createInMemoryJob<S, C>> } => ({
+): JobLike<S, Event, C> & { readonly inner: ReturnType<typeof createInMemoryJob<S, C>> } => ({
   inner,
   get data() { return inner.data; },
   async updateData(d) {
@@ -73,7 +73,7 @@ describe("§6.5 — runStateMachine appendEvent succeeds, updateData throws", ()
     const job = failingUpdateData(inner, { count: 1 });
 
     // START executor — fires once successfully.
-    const executor: Executor<State, Ctx, Event> = async () => ({ type: "START" });
+    const executor: Executor<State, Event, Ctx> = async () => ({ type: "START" });
 
     await expect(
       runStateMachine(job, machine, executor, runOpts),
@@ -87,7 +87,7 @@ describe("§6.5 — runStateMachine appendEvent succeeds, updateData throws", ()
     });
     const job = failingUpdateData(inner, { count: 1 });
 
-    const executor: Executor<State, Ctx, Event> = async () => ({ type: "START" });
+    const executor: Executor<State, Event, Ctx> = async () => ({ type: "START" });
 
     try { await runStateMachine(job, machine, executor, runOpts); } catch { /* expected */ }
 
@@ -111,7 +111,7 @@ describe("§6.5 — runStateMachine appendEvent succeeds, updateData throws", ()
     // First executor invocation: START. The runner appendEvents(START, k1);
     // updateData throws; runner throws.
     let invocations = 0;
-    const executor: Executor<State, Ctx, Event> = async (state) => {
+    const executor: Executor<State, Event, Ctx> = async (state) => {
       invocations += 1;
       if (state.kind === "pending") return { type: "START" };
       return { type: "DONE" };

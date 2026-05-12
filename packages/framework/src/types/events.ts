@@ -1,5 +1,6 @@
 import type { SpanKind } from "./span.js";
 import type { Predicate } from "./dag.js";
+import type { FrameworkError } from "./errors.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
@@ -49,8 +50,15 @@ export interface NodeErrorEvent {
   readonly dagId: string;
   readonly nodeId: string;
   readonly timestamp: Date;
+  /** Human-readable summary for display. */
   readonly error: string;
   readonly stack?: string;
+  /**
+   * Structured framework error. Required at the event boundary so consumers
+   * can pattern-match on `kind` without parsing `error` text. The discriminant
+   * carries `retriability`, `nodeId`, and the full FrameworkError union shape.
+   */
+  readonly frameworkError: FrameworkError;
 }
 
 export interface SubSpanEvent {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 
 describe("createInMemoryJob — appendEvent dedup", () => {
   it("appends when no dedupKey is supplied", async () => {

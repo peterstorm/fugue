@@ -10,7 +10,7 @@ import { withRetryLimits } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
@@ -35,9 +35,9 @@ const tracer = trace.getTracer("ai-summary-framework");
 // ---------------------------------------------------------------------------
 
 export interface DagRunOpts
-  extends Omit<RunOptions<DagPhase, DagMachineContext, DagEvent>, "errorEventOf"> {
+  extends Omit<RunOptions<DagPhase, DagEvent, DagMachineContext>, "errorEventOf"> {
   /** Provide a durable job backend (BullMQ, etc.). Falls back to in-memory when omitted. */
-  readonly jobLike?: JobLike<DagPhase, DagMachineContext>;
+  readonly jobLike?: JobLike<DagPhase, unknown, DagMachineContext>;
   /**
    * Human-review hook. Called when the DAG enters `awaiting-human`.
    * The resolved action is delivered to the machine as `human-responded`.
@@ -93,9 +93,9 @@ export interface DagRunOpts
 // ---------------------------------------------------------------------------
 
 const wrapDagJobLike = (
-  inner: JobLike<DagPhase, DagMachineContext>,
+  inner: JobLike<DagPhase, unknown, DagMachineContext>,
   dag: DagDef,
-): JobLike<DagPhase, DagMachineContext> => {
+): JobLike<DagPhase, unknown, DagMachineContext> => {
   const incomingByNode = computeIncomingByNode(dag);
   return {
     get data(): { state: DagPhase; context: DagMachineContext } {
@@ -120,7 +120,7 @@ const wrapDagJobLike = (
     },
     updateProgress: (pct: number) => inner.updateProgress(pct),
     // Tightened from `(event: unknown, ...)` so the wrapper's declared
-    // JobLike<…, DagEvent> contract is honest. Inner's E defaults to unknown,
+    // JobLike<…, unknown, DagEvent> contract is honest. Inner's E defaults to unknown,
     // which accepts DagEvent cleanly.
     appendEvent: (event: DagEvent, dedupKey?: string) =>
       inner.appendEvent(event, dedupKey),
@@ -197,13 +197,15 @@ export const runDagStateful = async <I, O>(
     });
   };
 
-  // Capability validation at run start. Returns the first missing capability
-  // paired with the declaring node id, before any `node.run` is called.
+  // Capability validation at run start. On success, hands back a phantom-
+  // branded `ValidatedNodeContext` token — `runNodeShared` requires it, so
+  // any code path that bypasses this check fails to typecheck.
   const capCheck = validateCapabilities(effectiveDag, nodeCtx);
   if (!capCheck.ok) {
     emitRunEnd("error");
     return err(capCheck.error);
   }
+  const validatedCtx = capCheck.value;
 
   return tracer.startActiveSpan(
     `run:${dag.id}`,
@@ -237,8 +239,8 @@ export const runDagStateful = async <I, O>(
         meta = foldOutcomes(meta, outcomes);
       };
 
-      // Build the executor closure
-      const executor = buildDagExecutor(effectiveDag, nodeCtx, {
+      // Build the executor closure (uses the validated-capabilities token).
+      const executor = buildDagExecutor(effectiveDag, validatedCtx, {
         onHumanReview: opts?.onHumanReview,
         recordOutcomes,
         resumeCheckpoint: opts?.resumeCheckpoint,
@@ -255,7 +257,7 @@ export const runDagStateful = async <I, O>(
       // `compileDagToMachine` is still called above so the DAG's topology
       // (cycle detection) is re-validated on every entry; the resulting
       // `initialContext` is then dropped for resumed runs.
-      const job: JobLike<DagPhase, DagMachineContext> = opts?.jobLike
+      const job: JobLike<DagPhase, unknown, DagMachineContext> = opts?.jobLike
         ? wrapDagJobLike(opts.jobLike, effectiveDag)
         : createInMemoryJob<DagPhase, DagMachineContext>({
             state: initialState,
@@ -283,7 +285,7 @@ export const runDagStateful = async <I, O>(
         opts?.onTrace?.(t);
       };
 
-      const runOpts: RunOptions<DagPhase, DagMachineContext, DagEvent> = {
+      const runOpts: RunOptions<DagPhase, DagEvent, DagMachineContext> = {
         beforeExecute: opts?.beforeExecute,
         classifyError: opts?.classifyError,
         onTrace,
@@ -380,36 +382,46 @@ export const runDagStateful = async <I, O>(
           })
           // Unexpected non-terminal states — should not be reached
           .with({ kind: "pending" }, async (s) => {
-            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
-            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            const msg = `runDagStateful: unexpected non-terminal state ${s.kind}`;
+
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", retriability: "retriable", message: msg };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: msg });
             rootSpan.end();
             emitRunEnd("error");
             return err(e);
           })
           .with({ kind: "running" }, async (s) => {
-            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
-            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            const msg = `runDagStateful: unexpected non-terminal state ${s.kind}`;
+
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", retriability: "retriable", message: msg };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: msg });
             rootSpan.end();
             emitRunEnd("error");
             return err(e);
           })
           .with({ kind: "retrying" }, async (s) => {
-            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
-            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            const msg = `runDagStateful: unexpected non-terminal state ${s.kind}`;
+
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", retriability: "retriable", message: msg };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: msg });
             rootSpan.end();
             emitRunEnd("error");
             return err(e);
           })
           .with({ kind: "retrying-hook" }, async (s) => {
-            const e: FrameworkError = { kind: "node-crash", nodeId: s.nodeId, message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
-            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            const msg = `runDagStateful: unexpected non-terminal state ${s.kind}`;
+
+            const e: FrameworkError = { kind: "node-crash", nodeId: s.nodeId, retriability: "retriable", message: msg };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: msg });
             rootSpan.end();
             emitRunEnd("error");
             return err(e);
           })
           .with({ kind: "awaiting-human" }, async (s) => {
-            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", message: `runDagStateful: unexpected non-terminal state ${s.kind}` };
-            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            const msg = `runDagStateful: unexpected non-terminal state ${s.kind}`;
+
+            const e: FrameworkError = { kind: "node-crash", nodeId: "__executor__", retriability: "retriable", message: msg };
+            rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: msg });
             rootSpan.end();
             emitRunEnd("error");
             return err(e);
@@ -420,7 +432,7 @@ export const runDagStateful = async <I, O>(
         // The failed state is NOT checkpointed (FR-005), so we capture it via onTrace above.
         const error: FrameworkError = lastFailedState !== undefined
           ? lastFailedState.error
-          : { kind: "node-crash", nodeId: "__executor__", message: e instanceof Error ? e.message : String(e) };
+          : { kind: "node-crash", nodeId: "__executor__", retriability: "retriable", message: e instanceof Error ? e.message : String(e) };
         rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
         rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "error", error: JSON.stringify(error) });
         rootSpan.end();

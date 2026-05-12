@@ -10,7 +10,7 @@ import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { replayEvents } from "../state-machine/replay.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { DagDef } from "../types/dag.js";

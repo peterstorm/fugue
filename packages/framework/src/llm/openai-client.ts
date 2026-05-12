@@ -202,8 +202,8 @@ const isRateLimit = (e: unknown): boolean =>
   typeof (e as { status?: unknown })?.status === "number" &&
   (e as { status: number }).status === 429;
 
-const resolveNodeId = (req: { readonly nodeId?: string }): string =>
-  req.nodeId ?? "<llm>";
+const resolveNodeId = (req: { readonly nodeId: string }): string =>
+  req.nodeId;
 
 /**
  * OpenAI LLM client using the Responses API (/openai/responses).
@@ -327,6 +327,7 @@ export class OpenAILlmClient implements LlmClient {
         }
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: `${httpResult.status} ${httpResult.bodyText}`,
         });
@@ -341,6 +342,7 @@ export class OpenAILlmClient implements LlmClient {
       if (!rawText) {
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: "Responses API returned no text output",
         });
@@ -354,6 +356,7 @@ export class OpenAILlmClient implements LlmClient {
       } catch {
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: `Response was not valid JSON: ${rawText.slice(0, 200)}`,
         });
@@ -363,6 +366,7 @@ export class OpenAILlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: `Schema validation failed: ${parsed.error.message}`,
         });
@@ -391,6 +395,7 @@ export class OpenAILlmClient implements LlmClient {
       }
       return err({
         kind: "node-crash",
+        retriability: "retriable",
         nodeId: resolveNodeId(req),
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
@@ -485,6 +490,7 @@ export class OpenAILlmClient implements LlmClient {
         }
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: error instanceof Error ? error.message : String(error),
           stack: error instanceof Error ? error.stack : undefined,
@@ -501,6 +507,7 @@ export class OpenAILlmClient implements LlmClient {
         }
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: `${httpResult.status} ${httpResult.bodyText}`,
         });
@@ -526,6 +533,7 @@ export class OpenAILlmClient implements LlmClient {
         if (!text) {
           return err({
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: "OpenAI final turn had no text output",
           });
@@ -536,6 +544,7 @@ export class OpenAILlmClient implements LlmClient {
         } catch {
           return err({
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: `Final response was not valid JSON: ${text.slice(0, 200)}`,
           });
@@ -544,6 +553,7 @@ export class OpenAILlmClient implements LlmClient {
         if (!validated.success) {
           return err({
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: `Schema validation failed: ${validated.error.message}`,
           });
@@ -568,7 +578,7 @@ export class OpenAILlmClient implements LlmClient {
       kind: "node-crash",
       nodeId: resolveNodeId(req),
       message: `Tool-call iteration limit (${maxIterations}) reached`,
-      retriable: false,
+      retriability: "non-retriable",
     });
   }
 }

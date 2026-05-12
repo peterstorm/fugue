@@ -1,9 +1,9 @@
 // createInMemoryJob — in-memory JobLike for tests and non-durable callers
 // FR-003
 
-import type { JobLike, RecordedEvent } from "./types.js";
+import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 
-export interface InMemoryJob<S, C> extends JobLike<S, C> {
+export interface InMemoryJob<S, C> extends JobLike<S, unknown, C> {
   /**
    * Exposed for test assertions. Each entry is a `RecordedEvent` envelope
    * with `recordedAtMs` (wall-clock at append time) and `event` (the raw

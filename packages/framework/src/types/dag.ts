@@ -36,35 +36,62 @@ export const isOneOfMatch = (
 /**
  * Edge variants (runtime shape, after `defineDag` strips literal id types).
  *
- * - Unconditional: always fires. Target is always reachable when source runs.
- * - Conditional (`when`): fires only when the predicate matches the upstream
- *   output. First-match-wins per source node; mutually exclusive across
- *   predicates from the same source.
- * - Default (`kind: "default"`): fires only when no guarded edge from the
- *   same source matched. Required if any conditional edge originates from
- *   the source.
- *
- * Narrowing: use the helpers below — never inspect `"when" in e` ad-hoc.
+ * Discriminated by `kind` — every variant carries an explicit tag so single-
+ * field narrowing replaces the brittle `"when" in e && !("kind" in e)` checks
+ * of earlier revisions. `EdgeDefInput` still accepts the implicit-unconditional
+ * form for authoring; `defineDag` materializes `kind: "unconditional"` after
+ * validation.
  */
 export type EdgeDef =
-  | { readonly from: string; readonly to: string }
-  | { readonly from: string; readonly to: string; readonly when: Predicate<unknown> }
+  | { readonly from: string; readonly to: string; readonly kind: "unconditional" }
+  | { readonly from: string; readonly to: string; readonly kind: "conditional"; readonly when: Predicate<unknown> }
   | { readonly from: string; readonly to: string; readonly kind: "default" };
 
 export const isUnconditionalEdge = (
   e: EdgeDef,
-): e is { readonly from: string; readonly to: string } =>
-  !("when" in e) && !("kind" in e);
+): e is { readonly from: string; readonly to: string; readonly kind: "unconditional" } =>
+  e.kind === "unconditional";
 
 export const isConditionalEdge = (
   e: EdgeDef,
-): e is { readonly from: string; readonly to: string; readonly when: Predicate<unknown> } =>
-  "when" in e;
+): e is { readonly from: string; readonly to: string; readonly kind: "conditional"; readonly when: Predicate<unknown> } =>
+  e.kind === "conditional";
 
 export const isDefaultEdge = (
   e: EdgeDef,
 ): e is { readonly from: string; readonly to: string; readonly kind: "default" } =>
-  "kind" in e && e.kind === "default";
+  e.kind === "default";
+
+/**
+ * Raw edge input as accepted by `defineDag` / `defineDagFromArray` / authoring
+ * call sites. Kind discriminants may be omitted on the unconditional and
+ * conditional variants — the validator materializes the explicit kind. This
+ * is the **input** shape; runtime code always sees the tagged `EdgeDef`.
+ */
+export type EdgeDefRawInput =
+  | { readonly from: string; readonly to: string }
+  | { readonly from: string; readonly to: string; readonly kind: "unconditional" }
+  | { readonly from: string; readonly to: string; readonly when: Predicate<unknown> }
+  | { readonly from: string; readonly to: string; readonly kind: "conditional"; readonly when: Predicate<unknown> }
+  | { readonly from: string; readonly to: string; readonly kind: "default" };
+
+/**
+ * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. The
+ * conditional branch is detected by presence of `when`; the default branch
+ * by explicit `kind === "default"`; everything else is unconditional.
+ */
+export const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
+  if ("kind" in e && e.kind === "default") return e;
+  if ("when" in e) {
+    return {
+      from: e.from,
+      to: e.to,
+      kind: "conditional",
+      when: e.when,
+    };
+  }
+  return { from: e.from, to: e.to, kind: "unconditional" };
+};
 
 // ---------------------------------------------------------------------------
 // DagDefInput — what authors construct, what `defineDag` accepts.
@@ -82,6 +109,11 @@ export const isDefaultEdge = (
  * output. With `<const Nodes>` inference, `OutputsByNodeId` carries every
  * node's `O` (from `NodeDef<I, O, E>`), so a path typo in `when` fails to
  * compile.
+ *
+ * Authoring ergonomics: the unconditional form may omit `kind` (defineDag
+ * materializes `kind: "unconditional"` after validation). The conditional
+ * form may omit `kind` when `when` is supplied; defineDag materializes
+ * `kind: "conditional"`.
  */
 export type EdgeDefInput<
   Ids extends string,

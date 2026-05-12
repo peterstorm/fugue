@@ -61,7 +61,7 @@ export interface QueueBackend {
   createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C>;
   createWorker<S, C>(
     name: string,
-    process: (job: JobLike<S, C>) => Promise<void>,
+    process: (job: JobLike<S, unknown, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle;
   /**

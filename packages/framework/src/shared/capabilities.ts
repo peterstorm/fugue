@@ -10,7 +10,9 @@ import type { DagDef } from "../types/dag.js";
 import type {
   BaseNodeContext,
   Capability,
+  ValidatedNodeContext,
 } from "../types/node.js";
+import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 
@@ -33,13 +35,15 @@ const capabilityField = (
 /**
  * Walk `dag.nodes`, collect `union(node.requires)`, and verify each capability
  * resolves to a non-null value on `ctx`. Returns the *first* missing
- * capability (paired with the declaring node id) as an Err, or `ok` when all
- * declarations are satisfied.
+ * capability (paired with the declaring node id) as an Err, or a phantom-
+ * branded `ValidatedNodeContext` token when all declarations are satisfied.
+ * Downstream code requires the token, so any path that bypasses this check
+ * fails to typecheck.
  */
 export const validateCapabilities = (
   dag: DagDef,
   ctx: BaseNodeContext,
-): Result<void, FrameworkError> => {
+): Result<ValidatedNodeContext, FrameworkError> => {
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
       if (capabilityField(ctx, cap) == null) {
@@ -51,5 +55,5 @@ export const validateCapabilities = (
       }
     }
   }
-  return ok(undefined);
+  return ok(brandAsValidatedNodeContext(ctx));
 };

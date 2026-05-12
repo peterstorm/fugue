@@ -98,7 +98,7 @@ export const defaultStreamKey = (queueName: string, jobId: string): string =>
   `events:${queueName}:${jobId}`;
 
 /**
- * Adapts a BullMQ `Job` to the `JobLike<S, C>` interface.
+ * Adapts a BullMQ `Job` to the `JobLike<S, unknown, C>` interface.
  *
  * - `updateData` calls `job.updateData` (BullMQ persists to Redis)
  * - `updateProgress` calls `job.updateProgress` (BullMQ persists to Redis)
@@ -112,7 +112,7 @@ export function adaptBullMQJob<S, C>(
   redis: Redis,
   queueName: string,
   opts?: AdaptBullMQJobOpts,
-): JobLike<S, C> {
+): JobLike<S, unknown, C> {
   if (!bullJob.id) {
     throw new Error(
       `[adaptBullMQJob] BullMQ job has no id for queue "${queueName}"`,

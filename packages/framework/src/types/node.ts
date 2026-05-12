@@ -137,6 +137,27 @@ export type TypedNodeContext<R extends readonly Capability[]> =
     readonly [K in R[number]]: CapabilityFields[K];
   };
 
+/**
+ * Phantom-tagged `NodeContext` — only `validateCapabilities` can construct
+ * one. Threaded into `runNodeShared` so the capability-erasure cast at the
+ * run boundary operates on a type-system-witnessed value rather than a raw
+ * `NodeContext`. The brand is a module-private symbol; downstream code cannot
+ * forge it.
+ */
+declare const __capabilitiesValidated: unique symbol;
+export type ValidatedNodeContext = NodeContext & {
+  readonly [__capabilitiesValidated]: true;
+};
+
+/**
+ * Apply the validated-capabilities brand to a `NodeContext`. Intentionally
+ * `internal` — the only legitimate caller is `validateCapabilities` after
+ * its checks pass. Exported only so the validator module can reach it.
+ */
+export const brandAsValidatedNodeContext = (
+  ctx: NodeContext,
+): ValidatedNodeContext => ctx as ValidatedNodeContext;
+
 export interface NodeDef<
   I,
   O,

@@ -19,7 +19,7 @@
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeContext, NodeDef } from "../types/node.js";
+import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
 import { dispatchEvent } from "../observer/buffered.js";
@@ -88,7 +88,7 @@ export interface RunNodeOpts {
 export const runNodeShared = async (
   node: NodeDef<unknown, unknown, unknown>,
   dagInput: unknown,
-  ctx: NodeContext,
+  ctx: ValidatedNodeContext,
   dagId: string,
   outputs: Map<string, unknown>,
   incoming: IncomingSources,
@@ -109,6 +109,7 @@ export const runNodeShared = async (
         nodeId,
         timestamp: new Date(),
         error: `checkpoint replay rejected: ${String(validated.error)}`,
+        frameworkError: validated.error,
       });
       return { result: validated, outcome: EMPTY_OUTCOME };
     }
@@ -138,6 +139,7 @@ export const runNodeShared = async (
       nodeId,
       timestamp: new Date(),
       error: `input validation failed: ${JSON.stringify(inputResult.error as FrameworkError)}`,
+      frameworkError: inputResult.error,
     });
     return { result: inputResult, outcome: EMPTY_OUTCOME };
   }
@@ -161,6 +163,13 @@ export const runNodeShared = async (
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const stack = e instanceof Error ? e.stack : undefined;
+      const crash: FrameworkError = {
+        kind: "node-crash" as const,
+        nodeId,
+        retriability: "retriable" as const,
+        message,
+        stack,
+      };
       emit(ctx, {
         type: "node-error",
         runId: ctx.runId,
@@ -169,8 +178,9 @@ export const runNodeShared = async (
         timestamp: new Date(),
         error: message,
         stack,
+        frameworkError: crash,
       });
-      return err({ kind: "node-crash" as const, nodeId, message, stack });
+      return err(crash);
     }
 
     if (!runResult.ok) {
@@ -179,7 +189,7 @@ export const runNodeShared = async (
         typeof runResult.error === "object" &&
         "kind" in (runResult.error as object)
           ? (runResult.error as FrameworkError)
-          : { kind: "node-crash" as const, nodeId, message: String(runResult.error) };
+          : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
 
       const errorMsg =
         frameworkError.kind === "node-crash"
@@ -193,6 +203,7 @@ export const runNodeShared = async (
         nodeId,
         timestamp: new Date(),
         error: errorMsg,
+        frameworkError,
       });
       return err(frameworkError);
     }
@@ -206,6 +217,7 @@ export const runNodeShared = async (
         nodeId,
         timestamp: new Date(),
         error: `output validation failed: ${JSON.stringify(outputResult.error as FrameworkError)}`,
+        frameworkError: outputResult.error,
       });
       return outputResult;
     }
@@ -217,6 +229,12 @@ export const runNodeShared = async (
         await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
+        const cpwError: FrameworkError = {
+          kind: "checkpoint-write-failed" as const,
+          runId: ctx.runId,
+          nodeId,
+          message,
+        };
         emit(ctx, {
           type: "node-error",
           runId: ctx.runId,
@@ -224,13 +242,9 @@ export const runNodeShared = async (
           nodeId,
           timestamp: new Date(),
           error: `checkpoint-write-failed: ${message}`,
+          frameworkError: cpwError,
         });
-        return err({
-          kind: "checkpoint-write-failed" as const,
-          runId: ctx.runId,
-          nodeId,
-          message,
-        });
+        return err(cpwError);
       }
     }
 

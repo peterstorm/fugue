@@ -169,7 +169,7 @@ describe("adaptInMemoryJob", () => {
     await job.appendEvent({ type: "B" });
     await job.appendEvent({ type: "C" });
 
-    const withEvents = job as JobLike<unknown, unknown> & {
+    const withEvents = job as JobLike<unknown, unknown, unknown> & {
       events: readonly { recordedAtMs: number; event: unknown }[];
     };
     expect(withEvents.events.map((e) => e.event)).toEqual([
@@ -190,7 +190,7 @@ describe("adaptInMemoryJob", () => {
   it("updateProgress is observable", async () => {
     const job = adaptInMemoryJob({ state: "s", context: {} });
     await job.updateProgress(75);
-    const withProg = job as unknown as JobLike<unknown, unknown> & { progress: number };
+    const withProg = job as unknown as JobLike<unknown, unknown, unknown> & { progress: number };
     expect(withProg.progress).toBe(75);
   });
 });

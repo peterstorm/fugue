@@ -149,7 +149,7 @@ describe("executor + eval-judge integration", () => {
       id: "failing",
       inputSchema: z.string(),
       outputSchema: z.string(),
-      transform: () => err({ kind: "node-crash" as const, nodeId: "failing", message: "boom" }),
+      transform: () => err({ kind: "node-crash" as const, nodeId: "failing", retriability: "retriable" as const, message: "boom" }),
     });
 
     const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });

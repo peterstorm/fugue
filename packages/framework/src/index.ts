@@ -22,8 +22,8 @@ export * from "./tracing/index.js";
 // ---------------------------------------------------------------------------
 export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent } from "./state-machine/types.js";
 export { runStateMachine } from "./state-machine/runner.js";
-export { createInMemoryJob } from "./state-machine/in-memory-job.js";
-export type { InMemoryJob, InMemoryJobOptions } from "./state-machine/in-memory-job.js";
+export { createInMemoryJob } from "./queue/in-memory-job.js";
+export type { InMemoryJob, InMemoryJobOptions } from "./queue/in-memory-job.js";
 export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machine/replay.js";
 // `toJson` / `fromJson` remain public — they're the documented serialization
 // helpers for callers building custom JobLike backends. The lower-level

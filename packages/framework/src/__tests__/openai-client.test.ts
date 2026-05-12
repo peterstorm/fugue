@@ -88,6 +88,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
+      nodeId: "test-node",
     });
 
     expect(result.ok).toBe(true);
@@ -150,6 +151,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
+      nodeId: "test-node",
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -192,6 +194,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
+      nodeId: "test-node",
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -235,6 +238,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
+      nodeId: "test-node",
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
@@ -262,20 +266,6 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("nodeId defaults to '<llm>' when omitted", async () => {
-    handler = async () => jsonResponse({ error: "boom" }, 500);
-    const result = await makeClient().sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "gpt-test",
-      schema: Schema,
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("<llm>");
-    }
-  });
-
   it("text.format is wired as json_schema with strict=true", async () => {
     handler = async () =>
       jsonResponse({
@@ -287,6 +277,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       user: "u",
       model: "gpt-test",
       schema: Schema,
+      nodeId: "test-node",
     });
     const body = JSON.parse(fetchCalls[0].init.body as string);
     expect(body.text.format.type).toBe("json_schema");
@@ -322,6 +313,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         model: "gpt-test",
         tools: [],
         schema: Schema,
+        nodeId: "test-node",
         signal: ctrl.signal,
       },
       RUNTIME,
@@ -403,7 +395,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
         expect(result.error.nodeId).toBe("loop-node");
-        expect(result.error.retriable).toBe(false);
+        expect(result.error.retriability).toBe("non-retriable");
       }
     }
   });
@@ -421,6 +413,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         model: "gpt-test",
         tools: [],
         schema: Schema,
+        nodeId: "test-node",
       },
       RUNTIME,
     );

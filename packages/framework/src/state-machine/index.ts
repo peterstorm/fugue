@@ -6,10 +6,6 @@ export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent 
 // Runner
 export { runStateMachine } from "./runner.js";
 
-// In-memory job (for tests + non-durable callers)
-export { createInMemoryJob } from "./in-memory-job.js";
-export type { InMemoryJob } from "./in-memory-job.js";
-
 // Replay
 export { replayEvents, replayEventsUntil, replayEventSlice } from "./replay.js";
 

@@ -132,7 +132,7 @@ export function createBullMQBackend(
 
   function createWorker<S, C>(
     name: string,
-    process: (job: JobLike<S, C>) => Promise<void>,
+    process: (job: JobLike<S, unknown, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle {
     if (

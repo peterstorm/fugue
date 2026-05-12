@@ -106,8 +106,8 @@ const isRateLimit = (e: unknown): boolean =>
   typeof (e as { status?: unknown })?.status === "number" &&
   (e as { status: number }).status === 429;
 
-const resolveNodeId = (req: { readonly nodeId?: string }): string =>
-  req.nodeId ?? "<llm>";
+const resolveNodeId = (req: { readonly nodeId: string }): string =>
+  req.nodeId;
 
 export class AnthropicLlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
@@ -148,6 +148,7 @@ export class AnthropicLlmClient implements LlmClient {
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: "Anthropic response did not contain a tool_use block",
         });
@@ -157,6 +158,7 @@ export class AnthropicLlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: `Schema validation failed: ${parsed.error.message}`,
         });
@@ -184,6 +186,7 @@ export class AnthropicLlmClient implements LlmClient {
       }
       return err({
         kind: "node-crash",
+        retriability: "retriable",
         nodeId: resolveNodeId(req),
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
@@ -274,6 +277,7 @@ export class AnthropicLlmClient implements LlmClient {
         }
         return err({
           kind: "node-crash",
+          retriability: "retriable",
           nodeId: resolveNodeId(req),
           message: e instanceof Error ? e.message : String(e),
           stack: e instanceof Error ? e.stack : undefined,
@@ -295,6 +299,7 @@ export class AnthropicLlmClient implements LlmClient {
         if (text === undefined) {
           return err({
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: "Anthropic final turn had no text block to parse",
           });
@@ -306,6 +311,7 @@ export class AnthropicLlmClient implements LlmClient {
         } catch {
           return err({
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: `Final response was not valid JSON: ${text.slice(0, 200)}`,
           });
@@ -314,6 +320,7 @@ export class AnthropicLlmClient implements LlmClient {
         if (!validated.success) {
           return err({
             kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: `Schema validation failed: ${validated.error.message}`,
           });
@@ -338,7 +345,7 @@ export class AnthropicLlmClient implements LlmClient {
       kind: "node-crash",
       nodeId: resolveNodeId(req),
       message: `Tool-call iteration limit (${maxIterations}) reached`,
-      retriable: false,
+      retriability: "non-retriable",
     });
   }
 }

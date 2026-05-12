@@ -174,7 +174,7 @@ describe("runDag", () => {
           id: "A",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          transform: (_i) => { log.push("A"); return err({ kind: "node-crash" as const, nodeId: "A", message: "boom" }); },
+          transform: (_i) => { log.push("A"); return err({ kind: "node-crash" as const, nodeId: "A", retriability: "retriable" as const, message: "boom" }); },
         }),
         createTransformNode({
           id: "B",
@@ -361,7 +361,7 @@ describe("runDag", () => {
           id: "B",
           inputSchema: z.any(),
           outputSchema: z.any(),
-          transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B", message: "boom" }),
+          transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B", retriability: "retriable" as const, message: "boom" }),
         }),
       ],
       edges: [{ from: "A", to: "B" }],
@@ -685,7 +685,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           run: async () => {
             attempts += 1;
             if (attempts < 2) {
-              return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+              return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient" });
             }
             return ok("done");
           },
@@ -729,7 +729,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+          return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient" });
         }
         return ok("ok");
       },
@@ -757,7 +757,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient" });
+          return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient" });
         }
         return ok("ok");
       },
@@ -785,7 +785,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           requires: [],
       run: async (_input, _ctx) => {
         callCount += 1;
-        return err({ kind: "node-crash" as const, nodeId: "flaky", message: "fail" });
+        return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "fail" });
       },
     };
     const dag = defineDagFromArray({
@@ -811,7 +811,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 3) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky", message: "transient failure" });
+          return err({ kind: "node-crash" as const, nodeId: "flaky", retriability: "retriable" as const, message: "transient failure" });
         }
         return ok("recovered");
       },

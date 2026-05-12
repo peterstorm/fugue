@@ -17,7 +17,7 @@ import {
   waveIndexOf,
 } from "../dag-runtime/transition-helpers.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
-import type { DagDef, EdgeDef } from "../types/dag.js";
+import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
@@ -45,7 +45,7 @@ const makeNode = (
 interface MakeDagOverrides {
   readonly id?: string;
   readonly nodes?: readonly NodeDef<unknown, unknown, unknown>[];
-  readonly edges?: readonly EdgeDef[];
+  readonly edges?: readonly EdgeDefRawInput[];
   readonly outputNodeId?: string;
   readonly retryLimits?: Readonly<Record<string, number>>;
   readonly defaultRetryLimit?: number;
@@ -57,7 +57,7 @@ const DEFAULT_NODES: readonly NodeDef<unknown, unknown, unknown>[] = [
   makeNode("b"),
   makeNode("c"),
 ];
-const DEFAULT_EDGES: readonly EdgeDef[] = [
+const DEFAULT_EDGES: readonly EdgeDefRawInput[] = [
   { from: "a", to: "b" },
   { from: "b", to: "c" },
 ];
@@ -96,6 +96,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
 
 const nodeFailedError: FrameworkError = {
   kind: "node-crash",
+  retriability: "retriable",
   nodeId: "a",
   message: "boom",
 };
@@ -1126,7 +1127,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     const ctx = makeCtx({ dag });
     const phase = awaitingWithPrompt("a", [], 0);
     // Event targets node "b", but we are awaiting-human for node "a"
-    const mismatchedError: FrameworkError = { kind: "node-crash", nodeId: "b", message: "wrong node" };
+    const mismatchedError: FrameworkError = { kind: "node-crash", nodeId: "b", retriability: "retriable", message: "wrong node" };
     const event: DagEvent = { type: "node-failed", nodeId: "b", error: mismatchedError };
     const result = dagTransition(phase, event, ctx);
 
@@ -1266,7 +1267,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
     const ctx = makeCtx({ dag, retries: new Map([["a", 1]]) });
     const phase = retryingHookPhase(1);
     // Event targets node "b", but we are retrying-hook for node "a"
-    const mismatchedError: FrameworkError = { kind: "node-crash", nodeId: "b", message: "wrong node" };
+    const mismatchedError: FrameworkError = { kind: "node-crash", nodeId: "b", retriability: "retriable", message: "wrong node" };
     const event: DagEvent = { type: "node-failed", nodeId: "b", error: mismatchedError };
     const result = dagTransition(phase, event, ctx);
 

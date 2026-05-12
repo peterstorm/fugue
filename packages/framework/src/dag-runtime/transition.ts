@@ -58,9 +58,10 @@ export const dagTransition = (
 
       if (event.type === "ERROR") {
         // Executor-level error delivered by the kernel loop via classifyError.
-        // The `retriable` flag is propagated into the failed terminal so callers
-        // and queue adapters can distinguish a permanent failure (don't retry the
-        // job) from a transient one (queue may retry).
+        // The boolean retriability flag from the kernel-classifier is mapped
+        // onto the structured `retriability` discriminant on the node-crash
+        // error so consumers and queue adapters can distinguish a permanent
+        // failure (don't retry the job) from a transient one (queue may retry).
         return {
           state: {
             kind: "failed",
@@ -68,7 +69,7 @@ export const dagTransition = (
               kind: "node-crash",
               nodeId: "unknown",
               message: event.error,
-              retriable: event.retriable,
+              retriability: event.retriable ? "retriable" : "non-retriable",
             },
           },
           context: ctx,
@@ -100,7 +101,7 @@ export const dagTransition = (
               kind: "node-crash",
               nodeId: "unknown",
               message: event.error,
-              retriable: event.retriable,
+              retriability: event.retriable ? "retriable" : "non-retriable",
             },
           },
           context: ctx,
@@ -136,6 +137,7 @@ export const dagTransition = (
         const syntheticError = {
           kind: "node-crash" as const,
           nodeId: phase.nodeId,
+          retriability: event.retriable ? "retriable" as const : "non-retriable" as const,
           message: event.error,
         };
         const result = handleHookCrash(
@@ -184,6 +186,7 @@ export const dagTransition = (
         const syntheticError = {
           kind: "node-crash" as const,
           nodeId: phase.nodeId,
+          retriability: event.retriable ? "retriable" as const : "non-retriable" as const,
           message: event.error,
         };
         const result = handleHookCrash(

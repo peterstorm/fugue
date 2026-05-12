@@ -34,7 +34,7 @@ export interface RunOptions {
    * `JobLike` is used (runtime semantics preserved; durability across worker
    * crashes is not).
    */
-  readonly jobLike?: JobLike<DagPhase, DagMachineContext>;
+  readonly jobLike?: JobLike<DagPhase, unknown, DagMachineContext>;
   /**
    * Human-review hook — required when any node in the DAG declares
    * `humanReview`; rejected otherwise.
@@ -66,6 +66,7 @@ export const runDag = async <I, O>(
   if (dagDeclaresHITL && !opts?.onHumanReview) {
     return err({
       kind: "node-crash",
+      retriability: "retriable",
       nodeId: "__executor__",
       message: `[runDag] DAG declares humanReview node(s) [${hitlNodes.map((n) => n.id).join(", ")}] but no \`onHumanReview\` hook supplied`,
     });
@@ -73,6 +74,7 @@ export const runDag = async <I, O>(
   if (!dagDeclaresHITL && opts?.onHumanReview !== undefined) {
     return err({
       kind: "node-crash",
+      retriability: "retriable",
       nodeId: "__executor__",
       message: "[runDag] `onHumanReview` hook supplied but no node declares `humanReview`",
     });

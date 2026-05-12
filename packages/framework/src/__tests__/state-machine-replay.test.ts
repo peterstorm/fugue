@@ -5,7 +5,7 @@ import {
   replayEventSlice,
 } from "../state-machine/replay.js";
 import { runStateMachine } from "../state-machine/runner.js";
-import { createInMemoryJob } from "../state-machine/in-memory-job.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import type { Machine, Executor, RecordedEvent } from "../state-machine/types.js";
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ describe("replayEvents", () => {
     ];
 
     let i = 0;
-    const executor: Executor<CountState, CountCtx, CountEvent> = async () => events[i++];
+    const executor: Executor<CountState, CountEvent, CountCtx> = async () => events[i++];
 
     const liveResult = await runStateMachine(job, counterMachine, executor, {
       errorEventOf: (c) => ({ type: "DONE" } as CountEvent),

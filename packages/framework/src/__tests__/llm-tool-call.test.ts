@@ -45,6 +45,7 @@ const baseReq = (
   model: "fake-model",
   tools: [addNumbers],
   schema: FinalSchema,
+  nodeId: "test-node",
   ...overrides,
 });
 
@@ -228,7 +229,7 @@ describe("FakeLlmClient.sendWithTools — loop behavior", () => {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
         expect(result.error.message).toContain("(3)");
-        expect(result.error.retriable).toBe(false);
+        expect(result.error.retriability).toBe("non-retriable");
       }
     }
   });

@@ -37,11 +37,12 @@ export interface LlmRequest<O> {
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   readonly signal?: AbortSignal;
   /**
-   * DAG node identifier for error reporting. When omitted, errors carry
-   * `"<llm>"` as nodeId. Pass the calling node's `id` so failures attribute
-   * to the right place in the DAG.
+   * DAG node identifier for error reporting. Required so failures attribute
+   * to the right place in the DAG; the silent `"<llm>"` fallback was removed
+   * during pass-3 type tightening (the only production caller, `runNodeShared`,
+   * always supplies it).
    */
-  readonly nodeId?: string;
+  readonly nodeId: string;
 }
 
 export interface LlmResponse<O> {
@@ -82,11 +83,9 @@ export interface SendWithToolsRequest<O> {
    */
   readonly toolChoice?: "auto" | "any" | "none";
   /**
-   * DAG node identifier for error reporting. When omitted, errors carry
-   * `"<llm>"` as nodeId. Pass the calling node's `id` so failures attribute
-   * to the right place in the DAG.
+   * DAG node identifier for error reporting. Required (see `LlmRequest.nodeId`).
    */
-  readonly nodeId?: string;
+  readonly nodeId: string;
 }
 
 export interface LlmClient {

@@ -3,8 +3,9 @@ import type {
   DagDefInput,
   DagDefShape,
   EdgeDef,
+  EdgeDefRawInput,
 } from "../types/dag.js";
-import { brandAsDagDef } from "../types/dag.js";
+import { brandAsDagDef, normalizeEdge } from "../types/dag.js";
 import type { NodesRecord } from "../types/dag-internals.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
@@ -65,7 +66,12 @@ export const validateDagShape = (
   }
 
   const nodeIds = new Set(entries.map(([id]) => id));
-  const edges = input.edges as readonly EdgeDef[];
+  // Normalize edges into the tagged-discriminant runtime form. The input may
+  // carry the implicit-unconditional or implicit-conditional (`when`-only)
+  // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
+  // normalized array.
+  const edges: readonly EdgeDef[] = (input.edges as readonly EdgeDefRawInput[])
+    .map(normalizeEdge);
 
   // Edge endpoints reference known nodes (the literal-typed input guards
   // this at edit time, but defensive at runtime for `as DagDefInput` casts).
