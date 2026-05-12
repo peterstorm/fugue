@@ -335,6 +335,7 @@ const runWave = async (
             kind: "node-crash" as const,
             nodeId,
             message: `node-not-found: ${nodeId}`,
+            retriability: "non-retriable" as const,
           }) as Result<unknown, FrameworkError>,
           outcome: EMPTY_OUTCOME,
         };

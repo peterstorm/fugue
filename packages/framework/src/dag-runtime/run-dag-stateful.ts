@@ -236,9 +236,10 @@ export const runDagStateful = async <I, O>(
     } catch (e) {
       // runStateMachine throws on terminal-failed (FR-007); also propagate beforeExecute abort.
       // The failed state is NOT checkpointed (FR-005), so we capture it via onTrace above.
+      const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
       const error: FrameworkError = lastFailedState !== undefined
         ? lastFailedState.error
-        : { kind: "node-crash", nodeId: "__executor__", retriability: "retriable", message: e instanceof Error ? e.message : String(e) };
+        : { kind: "node-crash", nodeId: "__executor__", retriability: isAbort ? "non-retriable" : "retriable", message: e instanceof Error ? e.message : String(e) };
       closeRootSpan(rootSpan, { kind: "error", error });
       emitRunEnd("error");
       return err(error);

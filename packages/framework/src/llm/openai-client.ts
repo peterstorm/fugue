@@ -40,8 +40,7 @@ function addAdditionalPropertiesFalse(schema: Record<string, unknown>): void {
 }
 
 const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
-  const json = z.toJSONSchema(schema as any) as Record<string, unknown>;
-  delete json.$schema;
+  const { $schema: _, ...json } = z.toJSONSchema(schema as any) as Record<string, unknown>;
   addAdditionalPropertiesFalse(json);
   return json;
 };
@@ -155,8 +154,9 @@ const parseToolCalls = (output: readonly ResponsesOutputItem[]): ToolCall[] => {
     let parsedInput: unknown;
     try {
       parsedInput = JSON.parse(block.arguments || "{}");
-    } catch {
+    } catch (parseErr) {
       // Surface as unknown_input; dispatchToolCall will turn it into an is_error result.
+      console.warn(`[openai-client] Failed to parse tool-call arguments for '${block.name}': ${parseErr instanceof Error ? parseErr.message : parseErr}`);
       parsedInput = { __parse_error__: block.arguments };
     }
     calls.push({ id: block.call_id, name: block.name, input: parsedInput });

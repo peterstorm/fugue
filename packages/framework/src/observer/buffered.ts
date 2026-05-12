@@ -122,7 +122,7 @@ export function computeRunSummary(
   }
 
   for (const count of startCounts.values()) {
-    if (count > 1) retryCount++;
+    if (count > 1) retryCount += count - 1;
   }
 
   return {
@@ -258,6 +258,8 @@ export class BufferedObserver implements Observer {
         } catch (err) {
           fwLogger().warn(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
         }
+      } else {
+        fwLogger().warn(`[BufferedObserver] Dropping ${events.length} events for run ${e.runId} (filtered by persistence policy)`);
       }
     } finally {
       // Always clear the buffer — orphaning it on a flush-time throw is what

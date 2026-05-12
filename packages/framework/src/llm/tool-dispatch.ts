@@ -68,6 +68,7 @@ export async function dispatchToolCall(
       isError: false,
     };
   } catch (e) {
+    ctx.logger.warn(`[tool-dispatch] Tool '${call.name}' threw: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
     return errResult(call, e instanceof Error ? e.message : String(e));
   }
 }

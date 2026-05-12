@@ -33,14 +33,12 @@ type AnthropicResponse = Anthropic.Message;
 
 /** Append a JSON-Schema instruction to the system prompt so free-form text replies can be parsed. */
 const appendSchemaInstruction = (system: string, schema: z.ZodType<any>): string => {
-  const json = z.toJSONSchema(schema as any) as Record<string, unknown>;
-  delete json.$schema;
+  const { $schema: _, ...json } = z.toJSONSchema(schema as any) as Record<string, unknown>;
   return `${system}\n\nWhen you have the final answer, respond with ONLY a JSON object matching this schema (no prose, no code fences):\n${JSON.stringify(json)}`;
 };
 
 const toolToAnthropicSpec = (tool: ToolDef<any, any>): Anthropic.Tool => {
-  const json = z.toJSONSchema(tool.inputSchema as any) as Record<string, unknown>;
-  delete json.$schema;
+  const { $schema: _, ...json } = z.toJSONSchema(tool.inputSchema as any) as Record<string, unknown>;
   return {
     name: tool.name,
     description: tool.description,

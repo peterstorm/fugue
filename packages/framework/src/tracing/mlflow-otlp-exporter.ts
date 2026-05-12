@@ -90,12 +90,17 @@ interface MlflowAccumulator {
   llmCost: Record<string, number> | null;
 }
 
+interface EventHandlerCtx {
+  readonly traceId: string;
+  readonly parseFailureCounter: { count: number };
+}
+
 interface EventHandler {
   readonly event: string;
   readonly apply: (
     eventAttrs: Readonly<Record<string, unknown>>,
     acc: MlflowAccumulator,
-    ctx: { readonly traceId: string },
+    ctx: EventHandlerCtx,
   ) => void;
 }
 
@@ -108,7 +113,7 @@ const mergeJsonDataField = (
     try {
       acc[field] = { ...acc[field], ...JSON.parse(data) };
     } catch (e) {
-      logParseFailure(fieldLabel, ctx.traceId, e);
+      logParseFailure(ctx.parseFailureCounter, fieldLabel, ctx.traceId, e);
       acc[field]["raw"] = data;
     }
   } else {
@@ -163,10 +168,9 @@ const EVENT_HANDLERS_BY_NAME: ReadonlyMap<string, EventHandler["apply"]> = new M
  * to avoid spam from a misbehaving node while still surfacing the problem at
  * first occurrence.
  */
-let parseFailureCount = 0;
-const logParseFailure = (field: string, traceId: string, err: unknown): void => {
-  parseFailureCount++;
-  const c = parseFailureCount;
+const logParseFailure = (counter: { count: number }, field: string, traceId: string, err: unknown): void => {
+  counter.count++;
+  const c = counter.count;
   // Log first hit and then every order-of-magnitude milestone.
   const shouldLog = c === 1 || (c >= 10 && c % Math.pow(10, Math.floor(Math.log10(c))) === 0);
   if (shouldLog) {
@@ -192,6 +196,15 @@ export class MlflowOtlpExporter implements SpanExporter {
   private innerPromise: Promise<SpanExporter> | null = null;
   private failedPermanently: Error | null = null;
   private readonly config: MlflowOtlpExporterConfig;
+  private readonly parseFailureCounter = { count: 0 };
+
+  /** Exposed for health checks — non-null when initialization failed permanently. */
+  get failed(): Error | null {
+    return this.failedPermanently;
+  }
+
+  /** Number of spans dropped due to permanent initialization failure. */
+  droppedSpanCount = 0;
 
   constructor(config: MlflowOtlpExporterConfig) {
     this.config = config;
@@ -235,19 +248,21 @@ export class MlflowOtlpExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    // Compute derived MLflow attrs into the side-channel registry — original
-    // spans are not mutated. Wrap each span so the inner exporter sees the
-    // merged view at serialization time.
+    // Compute derived MLflow attrs and wrap spans inline — no intermediate
+    // registry storage, so an exception cannot leak entries.
     const wrapped = spans.map((span) => {
-      this.indexDerivedAttrs(span);
-      const extra = SpanAttributeRegistry.pop(span.spanContext().spanId);
-      return extra ? withMergedAttrs(span, extra) : span;
+      const extra = this.computeDerivedAttrs(span);
+      // Also merge any pre-existing registry entries (from external callers)
+      const registryExtra = SpanAttributeRegistry.pop(span.spanContext().spanId);
+      const merged = registryExtra ? { ...registryExtra, ...extra } : extra;
+      return merged && Object.keys(merged).length > 0 ? withMergedAttrs(span, merged) : span;
     });
 
     this.getInner()
       .then((inner) => {
         if (!inner) {
           // Permanent failure: surface to the SDK so it stops retrying.
+          this.droppedSpanCount += spans.length;
           resultCallback({ code: 1, error: this.failedPermanently ?? undefined });
           return;
         }
@@ -255,12 +270,13 @@ export class MlflowOtlpExporter implements SpanExporter {
       })
       .catch((err) => {
         console.error("[MlflowOtlpExporter] Failed to initialize OTLP exporter:", err);
+        this.droppedSpanCount += spans.length;
         resultCallback({ code: 1, error: err instanceof Error ? err : new Error(String(err)) });
       });
   }
 
-  /** Compute MLflow-shape attributes from a span and store them in the registry. */
-  private indexDerivedAttrs(span: ReadableSpan): void {
+  /** Compute MLflow-shape attributes from a span. Returns the extra attrs or undefined. */
+  private computeDerivedAttrs(span: ReadableSpan): SpanAttributes | undefined {
     const attrs = span.attributes as Record<string, unknown>;
     const events = (span as { events?: TimedEvent[] }).events;
     const traceId = span.spanContext().traceId;
@@ -282,7 +298,7 @@ export class MlflowOtlpExporter implements SpanExporter {
     if (events) {
       for (const event of events) {
         const handler = EVENT_HANDLERS_BY_NAME.get(event.name);
-        if (handler) handler(event.attributes ?? {}, acc, { traceId });
+        if (handler) handler(event.attributes ?? {}, acc, { traceId, parseFailureCounter: this.parseFailureCounter });
       }
     }
     if (Object.keys(acc.spanInputs).length > 0) out["mlflow.spanInputs"] = acc.spanInputs;
@@ -305,9 +321,7 @@ export class MlflowOtlpExporter implements SpanExporter {
       out["mlflow.llm.provider"] = attrs[GEN_AI_SYSTEM] ?? "unknown";
     }
 
-    if (Object.keys(out).length > 0) {
-      SpanAttributeRegistry.set(span.spanContext().spanId, out);
-    }
+    return Object.keys(out).length > 0 ? out : undefined;
   }
 
   async shutdown(): Promise<void> {

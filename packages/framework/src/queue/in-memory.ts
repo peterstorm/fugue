@@ -145,8 +145,8 @@ export function createInMemoryBackend(): InMemoryBackend {
                 for (const eh of errorHandlers.get(name) ?? []) {
                   try {
                     eh(jobErr instanceof Error ? jobErr : new Error(String(jobErr)));
-                  } catch {
-                    // Swallow: onError handler must not break drain.
+                  } catch (swallowed) {
+                    fwLogger().error("[in-memory-queue] onError handler itself threw:", swallowed);
                   }
                 }
               }
@@ -159,8 +159,8 @@ export function createInMemoryBackend(): InMemoryBackend {
                   for (const eh of errorHandlers.get(name) ?? []) {
                     try {
                       eh(handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)));
-                    } catch {
-                      // Swallow: onError handler must not break drain.
+                    } catch (swallowed) {
+                      fwLogger().error("[in-memory-queue] onError handler itself threw:", swallowed);
                     }
                   }
                 }
