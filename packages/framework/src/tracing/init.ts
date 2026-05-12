@@ -19,6 +19,13 @@ export interface TracingConfig {
 export interface TracingHandle {
   /** The tail-sampling processor (for monitoring exported/dropped counts) */
   readonly processor: TailSamplingProcessor;
+  /**
+   * The persistence policy bound to the tail-sampler. Hosts wiring a
+   * `BufferedObserver` should pass *this same instance* so events and spans
+   * make a single coherent persistence decision per run. Diverging policies
+   * mean a run can persist events while dropping spans (or vice versa).
+   */
+  readonly policy: PersistencePolicy;
   /** Flush all pending traces */
   readonly flush: () => Promise<void>;
   /** Shut down the tracing pipeline */
@@ -33,6 +40,7 @@ export async function initTracing(config: TracingConfig): Promise<TracingHandle>
 
   return {
     processor: tailProcessor,
+    policy: config.policy,
     flush: async () => tailProcessor.forceFlush(),
     shutdown: async () => sdk.shutdown(),
   };

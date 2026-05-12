@@ -382,23 +382,28 @@ describe("runStateMachine", () => {
     expect(traceOutcomes[1]).toEqual(["success", "success"]);
   });
 
-  it("US7 S2: durationMs reflects executor wall time within tolerance", async () => {
+  it("US7 S2: durationMs reflects executor wall time exactly (fake clock via opts.now)", async () => {
     const job = makeJob({ kind: "running" });
     const traces: TraceEvent<State, Event>[] = [];
-    const executor: Executor<State, Event, Context> = async () => {
-      await new Promise<void>((r) => setTimeout(r, 50));
-      return { type: "DONE" };
-    };
+
+    // Deterministic clock: pre-script the values runStateMachine reads at
+    // start and end of the transition. The runner samples now() once at the
+    // top of the loop and once on the trace emission — same convention as
+    // the rest of the framework's `now: () => number` seam.
+    const stamps = [1_000, 1_050];
+    let idx = 0;
+    const now = (): number => stamps[Math.min(idx++, stamps.length - 1)]!;
+
+    const executor: Executor<State, Event, Context> = async () => ({ type: "DONE" });
 
     await runStateMachine(job, simpleMachine, executor, {
       errorEventOf: defaultErrorEventOf,
       onTrace: (t) => traces.push(t),
+      now,
     });
 
     expect(traces.length).toBe(1);
-    // Allow 10ms slop on low side; generous 300ms upper bound for slow CI
-    expect(traces[0].durationMs).toBeGreaterThanOrEqual(40);
-    expect(traces[0].durationMs).toBeLessThanOrEqual(300);
+    expect(traces[0]!.durationMs).toBe(50);
   });
 
   // Gap-5 fix: simulated crash + restart test
