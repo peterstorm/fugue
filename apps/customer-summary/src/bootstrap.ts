@@ -1,5 +1,4 @@
 import Anthropic from "@anthropic-ai/sdk";
-import OpenAI, { AzureOpenAI } from "openai";
 import Redis from "ioredis";
 import { join, resolve } from "node:path";
 import {
@@ -159,23 +158,17 @@ export const bootstrap = async () => {
     : (config.LLM_MODEL ?? DEFAULT_MODELS[provider]);
 
   if (provider === "azure" && config.AZURE_OPENAI_ENDPOINT && config.AZURE_OPENAI_API_KEY) {
-    const azureClient = new AzureOpenAI({
-      endpoint: config.AZURE_OPENAI_ENDPOINT,
-      apiKey: config.AZURE_OPENAI_API_KEY,
-      apiVersion: config.AZURE_OPENAI_API_VERSION,
-    });
     // Azure base URL: <endpoint>/openai/deployments/<deployment>
     const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? model;
     const azureBaseUrl = `${config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${deployment}`;
-    llm = new OpenAILlmClient(azureClient as any, {
+    llm = new OpenAILlmClient({
       apiKey: config.AZURE_OPENAI_API_KEY,
       baseUrl: azureBaseUrl,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
     });
     console.log(`Using Azure OpenAI LLM client (deployment: ${deployment}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
   } else if (provider === "openai" && config.OPENAI_API_KEY) {
-    const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
-    llm = new OpenAILlmClient(openai as any, {
+    llm = new OpenAILlmClient({
       apiKey: config.OPENAI_API_KEY,
       baseUrl: "https://api.openai.com/v1",
     });

@@ -200,5 +200,11 @@ export const dagTransition = (
       // Terminal — no further transitions
       return { state: phase, context: ctx };
     }
+
+    default: {
+      // Exhaustive check — a new DagPhase.kind without a case branch is a compile error.
+      const _exhaustive: never = phase;
+      return { state: _exhaustive, context: ctx };
+    }
   }
 };

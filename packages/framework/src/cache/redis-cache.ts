@@ -5,6 +5,7 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
 import type { Cache } from "./cache.js";
+import { fwLogger } from "../logger.js";
 
 const cacheError = (operation: string, message: string): FrameworkError => ({
   kind: "cache-error",
@@ -21,7 +22,9 @@ export class RedisCache implements Cache {
       if (raw === null) return ok(null);
       return ok(JSON.parse(raw) as T);
     } catch (e) {
-      return err(cacheError("get", e instanceof Error ? e.message : String(e)));
+      const message = `key="${key}": ${e instanceof Error ? e.message : String(e)}`;
+      fwLogger().warn(`[RedisCache.get] ${message}`);
+      return err(cacheError("get", message));
     }
   }
 
@@ -30,7 +33,9 @@ export class RedisCache implements Cache {
       await this.redis.set(key, JSON.stringify(value), "EX", ttlSec);
       return ok(undefined);
     } catch (e) {
-      return err(cacheError("set", e instanceof Error ? e.message : String(e)));
+      const message = `key="${key}": ${e instanceof Error ? e.message : String(e)}`;
+      fwLogger().warn(`[RedisCache.set] ${message}`);
+      return err(cacheError("set", message));
     }
   }
 }

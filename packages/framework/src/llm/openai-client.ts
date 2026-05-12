@@ -1,4 +1,3 @@
-import OpenAI from "openai";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -18,6 +17,7 @@ import {
   type ToolCall,
   type ToolDispatchResult,
 } from "./tool-dispatch.js";
+import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 
 /**
@@ -156,7 +156,7 @@ const parseToolCalls = (output: readonly ResponsesOutputItem[]): ToolCall[] => {
       parsedInput = JSON.parse(block.arguments || "{}");
     } catch (parseErr) {
       // Surface as unknown_input; dispatchToolCall will turn it into an is_error result.
-      console.warn(`[openai-client] Failed to parse tool-call arguments for '${block.name}': ${parseErr instanceof Error ? parseErr.message : parseErr}`);
+      fwLogger().warn(`[openai-client] Failed to parse tool-call arguments for '${block.name}': ${parseErr instanceof Error ? parseErr.message : parseErr}`);
       parsedInput = { __parse_error__: block.arguments };
     }
     calls.push({ id: block.call_id, name: block.name, input: parsedInput });
@@ -234,7 +234,7 @@ export class OpenAILlmClient implements LlmClient {
   private readonly apiKey: string;
   private readonly apiVersion: string | undefined;
 
-  constructor(private readonly openai: OpenAI, opts: OpenAILlmClientOpts) {
+  constructor(opts: OpenAILlmClientOpts) {
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 120_000;
     this.baseUrl = opts.baseUrl;
     this.apiKey = opts.apiKey;

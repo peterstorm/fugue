@@ -92,6 +92,26 @@ const DEFAULT_THRESHOLD = 0.8;
 /** Default model for eval-judge (GPT-4o-mini). */
 const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 
+/** Emit an observer event when the judge skips (fail-open). */
+const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): void => {
+  if (ctx.observer) {
+    ctx.observer.onSubSpan({
+      type: "sub-span",
+      runId: ctx.runId,
+      dagId: ctx.dagId,
+      nodeId: judgeId,
+      parentSpanId: judgeId,
+      kind: "EVALUATOR",
+      timestamp: new Date(),
+      duration: 0,
+      attributes: {
+        "eval_judge.skipped": true,
+        "eval_judge.skip_reason": reason,
+      },
+    });
+  }
+};
+
 /**
  * Create a fail-open result (used when judge LLM call fails).
  *
@@ -185,19 +205,24 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         if (!result.ok) {
           const msg = `LLM call failed: ${"message" in result.error ? result.error.message : String(result.error)}`;
           ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
+          emitJudgeSkipped(ctx, config.id, msg);
           return failOpenResult(msg);
         }
 
-        // Enrich active span with LLM details
-        enrichLlmSpan({
-          model,
-          system: JUDGE_SYSTEM_FRAME,
-          user: userMessage,
-          tokensIn: result.value.tokensIn,
-          tokensOut: result.value.tokensOut,
-          thinking: result.value.thinking,
-          includeContent: ctx.includeContent ?? false,
-        });
+        // Enrich active span with LLM details (guard against span errors)
+        try {
+          enrichLlmSpan({
+            model,
+            system: JUDGE_SYSTEM_FRAME,
+            user: userMessage,
+            tokensIn: result.value.tokensIn,
+            tokensOut: result.value.tokensOut,
+            thinking: result.value.thinking,
+            includeContent: ctx.includeContent ?? false,
+          });
+        } catch (spanErr) {
+          ctx.logger.warn(`[eval-judge:${config.id}] enrichLlmSpan threw: ${spanErr instanceof Error ? spanErr.message : String(spanErr)}`);
+        }
 
         // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)
         const parsed = EvalJudgeResponseSchema.safeParse(result.value.output);
@@ -211,6 +236,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
       } catch (e) {
         const msg = `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
         ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
+        emitJudgeSkipped(ctx, config.id, msg);
         return failOpenResult(msg);
       }
     },

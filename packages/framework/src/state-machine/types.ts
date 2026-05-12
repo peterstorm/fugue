@@ -37,7 +37,7 @@ export type Executor<S, E, C> = (state: S, context: C) => Promise<E>;
 // type still compile; callers that thread the machine event type (e.g. the
 // DAG layer uses `DagEvent`) get type-checked `appendEvent` payloads.
 export interface JobLike<S, E = unknown, C = unknown> {
-  readonly data: { state: S; context: C };
+  readonly data: { readonly state: S; readonly context: C };
   updateData(d: { state: S; context: C }): Promise<void>;
   updateProgress(pct: number): Promise<void>;
   /**

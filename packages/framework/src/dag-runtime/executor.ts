@@ -37,8 +37,13 @@ const emit = (ctx: NodeContext, event: ObserverEvent): void => {
 
 const DEFAULT_JITTER_RATIO = 0.2;
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 
 // ---------------------------------------------------------------------------
 // approve-with-edit validation
@@ -220,7 +225,7 @@ export const buildDagExecutor = (
         const nodeDef = nodeMap.get(p.nodeId);
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
-        await sleep(delayWithJitter);
+        await sleep(delayWithJitter, nodeCtx.signal);
 
         // `runWave` is called for the whole wave, but iterates with a
         // succeeded-output guard (see runWave:341): siblings already present
@@ -250,7 +255,7 @@ export const buildDagExecutor = (
         const nodeDef = nodeMap.get(p.nodeId);
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
-        await sleep(delayWithJitter);
+        await sleep(delayWithJitter, nodeCtx.signal);
         return callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id);
       })
 

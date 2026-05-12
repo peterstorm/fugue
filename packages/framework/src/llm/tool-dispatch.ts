@@ -69,6 +69,24 @@ export async function dispatchToolCall(
     };
   } catch (e) {
     ctx.logger.warn(`[tool-dispatch] Tool '${call.name}' threw: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+    // Emit observer event so tool failures appear in telemetry
+    if (ctx.observer) {
+      ctx.observer.onSubSpan({
+        type: "sub-span",
+        runId: ctx.runId,
+        dagId: ctx.dagId,
+        nodeId: call.name,
+        parentSpanId: call.id,
+        kind: "CHAIN",
+        timestamp: new Date(),
+        duration: 0,
+        attributes: {
+          "tool.error": true,
+          "tool.name": call.name,
+          "tool.error_message": e instanceof Error ? e.message : String(e),
+        },
+      });
+    }
     return errResult(call, e instanceof Error ? e.message : String(e));
   }
 }

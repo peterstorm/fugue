@@ -110,7 +110,10 @@ export function createInMemoryBackend(): InMemoryBackend {
       async drain(): Promise<void> {
         const q = getOrCreateQueue(name);
         const workerDef = workers.get(name);
-        if (!workerDef) return;
+        if (!workerDef) {
+          fwLogger().warn(`[InMemoryQueue] drain() called on queue "${name}" with no registered worker — jobs will not be processed`);
+          return;
+        }
         const defaults = queueDefaults.get(name) ?? { defaultAttempts: 1 };
 
         const { process: processFn, concurrency } = workerDef;

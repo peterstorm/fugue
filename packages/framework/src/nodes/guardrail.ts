@@ -94,7 +94,7 @@ export const createGuardrailNode = <I, T, const Id extends string = string>(
       result = config.validate(input);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[guardrail:${config.id}] validate() threw:`, msg);
+      ctx.logger.error(`[guardrail:${config.id}] validate() threw: ${msg}`);
       // Emit the explicit `failed` variant so consumers reading `.value`
       // on the error path get a compile error instead of `undefined` cast as T.
       result = {

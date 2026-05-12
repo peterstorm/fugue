@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { z } from "zod";
-import OpenAI from "openai";
 import { OpenAILlmClient } from "../llm/openai-client.js";
 import type { ToolDef } from "../llm/tools.js";
 
@@ -37,8 +36,7 @@ const Schema = z.object({ greeting: z.string() });
 type SchemaType = z.infer<typeof Schema>;
 
 const makeClient = () => {
-  const openai = new OpenAI({ apiKey: "test-key", baseURL: "https://api.example.com/v1" });
-  return new OpenAILlmClient(openai, {
+  return new OpenAILlmClient({
     apiKey: "test-key",
     baseUrl: "https://api.example.com/v1",
   });
