@@ -576,3 +576,11 @@ PRs A and B are merge blockers; C runs before D/E to avoid editing soon-deleted 
 - **Threading `outputNodeId` through `DagDef` to narrow `runDagStateful`'s return type.** Already deferred from pass-2 D3; still deferred.
 - **Replacing handrolled `Result` with a third-party Either library.** No motivating need; current `result.ts` scored 5/5 across all type-design dimensions.
 - **`apps/customer-summary/**`.** Out of scope for this pass per the original review brief.
+
+### Deferred from this pass to a follow-up (2026-05-12)
+
+The three Wave 5 items below are pure file-structure refactors with no correctness impact and a high test-import churn. Deferred so they can land as a single isolated PR that's easy to review/revert:
+
+- **W5.6 — Split `dag-runtime/transition-helpers.ts` (579 LOC)** into `retry-policy.ts`, `wave-resolution.ts`, `human-resolution.ts`. The current file works correctly; the split is a readability improvement. Defer until the next time `transition-helpers.ts` accrues another concern.
+- **W5.7 — Split `dag-runtime/run-dag-stateful.ts` (458 LOC)** into `persistence.ts`, `run-telemetry.ts`, and a slim orchestrator. Same rationale as W5.6 — mechanical move with no behaviour change.
+- **W5.8 — Single `decideRoute` evaluation per wave.** Hoists the routing decision from both `runWave` (executor) and `handleWaveDone` (transition) into a single computation returned as a new `routingDecision?` field on the `wave-done` event variant. Real change but blast radius is wide (touches the event union, both decision sites, and the dag-transition tests). Defer to a focused follow-up where the routing-decision shape can be designed deliberately rather than threaded as a single-PR addition.
