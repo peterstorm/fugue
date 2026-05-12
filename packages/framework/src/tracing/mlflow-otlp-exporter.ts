@@ -76,6 +76,12 @@ const SPAN_TYPE_TO_MLFLOW: Record<string, string> = {
   llm: "LLM",
   retriever: "RETRIEVER",
   tool: "TOOL",
+  // withLlmSpan / withToolSpan pass uppercase MLflow constants directly
+  CHAT_MODEL: "CHAT_MODEL",
+  TOOL: "TOOL",
+  CHAIN: "CHAIN",
+  LLM: "LLM",
+  RETRIEVER: "RETRIEVER",
 };
 
 // ---------------------------------------------------------------------------

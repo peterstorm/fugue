@@ -157,7 +157,10 @@ export const closeRootSpan = (rootSpan: Span, outcome: RootSpanOutcome): void =>
       });
     })
     .with({ kind: "error" }, ({ error }) => {
-      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
+      const errMsg = error && typeof error === "object" && "message" in error
+        ? (error as { message: string }).message
+        : JSON.stringify(error);
+      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: errMsg });
       rootSpan.addEvent(EVENT_NODE_OUTPUT, {
         status: "error",
         error: JSON.stringify(error),

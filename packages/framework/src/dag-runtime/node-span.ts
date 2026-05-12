@@ -120,7 +120,10 @@ export const withNodeSpan = async (
           outcome = { guardrailFailed: true, guardrailWarnings: warnings };
         }
       } else {
-        span.setStatus({ code: SpanStatusCode.ERROR, message: String(result.error) });
+        const errMsg = result.error && typeof result.error === "object" && "message" in result.error
+          ? (result.error as { message: string }).message
+          : JSON.stringify(result.error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errMsg });
       }
       span.end();
       return { result, outcome };

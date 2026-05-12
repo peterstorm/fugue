@@ -72,7 +72,7 @@ const tracing = await initTracing({
 const otelTracer: Tracer = {
   withSpan: async <T>(name: string, spanType: string, fn: () => Promise<T>): Promise<T> => {
     const tracer = trace.getTracer("ai-summary-framework");
-    return tracer.startActiveSpan(name, { attributes: { "ai.span.type": spanType } }, async (span) => {
+    return tracer.startActiveSpan(name, { attributes: { "ai.span.type": spanType, "mlflow.spanType": spanType } }, async (span) => {
       try {
         const result = await fn();
         return result;
