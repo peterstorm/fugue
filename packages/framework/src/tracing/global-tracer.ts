@@ -1,7 +1,7 @@
 // Framework-level OTel Tracer seam (D5).
 //
 // The kernel mints spans from `dag-runtime/run-dag-stateful.ts`,
-// `dag-runtime/eval-judges.ts`, and `shared/node-span.ts`. Each of these
+// `dag-runtime/eval-judges.ts`, and `dag-runtime/node-span.ts`. Each of these
 // previously did `trace.getTracer("ai-summary-framework")` at module load,
 // hard-wiring to the global OTel SDK. This module routes them through a
 // single resolved reference that the host can replace (typically alongside

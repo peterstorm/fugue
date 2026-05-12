@@ -64,9 +64,16 @@ export class TailSamplingProcessor implements SpanProcessor {
    */
   exportFailed = 0;
 
-  constructor(exporter: SpanExporter, policy: PersistencePolicy) {
+  private readonly now: () => number;
+
+  constructor(
+    exporter: SpanExporter,
+    policy: PersistencePolicy,
+    opts?: { readonly now?: () => number },
+  ) {
     this.exporter = exporter;
     this.policy = policy;
+    this.now = opts?.now ?? Date.now;
   }
 
   onStart(_span: Span, _parentContext: Context): void {
@@ -79,7 +86,7 @@ export class TailSamplingProcessor implements SpanProcessor {
     // Get or create buffer for this trace
     let buffer = this.buffers.get(traceId);
     if (!buffer) {
-      buffer = { spans: [], createdAt: Date.now() };
+      buffer = { spans: [], createdAt: this.now() };
       this.buffers.set(traceId, buffer);
     }
     buffer.spans.push(span);
@@ -91,7 +98,7 @@ export class TailSamplingProcessor implements SpanProcessor {
     }
 
     // Throttled periodic eviction of orphaned buffers — keep onEnd O(1).
-    const now = Date.now();
+    const now = this.now();
     if (now - this.lastEvictedAt > EVICTION_SWEEP_INTERVAL_MS) {
       this.lastEvictedAt = now;
       this.evictStaleBuffers();
@@ -99,7 +106,7 @@ export class TailSamplingProcessor implements SpanProcessor {
   }
 
   private evictStaleBuffers(): void {
-    const now = Date.now();
+    const now = this.now();
 
     // TTL-based eviction
     for (const [traceId, buffer] of this.buffers) {

@@ -141,10 +141,18 @@ Internals (`hasCycle`, `diffRegistry`) are not re-exported.
 
 Enforced by `scripts/check-imports.ts` and `__tests__/boundary-imports.test.ts`:
 
-- `scheduler/**` must not import `bullmq` / `ioredis` / `queue-bullmq/**`.
-- `executor/**` and `dag-runtime/**` must not import from each other (shared utilities live in `shared/`).
+- `state-machine/**`, `dag-runtime/**`, and `scheduler/**` must not import `bullmq` / `ioredis` / `queue-bullmq/**`. Transport adapters live in `queue-bullmq/`; the kernel and scheduler stay transport-agnostic.
+- `dag-runtime/**` must not import from `executor/**`. The reverse direction (`executor/` → `dag-runtime/`) is allowed: `executor/` is the public-API wrapper around the runtime.
+- Pure-core modules (`state-machine/**`, `dag-runtime/transition.ts`, `dag-runtime/transition-helpers.ts`, `dag-runtime/machine.ts`) must not import `@opentelemetry/*`. Tracing belongs to the imperative shell.
+- `shared/**` must not import `@opentelemetry/*`, `observer/**`, or `tracing/**`. Telemetry-aware helpers (`run-node.ts`, `node-span.ts`) moved into `dag-runtime/` during pass 3 — the only legitimate consumer. The two NodeContext-stub constructors (`shared/defaults.ts`, `shared/make-node-context.ts`) are exempted by `scopeExcludes`.
 
 Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
+
+## Public surface
+
+- `@ai-summary/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
+- `@ai-summary/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
+- `setFrameworkLogger(...)` / `setFrameworkTracer(...)` — host-injectable logger + OTel tracer seams. Defaults are `console.*` and `trace.getTracer("ai-summary-framework")` respectively, matching prior behaviour; tests typically pass recording stubs.
 
 ## Test conventions
 

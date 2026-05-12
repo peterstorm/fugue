@@ -147,6 +147,8 @@ export interface BufferedObserverOpts {
   readonly ttlMs?: number;
   /** Sweep interval for dropping stale buffers. Default 5min. */
   readonly sweepIntervalMs?: number;
+  /** Injectable clock; defaults to `Date.now`. Used by tests for deterministic eviction. */
+  readonly now?: () => number;
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
@@ -159,6 +161,7 @@ export class BufferedObserver implements Observer {
   evicted = 0;
   private readonly ttlMs: number;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
+  private readonly now: () => number;
 
   constructor(
     private readonly inner: Observer,
@@ -166,6 +169,7 @@ export class BufferedObserver implements Observer {
     opts?: BufferedObserverOpts,
   ) {
     this.ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
+    this.now = opts?.now ?? Date.now;
     const sweepMs = opts?.sweepIntervalMs ?? DEFAULT_SWEEP_MS;
     if (sweepMs > 0) {
       this.sweepHandle = setInterval(() => this.evictStale(), sweepMs);
@@ -182,14 +186,15 @@ export class BufferedObserver implements Observer {
   }
 
   /** Drop run buffers that exceeded `ttlMs` without a run-end. */
-  private evictStale(): void {
-    const cutoff = Date.now() - this.ttlMs;
+  evictStale(): void {
+    const nowMs = this.now();
+    const cutoff = nowMs - this.ttlMs;
     for (const [runId, buf] of this.buffers) {
       if (buf.createdAt < cutoff) {
         this.buffers.delete(runId);
         this.evicted++;
         fwLogger().warn(
-          `[BufferedObserver] Evicting orphaned run buffer ${runId} (age: ${Date.now() - buf.createdAt}ms, events: ${buf.events.length})`,
+          `[BufferedObserver] Evicting orphaned run buffer ${runId} (age: ${nowMs - buf.createdAt}ms, events: ${buf.events.length})`,
         );
       }
     }
@@ -198,7 +203,7 @@ export class BufferedObserver implements Observer {
   private buffer(runId: string, event: ObserverEvent): void {
     let buf = this.buffers.get(runId);
     if (!buf) {
-      buf = { events: [], createdAt: Date.now() };
+      buf = { events: [], createdAt: this.now() };
       this.buffers.set(runId, buf);
     }
     buf.events.push(event);

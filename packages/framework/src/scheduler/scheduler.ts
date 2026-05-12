@@ -38,7 +38,14 @@ export interface CronSchedulerOpts {
    * marker-based dedup so duplicate enqueues are no-ops).
    */
   enqueue: (task: TaskConfig, triggeredAt: Date) => Promise<void>;
-  /** Injectable `now` supplier for testing — defaults to `() => new Date()` */
+  /**
+   * Injectable wall-clock supplier. Defaults to `() => new Date()`. The
+   * scheduler keeps the `() => Date` shape (not `() => number`) because
+   * cron-parser and the `triggeredAt` arguments downstream want `Date`
+   * values directly; carrying the number through and re-wrapping at every
+   * call site costs more than the framework-wide uniformity buys. The
+   * `() => number` convention applies to observer + queue clocks.
+   */
   now?: () => Date;
 }
 

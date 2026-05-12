@@ -23,9 +23,9 @@ import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.j
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
 import { dispatchEvent } from "../observer/buffered.js";
-import { validateInput, validateOutput } from "./validate.js";
+import { validateInput, validateOutput } from "../shared/validate.js";
 import { withNodeSpan, type NodeSpanOutcome } from "./node-span.js";
-import type { IncomingSources } from "./incoming.js";
+import type { IncomingSources } from "../shared/incoming.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 

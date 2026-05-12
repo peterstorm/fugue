@@ -39,6 +39,13 @@ interface BoundaryRule {
    * (interpreted as `${entry}/`) or a specific relative file path under `src/`.
    */
   scope: string[];
+  /**
+   * Optional exact-path exclusions from `scope`. Use for files inside the
+   * scoped directory that legitimately need the otherwise-forbidden imports
+   * (e.g. `shared/defaults.ts` constructs the default observer/tracer
+   * stubs — pulling in their concrete types is necessary, not a smell).
+   */
+  scopeExcludes?: string[];
   /** Module specifiers that are forbidden. Partial prefix match is used. */
   forbiddenModules: string[];
   /** Human-readable reason — surfaced in violation messages and lint output. */
@@ -82,6 +89,30 @@ const RULES: BoundaryRule[] = [
     reason:
       "dag-runtime/** must not import from executor/** — executor wraps dag-runtime, not the other way. Use shared/ for pure utilities consumed by both.",
   },
+  // `shared/` must stay free of telemetry concerns: the modules that used to
+  // mint spans (`shared/run-node.ts`, `shared/node-span.ts`) moved into
+  // `dag-runtime/` during pass 3. Anything in `shared/` is consumed by both
+  // the executor and the dag-runtime — pulling OTel or observer/tracing
+  // plumbing in here would re-introduce the cycle the move was meant to break.
+  {
+    scope: ["shared"],
+    scopeExcludes: [
+      // `defaults.ts` constructs the public NodeContext stubs (noopTracer,
+      // noopObserver). It imports the concrete types so the stubs match the
+      // public interfaces. No span minting; pure value construction.
+      "shared/defaults.ts",
+      // `make-node-context.ts` wires the stubs above into a NodeContext
+      // factory. Same exemption rationale.
+      "shared/make-node-context.ts",
+    ],
+    forbiddenModules: [
+      "@opentelemetry/",
+      "../observer",
+      "../tracing",
+    ],
+    reason:
+      "shared/** must not import OTel, observer/**, or tracing/**. Telemetry-aware helpers belong in dag-runtime/ (the only consumer). NodeContext stub construction (defaults.ts, make-node-context.ts) is exempt.",
+  },
 ];
 
 /** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */
@@ -90,6 +121,12 @@ function inScope(relPath: string, scope: readonly string[]): boolean {
     if (entry.endsWith(".ts")) return relPath === entry;
     return relPath.startsWith(entry + "/");
   });
+}
+
+/** True when `relPath` is excluded from the rule via `scopeExcludes` (exact path). */
+function isExcluded(relPath: string, excludes: readonly string[] | undefined): boolean {
+  if (!excludes) return false;
+  return excludes.some((entry) => relPath === entry);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,8 +204,10 @@ export function checkImports(srcDir: string): CheckResult {
   for (const file of allFiles) {
     const relPath = relative(srcDir, file);
 
-    // Determine which rules apply to this file
-    const applicableRules = RULES.filter((rule) => inScope(relPath, rule.scope));
+    // Determine which rules apply to this file (in-scope and not explicitly excluded)
+    const applicableRules = RULES.filter(
+      (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
+    );
 
     if (applicableRules.length === 0) continue;
 

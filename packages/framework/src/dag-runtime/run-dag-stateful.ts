@@ -17,7 +17,7 @@ import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { runEvalJudges } from "./eval-judges.js";
 import { computeIncomingByNode } from "./conditional.js";
-import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "../shared/node-span.js";
+import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome } from "./node-span.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { fwLogger } from "../logger.js";
@@ -174,7 +174,8 @@ export const runDagStateful = async <I, O>(
   const effectiveDag: DagDef =
     opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
 
-  const runStart = Date.now();
+  const nowFn = opts?.now ?? Date.now;
+  const runStart = nowFn();
 
   // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
   // run-start/run-end pair. Otherwise observers see neither and the failure is
@@ -192,7 +193,7 @@ export const runDagStateful = async <I, O>(
       runId: nodeCtx.runId,
       dagId: dag.id,
       timestamp: new Date(),
-      duration: Date.now() - runStart,
+      duration: nowFn() - runStart,
       status,
     });
   };
