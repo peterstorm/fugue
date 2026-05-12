@@ -38,6 +38,7 @@ import {
 } from "@ai-summary/framework";
 import type { ToolDef, ToolCall, NodeContext } from "@ai-summary/framework";
 import { OpenAILlmClient } from "@ai-summary/framework";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { JsonFixtureSource } from "../src/sources/json-fixture-source.js";
 import { createSummaryDag } from "../src/dag/summary-dag.js";
 import type { SummaryResponse } from "../src/schemas/response.js";
@@ -63,6 +64,27 @@ const tracing = await initTracing({
   exporter: createMlflowExporter({ url: MLFLOW_URI, experimentId: "0" }),
   policy: alwaysOn(),
 });
+
+/**
+ * OTel-backed Tracer adapter — creates real OTel spans so tool calls and LLM
+ * calls show up as separate spans in MLflow with proper parent-child nesting.
+ */
+const otelTracer: Tracer = {
+  withSpan: async <T>(name: string, spanType: string, fn: () => Promise<T>): Promise<T> => {
+    const tracer = trace.getTracer("ai-summary-framework");
+    return tracer.startActiveSpan(name, { attributes: { "ai.span.type": spanType } }, async (span) => {
+      try {
+        const result = await fn();
+        return result;
+      } catch (e) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: e instanceof Error ? e.message : String(e) });
+        throw e;
+      } finally {
+        span.end();
+      }
+    });
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Helper: build LLM client
@@ -108,7 +130,7 @@ console.log("=== Case 1: Full production DAG (customer summary) ===");
     dagId: "customer-summary",
     observer,
     cache: null,
-    tracer: { withSpan: async (_n, _t, fn) => fn() },
+    tracer: otelTracer,
     logger: console,
     prompts: { get: () => "You are a customer analyst..." },
     llm,
@@ -269,6 +291,7 @@ console.log("\n=== Case 2: LLM with tool calls (CRM deal lookup) ===");
   const ctx = makeNodeContext({
     runId: "smoke-case-2-tool-calls",
     dagId: "deal-analysis-dag",
+    tracer: otelTracer,
     observer,
     llm,
     prompts: { get: () => null },
@@ -467,6 +490,7 @@ console.log("\n=== Case 3: Multi-node DAG (fetch → parallel analysis → guard
   const ctx = makeNodeContext({
     runId: "smoke-case-3-parallel-dag",
     dagId: "customer-health-report",
+    tracer: otelTracer,
     observer,
     llm,
     prompts: {
@@ -595,6 +619,7 @@ console.log("\n=== Case 4: Parallel tool dispatch (weather + calendar in one tur
   const ctx = makeNodeContext({
     runId: "smoke-case-4-parallel-tools",
     dagId: "morning-briefing-dag",
+    tracer: otelTracer,
     observer,
     llm,
   });
@@ -680,6 +705,7 @@ console.log("\n=== Case 5: Tool call failure (exercises error spans) ===");
   const ctx = makeNodeContext({
     runId: "smoke-case-5-tool-failure",
     dagId: "kb-qa-dag",
+    tracer: otelTracer,
     observer,
     llm,
   });
@@ -753,6 +779,7 @@ console.log("\n=== Case 6: Eval judge node (summary quality assessment) ===");
   const ctx = makeNodeContext({
     runId: "smoke-case-6-eval-judge",
     dagId: "eval-judge-test",
+    tracer: otelTracer,
     observer,
     llm: new FakeLlmClient(() => ({})),
     judgeLlm,
