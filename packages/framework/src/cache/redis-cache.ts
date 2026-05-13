@@ -16,11 +16,17 @@ const cacheError = (operation: string, message: string): FrameworkError => ({
 export class RedisCache implements Cache {
   constructor(private readonly redis: Redis) {}
 
-  async get<T>(key: string): Promise<Result<T | null, FrameworkError>> {
+  async get<T>(key: string, validate?: (v: unknown) => boolean): Promise<Result<T | null, FrameworkError>> {
     try {
       const raw = await this.redis.get(key);
       if (raw === null) return ok(null);
-      return ok(JSON.parse(raw) as T);
+      const parsed: unknown = JSON.parse(raw);
+      if (validate && !validate(parsed)) {
+        const message = `key="${key}": cached value failed shape validation`;
+        fwLogger().error(`[RedisCache.get] ${message}`);
+        return err(cacheError("get-validation", message));
+      }
+      return ok(parsed as T);
     } catch (e) {
       const message = `key="${key}": ${e instanceof Error ? e.message : String(e)}`;
       fwLogger().warn(`[RedisCache.get] ${message}`);
@@ -29,8 +35,18 @@ export class RedisCache implements Cache {
   }
 
   async set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>> {
+    // Separate serialization from the Redis call so callers can distinguish
+    // a non-retriable serialization bug from a retriable Redis failure.
+    let serialized: string;
     try {
-      await this.redis.set(key, JSON.stringify(value), "EX", ttlSec);
+      serialized = JSON.stringify(value);
+    } catch (e) {
+      const message = `key="${key}": serialization failed: ${e instanceof Error ? e.message : String(e)}`;
+      fwLogger().error(`[RedisCache.set] ${message}`);
+      return err(cacheError("set-serialize", message));
+    }
+    try {
+      await this.redis.set(key, serialized, "EX", ttlSec);
       return ok(undefined);
     } catch (e) {
       const message = `key="${key}": ${e instanceof Error ? e.message : String(e)}`;

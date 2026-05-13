@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr } from "../types/result.js";
+import { ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr, fold } from "../types/result.js";
 
 describe("Result", () => {
   it("ok() creates Ok", () => {
@@ -66,5 +66,15 @@ describe("Result", () => {
 
   it("unwrapOr returns fallback on Err", () => {
     expect(unwrapOr(err("x"), 99)).toBe(99);
+  });
+
+  it("fold calls onOk for Ok", () => {
+    const r = fold(ok(42), (v) => `val:${v}`, (e) => `err:${e}`);
+    expect(r).toBe("val:42");
+  });
+
+  it("fold calls onErr for Err", () => {
+    const r = fold(err("boom"), (v) => `val:${v}`, (e) => `err:${e}`);
+    expect(r).toBe("err:boom");
   });
 });

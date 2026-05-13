@@ -5,6 +5,7 @@ import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { handleWaveDone } from "./wave-resolution.js";
 import { handleNodeFailed, handleHookCrash } from "./retry-policy.js";
 import { handleHumanResponse } from "./human-resolution.js";
+import { EXECUTOR_NODE_ID } from "./types.js";
 
 /**
  * Pure DAG state transition. No I/O — all branches produce the next (state, context) pair.
@@ -63,7 +64,7 @@ export const dagTransition = (
             kind: "failed",
             error: {
               kind: "node-crash",
-              nodeId: "unknown",
+              nodeId: EXECUTOR_NODE_ID,
               message: event.error,
               retriability: event.retriable ? "retriable" : "non-retriable",
             },
@@ -95,7 +96,7 @@ export const dagTransition = (
             kind: "failed",
             error: {
               kind: "node-crash",
-              nodeId: "unknown",
+              nodeId: EXECUTOR_NODE_ID,
               message: event.error,
               retriability: event.retriable ? "retriable" : "non-retriable",
             },

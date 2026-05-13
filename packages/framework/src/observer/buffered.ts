@@ -251,12 +251,19 @@ export class BufferedObserver implements Observer {
 
     try {
       if (this.policy.shouldFlush(summary)) {
+        let replayFailures = 0;
         for (const buffered of events) {
           try {
             dispatchEvent(this.inner, buffered);
           } catch (err) {
-            fwLogger().warn(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+            replayFailures++;
+            fwLogger().error(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
           }
+        }
+        if (replayFailures > 0) {
+          fwLogger().error(
+            `[BufferedObserver] ${replayFailures}/${events.length} events lost during replay for run ${e.runId}`,
+          );
         }
         // Guard the final run-end dispatch the same way as the replay loop —
         // an unguarded throw here used to escape, skip buffer cleanup, and
@@ -264,7 +271,7 @@ export class BufferedObserver implements Observer {
         try {
           dispatchEvent(this.inner, e);
         } catch (err) {
-          fwLogger().warn(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
+          fwLogger().error(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
         }
       } else {
         fwLogger().warn(`[BufferedObserver] Dropping ${events.length} events for run ${e.runId} (filtered by persistence policy)`);

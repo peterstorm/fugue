@@ -319,16 +319,17 @@ const runWave = async (
   const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
   const waveNodeIds = allWaveNodeIds.filter((id) => machineCtx.activeNodeIds.has(id));
 
-  // Build a mutable outputs map for this wave execution.
-  // Pre-seed with existing outputs so deps from earlier waves resolve.
-  const outputs = new Map<string, unknown>(machineCtx.outputs);
+  // Snapshot prior-wave outputs so concurrent nodes in this wave can't
+  // observe each other's results mid-execution. Each node reads only from
+  // the frozen snapshot; the caller merges successes after Promise.all.
+  const priorOutputs: ReadonlyMap<string, unknown> = machineCtx.outputs;
 
   // Run all wave nodes concurrently
   const settled = await Promise.all(
     waveNodeIds.map(async (nodeId) => {
       // Skip nodes already successfully completed in this wave
       // (they already appear in machineCtx.outputs with correct values)
-      if (machineCtx.outputs.has(nodeId)) {
+      if (priorOutputs.has(nodeId)) {
         // Already have output — re-emit node-skipped for observability
         emit(nodeCtx, {
           type: "node-skipped",
@@ -340,7 +341,7 @@ const runWave = async (
         });
         return {
           nodeId,
-          result: ok(machineCtx.outputs.get(nodeId)) as Result<unknown, FrameworkError>,
+          result: ok(priorOutputs.get(nodeId)) as Result<unknown, FrameworkError>,
           outcome: EMPTY_OUTCOME,
         };
       }
@@ -365,7 +366,7 @@ const runWave = async (
         machineCtx.initialInput,
         nodeCtx,
         dag.id,
-        outputs,
+        priorOutputs,
         incoming,
         { checkpoint: resumeCheckpoint, writeCheckpoint: true, now: nowFn },
       );

@@ -102,7 +102,7 @@ export const handleWaveDone = (
           context: { ...ctx, outputs: newOutputs },
         };
       }
-      nextActive = expandActive(ctx.dag, nextActive, provided.chosenTargets);
+      nextActive = expandActive(ctx.dag, nextActive, provided.chosenTargets, ctx.outgoingByNode);
       continue;
     }
 
@@ -124,7 +124,7 @@ export const handleWaveDone = (
         context: { ...ctx, outputs: newOutputs },
       };
     }
-    nextActive = expandActive(ctx.dag, nextActive, decision.chosenTargets);
+    nextActive = expandActive(ctx.dag, nextActive, decision.chosenTargets, ctx.outgoingByNode);
   }
 
   const newCtx: DagMachineContext = {

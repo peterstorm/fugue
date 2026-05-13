@@ -25,6 +25,7 @@ export const mapErr = <T, E, F>(
   fn: (error: E) => F,
 ): Result<T, F> => (r.ok ? r : err(fn(r.error)));
 
+/** @deprecated Prefer `unwrapOr`, `fold`, or explicit `isOk`/`isErr` checks. Throws on Err. */
 export const unwrap = <T, E>(r: Result<T, E>): T => {
   if (r.ok) return r.value;
   throw new Error(`Called unwrap on Err: ${String(r.error)}`);
@@ -32,3 +33,10 @@ export const unwrap = <T, E>(r: Result<T, E>): T => {
 
 export const unwrapOr = <T, E>(r: Result<T, E>, fallback: T): T =>
   r.ok ? r.value : fallback;
+
+/** Exhaustive fold — forces handling both Ok and Err paths. */
+export const fold = <T, E, R>(
+  r: Result<T, E>,
+  onOk: (value: T) => R,
+  onErr: (error: E) => R,
+): R => (r.ok ? onOk(r.value) : onErr(r.error));

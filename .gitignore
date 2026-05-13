@@ -8,3 +8,4 @@ dist/
 coverage/
 .venv
 .direnv
+.pi/cortex-memory.local.md

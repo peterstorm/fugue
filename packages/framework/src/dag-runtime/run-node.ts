@@ -56,7 +56,7 @@ const emit = (ctx: NodeContext, event: ObserverEvent): void => {
  */
 const buildNodeInput = (
   dagInput: unknown,
-  outputs: Map<string, unknown>,
+  outputs: ReadonlyMap<string, unknown>,
   incoming: IncomingSources,
 ): unknown => {
   const { required, optional } = incoming;
@@ -98,7 +98,7 @@ export const runNodeShared = async (
   dagInput: unknown,
   ctx: ValidatedNodeContext,
   dagId: string,
-  outputs: Map<string, unknown>,
+  outputs: ReadonlyMap<string, unknown>,
   incoming: IncomingSources,
   opts: RunNodeOpts = {},
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
@@ -131,7 +131,6 @@ export const runNodeShared = async (
       timestamp: stamp(),
       reason: "checkpoint",
     });
-    outputs.set(nodeId, validated.value);
     return { result: ok(validated.value), outcome: EMPTY_OUTCOME };
   }
 
@@ -231,8 +230,6 @@ export const runNodeShared = async (
       });
       return outputResult;
     }
-
-    outputs.set(nodeId, outputResult.value);
 
     if (opts.writeCheckpoint && ctx.cache?.writeCheckpoint) {
       try {

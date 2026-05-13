@@ -114,6 +114,22 @@ export class AnthropicLlmClient implements LlmClient {
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // Manual timeout with a flag so we can distinguish timeout-aborts
+    // (retriable / transient) from caller-initiated aborts (terminal).
+    // Same pattern as openai-client.ts.
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.requestTimeoutMs);
+    const callerSignal = req.signal;
+    const onCallerAbort = () => controller.abort();
+    if (callerSignal) {
+      if (callerSignal.aborted) controller.abort();
+      else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
     try {
       const jsonSchema = z.toJSONSchema(req.schema as any) as Record<string, unknown>;
       delete jsonSchema.$schema;
@@ -132,11 +148,7 @@ export class AnthropicLlmClient implements LlmClient {
         tool_choice: { type: "tool", name: "structured_output" },
       };
 
-      const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
-      const signal = req.signal
-        ? AbortSignal.any([timeoutSignal, req.signal])
-        : timeoutSignal;
-      const response = await this.anthropic.messages.create(params, { signal });
+      const response = await this.anthropic.messages.create(params, { signal: controller.signal });
 
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
@@ -171,6 +183,14 @@ export class AnthropicLlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
+      if (isAbort(error) && timedOut && !callerSignal?.aborted) {
+        // Timeout-induced abort — retriable transient failure.
+        return err({
+          kind: "transient",
+          nodeId: resolveNodeId(req),
+          message: "request timed out",
+        });
+      }
       if (isAbort(error)) {
         return err({ kind: "aborted", reason: "signal" });
       }
@@ -188,6 +208,9 @@ export class AnthropicLlmClient implements LlmClient {
         message: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
+    } finally {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
     }
   }
 
@@ -230,11 +253,19 @@ export class AnthropicLlmClient implements LlmClient {
         tool_choice: toolChoice,
       };
 
-      const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
-      const callerSignal = req.signal ?? ctx.signal;
-      const signal = callerSignal
-        ? AbortSignal.any([timeoutSignal, callerSignal])
-        : timeoutSignal;
+      // Manual timeout per-turn — same pattern as sendStructured.
+      const turnController = new AbortController();
+      let turnTimedOut = false;
+      const turnTimeout = setTimeout(() => {
+        turnTimedOut = true;
+        turnController.abort();
+      }, this.requestTimeoutMs);
+      const turnCallerSignal = req.signal ?? ctx.signal;
+      const onTurnCallerAbort = () => turnController.abort();
+      if (turnCallerSignal) {
+        if (turnCallerSignal.aborted) turnController.abort();
+        else turnCallerSignal.addEventListener("abort", onTurnCallerAbort, { once: true });
+      }
 
       let response: AnthropicResponse;
       try {
@@ -243,7 +274,7 @@ export class AnthropicLlmClient implements LlmClient {
           { provider: "anthropic", model: req.model, operation: "chat" },
           async () => {
             setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
-            const r = await this.anthropic.messages.create(params, { signal });
+            const r = await this.anthropic.messages.create(params, { signal: turnController.signal });
             setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
             setLlmResponseAttributes({
               model: r.model,
@@ -254,6 +285,13 @@ export class AnthropicLlmClient implements LlmClient {
           },
         );
       } catch (e) {
+        if (isAbort(e) && turnTimedOut && !turnCallerSignal?.aborted) {
+          return err({
+            kind: "transient",
+            nodeId: resolveNodeId(req),
+            message: "request timed out",
+          });
+        }
         if (isAbort(e)) {
           return err({ kind: "aborted", reason: "signal" });
         }
@@ -271,6 +309,9 @@ export class AnthropicLlmClient implements LlmClient {
           message: e instanceof Error ? e.message : String(e),
           stack: e instanceof Error ? e.stack : undefined,
         });
+      } finally {
+        clearTimeout(turnTimeout);
+        turnCallerSignal?.removeEventListener("abort", onTurnCallerAbort);
       }
 
       totalTokensIn += response.usage.input_tokens;

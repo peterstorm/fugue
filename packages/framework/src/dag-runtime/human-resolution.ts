@@ -130,7 +130,7 @@ const handleReroute = (
           context: ctx,
         };
       }
-      reseededActive = expandActive(ctx.dag, reseededActive, decision.chosenTargets);
+      reseededActive = expandActive(ctx.dag, reseededActive, decision.chosenTargets, ctx.outgoingByNode);
     }
   }
 

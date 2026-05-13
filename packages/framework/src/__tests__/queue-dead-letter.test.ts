@@ -432,14 +432,16 @@ describe("attachDeadLetterHandler — F9: empty recipients short-circuit", () =>
 // ---------------------------------------------------------------------------
 
 describe("attachDeadLetterHandler — F10: defensive attempts/max validation", () => {
-  it("skips when max === 0", async () => {
+  it("logs error but still notifies when attempts === 0", async () => {
     const worker = makeWorker();
     const notifier = makeNotifier();
     attachDeadLetterHandler(worker, notifier, opts);
 
     await worker.simulateFailed("job-1", new Error("fail"), 0, 0);
 
-    expect(notifier.calls).toHaveLength(0);
+    // Changed from skip → notify: the job is dead and notification matters
+    // more than a clean attempts count.
+    expect(notifier.calls).toHaveLength(1);
   });
 
   it("skips when max is NaN", async () => {
@@ -452,14 +454,14 @@ describe("attachDeadLetterHandler — F10: defensive attempts/max validation", (
     expect(notifier.calls).toHaveLength(0);
   });
 
-  it("skips when max is negative", async () => {
+  it("logs error but still notifies when attempts is negative", async () => {
     const worker = makeWorker();
     const notifier = makeNotifier();
     attachDeadLetterHandler(worker, notifier, opts);
 
     await worker.simulateFailed("job-1", new Error("fail"), -1, -1);
 
-    expect(notifier.calls).toHaveLength(0);
+    expect(notifier.calls).toHaveLength(1);
   });
 
   it("skips when max is Infinity", async () => {

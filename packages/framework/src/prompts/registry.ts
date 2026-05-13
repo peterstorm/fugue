@@ -32,8 +32,9 @@ export const FilePromptRegistry = ({
     let text: string;
     try {
       text = await readFile(join(dir, `${name}.txt`), "utf-8");
-    } catch {
-      return err(promptNotFound(name, "file not found"));
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      return err(promptNotFound(name, code === "ENOENT" ? "file not found" : `file read failed: ${code ?? (e instanceof Error ? e.message : String(e))}`));
     }
 
     // 2. Compute hash
@@ -45,8 +46,9 @@ export const FilePromptRegistry = ({
     let raw: string;
     try {
       raw = await readFile(registryPath, "utf-8");
-    } catch {
-      return err(promptNotFound(name, "registry file does not exist"));
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      return err(promptNotFound(name, code === "ENOENT" ? "registry file does not exist" : `registry read failed: ${code ?? (e instanceof Error ? e.message : String(e))}`));
     }
     let registry: Record<string, { version: string; hash: string }>;
     try {

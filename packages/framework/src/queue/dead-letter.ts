@@ -23,13 +23,17 @@ export function attachDeadLetterHandler(
   opts: DeadLetterOpts,
 ): void {
   worker.onExhausted(async (id, err, attempts) => {
-    // Defensive validation against malformed adapter inputs.
+    // Defensive validation against malformed adapter inputs. Log and
+    // continue rather than silently dropping — the job is dead and
+    // notification matters more than a clean attempts count.
     if (
       typeof attempts !== "number" ||
       !Number.isFinite(attempts) ||
       attempts <= 0
     ) {
-      return;
+      fwLogger().error(
+        `[dead-letter] malformed attempts=${String(attempts)} for exhausted job ${id} — sending notification anyway`,
+      );
     }
 
     const recipients = opts.getRecipients(id, err);

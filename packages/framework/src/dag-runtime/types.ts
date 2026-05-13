@@ -4,6 +4,15 @@
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { Decision, IncomingSources } from "./conditional.js";
+import { __brandNodeId } from "../types/ids.js";
+
+/**
+ * Sentinel node id used by the executor/runner when an ERROR event arrives
+ * that cannot be attributed to a specific node. Branded via `__brandNodeId`
+ * so it satisfies the `NodeId` type. The `__executor__` value is already
+ * used in `run-dag-stateful.ts` for the same purpose.
+ */
+export const EXECUTOR_NODE_ID = __brandNodeId("__executor__");
 
 // ---------------------------------------------------------------------------
 // HumanAction — the payload a reviewer sends back

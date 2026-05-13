@@ -368,20 +368,32 @@ export class MlflowOtlpExporter implements SpanExporter {
   }
 
   async shutdown(): Promise<void> {
-    // No-op when init failed permanently — the failure was already logged at
-    // init time. Re-throwing here aborts the OTel SDK shutdown chain and
-    // leaves sibling exporters un-closed.
-    if (this.failedPermanently) return;
+    // When init failed permanently, log the drop count so operators have a
+    // signal at shutdown boundaries. We intentionally do NOT throw here —
+    // throwing aborts the OTel SDK shutdown chain and leaves sibling
+    // exporters un-closed. The `failed` getter and `droppedSpanCount` field
+    // are the programmatic health-check surface.
+    if (this.failedPermanently) {
+      fwLogger().warn(
+        `[MlflowOtlpExporter] shutdown() called but exporter failed permanently ` +
+        `(${this.droppedSpanCount} spans dropped): ${this.failedPermanently.message}`,
+      );
+      return;
+    }
     if (!this.innerPromise) return;
     const inner = await this.innerPromise.catch(() => null);
     if (inner?.shutdown) await inner.shutdown();
   }
 
   async forceFlush(): Promise<void> {
-    // No-op when init failed permanently. Silently resolving used to mask
-    // dropped spans; now the dropped count is surfaced via `droppedSpanCount`
-    // and the original init error via `failed`.
-    if (this.failedPermanently) return;
+    // Same rationale as shutdown() above — log but don't throw.
+    if (this.failedPermanently) {
+      fwLogger().warn(
+        `[MlflowOtlpExporter] forceFlush() called but exporter failed permanently ` +
+        `(${this.droppedSpanCount} spans dropped): ${this.failedPermanently.message}`,
+      );
+      return;
+    }
     if (!this.innerPromise) return;
     const inner = await this.innerPromise.catch(() => null);
     const flush = (inner as { forceFlush?: () => Promise<void> } | null)?.forceFlush;

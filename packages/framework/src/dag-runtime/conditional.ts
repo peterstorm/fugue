@@ -219,13 +219,18 @@ export const seedInitialActiveSet = (dag: DagDef): ReadonlySet<string> => {
 /**
  * Expand `prev` to include `chosenTargets` and every node forward-reachable
  * from those targets along unconditional edges only. Idempotent.
+ *
+ * When `outgoing` is provided (from `DagMachineContext.outgoingByNode`), avoids
+ * rebuilding the adjacency map. Falls back to `buildOutgoing(dag)` when the
+ * caller doesn't have a precomputed map.
  */
 export const expandActive = (
   dag: DagDef,
   prev: ReadonlySet<string>,
   chosenTargets: Iterable<string>,
+  outgoing?: ReadonlyMap<string, readonly EdgeDef[]>,
 ): ReadonlySet<string> => {
-  const outgoing = buildOutgoing(dag);
+  const adjacency = outgoing ?? buildOutgoing(dag);
   const next = new Set(prev);
   const stack: string[] = [];
   for (const t of chosenTargets) {
@@ -236,7 +241,7 @@ export const expandActive = (
   }
   while (stack.length > 0) {
     const cur = stack.pop()!;
-    const edges = outgoing.get(cur) ?? [];
+    const edges = adjacency.get(cur) ?? [];
     for (const e of edges) {
       if (!isUnconditionalEdge(e)) continue;
       if (!next.has(e.to)) {

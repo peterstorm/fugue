@@ -16,6 +16,7 @@ export {
   mapErr,
   unwrap,
   unwrapOr,
+  fold,
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────

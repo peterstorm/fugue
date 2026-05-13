@@ -32,7 +32,7 @@ export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machi
 // `serializeValue` / `deserializeValue` are intentionally internal; import
 // from their concrete paths if you genuinely need them.
 export { toJson, fromJson } from "./state-machine/serialize.js";
-export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr } from "./types/result.js";
+export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr, fold } from "./types/result.js";
 
 // ---------------------------------------------------------------------------
 // DAG runtime (NFR-021) — public surface only

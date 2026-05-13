@@ -198,12 +198,17 @@ const isAbort = (e: unknown): boolean =>
 
 /**
  * Distinguish a *timeout*-induced abort from a caller-cancellation abort.
- * `postResponses` tags timeouts with `__timedOut = true` so the outer
+ * `postResponses` tags timeouts via a `WeakSet` so the outer
  * handlers can surface them as `transient` (retriable) rather than
  * `aborted` (terminal, user-initiated).
  */
+// WeakSet tracks timed-out errors without mutating the error object.
+// Object.assign(e, { __timedOut: true }) fails silently on frozen/sealed
+// AbortError objects in some environments.
+const timedOutErrors = new WeakSet<Error>();
+
 const isTimeoutAbort = (e: unknown): boolean =>
-  isAbort(e) && (e as { __timedOut?: boolean }).__timedOut === true;
+  e instanceof Error && isAbort(e) && timedOutErrors.has(e);
 
 /** Duck-typed 429 detection (see anthropic-client.ts for rationale). */
 const isRateLimit = (e: unknown): boolean =>
@@ -299,7 +304,8 @@ export class OpenAILlmClient implements LlmClient {
       // fetch boundary; without the tag the outer handler routes both to
       // `{ kind: "aborted" }` and a transient timeout looks like a user cancel.
       if (e instanceof Error && e.name === "AbortError" && timedOut && !signal?.aborted) {
-        throw Object.assign(e, { __timedOut: true });
+        timedOutErrors.add(e);
+        throw e;
       }
       throw e;
     } finally {
