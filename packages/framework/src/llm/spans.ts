@@ -1,5 +1,6 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Tracer } from "../types/node.js";
+import { fwLogger } from "../logger.js";
 import {
   ERROR_TYPE,
   GEN_AI_OPERATION_NAME,
@@ -140,8 +141,11 @@ const stringifyOrTruncate = (value: unknown): string => {
   let s: string;
   try {
     s = JSON.stringify(value) ?? "";
-  } catch {
-    return JSON.stringify({ unserializable: true });
+  } catch (e) {
+    fwLogger().debug(
+      `[spans] stringifyOrTruncate failed for ${typeof value}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return JSON.stringify({ unserializable: true, type: typeof value });
   }
   if (s.length > MAX_TOOL_IO_BYTES) {
     return JSON.stringify({ truncated: s.length });

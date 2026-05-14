@@ -256,10 +256,29 @@ export function createCronScheduler(
       : 3600;
     try {
       await markers.set(markerCompletedKey(taskId), completedTtl);
-    } catch (err) {
-      fwLogger().error(`[CronScheduler] markers.set(completed) failed for task "${taskId}":`, err);
-      // Return early: dependents rely on completed marker to gate their enqueue
-      return;
+    } catch (err1) {
+      // Retry up to 2 more times with linear backoff before abandoning.
+      let markerSet = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        fwLogger().error(
+          `[CronScheduler] markers.set(completed) failed for task "${taskId}" (attempt ${attempt}/3):`,
+          attempt === 1 ? err1 : undefined,
+        );
+        await new Promise(r => setTimeout(r, 500 * attempt));
+        try {
+          await markers.set(markerCompletedKey(taskId), completedTtl);
+          markerSet = true;
+          break;
+        } catch (retryErr) {
+          if (attempt === 2) {
+            fwLogger().error(
+              `[CronScheduler] markers.set(completed) permanently failed for task "${taskId}" after 3 attempts — dependent chain abandoned:`,
+              retryErr,
+            );
+          }
+        }
+      }
+      if (!markerSet) return;
     }
 
     // Find all tasks that directly depend on taskId
@@ -285,11 +304,23 @@ export function createCronScheduler(
         const alreadyFired = await markers.exists(markerFiredKey(dep.id));
         if (alreadyFired) continue;
 
-        // Enqueue first — only mark fired on success. enqueue is idempotent (per contract).
-        try {
-          await enqueue(dep, triggeredAt);
-        } catch (err) {
-          fwLogger().error(`[CronScheduler] enqueue failed for dependent task "${dep.id}" — marker not set:`, err);
+        // Enqueue first — only mark fired on success. Retry up to 3 attempts.
+        let enqueued = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await enqueue(dep, triggeredAt);
+            enqueued = true;
+            break;
+          } catch (err) {
+            fwLogger().error(
+              `[CronScheduler] enqueue failed for dependent task "${dep.id}" (attempt ${attempt + 1}/3):`,
+              err,
+            );
+            if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+          }
+        }
+        if (!enqueued) {
+          fwLogger().error(`[CronScheduler] enqueue permanently failed for dependent "${dep.id}" — skipped`);
           continue;
         }
         const depFiredTtl = Math.ceil(dep.validForMs / 1000) + 60;

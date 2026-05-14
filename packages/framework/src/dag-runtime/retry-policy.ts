@@ -19,8 +19,9 @@ export const computeBackoffMs = (
   nodeId: string,
   attempt: number,
   dag: DagMachineContext["dag"],
+  nodeById?: ReadonlyMap<string, import("../types/node.js").NodeDef<unknown, unknown>>,
 ): number => {
-  const nodeDef = dag.nodes.find((n) => n.id === nodeId);
+  const nodeDef = nodeById?.get(nodeId) ?? dag.nodes.find((n) => n.id === nodeId);
   const backoffMs = nodeDef?.retry?.backoffMs ?? DEFAULT_BACKOFF_MS;
 
   const baseDelay = backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? backoffMs[backoffMs.length - 1] ?? 1000;
@@ -99,7 +100,7 @@ export const handleNodeFailed = (
     const newRetries = new Map(ctxWithCoFailed.retries);
     newRetries.set(nodeId, currentAttempts + 1);
     const newCtx: DagMachineContext = { ...ctxWithCoFailed, retries: newRetries };
-    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctxWithCoFailed.dag);
+    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctxWithCoFailed.dag, ctxWithCoFailed.nodeById);
 
     return {
       state: {
@@ -169,7 +170,7 @@ export const handleHookCrash = (
     const newRetries = new Map(ctx.retries);
     newRetries.set(nodeId, currentAttempts + 1);
     const newCtx: DagMachineContext = { ...ctx, retries: newRetries };
-    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctx.dag);
+    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctx.dag, ctx.nodeById);
 
     return {
       state: {

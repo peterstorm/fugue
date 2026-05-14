@@ -45,7 +45,7 @@ export const collectHumanReviewQueue = (
   const nodes = activeWaveNodes(ctx, wave);
   return nodes
     .filter((id) => {
-      const def = ctx.dag.nodes.find((n) => n.id === id);
+      const def = ctx.nodeById.get(id);
       return def?.humanReview !== undefined;
     })
     .sort(); // ascending node-id order per FR-028
@@ -137,7 +137,7 @@ export const handleWaveDone = (
 
   if (reviewQueue.length > 0) {
     const [firstNodeId, ...rest] = reviewQueue;
-    const nodeDef = newCtx.dag.nodes.find((n) => n.id === firstNodeId);
+    const nodeDef = newCtx.nodeById.get(firstNodeId);
     if (nodeDef === undefined) {
       return {
         state: {

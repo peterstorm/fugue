@@ -177,7 +177,12 @@ export const runStateMachine = async <S, E, C>(
       }
     }
 
-    // FR-007: throw after observing terminal-failed so queue can retry
+    // FR-007: throw after observing terminal-failed so queue can retry.
+    // DESIGN: We throw here intentionally. The BullMQ queue layer catches
+    // this and triggers its built-in retry mechanism. Returning a Result
+    // would require every queue adapter to unwrap and re-throw, adding
+    // complexity at every boundary for a pattern that only applies here.
+    // See ADR 0005 + ADR 0007 for the full two-layer retry rationale.
     if (isFailed) {
       throw new Error(`State machine reached failed terminal state: ${JSON.stringify(state)}`);
     }

@@ -85,6 +85,7 @@ export const compileDagToMachine = (
     activeNodeIds: seedInitialActiveSet(dag),
     incomingByNode: computeIncomingByNode(dag),
     outgoingByNode: computeOutgoingByNode(dag),
+    nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {

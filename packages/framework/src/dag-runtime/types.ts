@@ -149,4 +149,10 @@ export interface DagMachineContext {
    * don't pay an O(edges) linear scan each call.
    */
   readonly outgoingByNode: ReadonlyMap<string, readonly EdgeDef[]>;
+  /**
+   * Precomputed node-id → NodeDef lookup. Built once at compile time so
+   * retry-policy, wave-resolution, and human-resolution can do O(1) lookups
+   * instead of O(n) `dag.nodes.find()` per call.
+   */
+  readonly nodeById: ReadonlyMap<string, import("../types/node.js").NodeDef<unknown, unknown>>;
 }

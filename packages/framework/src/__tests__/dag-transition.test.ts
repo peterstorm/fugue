@@ -89,6 +89,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     activeNodeIds: new Set(dag.nodes.map((n) => n.id)),
     outgoingByNode: computeOutgoingByNode(dag),
     incomingByNode: new Map(),
+    nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     ...overrides,
   };
 };

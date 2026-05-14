@@ -194,6 +194,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       activeNodeIds: new Set(["a"]),
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
+      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     };
   };
 
@@ -244,6 +245,7 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       activeNodeIds: new Set(["a"]),
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
+      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     };
   };
 
@@ -529,6 +531,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       activeNodeIds: new Set(["a", "b"]),
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
+      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     };
   };
 

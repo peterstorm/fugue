@@ -42,6 +42,12 @@ export const isOneOfMatch = (
  * of earlier revisions. `EdgeDefInput` still accepts the implicit-unconditional
  * form for authoring; `defineDag` materializes `kind: "unconditional"` after
  * validation.
+ *
+ * NOTE: `when` is typed `Predicate<unknown>` at runtime because the DAG carries
+ * heterogeneous node types. Authoring-time type safety is enforced by
+ * `defineDag` (where `when` is checked against `OutputsByNodeId[F]`). Runtime
+ * correctness is enforced by `evaluatePredicate` + the node's `outputSchema`
+ * validation. This widening is intentional — see ADR 0016.
  */
 export type EdgeDef =
   | { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" }

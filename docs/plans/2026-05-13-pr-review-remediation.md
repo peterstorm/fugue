@@ -148,7 +148,7 @@ code. Do together with 1.7 in a dedicated commit.
 
 ---
 
-### 🔲 2.4 Scheduler: marker-write failure abandons dependent chain
+### ✅ 2.4 Scheduler: marker-write failure abandons dependent chain
 **Finding:** #11 (silent-failure-hunter, IMPORTANT)
 **Status:** TODO
 **File:** `scheduler/scheduler.ts`
@@ -156,7 +156,7 @@ code. Do together with 1.7 in a dedicated commit.
 
 ---
 
-### 🔲 2.5 Scheduler: dependent enqueue failure is terminal
+### ✅ 2.5 Scheduler: dependent enqueue failure is terminal
 **Finding:** #12 (silent-failure-hunter, IMPORTANT)
 **Status:** TODO
 **File:** `scheduler/scheduler.ts`
@@ -186,7 +186,7 @@ code. Do together with 1.7 in a dedicated commit.
 
 ---
 
-### 🔲 2.8 `llm/spans.ts` — bare `catch {}` in `stringifyOrTruncate`
+### ✅ 2.8 `llm/spans.ts` — bare `catch {}` in `stringifyOrTruncate`
 **Finding:** #13 from code-reviewer (ADVISORY)
 **Status:** TODO
 **File:** `llm/spans.ts`
@@ -196,7 +196,7 @@ code. Do together with 1.7 in a dedicated commit.
 
 ## Wave 3 — Type safety hardening (4 findings)
 
-### 🔲 3.1 `DagEvent` transitions not exhaustively checked
+### ✅ 3.1 `DagEvent` transitions not exhaustively checked
 **Finding:** #15 (type-design-analyzer, IMPORTANT)
 **Status:** TODO
 **File:** `dag-runtime/transition.ts`
@@ -205,7 +205,7 @@ code. Do together with 1.7 in a dedicated commit.
 
 ---
 
-### 🔲 3.2 `Predicate<unknown>` erases authoring-time type safety
+### ✅ 3.2 `Predicate<unknown>` erases authoring-time type safety
 **Finding:** #16 (type-design-analyzer, IMPORTANT)
 **Status:** TODO — documentation only, no code change
 **File:** `types/dag.ts`
@@ -227,7 +227,7 @@ and the runtime safety net (Zod schema validation).
 
 ---
 
-### 🔲 3.4 `__brandXxx` escape hatches — add `@internal` docs
+### ✅ 3.4 `__brandXxx` escape hatches — add `@internal` docs
 **Finding:** from type-design-analyzer (SUGGESTION)
 **Status:** TODO — documentation only
 **File:** `types/ids.ts`
@@ -250,7 +250,7 @@ and the runtime safety net (Zod schema validation).
 
 ---
 
-### 🔲 4.2 Precompute `Map<NodeId, NodeDef>` for O(1) node lookup
+### ✅ 4.2 Precompute `Map<NodeId, NodeDef>` for O(1) node lookup
 **Finding:** #24 (architecture-agent, SUGGESTION)
 **Status:** TODO
 **Files:** `dag-runtime/machine.ts`, `dag-runtime/types.ts`,
@@ -260,7 +260,7 @@ and the runtime safety net (Zod schema validation).
 
 ---
 
-### 🔲 4.3 `runStateMachine` throws for terminal-failed (architecture doc)
+### ✅ 4.3 `runStateMachine` throws for terminal-failed (architecture doc)
 **Finding:** #17 (architecture-agent, IMPORTANT)
 **Status:** TODO — documentation only
 **File:** `state-machine/runner.ts`
@@ -276,7 +276,7 @@ and the runtime safety net (Zod schema validation).
 
 ## Wave 5 — Test coverage gaps (2 findings)
 
-### 🔲 5.1 `tracing/span-enrich.ts` — cost calculation unit tests
+### ✅ 5.1 `tracing/span-enrich.ts` — cost calculation unit tests
 **Finding:** #18 (pr-test-analyzer, IMPORTANT)
 **Status:** TODO
 **File:** New: `__tests__/span-enrich.test.ts`
@@ -285,7 +285,7 @@ filter on/off, thinking attribute.
 
 ---
 
-### 🔲 5.2 `dag-runtime/run-node.ts` — conditional dep input assembly
+### ✅ 5.2 `dag-runtime/run-node.ts` — conditional dep input assembly
 **Finding:** #19 (pr-test-analyzer, IMPORTANT)
 **Status:** TODO
 **File:** New: `__tests__/run-node-input-assembly.test.ts`
@@ -339,11 +339,14 @@ Wave 6 (simplifier)
 | Wave | Findings | Done | Remaining |
 |------|----------|------|-----------|
 | 1 (critical) | 7 | **5** ✅ | 2 (branded ID migration) |
-| 2 (errors) | 8 | **5** ✅ | 3 (scheduler retry, spans catch) |
-| 3 (types) | 4 | **1** ✅ | 3 (exhaustive events, docs) |
-| 4 (perf) | 4 | **2** ✅ | 2 (nodeById, runner doc) |
-| 5 (tests) | 2 | 0 | 2 (new test files) |
+| 2 (errors) | 8 | **8** ✅ | 0 |
+| 3 (types) | 4 | **4** ✅ | 0 |
+| 4 (perf) | 4 | **4** ✅ | 0 |
+| 5 (tests) | 2 | **2** ✅ | 0 |
 | 6 (simplify) | — | 0 | Agent pass |
-| **Total** | **25** | **13 ✅** | **12 remaining** |
+| **Total** | **25** | **23 ✅** | **2 remaining** |
 
-**21 files changed, 713 tests pass, 0 type errors.**
+**729 tests pass, 0 fail, 0 type errors.**
+
+The only remaining items are **1.6 + 1.7** (branded ID migration) which require
+changing ~25+ files and all test fixtures. This is a separate dedicated commit.

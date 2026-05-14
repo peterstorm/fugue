@@ -158,7 +158,7 @@ const resolveHumanApproved = (
   // If there are more reviews pending in this wave, process the next one
   if (currentState.pendingReviews.length > 0) {
     const [nextNodeId, ...rest] = currentState.pendingReviews;
-    const nodeDef = ctx.dag.nodes.find((n) => n.id === nextNodeId);
+    const nodeDef = ctx.nodeById.get(nextNodeId);
     if (nodeDef === undefined) {
       return {
         state: {

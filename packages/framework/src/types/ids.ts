@@ -62,6 +62,13 @@ export const dagId = (s: string): DagId => {
  * `makeNodeContext`, factory helpers) skip the regex check when they have
  * already validated the incoming string by another invariant.
  */
+/**
+ * @internal Bypass validation for trusted internal code. NOT part of the
+ * public API — do not import from outside the framework package. These are
+ * intentionally not re-exported from the barrel (`src/index.ts`).
+ */
 export const __brandRunId = (s: string): RunId => s as RunId;
+/** @internal See `__brandRunId`. */
 export const __brandNodeId = (s: string): NodeId => s as NodeId;
+/** @internal See `__brandRunId`. */
 export const __brandDagId = (s: string): DagId => s as DagId;
