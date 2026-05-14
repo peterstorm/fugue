@@ -40,6 +40,8 @@ Start with these to understand the runtime as it stands today:
 | [0021](0021-single-path-runtime.md) | Single-path runtime | Accepted |
 | [0022](0022-legacy-path-retirement-criteria.md) | Legacy-path retirement criteria | Accepted |
 | [0023](0023-genai-semconv-source-of-truth.md) | OTel GenAI semconv as source of truth for LLM telemetry | Accepted |
+| [0024](0024-llm-types-in-types-layer.md) | LLM types in types layer | Accepted |
+| [0025](0025-freshness-witness-contract.md) | Freshness witness contract (Phase 3) | Accepted |
 
 ## Conventions
 

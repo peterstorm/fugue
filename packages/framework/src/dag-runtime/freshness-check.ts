@@ -8,7 +8,7 @@
  * same resource, returns a `FreshnessCheckResult` describing the conflict.
  *
  * This module is the single-process fallback. Cross-process detection with
- * Redis-backed indexes is layered on top (see `checkpoint/redis-checkpointer.ts`).
+ * Redis-backed indexes is layered on top (see `checkpoint/redis-freshness-index.ts`).
  */
 
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
@@ -34,12 +34,37 @@ export interface FreshnessCheckResult {
   readonly conflicts: readonly FreshnessConflict[];
 }
 
-/** In-memory write log entry, keyed by resource. */
-interface WriteEntry {
+/** Write log entry, keyed by resource. Returned by freshness index lookups. */
+export interface WriteEntry {
   readonly runId: RunId;
   readonly nodeId: NodeId;
   readonly newWitness: Witness;
   readonly succeededAtMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// FreshnessIndex port
+//
+// Defines the contract for freshness-write tracking. The in-memory
+// implementation is the default (single-process); a Redis-backed adapter
+// enables cross-process detection (see checkpoint/redis-freshness-index.ts).
+//
+// Return types are `| Promise<...>` so sync in-memory and async Redis
+// implementations both satisfy the interface. The executor `await`s all calls.
+// ---------------------------------------------------------------------------
+
+export interface FreshnessIndex {
+  /** Record a successful write for future conflict detection. */
+  recordWrite(event: WriteAttemptedEvent): Promise<void>;
+  /**
+   * Check if a conditioned-on witness has been superseded by a write that
+   * completed after `sinceMs`. Returns the first conflicting write, or `null`.
+   */
+  findConflict(
+    resource: string,
+    conditionedOnValue: string,
+    sinceMs: number,
+  ): Promise<WriteEntry | null>;
 }
 
 /**
@@ -85,29 +110,28 @@ export const checkFreshness = (
       const resource = e.conditionedOn.resource;
       const existingWrites = writesByResource.get(resource) ?? [];
 
-      // Check if any write completed after the conditioned-on witness was
-      // captured AND produced a different witness value. If so, the
-      // conditioned-on witness is stale.
-      for (const prior of existingWrites) {
-        if (prior.newWitness.value !== e.conditionedOn.value) {
-          // The conditioned-on witness doesn't match the latest write to
-          // this resource — this is expected when the write is updating the
-          // same version. Check if the prior write is strictly newer than
-          // the conditioned-on value.
-          conflicts.push({
-            writeNodeId: e.nodeId,
-            writeRunId: e.runId,
-            resource,
-            conditionedOnWitness: e.conditionedOn,
-            conflictingWrite: {
-              runId: prior.runId,
-              nodeId: prior.nodeId,
-              newWitness: prior.newWitness,
-              succeededAtMs: prior.succeededAtMs,
-            },
-          });
-          break; // One conflict per write is sufficient
-        }
+      // Check if the LATEST write to this resource produced a different
+      // witness value. Only the most recent write matters — older writes
+      // may have different values that were subsequently superseded.
+      // A conflict means: the current state of the resource has moved past
+      // what this write believes it's updating.
+      const latest = existingWrites.length > 0
+        ? existingWrites[existingWrites.length - 1]!
+        : null;
+
+      if (latest && latest.newWitness.value !== e.conditionedOn.value) {
+        conflicts.push({
+          writeNodeId: e.nodeId,
+          writeRunId: e.runId,
+          resource,
+          conditionedOnWitness: e.conditionedOn,
+          conflictingWrite: {
+            runId: latest.runId,
+            nodeId: latest.nodeId,
+            newWitness: latest.newWitness,
+            succeededAtMs: latest.succeededAtMs,
+          },
+        });
       }
 
       // Record this write
@@ -133,11 +157,11 @@ export const checkFreshness = (
  * Thread-safe within a single JS event loop (no concurrent mutation).
  * For cross-process detection, see Redis-backed freshness index.
  */
-export class InMemoryFreshnessIndex {
+export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly writes = new Map<string, WriteEntry[]>();
 
   /** Record a successful write. */
-  recordWrite(event: WriteAttemptedEvent): void {
+  async recordWrite(event: WriteAttemptedEvent): Promise<void> {
     const resource = event.newWitness.resource;
     const entries = this.writes.get(resource) ?? [];
     entries.push({
@@ -150,22 +174,29 @@ export class InMemoryFreshnessIndex {
   }
 
   /**
-   * Check if a conditioned-on witness has been superseded by a write that
-   * completed after `sinceMs`. Returns the first conflicting write, or `null`.
+   * Check if a conditioned-on witness has been superseded by a more recent
+   * write that completed after `sinceMs`. Only the latest write to this
+   * resource matters — older writes may have values that were subsequently
+   * superseded. Returns the conflicting write entry, or `null`.
    */
-  findConflict(
+  async findConflict(
     resource: string,
     conditionedOnValue: string,
     sinceMs: number,
-  ): WriteEntry | null {
+  ): Promise<WriteEntry | null> {
     const entries = this.writes.get(resource) ?? [];
+    // Find the most recent write at or after sinceMs. For same-timestamp
+    // entries, the later-inserted one wins (matches checkFreshness behavior).
+    let latest: WriteEntry | null = null;
     for (const entry of entries) {
-      if (
-        entry.succeededAtMs >= sinceMs &&
-        entry.newWitness.value !== conditionedOnValue
-      ) {
-        return entry;
+      if (entry.succeededAtMs >= sinceMs) {
+        if (!latest || entry.succeededAtMs >= latest.succeededAtMs) {
+          latest = entry;
+        }
       }
+    }
+    if (latest && latest.newWitness.value !== conditionedOnValue) {
+      return latest;
     }
     return null;
   }

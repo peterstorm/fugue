@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import fc from "fast-check";
 import {
   CONFIDENCE_ORDER,
   meetsConfidence,
@@ -114,5 +115,65 @@ describe("bucketFromEnsemble", () => {
   it("custom thresholds override defaults", () => {
     // With strict thresholds, 8/10 = 0.8 is only medium
     expect(bucketFromEnsemble(8, 10, { high: 0.95, medium: 0.5 })).toBe("medium");
+  });
+});
+
+describe("bucketFromProbability — edge inputs", () => {
+  it("NaN → low (NaN >= threshold is always false)", () => {
+    expect(bucketFromProbability(NaN)).toBe("low");
+  });
+
+  it("Infinity → high (Infinity >= any finite threshold)", () => {
+    expect(bucketFromProbability(Infinity)).toBe("high");
+  });
+
+  it("-Infinity → low (-Infinity >= threshold is always false)", () => {
+    expect(bucketFromProbability(-Infinity)).toBe("low");
+  });
+
+  it("negative values → low", () => {
+    expect(bucketFromProbability(-1)).toBe("low");
+    expect(bucketFromProbability(-0.5)).toBe("low");
+  });
+
+  it("values > 1 → high (no clamping)", () => {
+    expect(bucketFromProbability(2)).toBe("high");
+    expect(bucketFromProbability(100)).toBe("high");
+  });
+
+  it("zero → low", () => {
+    expect(bucketFromProbability(0)).toBe("low");
+  });
+
+  it("exactly 1.0 → high", () => {
+    expect(bucketFromProbability(1.0)).toBe("high");
+  });
+});
+
+describe("CONFIDENCE_ORDER — total order (property test)", () => {
+  const buckets = ["high", "medium", "low", "unknown"] as const;
+
+  it("reflexive, transitive, antisymmetric", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...buckets),
+        fc.constantFrom(...buckets),
+        fc.constantFrom(...buckets),
+        (a, b, c) => {
+          // Reflexive: a meets a
+          if (!meetsConfidence(a, a)) return false;
+          // Transitive: if a >= b and b >= c then a >= c
+          if (meetsConfidence(a, b) && meetsConfidence(b, c)) {
+            if (!meetsConfidence(a, c)) return false;
+          }
+          // Antisymmetric: if a >= b and b >= a then order(a) === order(b)
+          if (meetsConfidence(a, b) && meetsConfidence(b, a)) {
+            if (CONFIDENCE_ORDER[a] !== CONFIDENCE_ORDER[b]) return false;
+          }
+          return true;
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 });

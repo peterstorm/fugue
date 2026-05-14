@@ -101,14 +101,14 @@ describe("checkFreshness — pure conflict detection", () => {
 });
 
 describe("InMemoryFreshnessIndex", () => {
-  it("findConflict returns null when no writes recorded", () => {
+  it("findConflict returns null when no writes recorded", async () => {
     const index = new InMemoryFreshnessIndex();
-    expect(index.findConflict("postgres:orders", "42", 0)).toBeNull();
+    expect(await index.findConflict("postgres:orders", "42", 0)).toBeNull();
   });
 
-  it("findConflict returns null when conditioned value matches latest write", () => {
+  it("findConflict returns null when conditioned value matches latest write", async () => {
     const index = new InMemoryFreshnessIndex();
-    index.recordWrite({
+    await index.recordWrite({
       type: "write-attempted",
       runId: R("r1"),
       dagId: D("d"),
@@ -120,12 +120,12 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     // Conditioned on "42" which matches the latest write
-    expect(index.findConflict("postgres:orders", "42", 0)).toBeNull();
+    expect(await index.findConflict("postgres:orders", "42", 0)).toBeNull();
   });
 
-  it("findConflict returns conflicting write entry", () => {
+  it("findConflict returns conflicting write entry", async () => {
     const index = new InMemoryFreshnessIndex();
-    index.recordWrite({
+    await index.recordWrite({
       type: "write-attempted",
       runId: R("r1"),
       dagId: D("d"),
@@ -137,15 +137,15 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     // Conditioned on "41" but the latest write produced "42"
-    const conflict = index.findConflict("postgres:orders", "41", 0);
+    const conflict = await index.findConflict("postgres:orders", "41", 0);
     expect(conflict).not.toBeNull();
     expect(conflict!.newWitness.value).toBe("42");
     expect(conflict!.runId).toBe(R("r1"));
   });
 
-  it("findConflict respects sinceMs threshold", () => {
+  it("findConflict respects sinceMs threshold", async () => {
     const index = new InMemoryFreshnessIndex();
-    index.recordWrite({
+    await index.recordWrite({
       type: "write-attempted",
       runId: R("r1"),
       dagId: D("d"),
@@ -157,15 +157,15 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     // sinceMs=2000 should not see the write at 1000
-    expect(index.findConflict("postgres:orders", "41", 2000)).toBeNull();
+    expect(await index.findConflict("postgres:orders", "41", 2000)).toBeNull();
 
     // sinceMs=500 should see it
-    expect(index.findConflict("postgres:orders", "41", 500)).not.toBeNull();
+    expect(await index.findConflict("postgres:orders", "41", 500)).not.toBeNull();
   });
 
-  it("clear empties the index", () => {
+  it("clear empties the index", async () => {
     const index = new InMemoryFreshnessIndex();
-    index.recordWrite({
+    await index.recordWrite({
       type: "write-attempted",
       runId: R("r1"),
       dagId: D("d"),
@@ -177,6 +177,6 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     index.clear();
-    expect(index.findConflict("postgres:orders", "41", 0)).toBeNull();
+    expect(await index.findConflict("postgres:orders", "41", 0)).toBeNull();
   });
 });

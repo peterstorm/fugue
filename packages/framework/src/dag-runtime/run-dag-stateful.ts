@@ -26,7 +26,7 @@ import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome }
 import { validateCapabilities } from "../shared/capabilities.js";
 import { wrapDagJobLike } from "./persistence.js";
 import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.js";
-import type { InMemoryFreshnessIndex } from "./freshness-check.js";
+import type { FreshnessIndex } from "./freshness-check.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -75,7 +75,7 @@ export interface DagRunOpts
    * omitted, a private instance is created per executor. Pass a shared
    * instance to enable cross-DAG freshness detection within a process.
    */
-  readonly freshnessIndex?: InMemoryFreshnessIndex;
+  readonly freshnessIndex?: FreshnessIndex;
 }
 
 // ---------------------------------------------------------------------------

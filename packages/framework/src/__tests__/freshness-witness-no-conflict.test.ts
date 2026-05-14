@@ -162,4 +162,40 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     );
     expect(witnessCaptured).toHaveLength(0);
   });
+
+  it("reads node skipped via checkpoint does NOT emit witness-captured", async () => {
+    const observer = new RecordingObserver();
+    const readNode: NodeDef<unknown, { version: number }> = {
+      id: N("reader"),
+      kind: "fetch",
+      inputSchema: z.unknown(),
+      outputSchema: z.object({ version: z.number() }),
+      requires: [],
+      sideEffects: { kind: "reads", resource: "postgres:orders" },
+      confidence: { mode: "none" },
+      extractWitness: (output) => ({
+        kind: "version",
+        resource: "postgres:orders",
+        value: String(output.version),
+      }),
+      run: async () => { throw new Error("should not be called"); },
+    };
+    const dag = defineDagFromArray({ id: "fw-checkpoint", nodes: [readNode], edges: [] });
+
+    // Provide a checkpoint so the node is skipped
+    const checkpoint = new Map<string, unknown>([["reader", { version: 99 }]]);
+    await runDagStateful(dag, null, mkCtx(observer), { resumeCheckpoint: checkpoint });
+
+    // Node was skipped — extractWitness should NOT have been called
+    const witnessCaptured = observer.events.filter(
+      (e): e is WitnessCapturedEvent => e.type === "witness-captured",
+    );
+    expect(witnessCaptured).toHaveLength(0);
+
+    // Verify the node was actually skipped
+    const skipped = observer.events.filter(
+      (e) => e.type === "node-skipped",
+    );
+    expect(skipped).toHaveLength(1);
+  });
 });

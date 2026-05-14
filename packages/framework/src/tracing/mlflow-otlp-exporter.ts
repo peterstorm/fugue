@@ -31,6 +31,7 @@ import type { ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter, TimedEvent } from "@opentelemetry/sdk-trace-base";
 import {
   AI_SPAN_TYPE,
+  AI_NODE_SIDE_EFFECTS_KIND,
   GEN_AI_REQUEST_MODEL,
   GEN_AI_SYSTEM,
   GEN_AI_USAGE_INPUT_TOKENS,
@@ -362,6 +363,14 @@ export class MlflowOtlpExporter implements SpanExporter {
     // getting a misleading provider stamp.
     if (attrs[GEN_AI_REQUEST_MODEL] !== undefined) {
       out["mlflow.llm.provider"] = attrs[GEN_AI_SYSTEM] ?? "unknown";
+    }
+
+    // Phase 1: Promote side-effects kind to a top-level MLflow tag for
+    // run-level filterability. Only set for writes/external-call nodes so
+    // pure-transform spans don't get a misleading tag.
+    const seKind = attrs[AI_NODE_SIDE_EFFECTS_KIND] as string | undefined;
+    if (seKind === "writes" || seKind === "external-call") {
+      out["mlflow.side_effects"] = seKind;
     }
 
     return Object.keys(out).length > 0 ? out : undefined;

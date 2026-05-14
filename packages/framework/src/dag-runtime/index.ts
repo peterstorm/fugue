@@ -30,6 +30,10 @@ export { buildDagExecutor } from "./executor.js";
 export { runDagStateful } from "./run-dag-stateful.js";
 export type { DagRunOpts } from "./run-dag-stateful.js";
 
+// Freshness witness contract (Phase 3)
+export { checkFreshness, InMemoryFreshnessIndex } from "./freshness-check.js";
+export type { FreshnessIndex, FreshnessConflict, FreshnessCheckResult, WriteEntry } from "./freshness-check.js";
+
 // Conditional-edge runtime helpers (ADR 0015)
 export {
   decideRoute,
