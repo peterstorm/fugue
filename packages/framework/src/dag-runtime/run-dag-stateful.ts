@@ -10,10 +10,12 @@
 import { match } from "ts-pattern";
 import type { JobLike, RunOptions } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
+import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { runStateMachine } from "../state-machine/runner.js";
@@ -209,7 +211,7 @@ export const runDagStateful = async <I, O>(
               dag,
               input,
               s.output,
-              context.outputs as Map<string, unknown>,
+              context.outputs as unknown as Map<string, unknown>,
               nodeCtx,
               meta,
               emitRunEnd,
@@ -231,19 +233,19 @@ export const runDagStateful = async <I, O>(
         })
         // Unexpected non-terminal states — should not be reached
         .with({ kind: "pending" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, "__executor__"),
+          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
         )
         .with({ kind: "running" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, "__executor__"),
+          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
         )
         .with({ kind: "retrying" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, "__executor__"),
+          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
         )
         .with({ kind: "retrying-hook" }, async (s) =>
           unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, s.nodeId),
         )
         .with({ kind: "awaiting-human" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, "__executor__"),
+          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
         )
         .exhaustive();
     } catch (e) {
@@ -252,7 +254,7 @@ export const runDagStateful = async <I, O>(
       const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
       const error: FrameworkError = lastFailedState !== undefined
         ? lastFailedState.error
-        : { kind: "node-crash", nodeId: "__executor__", retriability: isAbort ? "non-retriable" : "retriable", message: e instanceof Error ? e.message : String(e) };
+        : { kind: "node-crash", nodeId: EXECUTOR_NODE_ID, retriability: isAbort ? "non-retriable" : "retriable", message: e instanceof Error ? e.message : String(e) };
       closeRootSpan(rootSpan, { kind: "error", error });
       emitRunEnd("error");
       return err(error);
@@ -268,7 +270,7 @@ const unexpectedNonTerminal = <O>(
   rootSpan: import("@opentelemetry/api").Span,
   emitRunEnd: (status: "ok" | "error") => void,
   kind: string,
-  nodeId: string,
+  nodeId: NodeId,
 ): Result<O, FrameworkError> => {
   const message = `runDagStateful: unexpected non-terminal state ${kind}`;
   const error: FrameworkError = {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { BufferedObserver, computeRunSummary } from "../observer/buffered.js";
 import { RecordingObserver } from "../observer/observer.js";
@@ -12,11 +13,13 @@ import type {
 } from "../types/events.js";
 
 function runStart(runId = "r1"): RunStartEvent {
+  // @ts-expect-error — branded ID test fixture
   return { type: "run-start", runId, dagId: "dag1" as DagId, timestamp: new Date() };
 }
 
 function nodeStart(nodeId: string, runId = "r1"): NodeStartEvent {
-  return { type: "node-start", runId, dagId: "dag1" as DagId, nodeId, timestamp: new Date() };
+  // @ts-expect-error — branded ID test fixture
+  return { type: N("node-start"), runId, dagId: N("dag1") as unknown as any, nodeId, timestamp: new Date() };
 }
 
 function nodeEnd(nodeId: string, attrs: Record<string, unknown> = {}, runId = "r1"): NodeEndEvent {
@@ -33,6 +36,7 @@ function nodeEnd(nodeId: string, attrs: Record<string, unknown> = {}, runId = "r
 }
 
 function runEnd(status: "ok" | "error" = "ok", runId = "r1"): RunEndEvent {
+  // @ts-expect-error — branded ID test fixture
   return { type: "run-end", runId, dagId: "dag1" as DagId, timestamp: new Date(), duration: 200, status };
 }
 

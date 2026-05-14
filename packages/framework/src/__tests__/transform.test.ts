@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { N } from "./_id-helpers.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import { createTransformNode } from "../nodes/transform.js";
@@ -7,7 +8,7 @@ describe("createTransformNode", () => {
   it("transform node receives purified context (no ctx passed to transform)", () => {
     let receivedArgs: unknown[] = [];
     const node = createTransformNode({
-      id: "t1",
+      id: N("t1"),
       inputSchema: z.object({ x: z.number() }),
       outputSchema: z.object({ y: z.number() }),
       transform: (...args: any[]) => {
@@ -22,7 +23,7 @@ describe("createTransformNode", () => {
 
   it("sync transform function works via async run wrapper", async () => {
     const node = createTransformNode({
-      id: "double",
+      id: N("double"),
       inputSchema: z.object({ n: z.number() }),
       outputSchema: z.object({ result: z.number() }),
       transform: (input: { n: number }) => ok({ result: input.n * 2 }),

@@ -22,6 +22,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
+import type { NodeId, DagId } from "../types/ids.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
 import { withNodeSpan, type NodeSpanOutcome } from "./node-span.js";
@@ -97,8 +98,8 @@ export const runNodeShared = async (
   node: NodeDef<unknown, unknown>,
   dagInput: unknown,
   ctx: ValidatedNodeContext,
-  dagId: string,
-  outputs: ReadonlyMap<string, unknown>,
+  dagId: DagId,
+  outputs: ReadonlyMap<NodeId, unknown>,
   incoming: IncomingSources,
   opts: RunNodeOpts = {},
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {

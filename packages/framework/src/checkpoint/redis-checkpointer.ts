@@ -1,6 +1,7 @@
 import Redis from "ioredis";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { RunId } from "../types/ids.js";
 import { ok, err } from "../types/result.js";
 import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
@@ -24,8 +25,8 @@ interface StoredNodeState {
   readonly completedAt: string;
 }
 
-const nodesKey = (runId: string) => `chkpt:${runId}`;
-const metaKey = (runId: string) => `chkpt:${runId}:meta`;
+const nodesKey = (runId: RunId) => `chkpt:${runId}`;
+const metaKey = (runId: RunId) => `chkpt:${runId}:meta`;
 
 const serializeMeta = (meta: RunMeta): string =>
   JSON.stringify({
@@ -91,7 +92,7 @@ export class RedisCheckpointer implements Checkpointer {
   constructor(private readonly redis: Redis) {}
 
   async load(
-    runId: string,
+    runId: RunId,
     opts?: CheckpointerLoadOpts,
   ): Promise<Result<RunState | null, FrameworkError>> {
     let rawMeta: string | null;
@@ -191,7 +192,7 @@ export class RedisCheckpointer implements Checkpointer {
     });
   }
 
-  async saveNode(runId: string, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
+  async saveNode(runId: RunId, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
     const payload = serializeNode(state);
     try {
       if (!this.saveNodeSha) {
@@ -235,7 +236,7 @@ export class RedisCheckpointer implements Checkpointer {
     }
   }
 
-  async setMeta(runId: string, meta: RunMeta): Promise<Result<void, FrameworkError>> {
+  async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
     try {
       await this.redis.set(metaKey(runId), serializeMeta(meta), "EX", TTL_SECONDS);
       return ok(undefined);

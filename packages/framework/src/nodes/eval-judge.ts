@@ -15,6 +15,8 @@
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
 import type { LlmClient, LlmRequest } from "../types/llm.js";
+import { __brandNodeId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 
@@ -61,7 +63,7 @@ export type EvalJudgeResponse = z.infer<typeof EvalJudgeResponseSchema>;
 /** Configuration for creating an eval-judge node. */
 export interface EvalJudgeNodeConfig {
   /** Unique node ID. */
-  readonly id: string;
+  readonly id: NodeId;
   /** Criteria to evaluate against. */
   readonly criteria: readonly string[];
   /** Score threshold — below this, the judge returns passed: false. Default 0.8. */
@@ -76,7 +78,7 @@ export interface EvalJudgeNodeConfig {
 
 /** Definition of an eval-judge node (stored on DagDef.evalJudges). */
 export interface EvalJudgeNodeDef {
-  readonly id: string;
+  readonly id: NodeId;
   readonly kind: "eval-judge";
   readonly config: EvalJudgeNodeConfig;
   /**
@@ -99,7 +101,7 @@ const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): vo
       type: "sub-span",
       runId: ctx.runId,
       dagId: ctx.dagId,
-      nodeId: judgeId,
+      nodeId: __brandNodeId(judgeId),
       parentSpanId: judgeId,
       kind: "EVALUATOR",
       timestamp: new Date(),

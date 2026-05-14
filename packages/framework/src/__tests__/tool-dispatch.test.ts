@@ -8,6 +8,7 @@ import { tool } from "../llm/tools.js";
 import type { NodeContext } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { ToolCall } from "../llm/tool-dispatch.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,

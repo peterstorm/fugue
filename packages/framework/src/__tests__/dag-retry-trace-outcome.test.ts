@@ -19,6 +19,7 @@ import { defineDagFromArray } from "../executor/define-dag.js";
 import type { NodeContext, NodeDef } from "../types/node.js";
 import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const mkCtx = (): NodeContext => ({
   runId: "retry-trace-run" as RunId,
@@ -36,7 +37,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
   it("flaky node that fails once emits at least one trace with outcome:'retry'", async () => {
     let callCount = 0;
     const flaky: NodeDef<unknown, unknown> = {
-      id: "flaky",
+      id: N("flaky"),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -79,7 +80,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
 
   it("non-flaky DAG emits zero traces with outcome:'retry'", async () => {
     const happy: NodeDef<unknown, unknown> = {
-      id: "happy",
+      id: N("happy"),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),

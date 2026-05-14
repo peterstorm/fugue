@@ -1,5 +1,6 @@
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { RunId } from "../types/ids.js";
 import { ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 
@@ -72,11 +73,11 @@ export interface CheckpointerLoadOpts {
 
 export interface Checkpointer {
   load(
-    runId: string,
+    runId: RunId,
     opts?: CheckpointerLoadOpts,
   ): Promise<Result<RunState | null, FrameworkError>>;
-  saveNode(runId: string, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>>;
-  setMeta(runId: string, meta: RunMeta): Promise<Result<void, FrameworkError>>;
+  saveNode(runId: RunId, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>>;
+  setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>>;
 }
 
 // --- InMemoryCheckpointer ---
@@ -104,7 +105,7 @@ export class InMemoryCheckpointer implements Checkpointer {
   }
 
   async load(
-    runId: string,
+    runId: RunId,
     opts?: CheckpointerLoadOpts,
   ): Promise<Result<RunState | null, FrameworkError>> {
     const stored = this.metas.get(runId);
@@ -148,13 +149,13 @@ export class InMemoryCheckpointer implements Checkpointer {
     return ok({ meta, nodes: this.nodes.get(runId) ?? {} });
   }
 
-  async saveNode(runId: string, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
+  async saveNode(runId: RunId, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
     const existing = this.nodes.get(runId) ?? {};
     this.nodes.set(runId, { ...existing, [nodeId]: state });
     return ok(undefined);
   }
 
-  async setMeta(runId: string, meta: RunMeta): Promise<Result<void, FrameworkError>> {
+  async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
     // Always stamp the writer's framework version unless the caller supplied
     // their own (lets tests construct stale-version payloads). Matches
     // `RedisCheckpointer.setMeta` exactly so backend swap is transparent.

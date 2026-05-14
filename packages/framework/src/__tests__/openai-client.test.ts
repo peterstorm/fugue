@@ -4,6 +4,7 @@ import { z } from "zod";
 import { OpenAILlmClient } from "../llm/openai-client.js";
 import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // fetch stub
@@ -119,7 +120,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
-        expect(result.error.nodeId).toBe("n");
+        expect(result.error.nodeId).toBe(N("n"));
         expect(result.error.message).toMatch(/429/);
         expect(result.error.message).toMatch(/rate limit/);
       }
@@ -139,7 +140,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
-        expect(result.error.nodeId).toBe("n");
+        expect(result.error.nodeId).toBe(N("n"));
         expect(result.error.message).toMatch(/500/);
       }
     }
@@ -175,7 +176,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("missing");
+      expect(result.error.nodeId).toBe(N("missing"));
     }
   });
 
@@ -227,7 +228,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("malformed");
+      expect(result.error.nodeId).toBe(N("malformed"));
       expect(result.error.message).toMatch(/no text output/);
     }
   });
@@ -266,7 +267,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("schema-node");
+      expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
     }
   });
@@ -399,7 +400,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
-        expect(result.error.nodeId).toBe("loop-node");
+        expect(result.error.nodeId).toBe(N("loop-node"));
         expect(result.error.retriability).toBe("non-retriable");
       }
     }
@@ -446,7 +447,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
-        expect(result.error.nodeId).toBe("rl");
+        expect(result.error.nodeId).toBe(N("rl"));
         expect(result.error.message).toMatch(/429/);
       }
     }

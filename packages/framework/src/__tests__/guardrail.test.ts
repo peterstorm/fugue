@@ -4,6 +4,7 @@ import { createGuardrailNode, ok } from "../../src/index.js";
 import type { GuardrailResult } from "../../src/index.js";
 import { z } from "zod";
 import { NoopObserver, RecordingObserver } from "../../src/observer/observer.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const InputSchema = z.object({ value: z.number() });
 const OutputSchema: z.ZodType<GuardrailResult<number>> = z.any();
@@ -23,7 +24,7 @@ const makeCtx = (observer = new NoopObserver()) => ({
 describe("createGuardrailNode", () => {
   test("passes data through when validation succeeds", async () => {
     const node = createGuardrailNode({
-      id: "test-guardrail",
+      id: N("test-guardrail"),
       inputSchema: InputSchema,
       outputSchema: OutputSchema,
       validate: (input) => ({
@@ -50,7 +51,7 @@ describe("createGuardrailNode", () => {
 
   test("passes data through with warnings when validation fails", async () => {
     const node = createGuardrailNode({
-      id: "test-guardrail",
+      id: N("test-guardrail"),
       inputSchema: InputSchema,
       outputSchema: OutputSchema,
       validate: (input) => ({
@@ -76,7 +77,7 @@ describe("createGuardrailNode", () => {
   test("emits sub-span event on failure", async () => {
     const observer = new RecordingObserver();
     const node = createGuardrailNode({
-      id: "test-guardrail",
+      id: N("test-guardrail"),
       inputSchema: InputSchema,
       outputSchema: OutputSchema,
       validate: (input) => ({
@@ -97,7 +98,7 @@ describe("createGuardrailNode", () => {
   test("does not emit sub-span on success", async () => {
     const observer = new RecordingObserver();
     const node = createGuardrailNode({
-      id: "test-guardrail",
+      id: N("test-guardrail"),
       inputSchema: InputSchema,
       outputSchema: OutputSchema,
       validate: (input) => ({

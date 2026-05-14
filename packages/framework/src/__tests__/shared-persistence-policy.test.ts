@@ -17,6 +17,7 @@ import { RecordingObserver } from "../observer/observer.js";
 import type { PersistencePolicy } from "../observer/policy.js";
 import type { RunSummary } from "../observer/buffered.js";
 import type { RunStartEvent, RunEndEvent } from "../types/events.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // Minimal SpanExporter stub — captures what was exported so the assertion
 // distinguishes "exported" from "dropped".
@@ -62,6 +63,7 @@ const makeSpan = (traceId: string, kind: "root" | "child" = "root"): ReadableSpa
 
 const runStart = (runId: string): RunStartEvent => ({
   type: "run-start",
+  // @ts-expect-error — branded ID test fixture
   runId,
   dagId: "dag1" as DagId,
   timestamp: new Date(),
@@ -69,6 +71,7 @@ const runStart = (runId: string): RunStartEvent => ({
 
 const runEnd = (runId: string, status: "ok" | "error" = "ok"): RunEndEvent => ({
   type: "run-end",
+  // @ts-expect-error — branded ID test fixture
   runId,
   dagId: "dag1" as DagId,
   timestamp: new Date(),

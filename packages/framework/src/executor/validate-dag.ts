@@ -10,9 +10,11 @@ import type { NodesRecord } from "../types/dag-internals.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId, DagId } from "../types/ids.js";
+import { __brandNodeId, __brandDagId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 
-const validationErr = (nodeId: string, message: string): FrameworkError => ({
+const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
   kind: "validation" as const,
   nodeId,
   message,
@@ -50,7 +52,7 @@ export const validateDagShape = (
   ][];
 
   if (entries.length === 0) {
-    return err(validationErr("__dag__", `DAG '${input.id}' has no nodes`));
+    return err(validationErr(__brandNodeId("__dag__"), `DAG '${input.id}' has no nodes`));
   }
 
   // Record-key vs node.id consistency.
@@ -65,7 +67,7 @@ export const validateDagShape = (
     }
   }
 
-  const nodeIds = new Set(entries.map(([id]) => id));
+  const nodeIds = new Set(entries.map(([id]) => id as NodeId));
   // Normalize edges into the tagged-discriminant runtime form. The input may
   // carry the implicit-unconditional or implicit-conditional (`when`-only)
   // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
@@ -142,7 +144,7 @@ export const validateDagShape = (
 
   // Else-totality: every node with any conditional out-edge must have exactly
   // one default out-edge.
-  const outgoingByNode = new Map<string, EdgeDef[]>();
+  const outgoingByNode = new Map<NodeId, EdgeDef[]>();
   for (const id of nodeIds) outgoingByNode.set(id, []);
   for (const e of edges) {
     const list = outgoingByNode.get(e.from);
@@ -164,14 +166,14 @@ export const validateDagShape = (
       continue;
     }
     if (defaults.length !== 1) {
-      return err({ kind: "missing-default-edge", nodeId: id });
+      return err({ kind: "missing-default-edge", nodeId: id as NodeId });
     }
   }
 
-  if (input.outputNodeId !== undefined && !nodeIds.has(input.outputNodeId)) {
+  if (input.outputNodeId !== undefined && !nodeIds.has(input.outputNodeId as NodeId)) {
     return err(
       validationErr(
-        input.outputNodeId,
+        input.outputNodeId as NodeId,
         `outputNodeId '${input.outputNodeId}' is not a node in DAG '${input.id}'`,
       ),
     );
@@ -188,7 +190,7 @@ export const validateDagShape = (
       (id) => (incomingAny.get(id)?.length ?? 0) === 0,
     );
 
-    const reachable = new Set<string>(entryIds);
+    const reachable = new Set<NodeId>(entryIds);
     const stack = [...reachable];
     while (stack.length > 0) {
       const cur = stack.pop()!;
@@ -201,7 +203,7 @@ export const validateDagShape = (
       }
     }
 
-    if (!reachable.has(input.outputNodeId)) {
+    if (!reachable.has(input.outputNodeId as NodeId)) {
       // Walk backward from the output along unconditional + default edges to
       // find the first node that has no unconditional/default inbound. That
       // node is the actual frontier — the place where routing diverged from
@@ -232,8 +234,8 @@ export const validateDagShape = (
       }
       return err({
         kind: "output-unreachable-under-routing",
-        outputNodeId: input.outputNodeId,
-        missedFromNode: frontier,
+        outputNodeId: input.outputNodeId as NodeId,
+        missedFromNode: frontier as NodeId,
       });
     }
   }
@@ -244,10 +246,10 @@ export const validateDagShape = (
   // compile error here, rather than a silent pass-through that would only
   // surface when something tried to read the missing field at runtime.
   const unbranded: DagDefShape = {
-    id: input.id,
+    id: __brandDagId(input.id),
     nodes: entries.map(([, n]) => n),
     edges,
-    ...(input.outputNodeId !== undefined ? { outputNodeId: input.outputNodeId } : {}),
+    ...(input.outputNodeId !== undefined ? { outputNodeId: input.outputNodeId as NodeId } : {}),
     ...(input.evalJudges !== undefined ? { evalJudges: input.evalJudges } : {}),
     ...(input.retryLimits !== undefined
       ? { retryLimits: input.retryLimits as Readonly<Record<string, number>> }

@@ -9,6 +9,7 @@ import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { NoopObserver, RecordingObserver } from "../observer/observer.js";
 import { ok } from "../types/result.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const noop = async () => ok(undefined as unknown);
 
@@ -16,6 +17,7 @@ const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
 ): NodeDef<unknown, unknown> => ({
+  // @ts-expect-error — branded ID test fixture
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -81,8 +83,8 @@ describe("conditional edges — 2-way routing", () => {
     const routeDecided = obs.events.filter((e) => e.type === "route-decided");
     expect(routeDecided).toHaveLength(1);
     if (routeDecided[0]?.type === "route-decided") {
-      expect([...routeDecided[0].chosenTargets]).toEqual(["yes-branch"]);
-      expect([...routeDecided[0].prunedTargets]).toEqual(["no-branch"]);
+      expect([...routeDecided[0].chosenTargets]).toEqual([N("yes-branch")]);
+      expect([...routeDecided[0].prunedTargets]).toEqual([N("no-branch")]);
       expect(routeDecided[0].defaultTaken).toBe(false);
       expect(routeDecided[0].matchedPredicate).toEqual({ kind: "yes" });
     }
@@ -90,7 +92,7 @@ describe("conditional edges — 2-way routing", () => {
     const pruned = obs.events.filter((e) => e.type === "node-pruned");
     expect(pruned).toHaveLength(1);
     if (pruned[0]?.type === "node-pruned") {
-      expect(pruned[0].nodeId).toBe("no-branch");
+      expect(pruned[0].nodeId).toBe(N("no-branch"));
     }
   });
 
@@ -347,7 +349,7 @@ describe("conditional edges — malformed predicate at runtime", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("predicate-malformed");
       if (result.error.kind === "predicate-malformed") {
-        expect(result.error.nodeId).toBe("router");
+        expect(result.error.nodeId).toBe(N("router"));
         expect(result.error.message).toContain("'kind'");
       }
     }

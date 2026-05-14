@@ -11,6 +11,7 @@
 // pipelines) depend on.
 
 import { describe, it, expect } from "bun:test";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { BufferedObserver } from "../observer/buffered.js";
 import { alwaysOn } from "../observer/policy.js";

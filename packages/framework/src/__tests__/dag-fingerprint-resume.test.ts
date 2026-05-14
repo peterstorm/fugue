@@ -18,6 +18,7 @@ import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const ctx: NodeContext = {
   runId: "resume-test" as RunId,

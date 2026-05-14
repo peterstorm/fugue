@@ -15,6 +15,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,6 +27,7 @@ const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
 ): NodeDef<unknown, unknown> => ({
+  // @ts-expect-error — branded ID test fixture
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -310,7 +312,7 @@ describe("runDagStateful — retry exhausted", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("retry-exhausted");
       if (result.error.kind === "retry-exhausted") {
-        expect(result.error.nodeId).toBe("a");
+        expect(result.error.nodeId).toBe(N("a"));
       }
     }
     expect(attempts).toBe(3); // initial + 2 retries
@@ -504,7 +506,7 @@ describe("runDagStateful — HITL reject", () => {
       expect(result.error.kind).toBe("rejected");
       if (result.error.kind === "rejected") {
         expect(result.error.reason).toBe("not acceptable");
-        expect(result.error.nodeId).toBe("a");
+        expect(result.error.nodeId).toBe(N("a"));
       }
     }
   });
@@ -543,7 +545,7 @@ describe("runDagStateful — HITL reroute-back", () => {
       rerouteCount++;
       if (rerouteCount === 1) {
         // First time: reroute back to wave 0 (node "a")
-        return { action: "reroute", targetNodeId: "a" };
+        return { action: "reroute", targetNodeId: N("a") };
       }
       // Second time: approve
       return { action: "approve" };
@@ -613,7 +615,7 @@ describe("runDagStateful — abort", () => {
     const controller = new AbortController();
     let observedSignalAborted = false;
     const slowNode: NodeDef<unknown, unknown, FrameworkError> = {
-      id: "slow",
+      id: N("slow"),
       kind: "transform",
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),
@@ -1063,7 +1065,7 @@ describe("runDagStateful — onHumanReview throws", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
-        expect(result.error.nodeId).toBe("review-node");
+        expect(result.error.nodeId).toBe(N("review-node"));
         expect(result.error.message).toBe("hook exploded");
       }
     }

@@ -18,11 +18,13 @@ import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { RecordingObserver } from "../observer/observer.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
 ): NodeDef<unknown, unknown> => ({
+  // @ts-expect-error — branded ID test fixture
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -100,7 +102,7 @@ describe("§6.13 — predicate-malformed observer event sequence (regression for
 
     // The node-error must be for the router, and the run-end status is "error".
     const nodeErrEvt = observer.events[nodeErrorIdx];
-    expect(nodeErrEvt && "nodeId" in nodeErrEvt && nodeErrEvt.nodeId).toBe("router");
+    expect(nodeErrEvt && "nodeId" in nodeErrEvt && nodeErrEvt.nodeId).toBe(N("router"));
     const runEndEvt = observer.events[runEndIdx];
     expect(runEndEvt && "status" in runEndEvt && runEndEvt.status).toBe("error");
   });

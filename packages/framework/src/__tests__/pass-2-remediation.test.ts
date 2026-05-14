@@ -38,6 +38,7 @@ import { NoopObserver } from "../observer/observer.js";
 import type { NodeContext } from "../types/node.js";
 
 import fc from "fast-check";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,
@@ -175,7 +176,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       id: "d",
       nodes: {
         a: createTransformNode({
-          id: "a",
+          id: N("a"),
           inputSchema: z.unknown(),
           outputSchema: z.unknown(),
           transform: () => ok(null),
@@ -187,11 +188,11 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
     });
     return {
       dag,
-      waves: [["a"]],
+      waves: [[N("a")]],
       outputs: new Map(),
       retries: new Map(),
       initialInput: null,
-      activeNodeIds: new Set(["a"]),
+      activeNodeIds: new Set(["a"]) as any,
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
@@ -200,7 +201,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
 
   it("retriability: non-retriable bypasses the retry budget", () => {
     const ctx = baseCtx();
-    const result = handleNodeFailed(0, "a", {
+    const result = handleNodeFailed(0, N("a"), {
       kind: "node-crash",
       nodeId: "a" as NodeId,
       message: "permanent",
@@ -211,7 +212,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
 
   it("retriability: retriable consumes the retry budget", () => {
     const ctx = baseCtx();
-    const result = handleNodeFailed(0, "a", {
+    const result = handleNodeFailed(0, N("a"), {
       kind: "node-crash",
       nodeId: "a" as NodeId,
       message: "transient",
@@ -227,7 +228,7 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       id: "d",
       nodes: {
         a: createTransformNode({
-          id: "a",
+          id: N("a"),
           inputSchema: z.unknown(),
           outputSchema: z.unknown(),
           transform: () => ok(null),
@@ -238,11 +239,11 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
     });
     return {
       dag,
-      waves: [["a"]],
+      waves: [[N("a")]],
       outputs: new Map(),
       retries: new Map(),
       initialInput: null,
-      activeNodeIds: new Set(["a"]),
+      activeNodeIds: new Set(["a"]) as any,
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
@@ -274,7 +275,7 @@ describe("Wave 2.3 — GuardrailFailed variant emitted when validator throws", (
       import("../nodes/guardrail.js").GuardrailResult<unknown>
     >;
     const node = createGuardrailNode<{ x: number }, unknown>({
-      id: "g",
+      id: N("g"),
       inputSchema: z.object({ x: z.number() }),
       outputSchema: ResultSchema,
       validate: (_i) => {
@@ -310,13 +311,13 @@ describe("Wave 2.3 — GuardrailFailed variant emitted when validator throws", (
 describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at load", () => {
   it("load with mismatched expectedDagFingerprint returns checkpoint-version-mismatch", async () => {
     const cp = new InMemoryCheckpointer();
-    await cp.setMeta("r1", {
+    await cp.setMeta(R("r1"), {
       dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
       dagFingerprint: "fp-a",
     });
-    const result = await cp.load("r1", { expectedDagFingerprint: "fp-b" });
+    const result = await cp.load(R("r1"), { expectedDagFingerprint: "fp-b" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-version-mismatch");
@@ -325,24 +326,24 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
 
   it("load with matching expectedDagFingerprint returns the state", async () => {
     const cp = new InMemoryCheckpointer();
-    await cp.setMeta("r2", {
+    await cp.setMeta(R("r2"), {
       dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
       dagFingerprint: "fp-match",
     });
-    const result = await cp.load("r2", { expectedDagFingerprint: "fp-match" });
+    const result = await cp.load(R("r2"), { expectedDagFingerprint: "fp-match" });
     expect(result.ok).toBe(true);
   });
 
   it("load without expectedDagFingerprint preserves legacy no-check behavior", async () => {
     const cp = new InMemoryCheckpointer();
-    await cp.setMeta("r3", {
+    await cp.setMeta(R("r3"), {
       dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
     });
-    const result = await cp.load("r3");
+    const result = await cp.load(R("r3"));
     expect(result.ok).toBe(true);
   });
 
@@ -351,7 +352,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
       id: "d",
       nodes: {
         n: createTransformNode({
-          id: "n",
+          id: N("n"),
           inputSchema: z.unknown(),
           outputSchema: z.unknown(),
           transform: () => ok(null),
@@ -364,7 +365,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
       id: "d",
       nodes: {
         n: createTransformNode({
-          id: "n",
+          id: N("n"),
           inputSchema: z.unknown(),
           outputSchema: z.unknown(),
           transform: () => ok(null),
@@ -443,7 +444,7 @@ describe("Wave 7 — resumeCheckpoint on the stateful executor", () => {
       id: "d",
       nodes: {
         a: createTransformNode({
-          id: "a",
+          id: N("a"),
           inputSchema: z.unknown(),
           // Schema tightened after the checkpoint was written
           outputSchema: z.object({ shape: z.literal("new") }),
@@ -473,7 +474,7 @@ describe("Wave 7 — resumeCheckpoint on the stateful executor", () => {
       id: "d",
       nodes: {
         a: createTransformNode({
-          id: "a",
+          id: N("a"),
           inputSchema: z.unknown(),
           outputSchema: z.object({ v: z.number() }),
           transform: () => {
@@ -506,13 +507,13 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       id: "d",
       nodes: {
         a: createTransformNode({
-          id: "a",
+          id: N("a"),
           inputSchema: z.unknown(),
           outputSchema: z.unknown(),
           transform: () => ok(null),
         }),
         b: createTransformNode({
-          id: "b",
+          id: N("b"),
           inputSchema: z.unknown(),
           outputSchema: z.unknown(),
           transform: () => ok(null),
@@ -524,11 +525,12 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
     });
     return {
       dag,
-      waves: [["a", "b"]],
+      waves: [[N("a"), N("b")]],
       outputs: new Map(),
+      // @ts-expect-error — branded ID test fixture
       retries,
       initialInput: null,
-      activeNodeIds: new Set(["a", "b"]),
+      activeNodeIds: new Set(["a", "b"]) as any,
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
@@ -539,28 +541,28 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
     const ctx = ctxWithRetries(new Map());
     const result = handleNodeFailed(
       0,
-      "a",
+      N("a"),
       { kind: "transient", nodeId: "a" as NodeId, message: "boom" },
       ctx,
       undefined,
-      ["b"],
+      [N("b")],
     );
     // After: a.retries = 1 (primary), b.retries = 1 (co-failed pre-increment)
-    expect(result.context.retries.get("a")).toBe(1);
-    expect(result.context.retries.get("b")).toBe(1);
+    expect(result.context.retries.get(N("a"))).toBe(1);
+    expect(result.context.retries.get(N("b"))).toBe(1);
   });
 
   it("co-failed pre-increment caps at retryLimit", () => {
     const ctx = ctxWithRetries(new Map([["b", 2]]));
     const result = handleNodeFailed(
       0,
-      "a",
+      N("a"),
       { kind: "transient", nodeId: "a" as NodeId, message: "boom" },
       ctx,
       undefined,
-      ["b"],
+      [N("b")],
     );
-    expect(result.context.retries.get("b")).toBe(2);
+    expect(result.context.retries.get(N("b"))).toBe(2);
   });
 });
 
@@ -632,7 +634,7 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
       id: "d",
       nodes: {
         a: createTransformNode({
-          id: "a",
+          id: N("a"),
           inputSchema: z.object({ requiredField: z.string() }),
           outputSchema: z.unknown(),
           transform: () => ok(null),

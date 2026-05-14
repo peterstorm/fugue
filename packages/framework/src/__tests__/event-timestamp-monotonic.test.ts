@@ -13,6 +13,7 @@ import { makeNodeContext } from "../shared/index.js";
 import { ok } from "../types/result.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // Helper: build a chain `n0 → n1 → ... → nK-1` of pure-transform nodes.
 const buildChain = (count: number): {

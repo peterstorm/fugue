@@ -6,6 +6,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { AnthropicLlmClient } from "../llm/anthropic-client.js";
 import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Anthropic SDK stub
@@ -132,7 +133,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
-        expect(result.error.nodeId).toBe("my-node");
+        expect(result.error.nodeId).toBe(N("my-node"));
       }
     }
   });
@@ -150,7 +151,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("schema-node");
+      expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
     }
   });
@@ -210,7 +211,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("n");
+      expect(result.error.nodeId).toBe(N("n"));
       expect(result.error.message).toMatch(/network down/);
       expect(result.error.stack).toBeDefined();
     }
@@ -309,7 +310,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
-        expect(result.error.nodeId).toBe("loop-node");
+        expect(result.error.nodeId).toBe(N("loop-node"));
         expect(result.error.retriability).toBe("non-retriable");
       }
     }
@@ -399,7 +400,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
-        expect(result.error.nodeId).toBe("rate-limited-node");
+        expect(result.error.nodeId).toBe(N("rate-limited-node"));
         expect(result.error.message).toMatch(/429|rate_limit/);
       }
     }
@@ -447,7 +448,7 @@ describe("AnthropicLlmClient — 429 mapping (sendStructured)", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
-        expect(result.error.nodeId).toBe("rl-node");
+        expect(result.error.nodeId).toBe(N("rl-node"));
       }
     }
   });

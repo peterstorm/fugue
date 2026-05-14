@@ -1,12 +1,12 @@
 import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type { LlmClient, LlmRequest } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 import { __brandNodeId } from "../types/ids.js";
-import type { NodeId } from "../types/ids.js";
 
 /**
  * Discriminated pairing for `skipWhen` + `skipDefault`. Supplying `skipWhen`
@@ -17,7 +17,7 @@ export type LlmSkipConfig<I, O> =
   | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
   | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
 
-interface LlmNodeConfigBase<I, O, Id extends string = string> {
+interface LlmNodeConfigBase<I, O, Id extends NodeId = NodeId> {
   readonly id: Id;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
@@ -35,7 +35,7 @@ interface LlmNodeConfigBase<I, O, Id extends string = string> {
   readonly system?: string;
 }
 
-export type LlmNodeConfig<I, O, Id extends string = string> =
+export type LlmNodeConfig<I, O, Id extends NodeId = NodeId> =
   LlmNodeConfigBase<I, O, Id> & LlmSkipConfig<I, O>;
 
 /**
@@ -47,7 +47,7 @@ const interpolatePrompt = (template: string, vars: Record<string, unknown>): str
     template,
   );
 
-export const createLlmNode = <I, O, const Id extends string = string>(
+export const createLlmNode = <I, O, const Id extends NodeId = NodeId>(
   config: LlmNodeConfig<I, O, Id>,
 ): NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & { readonly id: Id & NodeId } => ({
   id: __brandNodeId(config.id) as Id & NodeId,

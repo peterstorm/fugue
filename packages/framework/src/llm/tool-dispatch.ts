@@ -1,5 +1,6 @@
 import type { NodeContext } from "../types/node.js";
 import type { ToolDef, ToolContext } from "../types/llm.js";
+import { __brandNodeId } from "../types/ids.js";
 import { withToolSpan, setToolIoAttributes } from "./spans.js";
 
 /**
@@ -75,7 +76,7 @@ export async function dispatchToolCall(
         type: "sub-span",
         runId: ctx.runId,
         dagId: ctx.dagId,
-        nodeId: call.name,
+        nodeId: __brandNodeId(call.name),
         parentSpanId: call.id,
         kind: "CHAIN",
         timestamp: new Date(),

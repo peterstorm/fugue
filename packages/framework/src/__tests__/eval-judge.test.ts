@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import {
@@ -179,16 +180,16 @@ describe("failOpenResult", () => {
 describe("createEvalJudgeNode", () => {
   test("creates node with correct kind and id", () => {
     const node = createEvalJudgeNode({
-      id: "my-judge",
+      id: N("my-judge"),
       criteria: ["factuality"],
     });
-    expect(node.id).toBe("my-judge");
+    expect(node.id).toBe(N("my-judge"));
     expect(node.kind).toBe("eval-judge");
   });
 
   test("uses default threshold of 0.8", () => {
     const node = createEvalJudgeNode({
-      id: "judge",
+      id: N("judge"),
       criteria: ["x"],
     });
     expect(node.config.threshold).toBeUndefined(); // stored as config, applied at runtime
@@ -204,7 +205,7 @@ describe("createEvalJudgeNode", () => {
       });
 
       const node = createEvalJudgeNode({
-        id: "judge",
+        id: N("judge"),
         criteria: ["factuality", "relevance"],
         threshold: 0.8,
       });
@@ -223,7 +224,7 @@ describe("createEvalJudgeNode", () => {
       });
 
       const node = createEvalJudgeNode({
-        id: "judge",
+        id: N("judge"),
         criteria: ["factuality", "relevance"],
         threshold: 0.8,
       });
@@ -251,7 +252,7 @@ describe("createEvalJudgeNode", () => {
         },
       };
 
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       await node.run("in", "out", makeCtx({ llm: mainLlm, judgeLlm }));
       expect(calledWith).toBe("judgeLlm");
     });
@@ -266,13 +267,13 @@ describe("createEvalJudgeNode", () => {
         },
       };
 
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       await node.run("in", "out", makeCtx({ llm: mainLlm }));
       expect(calledWith).toBe("mainLlm");
     });
 
     test("fail-open when no LLM client available", async () => {
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx());
       expect(result.passed).toBe(true);
       expect(result.reason).toContain("No LLM client available");
@@ -280,7 +281,7 @@ describe("createEvalJudgeNode", () => {
 
     test("fail-open when LLM returns error", async () => {
       const llm = makeFailingLlm("rate limited");
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
       expect(result.passed).toBe(true);
       expect(result.reason).toContain("rate limited");
@@ -288,7 +289,7 @@ describe("createEvalJudgeNode", () => {
 
     test("fail-open when LLM throws exception", async () => {
       const llm = makeThrowingLlm();
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
       expect(result.passed).toBe(true);
       expect(result.reason).toContain("network timeout");
@@ -305,7 +306,7 @@ describe("createEvalJudgeNode", () => {
       };
 
       const node = createEvalJudgeNode({
-        id: "j",
+        id: N("j"),
         criteria: ["tone"],
         rubricInline: "Check that the tone is professional and neutral",
       });
@@ -325,7 +326,7 @@ describe("createEvalJudgeNode", () => {
 
       const prompts = { get: (name: string) => name === "custom-rubric" ? "Evaluate for Danish language quality" : null };
       const node = createEvalJudgeNode({
-        id: "j",
+        id: N("j"),
         criteria: ["language"],
         rubricTemplateId: "custom-rubric",
       });
@@ -344,7 +345,7 @@ describe("createEvalJudgeNode", () => {
       };
 
       const node = createEvalJudgeNode({
-        id: "j",
+        id: N("j"),
         criteria: ["factuality", "completeness"],
         threshold: 0.7,
       });
@@ -364,7 +365,7 @@ describe("createEvalJudgeNode", () => {
         },
       };
 
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       await node.run({ topic: "AI safety" }, { summary: "AI is important" }, makeCtx({ judgeLlm: llm }));
       expect(capturedUser).toContain("AI safety");
       expect(capturedUser).toContain("AI is important");
@@ -380,7 +381,7 @@ describe("createEvalJudgeNode", () => {
         },
       };
 
-      const node = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       await node.run("in", "out", makeCtx({ judgeLlm: llm }));
       expect(capturedSystem).toContain("quality evaluation judge");
     });
@@ -396,12 +397,12 @@ describe("createEvalJudgeNode", () => {
       };
 
       // Default model
-      const node1 = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+      const node1 = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       await node1.run("in", "out", makeCtx({ judgeLlm: llm }));
       expect(capturedModel).toBe("gpt-4o-mini");
 
       // Custom model
-      const node2 = createEvalJudgeNode({ id: "j", criteria: ["x"], model: "claude-haiku" });
+      const node2 = createEvalJudgeNode({ id: N("j"), criteria: [N("x")], model: N("claude-haiku") });
       await node2.run("in", "out", makeCtx({ judgeLlm: llm }));
       expect(capturedModel).toBe("claude-haiku");
     });

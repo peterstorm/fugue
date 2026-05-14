@@ -10,6 +10,8 @@ import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.j
 import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { Observer } from "../observer/observer.js";
+import type { NodeId, DagId } from "../types/ids.js";
+import { __brandNodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { runNodeShared } from "./run-node.js";
 import { type NodeSpanOutcome } from "./node-span.js";
@@ -55,8 +57,8 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 
 const validateApproveEdit = (
   action: import("./types.js").HumanAction,
-  nodeId: string,
-  nodeMap: Map<string, NodeDef<unknown, unknown>>,
+  nodeId: NodeId,
+  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
 ): string | null => {
   if (action.action !== "approve-with-edit") return null;
   const nodeDef = nodeMap.get(nodeId);
@@ -79,7 +81,7 @@ const validateApproveEdit = (
  */
 const callHumanReviewHook = async (
   phaseKind: "awaiting-human" | "retrying-hook",
-  nodeId: string,
+  nodeId: NodeId,
   output: unknown,
   prompt: string,
   hooks: {
@@ -89,9 +91,9 @@ const callHumanReviewHook = async (
       prompt: string;
     }) => Promise<import("./types.js").HumanAction>;
   } | undefined,
-  nodeMap: Map<string, NodeDef<unknown, unknown>>,
+  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
-  dagId: string,
+  dagId: DagId,
   nowFn: () => number,
 ): Promise<DagEvent> => {
   const stamp = (): Date => new Date(nowFn());
@@ -213,7 +215,7 @@ export const buildDagExecutor = (
     now?: () => number;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
-  const nodeMap = new Map<string, NodeDef<unknown, unknown>>(
+  const nodeMap = new Map<NodeId, NodeDef<unknown, unknown>>(
     dag.nodes.map((n) => [n.id, n]),
   );
   const recordOutcomes = hooks?.recordOutcomes;
@@ -291,7 +293,7 @@ const runWave = async (
   waveIndex: number,
   machineCtx: DagMachineContext,
   dag: DagDef,
-  nodeMap: Map<string, NodeDef<unknown, unknown>>,
+  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: ValidatedNodeContext,
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
   resumeCheckpoint: Map<string, unknown> | undefined,
@@ -312,8 +314,8 @@ const runWave = async (
     fwLogger().error(`[runWave] ${message}`);
     return {
       type: "node-failed",
-      nodeId: "__wave__",
-      error: { kind: "node-crash", nodeId: "__wave__", message, retriability: "non-retriable" },
+      nodeId: __brandNodeId("__wave__"),
+      error: { kind: "node-crash", nodeId: __brandNodeId("__wave__"), message, retriability: "non-retriable" },
     };
   }
   const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
@@ -322,7 +324,7 @@ const runWave = async (
   // Snapshot prior-wave outputs so concurrent nodes in this wave can't
   // observe each other's results mid-execution. Each node reads only from
   // the frozen snapshot; the caller merges successes after Promise.all.
-  const priorOutputs: ReadonlyMap<string, unknown> = machineCtx.outputs;
+  const priorOutputs: ReadonlyMap<NodeId, unknown> = machineCtx.outputs;
 
   // Run all wave nodes concurrently
   const settled = await Promise.all(
@@ -386,8 +388,8 @@ const runWave = async (
   //   so they can be persisted into ctx.outputs and skipped on retry.
   // - Collect ALL failures (not just the first) so co-failed siblings get their
   //   retry counters pre-incremented, preventing off-by-one retry accounting.
-  const newOutputs = new Map<string, unknown>();
-  const failures: Array<{ nodeId: string; error: FrameworkError }> = [];
+  const newOutputs = new Map<NodeId, unknown>();
+  const failures: Array<{ nodeId: NodeId; error: FrameworkError }> = [];
 
   for (const { nodeId, result } of results) {
     if (result.ok) {
@@ -398,7 +400,7 @@ const runWave = async (
   }
 
   if (failures.length > 0) {
-    const [primary, ...siblings] = failures as [{ nodeId: string; error: FrameworkError }, ...{ nodeId: string; error: FrameworkError }[]];
+    const [primary, ...siblings] = failures as [{ nodeId: NodeId; error: FrameworkError }, ...{ nodeId: NodeId; error: FrameworkError }[]];
 
     // Emit node-error for each sibling failure beyond the primary so operators can observe them.
     for (const sibling of siblings) {
@@ -415,7 +417,7 @@ const runWave = async (
 
     // Build partialOutputs: succeeded siblings (excludes already-known outputs from prior waves
     // since those are already in machineCtx.outputs; only new outputs from this wave execution).
-    const partialOutputs = new Map<string, unknown>();
+    const partialOutputs = new Map<NodeId, unknown>();
     for (const [id, val] of newOutputs) {
       if (!machineCtx.outputs.has(id)) {
         partialOutputs.set(id, val);
@@ -443,7 +445,7 @@ const runWave = async (
   // `handleNodeFailed` special-cases the `predicate-malformed` error kind to
   // fail-fast without consuming the retry budget — a malformed predicate is a
   // config error, not a transient runtime failure.
-  const routingDecisions = new Map<string, import("./conditional.js").Decision>();
+  const routingDecisions = new Map<NodeId, import("./conditional.js").Decision>();
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
     const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];

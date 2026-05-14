@@ -5,6 +5,7 @@ import { match } from "ts-pattern";
 import type { DagPhase, DagMachineContext, HumanAction } from "./types.js";
 import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
+import type { NodeId } from "../types/ids.js";
 import {
   type WaveDoneResult,
   advanceToNextWave,
@@ -56,7 +57,7 @@ export const handleHumanResponse = (
 
 const handleReroute = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
-  targetNodeId: string,
+  targetNodeId: NodeId,
   ctx: DagMachineContext,
 ): WaveDoneResult => {
   const targetWave = waveIndexOf(ctx, targetNodeId);
@@ -94,11 +95,11 @@ const handleReroute = (
   // FR-031: backward (or current wave) reroute — reset completed and resume from target wave.
   // Pre-build the nodeId → waveIndex map so the two filters below are O(N)
   // per pass instead of repeating ctx.waves.findIndex per node (O(N²)).
-  const waveByNodeId = new Map<string, number>();
+  const waveByNodeId = new Map<NodeId, number>();
   for (let w = 0; w < ctx.waves.length; w++) {
     for (const id of ctx.waves[w]) waveByNodeId.set(id, w);
   }
-  const beforeTargetWave = (nodeId: string): boolean =>
+  const beforeTargetWave = (nodeId: NodeId): boolean =>
     (waveByNodeId.get(nodeId) ?? -1) < targetWave;
 
   // Recompute activeNodeIds from the seed and re-expand using outputs that

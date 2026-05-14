@@ -55,7 +55,7 @@ export interface GuardrailFailed {
   readonly checks: readonly GuardrailCheck[];
 }
 
-export interface GuardrailNodeConfig<I, T, Id extends string = string> {
+export interface GuardrailNodeConfig<I, T, Id extends NodeId = NodeId> {
   /** Unique node ID. */
   readonly id: Id;
   /** Zod schema for the node's assembled input. */
@@ -82,10 +82,10 @@ export interface GuardrailNodeConfig<I, T, Id extends string = string> {
  * The executor is responsible for setting span status to ERROR when
  * `result.passed === false`. See executor.ts for span wrapping behavior.
  */
-export const createGuardrailNode = <I, T, const Id extends string = string>(
+export const createGuardrailNode = <I, T, const Id extends NodeId = NodeId>(
   config: GuardrailNodeConfig<I, T, Id>,
-): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: Id & NodeId } => ({
-  id: __brandNodeId(config.id) as Id & NodeId,
+): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: Id } => ({
+  id: config.id,
   kind: "guardrail",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,

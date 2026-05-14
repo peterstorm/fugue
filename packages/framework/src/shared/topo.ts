@@ -1,15 +1,16 @@
 import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 
 /**
  * Kahn's algorithm topological sort.
  * Returns waves of node IDs that can execute in parallel.
  */
-export const topoSort = (dag: DagDef): Result<string[][], FrameworkError> => {
+export const topoSort = (dag: DagDef): Result<NodeId[][], FrameworkError> => {
   const nodeIds = new Set(dag.nodes.map((n) => n.id));
-  const inDegree = new Map<string, number>();
-  const successors = new Map<string, string[]>();
+  const inDegree = new Map<NodeId, number>();
+  const successors = new Map<NodeId, NodeId[]>();
 
   for (const id of nodeIds) {
     inDegree.set(id, 0);
@@ -35,7 +36,7 @@ export const topoSort = (dag: DagDef): Result<string[][], FrameworkError> => {
     successors.get(edge.from)!.push(edge.to);
   }
 
-  const waves: string[][] = [];
+  const waves: NodeId[][] = [];
   let remaining = nodeIds.size;
 
   // Seed first wave with zero in-degree nodes
@@ -45,7 +46,7 @@ export const topoSort = (dag: DagDef): Result<string[][], FrameworkError> => {
     waves.push(currentWave);
     remaining -= currentWave.length;
 
-    const nextWave: string[] = [];
+    const nextWave: NodeId[] = [];
     for (const id of currentWave) {
       for (const succ of successors.get(id)!) {
         const newDeg = inDegree.get(succ)! - 1;

@@ -10,6 +10,7 @@
 // file; that opt-in stays available without polluting the package barrel.
 
 import type { NodeDef } from "./node.js";
+import type { NodeId } from "./ids.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak: nodes are heterogeneous
 export type NodesRecord = { readonly [id: string]: NodeDef<any, any, any> };
@@ -24,26 +25,21 @@ export type OutputsByNodeId<Nodes extends NodesRecord> = {
 };
 
 /**
- * Mapped type that flags any record entry whose key disagrees with its
- * `node.id`. The factory helpers (`createTransformNode` etc.) preserve
- * the literal `id` via `<const Id>`, so `Nodes[K]["id"]` is a literal
- * string for any node built with a helper.
+ * Mapped type that validates record-key/node-id consistency.
  *
- * The `string extends Nodes[K]["id"]` branch means "the id type is the
- * wide `string`, not a literal" — typically because the node was built
- * via a hand-rolled object literal or a custom helper that doesn't
- * preserve literal ids. In that case we can't compare at the type level,
- * so we accept the entry and let the runtime validator catch any
- * mismatch at module load.
- *
- * For literal ids, mismatches turn into a sentinel type that no real
- * `NodeDef` satisfies — the compiler reports the offending entry with a
- * descriptive message in its diagnostic.
+ * With branded `NodeId`, literal narrowing is no longer possible at the type
+ * level — `NodeDef.id` is always `NodeId`, never a string literal. The runtime
+ * validator in `validateDagShape` still catches key/id mismatches at module
+ * load. This type now accepts any entry whose `id` extends `NodeId` (which is
+ * always true for well-typed `NodeDef`). The compile-time guard is retained
+ * for edge cases where a hand-rolled node has `id: string` instead of `NodeId`.
  */
 export type ConsistentNodes<Nodes extends NodesRecord> = {
-  readonly [K in keyof Nodes]: string extends Nodes[K]["id"]
+  readonly [K in keyof Nodes]: Nodes[K]["id"] extends NodeId
     ? Nodes[K]
-    : Nodes[K] extends { readonly id: K }
+    : string extends Nodes[K]["id"]
       ? Nodes[K]
-      : { readonly __error: `nodes['${K & string}'].id must equal '${K & string}'` };
+      : Nodes[K] extends { readonly id: K }
+        ? Nodes[K]
+        : { readonly __error: `nodes['${K & string}'].id must equal '${K & string}'` };
 };

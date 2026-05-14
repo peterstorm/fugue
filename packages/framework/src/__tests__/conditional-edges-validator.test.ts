@@ -11,9 +11,11 @@ import { validateDagShape } from "../executor/validate-dag.js";
 import type { DagDefInput } from "../types/dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { ok } from "../types/result.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const mkNode = (id: string) =>
   createTransformNode({
+    // @ts-expect-error — branded ID test fixture
     id,
     inputSchema: z.any(),
     outputSchema: z.any(),
@@ -37,7 +39,7 @@ describe("validateDagShape — conditional edges", () => {
     if (!r.ok) {
       expect(r.error.kind).toBe("missing-default-edge");
       if (r.error.kind === "missing-default-edge") {
-        expect(r.error.nodeId).toBe("a");
+        expect(r.error.nodeId).toBe(N("a"));
       }
     }
   });

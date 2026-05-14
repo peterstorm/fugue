@@ -1,12 +1,12 @@
 import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../cache/hash.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 import { __brandNodeId } from "../types/ids.js";
-import type { NodeId } from "../types/ids.js";
 
 /**
  * Configuration for `createLlmWithToolsNode` — mirrors `LlmNodeConfig` but for
@@ -25,7 +25,7 @@ export type LlmWithToolsSkipConfig<I, O> =
   | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
   | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
 
-interface LlmWithToolsNodeConfigBase<I, O, Id extends string = string> {
+interface LlmWithToolsNodeConfigBase<I, O, Id extends NodeId = NodeId> {
   readonly id: Id;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
@@ -57,7 +57,7 @@ interface LlmWithToolsNodeConfigBase<I, O, Id extends string = string> {
   readonly disableValidationRetry?: boolean;
 }
 
-export type LlmWithToolsNodeConfig<I, O, Id extends string = string> =
+export type LlmWithToolsNodeConfig<I, O, Id extends NodeId = NodeId> =
   LlmWithToolsNodeConfigBase<I, O, Id> & LlmWithToolsSkipConfig<I, O>;
 
 /**
@@ -65,7 +65,7 @@ export type LlmWithToolsNodeConfig<I, O, Id extends string = string> =
  * through `LlmClient.sendWithTools`, so the model can call registered tools
  * mid-completion before producing the final structured answer.
  */
-export const createLlmWithToolsNode = <I, O, const Id extends string = string>(
+export const createLlmWithToolsNode = <I, O, const Id extends NodeId = NodeId>(
   config: LlmWithToolsNodeConfig<I, O, Id>,
 ): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: Id & NodeId } => ({
   id: __brandNodeId(config.id) as Id & NodeId,

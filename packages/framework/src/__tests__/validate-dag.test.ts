@@ -4,9 +4,11 @@ import { ok } from "../types/result.js";
 import type { DagDefInput } from "../types/dag.js";
 import { validateDagShape } from "../executor/validate-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const mkNode = (id: string) =>
   createTransformNode({
+    // @ts-expect-error — branded ID test fixture
     id,
     inputSchema: z.any(),
     outputSchema: z.any(),

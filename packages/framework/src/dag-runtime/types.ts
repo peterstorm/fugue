@@ -4,6 +4,7 @@
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { Decision, IncomingSources } from "./conditional.js";
+import type { NodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
 
 /**
@@ -22,7 +23,7 @@ export type HumanAction =
   | { readonly action: "approve" }
   | { readonly action: "approve-with-edit"; readonly newOutput: unknown }
   | { readonly action: "reject"; readonly reason: string }
-  | { readonly action: "reroute"; readonly targetNodeId: string };
+  | { readonly action: "reroute"; readonly targetNodeId: NodeId };
 
 // ---------------------------------------------------------------------------
 // DagPhase — state of the DAG machine
@@ -33,18 +34,18 @@ export type DagPhase =
   | { readonly kind: "running"; readonly wave: number }
   | {
       readonly kind: "awaiting-human";
-      readonly nodeId: string;
+      readonly nodeId: NodeId;
       readonly output: unknown;
       readonly prompt: string;
       /** Remaining review queue: node ids to review after the current one (ascending order). */
-      readonly pendingReviews: readonly string[];
+      readonly pendingReviews: readonly NodeId[];
       /** Wave index we paused on. */
       readonly wave: number;
     }
   | {
       readonly kind: "retrying";
       readonly wave: number;
-      readonly nodeId: string;
+      readonly nodeId: NodeId;
       readonly attempt: number;
       readonly nextDelayMs: number;
     }
@@ -55,7 +56,7 @@ export type DagPhase =
        * FR-029a: hook-crash retry semantics.
        */
       readonly kind: "retrying-hook";
-      readonly nodeId: string;
+      readonly nodeId: NodeId;
       /** The node's already-produced output — preserved across hook retries. */
       readonly output: unknown;
       /** The original review prompt — preserved across hook retries. */
@@ -65,7 +66,7 @@ export type DagPhase =
       /** Delay before next hook call. Executor applies jitter. */
       readonly nextDelayMs: number;
       /** Remaining reviews after this node — preserved from the original awaiting-human phase. */
-      readonly pendingReviews: readonly string[];
+      readonly pendingReviews: readonly NodeId[];
       /** Wave index we paused on — preserved from the original awaiting-human phase. */
       readonly wave: number;
     }
@@ -81,7 +82,7 @@ export type DagEvent =
   | {
       readonly type: "wave-done";
       readonly wave: number;
-      readonly outputs: ReadonlyMap<string, unknown>;
+      readonly outputs: ReadonlyMap<NodeId, unknown>;
       /**
        * Per-source-node routing decision computed once by `runWave` after the
        * wave completes. Computed once per wave to avoid re-evaluating
@@ -94,27 +95,27 @@ export type DagEvent =
        * (e.g. event-log replay paths); when omitted the transition falls
        * back to inline `decideRoute` calls.
        */
-      readonly routingDecisions?: ReadonlyMap<string, Decision>;
+      readonly routingDecisions?: ReadonlyMap<NodeId, Decision>;
     }
   | {
       readonly type: "node-failed";
-      readonly nodeId: string;
+      readonly nodeId: NodeId;
       readonly error: FrameworkError;
       /**
        * Outputs from sibling nodes that completed successfully in the same wave before
        * this failure. Carried so the transition can persist them into `ctx.outputs` and
        * avoid re-running succeeded siblings on retry.
        */
-      readonly partialOutputs?: ReadonlyMap<string, unknown>;
+      readonly partialOutputs?: ReadonlyMap<NodeId, unknown>;
       /**
        * Additional node ids that also failed concurrently in the same wave.
        * The primary failure is `nodeId`; these are co-failed siblings.
        * Carried so `handleNodeFailed` can pre-increment their retry counters,
        * preventing off-by-one retry accounting when multiple nodes fail together.
        */
-      readonly coFailedNodeIds?: ReadonlyArray<string>;
+      readonly coFailedNodeIds?: ReadonlyArray<NodeId>;
     }
-  | { readonly type: "human-responded"; readonly nodeId: string; readonly action: HumanAction }
+  | { readonly type: "human-responded"; readonly nodeId: NodeId; readonly action: HumanAction }
   | { readonly type: "abort"; readonly reason: string }
   | { readonly type: "ERROR"; readonly retriable: boolean; readonly error: string };
 
@@ -124,9 +125,9 @@ export type DagEvent =
 
 export interface DagMachineContext {
   readonly dag: DagDef;
-  readonly waves: readonly (readonly string[])[];
-  readonly outputs: ReadonlyMap<string, unknown>;
-  readonly retries: ReadonlyMap<string, number>;
+  readonly waves: readonly (readonly NodeId[])[];
+  readonly outputs: ReadonlyMap<NodeId, unknown>;
+  readonly retries: ReadonlyMap<NodeId, number>;
   readonly initialInput: unknown;
   /**
    * Subset of node ids that should still run. Seeded at compile time to every
@@ -134,25 +135,25 @@ export interface DagMachineContext {
    * conditional/default edges fire after each wave. Pruned nodes never appear
    * in `outputs` and never get dispatched.
    */
-  readonly activeNodeIds: ReadonlySet<string>;
+  readonly activeNodeIds: ReadonlySet<NodeId>;
   /**
    * Precomputed `{ required, optional }` source partition per node, derived
    * from the edges at compile time. Used by `runNode` to assemble `nodeInput`
    * without consulting any author-supplied `deps` field (which no longer
    * exists — edges are the single source of truth, see ADR 0017).
    */
-  readonly incomingByNode: ReadonlyMap<string, IncomingSources>;
+  readonly incomingByNode: ReadonlyMap<NodeId, IncomingSources>;
   /**
    * Precomputed adjacency: `nodeId → out-edges`. Built once at compile time so
    * routing decisions (run per active node per wave, both in the executor's
    * `runWave` and the transition layer's `handleWaveDone` + reroute paths)
    * don't pay an O(edges) linear scan each call.
    */
-  readonly outgoingByNode: ReadonlyMap<string, readonly EdgeDef[]>;
+  readonly outgoingByNode: ReadonlyMap<NodeId, readonly EdgeDef[]>;
   /**
    * Precomputed node-id → NodeDef lookup. Built once at compile time so
    * retry-policy, wave-resolution, and human-resolution can do O(1) lookups
    * instead of O(n) `dag.nodes.find()` per call.
    */
-  readonly nodeById: ReadonlyMap<string, import("../types/node.js").NodeDef<unknown, unknown>>;
+  readonly nodeById: ReadonlyMap<NodeId, import("../types/node.js").NodeDef<unknown, unknown>>;
 }

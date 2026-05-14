@@ -11,6 +11,7 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { RecordingObserver, NoopObserver } from "../observer/observer.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,
@@ -30,9 +31,9 @@ describe("topoSort", () => {
     const dag = defineDagFromArray({
       id: "linear",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
-        createTransformNode({ id: "C", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("B"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("C"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "B" },
@@ -42,6 +43,7 @@ describe("topoSort", () => {
     const result = topoSort(dag);
     expect(result.ok).toBe(true);
     if (result.ok) {
+      // @ts-expect-error — branded ID test fixture
       expect(result.value).toEqual([["A"], ["B"], ["C"]]);
     }
   });
@@ -50,9 +52,9 @@ describe("topoSort", () => {
     const dag = defineDagFromArray({
       id: "parallel",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
-        createTransformNode({ id: "C", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("B"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("C"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "C" },
@@ -62,8 +64,8 @@ describe("topoSort", () => {
     const result = topoSort(dag);
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.value[0].sort()).toEqual(["A", "B"]);
-      expect(result.value[1]).toEqual(["C"]);
+      expect(result.value[0].sort()).toEqual([N("A"), N("B")]);
+      expect(result.value[1]).toEqual([N("C")]);
     }
   });
 
@@ -71,8 +73,8 @@ describe("topoSort", () => {
     const dag = defineDagFromArray({
       id: "cycle",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("B"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "B" },
@@ -94,19 +96,19 @@ describe("runDag", () => {
       id: "linear",
       nodes: ([
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => { log.push("A"); return ok({ value: i.value + 1 }); },
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => { log.push("B"); return ok({ value: i.value * 2 }); },
         }),
         createTransformNode({
-          id: "C",
+          id: N("C"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => { log.push("C"); return ok({ value: i.value + 10 }); },
@@ -131,7 +133,7 @@ describe("runDag", () => {
       id: "val",
       nodes: ([
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.any(),
           transform: (i) => ok(i),
@@ -151,7 +153,7 @@ describe("runDag", () => {
       id: "val",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.object({ value: z.number() }),
           transform: (_i) => ok({ value: "wrong" } as any),
@@ -172,13 +174,13 @@ describe("runDag", () => {
       id: "err",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (_i) => { log.push("A"); return err({ kind: "node-crash" as const, nodeId: "A" as NodeId, retriability: "retriable" as const, message: "boom" }); },
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (i) => { log.push("B"); return ok(i); },
@@ -198,19 +200,19 @@ describe("runDag", () => {
       id: "resume-test",
       nodes: ([
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => { log.push("A"); return ok({ value: i.value + 1 }); },
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => { log.push("B"); return ok({ value: i.value * 2 }); },
         }),
         createTransformNode({
-          id: "C",
+          id: N("C"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => { log.push("C"); return ok({ value: i.value + 10 }); },
@@ -269,7 +271,7 @@ describe("runDag", () => {
       id: "schema-evolved",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.unknown(),
           // Current schema requires `value: number` AND a new field `version: 2`.
           outputSchema: z.object({ value: z.number(), version: z.literal(2) }),
@@ -293,7 +295,7 @@ describe("runDag", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("validation");
       if (result.error.kind === "validation") {
-        expect(result.error.nodeId).toBe("A");
+        expect(result.error.nodeId).toBe(N("A"));
       }
     }
     // Stale value must NOT be silently passed through.
@@ -309,13 +311,13 @@ describe("runDag", () => {
       id: "obs-test",
       nodes: ([
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => ok({ value: i.value + 1 }),
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => ok({ value: i.value * 2 }),
@@ -353,13 +355,13 @@ describe("runDag", () => {
       id: "err-obs",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (_i) => ok({ v: 1 }),
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B" as NodeId, retriability: "retriable" as const, message: "boom" }),
@@ -384,13 +386,13 @@ describe("runDag", () => {
       id: "ckpt-test",
       nodes: ([
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => ok({ value: i.value + 1 }),
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.object({ value: z.number() }),
           outputSchema: z.object({ value: z.number() }),
           transform: (i: { value: number }) => ok({ value: i.value * 2 }),
@@ -420,8 +422,8 @@ describe("runDag", () => {
     const dag = defineDagFromArray({
       id: "cycle",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
-        createTransformNode({ id: "B", inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
+        createTransformNode({ id: N("B"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
         { from: "A", to: "B" },
@@ -439,7 +441,7 @@ describe("runDag", () => {
     const { createGuardrailNode } = await import("../nodes/guardrail.js");
 
     const guardrail = createGuardrailNode({
-      id: "guard",
+      id: N("guard"),
       inputSchema: z.any(),
       outputSchema: z.any(),
       validate: (input: any) => ({
@@ -454,10 +456,10 @@ describe("runDag", () => {
     const dag = defineDagFromArray({
       id: "guardrail-test",
       nodes: [
-        createTransformNode({ id: "source", inputSchema: z.any(), outputSchema: z.any(), transform: () => ok({ data: 42 }) }),
+        createTransformNode({ id: N("source"), inputSchema: z.any(), outputSchema: z.any(), transform: () => ok({ data: 42 }) }),
         guardrail,
         createTransformNode({
-          id: "consumer",
+          id: N("consumer"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (input: any) => ok({ received: input.passed, value: input.value }),
@@ -490,7 +492,7 @@ describe("runDag", () => {
     const dag = defineDagFromArray({
       id: "checkpoint-fail",
       nodes: [
-        createTransformNode({ id: "A", inputSchema: z.any(), outputSchema: z.any(), transform: () => ok(42) }),
+        createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: () => ok(42) }),
       ],
       edges: [],
     });
@@ -499,7 +501,7 @@ describe("runDag", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-write-failed");
       if (result.error.kind === "checkpoint-write-failed") {
-        expect(result.error.nodeId).toBe("A");
+        expect(result.error.nodeId).toBe(N("A"));
         expect(result.error.message).toContain("Redis timeout");
       }
     }
@@ -522,7 +524,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       id,
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (i) => ok(i),
@@ -537,13 +539,13 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       id: "resume-only",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (_i) => { log.push("A"); return ok(42); },
         }),
         createTransformNode({
-          id: "B",
+          id: N("B"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (i) => { log.push("B"); return ok(i); },
@@ -575,6 +577,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     defineDagFromArray({
       id,
       nodes: [
+        // @ts-expect-error — branded ID test fixture
         {
           id: "reviewed",
           kind: "transform",
@@ -614,7 +617,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     const result = await runDag(dag, {}, mkCtx(), {});
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.nodeId).toBe(N("__executor__"));
       expect(result.error.message).toContain("declares humanReview");
       expect(result.error.message).toContain("reviewed");
     } else {
@@ -627,7 +630,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     const result = await runDag(dag, {}, mkCtx(), { onHumanReview: noopReview });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe("__executor__");
+      expect(result.error.nodeId).toBe(N("__executor__"));
       expect(result.error.message).toContain("no node declares");
     } else {
       throw new Error("expected node-crash error");
@@ -640,11 +643,12 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       id: "resume-hr",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (_i) => { log.push("A"); return ok(1); },
         }),
+        // @ts-expect-error — branded ID test fixture
         {
           id: "reviewed",
           kind: "transform",
@@ -672,11 +676,12 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       id: "resume-rl",
       nodes: [
         createTransformNode({
-          id: "A",
+          id: N("A"),
           inputSchema: z.any(),
           outputSchema: z.any(),
           transform: (_i) => ok("A"),
         }),
+        // @ts-expect-error — branded ID test fixture
         {
           id: "flaky",
           kind: "transform",
@@ -722,7 +727,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   it("DagDef.defaultRetryLimit routes to state-machine path even without opts.retryLimits", async () => {
     let callCount = 0;
     const flakyNode: NodeDef<unknown, unknown> = {
-      id: "flaky",
+      id: N("flaky"),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -750,7 +755,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   it("DagDef.retryLimits routes to state-machine path even without opts.retryLimits", async () => {
     let callCount = 0;
     const flakyNode: NodeDef<unknown, unknown> = {
-      id: "flaky",
+      id: N("flaky"),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -779,7 +784,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     // Empty retryLimits is meaningless; should stay on legacy fast path.
     let callCount = 0;
     const flakyNode: NodeDef<unknown, unknown> = {
-      id: "flaky",
+      id: N("flaky"),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -804,7 +809,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   it("retryLimits triggers state-machine path and is forwarded — node retries on failure", async () => {
     let callCount = 0;
     const flakyNode: NodeDef<unknown, unknown> = {
-      id: "flaky",
+      id: N("flaky"),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),

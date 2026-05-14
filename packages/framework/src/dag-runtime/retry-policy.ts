@@ -3,6 +3,7 @@
 
 import type { DagMachineContext } from "./types.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type { WaveDoneResult } from "./wave-resolution.js";
 
 // ---------------------------------------------------------------------------
@@ -16,10 +17,10 @@ const DEFAULT_BACKOFF_MS = [1000, 2000, 4000] as const;
  * `baseDelay * (1 + jitterRatio * Math.random())`.
  */
 export const computeBackoffMs = (
-  nodeId: string,
+  nodeId: NodeId,
   attempt: number,
   dag: DagMachineContext["dag"],
-  nodeById?: ReadonlyMap<string, import("../types/node.js").NodeDef<unknown, unknown>>,
+  nodeById?: ReadonlyMap<NodeId, import("../types/node.js").NodeDef<unknown, unknown>>,
 ): number => {
   const nodeDef = nodeById?.get(nodeId) ?? dag.nodes.find((n) => n.id === nodeId);
   const backoffMs = nodeDef?.retry?.backoffMs ?? DEFAULT_BACKOFF_MS;
@@ -29,7 +30,7 @@ export const computeBackoffMs = (
 };
 
 /** Get retry limit for a node (per-node override > DAG default > 0). */
-export const getRetryLimit = (nodeId: string, ctx: DagMachineContext): number => {
+export const getRetryLimit = (nodeId: NodeId, ctx: DagMachineContext): number => {
   const perNode = ctx.dag.retryLimits?.[nodeId];
   if (perNode !== undefined) return perNode;
   return ctx.dag.defaultRetryLimit ?? 0;
@@ -41,11 +42,11 @@ export const getRetryLimit = (nodeId: string, ctx: DagMachineContext): number =>
 
 export const handleNodeFailed = (
   currentWave: number,
-  nodeId: string,
+  nodeId: NodeId,
   error: FrameworkError,
   ctx: DagMachineContext,
-  partialOutputs?: ReadonlyMap<string, unknown>,
-  coFailedNodeIds?: ReadonlyArray<string>,
+  partialOutputs?: ReadonlyMap<NodeId, unknown>,
+  coFailedNodeIds?: ReadonlyArray<NodeId>,
 ): WaveDoneResult => {
   // Fast-fail kinds — deterministic failures that won't resolve on re-execution:
   //   - predicate-malformed: predicate shape invalid against upstream output (config error).
@@ -155,12 +156,12 @@ export const handleNodeFailed = (
  * Hook retries do NOT re-execute the node.
  */
 export const handleHookCrash = (
-  nodeId: string,
+  nodeId: NodeId,
   output: unknown,
   prompt: string,
   error: FrameworkError,
   ctx: DagMachineContext,
-  pendingReviews: readonly string[] = [],
+  pendingReviews: readonly NodeId[] = [],
   wave: number = 0,
 ): WaveDoneResult => {
   const currentAttempts = ctx.retries.get(nodeId) ?? 0;

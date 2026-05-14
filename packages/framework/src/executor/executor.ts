@@ -13,6 +13,7 @@ import type { NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { JobLike } from "../state-machine/types.js";
 import type { DagPhase, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
+import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
 import { type Result, err } from "../types/result.js";
 import { runDagStateful, type DagRunOpts } from "../dag-runtime/run-dag-stateful.js";
 
@@ -75,7 +76,7 @@ export const runDag = async <I, O>(
     return err({
       kind: "node-crash",
       retriability: "retriable",
-      nodeId: "__executor__",
+      nodeId: EXECUTOR_NODE_ID,
       message: `[runDag] DAG declares humanReview node(s) [${hitlNodes.map((n) => n.id).join(", ")}] but no \`onHumanReview\` hook supplied`,
     });
   }
@@ -83,7 +84,7 @@ export const runDag = async <I, O>(
     return err({
       kind: "node-crash",
       retriability: "retriable",
-      nodeId: "__executor__",
+      nodeId: EXECUTOR_NODE_ID,
       message: "[runDag] `onHumanReview` hook supplied but no node declares `humanReview`",
     });
   }

@@ -6,6 +6,7 @@
 // random outputs.
 
 import { NoopObserver } from "../observer/observer.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
@@ -29,6 +30,7 @@ const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
 ): NodeDef<unknown, unknown> => ({
+  // @ts-expect-error — branded ID test fixture
   id,
   kind: "transform",
   inputSchema: z.unknown(),

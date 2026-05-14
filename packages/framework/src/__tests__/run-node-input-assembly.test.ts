@@ -5,6 +5,7 @@
 // via runNodeShared with a trivial echo node that returns its input.
 
 import { describe, it, expect } from "bun:test";
+import { N, R, D, nodeMap } from "./_id-helpers.js";
 import { z } from "zod";
 import { runNodeShared } from "../dag-runtime/run-node.js";
 import { ok } from "../types/result.js";
@@ -14,7 +15,7 @@ import { makeNodeContext } from "../shared/index.js";
 
 // Echo node: returns whatever input it receives
 const echoNode: NodeDef<unknown, unknown> = {
-  id: "echo",
+  id: N("echo"),
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
@@ -32,7 +33,8 @@ describe("runNodeShared input assembly", () => {
     const incoming: IncomingSources = { required: [], optional: [] };
     const outputs: ReadonlyMap<string, unknown> = new Map();
 
-    const { result } = await runNodeShared(echoNode, "dag-level-input", ctx, "d", outputs, incoming);
+    // @ts-expect-error — branded ID test fixture
+    const { result } = await runNodeShared(echoNode, "dag-level-input", ctx, D("d"), outputs, incoming);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBe("dag-level-input");
   });
@@ -41,7 +43,8 @@ describe("runNodeShared input assembly", () => {
     const incoming: IncomingSources = { required: ["upstream"], optional: [] };
     const outputs: ReadonlyMap<string, unknown> = new Map([["upstream", { x: 42 }]]);
 
-    const { result } = await runNodeShared(echoNode, "ignored", ctx, "d", outputs, incoming);
+    // @ts-expect-error — branded ID test fixture
+    const { result } = await runNodeShared(echoNode, "ignored", ctx, D("d"), outputs, incoming);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual({ x: 42 });
   });
@@ -53,7 +56,8 @@ describe("runNodeShared input assembly", () => {
       ["b", "valueB"],
     ]);
 
-    const { result } = await runNodeShared(echoNode, "ignored", ctx, "d", outputs, incoming);
+    // @ts-expect-error — branded ID test fixture
+    const { result } = await runNodeShared(echoNode, "ignored", ctx, D("d"), outputs, incoming);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual({ a: "valueA", b: "valueB" });
   });
@@ -65,7 +69,8 @@ describe("runNodeShared input assembly", () => {
       ["opt", "optVal"],
     ]);
 
-    const { result } = await runNodeShared(echoNode, "ignored", ctx, "d", outputs, incoming);
+    // @ts-expect-error — branded ID test fixture
+    const { result } = await runNodeShared(echoNode, "ignored", ctx, D("d"), outputs, incoming);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual({ r: "reqVal", opt: "optVal" });
   });
@@ -74,7 +79,8 @@ describe("runNodeShared input assembly", () => {
     const incoming: IncomingSources = { required: ["r"], optional: ["missing"] };
     const outputs: ReadonlyMap<string, unknown> = new Map([["r", "reqVal"]]);
 
-    const { result } = await runNodeShared(echoNode, "ignored", ctx, "d", outputs, incoming);
+    // @ts-expect-error — branded ID test fixture
+    const { result } = await runNodeShared(echoNode, "ignored", ctx, D("d"), outputs, incoming);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value).toEqual({ r: "reqVal", missing: undefined });
@@ -89,7 +95,8 @@ describe("runNodeShared input assembly", () => {
       // "c" deliberately absent
     ]);
 
-    const { result } = await runNodeShared(echoNode, "ignored", ctx, "d", outputs, incoming);
+    // @ts-expect-error — branded ID test fixture
+    const { result } = await runNodeShared(echoNode, "ignored", ctx, D("d"), outputs, incoming);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual({ a: 1, b: 2, c: undefined });
   });

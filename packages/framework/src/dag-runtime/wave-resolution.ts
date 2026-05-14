@@ -4,6 +4,7 @@
 import type { DagPhase, DagMachineContext } from "./types.js";
 import { decideRoute, expandActive } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
+import type { NodeId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
 // Shared result shape returned by every transition helper.
@@ -19,15 +20,15 @@ export interface WaveDoneResult {
 // ---------------------------------------------------------------------------
 
 /** Return the node-ids in a given wave, sorted ascending (for deterministic review order). */
-export const waveNodes = (ctx: DagMachineContext, wave: number): readonly string[] =>
+export const waveNodes = (ctx: DagMachineContext, wave: number): readonly NodeId[] =>
   ctx.waves[wave] ?? [];
 
 /** Active subset of a wave (filters out pruned nodes). */
-export const activeWaveNodes = (ctx: DagMachineContext, wave: number): readonly string[] =>
+export const activeWaveNodes = (ctx: DagMachineContext, wave: number): readonly NodeId[] =>
   waveNodes(ctx, wave).filter((id) => ctx.activeNodeIds.has(id));
 
 /** The index of the wave that contains a given nodeId, or -1 if not found. */
-export const waveIndexOf = (ctx: DagMachineContext, nodeId: string): number =>
+export const waveIndexOf = (ctx: DagMachineContext, nodeId: NodeId): number =>
   ctx.waves.findIndex((w) => w.includes(nodeId));
 
 // ---------------------------------------------------------------------------
@@ -41,14 +42,14 @@ export const waveIndexOf = (ctx: DagMachineContext, nodeId: string): number =>
 export const collectHumanReviewQueue = (
   ctx: DagMachineContext,
   wave: number,
-): readonly string[] => {
+): readonly NodeId[] => {
   const nodes = activeWaveNodes(ctx, wave);
   return nodes
     .filter((id) => {
       const def = ctx.nodeById.get(id);
       return def?.humanReview !== undefined;
     })
-    .sort(); // ascending node-id order per FR-028
+    .sort() as NodeId[]; // ascending node-id order per FR-028
 };
 
 // ---------------------------------------------------------------------------
@@ -71,9 +72,9 @@ export const collectHumanReviewQueue = (
  */
 export const handleWaveDone = (
   wave: number,
-  outputs: ReadonlyMap<string, unknown>,
+  outputs: ReadonlyMap<NodeId, unknown>,
   ctx: DagMachineContext,
-  routingDecisions?: ReadonlyMap<string, import("./conditional.js").Decision>,
+  routingDecisions?: ReadonlyMap<NodeId, import("./conditional.js").Decision>,
 ): WaveDoneResult => {
   const newOutputs = new Map([...ctx.outputs, ...outputs]);
 
@@ -208,7 +209,7 @@ export const advanceToNextWave = (
     // No outputNodeId configured
     // Fall back to the last active node, walking back through waves so a fully
     // pruned final wave doesn't strand the run.
-    let fallbackNodeId: string | undefined;
+    let fallbackNodeId: NodeId | undefined;
     for (let w = ctx.waves.length - 1; w >= 0 && !fallbackNodeId; w--) {
       const wave = ctx.waves[w] ?? [];
       for (let i = wave.length - 1; i >= 0; i--) {
@@ -226,7 +227,7 @@ export const advanceToNextWave = (
           error: {
             kind: "node-crash",
             retriability: "retriable",
-            nodeId: "",
+            nodeId: "" as NodeId,
             message: "output-missing: outputNodeId unset and no active node produced output",
           },
         },

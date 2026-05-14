@@ -6,6 +6,7 @@
 // Run with: REDIS_URL=redis://localhost:6379 bun test
 
 import { NoopObserver } from "../../observer/observer.js";
+import { N, R, D, nodeMap, nodeSet } from "../../__tests__/_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../../types/ids.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
@@ -1051,6 +1052,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
     const callCount = { a: 0, b: 0, c: 0 };
 
     const mkNode = (id: "a" | "b" | "c", body: NodeDef["run"]): NodeDef => ({
+      // @ts-expect-error — branded ID test fixture
       id,
       kind: "transform",
       inputSchema: z.unknown(),

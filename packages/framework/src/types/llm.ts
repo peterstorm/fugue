@@ -14,6 +14,7 @@ import type { z } from "zod";
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { NodeContext, TypedNodeContext } from "./node.js";
+import type { NodeId } from "./ids.js";
 
 // ---------------------------------------------------------------------------
 // Branded `ToolName`
@@ -47,7 +48,7 @@ export interface LlmRequest<O> {
    * DAG node identifier for error reporting. Required so failures attribute
    * to the right place in the DAG.
    */
-  readonly nodeId: string;
+  readonly nodeId: NodeId;
 }
 
 export interface LlmResponse<O> {
@@ -133,7 +134,7 @@ export interface SendWithToolsRequest<O> {
   /**
    * DAG node identifier for error reporting. Required.
    */
-  readonly nodeId: string;
+  readonly nodeId: NodeId;
 }
 
 // ---------------------------------------------------------------------------

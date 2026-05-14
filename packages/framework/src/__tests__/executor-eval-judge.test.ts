@@ -12,6 +12,7 @@ import type { LlmClient } from "../../src/types/llm.js";
 import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // --- Helpers ---
 
@@ -35,7 +36,7 @@ const makeMockJudgeLlm = (response: EvalJudgeResponse): LlmClient => ({
 
 /** Simple transform node that uppercases a string. */
 const uppercaseNode = createTransformNode({
-  id: "uppercase",
+  id: N("uppercase"),
   inputSchema: z.string(),
   outputSchema: z.string(),
   transform: (input) => ok(input.toUpperCase()),
@@ -63,7 +64,7 @@ describe("executor + eval-judge integration", () => {
     });
 
     const judge = createEvalJudgeNode({
-      id: "quality-judge",
+      id: N("quality-judge"),
       criteria: ["quality"],
       threshold: 0.8,
     });
@@ -128,8 +129,8 @@ describe("executor + eval-judge integration", () => {
       },
     };
 
-    const judge1 = createEvalJudgeNode({ id: "judge-1", criteria: ["x"] });
-    const judge2 = createEvalJudgeNode({ id: "judge-2", criteria: ["y"] });
+    const judge1 = createEvalJudgeNode({ id: N("judge-1"), criteria: [N("x")] });
+    const judge2 = createEvalJudgeNode({ id: N("judge-2"), criteria: [N("y")] });
 
     const dag = makeDag([judge1, judge2]);
     await runDag<string, string>(dag, "hi", makeCtx({ judgeLlm: sharedLlm }));
@@ -147,13 +148,13 @@ describe("executor + eval-judge integration", () => {
     };
 
     const failingNode = createTransformNode({
-      id: "failing",
+      id: N("failing"),
       inputSchema: z.string(),
       outputSchema: z.string(),
       transform: () => err({ kind: "node-crash" as const, nodeId: "failing" as NodeId, retriability: "retriable" as const, message: "boom" }),
     });
 
-    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const judge = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
     const dag = defineDagFromArray({
       id: "fail-dag",
       nodes: [failingNode],
@@ -173,7 +174,7 @@ describe("executor + eval-judge integration", () => {
       sendStructured: async () => { throw new Error("catastrophic failure"); },
     };
 
-    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const judge = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
     const dag = makeDag([judge]);
 
     const result = await runDag<string, string>(dag, "hi", makeCtx({ judgeLlm: throwingLlm }));
@@ -198,7 +199,7 @@ describe("executor + eval-judge integration", () => {
       },
     };
 
-    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const judge = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
     const dag = makeDag([judge]);
 
     await runDag<string, string>(dag, "original input", makeCtx({ judgeLlm: llm }));
@@ -224,7 +225,7 @@ describe("executor + eval-judge integration", () => {
       },
     };
 
-    const judge = createEvalJudgeNode({ id: "j", criteria: ["x"] });
+    const judge = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
     const dag = makeDag([judge]);
 
     await runDag<string, string>(dag, "hi", makeCtx({ llm: mainLlm, judgeLlm }));

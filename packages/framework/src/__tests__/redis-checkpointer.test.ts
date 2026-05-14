@@ -5,6 +5,7 @@ import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import type { Checkpointer, RunMeta, NodeState } from "../checkpoint/checkpointer.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // --- Shared test suite for any Checkpointer ---
 
@@ -39,17 +40,17 @@ function checkpointerSuite(
     });
 
     test("load returns null for non-existent runId", async () => {
-      const result = await cp.load("nonexistent");
+      const result = await cp.load(R("nonexistent"));
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.value).toBeNull();
     });
 
     test("setMeta + load round-trips metadata", async () => {
       const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date("2025-01-01T00:00:00Z"), nodeCount: 3 };
-      const setResult = await cp.setMeta("run-1", meta);
+      const setResult = await cp.setMeta(R("run-1"), meta);
       expect(setResult.ok).toBe(true);
 
-      const loadResult = await cp.load("run-1");
+      const loadResult = await cp.load(R("run-1"));
       expect(loadResult.ok).toBe(true);
       if (loadResult.ok && loadResult.value) {
         expect(loadResult.value.meta.dagId).toBe("dag-1");
@@ -60,13 +61,13 @@ function checkpointerSuite(
 
     test("saveNode + load round-trips correctly", async () => {
       const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
-      await cp.setMeta("run-2", meta);
+      await cp.setMeta(R("run-2"), meta);
 
       const nodeState: NodeState = { nodeId: "n1" as NodeId, output: { text: "hello" }, completedAt: new Date("2025-06-01T12:00:00Z") };
-      const saveResult = await cp.saveNode("run-2", "n1", nodeState);
+      const saveResult = await cp.saveNode(R("run-2"), "n1", nodeState);
       expect(saveResult.ok).toBe(true);
 
-      const loadResult = await cp.load("run-2");
+      const loadResult = await cp.load(R("run-2"));
       expect(loadResult.ok).toBe(true);
       if (loadResult.ok && loadResult.value) {
         expect(loadResult.value.nodes["n1"].nodeId).toBe("n1");
@@ -76,13 +77,13 @@ function checkpointerSuite(
 
     test("multiple nodes saved, all present in load", async () => {
       const meta: RunMeta = { dagId: "dag-2" as DagId, startedAt: new Date(), nodeCount: 3 };
-      await cp.setMeta("run-3", meta);
+      await cp.setMeta(R("run-3"), meta);
 
       for (const id of ["a", "b", "c"]) {
-        await cp.saveNode("run-3", id, { nodeId: id, output: id, completedAt: new Date() });
+        await cp.saveNode(R("run-3"), id, { nodeId: id, output: id, completedAt: new Date() });
       }
 
-      const loadResult = await cp.load("run-3");
+      const loadResult = await cp.load(R("run-3"));
       expect(loadResult.ok).toBe(true);
       if (loadResult.ok && loadResult.value) {
         expect(Object.keys(loadResult.value.nodes).sort()).toEqual(["a", "b", "c"]);
@@ -95,12 +96,13 @@ function checkpointerSuite(
     // skipping invariants that were tightened in the meantime.
     test("load rejects checkpoint with stale frameworkVersion", async () => {
       await raw.setStaleVersion(cp, "stale-1", { startedAt: new Date(), nodeCount: 1 });
-      const result = await cp.load("stale-1");
+      const result = await cp.load(R("stale-1"));
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe("checkpoint-version-mismatch");
         if (result.error.kind === "checkpoint-version-mismatch") {
-          expect(result.error.runId).toBe("stale-1");
+          // @ts-expect-error — branded ID test fixture
+          expect(result.error.runId).toBe(N("stale-1"));
           expect(result.error.expected).toBe(FRAMEWORK_VERSION);
           expect(result.error.actual).toBe("1");
         }
@@ -109,7 +111,7 @@ function checkpointerSuite(
 
     test("load rejects checkpoint missing frameworkVersion field", async () => {
       await raw.setMissingVersion(cp, "missing-1", { startedAt: new Date(), nodeCount: 1 });
-      const result = await cp.load("missing-1");
+      const result = await cp.load(R("missing-1"));
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe("checkpoint-version-mismatch");
@@ -122,12 +124,13 @@ function checkpointerSuite(
     test("load rejects expired checkpoint (createdAt older than TTL)", async () => {
       const expiredAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
       await raw.setExpired(cp, "expired-1", { startedAt: new Date(), nodeCount: 1, expiredAt });
-      const result = await cp.load("expired-1");
+      const result = await cp.load(R("expired-1"));
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe("checkpoint-expired");
         if (result.error.kind === "checkpoint-expired") {
-          expect(result.error.runId).toBe("expired-1");
+          // @ts-expect-error — branded ID test fixture
+          expect(result.error.runId).toBe(N("expired-1"));
           expect(result.error.expiredAt.getTime()).toBe(expiredAt.getTime());
         }
       }
@@ -139,12 +142,13 @@ function checkpointerSuite(
     if (raw.setCorrupt !== undefined) {
       test("load rejects malformed meta payload with checkpoint-corrupt", async () => {
         await raw.setCorrupt!(cp, "corrupt-1");
-        const result = await cp.load("corrupt-1");
+        const result = await cp.load(R("corrupt-1"));
         expect(result.ok).toBe(false);
         if (!result.ok) {
           expect(result.error.kind).toBe("checkpoint-corrupt");
           if (result.error.kind === "checkpoint-corrupt") {
-            expect(result.error.runId).toBe("corrupt-1");
+            // @ts-expect-error — branded ID test fixture
+            expect(result.error.runId).toBe(N("corrupt-1"));
           }
         }
       });
@@ -161,7 +165,7 @@ checkpointerSuite(
     setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
       // Caller-supplied frameworkVersion bypasses setMeta's default stamp;
       // matches the Redis-side test's explicit frameworkVersion: "1".
-      await cp.setMeta(runId, {
+      await cp.setMeta(runId as any, {
         dagId: "d" as DagId,
         startedAt,
         nodeCount,
@@ -172,7 +176,7 @@ checkpointerSuite(
       // setMeta would re-stamp the version; reach into the private store the
       // same way the Redis test reaches into `redis.set`. Same "missing
       // field" simulation, same observable error.
-      await cp.setMeta(runId, {
+      await cp.setMeta(runId as any, {
         dagId: "d" as DagId,
         startedAt,
         nodeCount,
@@ -185,7 +189,7 @@ checkpointerSuite(
       });
     },
     setExpired: async (cp, runId, { startedAt, nodeCount, expiredAt }) => {
-      await cp.setMeta(runId, { dagId: "d" as DagId, startedAt, nodeCount });
+      await cp.setMeta(runId as any, { dagId: "d" as DagId, startedAt, nodeCount });
       const rawMap = (cp as InMemoryCheckpointer).__testRawMetas();
       const stored = rawMap.get(runId)!;
       rawMap.set(runId, { ...stored, createdAt: expiredAt });
@@ -244,7 +248,7 @@ describeRedis("RedisCheckpointer", () => {
   });
 
   test("load returns null for non-existent runId", async () => {
-    const result = await cp.load("nonexistent-redis-test");
+    const result = await cp.load(R("nonexistent-redis-test"));
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBeNull();
   });
@@ -252,9 +256,9 @@ describeRedis("RedisCheckpointer", () => {
   test("setMeta + load round-trips metadata", async () => {
     const runId = makeRunId();
     const meta: RunMeta = { dagId: "dag-r1" as DagId, startedAt: new Date("2025-01-01T00:00:00Z"), nodeCount: 5 };
-    await cp.setMeta(runId, meta);
+    await cp.setMeta(runId as any, meta);
 
-    const loadResult = await cp.load(runId);
+    const loadResult = await cp.load(runId as any);
     expect(loadResult.ok).toBe(true);
     if (loadResult.ok && loadResult.value) {
       expect(loadResult.value.meta.dagId).toBe("dag-r1");
@@ -264,10 +268,10 @@ describeRedis("RedisCheckpointer", () => {
 
   test("saveNode + load round-trips correctly", async () => {
     const runId = makeRunId();
-    await cp.setMeta(runId, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 1 });
-    await cp.saveNode(runId, "n1", { nodeId: "n1" as NodeId, output: { x: 42 }, completedAt: new Date("2025-06-01T00:00:00Z") });
+    await cp.setMeta(runId as any, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 1 });
+    await cp.saveNode(runId as any, "n1", { nodeId: "n1" as NodeId, output: { x: 42 }, completedAt: new Date("2025-06-01T00:00:00Z") });
 
-    const result = await cp.load(runId);
+    const result = await cp.load(runId as any);
     expect(result.ok).toBe(true);
     if (result.ok && result.value) {
       expect(result.value.nodes["n1"].output).toEqual({ x: 42 });
@@ -276,12 +280,12 @@ describeRedis("RedisCheckpointer", () => {
 
   test("multiple nodes saved, all present in load", async () => {
     const runId = makeRunId();
-    await cp.setMeta(runId, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 3 });
+    await cp.setMeta(runId as any, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 3 });
     for (const id of ["x", "y", "z"]) {
-      await cp.saveNode(runId, id, { nodeId: id, output: id, completedAt: new Date() });
+      await cp.saveNode(runId as any, id, { nodeId: id, output: id, completedAt: new Date() });
     }
 
-    const result = await cp.load(runId);
+    const result = await cp.load(runId as any);
     expect(result.ok).toBe(true);
     if (result.ok && result.value) {
       expect(Object.keys(result.value.nodes).sort()).toEqual(["x", "y", "z"]);
@@ -293,18 +297,19 @@ describeRedis("RedisCheckpointer", () => {
     const runId = makeRunId();
     // Explicit stale version forces the writer to stamp v1 instead of the
     // current FRAMEWORK_VERSION default.
-    await cp.setMeta(runId, {
+    await cp.setMeta(runId as any, {
       dagId: "d" as DagId,
       startedAt: new Date(),
       nodeCount: 1,
       frameworkVersion: "1",
     });
 
-    const result = await cp.load(runId);
+    const result = await cp.load(runId as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-version-mismatch");
       if (result.error.kind === "checkpoint-version-mismatch") {
+        // @ts-expect-error — branded ID test fixture
         expect(result.error.runId).toBe(runId);
         expect(result.error.expected).toBe("2");
         expect(result.error.actual).toBe("1");
@@ -329,7 +334,7 @@ describeRedis("RedisCheckpointer", () => {
     );
     runIds.push(runId);
 
-    const result = await cp.load(runId);
+    const result = await cp.load(runId as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-version-mismatch");
@@ -358,11 +363,12 @@ describeRedis("RedisCheckpointer", () => {
     );
     runIds.push(runId);
 
-    const result = await cp.load(runId);
+    const result = await cp.load(runId as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-expired");
       if (result.error.kind === "checkpoint-expired") {
+        // @ts-expect-error — branded ID test fixture
         expect(result.error.runId).toBe(runId);
         expect(result.error.expiredAt.getTime()).toBe(expiredCreatedAt.getTime());
       }
@@ -375,11 +381,12 @@ describeRedis("RedisCheckpointer", () => {
     await redis!.set(`chkpt:${runId}:meta`, "{ not valid json", "EX", 300);
     runIds.push(runId);
 
-    const result = await cp.load(runId);
+    const result = await cp.load(runId as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-corrupt");
       if (result.error.kind === "checkpoint-corrupt") {
+        // @ts-expect-error — branded ID test fixture
         expect(result.error.runId).toBe(runId);
       }
     }
@@ -389,10 +396,10 @@ describeRedis("RedisCheckpointer", () => {
   // the checkpointer must fall back to inline EVAL and re-prime the SHA.
   test("recovers from server-side SCRIPT FLUSH (NOSCRIPT) via inline EVAL fallback", async () => {
     const runId = makeRunId();
-    await cp.setMeta(runId, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 2 });
+    await cp.setMeta(runId as any, { dagId: "d" as DagId, startedAt: new Date(), nodeCount: 2 });
 
     // First save primes the SHA cache.
-    await cp.saveNode(runId, "n1", {
+    await cp.saveNode(runId as any, "n1", {
       nodeId: "n1" as NodeId,
       output: { v: 1 },
       completedAt: new Date(),
@@ -404,7 +411,7 @@ describeRedis("RedisCheckpointer", () => {
     await redis!.script("FLUSH");
 
     // Second save must recover and re-prime the SHA.
-    const result = await cp.saveNode(runId, "n2", {
+    const result = await cp.saveNode(runId as any, "n2", {
       nodeId: "n2" as NodeId,
       output: { v: 2 },
       completedAt: new Date(),
@@ -413,7 +420,7 @@ describeRedis("RedisCheckpointer", () => {
 
     // The fallback path clears saveNodeSha at line `this.saveNodeSha = null`;
     // a subsequent saveNode re-LOADs.
-    await cp.saveNode(runId, "n3", {
+    await cp.saveNode(runId as any, "n3", {
       nodeId: "n3" as NodeId,
       output: { v: 3 },
       completedAt: new Date(),
@@ -422,7 +429,7 @@ describeRedis("RedisCheckpointer", () => {
     expect(shaAfter).not.toBeNull();
 
     // Verify all three node states landed.
-    const loaded = await cp.load(runId);
+    const loaded = await cp.load(runId as any);
     expect(loaded.ok).toBe(true);
     if (loaded.ok && loaded.value) {
       expect(Object.keys(loaded.value.nodes).sort()).toEqual(["n1", "n2", "n3"]);

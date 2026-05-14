@@ -6,6 +6,7 @@ import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Observer } from "../observer/observer.js";
 import type { RunStartEvent, RunEndEvent } from "../types/events.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 /**
  * Wave 1.3 regression — `beginRunTelemetry` previously dispatched `run-start`

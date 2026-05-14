@@ -1,23 +1,24 @@
 import type { z } from "zod";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 
 export const validateInput = <T>(
   schema: z.ZodType<T>,
   data: unknown,
-  nodeId: string,
+  nodeId: NodeId,
 ): Result<T, FrameworkError> => validate(schema, data, nodeId, "input");
 
 export const validateOutput = <T>(
   schema: z.ZodType<T>,
   data: unknown,
-  nodeId: string,
+  nodeId: NodeId,
 ): Result<T, FrameworkError> => validate(schema, data, nodeId, "output");
 
 const validate = <T>(
   schema: z.ZodType<T>,
   data: unknown,
-  nodeId: string,
+  nodeId: NodeId,
   direction: string,
 ): Result<T, FrameworkError> => {
   const result = schema.safeParse(data);

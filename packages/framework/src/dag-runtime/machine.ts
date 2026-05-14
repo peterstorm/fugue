@@ -4,6 +4,7 @@
 import type { Machine } from "../state-machine/types.js";
 import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
@@ -74,7 +75,7 @@ export const compileDagToMachine = (
   const sortResult = topoSort(dag);
   if (!sortResult.ok) return sortResult;
 
-  const waves: readonly (readonly string[])[] = sortResult.value;
+  const waves: readonly (readonly NodeId[])[] = sortResult.value;
 
   const initialContext: DagMachineContext = {
     dag,

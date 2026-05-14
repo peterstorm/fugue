@@ -11,6 +11,7 @@ import { createLlmNode } from "../nodes/llm.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 import { defineDag } from "../executor/define-dag.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const OutputSchema = z.object({ greeting: z.string() });
 
@@ -43,7 +44,7 @@ const mkLlmCtx = (outputs: unknown[]): NodeContext => {
 describe("LLM node retry", () => {
   it("retries once on output validation failure then succeeds", async () => {
     const node = createLlmNode({
-      id: "llm1",
+      id: N("llm1"),
       inputSchema: z.object({ name: z.string() }),
       outputSchema: OutputSchema,
       promptName: "greet",
@@ -66,7 +67,7 @@ describe("LLM node retry", () => {
 
   it("second validation failure returns Err(retry-exhausted)", async () => {
     const node = createLlmNode({
-      id: "llm2",
+      id: N("llm2"),
       inputSchema: z.object({ name: z.string() }),
       outputSchema: OutputSchema,
       promptName: "greet",
@@ -129,7 +130,7 @@ describe("LLM rate-limit → DAG retry-exhausted (W5.6)", () => {
     const counter = { calls: 0 };
 
     const llmNode = createLlmNode({
-      id: "llm-rate-limited",
+      id: N("llm-rate-limited"),
       inputSchema: z.object({ name: z.string() }),
       outputSchema: OutputSchema,
       promptName: "greet",

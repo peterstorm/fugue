@@ -4,6 +4,7 @@ import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -103,7 +104,7 @@ const isRateLimit = (e: unknown): boolean =>
   typeof (e as { status?: unknown })?.status === "number" &&
   (e as { status: number }).status === 429;
 
-const resolveNodeId = (req: { readonly nodeId: string }): string =>
+const resolveNodeId = (req: { readonly nodeId: NodeId }): NodeId =>
   req.nodeId;
 
 export class AnthropicLlmClient implements LlmClient {

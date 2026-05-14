@@ -25,6 +25,7 @@ import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -49,6 +50,7 @@ const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
 ): NodeDef<unknown, unknown> => ({
+  // @ts-expect-error — branded ID test fixture
   id,
   kind: "transform",
   inputSchema: z.unknown(),
@@ -108,7 +110,7 @@ describe("Wave 1.1 — aborted FrameworkError fast-fails without consuming retry
 
     const result = handleNodeFailed(
       0,
-      "a",
+      N("a"),
       { kind: "aborted", reason: "signal" },
       compiled.value.initialContext,
     );
@@ -366,9 +368,9 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
 describe("Wave 1.4 — eval-judge orchestrator exception flips passed to false", () => {
   it("a judge that throws past its own internal handler returns passed:false with crash field", async () => {
     const throwingJudge: EvalJudgeNodeDef = {
-      id: "broken-judge",
+      id: N("broken-judge"),
       kind: "eval-judge",
-      config: { id: "broken-judge", criteria: ["c1"] },
+      config: { id: N("broken-judge"), criteria: [N("c1")] },
       run: async () => {
         throw new Error("judge runtime exploded");
       },
@@ -401,9 +403,9 @@ describe("Wave 1.4 — eval-judge orchestrator exception flips passed to false",
 
   it("a healthy judge that scores below threshold still returns passed:false with NO crash field", async () => {
     const lowScoreJudge: EvalJudgeNodeDef = {
-      id: "low-judge",
+      id: N("low-judge"),
       kind: "eval-judge",
-      config: { id: "low-judge", criteria: ["c1"], threshold: 0.9 },
+      config: { id: N("low-judge"), criteria: [N("c1")], threshold: 0.9 },
       run: async () => ({
         passed: false,
         score: 0.3,
@@ -583,8 +585,8 @@ describe("Wave 6.8 — advanceToNextWave multi-wave fallback traversal", () => {
     //   - b, c pruned from activeNodeIds
     const ctx: DagMachineContext = {
       ...compiled.value.initialContext,
-      outputs: new Map([["a", "a-result"]]),
-      activeNodeIds: new Set(["a"]),
+      outputs: new Map([["a", "a-result"]]) as any,
+      activeNodeIds: new Set(["a"]) as any,
     };
 
     const result = advanceToNextWave(2, ctx);
@@ -614,14 +616,15 @@ describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", (
     const partials = new Map<string, unknown>([["b", "b-out"]]);
     const result = handleNodeFailed(
       0,
-      "a",
+      N("a"),
       { kind: "node-crash", nodeId: "a" as NodeId, retriability: "retriable", message: "boom" },
       compiled.value.initialContext,
+      // @ts-expect-error — branded ID test fixture
       partials,
     );
 
     expect(result.state.kind).toBe("retrying");
-    expect(result.context.outputs.get("b")).toBe("b-out");
+    expect(result.context.outputs.get(N("b"))).toBe(N("b-out"));
   });
 });
 
@@ -648,8 +651,8 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
           ]);
           const compiled = compileDagToMachine(dag, null);
           if (!compiled.ok) return false;
-          const d0 = computeBackoffMs("n", attempt, compiled.value.initialContext.dag);
-          const d1 = computeBackoffMs("n", attempt + 1, compiled.value.initialContext.dag);
+          const d0 = computeBackoffMs(N("n"), attempt, compiled.value.initialContext.dag);
+          const d1 = computeBackoffMs(N("n"), attempt + 1, compiled.value.initialContext.dag);
           return d1 >= d0;
         },
       ),
@@ -666,9 +669,9 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
     if (!compiled.ok) throw new Error("compile failed");
 
     // attempt 0 → 100, attempt 1 → 200, attempt 2 → 400, attempt 3+ → 400
-    expect(computeBackoffMs("n", 0, compiled.value.initialContext.dag)).toBe(100);
-    expect(computeBackoffMs("n", 2, compiled.value.initialContext.dag)).toBe(400);
-    expect(computeBackoffMs("n", 99, compiled.value.initialContext.dag)).toBe(400);
+    expect(computeBackoffMs(N("n"), 0, compiled.value.initialContext.dag)).toBe(100);
+    expect(computeBackoffMs(N("n"), 2, compiled.value.initialContext.dag)).toBe(400);
+    expect(computeBackoffMs(N("n"), 99, compiled.value.initialContext.dag)).toBe(400);
   });
 });
 
@@ -706,7 +709,7 @@ describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
     );
     expect(event.type).toBe("node-failed");
     if (event.type === "node-failed") {
-      expect(event.nodeId).toBe("a");
+      expect(event.nodeId).toBe(N("a"));
       expect(event.error.kind).toBe("node-crash");
       if (event.error.kind === "node-crash") {
         expect(event.error.message).toContain("no onHumanReview hook supplied");

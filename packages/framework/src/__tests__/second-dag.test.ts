@@ -9,6 +9,7 @@ import { runDag } from "../executor/executor.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 /**
  * SC-007: A simple "hello world" DAG using only public framework primitives.
@@ -20,14 +21,14 @@ describe("second-dag (SC-007): hello world DAG", () => {
   const FormattedGreeting = z.object({ message: z.string() });
 
   const fetchGreeting = createFetchNode({
-    id: "fetchGreeting",
+    id: N("fetchGreeting"),
     inputSchema: GreetingInput,
     outputSchema: RawGreeting,
     fetch: async (input) => ok({ raw: `Hello, ${input.name}` }),
   });
 
   const formatGreeting = createTransformNode({
-    id: "formatGreeting",
+    id: N("formatGreeting"),
     inputSchema: RawGreeting,
     outputSchema: FormattedGreeting,
     transform: (input) => ok({ message: `${input.raw}!` }),

@@ -8,6 +8,7 @@ import type { NodeContext } from "../types/node.js";
 import type { LlmClient, ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const InputSchema = z.object({ customerId: z.string() });
 const OutputSchema = z.object({ greeting: z.string() });
@@ -39,7 +40,7 @@ describe("createLlmWithToolsNode — factory", () => {
     };
 
     const node = createLlmWithToolsNode<{ customerId: string }, { greeting: string }>({
-      id: "greet",
+      id: N("greet"),
       inputSchema: InputSchema,
       outputSchema: OutputSchema,
       model: "fake-model",
@@ -96,7 +97,7 @@ describe("createLlmWithToolsNode — factory", () => {
     };
 
     const node = createLlmWithToolsNode<{ customerId: string }, { greeting: string }>({
-      id: "greet",
+      id: N("greet"),
       inputSchema: InputSchema,
       outputSchema: OutputSchema,
       model: "fake-model",

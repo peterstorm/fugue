@@ -8,6 +8,7 @@ import {
   isOneOfMatch,
   isUnconditionalEdge,
 } from "../types/dag.js";
+import type { NodeId } from "../types/ids.js";
 import type { IncomingSources } from "../shared/incoming.js";
 
 export type { IncomingSources };
@@ -16,9 +17,9 @@ export type Decision =
   | {
       readonly kind: "decided";
       /** Targets that fire on this routing decision (always-fired unconditional + at most one branch target). */
-      readonly chosenTargets: ReadonlySet<string>;
+      readonly chosenTargets: ReadonlySet<NodeId>;
       /** Guarded + default targets that did NOT fire from this source. */
-      readonly prunedTargets: ReadonlySet<string>;
+      readonly prunedTargets: ReadonlySet<NodeId>;
       /** True when no predicate matched and the default edge target was selected. */
       readonly defaultTaken: boolean;
       /** The predicate that matched, or `null` when the default fired or no guarded edges exist. */
@@ -26,7 +27,7 @@ export type Decision =
     }
   | {
       readonly kind: "predicate-malformed";
-      readonly fromNodeId: string;
+      readonly fromNodeId: NodeId;
       readonly message: string;
     };
 
@@ -106,7 +107,7 @@ const validatePredicateShape = (pred: unknown): string | null => {
  * trigger this branch.
  */
 export const decideRoute = (
-  fromNodeId: string,
+  fromNodeId: NodeId,
   output: unknown,
   outgoing: readonly EdgeDef[],
 ): Decision => {
@@ -120,7 +121,7 @@ export const decideRoute = (
     return {
       kind: "decided",
       chosenTargets: new Set(unconditionalTargets),
-      prunedTargets: new Set(),
+      prunedTargets: new Set<NodeId>(),
       defaultTaken: false,
       matchedPredicate: null,
     };
@@ -136,7 +137,7 @@ export const decideRoute = (
       };
     }
     if (evaluatePredicate(e.when, output)) {
-      const pruned = new Set<string>();
+      const pruned = new Set<NodeId>();
       for (const g of guarded) if (g.to !== e.to) pruned.add(g.to);
       if (defaultEdge) pruned.add(defaultEdge.to);
       return {
@@ -150,7 +151,7 @@ export const decideRoute = (
   }
 
   // No predicate matched — validator guarantees defaultEdge exists.
-  const pruned = new Set<string>(guarded.map((g) => g.to));
+  const pruned = new Set<NodeId>(guarded.map((g) => g.to));
   return {
     kind: "decided",
     chosenTargets: new Set([...unconditionalTargets, defaultEdge!.to]),
@@ -164,8 +165,8 @@ export const decideRoute = (
 // Adjacency helpers
 // ---------------------------------------------------------------------------
 
-const buildOutgoing = (dag: DagDef): Map<string, EdgeDef[]> => {
-  const out = new Map<string, EdgeDef[]>();
+const buildOutgoing = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
+  const out = new Map<NodeId, EdgeDef[]>();
   for (const n of dag.nodes) out.set(n.id, []);
   for (const e of dag.edges) {
     const list = out.get(e.from);
@@ -174,8 +175,8 @@ const buildOutgoing = (dag: DagDef): Map<string, EdgeDef[]> => {
   return out;
 };
 
-const buildIncoming = (dag: DagDef): Map<string, EdgeDef[]> => {
-  const inc = new Map<string, EdgeDef[]>();
+const buildIncoming = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
+  const inc = new Map<NodeId, EdgeDef[]>();
   for (const n of dag.nodes) inc.set(n.id, []);
   for (const e of dag.edges) {
     const list = inc.get(e.to);
@@ -191,16 +192,16 @@ const buildIncoming = (dag: DagDef): Map<string, EdgeDef[]> => {
  *
  * Wave-0 entry points are nodes with no incoming edges of any kind.
  */
-export const seedInitialActiveSet = (dag: DagDef): ReadonlySet<string> => {
+export const seedInitialActiveSet = (dag: DagDef): ReadonlySet<NodeId> => {
   const incoming = buildIncoming(dag);
   const outgoing = buildOutgoing(dag);
 
-  const seeds: string[] = [];
+  const seeds: NodeId[] = [];
   for (const n of dag.nodes) {
     if ((incoming.get(n.id)?.length ?? 0) === 0) seeds.push(n.id);
   }
 
-  const active = new Set<string>(seeds);
+  const active = new Set<NodeId>(seeds);
   const stack = [...seeds];
   while (stack.length > 0) {
     const cur = stack.pop()!;
@@ -226,13 +227,13 @@ export const seedInitialActiveSet = (dag: DagDef): ReadonlySet<string> => {
  */
 export const expandActive = (
   dag: DagDef,
-  prev: ReadonlySet<string>,
-  chosenTargets: Iterable<string>,
-  outgoing?: ReadonlyMap<string, readonly EdgeDef[]>,
-): ReadonlySet<string> => {
+  prev: ReadonlySet<NodeId>,
+  chosenTargets: Iterable<NodeId>,
+  outgoing?: ReadonlyMap<NodeId, readonly EdgeDef[]>,
+): ReadonlySet<NodeId> => {
   const adjacency = outgoing ?? buildOutgoing(dag);
   const next = new Set(prev);
-  const stack: string[] = [];
+  const stack: NodeId[] = [];
   for (const t of chosenTargets) {
     if (!next.has(t)) {
       next.add(t);
@@ -261,7 +262,7 @@ export const expandActive = (
  * helper is retained for non-runtime callers (validators, tests) that don't
  * have access to a `DagMachineContext`.
  */
-export const outgoingOf = (dag: DagDef, fromNodeId: string): readonly EdgeDef[] =>
+export const outgoingOf = (dag: DagDef, fromNodeId: NodeId): readonly EdgeDef[] =>
   dag.edges.filter((e) => e.from === fromNodeId);
 
 /**
@@ -270,8 +271,8 @@ export const outgoingOf = (dag: DagDef, fromNodeId: string): readonly EdgeDef[] 
  */
 export const computeOutgoingByNode = (
   dag: DagDef,
-): ReadonlyMap<string, readonly EdgeDef[]> => {
-  const map = new Map<string, EdgeDef[]>();
+): ReadonlyMap<NodeId, readonly EdgeDef[]> => {
+  const map = new Map<NodeId, EdgeDef[]>();
   for (const e of dag.edges) {
     const bucket = map.get(e.from);
     if (bucket) bucket.push(e);
@@ -305,8 +306,8 @@ export const computeOutgoingByNode = (
 
 const incomingSourcesFor = (
   dag: DagDef,
-  toNodeId: string,
-  alwaysActive: ReadonlySet<string>,
+  toNodeId: NodeId,
+  alwaysActive: ReadonlySet<NodeId>,
 ): IncomingSources => {
   const required: string[] = [];
   const optional: string[] = [];
@@ -348,9 +349,9 @@ const incomingSourcesFor = (
  */
 export const computeIncomingByNode = (
   dag: DagDef,
-): Map<string, IncomingSources> => {
+): Map<NodeId, IncomingSources> => {
   const alwaysActive = seedInitialActiveSet(dag);
-  const out = new Map<string, IncomingSources>();
+  const out = new Map<NodeId, IncomingSources>();
   for (const n of dag.nodes) {
     out.set(n.id, incomingSourcesFor(dag, n.id, alwaysActive));
   }
@@ -364,6 +365,6 @@ export const computeIncomingByNode = (
  */
 export const incomingSources = (
   dag: DagDef,
-  toNodeId: string,
+  toNodeId: NodeId,
 ): IncomingSources =>
   incomingSourcesFor(dag, toNodeId, seedInitialActiveSet(dag));

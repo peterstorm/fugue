@@ -88,22 +88,50 @@ shape returns `Err` when `validate` is provided.
 
 ---
 
-### 🔲 1.6 Branded IDs are soft — `string` satisfies `RunId`/`NodeId`/`DagId`
+### ✅ 1.6 Branded IDs are soft — `string` satisfies `RunId`/`NodeId`/`DagId`
 **Finding:** #6 (type-design-analyzer, CRITICAL)
-**Status:** TODO — largest single change, ~25+ files
-**File:** `types/ids.ts`
-**Plan:** Make brand required (`?` → non-optional). Run `tsc --noEmit`, fix all
-compile errors using smart constructors or `__brandXxx` for trusted internal
-code. Do together with 1.7 in a dedicated commit.
+**Status:** DONE
+**Files changed:** `types/ids.ts`, `types/dag-internals.ts`, `types/llm.ts`,
+`shared/validate.ts`, `shared/topo.ts`, `dag-runtime/types.ts`,
+`dag-runtime/executor.ts`, `dag-runtime/machine.ts`, `dag-runtime/transition.ts`,
+`dag-runtime/wave-resolution.ts`, `dag-runtime/retry-policy.ts`,
+`dag-runtime/human-resolution.ts`, `dag-runtime/conditional.ts`,
+`dag-runtime/run-node.ts`, `dag-runtime/run-dag-stateful.ts`,
+`executor/executor.ts`, `executor/validate-dag.ts`,
+`llm/anthropic-client.ts`, `llm/openai-client.ts`, `llm/fake-client.ts`,
+`llm/tool-dispatch.ts`, `nodes/eval-judge.ts`, `nodes/guardrail.ts`,
+`nodes/llm.ts`, `nodes/llm-with-tools.ts`, `nodes/fetch.ts`, `nodes/transform.ts`,
+`checkpoint/checkpointer.ts`, `checkpoint/redis-checkpointer.ts`,
++ 31 test files, new `__tests__/_id-helpers.ts`
+**What was done:**
+- Changed brand from optional (`?`) to required on all three ID types.
+- Added `NodeId` type to `DagMachineContext` map keys, `DagPhase` fields,
+  `DagEvent` fields, `HumanAction.targetNodeId`, `LlmRequest.nodeId`,
+  function parameters throughout the DAG runtime.
+- Node factory configs changed from `Id extends string` to `Id extends NodeId`.
+- All internal error constructions use `EXECUTOR_NODE_ID` or `__brandNodeId`.
+- Test helper `_id-helpers.ts` provides `N()`, `R()`, `D()`, `nodeMap()`,
+  `nodeSet()` for test fixture construction.
+- `ConsistentNodes` type simplified to accept `NodeId`-typed ids unconditionally
+  (runtime validator still catches key/id mismatches).
 
 ---
 
-### 🔲 1.7 `DagMachineContext` uses `ReadonlyMap<string, unknown>` — brand erased
+### ✅ 1.7 `DagMachineContext` uses `ReadonlyMap<string, unknown>` — brand erased
 **Finding:** #7 (type-design-analyzer, CRITICAL)
-**Status:** TODO — cascades through ~15 files
-**File:** `dag-runtime/types.ts`
-**Plan:** Change all `string` keys to `NodeId` in `DagMachineContext`,
-`DagPhase`, `DagEvent`, and `HumanAction`. Requires 1.6 first.
+**Status:** DONE (done together with 1.6)
+**Files changed:** Same as 1.6 above
+**What was done:**
+- `DagMachineContext.waves`: `readonly (readonly string[])[]` → `readonly (readonly NodeId[])[]`
+- `DagMachineContext.outputs`: `ReadonlyMap<string, unknown>` → `ReadonlyMap<NodeId, unknown>`
+- `DagMachineContext.retries`: `ReadonlyMap<string, number>` → `ReadonlyMap<NodeId, number>`
+- `DagMachineContext.activeNodeIds`: `ReadonlySet<string>` → `ReadonlySet<NodeId>`
+- `DagMachineContext.incomingByNode`: `ReadonlyMap<string, ...>` → `ReadonlyMap<NodeId, ...>`
+- `DagMachineContext.outgoingByNode`: `ReadonlyMap<string, ...>` → `ReadonlyMap<NodeId, ...>`
+- `DagMachineContext.nodeById`: `ReadonlyMap<string, ...>` → `ReadonlyMap<NodeId, ...>`
+- `DagPhase` nodeId fields: `string` → `NodeId`
+- `DagEvent` nodeId fields and map keys: `string` → `NodeId`
+- `Decision.chosenTargets`/`prunedTargets`: `ReadonlySet<string>` → `ReadonlySet<NodeId>`
 
 ---
 
@@ -338,15 +366,14 @@ Wave 6 (simplifier)
 
 | Wave | Findings | Done | Remaining |
 |------|----------|------|-----------|
-| 1 (critical) | 7 | **5** ✅ | 2 (branded ID migration) |
+| 1 (critical) | 7 | **7** ✅ | 0 |
 | 2 (errors) | 8 | **8** ✅ | 0 |
 | 3 (types) | 4 | **4** ✅ | 0 |
 | 4 (perf) | 4 | **4** ✅ | 0 |
 | 5 (tests) | 2 | **2** ✅ | 0 |
 | 6 (simplify) | — | 0 | Agent pass |
-| **Total** | **25** | **23 ✅** | **2 remaining** |
+| **Total** | **25** | **25 ✅** | **0 remaining** |
 
-**729 tests pass, 0 fail, 0 type errors.**
+**859 tests pass, 0 fail, 0 type errors.**
 
-The only remaining items are **1.6 + 1.7** (branded ID migration) which require
-changing ~25+ files and all test fixtures. This is a separate dedicated commit.
+All findings from the comprehensive PR review are now resolved.

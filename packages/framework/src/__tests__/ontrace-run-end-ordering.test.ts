@@ -20,6 +20,7 @@ import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createTransformNode } from "../nodes/transform.js";
 import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — seeded linear congruential generator. Test failures
@@ -46,6 +47,7 @@ interface Recording {
 }
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
+  // @ts-expect-error — branded ID test fixture
   runId: `r-${Math.floor(Math.random() * 1e9)}`,
   dagId: "ontrace-ordering" as DagId,
   observer,
@@ -60,6 +62,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
 const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { calls: Record<string, number> }): NodeDef<unknown, unknown> => {
   if (kind === "ok") {
     return createTransformNode({
+      // @ts-expect-error — branded ID test fixture
       id,
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -68,11 +71,13 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
   }
   if (kind === "fail-once") {
     return {
+      // @ts-expect-error — branded ID test fixture
       id,
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
       requires: [],
+      // @ts-expect-error — branded ID test fixture
       run: async (i) => {
         state.calls[id] = (state.calls[id] ?? 0) + 1;
         if ((state.calls[id] ?? 0) < 2) {
@@ -84,11 +89,13 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
     };
   }
   return {
+    // @ts-expect-error — branded ID test fixture
     id,
     kind: "transform",
     inputSchema: z.any(),
     outputSchema: z.any(),
     requires: [],
+    // @ts-expect-error — branded ID test fixture
     run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: id, message: "permanent" }),
     retry: { backoffMs: [1] },
   };

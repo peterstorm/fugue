@@ -1,30 +1,23 @@
 // Identifier types — `RunId`, `NodeId`, `DagId`.
 //
-// These are *documentation* aliases over `string`, paired with smart
-// constructors (`runId`, `nodeId`, `dagId`) that validate against the shared
-// `ID_REGEX` and brand the value. The brand is a TypeScript-level marker; at
-// runtime the value is simply the original string.
+// Hard-branded newtypes over `string`. A plain `string` does NOT satisfy
+// these types at compile time — callers must go through the smart
+// constructors (`runId`, `nodeId`, `dagId`) which validate against
+// `ID_REGEX`, or through the internal `__brandXxx` escape hatches for
+// trusted framework code that has already validated by other means.
 //
-// Why soft aliases rather than full structural brands: every event, error,
-// `NodeContext`, and `DagDef` slot threads ids through hundreds of internal
-// callsites. A hard `unique symbol` brand turns each of those into a
-// compile error unless the caller pre-brands the string. The soft alias
-// retains the *documentary* intent (every `runId: RunId` slot signals "this
-// is a run identifier, not an arbitrary string") and lets callers opt into
-// validation via the smart constructors when they care. The same surface is
-// retained — `runId("my-run")` runs the regex check and returns a typed
-// value — so the API for hosts that DO want validation is unchanged.
+// At runtime the values are still plain strings; the brand is erased by
+// TypeScript. The hard brand catches argument-swap bugs and ensures that
+// every id flowing through the system has been explicitly validated or
+// branded at its point of origin.
 
 declare const __runIdBrand: unique symbol;
 declare const __nodeIdBrand: unique symbol;
 declare const __dagIdBrand: unique symbol;
 
-// Intersection with a phantom marker keeps `RunId` distinct in IntelliSense
-// (hovering `runId(...)` shows `RunId`, not `string`) without preventing a
-// raw string from assigning to it.
-export type RunId = string & { readonly [__runIdBrand]?: void };
-export type NodeId = string & { readonly [__nodeIdBrand]?: void };
-export type DagId = string & { readonly [__dagIdBrand]?: void };
+export type RunId = string & { readonly [__runIdBrand]: void };
+export type NodeId = string & { readonly [__nodeIdBrand]: void };
+export type DagId = string & { readonly [__dagIdBrand]: void };
 
 // Allow `:` so callers can namespace run ids (`tenant:run-abc`) without
 // jumping through encoding hoops. The regex stays restrictive enough that

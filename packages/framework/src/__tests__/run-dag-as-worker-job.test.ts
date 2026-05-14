@@ -11,6 +11,7 @@ import type { DagDef } from "../types/dag.js";
 import { runDagAsWorkerJob, runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createInMemoryBackend } from "../queue/in-memory.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
+import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unknown);
 
@@ -18,6 +19,7 @@ const mkNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
 ): NodeDef<unknown, unknown> => ({
+  // @ts-expect-error — branded ID test fixture
   id,
   kind: "transform",
   inputSchema: z.unknown(),
