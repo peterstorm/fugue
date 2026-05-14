@@ -20,5 +20,7 @@ export const createTransformNode = <I, O, const Id extends NodeId = NodeId>(
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
   requires: [] as const,
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   run: async (input, _ctx) => config.transform(input),
 });

@@ -55,6 +55,8 @@ export const createLlmNode = <I, O, const Id extends NodeId = NodeId>(
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
   requires: ["llm", "prompts"] as const,
+  sideEffects: { kind: "external-call", resource: `llm:${config.model}` },
+  confidence: { mode: "none" },
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     // Skip check — the discriminated `LlmSkipConfig` makes `skipDefault`
     // statically present whenever `skipWhen` is provided, so no runtime

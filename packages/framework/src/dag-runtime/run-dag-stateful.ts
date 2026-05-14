@@ -26,6 +26,7 @@ import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome }
 import { validateCapabilities } from "../shared/capabilities.js";
 import { wrapDagJobLike } from "./persistence.js";
 import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.js";
+import type { InMemoryFreshnessIndex } from "./freshness-check.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -69,6 +70,12 @@ export interface DagRunOpts
    * a seeded deterministic source.
    */
   readonly random?: () => number;
+  /**
+   * In-memory freshness index for single-process witness tracking. When
+   * omitted, a private instance is created per executor. Pass a shared
+   * instance to enable cross-DAG freshness detection within a process.
+   */
+  readonly freshnessIndex?: InMemoryFreshnessIndex;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +147,7 @@ export const runDagStateful = async <I, O>(
       resumeCheckpoint: opts?.resumeCheckpoint,
       random: opts?.random,
       now: opts?.now,
+      freshnessIndex: opts?.freshnessIndex,
     });
 
     // Resolve the job handle — caller-supplied or fresh in-memory.

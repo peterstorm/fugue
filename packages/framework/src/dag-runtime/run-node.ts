@@ -154,9 +154,9 @@ export const runNodeShared = async (
     return { result: inputResult, outcome: EMPTY_OUTCOME };
   }
 
-  return withNodeSpan(nodeId, node.kind, inputResult.value, resolveContentFilter(ctx), async () => {
+  return withNodeSpan(nodeId, node.kind, inputResult.value, resolveContentFilter(ctx), node.sideEffects, async () => {
     const nodeStart = nowFn();
-    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, timestamp: stamp() });
+    emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, sideEffects: node.sideEffects, timestamp: stamp() });
 
     let runResult: Result<unknown, FrameworkError>;
     try {
@@ -185,6 +185,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
+        sideEffects: node.sideEffects,
         timestamp: stamp(),
         error: message,
         stack,
@@ -211,6 +212,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
+        sideEffects: node.sideEffects,
         timestamp: stamp(),
         error: errorMsg,
         frameworkError,
@@ -225,6 +227,7 @@ export const runNodeShared = async (
         runId: ctx.runId,
         dagId,
         nodeId,
+        sideEffects: node.sideEffects,
         timestamp: stamp(),
         error: `output validation failed: ${JSON.stringify(outputResult.error as FrameworkError)}`,
         frameworkError: outputResult.error,
@@ -248,6 +251,7 @@ export const runNodeShared = async (
           runId: ctx.runId,
           dagId,
           nodeId,
+          sideEffects: node.sideEffects,
           timestamp: stamp(),
           error: `checkpoint-write-failed: ${message}`,
           frameworkError: cpwError,
@@ -262,6 +266,7 @@ export const runNodeShared = async (
       runId: ctx.runId,
       dagId,
       nodeId,
+      sideEffects: node.sideEffects,
       timestamp: stamp(),
       duration,
       output: outputResult.value,

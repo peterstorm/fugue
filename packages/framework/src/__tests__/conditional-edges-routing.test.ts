@@ -1,5 +1,5 @@
-// Routing tests for conditional edges (ADR 0015 + ADR 0016).
-// Predicates are structural-match data; closures are no longer accepted.
+// Routing tests for conditional edges — function-based predicates with
+// bucketed confidence (Phase 2).
 
 import { describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
@@ -24,6 +24,8 @@ const makeNode = (
   outputSchema: z.unknown(),
   run: noop as any,
   requires: [],
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   ...overrides,
 });
 
@@ -39,9 +41,6 @@ const ctx = (observer?: RecordingObserver): NodeContext => ({
   logger: { warn: () => {}, error: () => {} },
 });
 
-// Branch-target nodes whose only incoming edge is conditional MUST declare
-// the dep as `optionalDeps` per the validator. The runtime input shape is
-// then an object keyed by `deps ∪ optionalDeps`.
 describe("conditional edges — 2-way routing", () => {
   it("predicate matches: conditional branch picked; default skipped", async () => {
     const dag = defineDag({
@@ -66,7 +65,7 @@ describe("conditional edges — 2-way routing", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes-branch", when: { kind: "yes" } as any },
+        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no-branch", kind: "default" },
         { from: "yes-branch", to: "merge" },
         { from: "no-branch", to: "merge" },
@@ -86,7 +85,11 @@ describe("conditional edges — 2-way routing", () => {
       expect([...routeDecided[0].chosenTargets]).toEqual([N("yes-branch")]);
       expect([...routeDecided[0].prunedTargets]).toEqual([N("no-branch")]);
       expect(routeDecided[0].defaultTaken).toBe(false);
-      expect(routeDecided[0].matchedPredicate).toEqual({ kind: "yes" });
+      // Phase 2: evidence colocated with routing decision
+      expect(routeDecided[0].evidence.predicateResults).toHaveLength(1);
+      expect(routeDecided[0].evidence.predicateResults[0]?.predicateLabel).toBe("kind-is-yes");
+      expect(routeDecided[0].evidence.predicateResults[0]?.matched).toBe(true);
+      expect(routeDecided[0].evidence.upstreamConfidence).toBeNull(); // router has confidence: none
     }
 
     const pruned = obs.events.filter((e) => e.type === "node-pruned");
@@ -96,7 +99,7 @@ describe("conditional edges — 2-way routing", () => {
     }
   });
 
-  it("default fires when no predicate matches; matchedPredicate is null", async () => {
+  it("default fires when no predicate matches; all predicateResults show matched: false", async () => {
     const dag = defineDag({
       id: "default-fires",
       nodes: {
@@ -119,7 +122,7 @@ describe("conditional edges — 2-way routing", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes-branch", when: { kind: "yes" } as any },
+        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no-branch", kind: "default" },
         { from: "yes-branch", to: "merge" },
         { from: "no-branch", to: "merge" },
@@ -136,7 +139,8 @@ describe("conditional edges — 2-way routing", () => {
     const decided = obs.events.find((e) => e.type === "route-decided");
     if (decided?.type === "route-decided") {
       expect(decided.defaultTaken).toBe(true);
-      expect(decided.matchedPredicate).toBeNull();
+      // No predicate matched
+      expect(decided.evidence.predicateResults.every((r) => !r.matched)).toBe(true);
     }
   });
 });
@@ -175,9 +179,9 @@ describe("conditional edges — 3-way routing", () => {
         }),
       },
       edges: [
-        { from: "router", to: "a", when: { kind: "a" } as any },
-        { from: "router", to: "b", when: { kind: "b" } as any },
-        { from: "router", to: "c", when: { kind: "c" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-a", check: (v: any) => v?.kind === "a" } as any },
+        { from: "router", to: "b", when: { label: "kind-is-b", check: (v: any) => v?.kind === "b" } as any },
+        { from: "router", to: "c", when: { label: "kind-is-c", check: (v: any) => v?.kind === "c" } as any },
         { from: "router", to: "d", kind: "default" },
         { from: "a", to: "merge" },
         { from: "b", to: "merge" },
@@ -193,9 +197,9 @@ describe("conditional edges — 3-way routing", () => {
     if (result.ok) expect(result.value).toBe("B");
   });
 
-  it("oneOf matches any listed value", async () => {
+  it("check function with multi-value matching (replaces oneOf)", async () => {
     const dag = defineDag({
-      id: "oneof",
+      id: "multi-value",
       nodes: {
         router: makeNode("router", { run: async () => ok({ kind: "beta" }) }),
         match: makeNode("match", {
@@ -211,7 +215,10 @@ describe("conditional edges — 3-way routing", () => {
         {
           from: "router",
           to: "match",
-          when: { kind: { oneOf: ["alpha", "beta", "gamma"] } } as any,
+          when: {
+            label: "kind-in-alpha-beta-gamma",
+            check: (v: any) => ["alpha", "beta", "gamma"].includes(v?.kind),
+          } as any,
         },
         { from: "router", to: "fallback", kind: "default" },
       ],
@@ -223,7 +230,7 @@ describe("conditional edges — 3-way routing", () => {
     if (result.ok) expect(result.value).toBe("MATCHED");
   });
 
-  it("multi-key predicate requires every key to match", async () => {
+  it("multi-condition check requires every condition to match", async () => {
     const dag = defineDag({
       id: "multi-key",
       nodes: {
@@ -243,7 +250,10 @@ describe("conditional edges — 3-way routing", () => {
         {
           from: "router",
           to: "gold",
-          when: { kind: "ok", tier: "gold" } as any,
+          when: {
+            label: "kind-ok-tier-gold",
+            check: (v: any) => v?.kind === "ok" && v?.tier === "gold",
+          } as any,
         },
         { from: "router", to: "other", kind: "default" },
       ],
@@ -287,7 +297,7 @@ describe("conditional edges — branch-then-rejoin via optionalDeps", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes", when: { kind: "yes" } as any },
+        { from: "router", to: "yes", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
         { from: "yes", to: "merge" },
         { from: "no", to: "merge" },
@@ -311,12 +321,11 @@ describe("conditional edges — branch-then-rejoin via optionalDeps", () => {
   });
 });
 
-describe("conditional edges — malformed predicate at runtime", () => {
-  it("predicate cast that introduces an array value fails with predicate-malformed", async () => {
-    // Module-load validator only checks `{}` for emptiness — a malformed
-    // value smuggled in via `as` casts (here: an array under a key) surfaces
-    // at decideRoute as a predicate-malformed error.
-    const dag = defineDag({
+describe("conditional edges — malformed predicate at definition time", () => {
+  it("predicate cast that introduces a non-function check throws DagDefinitionError", () => {
+    // A malformed predicate smuggled via `as` casts: missing `check` function.
+    // The validator rejects at defineDag time with a DagDefinitionError.
+    expect(() => defineDag({
       id: "malformed",
       nodes: {
         router: makeNode("router", { run: async () => ok({ kind: "x" }) }),
@@ -330,39 +339,20 @@ describe("conditional edges — malformed predicate at runtime", () => {
         }),
       },
       edges: [
-        // Array values are not part of the predicate vocabulary — must be a
-        // literal or `{ oneOf: [...] }`. Cast through `unknown` to bypass
-        // edit-time typing.
         {
           from: "router",
           to: "a",
-          when: { kind: ["x", "y"] } as unknown as Record<string, never>,
+          when: { label: "bad", check: "not-a-function" } as any,
         } as any,
         { from: "router", to: "b", kind: "default" },
       ],
       outputNodeId: "b",
       defaultRetryLimit: 0,
-    });
-
-    const result = await runDagStateful<unknown, string>(dag, null, ctx());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("predicate-malformed");
-      if (result.error.kind === "predicate-malformed") {
-        expect(result.error.nodeId).toBe(N("router"));
-        expect(result.error.message).toContain("'kind'");
-      }
-    }
+    })).toThrow(/check/);
   });
 
-  // Wave 3 §3.6: malformed predicate is a config error — fail-fast regardless
-  // of retry budget. Previously runWave fell through to wave-done and
-  // handleWaveDone failed the run; now runWave returns node-failed and
-  // handleNodeFailed special-cases the kind to skip retry. This test pins the
-  // fail-fast behavior — without §3.6, a non-zero retry budget would have
-  // produced retry-exhausted.
-  it("predicate-malformed is non-retriable even with a retry budget", async () => {
-    const dag = defineDag({
+  it("predicate-malformed throws even with a retry budget", () => {
+    expect(() => defineDag({
       id: "malformed-retries",
       nodes: {
         router: makeNode("router", { run: async () => ok({ kind: "x" }) }),
@@ -379,19 +369,12 @@ describe("conditional edges — malformed predicate at runtime", () => {
         {
           from: "router",
           to: "a",
-          when: { kind: ["x", "y"] } as unknown as Record<string, never>,
+          when: { label: "bad", check: 42 } as any,
         } as any,
         { from: "router", to: "b", kind: "default" },
       ],
       outputNodeId: "b",
       defaultRetryLimit: 3,
-    });
-
-    const result = await runDagStateful<unknown, string>(dag, null, ctx());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      // §3.6: failure preserves the predicate-malformed kind, not wrapped in retry-exhausted.
-      expect(result.error.kind).toBe("predicate-malformed");
-    }
+    })).toThrow(/check/);
   });
 });

@@ -35,7 +35,8 @@ describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
       kind: "llm",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      requires: ["llm"] as const,
+      requires: ["llm"] as const, sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async () => {
         ranBody = true;
         return ok("never");
@@ -63,7 +64,8 @@ describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      requires: ["prompts"] as const,
+      requires: ["prompts"] as const, sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async () => ok("never"),
     };
     const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
@@ -82,7 +84,8 @@ describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      requires: [] as const,
+      requires: [] as const, sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async () => ok("ok"),
     };
     const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
@@ -96,7 +99,8 @@ describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      requires: ["llm", "cache"] as const,
+      requires: ["llm", "cache"] as const, sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async () => ok("never"),
     };
     const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
@@ -118,7 +122,8 @@ describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
       kind: "llm",
       inputSchema: z.any(),
       outputSchema: z.any(),
-      requires: ["llm"] as const,
+      requires: ["llm"] as const, sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async (_input, ctx) => {
         ranBody = true;
         // ctx.llm is typed non-null here — no need to null-check.

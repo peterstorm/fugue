@@ -9,7 +9,11 @@ import type {
   RunEndEvent,
   RouteDecidedEvent,
   NodePrunedEvent,
+  WitnessCapturedEvent,
+  WriteAttemptedEvent,
+  FreshnessViolationEvent,
 } from "../types/events.js";
+import { match } from "ts-pattern";
 import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
 import { fwLogger } from "../logger.js";
@@ -40,39 +44,20 @@ const OBSERVER_STRICT =
 
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
   try {
-    switch (event.type) {
-      case "run-start":
-        observer.onRunStart(event);
-        break;
-      case "node-start":
-        observer.onNodeStart(event);
-        break;
-      case "node-end":
-        observer.onNodeEnd(event);
-        break;
-      case "node-skipped":
-        observer.onNodeSkipped(event);
-        break;
-      case "node-error":
-        observer.onNodeError(event);
-        break;
-      case "sub-span":
-        observer.onSubSpan(event);
-        break;
-      case "run-end":
-        observer.onRunEnd(event);
-        break;
-      case "route-decided":
-        observer.onRouteDecided(event);
-        break;
-      case "node-pruned":
-        observer.onNodePruned(event);
-        break;
-      default: {
-        const _exhaustive: never = event;
-        break;
-      }
-    }
+    match(event)
+      .with({ type: "run-start" }, (e) => observer.onRunStart(e))
+      .with({ type: "node-start" }, (e) => observer.onNodeStart(e))
+      .with({ type: "node-end" }, (e) => observer.onNodeEnd(e))
+      .with({ type: "node-skipped" }, (e) => observer.onNodeSkipped(e))
+      .with({ type: "node-error" }, (e) => observer.onNodeError(e))
+      .with({ type: "sub-span" }, (e) => observer.onSubSpan(e))
+      .with({ type: "run-end" }, (e) => observer.onRunEnd(e))
+      .with({ type: "route-decided" }, (e) => observer.onRouteDecided(e))
+      .with({ type: "node-pruned" }, (e) => observer.onNodePruned(e))
+      .with({ type: "witness-captured" }, (e) => observer.onWitnessCaptured(e))
+      .with({ type: "write-attempted" }, (e) => observer.onWriteAttempted(e))
+      .with({ type: "freshness-violation" }, (e) => observer.onFreshnessViolation(e))
+      .exhaustive();
   } catch (e) {
     // Log at error level with full stack — production observers MUST be
     // failure-tolerant (runs continue), but silent failure is worse than a
@@ -231,6 +216,16 @@ export class BufferedObserver implements Observer {
     this.buffer(e.runId, e);
   }
   onNodePruned(e: NodePrunedEvent): void {
+    this.buffer(e.runId, e);
+  }
+
+  onWitnessCaptured(e: WitnessCapturedEvent): void {
+    this.buffer(e.runId, e);
+  }
+  onWriteAttempted(e: WriteAttemptedEvent): void {
+    this.buffer(e.runId, e);
+  }
+  onFreshnessViolation(e: FreshnessViolationEvent): void {
     this.buffer(e.runId, e);
   }
 

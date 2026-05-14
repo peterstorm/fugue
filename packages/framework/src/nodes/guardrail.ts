@@ -90,6 +90,8 @@ export const createGuardrailNode = <I, T, const Id extends NodeId = NodeId>(
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
   requires: [] as const,
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   run: async (input, ctx): Promise<Result<GuardrailResult<T>, FrameworkError>> => {
     let result: GuardrailResult<T>;
     try {

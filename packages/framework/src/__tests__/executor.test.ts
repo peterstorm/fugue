@@ -584,6 +584,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           inputSchema: z.any(),
           outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
           run: async (_input, _ctx) => ok({ result: "needs-review" }),
           humanReview: { prompt: "Please review" },
         } as NodeDef<unknown, unknown>,
@@ -655,6 +657,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           inputSchema: z.any(),
           outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
           run: async (_input, _ctx) => { log.push("reviewed"); return ok({ result: "needs-review" }); },
           humanReview: { prompt: "Please review" },
         } as NodeDef<unknown, unknown>,
@@ -688,6 +692,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           inputSchema: z.any(),
           outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
           run: async () => {
             attempts += 1;
             if (attempts < 2) {
@@ -732,6 +738,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       inputSchema: z.any(),
       outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
@@ -760,6 +768,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       inputSchema: z.any(),
       outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 2) {
@@ -789,6 +799,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       inputSchema: z.any(),
       outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async (_input, _ctx) => {
         callCount += 1;
         return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "fail" });
@@ -814,6 +826,8 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       inputSchema: z.any(),
       outputSchema: z.any(),
           requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async (_input, _ctx) => {
         callCount += 1;
         if (callCount < 3) {

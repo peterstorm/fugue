@@ -6,8 +6,24 @@ import type { LlmClient } from "./llm.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 import type { ContentFilter } from "../tracing/content-filter.js";
+import type { SideEffectProfile } from "./side-effects.js";
+import type { Confidence } from "./confidence.js";
+import type { Witness } from "./freshness.js";
 
 export type { Tracer };
+
+/**
+ * Confidence extraction mode for a node. Every node declares how (or whether)
+ * it produces a confidence signal. The framework never coerces a bare number
+ * into a confidence value.
+ *
+ * - `{ mode: "none" }` — node does not produce confidence (explicitly opting out).
+ * - `{ mode: "value"; extract }` — node produces confidence; `extract` is called
+ *   on the node's output after successful execution.
+ */
+export type ConfidenceMode<O> =
+  | { readonly mode: "none" }
+  | { readonly mode: "value"; readonly extract: (output: O) => Confidence };
 
 export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge";
 
@@ -183,9 +199,15 @@ export const brandAsValidatedNodeContext = (
   ctx: NodeContext,
 ): ValidatedNodeContext => ctx as ValidatedNodeContext;
 
+/**
+ * Base node definition fields shared by all side-effect profiles.
+ * The full `NodeDef` type adds optional freshness extractors for `reads`
+ * and `writes` nodes. When present, the framework emits witness events;
+ * when absent, freshness tracking is silently skipped for that node.
+ */
 export interface NodeDef<
-  I,
-  O,
+  I = unknown,
+  O = unknown,
   E extends FrameworkError = FrameworkError,
   R extends readonly Capability[] = readonly Capability[],
 > {
@@ -202,6 +224,32 @@ export interface NodeDef<
   readonly requires: R;
   readonly run: (input: I, ctx: TypedNodeContext<R>) => Promise<Result<O, E>>;
   /**
+   * Declares the side-effect profile for this node. The framework uses this
+   * for freshness-witness contracts, operator dashboards, and routing safety
+   * analysis.
+   *
+   * - `"none"` — pure transform, no external state read or mutated.
+   * - `"reads"` — reads external state (DB, API) without mutation.
+   * - `"writes"` — mutates external state (DB writes, state changes).
+   * - `"external-call"` — calls an external service with potential side effects.
+   *
+   * `resource` is mandatory for all kinds except `"none"` and names the logical
+   * resource (e.g. `"postgres:orders"`, `"stripe:charges"`).
+   */
+  readonly sideEffects: SideEffectProfile;
+  /**
+   * Confidence extraction mode. Declares how this node produces a confidence
+   * signal for downstream routing decisions.
+   *
+   * - `{ mode: "none" }` — no confidence signal (default for pure transforms).
+   * - `{ mode: "value", extract: (output) => Confidence }` — extract a
+   *   bucketed confidence from the node's output.
+   *
+   * When `mode === "value"`, the framework calls `extract(output)` after
+   * successful execution and colocates the result with routing evidence.
+   */
+  readonly confidence: ConfidenceMode<O>;
+  /**
    * When set, the DAG pauses after this node completes and awaits a human
    * response. Routing to the state-machine path is driven by this field.
    */
@@ -211,6 +259,33 @@ export interface NodeDef<
    * `DagDef.retryLimits` / `DagDef.defaultRetryLimit` when omitted.
    */
   readonly retry?: NodeRetryConfig;
+
+  // -------------------------------------------------------------------------
+  // Freshness witness extractors (Phase 3)
+  //
+  // Required for nodes that declare `sideEffects.kind === "reads"` or
+  // `sideEffects.kind === "writes"`. When present, the framework emits
+  // `witness-captured` / `write-attempted` / `freshness-violation` events.
+  // When absent, freshness tracking is silently skipped for the node.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Extract a freshness witness from the node's output after successful
+   * execution. For `reads` nodes only.
+   *
+   * Example: `(output) => ({ kind: "version", resource: "postgres:orders:123", value: String(output.xmin) })`
+   */
+  readonly extractWitness?: (output: O) => Witness;
+  /**
+   * Declare which witness this write is conditioned on. Called with the
+   * node's assembled input before execution. For `writes` nodes only.
+   */
+  readonly extractConditionedOn?: (input: I) => Witness;
+  /**
+   * Extract the new witness after a successful write. Captures the new
+   * resource version that resulted from the mutation. For `writes` nodes only.
+   */
+  readonly extractNewWitness?: (output: O) => Witness;
 }
 
 /**

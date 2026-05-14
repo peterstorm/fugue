@@ -1,7 +1,9 @@
 import type { SpanKind } from "./span.js";
-import type { Predicate } from "./dag.js";
 import type { FrameworkError } from "./errors.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
+import type { SideEffectProfile } from "./side-effects.js";
+import type { Confidence } from "./confidence.js";
+import type { Witness } from "./freshness.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
@@ -15,6 +17,7 @@ export interface NodeStartEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
+  readonly sideEffects: SideEffectProfile;
   readonly timestamp: Date;
 }
 
@@ -23,6 +26,7 @@ export interface NodeEndEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
+  readonly sideEffects: SideEffectProfile;
   readonly timestamp: Date;
   readonly duration: number;
   readonly output: unknown;
@@ -50,6 +54,7 @@ export interface NodeErrorEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
+  readonly sideEffects?: SideEffectProfile;
   readonly timestamp: Date;
   /** Human-readable summary for display. */
   readonly error: string;
@@ -83,6 +88,23 @@ export interface RunEndEvent {
   readonly status: "ok" | "error";
 }
 
+/**
+ * Evidence colocated with a routing decision. Captures the upstream output,
+ * confidence signal, and per-predicate evaluation results so that an
+ * operator can answer "why did this route fire?" from the event log alone.
+ */
+export interface RouteEvidence {
+  readonly upstreamOutput: unknown;
+  readonly upstreamConfidence: Confidence | null;
+  readonly predicateResults: ReadonlyArray<{
+    readonly predicateLabel: string;
+    readonly matched: boolean;
+    readonly evaluatedConfidence: Confidence | null;
+    readonly errorKind?: "malformed" | "threw" | "below-min-confidence";
+  }>;
+  readonly decidedAtMs: number;
+}
+
 export interface RouteDecidedEvent {
   readonly type: "route-decided";
   readonly runId: RunId;
@@ -91,8 +113,7 @@ export interface RouteDecidedEvent {
   readonly chosenTargets: readonly NodeId[];
   readonly prunedTargets: readonly NodeId[];
   readonly defaultTaken: boolean;
-  /** The predicate that matched, or `null` when the default fired. Serializable JSON. */
-  readonly matchedPredicate: Predicate<unknown> | null;
+  readonly evidence: RouteEvidence;
   readonly timestamp: Date;
 }
 
@@ -105,6 +126,62 @@ export interface NodePrunedEvent {
   readonly timestamp: Date;
 }
 
+// ---------------------------------------------------------------------------
+// Freshness witness events (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Emitted after a `reads` node completes successfully. Captures the
+ * freshness witness extracted from the node's output.
+ */
+export interface WitnessCapturedEvent {
+  readonly type: "witness-captured";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly witness: Witness;
+  readonly capturedAtMs: number;
+  readonly timestamp: Date;
+}
+
+/**
+ * Emitted after a `writes` node completes successfully. Records both the
+ * witness the write was conditioned on and the new witness produced.
+ */
+export interface WriteAttemptedEvent {
+  readonly type: "write-attempted";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly conditionedOn: Witness;
+  readonly newWitness: Witness;
+  readonly succeededAtMs: number;
+  readonly timestamp: Date;
+}
+
+/**
+ * Emitted when the framework detects that a write's conditioned-on witness
+ * has been superseded by a conflicting write (possibly from another run).
+ * The write still proceeds — the policy of "abort vs. proceed on violation"
+ * is owned by the node author via routing on `freshness-violation` events.
+ */
+export interface FreshnessViolationEvent {
+  readonly type: "freshness-violation";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly resource: string;
+  readonly conditionedOnWitness: Witness;
+  readonly conflictingWrite: {
+    readonly runId: RunId;
+    readonly nodeId: NodeId;
+    readonly newWitness: Witness;
+    readonly succeededAtMs: number;
+  };
+  readonly detectedAtMs: number;
+  readonly timestamp: Date;
+}
+
 export type ObserverEvent =
   | RunStartEvent
   | NodeStartEvent
@@ -114,4 +191,7 @@ export type ObserverEvent =
   | SubSpanEvent
   | RunEndEvent
   | RouteDecidedEvent
-  | NodePrunedEvent;
+  | NodePrunedEvent
+  | WitnessCapturedEvent
+  | WriteAttemptedEvent
+  | FreshnessViolationEvent;

@@ -20,6 +20,8 @@ const echoNode: NodeDef<unknown, unknown> = {
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   requires: [],
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   run: async (input) => ok(input),
 };
 

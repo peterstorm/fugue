@@ -24,6 +24,19 @@ export const AI_LLM_HAS_THINKING = "ai.llm.has_thinking";
 
 export const AI_GUARDRAIL_PASSED = "ai.guardrail.passed";
 
+export const AI_NODE_SIDE_EFFECTS_KIND = "ai.node.side_effects.kind";
+export const AI_NODE_SIDE_EFFECTS_RESOURCE = "ai.node.side_effects.resource";
+export const AI_NODE_IDEMPOTENCY_KEY = "ai.node.idempotency_key";
+
+export const AI_ROUTE_CONFIDENCE_BUCKET = "ai.route.confidence_bucket";
+export const AI_ROUTE_CONFIDENCE_SOURCE = "ai.route.confidence_source";
+
+export const AI_FRESHNESS_WITNESS_KIND = "ai.freshness.witness_kind";
+export const AI_FRESHNESS_WITNESS_RESOURCE = "ai.freshness.witness_resource";
+export const AI_FRESHNESS_WITNESS_VALUE = "ai.freshness.witness_value";
+export const AI_FRESHNESS_CONDITIONED_ON_VALUE = "ai.freshness.conditioned_on_value";
+export const AI_FRESHNESS_VIOLATION = "ai.freshness.violation";
+
 // --- OTel GenAI semantic conventions used by the framework ---
 // Re-exported as string constants so call sites can import them by name.
 // Names mirror the OTel `@opentelemetry/semantic-conventions/incubating` exports.

@@ -6,6 +6,8 @@ import type {
   ConsistentNodes,
 } from "./dag-internals.js";
 import type { DagId, NodeId } from "./ids.js";
+import type { Confidence, ConfidenceBucket } from "./confidence.js";
+import { meetsConfidence } from "./confidence.js";
 
 // Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
 // are imported above but NOT re-exported. They live in `./dag-internals.ts`,
@@ -14,25 +16,70 @@ import type { DagId, NodeId } from "./ids.js";
 // without losing intra-framework usability.
 
 /**
- * Structural-match predicate over a node's output. Pure data — no closures —
- * so serialization and replay are deterministic. Boolean composition is
- * intentionally absent; see ADR 0016 for the classifier-node pattern.
+ * Function-based predicate over a node's output with optional confidence
+ * gating. Every predicate carries a human-readable label for evidence
+ * recording and a `check` function that receives both the output and the
+ * upstream confidence signal.
+ *
+ * When `minConfidence` is set, the framework short-circuits: if the
+ * upstream confidence bucket is below `minConfidence` (per
+ * `CONFIDENCE_ORDER`), the predicate is recorded as `{ matched: false,
+ * errorKind: "below-min-confidence" }` and the check function is never
+ * called.
+ *
+ * @see RouteEvidence for how predicate results are recorded.
  */
-export type Predicate<O> = {
-  readonly [K in keyof O]?: O[K] | { readonly oneOf: readonly O[K][] };
-};
+export interface Predicate<T> {
+  readonly label: string;
+  readonly check: (value: T, confidence: Confidence | null) => boolean;
+  readonly minConfidence?: ConfidenceBucket;
+}
 
 /**
- * Type-guard helper for the `oneOf` form. Narrows an expected predicate
- * value to its `oneOf` variant.
+ * Evaluate a predicate against a node's output with confidence gating.
+ *
+ * Returns a result record suitable for inclusion in `RouteEvidence`.
+ * The function is total — it catches exceptions from `check` and records
+ * them as `errorKind: "threw"`.
  */
-export const isOneOfMatch = (
-  value: unknown,
-): value is { readonly oneOf: readonly unknown[] } =>
-  typeof value === "object" &&
-  value !== null &&
-  "oneOf" in value &&
-  Array.isArray((value as { oneOf: unknown }).oneOf);
+export const evaluatePredicate = <T>(
+  pred: Predicate<T>,
+  output: T,
+  confidence: Confidence | null,
+): {
+  readonly predicateLabel: string;
+  readonly matched: boolean;
+  readonly evaluatedConfidence: Confidence | null;
+  readonly errorKind?: "malformed" | "threw" | "below-min-confidence";
+} => {
+  // Gate on minConfidence before calling check
+  if (pred.minConfidence !== undefined) {
+    if (confidence === null || !meetsConfidence(confidence.bucket, pred.minConfidence)) {
+      return {
+        predicateLabel: pred.label,
+        matched: false,
+        evaluatedConfidence: confidence,
+        errorKind: "below-min-confidence",
+      };
+    }
+  }
+
+  try {
+    const matched = pred.check(output, confidence);
+    return {
+      predicateLabel: pred.label,
+      matched,
+      evaluatedConfidence: confidence,
+    };
+  } catch {
+    return {
+      predicateLabel: pred.label,
+      matched: false,
+      evaluatedConfidence: confidence,
+      errorKind: "threw",
+    };
+  }
+};
 
 /**
  * Edge variants (runtime shape, after `defineDag` strips literal id types).
@@ -46,8 +93,7 @@ export const isOneOfMatch = (
  * NOTE: `when` is typed `Predicate<unknown>` at runtime because the DAG carries
  * heterogeneous node types. Authoring-time type safety is enforced by
  * `defineDag` (where `when` is checked against `OutputsByNodeId[F]`). Runtime
- * correctness is enforced by `evaluatePredicate` + the node's `outputSchema`
- * validation. This widening is intentional — see ADR 0016.
+ * correctness is enforced by `evaluatePredicate`. This widening is intentional.
  */
 export type EdgeDef =
   | { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" }

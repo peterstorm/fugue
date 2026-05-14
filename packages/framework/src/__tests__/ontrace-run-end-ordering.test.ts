@@ -77,6 +77,8 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
       inputSchema: z.any(),
       outputSchema: z.any(),
       requires: [],
+      sideEffects: { kind: "none" } as const,
+      confidence: { mode: "none" } as const,
       // @ts-expect-error — branded ID test fixture
       run: async (i) => {
         state.calls[id] = (state.calls[id] ?? 0) + 1;
@@ -95,6 +97,8 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
     inputSchema: z.any(),
     outputSchema: z.any(),
     requires: [],
+    sideEffects: { kind: "none" } as const,
+    confidence: { mode: "none" } as const,
     // @ts-expect-error — branded ID test fixture
     run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: id, message: "permanent" }),
     retry: { backoffMs: [1] },

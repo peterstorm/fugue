@@ -7,12 +7,15 @@ import type { Observer } from "../observer/observer.js";
  * miss routing/pruning events; the type-level guarantee replaces the runtime
  * `?.()` paper-over in `dispatchEvent`.
  *
+ * Phase 3 — `onWitnessCaptured`, `onWriteAttempted`, `onFreshnessViolation`
+ * are now required for freshness-witness observability.
+ *
  * This test is a compile-time assertion: removing one of the now-required
  * methods from a literal must produce a TypeScript error. The accompanying
  * `// @ts-expect-error` lines fail the build if the constraint is ever
  * relaxed.
  */
-describe("Observer port — required methods (Wave 1.4)", () => {
+describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
   test("Observer literal missing onRouteDecided fails to compile", () => {
     // @ts-expect-error onRouteDecided is required
     const _missingRouteDecided: Observer = {
@@ -24,6 +27,9 @@ describe("Observer port — required methods (Wave 1.4)", () => {
       onSubSpan: () => {},
       onRunEnd: () => {},
       onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
     void _missingRouteDecided;
 
@@ -37,8 +43,63 @@ describe("Observer port — required methods (Wave 1.4)", () => {
       onSubSpan: () => {},
       onRunEnd: () => {},
       onRouteDecided: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
     void _missingNodePruned;
+
+    expect(true).toBe(true);
+  });
+
+  test("Observer literal missing freshness methods fails to compile", () => {
+    // @ts-expect-error onWitnessCaptured is required
+    const _missingWitnessCaptured: Observer = {
+      onRunStart: () => {},
+      onNodeStart: () => {},
+      onNodeEnd: () => {},
+      onNodeSkipped: () => {},
+      onNodeError: () => {},
+      onSubSpan: () => {},
+      onRunEnd: () => {},
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
+    };
+    void _missingWitnessCaptured;
+
+    // @ts-expect-error onWriteAttempted is required
+    const _missingWriteAttempted: Observer = {
+      onRunStart: () => {},
+      onNodeStart: () => {},
+      onNodeEnd: () => {},
+      onNodeSkipped: () => {},
+      onNodeError: () => {},
+      onSubSpan: () => {},
+      onRunEnd: () => {},
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onFreshnessViolation: () => {},
+    };
+    void _missingWriteAttempted;
+
+    // @ts-expect-error onFreshnessViolation is required
+    const _missingFreshnessViolation: Observer = {
+      onRunStart: () => {},
+      onNodeStart: () => {},
+      onNodeEnd: () => {},
+      onNodeSkipped: () => {},
+      onNodeError: () => {},
+      onSubSpan: () => {},
+      onRunEnd: () => {},
+      onRouteDecided: () => {},
+      onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+    };
+    void _missingFreshnessViolation;
 
     expect(true).toBe(true);
   });
@@ -54,8 +115,14 @@ describe("Observer port — required methods (Wave 1.4)", () => {
       onRunEnd: () => {},
       onRouteDecided: () => {},
       onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
     expect(typeof full.onRouteDecided).toBe("function");
     expect(typeof full.onNodePruned).toBe("function");
+    expect(typeof full.onWitnessCaptured).toBe("function");
+    expect(typeof full.onWriteAttempted).toBe("function");
+    expect(typeof full.onFreshnessViolation).toBe("function");
   });
 });

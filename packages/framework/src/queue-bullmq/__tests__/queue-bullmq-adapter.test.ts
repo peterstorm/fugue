@@ -1058,6 +1058,8 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),
       requires: [],
+      sideEffects: { kind: "none" },
+      confidence: { mode: "none" },
       run: body,
       retry: { backoffMs: [1] },
     });

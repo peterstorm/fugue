@@ -100,9 +100,8 @@ export const validateDagShape = (
     seenPairs.add(key);
   }
 
-  // Conditional edges must carry a non-empty, well-formed predicate. An empty
-  // predicate `{}` matches every output and is almost always a bug — make it
-  // an unconditional edge instead.
+  // Conditional edges must carry a well-formed function-based predicate with
+  // a non-empty `label` and a `check` function.
   for (const e of edges) {
     if (!isConditionalEdge(e)) continue;
     const pred = e.when;
@@ -110,33 +109,34 @@ export const validateDagShape = (
       return err(
         validationErr(
           e.from,
-          `Edge '${e.from}' -> '${e.to}' has a malformed predicate — expected a plain object`,
+          `Edge '${e.from}' -> '${e.to}' has a malformed predicate — expected an object with { label, check }`,
         ),
       );
     }
-    if (Object.keys(pred as Record<string, unknown>).length === 0) {
+    const p = pred as { label?: unknown; check?: unknown; minConfidence?: unknown };
+    if (typeof p.label !== "string" || p.label.length === 0) {
       return err(
         validationErr(
           e.from,
-          `Edge '${e.from}' -> '${e.to}' has an empty predicate '{}' — use an unconditional edge instead`,
+          `Edge '${e.from}' -> '${e.to}' predicate is missing a non-empty 'label'`,
         ),
       );
     }
-    // Each predicate field is either a direct value or a `{ oneOf: [...] }`
-    // envelope. An empty `oneOf` array can never match — fail at validation
-    // time rather than producing a permanently-prunable conditional edge.
-    for (const [field, value] of Object.entries(pred as Record<string, unknown>)) {
-      if (
-        value !== null &&
-        typeof value === "object" &&
-        "oneOf" in value &&
-        Array.isArray((value as { oneOf: unknown[] }).oneOf) &&
-        (value as { oneOf: unknown[] }).oneOf.length === 0
-      ) {
+    if (typeof p.check !== "function") {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' predicate is missing a 'check' function`,
+        ),
+      );
+    }
+    if (p.minConfidence !== undefined) {
+      const validBuckets = ["high", "medium", "low", "unknown"];
+      if (!validBuckets.includes(p.minConfidence as string)) {
         return err({
           kind: "predicate-malformed",
           nodeId: e.from,
-          message: `Edge '${e.from}' -> '${e.to}' has an empty 'oneOf' array on field '${field}' — predicate can never match`,
+          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${String(p.minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
         });
       }
     }

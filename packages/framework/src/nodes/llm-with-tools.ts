@@ -73,6 +73,8 @@ export const createLlmWithToolsNode = <I, O, const Id extends NodeId = NodeId>(
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
   requires: ["llm"] as const,
+  sideEffects: { kind: "external-call", resource: `llm:${config.model}` },
+  confidence: { mode: "none" },
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     // Skip check — discriminated `LlmWithToolsSkipConfig` guarantees
     // `skipDefault` is present whenever `skipWhen` is set.

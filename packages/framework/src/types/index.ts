@@ -36,8 +36,26 @@ export type {
   SubSpanEvent,
   RunEndEvent,
   RouteDecidedEvent,
+  RouteEvidence,
   NodePrunedEvent,
+  WitnessCapturedEvent,
+  WriteAttemptedEvent,
+  FreshnessViolationEvent,
 } from "./events.js";
+
+// ── Side-effects taxonomy ─────────────────────────────────────────────────
+export type { SideEffectKind, SideEffectProfile } from "./side-effects.js";
+
+// ── Confidence types ──────────────────────────────────────────────────────
+export type {
+  ConfidenceBucket,
+  ConfidenceSource,
+  Confidence,
+} from "./confidence.js";
+export { CONFIDENCE_ORDER, meetsConfidence } from "./confidence.js";
+
+// ── Freshness witness types ───────────────────────────────────────────────
+export type { WitnessKind, Witness } from "./freshness.js";
 
 // ── Node authoring ────────────────────────────────────────────────────────
 export type {
@@ -45,6 +63,7 @@ export type {
   NodeKind,
   NodeRetryConfig,
   NodeHumanReviewConfig,
+  ConfidenceMode,
   Capability,
   CapabilityFields,
   BaseNodeContext,

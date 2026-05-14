@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, R, D, nodeMap, nodeSet, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode } from "../dag-runtime/conditional.js";
 import {
@@ -39,6 +39,8 @@ const makeNode = (
   outputSchema: z.unknown(),
   run: noop as any,
   requires: [],
+  sideEffects: NO_SIDE_EFFECTS,
+  confidence: NO_CONFIDENCE,
   ...overrides,
 });
 

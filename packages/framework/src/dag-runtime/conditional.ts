@@ -1,15 +1,17 @@
 // Conditional-edge runtime helpers.
-// All functions are pure; no I/O. Predicates are pure data — see ADR 0016.
+// All functions are pure; no I/O.
 
 import type { DagDef, EdgeDef, Predicate } from "../types/dag.js";
 import {
   isConditionalEdge,
   isDefaultEdge,
-  isOneOfMatch,
   isUnconditionalEdge,
+  evaluatePredicate,
 } from "../types/dag.js";
 import type { NodeId } from "../types/ids.js";
 import type { IncomingSources } from "../shared/incoming.js";
+import type { Confidence } from "../types/confidence.js";
+import type { RouteEvidence } from "../types/events.js";
 
 export type { IncomingSources };
 
@@ -22,74 +24,14 @@ export type Decision =
       readonly prunedTargets: ReadonlySet<NodeId>;
       /** True when no predicate matched and the default edge target was selected. */
       readonly defaultTaken: boolean;
-      /** The predicate that matched, or `null` when the default fired or no guarded edges exist. */
-      readonly matchedPredicate: Predicate<unknown> | null;
+      /** Per-predicate evaluation results for evidence recording. */
+      readonly predicateResults: RouteEvidence["predicateResults"];
     }
   | {
       readonly kind: "predicate-malformed";
       readonly fromNodeId: NodeId;
       readonly message: string;
     };
-
-/**
- * Evaluate a structural-match predicate against a node's output. Pure, total,
- * and side-effect-free. Returns `true` when every key in `pred` matches the
- * corresponding field in `output` (by `===` for literal values, by
- * `includes` for `{ oneOf: [...] }` values).
- *
- * An empty predicate `{}` matches every output (vacuously true). The
- * validator rejects empty predicates at module load — they are nearly always
- * bugs and an "always-true" routing edge should be unconditional instead.
- */
-export const evaluatePredicate = <O>(pred: Predicate<O>, output: O): boolean => {
-  const predRecord = pred as { readonly [k: string]: unknown };
-  const outputRecord = (output ?? {}) as { readonly [k: string]: unknown };
-
-  for (const key of Object.keys(predRecord)) {
-    const expected = predRecord[key];
-    const actual = outputRecord[key];
-
-    if (isOneOfMatch(expected)) {
-      if (!expected.oneOf.includes(actual)) return false;
-    } else {
-      if (actual !== expected) return false;
-    }
-  }
-  return true;
-};
-
-/**
- * Defense-in-depth check for predicates introduced via `as Predicate<...>`
- * casts. The type system catches malformed shapes at edit time; this guard
- * surfaces runtime-only breaches with a clear error.
- *
- * Returns `null` when valid, or a message describing the malformation.
- */
-const validatePredicateShape = (pred: unknown): string | null => {
-  if (pred === null || typeof pred !== "object" || Array.isArray(pred)) {
-    return "predicate must be a plain object";
-  }
-  const rec = pred as { readonly [k: string]: unknown };
-  for (const key of Object.keys(rec)) {
-    if (key === "__proto__" || key === "constructor" || key === "prototype") {
-      return `predicate key '${key}' is forbidden`;
-    }
-    const v = rec[key];
-    if (typeof v === "object" && v !== null) {
-      if (Array.isArray(v)) {
-        return `predicate value for '${key}' must be a literal or { oneOf: [...] }, not an array`;
-      }
-      const obj = v as Record<string, unknown>;
-      if (!("oneOf" in obj) || Object.keys(obj).length !== 1) {
-        return `predicate value for '${key}' must be a literal or exactly { oneOf: [...] }`;
-      }
-      if (!Array.isArray(obj.oneOf)) {
-        return `predicate value for '${key}': 'oneOf' must be an array`;
-      }
-    }
-  }
-  return null;
-};
 
 /**
  * Decide which targets of a single source node fire after it produces `output`.
@@ -101,15 +43,19 @@ const validatePredicateShape = (pred: unknown): string | null => {
  * - The validator guarantees a default edge exists whenever there is at least
  *   one conditional edge from this source.
  *
- * Malformed predicates (introduced via `as`-casts) yield a
- * `predicate-malformed` decision; the caller surfaces this as a
- * `predicate-malformed` framework error. A well-typed predicate cannot
- * trigger this branch.
+ * Each predicate is evaluated via `evaluatePredicate` which handles
+ * `minConfidence` gating and exception safety. All results are recorded
+ * in `predicateResults` for evidence.
+ *
+ * @param upstreamConfidence - The confidence signal from the source node.
+ *   When the source node declares `confidence: { mode: "value" }`, the
+ *   executor extracts it. Pass `null` for nodes with `mode: "none"`.
  */
 export const decideRoute = (
   fromNodeId: NodeId,
   output: unknown,
   outgoing: readonly EdgeDef[],
+  upstreamConfidence: Confidence | null = null,
 ): Decision => {
   const unconditional = outgoing.filter(isUnconditionalEdge);
   const guarded = outgoing.filter(isConditionalEdge);
@@ -123,31 +69,61 @@ export const decideRoute = (
       chosenTargets: new Set(unconditionalTargets),
       prunedTargets: new Set<NodeId>(),
       defaultTaken: false,
-      matchedPredicate: null,
+      predicateResults: [],
     };
   }
 
+  // Validate predicate shapes defensively (catches `as` casts at runtime)
   for (const e of guarded) {
-    const shapeError = validatePredicateShape(e.when);
-    if (shapeError !== null) {
+    const pred = e.when;
+    if (pred === null || typeof pred !== "object") {
       return {
         kind: "predicate-malformed",
         fromNodeId,
-        message: shapeError,
+        message: "predicate must be a non-null object",
       };
     }
-    if (evaluatePredicate(e.when, output)) {
-      const pruned = new Set<NodeId>();
-      for (const g of guarded) if (g.to !== e.to) pruned.add(g.to);
-      if (defaultEdge) pruned.add(defaultEdge.to);
+    if (typeof (pred as { check?: unknown }).check !== "function") {
       return {
-        kind: "decided",
-        chosenTargets: new Set([...unconditionalTargets, e.to]),
-        prunedTargets: pruned,
-        defaultTaken: false,
-        matchedPredicate: e.when,
+        kind: "predicate-malformed",
+        fromNodeId,
+        message: `predicate on edge from '${fromNodeId}' is missing a 'check' function`,
       };
     }
+    if (typeof (pred as { label?: unknown }).label !== "string" || (pred as { label: string }).label.length === 0) {
+      return {
+        kind: "predicate-malformed",
+        fromNodeId,
+        message: `predicate on edge from '${fromNodeId}' is missing a 'label'`,
+      };
+    }
+  }
+
+  // Evaluate predicates in declaration order; first match wins.
+  const predicateResults: RouteEvidence["predicateResults"][number][] = [];
+  let matchedEdge: EdgeDef | null = null;
+
+  for (const e of guarded) {
+    const result = evaluatePredicate(e.when, output, upstreamConfidence);
+    predicateResults.push(result);
+
+    if (result.matched && matchedEdge === null) {
+      matchedEdge = e;
+      // Continue evaluating remaining predicates for evidence completeness
+    }
+  }
+
+  if (matchedEdge !== null) {
+    const pruned = new Set<NodeId>();
+    for (const g of guarded) if (g.to !== matchedEdge.to) pruned.add(g.to);
+    if (defaultEdge) pruned.add(defaultEdge.to);
+    return {
+      kind: "decided",
+      chosenTargets: new Set([...unconditionalTargets, matchedEdge.to]),
+      prunedTargets: pruned,
+      defaultTaken: false,
+      predicateResults,
+    };
   }
 
   // No predicate matched — validator guarantees defaultEdge exists.
@@ -157,7 +133,7 @@ export const decideRoute = (
     chosenTargets: new Set([...unconditionalTargets, defaultEdge!.to]),
     prunedTargets: pruned,
     defaultTaken: true,
-    matchedPredicate: null,
+    predicateResults,
   };
 };
 

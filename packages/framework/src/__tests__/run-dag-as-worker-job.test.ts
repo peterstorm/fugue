@@ -26,6 +26,8 @@ const mkNode = (
   outputSchema: z.unknown(),
   run: noop as any,
   requires: [],
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   ...overrides,
 });
 

@@ -1,9 +1,7 @@
-// Validator tests for conditional edges (ADR 0015 + ADR 0016 + ADR 0017).
+// Validator tests for conditional edges — function-based predicates (Phase 2).
 //
-// Note: after ADR 0017, deps/optionalDeps no longer exist on NodeDef — the
-// validator's deps↔edges symmetry checks are gone. The tests here cover the
-// surviving rules: else-totality, predicate shape, duplicate edges, output
-// reachability, and record-key consistency.
+// Note: after Phase 2, predicates are `{ label, check, minConfidence? }` objects.
+// The validator's predicate shape checks now verify label + check + minConfidence.
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
@@ -22,10 +20,10 @@ const mkNode = (id: string) =>
     transform: (i) => ok(i),
   });
 
-// Non-empty predicate used wherever the test just needs *some* conditional
-// edge. Cast through `any` so we can build edge arrays in the simple
-// `DagDefInput` shape without threading per-edge type inference.
-const SOME = { kind: "x" } as any;
+// Well-formed predicate used wherever the test just needs *some* conditional
+// edge. Cast through `any` to build edge arrays in the simple `DagDefInput`
+// shape without threading per-edge type inference.
+const SOME = { label: "some-pred", check: () => true } as any;
 
 describe("validateDagShape — conditional edges", () => {
   it("rejects missing default edge when conditionals exist", () => {
@@ -124,23 +122,43 @@ describe("validateDagShape — conditional edges", () => {
     }
   });
 
-  it("rejects an empty predicate `{}` — use an unconditional edge instead", () => {
+  it("rejects a predicate with empty label", () => {
     const dag: DagDefInput = {
-      id: "empty-pred",
+      id: "empty-label",
       nodes: {
         a: mkNode("a"),
         b: mkNode("b"),
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: {} as any },
+        { from: "a", to: "b", when: { label: "", check: () => true } as any },
         { from: "a", to: "c", kind: "default" },
       ],
     };
     const r = validateDagShape(dag);
     expect(r.ok).toBe(false);
     if (!r.ok && r.error.kind === "validation") {
-      expect(r.error.message).toContain("empty predicate");
+      expect(r.error.message).toContain("label");
+    }
+  });
+
+  it("rejects a predicate with missing check function", () => {
+    const dag: DagDefInput = {
+      id: "no-check",
+      nodes: {
+        a: mkNode("a"),
+        b: mkNode("b"),
+        c: mkNode("c"),
+      },
+      edges: [
+        { from: "a", to: "b", when: { label: "foo" } as any },
+        { from: "a", to: "c", kind: "default" },
+      ],
+    };
+    const r = validateDagShape(dag);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.error.kind === "validation") {
+      expect(r.error.message).toContain("check");
     }
   });
 
@@ -164,7 +182,27 @@ describe("validateDagShape — conditional edges", () => {
     }
   });
 
-  it("accepts a well-formed conditional DAG with structural predicates", () => {
+  it("rejects a predicate with invalid minConfidence", () => {
+    const dag: DagDefInput = {
+      id: "bad-min-conf",
+      nodes: {
+        a: mkNode("a"),
+        b: mkNode("b"),
+        c: mkNode("c"),
+      },
+      edges: [
+        { from: "a", to: "b", when: { label: "test", check: () => true, minConfidence: "super-high" } as any },
+        { from: "a", to: "c", kind: "default" },
+      ],
+    };
+    const r = validateDagShape(dag);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.kind).toBe("predicate-malformed");
+    }
+  });
+
+  it("accepts a well-formed conditional DAG with function-based predicates", () => {
     const dag: DagDefInput = {
       id: "ok",
       nodes: {
@@ -174,7 +212,7 @@ describe("validateDagShape — conditional edges", () => {
         merge: mkNode("merge"),
       },
       edges: [
-        { from: "router", to: "a", when: { kind: "yes" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "b", kind: "default" },
         { from: "a", to: "merge" },
         { from: "b", to: "merge" },
@@ -185,16 +223,16 @@ describe("validateDagShape — conditional edges", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("accepts a oneOf predicate", () => {
+  it("accepts a predicate with valid minConfidence", () => {
     const dag: DagDefInput = {
-      id: "oneof-ok",
+      id: "with-min-conf",
       nodes: {
         router: mkNode("router"),
         a: mkNode("a"),
         b: mkNode("b"),
       },
       edges: [
-        { from: "router", to: "a", when: { kind: { oneOf: ["x", "y"] } } as any },
+        { from: "router", to: "a", when: { label: "high-conf-route", check: () => true, minConfidence: "medium" } as any },
         { from: "router", to: "b", kind: "default" },
       ],
     };

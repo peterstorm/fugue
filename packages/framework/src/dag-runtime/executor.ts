@@ -20,6 +20,9 @@ import { dispatchEvent } from "../observer/buffered.js";
 import { decideRoute } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
+import type { Confidence } from "../types/confidence.js";
+import type { Witness } from "../types/freshness.js";
+import { InMemoryFreshnessIndex } from "./freshness-check.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
@@ -122,6 +125,7 @@ const callHumanReviewHook = async (
       runId: nodeCtx.runId,
       dagId,
       nodeId,
+      sideEffects: nodeMap.get(nodeId)?.sideEffects,
       timestamp: stamp(),
       error: message,
       stack,
@@ -148,6 +152,7 @@ const callHumanReviewHook = async (
       runId: nodeCtx.runId,
       dagId,
       nodeId,
+      sideEffects: nodeMap.get(nodeId)?.sideEffects,
       timestamp: stamp(),
       error: validationFailure,
       frameworkError: valErr,
@@ -213,6 +218,12 @@ export const buildDagExecutor = (
      * checkable via property tests.
      */
     now?: () => number;
+    /**
+     * In-memory freshness index for single-process witness tracking. When
+     * omitted, a private instance is created per executor. Pass a shared
+     * instance to enable cross-DAG freshness detection within a process.
+     */
+    freshnessIndex?: InMemoryFreshnessIndex;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
   const nodeMap = new Map<NodeId, NodeDef<unknown, unknown>>(
@@ -222,6 +233,7 @@ export const buildDagExecutor = (
   const resumeCheckpoint = hooks?.resumeCheckpoint;
   const random = hooks?.random ?? Math.random;
   const nowFn = hooks?.now ?? Date.now;
+  const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
@@ -245,13 +257,13 @@ export const buildDagExecutor = (
         // `machineCtx.outputs` short-circuit to a `node-skipped` event with
         // their cached value, so only the failed node (plus any sibling that
         // co-failed and is still absent from outputs) actually re-runs.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn);
+        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
@@ -298,6 +310,7 @@ const runWave = async (
   recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
   resumeCheckpoint: Map<string, unknown> | undefined,
   nowFn: () => number,
+  freshnessIndex: InMemoryFreshnessIndex,
 ): Promise<DagEvent> => {
   const stamp = (): Date => new Date(nowFn());
   // Filter to active nodes only. Pruned nodes are silently skipped — they
@@ -409,6 +422,7 @@ const runWave = async (
         runId: nodeCtx.runId,
         dagId: dag.id,
         nodeId: sibling.nodeId,
+        sideEffects: nodeMap.get(sibling.nodeId)?.sideEffects,
         timestamp: stamp(),
         error: sibling.error.kind === "node-crash" ? sibling.error.message : JSON.stringify(sibling.error),
         frameworkError: sibling.error,
@@ -435,6 +449,110 @@ const runWave = async (
     };
   }
 
+  // -------------------------------------------------------------------------
+  // Freshness witness emission (Phase 3)
+  //
+  // After all nodes in the wave succeed, emit witness events for reads and
+  // writes nodes. For writes nodes, check the freshness index for conflicts
+  // BEFORE the write's witness is recorded — so the conflict detection sees
+  // the state as of write time.
+  // -------------------------------------------------------------------------
+  for (const nodeId of waveNodeIds) {
+    if (!newOutputs.has(nodeId)) continue;
+    const nodeDef = nodeMap.get(nodeId);
+    if (!nodeDef) continue;
+
+    const output = newOutputs.get(nodeId);
+    const se = nodeDef.sideEffects;
+
+    if (se.kind === "reads" && nodeDef.extractWitness) {
+      try {
+        const witness: Witness = nodeDef.extractWitness(output);
+        emit(nodeCtx, {
+          type: "witness-captured",
+          runId: nodeCtx.runId,
+          dagId: dag.id,
+          nodeId,
+          witness,
+          capturedAtMs: nowFn(),
+          timestamp: stamp(),
+        });
+      } catch (e) {
+        // Witness extraction failure is non-fatal — log and continue.
+        fwLogger().warn(
+          `[runWave] extractWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    } else if (se.kind === "writes" && nodeDef.extractConditionedOn && nodeDef.extractNewWitness) {
+      try {
+        // We need the node's input to extract conditionedOn. Rebuild it.
+        // For writes nodes the input was already built inside runNodeShared;
+        // here we call extractConditionedOn with the assembled input from
+        // prior outputs + dagInput.
+        const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
+        const { required, optional } = incoming;
+        let nodeInput: unknown;
+        if (optional.length > 0) {
+          nodeInput = Object.fromEntries(
+            [...required, ...optional].map((d) => [d, priorOutputs.get(d as NodeId)]),
+          );
+        } else if (required.length === 0) {
+          nodeInput = machineCtx.initialInput;
+        } else if (required.length === 1) {
+          nodeInput = priorOutputs.get(required[0] as NodeId);
+        } else {
+          nodeInput = Object.fromEntries(required.map((d) => [d, priorOutputs.get(d as NodeId)]));
+        }
+
+        const conditionedOn: Witness = nodeDef.extractConditionedOn(nodeInput);
+        const newWitness: Witness = nodeDef.extractNewWitness(output);
+
+        // Check for freshness violations before recording the new write
+        const conflict = freshnessIndex.findConflict(
+          conditionedOn.resource,
+          conditionedOn.value,
+          0, // check all recorded writes
+        );
+        if (conflict) {
+          emit(nodeCtx, {
+            type: "freshness-violation",
+            runId: nodeCtx.runId,
+            dagId: dag.id,
+            nodeId,
+            resource: conditionedOn.resource,
+            conditionedOnWitness: conditionedOn,
+            conflictingWrite: {
+              runId: conflict.runId,
+              nodeId: conflict.nodeId,
+              newWitness: conflict.newWitness,
+              succeededAtMs: conflict.succeededAtMs,
+            },
+            detectedAtMs: nowFn(),
+            timestamp: stamp(),
+          });
+        }
+
+        const writeEvent = {
+          type: "write-attempted" as const,
+          runId: nodeCtx.runId,
+          dagId: dag.id,
+          nodeId,
+          conditionedOn,
+          newWitness,
+          succeededAtMs: nowFn(),
+          timestamp: stamp(),
+        };
+        emit(nodeCtx, writeEvent);
+        freshnessIndex.recordWrite(writeEvent);
+      } catch (e) {
+        // Freshness extraction failure is non-fatal — log and continue.
+        fwLogger().warn(
+          `[runWave] freshness extraction failed for writes node '${nodeId}': ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+  }
+
   // Compute routing decisions exactly once per source node. The executor uses
   // the result to emit observer events; the transition (`handleWaveDone`)
   // reads them off the wave-done event to expand `activeNodeIds` without
@@ -450,7 +568,20 @@ const runWave = async (
     if (!newOutputs.has(nodeId)) continue;
     const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
     if (!outgoing.some(isConditionalEdge)) continue;
-    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
+
+    // Extract upstream confidence from the node definition
+    const nodeDef = nodeMap.get(nodeId);
+    let upstreamConfidence: Confidence | null = null;
+    if (nodeDef && nodeDef.confidence.mode === "value") {
+      try {
+        upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
+      } catch {
+        // Confidence extraction failure is non-fatal; record null
+        upstreamConfidence = null;
+      }
+    }
+
+    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing, upstreamConfidence);
     if (decision.kind === "predicate-malformed") {
       const predErr: FrameworkError = {
         kind: "predicate-malformed",
@@ -462,6 +593,7 @@ const runWave = async (
         runId: nodeCtx.runId,
         dagId: dag.id,
         nodeId,
+        sideEffects: nodeMap.get(nodeId)?.sideEffects,
         timestamp: stamp(),
         error: `predicate-malformed: ${decision.message}`,
         frameworkError: predErr,
@@ -481,7 +613,12 @@ const runWave = async (
       chosenTargets: [...decision.chosenTargets],
       prunedTargets: [...decision.prunedTargets],
       defaultTaken: decision.defaultTaken,
-      matchedPredicate: decision.matchedPredicate,
+      evidence: {
+        upstreamOutput: newOutputs.get(nodeId),
+        upstreamConfidence,
+        predicateResults: decision.predicateResults,
+        decidedAtMs: nowFn(),
+      },
       timestamp: stamp(),
     });
     for (const pruned of decision.prunedTargets) {

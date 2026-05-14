@@ -38,6 +38,8 @@ const transform = (id: string): NodeDef<unknown, unknown> => ({
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
   requires: [],
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   async run(input) {
     return ok(input);
   },

@@ -24,6 +24,8 @@ const makeNode = (
   outputSchema: z.unknown(),
   run: noop as any,
   requires: [],
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   ...overrides,
 });
 
@@ -65,7 +67,7 @@ describe("conditional edges — reroute", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes", when: { kind: "yes" } as any },
+        { from: "router", to: "yes", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 1,

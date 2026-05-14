@@ -36,6 +36,7 @@ const mkNodeStart = (runId: string, nodeId: string): NodeStartEvent => ({
   runId: runId as RunId,
   dagId: "d" as DagId,
   nodeId: nodeId as NodeId,
+  sideEffects: { kind: "none" },
   timestamp: new Date(),
 });
 
@@ -44,6 +45,7 @@ const mkNodeEnd = (runId: string, nodeId: string): NodeEndEvent => ({
   runId: runId as RunId,
   dagId: "d" as DagId,
   nodeId: nodeId as NodeId,
+  sideEffects: { kind: "none" },
   timestamp: new Date(),
   duration: 1,
   output: null,

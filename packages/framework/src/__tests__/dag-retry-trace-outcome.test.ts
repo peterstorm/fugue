@@ -42,6 +42,8 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
       inputSchema: z.any(),
       outputSchema: z.any(),
       requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async () => {
         callCount += 1;
         if (callCount < 2) {
@@ -85,6 +87,8 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
       inputSchema: z.any(),
       outputSchema: z.any(),
       requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async () => ok("done"),
     };
 

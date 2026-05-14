@@ -8,6 +8,9 @@ import type {
   RunEndEvent,
   RouteDecidedEvent,
   NodePrunedEvent,
+  WitnessCapturedEvent,
+  WriteAttemptedEvent,
+  FreshnessViolationEvent,
   ObserverEvent,
 } from "../types/events.js";
 
@@ -21,6 +24,9 @@ export interface Observer {
   onRunEnd(e: RunEndEvent): void;
   onRouteDecided(e: RouteDecidedEvent): void;
   onNodePruned(e: NodePrunedEvent): void;
+  onWitnessCaptured(e: WitnessCapturedEvent): void;
+  onWriteAttempted(e: WriteAttemptedEvent): void;
+  onFreshnessViolation(e: FreshnessViolationEvent): void;
 }
 
 export class NoopObserver implements Observer {
@@ -33,6 +39,9 @@ export class NoopObserver implements Observer {
   onRunEnd(_e: RunEndEvent): void {}
   onRouteDecided(_e: RouteDecidedEvent): void {}
   onNodePruned(_e: NodePrunedEvent): void {}
+  onWitnessCaptured(_e: WitnessCapturedEvent): void {}
+  onWriteAttempted(_e: WriteAttemptedEvent): void {}
+  onFreshnessViolation(_e: FreshnessViolationEvent): void {}
 }
 
 export class RecordingObserver implements Observer {
@@ -63,6 +72,15 @@ export class RecordingObserver implements Observer {
     this.events.push(e);
   }
   onNodePruned(e: NodePrunedEvent): void {
+    this.events.push(e);
+  }
+  onWitnessCaptured(e: WitnessCapturedEvent): void {
+    this.events.push(e);
+  }
+  onWriteAttempted(e: WriteAttemptedEvent): void {
+    this.events.push(e);
+  }
+  onFreshnessViolation(e: FreshnessViolationEvent): void {
     this.events.push(e);
   }
 }

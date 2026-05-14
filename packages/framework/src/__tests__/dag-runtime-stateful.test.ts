@@ -34,6 +34,8 @@ const makeNode = (
   outputSchema: z.unknown(),
   run: noop as any,
   requires: [],
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   ...overrides,
 });
 
@@ -620,6 +622,8 @@ describe("runDagStateful — abort", () => {
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),
       requires: [],
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       run: async (_input, ctx) => {
         const start = Date.now();
         // Bound the loop to keep the test fast even if the signal never fires.
@@ -752,6 +756,9 @@ describe("runDagStateful — observer events", () => {
       onRunEnd: () => events.push("run-end"),
       onRouteDecided: () => {},
       onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
 
     const dag = makeDag({
@@ -779,6 +786,9 @@ describe("runDagStateful — observer events", () => {
       onRunEnd: () => events.push("run-end"),
       onRouteDecided: () => {},
       onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
 
     const dag = makeDag({
@@ -1041,6 +1051,9 @@ describe("runDagStateful — onHumanReview throws", () => {
       onRunEnd: () => {},
       onRouteDecided: () => {},
       onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
 
     const dag = makeDag({
@@ -1088,6 +1101,9 @@ describe("runDagStateful — onHumanReview throws", () => {
       onRunEnd: () => {},
       onRouteDecided: () => {},
       onNodePruned: () => {},
+      onWitnessCaptured: () => {},
+      onWriteAttempted: () => {},
+      onFreshnessViolation: () => {},
     };
 
     const dag = makeDag({

@@ -30,6 +30,8 @@ const buildChain = (count: number): {
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),
       requires: [] as const,
+      sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
       async run(input) {
         return ok(input);
       },

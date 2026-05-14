@@ -3,6 +3,8 @@
 
 import type { NodeId, RunId, DagId } from "../types/ids.js";
 import { __brandNodeId, __brandRunId, __brandDagId } from "../types/ids.js";
+import type { SideEffectProfile } from "../types/side-effects.js";
+import type { ConfidenceMode } from "../types/node.js";
 
 /** Brand a string as `NodeId` — test shorthand, skips regex validation. */
 export const N = (s: string): NodeId => __brandNodeId(s);
@@ -12,6 +14,12 @@ export const R = (s: string): RunId => __brandRunId(s);
 
 /** Brand a string as `DagId` — test shorthand, skips regex validation. */
 export const D = (s: string): DagId => __brandDagId(s);
+
+/** Default side-effects for test nodes — pure transform, no effects. */
+export const NO_SIDE_EFFECTS: SideEffectProfile = { kind: "none" } as const;
+
+/** Default confidence for test nodes — no confidence signal. */
+export const NO_CONFIDENCE: ConfidenceMode<unknown> = { mode: "none" } as const;
 
 /**
  * Create a `Map<NodeId, V>` from string-keyed entries. Test convenience so

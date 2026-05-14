@@ -9,11 +9,15 @@ import {
   AI_NODE_KIND,
   AI_SPAN_TYPE,
   AI_GUARDRAIL_PASSED,
+  AI_NODE_SIDE_EFFECTS_KIND,
+  AI_NODE_SIDE_EFFECTS_RESOURCE,
+  AI_NODE_IDEMPOTENCY_KEY,
   EVENT_NODE_INPUT,
   EVENT_NODE_OUTPUT,
   NODE_KIND_TO_SPAN_TYPE,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
+import type { SideEffectProfile } from "../types/side-effects.js";
 
 /** Per-node guardrail outcome produced by `withNodeSpan`. */
 export interface NodeSpanOutcome {
@@ -72,19 +76,38 @@ export const withNodeSpan = async (
   kind: string,
   input: unknown,
   contentFilter: ContentFilter | null,
+  sideEffects: SideEffectProfile,
   fn: () => Promise<Result<unknown, FrameworkError>>,
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
 
+  // Build base attributes
+  const attrs: Record<string, string> = {
+    [AI_SPAN_TYPE]: spanType,
+    [AI_NODE_ID]: nodeId,
+    [AI_NODE_KIND]: kind,
+    [AI_NODE_SIDE_EFFECTS_KIND]: sideEffects.kind,
+  };
+  if (sideEffects.kind !== "none" && sideEffects.resource) {
+    attrs[AI_NODE_SIDE_EFFECTS_RESOURCE] = sideEffects.resource;
+  }
+  // Evaluate idempotency key lazily — only if the node declares one
+  if (
+    (sideEffects.kind === "writes" || sideEffects.kind === "external-call") &&
+    sideEffects.idempotencyKey
+  ) {
+    try {
+      const idemKey = sideEffects.idempotencyKey(input);
+      attrs[AI_NODE_IDEMPOTENCY_KEY] = idemKey;
+    } catch {
+      // Idempotency key evaluation failure is non-fatal — log would be ideal
+      // but we don't have a logger here; the attribute is simply absent.
+    }
+  }
+
   return fwTracer().startActiveSpan(
     `node:${nodeId}`,
-    {
-      attributes: {
-        [AI_SPAN_TYPE]: spanType,
-        [AI_NODE_ID]: nodeId,
-        [AI_NODE_KIND]: kind,
-      },
-    },
+    { attributes: attrs },
     async (span) => {
       span.addEvent(
         EVENT_NODE_INPUT,
