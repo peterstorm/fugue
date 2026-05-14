@@ -759,6 +759,7 @@ describe("runDagStateful — observer events", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
 
     const dag = makeDag({
@@ -789,6 +790,7 @@ describe("runDagStateful — observer events", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
 
     const dag = makeDag({
@@ -1054,6 +1056,7 @@ describe("runDagStateful — onHumanReview throws", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
 
     const dag = makeDag({
@@ -1104,6 +1107,7 @@ describe("runDagStateful — onHumanReview throws", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
 
     const dag = makeDag({

@@ -13,6 +13,10 @@ import {
   EVENT_LLM_COST,
   EVENT_GEN_AI_SYSTEM_MESSAGE,
   EVENT_GEN_AI_USER_MESSAGE,
+  AI_HUMAN_ACTION,
+  AI_HUMAN_ACTOR,
+  AI_HUMAN_CONFIDENCE_BUCKET,
+  AI_HUMAN_CONFIDENCE_SOURCE,
 } from "../tracing/semantic-conventions.js";
 
 // --- Helpers ---
@@ -287,5 +291,47 @@ describe("MlflowOtlpExporter", () => {
     });
     await idle.shutdown();
     await idle.forceFlush();
+  });
+
+  describe("Phase 4 — human intervention tag promotion", () => {
+    it("promotes ai.human.action to mlflow.human.action", async () => {
+      const span = fakeSpan({ attributes: { [AI_HUMAN_ACTION]: "approve" } });
+      await collectExport(exporter, [span]);
+      expect((exported[0].attributes as Record<string, unknown>)["mlflow.human.action"]).toBe("approve");
+    });
+
+    it("promotes ai.human.actor only when present", async () => {
+      const withActor = fakeSpan({ attributes: { [AI_HUMAN_ACTION]: "reject", [AI_HUMAN_ACTOR]: "alice" } });
+      await collectExport(exporter, [withActor]);
+      expect((exported[0].attributes as Record<string, unknown>)["mlflow.human.actor"]).toBe("alice");
+
+      // Reset for second assertion
+      exported = [];
+      const withoutActor = fakeSpan({ attributes: { [AI_HUMAN_ACTION]: "reject" } });
+      await collectExport(exporter, [withoutActor]);
+      expect((exported[0].attributes as Record<string, unknown>)["mlflow.human.actor"]).toBeUndefined();
+    });
+
+    it("promotes confidence bucket and source at intervention", async () => {
+      const span = fakeSpan({
+        attributes: {
+          [AI_HUMAN_ACTION]: "approve",
+          [AI_HUMAN_CONFIDENCE_BUCKET]: "low",
+          [AI_HUMAN_CONFIDENCE_SOURCE]: "self-reported-numeric",
+        },
+      });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      expect(attrs["mlflow.human.confidence_bucket_at_intervention"]).toBe("low");
+      expect(attrs["mlflow.human.confidence_source_at_intervention"]).toBe("self-reported-numeric");
+    });
+
+    it("no mlflow.human.* tags without ai.human.action", async () => {
+      const span = fakeSpan({ attributes: { [AI_SPAN_TYPE]: "chain" } });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      const humanKeys = Object.keys(attrs).filter((k) => k.startsWith("mlflow.human."));
+      expect(humanKeys).toEqual([]);
+    });
   });
 });

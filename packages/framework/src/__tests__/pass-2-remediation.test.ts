@@ -631,6 +631,7 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
 
     const dag = defineDag({

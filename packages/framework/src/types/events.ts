@@ -4,6 +4,8 @@ import type { RunId, NodeId, DagId } from "./ids.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
 import type { Witness } from "./freshness.js";
+import type { SideEffectKind } from "./side-effects.js";
+import type { JsonPatch } from "../dag-runtime/json-patch.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
@@ -182,6 +184,53 @@ export interface FreshnessViolationEvent {
   readonly timestamp: Date;
 }
 
+// ---------------------------------------------------------------------------
+// Human intervention event (Phase 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detailed human action with full context for forensic analysis.
+ * Extends the DAG-layer `HumanAction` with structural diff for edits
+ * and reason fields for reroutes.
+ */
+export type HumanActionDetailed =
+  | { readonly kind: "approve" }
+  | {
+      readonly kind: "approve-with-edit";
+      readonly originalOutput: unknown;
+      readonly replacedOutput: unknown;
+      readonly diff: JsonPatch;
+    }
+  | { readonly kind: "reject"; readonly reason: string }
+  | { readonly kind: "reroute"; readonly targetNodeId: NodeId; readonly reason?: string };
+
+/**
+ * Emitted when a human reviewer responds to an `awaiting-human` gate.
+ * Captures the full decision context — model confidence, side-effects being
+ * authorized, freshness state of involved resources — so that the event log
+ * answers "what did the human see when they approved this?" without joining
+ * across separate events.
+ *
+ * This is the Phase 4 capstone: the `context` field is the payoff for
+ * Phases 1–3 (sideEffects, confidence, freshness) happening first.
+ */
+export interface HumanInterventionEvent {
+  readonly type: "human-intervention";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly action: HumanActionDetailed;
+  readonly actor: string;
+  readonly elapsedMsSinceAwait: number;
+  readonly context: {
+    readonly nodeConfidence: Confidence | null;
+    /** Kind only — the full `SideEffectProfile` (resource, idempotencyKey) is available on the preceding `NodeStartEvent`. */
+    readonly nodeSideEffects: SideEffectKind;
+    readonly priorWitnesses: readonly Witness[];
+  };
+  readonly timestamp: Date;
+}
+
 export type ObserverEvent =
   | RunStartEvent
   | NodeStartEvent
@@ -194,4 +243,5 @@ export type ObserverEvent =
   | NodePrunedEvent
   | WitnessCapturedEvent
   | WriteAttemptedEvent
-  | FreshnessViolationEvent;
+  | FreshnessViolationEvent
+  | HumanInterventionEvent;

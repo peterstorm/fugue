@@ -15,7 +15,7 @@ import type { Observer } from "../observer/observer.js";
  * `// @ts-expect-error` lines fail the build if the constraint is ever
  * relaxed.
  */
-describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
+describe("Observer port — required methods (Wave 1.4 + Phase 3 + Phase 4)", () => {
   test("Observer literal missing onRouteDecided fails to compile", () => {
     // @ts-expect-error onRouteDecided is required
     const _missingRouteDecided: Observer = {
@@ -30,6 +30,7 @@ describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
     void _missingRouteDecided;
 
@@ -46,6 +47,7 @@ describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
     void _missingNodePruned;
 
@@ -66,6 +68,7 @@ describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
       onNodePruned: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
     void _missingWitnessCaptured;
 
@@ -82,6 +85,7 @@ describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
       onNodePruned: () => {},
       onWitnessCaptured: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
     void _missingWriteAttempted;
 
@@ -98,6 +102,7 @@ describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
       onNodePruned: () => {},
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
+      onHumanIntervention: () => {},
     };
     void _missingFreshnessViolation;
 
@@ -118,11 +123,13 @@ describe("Observer port — required methods (Wave 1.4 + Phase 3)", () => {
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
     expect(typeof full.onRouteDecided).toBe("function");
     expect(typeof full.onNodePruned).toBe("function");
     expect(typeof full.onWitnessCaptured).toBe("function");
     expect(typeof full.onWriteAttempted).toBe("function");
     expect(typeof full.onFreshnessViolation).toBe("function");
+    expect(typeof full.onHumanIntervention).toBe("function");
   });
 });

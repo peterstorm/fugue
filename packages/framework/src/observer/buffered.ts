@@ -12,6 +12,7 @@ import type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
   FreshnessViolationEvent,
+  HumanInterventionEvent,
 } from "../types/events.js";
 import { match } from "ts-pattern";
 import type { Observer } from "./observer.js";
@@ -57,6 +58,7 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
       .with({ type: "witness-captured" }, (e) => observer.onWitnessCaptured(e))
       .with({ type: "write-attempted" }, (e) => observer.onWriteAttempted(e))
       .with({ type: "freshness-violation" }, (e) => observer.onFreshnessViolation(e))
+      .with({ type: "human-intervention" }, (e) => observer.onHumanIntervention(e))
       .exhaustive();
   } catch (e) {
     // Log at error level with full stack — production observers MUST be
@@ -226,6 +228,9 @@ export class BufferedObserver implements Observer {
     this.buffer(e.runId, e);
   }
   onFreshnessViolation(e: FreshnessViolationEvent): void {
+    this.buffer(e.runId, e);
+  }
+  onHumanIntervention(e: HumanInterventionEvent): void {
     this.buffer(e.runId, e);
   }
 

@@ -4,7 +4,7 @@
 
 import { match } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
-import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
+import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -21,6 +21,9 @@ import { decideRoute } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
 import type { Confidence } from "../types/confidence.js";
+import type { SideEffectKind } from "../types/side-effects.js";
+import type { HumanActionDetailed } from "../types/events.js";
+import { computeJsonPatch } from "./json-patch.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 
@@ -169,6 +172,78 @@ const callHumanReviewHook = async (
 
 
 // ---------------------------------------------------------------------------
+// emitHumanIntervention — Phase 4: human-intervention observer event
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate a DAG-layer `HumanAction` into the detailed observer-event
+ * shape, then emit `HumanInterventionEvent`. Called in the executor after
+ * `callHumanReviewHook` produces a successful `human-responded` event.
+ */
+const emitHumanIntervention = (
+  phase: { nodeId: NodeId; output: unknown },
+  action: HumanAction,
+  nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
+  nodeCtx: NodeContext,
+  dagId: DagId,
+  nowFn: () => number,
+  awaitStartMs: number,
+  capturedWitnesses: readonly Witness[],
+): void => {
+  const stamp = (): Date => new Date(nowFn());
+  const nodeDef = nodeMap.get(phase.nodeId);
+
+  // Build HumanActionDetailed from the DAG-layer HumanAction
+  const detailed: HumanActionDetailed = match(action)
+    .with({ action: "approve" }, () => ({ kind: "approve" as const }))
+    .with({ action: "approve-with-edit" }, (a) => ({
+      kind: "approve-with-edit" as const,
+      originalOutput: phase.output,
+      replacedOutput: a.newOutput,
+      diff: computeJsonPatch(phase.output, a.newOutput),
+    }))
+    .with({ action: "reject" }, (a) => ({ kind: "reject" as const, reason: a.reason }))
+    .with({ action: "reroute" }, (a) => ({
+      kind: "reroute" as const,
+      targetNodeId: a.targetNodeId,
+      ...(a.reason !== undefined ? { reason: a.reason } : {}),
+    }))
+    .exhaustive();
+
+  // Extract confidence from the node's output
+  let nodeConfidence: Confidence | null = null;
+  if (nodeDef && nodeDef.confidence.mode === "value") {
+    try {
+      nodeConfidence = nodeDef.confidence.extract(phase.output);
+    } catch (e) {
+      fwLogger().warn(
+        `[emitHumanIntervention] confidence.extract failed for node '${phase.nodeId}': ${e instanceof Error ? e.message : e}`,
+      );
+      nodeConfidence = null;
+    }
+  }
+
+  // Side-effects kind
+  const nodeSideEffects: SideEffectKind = nodeDef?.sideEffects.kind ?? "none";
+
+  emit(nodeCtx, {
+    type: "human-intervention",
+    runId: nodeCtx.runId,
+    dagId,
+    nodeId: phase.nodeId,
+    action: detailed,
+    actor: action.actor ?? "unknown",
+    elapsedMsSinceAwait: nowFn() - awaitStartMs,
+    context: {
+      nodeConfidence,
+      nodeSideEffects,
+      priorWitnesses: [...capturedWitnesses],
+    },
+    timestamp: stamp(),
+  });
+};
+
+// ---------------------------------------------------------------------------
 // buildDagExecutor — FR-027 applied when state.kind === "retrying"
 // ---------------------------------------------------------------------------
 
@@ -235,6 +310,15 @@ export const buildDagExecutor = (
   const nowFn = hooks?.now ?? Date.now;
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
+  // Phase 4: Track captured witnesses for HumanInterventionEvent context.
+  // Accumulated as witness-captured events are emitted; read by the
+  // awaiting-human branch to populate context.priorWitnesses.
+  // Witnesses accumulate across all waves for the lifetime of the executor,
+  // so a human gate in a later wave sees all prior reads.
+  // TODO: For long-running DAGs with many reads nodes, consider deduplicating
+  // by resource (keep latest per resource) or capping with a sliding window.
+  const capturedWitnesses: Witness[] = [];
+
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
       // -----------------------------------------------------------------------
@@ -257,20 +341,34 @@ export const buildDagExecutor = (
         // `machineCtx.outputs` short-circuit to a `node-skipped` event with
         // their cached value, so only the failed node (plus any sibling that
         // co-failed and is still absent from outputs) actually re-runs.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex);
+        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex, capturedWitnesses);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex, capturedWitnesses))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
       // -----------------------------------------------------------------------
-      .with({ kind: "awaiting-human" }, (p) =>
-        callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn),
-      )
+      .with({ kind: "awaiting-human" }, async (p) => {
+        const awaitStartMs = nowFn();
+        const event = await callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        if (event.type === "human-responded") {
+          emitHumanIntervention(
+            { nodeId: p.nodeId, output: p.output },
+            event.action,
+            nodeMap,
+            nodeCtx,
+            dag.id,
+            nowFn,
+            awaitStartMs,
+            capturedWitnesses,
+          );
+        }
+        return event;
+      })
 
       // -----------------------------------------------------------------------
       // retrying-hook: sleep with jitter then re-call the onHumanReview hook.
@@ -281,7 +379,21 @@ export const buildDagExecutor = (
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter, nodeCtx.signal);
-        return callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        const awaitStartMs = nowFn();
+        const event = await callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        if (event.type === "human-responded") {
+          emitHumanIntervention(
+            { nodeId: p.nodeId, output: p.output },
+            event.action,
+            nodeMap,
+            nodeCtx,
+            dag.id,
+            nowFn,
+            awaitStartMs,
+            capturedWitnesses,
+          );
+        }
+        return event;
       })
 
       // -----------------------------------------------------------------------
@@ -316,6 +428,7 @@ const emitFreshnessWitnessEvents = async (
   nowFn: () => number,
   freshnessIndex: FreshnessIndex,
   skippedNodeIds: ReadonlySet<NodeId>,
+  witnessAccumulator?: Witness[],
 ): Promise<void> => {
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
@@ -346,6 +459,7 @@ const emitFreshnessWitnessEvents = async (
             capturedAtMs: nowFn(),
             timestamp: stamp(),
           });
+          witnessAccumulator?.push(witness);
         } catch (e) {
           fwLogger().warn(
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
@@ -437,6 +551,7 @@ const runWave = async (
   resumeCheckpoint: Map<string, unknown> | undefined,
   nowFn: () => number,
   freshnessIndex: FreshnessIndex,
+  witnessAccumulator?: Witness[],
 ): Promise<DagEvent> => {
   const stamp = (): Date => new Date(nowFn());
   // Filter to active nodes only. Pruned nodes are silently skipped — they
@@ -587,7 +702,7 @@ const runWave = async (
     }
   }
   await emitFreshnessWitnessEvents(
-    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn, freshnessIndex, skippedNodeIds,
+    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator,
   );
 
   // Compute routing decisions exactly once per source node. The executor uses

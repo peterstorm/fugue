@@ -32,6 +32,10 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from "@opentelemetry/sdk-
 import {
   AI_SPAN_TYPE,
   AI_NODE_SIDE_EFFECTS_KIND,
+  AI_HUMAN_ACTION,
+  AI_HUMAN_ACTOR,
+  AI_HUMAN_CONFIDENCE_BUCKET,
+  AI_HUMAN_CONFIDENCE_SOURCE,
   GEN_AI_REQUEST_MODEL,
   GEN_AI_SYSTEM,
   GEN_AI_USAGE_INPUT_TOKENS,
@@ -371,6 +375,21 @@ export class MlflowOtlpExporter implements SpanExporter {
     const seKind = attrs[AI_NODE_SIDE_EFFECTS_KIND] as string | undefined;
     if (seKind === "writes" || seKind === "external-call") {
       out["mlflow.side_effects"] = seKind;
+    }
+
+    // Phase 4: Promote human intervention attributes to MLflow tags.
+    // Enables queries like "show me all runs a human edited" and
+    // "show me runs where humans intervened at confidence_bucket = 'low'
+    // grouped by confidence_source".
+    const humanAction = attrs[AI_HUMAN_ACTION] as string | undefined;
+    if (humanAction) {
+      out["mlflow.human.action"] = humanAction;
+      const humanActor = attrs[AI_HUMAN_ACTOR] as string | undefined;
+      if (humanActor) out["mlflow.human.actor"] = humanActor;
+      const humanConfBucket = attrs[AI_HUMAN_CONFIDENCE_BUCKET] as string | undefined;
+      if (humanConfBucket) out["mlflow.human.confidence_bucket_at_intervention"] = humanConfBucket;
+      const humanConfSource = attrs[AI_HUMAN_CONFIDENCE_SOURCE] as string | undefined;
+      if (humanConfSource) out["mlflow.human.confidence_source_at_intervention"] = humanConfSource;
     }
 
     return Object.keys(out).length > 0 ? out : undefined;

@@ -11,6 +11,7 @@ import type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
   FreshnessViolationEvent,
+  HumanInterventionEvent,
   ObserverEvent,
 } from "../types/events.js";
 
@@ -27,6 +28,7 @@ export interface Observer {
   onWitnessCaptured(e: WitnessCapturedEvent): void;
   onWriteAttempted(e: WriteAttemptedEvent): void;
   onFreshnessViolation(e: FreshnessViolationEvent): void;
+  onHumanIntervention(e: HumanInterventionEvent): void;
 }
 
 export class NoopObserver implements Observer {
@@ -42,6 +44,7 @@ export class NoopObserver implements Observer {
   onWitnessCaptured(_e: WitnessCapturedEvent): void {}
   onWriteAttempted(_e: WriteAttemptedEvent): void {}
   onFreshnessViolation(_e: FreshnessViolationEvent): void {}
+  onHumanIntervention(_e: HumanInterventionEvent): void {}
 }
 
 export class RecordingObserver implements Observer {
@@ -81,6 +84,9 @@ export class RecordingObserver implements Observer {
     this.events.push(e);
   }
   onFreshnessViolation(e: FreshnessViolationEvent): void {
+    this.events.push(e);
+  }
+  onHumanIntervention(e: HumanInterventionEvent): void {
     this.events.push(e);
   }
 }

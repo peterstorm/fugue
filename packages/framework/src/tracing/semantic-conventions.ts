@@ -37,6 +37,11 @@ export const AI_FRESHNESS_WITNESS_VALUE = "ai.freshness.witness_value";
 export const AI_FRESHNESS_CONDITIONED_ON_VALUE = "ai.freshness.conditioned_on_value";
 export const AI_FRESHNESS_VIOLATION = "ai.freshness.violation";
 
+export const AI_HUMAN_ACTION = "ai.human.action";
+export const AI_HUMAN_ACTOR = "ai.human.actor";
+export const AI_HUMAN_CONFIDENCE_BUCKET = "ai.human.confidence_bucket_at_intervention";
+export const AI_HUMAN_CONFIDENCE_SOURCE = "ai.human.confidence_source_at_intervention";
+
 // --- OTel GenAI semantic conventions used by the framework ---
 // Re-exported as string constants so call sites can import them by name.
 // Names mirror the OTel `@opentelemetry/semantic-conventions/incubating` exports.

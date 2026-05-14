@@ -41,6 +41,8 @@ export type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
   FreshnessViolationEvent,
+  HumanActionDetailed,
+  HumanInterventionEvent,
 } from "./events.js";
 
 // ── Side-effects taxonomy ─────────────────────────────────────────────────
@@ -56,6 +58,10 @@ export { CONFIDENCE_ORDER, meetsConfidence } from "./confidence.js";
 
 // ── Freshness witness types ───────────────────────────────────────────────
 export type { WitnessKind, Witness } from "./freshness.js";
+
+// ── JSON Patch ────────────────────────────────────────────────────────────
+export type { JsonPatchOp, JsonPatch } from "../dag-runtime/json-patch.js";
+export { computeJsonPatch } from "../dag-runtime/json-patch.js";
 
 // ── Node authoring ────────────────────────────────────────────────────────
 export type {

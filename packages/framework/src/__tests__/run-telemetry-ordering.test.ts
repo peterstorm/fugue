@@ -68,6 +68,7 @@ describe("beginRunTelemetry — balanced start/end on observer throw (Wave 1.3)"
       onWitnessCaptured: () => {},
       onWriteAttempted: () => {},
       onFreshnessViolation: () => {},
+      onHumanIntervention: () => {},
     };
 
     const { emitRunEnd } = beginRunTelemetry(makeCtx(observer), dag, {});

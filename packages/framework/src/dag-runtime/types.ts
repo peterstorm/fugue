@@ -20,10 +20,10 @@ export const EXECUTOR_NODE_ID = __brandNodeId("__executor__");
 // ---------------------------------------------------------------------------
 
 export type HumanAction =
-  | { readonly action: "approve" }
-  | { readonly action: "approve-with-edit"; readonly newOutput: unknown }
-  | { readonly action: "reject"; readonly reason: string }
-  | { readonly action: "reroute"; readonly targetNodeId: NodeId };
+  | { readonly action: "approve"; readonly actor?: string }
+  | { readonly action: "approve-with-edit"; readonly newOutput: unknown; readonly actor?: string }
+  | { readonly action: "reject"; readonly reason: string; readonly actor?: string }
+  | { readonly action: "reroute"; readonly targetNodeId: NodeId; readonly reason?: string; readonly actor?: string };
 
 // ---------------------------------------------------------------------------
 // DagPhase — state of the DAG machine
