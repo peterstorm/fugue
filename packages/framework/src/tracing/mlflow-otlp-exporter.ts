@@ -17,12 +17,11 @@
  * - gen_ai.system → mlflow.llm.provider
  * - gen_ai.usage.input_tokens / gen_ai.usage.output_tokens → mlflow.chat.tokenUsage
  *
- * The OTel SDK drops object-valued attributes, so the derived MLflow attributes
- * are stored in `SpanAttributeRegistry` (keyed by spanId) rather than mutated
- * onto the original `ReadableSpan.attributes`. At export time the spans are
- * wrapped in a Proxy that merges the registry entries with the original
- * attributes — the original span object stays untouched, so any other
- * downstream consumer sees pristine data.
+ * Derived MLflow attributes are computed inline at export time and merged
+ * onto spans via a Proxy wrapper — the original span object stays untouched,
+ * so any other downstream consumer sees pristine data. The optional
+ * `SpanAttributeRegistry` handles attributes from external producers (e.g.
+ * enrichment helpers) that write to the same spans before export.
  *
  * The otlp-transformer serializes object-valued attributes as protobuf
  * kvlist_value, which MLflow's server decodes correctly.
@@ -244,6 +243,10 @@ export class MlflowOtlpExporter implements SpanExporter {
   /** Number of spans dropped due to permanent initialization failure. */
   droppedSpanCount = 0;
 
+  /** Number of init attempts made before permanent failure latch. */
+  private initAttempts = 0;
+  private static readonly MAX_INIT_ATTEMPTS = 3;
+
   constructor(config: MlflowOtlpExporterConfig) {
     this.config = config;
     this.registry = config.registry ?? createSpanAttributeRegistry();
@@ -255,9 +258,10 @@ export class MlflowOtlpExporter implements SpanExporter {
   }
 
   /**
-   * Lazy-init the OTLPTraceExporter (singleton promise to avoid races).
-   * On first failure, latches `failedPermanently` so subsequent calls
-   * resolve to `null` immediately rather than thundering-herd retrying.
+   * Lazy-init the OTLPTraceExporter with bounded retry.
+   * Allows up to MAX_INIT_ATTEMPTS transient failures before latching
+   * `failedPermanently`. This prevents a brief network blip at startup
+   * from permanently killing telemetry for a long-lived process.
    */
   private getInner(): Promise<SpanExporter | null> {
     if (this.failedPermanently) return Promise.resolve(null);
@@ -274,17 +278,24 @@ export class MlflowOtlpExporter implements SpanExporter {
           });
         });
       this.innerPromise = factory().catch((err) => {
-        // Latch permanent failure — every future call resolves to null.
-        this.failedPermanently = err instanceof Error ? err : new Error(String(err));
-        // Log at the failure point so misconfiguration is visible
-        // immediately. Without this the failure was silently latched and only
-        // logged on the next export() (and only if getInner threw, which it
-        // can't here because of the `.catch(() => null)` below).
-        fwLogger().error(
-          "[MlflowOtlpExporter] Permanent initialization failure — all future spans will be dropped:",
-          this.failedPermanently,
-        );
-        throw this.failedPermanently;
+        this.initAttempts++;
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (this.initAttempts >= MlflowOtlpExporter.MAX_INIT_ATTEMPTS) {
+          // Latch permanent failure after exhausting retries.
+          this.failedPermanently = error;
+          fwLogger().error(
+            `[MlflowOtlpExporter] Permanent initialization failure after ${this.initAttempts} attempts — all future spans will be dropped:`,
+            this.failedPermanently,
+          );
+        } else {
+          fwLogger().warn(
+            `[MlflowOtlpExporter] Init attempt ${this.initAttempts}/${MlflowOtlpExporter.MAX_INIT_ATTEMPTS} failed, will retry on next export:`,
+            error.message,
+          );
+          // Allow retry on next export() call.
+          this.innerPromise = null;
+        }
+        throw error;
       });
     }
     // Surface latched failure as `null` to callers, but never re-trigger import.

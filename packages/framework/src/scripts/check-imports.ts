@@ -115,6 +115,14 @@ const RULES: BoundaryRule[] = [
     reason:
       "shared/** must not import OTel, observer/**, or tracing/**. Telemetry-aware helpers belong in dag-runtime/ (the only consumer). NodeContext stub construction (defaults.ts, make-node-context.ts) is exempt.",
   },
+  // `types/` is a lower layer consumed by everything above it. It must not
+  // depend on `dag-runtime/` or `executor/` — those are higher layers.
+  {
+    scope: ["types"],
+    forbiddenModules: ["../dag-runtime", "../executor"],
+    reason:
+      "types/ is a lower layer; it must not import from dag-runtime/ or executor/. Pure utilities belong in shared/.",
+  },
 ];
 
 /** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */

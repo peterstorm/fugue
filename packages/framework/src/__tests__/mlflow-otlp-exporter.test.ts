@@ -165,15 +165,21 @@ describe("MlflowOtlpExporter", () => {
     expect(inputs["prompt_name"]).toBe("summary");
   });
 
-  it("latches permanent failure and exposes via .failed", async () => {
+  it("latches permanent failure and exposes via .failed after 3 attempts", async () => {
     const failExporter = new MlflowOtlpExporter({
       url: "http://localhost:5000",
       experimentId: "1",
       createInner: async () => { throw new Error("module not found"); },
     });
 
-    const span = fakeSpan();
-    const { result } = await collectExport(failExporter, [span]);
+    // Attempts 1 and 2: retries allowed, not yet permanent
+    await collectExport(failExporter, [fakeSpan()]);
+    expect(failExporter.failed).toBeNull();
+    await collectExport(failExporter, [fakeSpan()]);
+    expect(failExporter.failed).toBeNull();
+
+    // Attempt 3: permanent failure latched
+    const { result } = await collectExport(failExporter, [fakeSpan()]);
     expect(result.code).toBe(1);
     expect(failExporter.failed).toBeInstanceOf(Error);
     expect(failExporter.failed!.message).toBe("module not found");
@@ -186,9 +192,15 @@ describe("MlflowOtlpExporter", () => {
       createInner: async () => { throw new Error("boom"); },
     });
 
+    // Exhaust retries (3 attempts)
     await collectExport(failExporter, [fakeSpan()]);
+    await collectExport(failExporter, [fakeSpan()]);
+    await collectExport(failExporter, [fakeSpan()]);
+    // Now permanently failed — count from here
+    expect(failExporter.failed).toBeInstanceOf(Error);
     await collectExport(failExporter, [fakeSpan(), fakeSpan()]);
-    expect(failExporter.droppedSpanCount).toBe(3);
+    // 3 spans from retry phase + 2 after permanent = 5 total
+    expect(failExporter.droppedSpanCount).toBe(5);
   });
 
   it("does not leak SpanAttributeRegistry entries on normal export", async () => {
@@ -267,7 +279,9 @@ describe("MlflowOtlpExporter", () => {
       experimentId: "1",
       createInner: async () => { throw new Error("init blew up"); },
     });
-    // Trigger init by calling export so failedPermanently latches.
+    // Exhaust retries (3 attempts) so failedPermanently latches.
+    await collectExport(failExporter, [fakeSpan()]);
+    await collectExport(failExporter, [fakeSpan()]);
     await collectExport(failExporter, [fakeSpan()]);
     expect(failExporter.failed).toBeInstanceOf(Error);
 
@@ -281,6 +295,9 @@ describe("MlflowOtlpExporter", () => {
       experimentId: "1",
       createInner: async () => { throw new Error("init blew up"); },
     });
+    // Exhaust retries (3 attempts) so failedPermanently latches.
+    await collectExport(failExporter, [fakeSpan()]);
+    await collectExport(failExporter, [fakeSpan()]);
     await collectExport(failExporter, [fakeSpan()]);
     expect(failExporter.failed).toBeInstanceOf(Error);
 

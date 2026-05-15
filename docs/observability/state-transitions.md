@@ -195,7 +195,11 @@ const dag = defineDag({
   },
   edges: [
     { from: "fetch-order", to: "assess-risk" },
-    { from: "assess-risk", to: "execute-refund" },
+    {
+      from: "assess-risk",
+      to: "execute-refund",
+      when: { label: "risk-acceptable", check: (v) => v.riskAssessment.level !== "critical" },
+    },
     { from: "execute-refund", to: "human-review" },
   ],
 });
@@ -511,7 +515,7 @@ const fetchOrderNode = {
 
 #### `writes` node — `extractConditionedOn` + `extractNewWitness`
 
-- `extractConditionedOn(input)`: Called before execution. Returns the witness this write assumes is still current.
+- `extractConditionedOn(input)`: Called after the node completes. Extracts the version the write assumed was still current (from the node's input, which carries the upstream read's version).
 - `extractNewWitness(output)`: Called after execution. Returns the new version produced.
 
 ```ts

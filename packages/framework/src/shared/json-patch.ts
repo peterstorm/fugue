@@ -76,7 +76,7 @@ export const computeJsonPatch = (
             ops.push({ op: "replace", path, value: replVal });
           }
         } catch (e) {
-          fwLogger().debug(
+          fwLogger().warn(
             `[computeJsonPatch] JSON.stringify comparison failed for key '${key}': ${e instanceof Error ? e.message : e}; treating as changed`,
           );
           ops.push({ op: "replace", path, value: replVal });

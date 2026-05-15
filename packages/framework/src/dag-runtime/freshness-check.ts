@@ -49,8 +49,9 @@ export interface WriteEntry {
 // implementation is the default (single-process); a Redis-backed adapter
 // enables cross-process detection (see checkpoint/redis-freshness-index.ts).
 //
-// Return types are `| Promise<...>` so sync in-memory and async Redis
-// implementations both satisfy the interface. The executor `await`s all calls.
+// Both methods return `Promise<...>`. The in-memory implementation uses
+// trivially-async methods to satisfy the same interface as the Redis adapter
+// without requiring callers to handle sync/async differently.
 // ---------------------------------------------------------------------------
 
 export interface FreshnessIndex {
@@ -74,9 +75,9 @@ export interface FreshnessIndex {
  *
  * The algorithm:
  * 1. Maintain a per-resource list of completed writes (from `WriteAttemptedEvent`).
- * 2. For each `WriteAttemptedEvent`, check if `conditionedOn.value` matches
- *    the latest known witness for that resource. If a newer write exists,
- *    record a conflict.
+ * 2. For each `WriteAttemptedEvent`, check if the latest recorded write to the
+ *    same resource produced a different witness value than `conditionedOn.value`.
+ *    If so, the conditioned-on state is stale — record a conflict.
  *
  * Pure function — no I/O, no side effects.
  */
@@ -156,11 +157,19 @@ export const checkFreshness = (
  *
  * Thread-safe within a single JS event loop (no concurrent mutation).
  * For cross-process detection, see Redis-backed freshness index.
+ *
+ * The index is bounded: each resource retains at most `maxEntriesPerResource`
+ * write entries (default 1000). Oldest entries are evicted on overflow.
  */
 export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly writes = new Map<string, WriteEntry[]>();
+  private readonly maxEntries: number;
 
-  /** Record a successful write. */
+  constructor(opts?: { maxEntriesPerResource?: number }) {
+    this.maxEntries = opts?.maxEntriesPerResource ?? 1000;
+  }
+
+  /** Record a successful write. Evicts oldest if over capacity. */
   async recordWrite(event: WriteAttemptedEvent): Promise<void> {
     const resource = event.newWitness.resource;
     const entries = this.writes.get(resource) ?? [];
@@ -170,6 +179,10 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
       newWitness: event.newWitness,
       succeededAtMs: event.succeededAtMs,
     });
+    // Evict oldest entries when over capacity
+    if (entries.length > this.maxEntries) {
+      entries.splice(0, entries.length - this.maxEntries);
+    }
     this.writes.set(resource, entries);
   }
 

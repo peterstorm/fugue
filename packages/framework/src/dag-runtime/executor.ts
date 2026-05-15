@@ -23,7 +23,7 @@ import { fwLogger } from "../logger.js";
 import type { Confidence } from "../types/confidence.js";
 import type { SideEffectKind } from "../types/side-effects.js";
 import type { HumanActionDetailed } from "../types/events.js";
-import { computeJsonPatch } from "./json-patch.js";
+import { computeJsonPatch } from "../shared/json-patch.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 
@@ -468,11 +468,12 @@ const emitFreshnessWitnessEvents = async (
       })
       .with({ kind: "writes" }, async () => {
         if (!nodeDef.extractConditionedOn || !nodeDef.extractNewWitness) return;
+
+        // Step 1: Rebuild the node's input (framework invariant — should not fail)
+        let nodeInput: unknown;
         try {
-          // Rebuild the node's input to extract conditionedOn.
           const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
           const { required, optional } = incoming;
-          let nodeInput: unknown;
           if (optional.length > 0) {
             nodeInput = Object.fromEntries(
               [...required, ...optional].map((d) => [d, priorOutputs.get(d as NodeId)]),
@@ -484,52 +485,66 @@ const emitFreshnessWitnessEvents = async (
           } else {
             nodeInput = Object.fromEntries(required.map((d) => [d, priorOutputs.get(d as NodeId)]));
           }
-
-          const conditionedOn: Witness = nodeDef.extractConditionedOn(nodeInput);
-          const newWitness: Witness = nodeDef.extractNewWitness(output);
-
-          // Check for freshness violations before recording the new write
-          const conflict = await freshnessIndex.findConflict(
-            conditionedOn.resource,
-            conditionedOn.value,
-            0, // check all recorded writes
+        } catch (e) {
+          fwLogger().error(
+            `[emitFreshnessWitnessEvents] BUG: input reconstruction failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
           );
-          if (conflict) {
-            emit(nodeCtx, {
-              type: "freshness-violation",
-              runId: nodeCtx.runId,
-              dagId,
-              nodeId,
-              resource: conditionedOn.resource,
-              conditionedOnWitness: conditionedOn,
-              conflictingWrite: {
-                runId: conflict.runId,
-                nodeId: conflict.nodeId,
-                newWitness: conflict.newWitness,
-                succeededAtMs: conflict.succeededAtMs,
-              },
-              detectedAtMs: nowFn(),
-              timestamp: stamp(),
-            });
-          }
+          return;
+        }
 
-          const writeEvent = {
-            type: "write-attempted" as const,
+        // Step 2: User-provided extractors
+        let conditionedOn: Witness;
+        let newWitness: Witness;
+        try {
+          conditionedOn = nodeDef.extractConditionedOn(nodeInput);
+          newWitness = nodeDef.extractNewWitness(output);
+        } catch (e) {
+          fwLogger().warn(
+            `[emitFreshnessWitnessEvents] extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
+          );
+          return;
+        }
+
+        // Step 3: Freshness conflict check + event emission
+        // sinceMs: 0 is intentional — within a run, all prior writes are relevant
+        // because topological ordering guarantees the read witness was captured
+        // before any writes in later waves.
+        const conflict = await freshnessIndex.findConflict(
+          conditionedOn.resource,
+          conditionedOn.value,
+          0,
+        );
+        if (conflict) {
+          emit(nodeCtx, {
+            type: "freshness-violation",
             runId: nodeCtx.runId,
             dagId,
             nodeId,
-            conditionedOn,
-            newWitness,
-            succeededAtMs: nowFn(),
+            resource: conditionedOn.resource,
+            conditionedOnWitness: conditionedOn,
+            conflictingWrite: {
+              runId: conflict.runId,
+              nodeId: conflict.nodeId,
+              newWitness: conflict.newWitness,
+              succeededAtMs: conflict.succeededAtMs,
+            },
+            detectedAtMs: nowFn(),
             timestamp: stamp(),
-          };
-          emit(nodeCtx, writeEvent);
-          await freshnessIndex.recordWrite(writeEvent);
-        } catch (e) {
-          fwLogger().warn(
-            `[emitFreshnessWitnessEvents] freshness extraction failed for writes node '${nodeId}': ${e instanceof Error ? e.message : e}`,
-          );
+          });
         }
+
+        const writeEvent = {
+          type: "write-attempted" as const,
+          runId: nodeCtx.runId,
+          dagId,
+          nodeId,
+          conditionedOn,
+          newWitness,
+          succeededAtMs: nowFn(),
+          timestamp: stamp(),
+        };
+        emit(nodeCtx, writeEvent);
+        await freshnessIndex.recordWrite(writeEvent);
       })
       .with({ kind: "none" }, () => { /* pure transform — no freshness tracking */ })
       .with({ kind: "external-call" }, () => { /* external calls don't participate in witness contract */ })
@@ -727,8 +742,10 @@ const runWave = async (
     if (nodeDef && nodeDef.confidence.mode === "value") {
       try {
         upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
-      } catch {
-        // Confidence extraction failure is non-fatal; record null
+      } catch (e) {
+        fwLogger().warn(
+          `[runWave] confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
+        );
         upstreamConfidence = null;
       }
     }

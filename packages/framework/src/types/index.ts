@@ -60,8 +60,8 @@ export { CONFIDENCE_ORDER, meetsConfidence } from "./confidence.js";
 export type { WitnessKind, Witness } from "./freshness.js";
 
 // ── JSON Patch ────────────────────────────────────────────────────────────
-export type { JsonPatchOp, JsonPatch } from "../dag-runtime/json-patch.js";
-export { computeJsonPatch } from "../dag-runtime/json-patch.js";
+export type { JsonPatchOp, JsonPatch } from "../shared/json-patch.js";
+export { computeJsonPatch } from "../shared/json-patch.js";
 
 // ── Node authoring ────────────────────────────────────────────────────────
 export type {

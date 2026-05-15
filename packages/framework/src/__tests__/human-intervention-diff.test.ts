@@ -3,7 +3,7 @@
 
 import { describe, test, expect } from "bun:test";
 import fc from "fast-check";
-import { computeJsonPatch } from "../dag-runtime/json-patch.js";
+import { computeJsonPatch } from "../shared/json-patch.js";
 
 describe("computeJsonPatch", () => {
   test("identical values yield empty patch", () => {

@@ -50,14 +50,22 @@ const decodeMember = (
 ): { runId: RunId; nodeId: NodeId; witnessKind: string; witnessValue: string } | null => {
   try {
     const parsed = JSON.parse(member);
-    if (!Array.isArray(parsed) || parsed.length !== 4) return null;
+    if (!Array.isArray(parsed) || parsed.length !== 4) {
+      fwLogger().warn(
+        `[RedisFreshnessIndex] decodeMember: unexpected shape (length=${Array.isArray(parsed) ? parsed.length : "not-array"}): ${member.slice(0, 100)}`,
+      );
+      return null;
+    }
     return {
       runId: __brandRunId(parsed[0]),
       nodeId: __brandNodeId(parsed[1]),
       witnessKind: parsed[2],
       witnessValue: parsed[3],
     };
-  } catch {
+  } catch (e) {
+    fwLogger().warn(
+      `[RedisFreshnessIndex] decodeMember: JSON parse failed: ${e instanceof Error ? e.message : e}`,
+    );
     return null;
   }
 };
@@ -76,6 +84,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
   private scriptSha: string | null = null;
   private _consecutiveFailures = 0;
   private _lastError: Error | null = null;
+  private _degradedChecks = 0;
 
   /** Number of consecutive Redis failures. Resets on success. */
   get consecutiveFailures(): number {
@@ -85,6 +94,15 @@ export class RedisFreshnessIndex implements FreshnessIndex {
   /** Last observed error, or null if healthy. */
   get lastError(): Error | null {
     return this._lastError;
+  }
+
+  /**
+   * Number of findConflict calls that returned "no conflict" due to Redis
+   * failure rather than an actual absence of conflict. When non-zero, freshness
+   * detection is degraded — violations may go undetected.
+   */
+  get degradedChecks(): number {
+    return this._degradedChecks;
   }
 
   constructor(private readonly redis: Redis) {}
@@ -203,10 +221,11 @@ export class RedisFreshnessIndex implements FreshnessIndex {
       return null;
     } catch (e) {
       this.onFailure(e);
-      // Non-fatal — log and return null (no conflict detected). Freshness
-      // detection degrades gracefully.
+      this._degradedChecks++;
+      // Non-fatal — return null means "couldn't check" not "no conflict".
+      // The degradedChecks counter surfaces this for health monitoring.
       fwLogger().error(
-        `[RedisFreshnessIndex] findConflict failed for resource '${resource}': ${e instanceof Error ? e.message : e}`,
+        `[RedisFreshnessIndex] findConflict failed for resource '${resource}' — freshness NOT checked (degradedChecks=${this._degradedChecks}): ${e instanceof Error ? e.message : e}`,
       );
       return null;
     }

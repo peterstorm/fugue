@@ -5,7 +5,7 @@ import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
 import type { Witness } from "./freshness.js";
 import type { SideEffectKind } from "./side-effects.js";
-import type { JsonPatch } from "../dag-runtime/json-patch.js";
+import type { JsonPatch } from "../shared/json-patch.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
