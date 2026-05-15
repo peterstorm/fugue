@@ -522,12 +522,12 @@ describe("Wave 6.6 — BufferedObserver policy-throw still clears the run buffer
     } as any;
     const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0 });
 
-    buf.onRunStart({ type: "run-start", runId: "X" as RunId, dagId: "d" as DagId, timestamp: new Date() });
+    buf.observe({ type: "run-start", runId: "X" as RunId, dagId: "d" as DagId, timestamp: new Date() });
     expect((buf as any).buffers.has("X")).toBe(true);
 
     // shouldFlush throws — the try/finally must still drop the buffer.
     expect(() =>
-      buf.onRunEnd({
+      buf.observe({
         type: "run-end",
         runId: "X" as RunId,
         dagId: "d" as DagId,
@@ -553,7 +553,7 @@ describe("Wave 6.7 — BufferedObserver.evictStale", () => {
     const policy = { shouldFlush: () => true } as any;
     const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0, ttlMs: 1 });
 
-    buf.onRunStart({ type: "run-start", runId: "orphan" as RunId, dagId: "d" as DagId, timestamp: new Date() });
+    buf.observe({ type: "run-start", runId: "orphan" as RunId, dagId: "d" as DagId, timestamp: new Date() });
     // Force the buffer to look stale by hand-stamping the createdAt — avoids
     // relying on real sleep timing.
     const entry = (buf as any).buffers.get("orphan");

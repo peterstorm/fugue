@@ -40,9 +40,9 @@ export const createAssembleResponseNode = (customerId: string) =>
           return ok({ status: "insufficient_data" as const, customerId, message: "Insufficient data for analysis" });
         case "ok": {
           const guardrail = input["grounding-guardrail"];
-          if (guardrail === undefined || guardrail.kind === "skipped") {
-            // Guardrail output missing or skipped (non-ok upstream) — degrade gracefully
-            console.warn(`[assemble-response] guardrail output missing or skipped for customer ${customerId}`);
+          if (guardrail === undefined || guardrail.kind === "skipped" || guardrail.kind === "failed") {
+            // Guardrail output missing, skipped, or failed — degrade gracefully
+            console.warn(`[assemble-response] guardrail ${guardrail?.kind ?? "missing"} for customer ${customerId}`);
             return ok({ status: "degraded" as const, customerId, message: "Guardrail data unavailable" });
           }
           const synthesis = guardrail.value;

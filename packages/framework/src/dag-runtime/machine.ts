@@ -10,6 +10,7 @@ import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
 import { computeIncomingByNode, computeOutgoingByNode, seedInitialActiveSet } from "./conditional.js";
+import { fwLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // stateProgress — maps DagPhase to a 0–100 progress value
@@ -101,7 +102,11 @@ export const compileDagToMachine = (
     stateKey: (phase) => {
       try {
         return JSON.stringify(phase);
-      } catch {
+      } catch (e) {
+        fwLogger().error(
+          `[compileDagToMachine] stateKey serialization failed for phase kind="${phase.kind}": ` +
+          `${e instanceof Error ? e.message : e}. Dedup keys degraded.`,
+        );
         return `${phase.kind}:unserializable`;
       }
     },

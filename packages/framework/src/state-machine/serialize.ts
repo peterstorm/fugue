@@ -45,6 +45,7 @@ export const serializeValue = (value: unknown): unknown => {
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
       out[k] = serializeValue(v);
     }
     return out;
@@ -92,9 +93,10 @@ export const deserializeValue = (value: unknown): unknown => {
       return set;
     }
 
-    // Plain object
+    // Plain object — filter prototype pollution vectors
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
       out[k] = deserializeValue(v);
     }
     return out;

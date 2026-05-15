@@ -55,9 +55,9 @@ export interface GuardrailFailed {
   readonly checks: readonly GuardrailCheck[];
 }
 
-export interface GuardrailNodeConfig<I, T, Id extends NodeId = NodeId> {
+export interface GuardrailNodeConfig<I, T> {
   /** Unique node ID. */
-  readonly id: Id;
+  readonly id: string;
   /** Zod schema for the node's assembled input. */
   readonly inputSchema: z.ZodType<I>;
   /** Zod schema for the node's output. */
@@ -82,10 +82,12 @@ export interface GuardrailNodeConfig<I, T, Id extends NodeId = NodeId> {
  * The executor is responsible for setting span status to ERROR when
  * `result.passed === false`. See executor.ts for span wrapping behavior.
  */
-export const createGuardrailNode = <I, T, const Id extends NodeId = NodeId>(
-  config: GuardrailNodeConfig<I, T, Id>,
-): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: Id } => ({
-  id: config.id,
+export const createGuardrailNode = <I, T>(
+  config: GuardrailNodeConfig<I, T>,
+): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: NodeId } => {
+  const id = __brandNodeId(config.id);
+  return {
+  id,
   kind: "guardrail",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
@@ -99,8 +101,6 @@ export const createGuardrailNode = <I, T, const Id extends NodeId = NodeId>(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       ctx.logger.error(`[guardrail:${config.id}] validate() threw: ${msg}`);
-      // Emit the explicit `failed` variant so consumers reading `.value`
-      // on the error path get a compile error instead of `undefined` cast as T.
       result = {
         kind: "failed",
         passed: false,
@@ -112,11 +112,11 @@ export const createGuardrailNode = <I, T, const Id extends NodeId = NodeId>(
 
     // Emit guardrail-specific sub-span attributes via observer
     if (ctx.observer && !result.passed) {
-      ctx.observer.onSubSpan({
+      ctx.observer.observe({
         type: "sub-span",
         runId: ctx.runId,
         dagId: ctx.dagId,
-        nodeId: config.id,
+        nodeId: id,
         parentSpanId: config.id,
         kind: "GUARDRAIL",
         timestamp: new Date(),
@@ -132,4 +132,5 @@ export const createGuardrailNode = <I, T, const Id extends NodeId = NodeId>(
 
     return ok(result);
   },
-});
+};
+};

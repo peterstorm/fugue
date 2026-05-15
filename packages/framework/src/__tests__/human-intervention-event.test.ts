@@ -292,12 +292,11 @@ describe("Phase 4 — HumanInterventionEvent", () => {
       id: "test-witnesses",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: "postgres:orders" },
-          extractWitness: (output: unknown) => ({
+          sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: (output: unknown) => ({
             kind: "version" as const,
             resource: "postgres:orders",
             value: String((output as { version: number }).version),
-          }),
+          }) },
           run: async () => ok({ version: 42 }),
         }),
         review: makeNode("review", {

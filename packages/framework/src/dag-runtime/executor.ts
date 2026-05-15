@@ -15,10 +15,8 @@ import { runNodeShared } from "./run-node.js";
 import { type NodeSpanOutcome } from "./node-span.js";
 import { emit } from "./emit.js";
 import { applyJitter } from "../shared/jitter.js";
-import { decideRoute } from "./conditional.js";
-import { isConditionalEdge } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
-import type { Confidence } from "../types/confidence.js";
+import { emitRoutingDecisions } from "./route-emission.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { emitHumanIntervention } from "./human-emission.js";
@@ -507,101 +505,18 @@ const runWave = async (
     waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator,
   );
 
-  // Compute routing decisions exactly once per source node. The executor uses
-  // the result to emit observer events; the transition (`handleWaveDone`)
-  // reads them off the wave-done event to expand `activeNodeIds` without
-  // re-running the same predicates.
-  //
-  // When `decideRoute` returns `predicate-malformed`, short-circuit the wave
-  // with `node-failed` instead of letting it fall through to `wave-done`.
-  // `handleNodeFailed` special-cases the `predicate-malformed` error kind to
-  // fail-fast without consuming the retry budget — a malformed predicate is a
-  // config error, not a transient runtime failure.
-  const routingDecisions = new Map<NodeId, import("./conditional.js").Decision>();
-  for (const nodeId of waveNodeIds) {
-    if (!newOutputs.has(nodeId)) continue;
-    const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
-    if (!outgoing.some(isConditionalEdge)) continue;
-
-    // Extract upstream confidence from the node definition
-    const nodeDef = nodeMap.get(nodeId);
-    let upstreamConfidence: Confidence | null = null;
-    if (nodeDef && nodeDef.confidence.mode === "value") {
-      try {
-        upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
-      } catch (e) {
-        const message = `confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
-        fwLogger().warn(`[runWave] ${message}`);
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId: dag.id,
-          nodeId,
-          sideEffects: nodeMap.get(nodeId)?.sideEffects,
-          timestamp: stamp(),
-          error: message,
-          frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message },
-        });
-        upstreamConfidence = null;
-      }
-    }
-
-    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing, upstreamConfidence);
-    if (decision.kind === "predicate-malformed") {
-      const predErr: FrameworkError = {
-        kind: "predicate-malformed",
-        nodeId: decision.fromNodeId,
-        message: decision.message,
-      };
-      emit(nodeCtx, {
-        type: "node-error",
-        runId: nodeCtx.runId,
-        dagId: dag.id,
-        nodeId,
-        sideEffects: nodeMap.get(nodeId)?.sideEffects,
-        timestamp: stamp(),
-        error: `predicate-malformed: ${decision.message}`,
-        frameworkError: predErr,
-      });
-      return {
-        type: "node-failed",
-        nodeId,
-        error: predErr,
-      };
-    }
-    routingDecisions.set(nodeId, decision);
-    emit(nodeCtx, {
-      type: "route-decided",
-      runId: nodeCtx.runId,
-      dagId: dag.id,
-      fromNodeId: nodeId,
-      chosenTargets: [...decision.chosenTargets],
-      prunedTargets: [...decision.prunedTargets],
-      defaultTaken: decision.defaultTaken,
-      evidence: {
-        upstreamOutput: newOutputs.get(nodeId),
-        upstreamConfidence,
-        predicateResults: decision.predicateResults,
-        decidedAtMs: nowFn(),
-      },
-      timestamp: stamp(),
-    });
-    for (const pruned of decision.prunedTargets) {
-      emit(nodeCtx, {
-        type: "node-pruned",
-        runId: nodeCtx.runId,
-        dagId: dag.id,
-        nodeId: pruned,
-        reason: "branch-not-taken",
-        timestamp: stamp(),
-      });
-    }
-  }
+  // Compute routing decisions for all source nodes with conditional out-edges.
+  // Emits route-decided and node-pruned observer events. Short-circuits on
+  // predicate-malformed (config error, not transient).
+  const routing = emitRoutingDecisions(
+    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn,
+  );
+  if (routing.earlyFailure) return routing.earlyFailure;
 
   return {
     type: "wave-done",
     wave: waveIndex,
     outputs: newOutputs,
-    routingDecisions: routingDecisions.size > 0 ? routingDecisions : undefined,
+    routingDecisions: routing.decisions.size > 0 ? routing.decisions : undefined,
   };
 };

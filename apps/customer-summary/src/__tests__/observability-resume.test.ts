@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, makeNodeContext } from "@ai-summary/framework";
+import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, makeNodeContext, runId, nodeId, dagId, frameworkError } from "@ai-summary/framework";
 import type { NodeContext, DagDef } from "@ai-summary/framework";
 import type { SummaryResponse } from "../schemas/response.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
@@ -30,7 +30,7 @@ const fakeSynthesisOutput: SynthesisOutput = {
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
   makeNodeContext({
-    runId: "test-run",
+    runId: runId("test-run"),
     dagId: "test-dag",
     prompts: { get: (_name: string) => "prompt template" },
     llm: new FakeLlmClient((_req: any) => fakeSynthesisOutput),
@@ -47,7 +47,7 @@ describe("E2E observability flow", () => {
 
     const ctx = makeCtx({
       observer,
-      runId: "e2e-obs-run",
+      runId: runId("e2e-obs-run"),
       dagId: dag.id,
     });
 
@@ -62,8 +62,8 @@ describe("E2E observability flow", () => {
     // RunStart
     const runStart = events.find((e) => e.type === "run-start");
     expect(runStart).toBeDefined();
-    expect(runStart!.runId).toBe("e2e-obs-run");
-    expect(runStart!.dagId).toBe("customer-summary");
+    expect(runStart!.runId).toBe(runId("e2e-obs-run"));
+    expect(runStart!.dagId).toBe(dagId("customer-summary"));
 
     // RunEnd with ok
     const runEnd = events.find((e) => e.type === "run-end");
@@ -79,8 +79,8 @@ describe("E2E observability flow", () => {
 
     // All events have required fields
     for (const ns of nodeStarts) {
-      expect(ns.runId).toBe("e2e-obs-run");
-      expect(ns.dagId).toBe("customer-summary");
+      expect(ns.runId).toBe(runId("e2e-obs-run"));
+      expect(ns.dagId).toBe(dagId("customer-summary"));
       expect(typeof ns.nodeId).toBe("string");
     }
 
@@ -90,9 +90,9 @@ describe("E2E observability flow", () => {
 
     // All 4 DAG nodes should appear in node-end events
     const endedIds = nodeEnds.map((e) => e.nodeId).sort();
-    expect(endedIds).toContain("fetch-crm");
-    expect(endedIds).toContain("extract-features");
-    expect(endedIds).toContain("assemble-response");
+    expect(endedIds).toContain(nodeId("fetch-crm"));
+    expect(endedIds).toContain(nodeId("extract-features"));
+    expect(endedIds).toContain(nodeId("assemble-response"));
   });
 });
 
@@ -108,7 +108,7 @@ describe("E2E resume integration (SC-008)", () => {
     const firstRunObserver = new RecordingObserver();
     const firstCtx = makeCtx({
       observer: firstRunObserver,
-      runId: "first-run",
+      runId: runId("first-run"),
       dagId: dag.id,
     });
 
@@ -133,12 +133,12 @@ describe("E2E resume integration (SC-008)", () => {
     // Resume run
     const ctx = makeCtx({
       observer,
-      runId: "resume-run",
+      runId: runId("resume-run"),
       dagId: dag.id,
     });
 
     const result = await runDag(dag, undefined, ctx, {
-      resume: { runId: "resume-run", checkpoint },
+      resume: { runId: runId("resume-run"), checkpoint },
     });
 
     expect(result.ok).toBe(true);
@@ -146,17 +146,17 @@ describe("E2E resume integration (SC-008)", () => {
     // Checkpointed nodes should be skipped
     const skipped = events.filter((e) => e.type === "node-skipped");
     const skippedIds = skipped.map((e) => e.nodeId).sort();
-    expect(skippedIds).toContain("fetch-crm");
-    expect(skippedIds).toContain("extract-features");
+    expect(skippedIds).toContain(nodeId("fetch-crm"));
+    expect(skippedIds).toContain(nodeId("extract-features"));
 
     // Skipped nodes should NOT have node-start events
     const startedIds = events.filter((e) => e.type === "node-start").map((e) => e.nodeId);
-    expect(startedIds).not.toContain("fetch-crm");
-    expect(startedIds).not.toContain("extract-features");
+    expect(startedIds).not.toContain(nodeId("fetch-crm"));
+    expect(startedIds).not.toContain(nodeId("extract-features"));
 
     // Remaining nodes should run
-    expect(startedIds).toContain("synthesize");
-    expect(startedIds).toContain("assemble-response");
+    expect(startedIds).toContain(nodeId("synthesize"));
+    expect(startedIds).toContain(nodeId("assemble-response"));
 
     // All skipped events have reason "checkpoint"
     expect(skipped.every((e) => e.reason === "checkpoint")).toBe(true);
@@ -175,7 +175,7 @@ describe("E2E resume integration (SC-008)", () => {
     const firstRunObserver2 = new RecordingObserver();
     const firstCtx = makeCtx({
       observer: firstRunObserver2,
-      runId: "full-run",
+      runId: runId("full-run"),
       dagId: dag.id,
     });
     const firstResult = await runDag<{ customerId: string }, SummaryResponse>(
@@ -191,12 +191,12 @@ describe("E2E resume integration (SC-008)", () => {
 
     const ctx = makeCtx({
       observer,
-      runId: "full-resume",
+      runId: runId("full-resume"),
       dagId: dag.id,
     });
 
     const result = await runDag(dag, undefined, ctx, {
-      resume: { runId: "full-resume", checkpoint },
+      resume: { runId: runId("full-resume"), checkpoint },
     });
     expect(result.ok).toBe(true);
 
@@ -257,7 +257,7 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
           outputSchema: z.object({ v: z.number() }),
           transform: (_i: { v: number }) => {
             log.push("N3-fail");
-            return err({ kind: "node-crash" as const, nodeId: "N3", retriability: "retriable" as const, message: "transient failure" });
+            return err({ kind: "node-crash" as const, nodeId: nodeId("N3"), retriability: "retriable" as const, message: "transient failure" });
           },
         }),
       ]),
@@ -273,7 +273,7 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
     };
 
     const ctx1: NodeContext = makeNodeContext({
-      runId: "run-1",
+      runId: runId("run-1"),
       dagId: "resume-3node",
       cache,
     });
@@ -290,14 +290,14 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
     log.length = 0;
 
     const ctx2: NodeContext = makeNodeContext({
-      runId: "run-1",
+      runId: runId("run-1"),
       dagId: "resume-3node",
       observer,
       cache,
     });
 
     const r2 = await runDag(dag, undefined, ctx2, {
-      resume: { runId: "run-1", checkpoint: checkpoints },
+      resume: { runId: runId("run-1"), checkpoint: checkpoints },
     });
 
     expect(r2.ok).toBe(true);
@@ -311,11 +311,11 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
 
     // N1 and N2 emitted NodeSkipped
     const skipped = events.filter((e) => e.type === "node-skipped");
-    expect(skipped.map((e) => e.nodeId).sort()).toEqual(["N1", "N2"]);
+    expect(skipped.map((e) => e.nodeId).sort()).toEqual([nodeId("N1"), nodeId("N2")]);
 
     // N3 emitted node-start and node-end
     const starts = events.filter((e) => e.type === "node-start");
     expect(starts.length).toBe(1);
-    expect(starts[0].nodeId).toBe("N3");
+    expect(starts[0].nodeId).toBe(nodeId("N3"));
   });
 });

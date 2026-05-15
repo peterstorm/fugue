@@ -248,7 +248,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.message).toMatch(/not valid JSON/);
+      expect(result.error.message).toMatch(/Not valid JSON/);
     }
   });
 

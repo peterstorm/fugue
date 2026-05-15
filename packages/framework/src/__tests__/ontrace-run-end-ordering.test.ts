@@ -47,9 +47,8 @@ interface Recording {
 }
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
-  // @ts-expect-error — branded ID test fixture
-  runId: `r-${Math.floor(Math.random() * 1e9)}`,
-  dagId: "ontrace-ordering" as DagId,
+  runId: R(`r-${Math.floor(Math.random() * 1e9)}`),
+  dagId: D("ontrace-ordering"),
   observer,
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   judgeLlm: null,
@@ -62,7 +61,6 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
 const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { calls: Record<string, number> }): NodeDef<unknown, unknown> => {
   if (kind === "ok") {
     return createTransformNode({
-      // @ts-expect-error — branded ID test fixture
       id,
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -71,19 +69,17 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
   }
   if (kind === "fail-once") {
     return {
-      // @ts-expect-error — branded ID test fixture
-      id,
+      id: N(id),
       kind: "transform",
       inputSchema: z.any(),
       outputSchema: z.any(),
       requires: [],
       sideEffects: { kind: "none" } as const,
       confidence: { mode: "none" } as const,
-      // @ts-expect-error — branded ID test fixture
       run: async (i) => {
         state.calls[id] = (state.calls[id] ?? 0) + 1;
         if ((state.calls[id] ?? 0) < 2) {
-          return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: id, message: "transient" });
+          return err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: N(id), message: "transient" });
         }
         return ok(i);
       },
@@ -91,16 +87,14 @@ const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { c
     };
   }
   return {
-    // @ts-expect-error — branded ID test fixture
-    id,
+    id: N(id),
     kind: "transform",
     inputSchema: z.any(),
     outputSchema: z.any(),
     requires: [],
     sideEffects: { kind: "none" } as const,
     confidence: { mode: "none" } as const,
-    // @ts-expect-error — branded ID test fixture
-    run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: id, message: "permanent" }),
+    run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: N(id), message: "permanent" }),
     retry: { backoffMs: [1] },
   };
 };
@@ -158,15 +152,11 @@ const runOnce = async (shape: Shape, seedTag: number): Promise<Recording> => {
 
   // Custom recording observer that increments the shared counter.
   class SeqObserver extends RecordingObserver {
-    onRunStart(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "run-start" }); super.onRunStart(e); }
-    onNodeStart(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "node-start" }); super.onNodeStart(e); }
-    onNodeEnd(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "node-end" }); super.onNodeEnd(e); }
-    onNodeError(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "node-error" }); super.onNodeError(e); }
-    onNodeSkipped(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "node-skipped" }); super.onNodeSkipped(e); }
-    onSubSpan(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "sub-span" }); super.onSubSpan(e); }
-    onRunEnd(e: any) { entries.push({ kind: "observer", idx: seq++, tag: `run-end:${e.status}` }); super.onRunEnd(e); }
-    onRouteDecided(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "route-decided" }); super.onRouteDecided(e); }
-    onNodePruned(e: any) { entries.push({ kind: "observer", idx: seq++, tag: "node-pruned" }); super.onNodePruned(e); }
+    observe(e: any) {
+      const tag = e.type === "run-end" ? `run-end:${e.status}` : e.type;
+      entries.push({ kind: "observer", idx: seq++, tag });
+      super.observe(e);
+    }
   }
   const observer = new SeqObserver();
 

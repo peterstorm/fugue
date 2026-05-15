@@ -68,20 +68,20 @@ describe("§6.14 — BufferedObserver concurrent flush", () => {
     const buf = new BufferedObserver(inner, alwaysOn(), { sweepIntervalMs: 0 });
 
     // Interleave run A and run B emissions.
-    buf.onRunStart(mkRunStart("A"));
-    buf.onRunStart(mkRunStart("B"));
-    buf.onNodeStart(mkNodeStart("A", "a1"));
-    buf.onNodeStart(mkNodeStart("B", "b1"));
-    buf.onNodeEnd(mkNodeEnd("A", "a1"));
-    buf.onNodeEnd(mkNodeEnd("B", "b1"));
-    buf.onNodeStart(mkNodeStart("A", "a2"));
-    buf.onNodeStart(mkNodeStart("B", "b2"));
-    buf.onNodeEnd(mkNodeEnd("A", "a2"));
-    buf.onNodeEnd(mkNodeEnd("B", "b2"));
+    buf.observe(mkRunStart("A"));
+    buf.observe(mkRunStart("B"));
+    buf.observe(mkNodeStart("A", "a1"));
+    buf.observe(mkNodeStart("B", "b1"));
+    buf.observe(mkNodeEnd("A", "a1"));
+    buf.observe(mkNodeEnd("B", "b1"));
+    buf.observe(mkNodeStart("A", "a2"));
+    buf.observe(mkNodeStart("B", "b2"));
+    buf.observe(mkNodeEnd("A", "a2"));
+    buf.observe(mkNodeEnd("B", "b2"));
 
     // Run A ends first, then run B.
-    buf.onRunEnd(mkRunEnd("A", "ok"));
-    buf.onRunEnd(mkRunEnd("B", "ok"));
+    buf.observe(mkRunEnd("A", "ok"));
+    buf.observe(mkRunEnd("B", "ok"));
 
     // Inner sees A's full sequence first, then B's full sequence.
     const log = inner.events;
@@ -100,14 +100,14 @@ describe("§6.14 — BufferedObserver concurrent flush", () => {
     const inner = new RecordingObserver();
     const buf = new BufferedObserver(inner, alwaysOn(), { sweepIntervalMs: 0 });
 
-    buf.onRunStart(mkRunStart("A"));
-    buf.onRunStart(mkRunStart("B"));
-    buf.onNodeStart(mkNodeStart("A", "a1"));
-    buf.onNodeStart(mkNodeStart("B", "b1"));
-    buf.onNodeEnd(mkNodeEnd("A", "a1"));
-    buf.onNodeEnd(mkNodeEnd("B", "b1"));
-    buf.onRunEnd(mkRunEnd("B", "ok"));
-    buf.onRunEnd(mkRunEnd("A", "ok"));
+    buf.observe(mkRunStart("A"));
+    buf.observe(mkRunStart("B"));
+    buf.observe(mkNodeStart("A", "a1"));
+    buf.observe(mkNodeStart("B", "b1"));
+    buf.observe(mkNodeEnd("A", "a1"));
+    buf.observe(mkNodeEnd("B", "b1"));
+    buf.observe(mkRunEnd("B", "ok"));
+    buf.observe(mkRunEnd("A", "ok"));
 
     const log = inner.events;
     const bEndIdx = log.findIndex((e) => e.type === "run-end" && runIdOf(e) === "B");
@@ -125,14 +125,14 @@ describe("§6.14 — BufferedObserver concurrent flush", () => {
     const buf = new BufferedObserver(inner, alwaysOn(), { sweepIntervalMs: 0 });
 
     // Emit run A in interleaved order with run B's events between them.
-    buf.onRunStart(mkRunStart("A"));
-    buf.onNodeStart(mkNodeStart("B", "b1")); // B injection
-    buf.onNodeStart(mkNodeStart("A", "a1"));
-    buf.onRunStart(mkRunStart("B"));         // out-of-order B start (still consistent)
-    buf.onNodeEnd(mkNodeEnd("A", "a1"));
-    buf.onRunEnd(mkRunEnd("A", "ok"));
-    buf.onNodeEnd(mkNodeEnd("B", "b1"));
-    buf.onRunEnd(mkRunEnd("B", "ok"));
+    buf.observe(mkRunStart("A"));
+    buf.observe(mkNodeStart("B", "b1")); // B injection
+    buf.observe(mkNodeStart("A", "a1"));
+    buf.observe(mkRunStart("B"));         // out-of-order B start (still consistent)
+    buf.observe(mkNodeEnd("A", "a1"));
+    buf.observe(mkRunEnd("A", "ok"));
+    buf.observe(mkNodeEnd("B", "b1"));
+    buf.observe(mkRunEnd("B", "ok"));
 
     const aSlice = inner.events.filter((e) => runIdOf(e) === "A").map((e) => e.type);
     expect(aSlice).toEqual(["run-start", "node-start", "node-end", "run-end"]);
@@ -147,30 +147,34 @@ describe("§6.14 — BufferedObserver concurrent flush", () => {
   });
 
   it("inner observer that throws on one run doesn't block the other run's flush", () => {
-    const flaky: typeof RecordingObserver.prototype = new RecordingObserver();
-    // Override onNodeEnd to throw on run A only.
-    const originalOnNodeEnd = flaky.onNodeEnd.bind(flaky);
-    flaky.onNodeEnd = (e: NodeEndEvent): void => {
-      if (e.runId === "A") throw new Error("inner-failed-for-A");
-      originalOnNodeEnd(e);
+    let throwOnNodeEndForRun = "A";
+    const inner = new RecordingObserver();
+    // Wrap the inner to throw on node-end for run A only.
+    const throwingInner = {
+      observe(event: ObserverEvent): void {
+        if (event.type === "node-end" && event.runId === throwOnNodeEndForRun) {
+          throw new Error("inner-failed-for-A");
+        }
+        inner.observe(event);
+      },
     };
 
-    const buf = new BufferedObserver(flaky, alwaysOn(), { sweepIntervalMs: 0 });
+    const buf = new BufferedObserver(throwingInner, alwaysOn(), { sweepIntervalMs: 0 });
 
-    buf.onRunStart(mkRunStart("A"));
-    buf.onRunStart(mkRunStart("B"));
-    buf.onNodeStart(mkNodeStart("A", "a1"));
-    buf.onNodeStart(mkNodeStart("B", "b1"));
-    buf.onNodeEnd(mkNodeEnd("A", "a1"));
-    buf.onNodeEnd(mkNodeEnd("B", "b1"));
-    buf.onRunEnd(mkRunEnd("A", "ok"));
-    buf.onRunEnd(mkRunEnd("B", "ok"));
+    buf.observe(mkRunStart("A"));
+    buf.observe(mkRunStart("B"));
+    buf.observe(mkNodeStart("A", "a1"));
+    buf.observe(mkNodeStart("B", "b1"));
+    buf.observe(mkNodeEnd("A", "a1"));
+    buf.observe(mkNodeEnd("B", "b1"));
+    buf.observe(mkRunEnd("A", "ok"));
+    buf.observe(mkRunEnd("B", "ok"));
 
     // Run B's node-end made it through despite A's throw.
-    const bEnds = flaky.events.filter((e) => e.type === "node-end" && runIdOf(e) === "B");
+    const bEnds = inner.events.filter((e) => e.type === "node-end" && runIdOf(e) === "B");
     expect(bEnds.length).toBe(1);
     // Both run-ends made it through too.
-    const ends = flaky.events.filter((e) => e.type === "run-end");
+    const ends = inner.events.filter((e) => e.type === "run-end");
     expect(ends.length).toBe(2);
   });
 });

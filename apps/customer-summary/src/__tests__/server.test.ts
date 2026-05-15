@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { createApp } from "../server.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
-import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION } from "@ai-summary/framework";
+import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, runId as mkRunId } from "@ai-summary/framework";
 import { SummaryResponseSchema } from "../schemas/response.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
 import { join } from "node:path";
@@ -120,7 +120,7 @@ describe("POST /summarize", () => {
       const cp = new InMemoryCheckpointer();
 
       // Pre-seed a checkpoint owned by victim "cust-001"
-      const victimRunId = "victim-run-id-123";
+      const victimRunId = mkRunId("victim-run-id-123");
       await cp.setMeta(victimRunId, {
         dagId: "customer-summary",
         startedAt: new Date(),
@@ -157,7 +157,7 @@ describe("POST /summarize", () => {
 
     test("resume with matching subject succeeds", async () => {
       const cp = new InMemoryCheckpointer();
-      const runId = "owner-run-id";
+      const runId = mkRunId("owner-run-id");
       const id = currentDagIdentity();
       await cp.setMeta(runId, {
         dagId: id.dagId,
@@ -178,7 +178,7 @@ describe("POST /summarize", () => {
 
     test("resume rejects with 409 on dagFingerprint mismatch (codex finding #2)", async () => {
       const cp = new InMemoryCheckpointer();
-      const runId = "fp-mismatch-run";
+      const runId = mkRunId("fp-mismatch-run");
       const id = currentDagIdentity();
       await cp.setMeta(runId, {
         dagId: id.dagId,
@@ -201,7 +201,7 @@ describe("POST /summarize", () => {
 
     test("resume rejects with 409 on frameworkVersion mismatch", async () => {
       const cp = new InMemoryCheckpointer();
-      const runId = "fwver-mismatch-run";
+      const runId = mkRunId("fwver-mismatch-run");
       const id = currentDagIdentity();
       await cp.setMeta(runId, {
         dagId: id.dagId,
@@ -224,7 +224,7 @@ describe("POST /summarize", () => {
       // Pre-fingerprint checkpoints have subject set but no dagFingerprint or
       // frameworkVersion. They must not be replayed against the current DAG.
       const cp = new InMemoryCheckpointer();
-      const runId = "preFp-run";
+      const runId = mkRunId("preFp-run");
       await cp.setMeta(runId, {
         dagId: "customer-summary",
         startedAt: new Date(),
@@ -271,7 +271,7 @@ describe("POST /summarize", () => {
 
     test("resume against legacy meta (no subject) returns 404", async () => {
       const cp = new InMemoryCheckpointer();
-      const runId = "legacy-run-id";
+      const runId = mkRunId("legacy-run-id");
       await cp.setMeta(runId, {
         dagId: "customer-summary",
         startedAt: new Date(),

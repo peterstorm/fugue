@@ -29,6 +29,18 @@ export const buildNodeInput = (
   incoming: IncomingSources,
 ): unknown => {
   const { required, optional } = incoming;
+
+  // Assert all required sources produced output (wave ordering guarantees this;
+  // assertion catches checkpoint corruption or framework ordering bugs)
+  for (const dep of required) {
+    if (!outputs.has(dep)) {
+      throw new Error(
+        `BUG: required source '${dep}' has no output in the outputs map. ` +
+        `This indicates checkpoint corruption or a framework ordering bug.`,
+      );
+    }
+  }
+
   if (optional.length > 0) {
     return Object.fromEntries(
       [...required, ...optional].map((d) => [d, outputs.get(d)]),

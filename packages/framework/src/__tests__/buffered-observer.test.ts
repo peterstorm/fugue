@@ -18,21 +18,27 @@ function runStart(runId = "r1"): RunStartEvent {
 }
 
 function nodeStart(nodeId: string, runId = "r1"): NodeStartEvent {
-  // @ts-expect-error — branded ID test fixture
-  return { type: N("node-start"), runId, dagId: N("dag1") as unknown as any, nodeId, timestamp: new Date() };
+  return {
+    type: "node-start",
+    runId: runId as RunId,
+    dagId: "dag1" as DagId,
+    nodeId: nodeId as NodeId,
+    sideEffects: { kind: "none" },
+    timestamp: new Date(),
+  };
 }
 
 function nodeEnd(nodeId: string, attrs: Record<string, unknown> = {}, runId = "r1"): NodeEndEvent {
   return {
     type: "node-end",
-    runId,
+    runId: runId as RunId,
     dagId: "dag1" as DagId,
-    nodeId,
+    nodeId: nodeId as NodeId,
+    sideEffects: { kind: "none" },
     timestamp: new Date(),
     duration: 50,
     output: null,
-    ...( Object.keys(attrs).length > 0 ? { attributes: attrs } : {}),
-  } as NodeEndEvent;
+  };
 }
 
 function runEnd(status: "ok" | "error" = "ok", runId = "r1"): RunEndEvent {
@@ -41,17 +47,17 @@ function runEnd(status: "ok" | "error" = "ok", runId = "r1"): RunEndEvent {
 }
 
 describe("BufferedObserver", () => {
-  it("events are buffered until onRunEnd", () => {
+  it("events are buffered until run-end", () => {
     const inner = new RecordingObserver();
     const buffered = new BufferedObserver(inner, alwaysOn());
 
-    buffered.onRunStart(runStart());
-    buffered.onNodeStart(nodeStart("n1"));
-    buffered.onNodeEnd(nodeEnd("n1"));
+    buffered.observe(runStart());
+    buffered.observe(nodeStart("n1"));
+    buffered.observe(nodeEnd("n1"));
 
     expect(inner.events).toHaveLength(0);
 
-    buffered.onRunEnd(runEnd());
+    buffered.observe(runEnd());
     expect(inner.events.length).toBeGreaterThan(0);
   });
 
@@ -59,10 +65,10 @@ describe("BufferedObserver", () => {
     const inner = new RecordingObserver();
     const buffered = new BufferedObserver(inner, alwaysOn());
 
-    buffered.onRunStart(runStart());
-    buffered.onNodeStart(nodeStart("n1"));
-    buffered.onNodeEnd(nodeEnd("n1"));
-    buffered.onRunEnd(runEnd());
+    buffered.observe(runStart());
+    buffered.observe(nodeStart("n1"));
+    buffered.observe(nodeEnd("n1"));
+    buffered.observe(runEnd());
 
     // 3 buffered + 1 run-end = 4
     expect(inner.events).toHaveLength(4);
@@ -75,10 +81,10 @@ describe("BufferedObserver", () => {
     const neverFlush = { shouldFlush: () => false };
     const buffered = new BufferedObserver(inner, neverFlush);
 
-    buffered.onRunStart(runStart());
-    buffered.onNodeStart(nodeStart("n1"));
-    buffered.onNodeEnd(nodeEnd("n1"));
-    buffered.onRunEnd(runEnd());
+    buffered.observe(runStart());
+    buffered.observe(nodeStart("n1"));
+    buffered.observe(nodeEnd("n1"));
+    buffered.observe(runEnd());
 
     expect(inner.events).toHaveLength(0);
     expect(buffered.aggregates.runCount).toBe(1);
@@ -89,13 +95,13 @@ describe("BufferedObserver", () => {
     const neverFlush = { shouldFlush: () => false };
     const buffered = new BufferedObserver(inner, neverFlush);
 
-    buffered.onRunStart(runStart("r1"));
-    buffered.onNodeEnd(nodeEnd("n1", {}, "r1"));
-    buffered.onRunEnd(runEnd("ok", "r1"));
+    buffered.observe(runStart("r1"));
+    buffered.observe(nodeEnd("n1", {}, "r1"));
+    buffered.observe(runEnd("ok", "r1"));
 
-    buffered.onRunStart(runStart("r2"));
-    buffered.onNodeEnd(nodeEnd("n1", {}, "r2"));
-    buffered.onRunEnd(runEnd("ok", "r2"));
+    buffered.observe(runStart("r2"));
+    buffered.observe(nodeEnd("n1", {}, "r2"));
+    buffered.observe(runEnd("ok", "r2"));
 
     expect(buffered.aggregates.runCount).toBe(2);
   });

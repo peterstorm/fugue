@@ -348,12 +348,13 @@ export class AnthropicLlmClient implements LlmClient {
         let parsed: unknown;
         try {
           parsed = JSON.parse(stripCodeFences(text));
-        } catch {
+        } catch (parseErr) {
+          const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
           return err({
             kind: "node-crash",
             retriability: "retriable",
             nodeId: resolveNodeId(req),
-            message: `Final response was not valid JSON: ${text.slice(0, 200)}`,
+            message: `Not valid JSON (${parseMsg}): ${text.slice(0, 200)}`,
           });
         }
         const validated = req.schema.safeParse(parsed);

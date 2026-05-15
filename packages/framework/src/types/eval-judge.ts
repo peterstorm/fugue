@@ -39,7 +39,7 @@ export interface EvalJudgeResult {
 /** Configuration for creating an eval-judge node. */
 export interface EvalJudgeNodeConfig {
   /** Unique node ID. */
-  readonly id: NodeId;
+  readonly id: string;
   /** Criteria to evaluate against. */
   readonly criteria: readonly string[];
   /** Score threshold — below this, the judge returns passed: false. Default 0.8. */

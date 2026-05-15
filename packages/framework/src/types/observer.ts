@@ -4,46 +4,20 @@
 // Runtime implementations (NoopObserver, RecordingObserver, createObserver)
 // live in `observer/observer.ts`.
 
-import type {
-  RunStartEvent,
-  NodeStartEvent,
-  NodeEndEvent,
-  NodeSkippedEvent,
-  NodeErrorEvent,
-  SubSpanEvent,
-  RunEndEvent,
-  RouteDecidedEvent,
-  NodePrunedEvent,
-  WitnessCapturedEvent,
-  WriteAttemptedEvent,
-  FreshnessViolationEvent,
-  HumanInterventionEvent,
-} from "./events.js";
+import type { ObserverEvent } from "./events.js";
 
 /**
- * Observer contract — one method per event type.
+ * Observer contract — single entry point for all framework events.
  *
- * This is intentionally a per-event interface (not a single `observe(event)`
- * method) so that adding a new event type to `ObserverEvent` forces every
- * `implements Observer` class to handle it at compile time. The 4-file update
- * cost on new event types is the exhaustiveness tax — it prevents silent
- * omissions in downstream consumers.
+ * Implementations that need to branch on event type use
+ * `match(event).with(...).exhaustive()` from ts-pattern — adding a new
+ * event variant to `ObserverEvent` surfaces as a compile error inside
+ * the implementation's match block, not across a 13-method interface.
  *
- * The framework dispatches via `dispatchEvent(observer, event)` which routes
- * the discriminated union to the appropriate method using ts-pattern.
+ * For consumers that only care about a subset of events, use the
+ * `createObserver({ "run-end": (e) => ... })` factory which accepts
+ * per-event-type handlers and ignores unspecified types.
  */
 export interface Observer {
-  onRunStart(e: RunStartEvent): void;
-  onNodeStart(e: NodeStartEvent): void;
-  onNodeEnd(e: NodeEndEvent): void;
-  onNodeSkipped(e: NodeSkippedEvent): void;
-  onNodeError(e: NodeErrorEvent): void;
-  onSubSpan(e: SubSpanEvent): void;
-  onRunEnd(e: RunEndEvent): void;
-  onRouteDecided(e: RouteDecidedEvent): void;
-  onNodePruned(e: NodePrunedEvent): void;
-  onWitnessCaptured(e: WitnessCapturedEvent): void;
-  onWriteAttempted(e: WriteAttemptedEvent): void;
-  onFreshnessViolation(e: FreshnessViolationEvent): void;
-  onHumanIntervention(e: HumanInterventionEvent): void;
+  observe(event: ObserverEvent): void;
 }

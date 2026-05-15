@@ -186,8 +186,8 @@ export const validateDagShape = (
   for (const [, node] of entries) {
     if (
       node.sideEffects.kind === "writes" &&
-      node.extractNewWitness &&
-      !node.extractConditionedOn
+      node.sideEffects.extractNewWitness &&
+      !node.sideEffects.extractConditionedOn
     ) {
       return err(
         validationErr(
@@ -198,8 +198,8 @@ export const validateDagShape = (
     }
     if (
       node.sideEffects.kind === "writes" &&
-      node.extractConditionedOn &&
-      !node.extractNewWitness
+      node.sideEffects.extractConditionedOn &&
+      !node.sideEffects.extractNewWitness
     ) {
       return err(
         validationErr(

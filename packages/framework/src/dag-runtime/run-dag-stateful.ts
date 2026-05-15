@@ -336,9 +336,13 @@ export const runDagAsWorkerJob = async <I, O>(
       result.error.kind === "node-crash"
         ? result.error.message
         : JSON.stringify(result.error);
-    throw new Error(`runDagAsWorkerJob: DAG '${dag.id}' failed: ${detail}`, {
+    const thrownError = new Error(`runDagAsWorkerJob: DAG '${dag.id}' failed: ${detail}`, {
       cause: result.error,
     });
+    // Attach structured error so BullMQ serialization preserves it
+    (thrownError as any).frameworkErrorKind = result.error.kind;
+    (thrownError as any).frameworkError = JSON.stringify(result.error);
+    throw thrownError;
   }
   return result.value;
 };

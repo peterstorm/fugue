@@ -4,9 +4,9 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
-import { stableHash } from "../cache/hash.js";
-import { enrichLlmSpan } from "../tracing/index.js";
+import { stableHash } from "../shared/hash.js";
 import { __brandNodeId } from "../types/ids.js";
+import { runLlmCallPipeline } from "./llm-pipeline.js";
 
 /**
  * Configuration for `createLlmWithToolsNode` — mirrors `LlmNodeConfig` but for
@@ -25,8 +25,8 @@ export type LlmWithToolsSkipConfig<I, O> =
   | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
   | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
 
-interface LlmWithToolsNodeConfigBase<I, O, Id extends NodeId = NodeId> {
-  readonly id: Id;
+interface LlmWithToolsNodeConfigBase<I, O> {
+  readonly id: string;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   readonly model: string;
@@ -57,18 +57,20 @@ interface LlmWithToolsNodeConfigBase<I, O, Id extends NodeId = NodeId> {
   readonly disableValidationRetry?: boolean;
 }
 
-export type LlmWithToolsNodeConfig<I, O, Id extends NodeId = NodeId> =
-  LlmWithToolsNodeConfigBase<I, O, Id> & LlmWithToolsSkipConfig<I, O>;
+export type LlmWithToolsNodeConfig<I, O> =
+  LlmWithToolsNodeConfigBase<I, O> & LlmWithToolsSkipConfig<I, O>;
 
 /**
  * Build a tool-call LLM node. The factory mirrors `createLlmNode` but routes
  * through `LlmClient.sendWithTools`, so the model can call registered tools
  * mid-completion before producing the final structured answer.
  */
-export const createLlmWithToolsNode = <I, O, const Id extends NodeId = NodeId>(
-  config: LlmWithToolsNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: Id & NodeId } => ({
-  id: __brandNodeId(config.id) as Id & NodeId,
+export const createLlmWithToolsNode = <I, O>(
+  config: LlmWithToolsNodeConfig<I, O>,
+): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: NodeId } => {
+  const id = __brandNodeId(config.id);
+  return {
+  id,
   kind: "llm",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
@@ -76,20 +78,15 @@ export const createLlmWithToolsNode = <I, O, const Id extends NodeId = NodeId>(
   sideEffects: { kind: "external-call", resource: `llm:${config.model}` },
   confidence: { mode: "none" },
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
-    // Skip check — discriminated `LlmWithToolsSkipConfig` guarantees
-    // `skipDefault` is present whenever `skipWhen` is set.
     if (config.skipWhen?.(input)) {
       return ok(config.skipDefault as O);
     }
 
-    // ctx.llm guaranteed non-null by `requires`. `sendWithTools` is still a
-    // method-shape concern (some clients implement send-only) — leave that
-    // runtime check on the LlmClient surface.
     const llmClient: LlmClient = ctx.llm;
     if (!llmClient.sendWithTools) {
       return err({
         kind: "node-crash" as const,
-        nodeId: config.id,
+        nodeId: id,
         retriability: "non-retriable" as const,
         message: "llm.sendWithTools not available on context",
       });
@@ -110,8 +107,6 @@ export const createLlmWithToolsNode = <I, O, const Id extends NodeId = NodeId>(
 
     const userMessage = config.buildUser(input);
 
-    // Cache check — keyed on prompt + model + input + tool-names so any of
-    // those changing invalidates the entry. Cache is opt-in.
     const toolNamesHash = stableHash(config.tools.map((t) => t.name).slice().sort());
     const cacheKey =
       config.computeCacheKey?.(input) ??
@@ -122,94 +117,35 @@ export const createLlmWithToolsNode = <I, O, const Id extends NodeId = NodeId>(
         toolNamesHash,
         input,
       })}`;
-    if (ctx.cache) {
-      try {
-        const lookup = await ctx.cache.get(cacheKey);
-        if (lookup.hit) {
-          return ok(lookup.value as O);
-        }
-      } catch (e) {
-        ctx.logger.warn(`[${config.id}] Cache read failed (cacheKey=${cacheKey}): ${e instanceof Error ? e.message : e}`);
-      }
-    }
 
-    const req: SendWithToolsRequest<O> = {
-      system: systemPrompt,
-      user: userMessage,
-      model: config.model,
-      tools: config.tools,
-      schema: config.outputSchema,
-      maxIterations: config.maxIterations,
-      toolChoice: config.toolChoice,
-      nodeId: config.id,
-      ...(config.thinking ? { thinking: config.thinking } : {}),
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    };
-
-    const attempt = async () => {
-      const result = await llmClient.sendWithTools!(req, ctx);
-      if (!result.ok) return result;
-      const parsed = config.outputSchema.safeParse(result.value.output);
-      if (!parsed.success) {
-        return err({
-          kind: "validation" as const,
-          nodeId: config.id,
-          message: `LLM tool-call output validation failed: ${parsed.error.message}`,
-        });
-      }
-      return ok(result.value);
-    };
-
-    let result = await attempt();
-
-    if (
-      !result.ok &&
-      result.error.kind === "validation" &&
-      !config.disableValidationRetry
-    ) {
-      result = await attempt();
-      if (!result.ok) {
-        return err({
-          kind: "retry-exhausted" as const,
-          nodeId: config.id,
-          attempts: 2,
-          lastError: "message" in result.error ? result.error.message : String(result.error),
-          rootErrorKind: result.error.kind,
-        });
-      }
-    }
-
-    if (!result.ok) return result;
-    const llmResponse = result.value;
-
-    enrichLlmSpan({
-      model: config.model,
-      promptName: config.promptName,
-      system: systemPrompt,
-      user: userMessage,
-      tokensIn: llmResponse.tokensIn,
-      tokensOut: llmResponse.tokensOut,
-      thinking: llmResponse.thinking,
-      includeContent: ctx.includeContent,
-      contentFilter: ctx.contentFilter,
-    });
-
-    const output = llmResponse.output as O;
-
-    if (ctx.cache) {
-      const DEFAULT_CACHE_TTL_SEC = 86400;
-      try {
-        const setResult = await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
-        if (!setResult.ok) {
-          ctx.logger.warn(
-            `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`,
-          );
-        }
-      } catch (e) {
-        ctx.logger.warn(`[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`);
-      }
-    }
-
-    return ok(output);
+    return runLlmCallPipeline(
+      {
+        nodeId: id,
+        model: config.model,
+        outputSchema: config.outputSchema,
+        prompts: { system: systemPrompt, user: userMessage },
+        cacheKey,
+        disableValidationRetry: config.disableValidationRetry,
+        promptName: config.promptName,
+        thinking: config.thinking,
+      },
+      () => {
+        const req: SendWithToolsRequest<O> = {
+          system: systemPrompt,
+          user: userMessage,
+          model: config.model,
+          tools: config.tools,
+          schema: config.outputSchema,
+          maxIterations: config.maxIterations,
+          toolChoice: config.toolChoice,
+          nodeId: id,
+          ...(config.thinking ? { thinking: config.thinking } : {}),
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        };
+        return llmClient.sendWithTools!(req, ctx);
+      },
+      ctx,
+    );
   },
-});
+};
+};

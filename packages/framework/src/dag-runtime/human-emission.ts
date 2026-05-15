@@ -1,7 +1,7 @@
 // emitHumanIntervention — Phase 4: human-intervention observer event
 //
-// Extracted from executor.ts for readability. Pure event-emission helper
-// with no coupling to the executor closure.
+// Extracted from executor.ts for readability. Event-emission helper
+// decoupled from the executor closure.
 
 import { match } from "ts-pattern";
 import type { NodeDef, NodeContext } from "../types/node.js";

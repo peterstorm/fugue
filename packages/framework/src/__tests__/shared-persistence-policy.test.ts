@@ -118,8 +118,8 @@ describe("W6.16 — shared PersistencePolicy: events + spans agree per run", () 
     const processor = new TailSamplingProcessor(exporter, policy);
 
     // Drive a run-end through BufferedObserver — triggers policy.shouldFlush.
-    buffered.onRunStart(runStart("run-1"));
-    buffered.onRunEnd(runEnd("run-1"));
+    buffered.observe(runStart("run-1"));
+    buffered.observe(runEnd("run-1"));
 
     // Drive a root-span through TailSamplingProcessor — triggers the same
     // policy.shouldFlush hook on the trace-buffer.
@@ -140,8 +140,8 @@ describe("W6.16 — shared PersistencePolicy: events + spans agree per run", () 
     const { exporter, spans } = makeExporter();
     const processor = new TailSamplingProcessor(exporter, policy);
 
-    buffered.onRunStart(runStart("run-2"));
-    buffered.onRunEnd(runEnd("run-2"));
+    buffered.observe(runStart("run-2"));
+    buffered.observe(runEnd("run-2"));
 
     processor.onEnd(makeSpan("trace-2"));
 

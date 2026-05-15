@@ -1,14 +1,11 @@
 // Shared emit helper — dispatches an ObserverEvent through the NodeContext's
-// observer (if present). Eliminates the 4-file duplication of the same
-// null-check + dispatchEvent pattern.
+// observer. The observer field always has a value (defaults to NoopObserver
+// via makeNodeContext), so no null-check is needed.
 
 import type { NodeContext } from "../types/node.js";
 import type { ObserverEvent } from "../types/events.js";
-import type { Observer } from "../types/observer.js";
 import { dispatchEvent } from "../observer/buffered.js";
 
 export const emit = (ctx: NodeContext, event: ObserverEvent): void => {
-  if (ctx.observer) {
-    dispatchEvent(ctx.observer as Observer, event);
-  }
+  dispatchEvent(ctx.observer, event);
 };

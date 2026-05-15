@@ -6,8 +6,8 @@ import type { SideEffectProfile } from "../types/side-effects.js";
 import { __brandNodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
 
-export interface FetchNodeConfig<I, O, Id extends NodeId = NodeId> {
-  readonly id: Id;
+export interface FetchNodeConfig<I, O> {
+  readonly id: string;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   readonly fetch: (input: I, ctx: NodeContext) => Promise<Result<O, FrameworkError>>;
@@ -15,10 +15,10 @@ export interface FetchNodeConfig<I, O, Id extends NodeId = NodeId> {
   readonly sideEffects?: SideEffectProfile;
 }
 
-export const createFetchNode = <I, O, const Id extends NodeId = NodeId>(
-  config: FetchNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: Id & NodeId } => ({
-  id: __brandNodeId(config.id) as Id & NodeId,
+export const createFetchNode = <I, O>(
+  config: FetchNodeConfig<I, O>,
+): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: NodeId } => ({
+  id: __brandNodeId(config.id),
   kind: "fetch",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,

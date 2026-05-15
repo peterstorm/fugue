@@ -623,19 +623,11 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
   it("a node with a strict input schema and bad upstream value emits node-error", async () => {
     const events: string[] = [];
     const observer = {
-      onRunStart: () => {},
-      onRunEnd: () => {},
-      onNodeStart: () => events.push("node-start"),
-      onNodeEnd: () => events.push("node-end"),
-      onNodeError: (e: { error: string }) => events.push(`node-error:${e.error.slice(0, 30)}`),
-      onNodeSkipped: () => {},
-      onSubSpan: () => {},
-      onRouteDecided: () => {},
-      onNodePruned: () => {},
-      onWitnessCaptured: () => {},
-      onWriteAttempted: () => {},
-      onFreshnessViolation: () => {},
-      onHumanIntervention: () => {},
+      observe(e: any) {
+        if (e.type === "node-start") events.push("node-start");
+        else if (e.type === "node-end") events.push("node-end");
+        else if (e.type === "node-error") events.push(`node-error:${e.error.slice(0, 30)}`);
+      },
     };
 
     const dag = defineDag({

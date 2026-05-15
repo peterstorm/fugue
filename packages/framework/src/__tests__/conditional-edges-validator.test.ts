@@ -13,7 +13,6 @@ import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const mkNode = (id: string) =>
   createTransformNode({
-    // @ts-expect-error — branded ID test fixture
     id,
     inputSchema: z.any(),
     outputSchema: z.any(),

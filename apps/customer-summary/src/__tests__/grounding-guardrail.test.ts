@@ -46,9 +46,11 @@ describe("grounding-guardrail node", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.kind).toBe("validated");
-      expect(result.value.passed).toBe(true);
-      expect(result.value.warnings).toHaveLength(0);
-      expect(result.value.value).toEqual(makeSynthesis());
+      if (result.value.kind === "validated") {
+        expect(result.value.passed).toBe(true);
+        expect(result.value.warnings).toHaveLength(0);
+        expect(result.value.value).toEqual(makeSynthesis());
+      }
     }
   });
 

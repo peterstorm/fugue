@@ -115,12 +115,13 @@ export const decideRoute = (
 
   // A predicate that throws is a programming error — surface as malformed
   // rather than silently falling to the default edge.
-  const threwResult = predicateResults.find(r => r.reason === "threw");
+  const threwResult = predicateResults.find(r => r.reason?.startsWith("threw"));
   if (threwResult) {
+    const detail = threwResult.reason?.startsWith("threw: ") ? threwResult.reason.slice(7) : "unknown";
     return {
       kind: "predicate-malformed",
       fromNodeId,
-      message: `Predicate '${threwResult.predicateLabel}' threw an exception`,
+      message: `Predicate '${threwResult.predicateLabel}' threw an exception: ${detail}`,
     };
   }
 

@@ -2,11 +2,11 @@ import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
-import type { LlmClient, LlmRequest } from "../types/llm.js";
+import type { LlmRequest } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
-import { stableHash } from "../cache/hash.js";
-import { enrichLlmSpan } from "../tracing/index.js";
+import { stableHash } from "../shared/hash.js";
 import { __brandNodeId } from "../types/ids.js";
+import { runLlmCallPipeline } from "./llm-pipeline.js";
 
 /**
  * Discriminated pairing for `skipWhen` + `skipDefault`. Supplying `skipWhen`
@@ -17,8 +17,8 @@ export type LlmSkipConfig<I, O> =
   | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
   | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
 
-interface LlmNodeConfigBase<I, O, Id extends NodeId = NodeId> {
-  readonly id: Id;
+interface LlmNodeConfigBase<I, O> {
+  readonly id: string;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   readonly promptName: string;
@@ -35,22 +35,24 @@ interface LlmNodeConfigBase<I, O, Id extends NodeId = NodeId> {
   readonly system?: string;
 }
 
-export type LlmNodeConfig<I, O, Id extends NodeId = NodeId> =
-  LlmNodeConfigBase<I, O, Id> & LlmSkipConfig<I, O>;
+export type LlmNodeConfig<I, O> =
+  LlmNodeConfigBase<I, O> & LlmSkipConfig<I, O>;
 
 /**
  * Interpolates {{placeholder}} variables in a prompt template.
  */
-const interpolatePrompt = (template: string, vars: Record<string, unknown>): string =>
+export const interpolatePrompt = (template: string, vars: Record<string, unknown>): string =>
   Object.entries(vars).reduce(
     (t, [k, v]) => t.replaceAll(`{{${k}}}`, String(v ?? "")),
     template,
   );
 
-export const createLlmNode = <I, O, const Id extends NodeId = NodeId>(
-  config: LlmNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & { readonly id: Id & NodeId } => ({
-  id: __brandNodeId(config.id) as Id & NodeId,
+export const createLlmNode = <I, O>(
+  config: LlmNodeConfig<I, O>,
+): NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & { readonly id: NodeId } => {
+  const id = __brandNodeId(config.id);
+  return {
+  id,
   kind: "llm",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
@@ -58,9 +60,6 @@ export const createLlmNode = <I, O, const Id extends NodeId = NodeId>(
   sideEffects: { kind: "external-call", resource: `llm:${config.model}` },
   confidence: { mode: "none" },
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
-    // Skip check — the discriminated `LlmSkipConfig` makes `skipDefault`
-    // statically present whenever `skipWhen` is provided, so no runtime
-    // validation hedge is needed.
     if (config.skipWhen?.(input)) {
       return ok(config.skipDefault as O);
     }
@@ -71,102 +70,35 @@ export const createLlmNode = <I, O, const Id extends NodeId = NodeId>(
       return err({ kind: "prompt-not-found", promptName: config.promptName, reason: "prompt not registered" });
     }
 
-    // Build interpolation vars and construct user message
     const vars = config.buildInput(input);
     const userMessage = interpolatePrompt(promptTemplate, vars);
-
-    // Cache check — cache stays opt-in (not in `requires`), so null-check
-    // remains here. A wired cache that throws is treated as a miss.
+    const systemPrompt = config.system ?? "You are an AI assistant. Follow the instructions in the user message and return structured output.";
     const cacheKey = config.computeCacheKey?.(input) ?? `${config.id}:${stableHash(input)}`;
-    if (ctx.cache) {
-      try {
-        const lookup = await ctx.cache.get(cacheKey);
-        if (lookup.hit) {
-          return ok(lookup.value as O);
-        }
-      } catch (e) {
-        ctx.logger.warn(`[${config.id}] Cache read failed (cacheKey=${cacheKey}): ${e instanceof Error ? e.message : e}`);
-      }
-    }
 
-    // ctx.llm is guaranteed non-null by `requires`.
-    const llmClient: LlmClient = ctx.llm;
-    const req: LlmRequest<O> = {
-      system: config.system ?? `You are an AI assistant. Follow the instructions in the user message and return structured output.`,
-      user: userMessage,
-      model: config.model,
-      schema: config.outputSchema,
-      nodeId: config.id,
-      ...(config.thinking ? { thinking: config.thinking } : {}),
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    };
-
-    const attempt = async () => {
-      const result = await llmClient.sendStructured(req);
-      if (!result.ok) return result;
-
-      const parsed = config.outputSchema.safeParse(result.value.output);
-      if (!parsed.success) {
-        return err({
-          kind: "validation" as const,
-          nodeId: config.id,
-          message: `LLM output validation failed: ${parsed.error.message}`,
-        });
-      }
-      return ok(result.value);
-    };
-
-    // First attempt
-    let result = await attempt();
-
-    // FR-021: retry once on validation failure
-    if (!result.ok && result.error.kind === "validation") {
-      result = await attempt();
-      if (!result.ok) {
-        return err({
-          kind: "retry-exhausted" as const,
-          nodeId: config.id,
-          attempts: 2,
-          lastError: "message" in result.error ? result.error.message : String(result.error),
-          rootErrorKind: result.error.kind,
-        });
-      }
-    }
-
-    if (!result.ok) return result;
-
-    const llmResponse = result.value;
-
-    // Enrich active span
-    enrichLlmSpan({
-      model: config.model,
-      promptName: config.promptName,
-      system: req.system,
-      user: userMessage,
-      tokensIn: llmResponse.tokensIn,
-      tokensOut: llmResponse.tokensOut,
-      thinking: llmResponse.thinking,
-      includeContent: ctx.includeContent,
-      contentFilter: ctx.contentFilter,
-    });
-
-    const output = llmResponse.output as O;
-
-    // Cache result (best-effort) — failures must never break a successful run.
-    if (ctx.cache) {
-      const DEFAULT_CACHE_TTL_SEC = 86400;
-      try {
-        const setResult = await ctx.cache.set(cacheKey, output, DEFAULT_CACHE_TTL_SEC);
-        if (!setResult.ok) {
-          ctx.logger.warn(
-            `[${config.id}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`,
-          );
-        }
-      } catch (e) {
-        ctx.logger.warn(`[${config.id}] Cache write threw: ${e instanceof Error ? e.message : e}`);
-      }
-    }
-
-    return ok(output);
+    return runLlmCallPipeline(
+      {
+        nodeId: id,
+        model: config.model,
+        outputSchema: config.outputSchema,
+        prompts: { system: systemPrompt, user: userMessage },
+        cacheKey,
+        promptName: config.promptName,
+        thinking: config.thinking,
+      },
+      () => {
+        const req: LlmRequest<O> = {
+          system: systemPrompt,
+          user: userMessage,
+          model: config.model,
+          schema: config.outputSchema,
+          nodeId: id,
+          ...(config.thinking ? { thinking: config.thinking } : {}),
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        };
+        return ctx.llm.sendStructured(req);
+      },
+      ctx,
+    );
   },
-});
+};
+};

@@ -80,13 +80,13 @@ Both implementations satisfy the `FreshnessIndex` interface:
 
 ```ts
 interface FreshnessIndex {
-  recordWrite(event: WriteAttemptedEvent): void | Promise<void>;
+  recordWrite(event: WriteAttemptedEvent): Promise<void>;
   findConflict(resource: string, conditionedOnValue: string, sinceMs: number):
-    WriteEntry | null | Promise<WriteEntry | null>;
+    Promise<WriteEntry | null>;
 }
 ```
 
-The executor `await`s all calls, so sync (in-memory) and async (Redis)
+Both methods return `Promise` — the executor `await`s all calls, so sync (in-memory) and async (Redis)
 implementations are interchangeable.
 
 ### Non-blocking violation policy

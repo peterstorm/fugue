@@ -56,8 +56,7 @@ describe("dispatchToolCall", () => {
 
   test("emits observer sub-span when tool throws", async () => {
     const events: unknown[] = [];
-    const observer = new NoopObserver();
-    observer.onSubSpan = (e) => events.push(e);
+    const observer = { observe(e: any) { if (e.type === "sub-span") events.push(e); } };
 
     const call: ToolCall = { id: "c1", name: "fail", input: { msg: "hi" } };
     await dispatchToolCall(call, [failTool], makeCtx({ observer }));

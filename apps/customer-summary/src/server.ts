@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext } from "@ai-summary/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId } from "@ai-summary/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, ContentFilter } from "@ai-summary/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -77,7 +77,7 @@ export const createApp = (deps: AppDeps): Hono => {
         thinking: deps.thinking,
         synthesisSystemPrompt: deps.prompts?.get("synthesis-system"),
       });
-      const runId = resume_run_id ?? randomUUID();
+      const runId = brandRunId(resume_run_id ?? randomUUID());
       const fingerprint = dagFingerprint(dag);
 
       // Resume: load prior checkpoint if requested. Fresh run: write meta so future resume can load.
@@ -89,7 +89,7 @@ export const createApp = (deps: AppDeps): Hono => {
       // re-shaped one and skip nodes whose schemas have evolved.
       let resumeCheckpoint: Map<string, unknown> | undefined;
       if (resume_run_id) {
-        const loaded = await checkpointer.load(resume_run_id);
+        const loaded = await checkpointer.load(brandRunId(resume_run_id));
         if (!loaded.ok) {
           console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
           // checkpoint-version-mismatch and checkpoint-expired are *semantic*
@@ -149,7 +149,8 @@ export const createApp = (deps: AppDeps): Hono => {
           frameworkVersion: FRAMEWORK_VERSION,
         });
         if (!metaResult.ok) {
-          console.warn(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
+          console.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
+          return c.json({ error: "Checkpoint store unavailable", requestId: runId }, 503);
         }
       }
 

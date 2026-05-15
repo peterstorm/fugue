@@ -102,7 +102,7 @@ export interface RouteEvidence {
     readonly predicateLabel: string;
     readonly matched: boolean;
     readonly evaluatedConfidence: Confidence | null;
-    readonly reason?: "malformed" | "threw" | "below-min-confidence";
+    readonly reason?: string;
   }>;
   readonly decidedAtMs: number;
 }

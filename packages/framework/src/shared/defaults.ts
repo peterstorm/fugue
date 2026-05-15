@@ -20,5 +20,5 @@ export const noopTracer: Tracer = {
   withSpan: async (_name, _spanType, fn) => fn(),
 };
 
-/** Reuse the existing NoopObserver — every method is a no-op. */
+/** Reuse the existing NoopObserver — `observe` is a no-op. */
 export const noopObserver: Observer = new NoopObserver();

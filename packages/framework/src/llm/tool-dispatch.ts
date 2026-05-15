@@ -72,11 +72,11 @@ export async function dispatchToolCall(
     ctx.logger.warn(`[tool-dispatch] Tool '${call.name}' threw: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
     // Emit observer event so tool failures appear in telemetry
     if (ctx.observer) {
-      ctx.observer.onSubSpan({
+      ctx.observer.observe({
         type: "sub-span",
         runId: ctx.runId,
         dagId: ctx.dagId,
-        nodeId: __brandNodeId(call.name),
+        nodeId: __brandNodeId(`tool:${call.name}`),
         parentSpanId: call.id,
         kind: "CHAIN",
         timestamp: new Date(),

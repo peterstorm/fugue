@@ -7,6 +7,7 @@
 import { z } from "zod";
 import {
   createLlmWithToolsNode,
+  toolName,
   type FrameworkError,
   type NodeDef,
   type ToolDef,
@@ -28,7 +29,7 @@ const makeLookupDealsTool = (
   { customerId: string; limit?: number },
   { deals: Array<{ id: string; amount: number; closedAt: string }> }
 > => ({
-  name: "lookup_deals_by_customer",
+  name: toolName("lookup_deals_by_customer"),
   description: "Fetch closed deals for a customer (most recent first).",
   inputSchema: z.object({
     customerId: z.string(),

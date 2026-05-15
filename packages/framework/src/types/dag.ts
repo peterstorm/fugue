@@ -50,7 +50,7 @@ export const evaluatePredicate = <T>(
   readonly predicateLabel: string;
   readonly matched: boolean;
   readonly evaluatedConfidence: Confidence | null;
-  readonly reason?: "malformed" | "threw" | "below-min-confidence";
+  readonly reason?: string;
 } => {
   // Gate on minConfidence before calling check
   if (pred.minConfidence !== undefined) {
@@ -71,12 +71,13 @@ export const evaluatePredicate = <T>(
       matched,
       evaluatedConfidence: confidence,
     };
-  } catch {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     return {
       predicateLabel: pred.label,
       matched: false,
       evaluatedConfidence: confidence,
-      reason: "threw",
+      reason: `threw: ${msg}`,
     };
   }
 };

@@ -161,26 +161,23 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       id: "pipeline",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: "postgres:orders" },
-          extractWitness: (output: unknown) => ({
+          sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: (output: unknown) => ({
             kind: "version" as const,
             resource: "postgres:orders",
             value: String((output as { version: number }).version),
-          }),
+          }) },
           run: async () => ok({ version: 42 }),
         }),
         writer: makeNode("writer", {
-          sideEffects: { kind: "writes", resource: "postgres:orders" },
-          extractConditionedOn: (input: unknown) => ({
+          sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: (input: unknown) => ({
             kind: "version" as const,
             resource: "postgres:orders",
             value: String((input as { version: number }).version),
-          }),
-          extractNewWitness: (output: unknown) => ({
+          }), extractNewWitness: (output: unknown) => ({
             kind: "version" as const,
             resource: "postgres:orders",
             value: String((output as { newVersion: number }).newVersion),
-          }),
+          }) },
           run: async () => ok({ newVersion: 44 }),
         }),
         review: makeNode("review", {
@@ -254,10 +251,9 @@ describe("Freshness extractor failure resilience", () => {
       id: "extractor-fail",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: "postgres:orders" },
-          extractWitness: () => {
+          sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: () => {
             throw new Error("extractor boom");
-          },
+          } },
           run: async () => ok({ data: "read" }),
         }),
         next: makeNode("next"),
@@ -289,15 +285,13 @@ describe("Freshness extractor failure resilience", () => {
       id: "conditioned-fail",
       nodes: {
         writer: makeNode("writer", {
-          sideEffects: { kind: "writes", resource: "postgres:orders" },
-          extractConditionedOn: () => {
+          sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: () => {
             throw new Error("conditionedOn boom");
-          },
-          extractNewWitness: () => ({
+          }, extractNewWitness: () => ({
             kind: "version" as const,
             resource: "postgres:orders",
             value: "99",
-          }),
+          }) },
           run: async () => ok({ written: true }),
         }),
       },

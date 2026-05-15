@@ -1,20 +1,4 @@
-import type {
-  ObserverEvent,
-  RunStartEvent,
-  NodeStartEvent,
-  NodeEndEvent,
-  NodeSkippedEvent,
-  NodeErrorEvent,
-  SubSpanEvent,
-  RunEndEvent,
-  RouteDecidedEvent,
-  NodePrunedEvent,
-  WitnessCapturedEvent,
-  WriteAttemptedEvent,
-  FreshnessViolationEvent,
-  HumanInterventionEvent,
-} from "../types/events.js";
-import { match } from "ts-pattern";
+import type { ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
 import { fwLogger } from "../logger.js";
@@ -45,27 +29,16 @@ export interface AggregateCounters {
 const OBSERVER_STRICT =
   typeof process !== "undefined" && process.env?.OBSERVER_STRICT === "1";
 
+/**
+ * Error-isolating dispatch wrapper. Calls `observer.observe(event)` and
+ * catches any failure — production observers MUST be failure-tolerant (runs
+ * continue). Under `OBSERVER_STRICT=1` the error is re-thrown after logging
+ * so tests surface programming bugs in observer implementations.
+ */
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
   try {
-    match(event)
-      .with({ type: "run-start" }, (e) => observer.onRunStart(e))
-      .with({ type: "node-start" }, (e) => observer.onNodeStart(e))
-      .with({ type: "node-end" }, (e) => observer.onNodeEnd(e))
-      .with({ type: "node-skipped" }, (e) => observer.onNodeSkipped(e))
-      .with({ type: "node-error" }, (e) => observer.onNodeError(e))
-      .with({ type: "sub-span" }, (e) => observer.onSubSpan(e))
-      .with({ type: "run-end" }, (e) => observer.onRunEnd(e))
-      .with({ type: "route-decided" }, (e) => observer.onRouteDecided(e))
-      .with({ type: "node-pruned" }, (e) => observer.onNodePruned(e))
-      .with({ type: "witness-captured" }, (e) => observer.onWitnessCaptured(e))
-      .with({ type: "write-attempted" }, (e) => observer.onWriteAttempted(e))
-      .with({ type: "freshness-violation" }, (e) => observer.onFreshnessViolation(e))
-      .with({ type: "human-intervention" }, (e) => observer.onHumanIntervention(e))
-      .exhaustive();
+    observer.observe(event);
   } catch (e) {
-    // Log at error level with full stack — production observers MUST be
-    // failure-tolerant (runs continue), but silent failure is worse than a
-    // crash when debugging an observer-impl bug.
     fwLogger().error(
       `[observer] dispatchEvent failed for ${event.type}:`,
       e instanceof Error && e.stack ? e.stack : e,
@@ -220,45 +193,15 @@ export class BufferedObserver implements Observer, Disposable {
     buf.events.push(event);
   }
 
-  onRunStart(e: RunStartEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onNodeStart(e: NodeStartEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onNodeEnd(e: NodeEndEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onNodeSkipped(e: NodeSkippedEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onNodeError(e: NodeErrorEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onSubSpan(e: SubSpanEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onRouteDecided(e: RouteDecidedEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onNodePruned(e: NodePrunedEvent): void {
-    this.buffer(e.runId, e);
+  observe(event: ObserverEvent): void {
+    if (event.type === "run-end") {
+      this.handleRunEnd(event);
+    } else {
+      this.buffer(event.runId, event);
+    }
   }
 
-  onWitnessCaptured(e: WitnessCapturedEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onWriteAttempted(e: WriteAttemptedEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onFreshnessViolation(e: FreshnessViolationEvent): void {
-    this.buffer(e.runId, e);
-  }
-  onHumanIntervention(e: HumanInterventionEvent): void {
-    this.buffer(e.runId, e);
-  }
-
-  onRunEnd(e: RunEndEvent): void {
+  private handleRunEnd(e: RunEndEvent): void {
     const buf = this.buffers.get(e.runId);
     if (!buf) {
       // An unmatched run-end means the inner observer is about to see a

@@ -45,7 +45,7 @@ const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 /** Emit an observer event when the judge skips (fail-open). */
 const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): void => {
   if (ctx.observer) {
-    ctx.observer.onSubSpan({
+    ctx.observer.observe({
       type: "sub-span",
       runId: ctx.runId,
       dagId: ctx.dagId,
@@ -117,11 +117,12 @@ export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number
  */
 export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeDef => {
   const threshold = config.threshold ?? DEFAULT_THRESHOLD;
+  const brandedId = __brandNodeId(config.id);
 
   return {
-    id: config.id,
+    id: brandedId,
     kind: "eval-judge",
-    config,
+    config: { ...config, id: brandedId },
     run: async (dagInput: unknown, dagOutput: unknown, ctx: NodeContext): Promise<EvalJudgeResult> => {
       // Resolve LLM client (judgeLlm > llm > fail-open)
       const llm: LlmClient | null = ctx.judgeLlm ?? ctx.llm ?? null;
@@ -149,7 +150,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
           model,
           schema: EvalJudgeResponseSchema,
           signal: ctx.signal,
-          nodeId: config.id,
+          nodeId: brandedId,
         });
 
         if (!result.ok) {

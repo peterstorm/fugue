@@ -46,13 +46,12 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ version: z.number() }),
       requires: [],
-      sideEffects: { kind: "reads", resource: "postgres:orders" },
-      confidence: { mode: "none" },
-      extractWitness: (output) => ({
+      sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: (output: any) => ({
         kind: "version",
         resource: "postgres:orders",
         value: String(output.version),
-      }),
+      }) },
+      confidence: { mode: "none" },
       run: async () => ok({ version: 42 }),
     };
     const dag = defineDagFromArray({ id: "fw-read", nodes: [readNode], edges: [] });
@@ -80,13 +79,12 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ version: z.number(), data: z.string() }),
       requires: [],
-      sideEffects: { kind: "reads", resource: "postgres:orders" },
-      confidence: { mode: "none" },
-      extractWitness: (output) => ({
+      sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: (output: any) => ({
         kind: "version",
         resource: "postgres:orders",
         value: String(output.version),
-      }),
+      }) },
+      confidence: { mode: "none" },
       run: async () => ok({ version: 42, data: "order-data" }),
     };
 
@@ -96,18 +94,16 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.object({ version: z.number(), data: z.string() }),
       outputSchema: z.object({ newVersion: z.number() }),
       requires: [],
-      sideEffects: { kind: "writes", resource: "postgres:orders" },
-      confidence: { mode: "none" },
-      extractConditionedOn: (input) => ({
+      sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: (input: any) => ({
         kind: "version",
         resource: "postgres:orders",
         value: String(input.version),
-      }),
-      extractNewWitness: (output) => ({
+      }), extractNewWitness: (output: any) => ({
         kind: "version",
         resource: "postgres:orders",
         value: String(output.newVersion),
-      }),
+      }) },
+      confidence: { mode: "none" },
       run: async () => ok({ newVersion: 43 }),
     };
 
@@ -171,13 +167,12 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ version: z.number() }),
       requires: [],
-      sideEffects: { kind: "reads", resource: "postgres:orders" },
-      confidence: { mode: "none" },
-      extractWitness: (output) => ({
+      sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: (output: any) => ({
         kind: "version",
         resource: "postgres:orders",
         value: String(output.version),
-      }),
+      }) },
+      confidence: { mode: "none" },
       run: async () => { throw new Error("should not be called"); },
     };
     const dag = defineDagFromArray({ id: "fw-checkpoint", nodes: [readNode], edges: [] });

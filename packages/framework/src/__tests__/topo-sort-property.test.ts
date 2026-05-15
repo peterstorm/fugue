@@ -6,7 +6,7 @@
 // set (no nodes dropped, no extras invented) and waves are non-empty.
 
 import { describe, it, expect } from "bun:test";
-import { N } from "./_id-helpers.js";
+import { N, nodeSet } from "./_id-helpers.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
@@ -65,7 +65,6 @@ const genRandomDag = (rng: () => number): RandomDag => {
 const buildDagDef = (shape: RandomDag) => {
   const nodes = shape.nodeIds.map((id) =>
     createTransformNode({
-      // @ts-expect-error — branded ID test fixture
       id,
       inputSchema: z.any(),
       outputSchema: z.any(),
@@ -163,8 +162,7 @@ describe("§6.9 — topoSort ordering property", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.length).toBe(1);
-      // @ts-expect-error — branded ID test fixture
-      expect(new Set(result.value[0])).toEqual(new Set(["A", "B"]));
+      expect(new Set(result.value[0])).toEqual(nodeSet(["A", "B"]));
     }
   });
 
@@ -172,7 +170,6 @@ describe("§6.9 — topoSort ordering property", () => {
     const dag = defineDagFromArray({
       id: "diamond",
       nodes: ["A", "B", "C", "D"].map((id) =>
-        // @ts-expect-error — branded ID test fixture
         createTransformNode({ id, inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ),
       edges: [
@@ -186,8 +183,7 @@ describe("§6.9 — topoSort ordering property", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value[0]).toEqual([N("A")]);
-      // @ts-expect-error — branded ID test fixture
-      expect(new Set(result.value[1])).toEqual(new Set(["B", "C"]));
+      expect(new Set(result.value[1])).toEqual(nodeSet(["B", "C"]));
       expect(result.value[2]).toEqual([N("D")]);
     }
   });

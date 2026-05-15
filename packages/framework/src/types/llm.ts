@@ -1,7 +1,7 @@
 // LLM-facing public types. Moved out of `llm/client.ts` + `llm/tools.ts` to
-// break the `types/node.ts ↔ llm/**` import cycle that previously forced
-// `sendWithTools` to take the structural `LlmRuntime` and cast to `NodeContext`
-// at the dispatch boundary (ADR 0012). With the contract living here, both
+// break the `types/node.ts ↔ llm/**` import cycle. Pre-ADR-0024,
+// `sendWithTools` took a structural `LlmRuntime` (now deleted) and cast to
+// `NodeContext` at the dispatch boundary. With the contract living here, both
 // `NodeContext` and `LlmClient` sit in the same `types/` layer; the only
 // remaining edge is a 2-step type-only cycle `types/node.ts ↔ types/llm.ts`,
 // which TypeScript erases at runtime.

@@ -5,7 +5,7 @@ import { beginRunTelemetry } from "../dag-runtime/run-telemetry.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Observer } from "../observer/observer.js";
-import type { RunStartEvent, RunEndEvent } from "../types/events.js";
+import type { RunStartEvent, RunEndEvent, ObserverEvent } from "../types/events.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 /**
@@ -33,10 +33,11 @@ describe("beginRunTelemetry — balanced start/end on observer throw (Wave 1.3)"
 
   const dag = { id: "dag-1" } as unknown as DagDef;
 
-  test("returns emitRunEnd even when observer.onRunStart throws", () => {
-    const throwing = new NoopObserver();
-    throwing.onRunStart = () => {
-      throw new Error("boom on run-start");
+  test("returns emitRunEnd even when observer throws on run-start", () => {
+    const throwing: Observer = {
+      observe(event: ObserverEvent) {
+        if (event.type === "run-start") throw new Error("boom on run-start");
+      },
     };
 
     // Must not throw — beginRunTelemetry swallows the run-start failure and
@@ -51,24 +52,15 @@ describe("beginRunTelemetry — balanced start/end on observer throw (Wave 1.3)"
   test("emitRunEnd dispatches run-end even after run-start throw", () => {
     const seen: Array<"run-start" | "run-end"> = [];
     const observer: Observer = {
-      onRunStart: () => {
-        seen.push("run-start");
-        throw new Error("nope");
+      observe(event: ObserverEvent) {
+        if (event.type === "run-start") {
+          seen.push("run-start");
+          throw new Error("nope");
+        }
+        if (event.type === "run-end") {
+          seen.push("run-end");
+        }
       },
-      onRunEnd: () => {
-        seen.push("run-end");
-      },
-      onNodeStart: () => {},
-      onNodeEnd: () => {},
-      onNodeSkipped: () => {},
-      onNodeError: () => {},
-      onSubSpan: () => {},
-      onRouteDecided: () => {},
-      onNodePruned: () => {},
-      onWitnessCaptured: () => {},
-      onWriteAttempted: () => {},
-      onFreshnessViolation: () => {},
-      onHumanIntervention: () => {},
     };
 
     const { emitRunEnd } = beginRunTelemetry(makeCtx(observer), dag, {});
@@ -80,10 +72,12 @@ describe("beginRunTelemetry — balanced start/end on observer throw (Wave 1.3)"
   });
 
   test("non-throwing observer sees normal run-start → run-end", () => {
-    const events: Array<RunStartEvent | RunEndEvent> = [];
-    const observer = new NoopObserver();
-    observer.onRunStart = (e) => events.push(e);
-    observer.onRunEnd = (e) => events.push(e);
+    const events: ObserverEvent[] = [];
+    const observer: Observer = {
+      observe(event: ObserverEvent) {
+        events.push(event);
+      },
+    };
 
     const { emitRunEnd } = beginRunTelemetry(makeCtx(observer), dag, {});
     emitRunEnd("ok");

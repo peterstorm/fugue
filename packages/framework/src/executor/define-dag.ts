@@ -27,6 +27,7 @@ import type { NodesRecord } from "../types/dag-internals.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { FrameworkError } from "../types/errors.js";
+import { formatFrameworkError } from "../types/errors.js";
 import { validateDagShape } from "./validate-dag.js";
 
 export class DagDefinitionError extends Error {
@@ -34,52 +35,12 @@ export class DagDefinitionError extends Error {
   readonly detail: FrameworkError;
 
   constructor(dagId: string, detail: FrameworkError) {
-    super(`[defineDag] DAG '${dagId}' is unsound: ${formatDetail(detail)}`);
+    super(`[defineDag] DAG '${dagId}' is unsound: ${formatFrameworkError(detail)}`);
     this.name = "DagDefinitionError";
     this.dagId = dagId;
     this.detail = detail;
   }
 }
-
-const formatDetail = (e: FrameworkError): string => {
-  switch (e.kind) {
-    case "validation":
-      return `${e.message} (node '${e.nodeId}')`;
-    case "missing-default-edge":
-      return `node '${e.nodeId}' has conditional out-edges but no default edge`;
-    case "output-unreachable-under-routing":
-      return `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges (frontier at '${e.missedFromNode}')`;
-    case "duplicate-edge":
-      return `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`;
-    case "predicate-malformed":
-      return `${e.message} (node '${e.nodeId}')`;
-    case "cycle-detected":
-      return `cycle detected: ${e.nodeIds.join(" -> ")}`;
-    case "retry-exhausted":
-    case "checkpoint-missing":
-    case "checkpoint-expired":
-    case "checkpoint-corrupt":
-    case "checkpoint-version-mismatch":
-    case "checkpoint-write-failed":
-    case "prompt-not-found":
-    case "cache-error":
-    case "node-crash":
-    case "aborted":
-    case "rejected":
-    case "invalid-reroute":
-    case "transient":
-    case "missing-capability":
-      return JSON.stringify(e);
-    default: {
-      // Exhaustive guard — adding a new `FrameworkError.kind` without
-      // handling it here (or routing it through the catch-all list above)
-      // surfaces as a compile error at this assignment. Runtime fallback
-      // keeps callers from crashing on a malformed message.
-      const _exhaustive: never = e;
-      return `unhandled error kind: ${JSON.stringify(_exhaustive)}`;
-    }
-  }
-};
 
 /**
  * Validate a DAG and return a branded `DagDef`. Throws `DagDefinitionError`

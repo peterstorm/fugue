@@ -17,7 +17,7 @@
 // `verifyDagFingerprint()` compares the persisted fingerprint against the
 // live one and returns `checkpoint-version-mismatch` when they diverge — a
 // redeploy that rewired edges or renamed nodes is no longer undefined
-// behaviour (ADR 0024 / pass-4 plan §4.6).
+// behaviour (pass-4 plan §4.6).
 
 import type { JobLike } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted } from "./types.js";

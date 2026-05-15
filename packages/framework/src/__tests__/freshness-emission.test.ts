@@ -59,8 +59,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits witness-captured for reads node with extractWitness", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders" },
-      extractWitness: (output: any) => ({ kind: "version", resource: "pg:orders", value: String(output.version) }),
+      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: (output: any) => ({ kind: "version", resource: "pg:orders", value: String(output.version) }) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, { version: 42 }]]);
@@ -80,9 +79,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits write-attempted for writes node with both extractors", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: "pg:orders" },
-      extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "42" }),
-      extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "43" }),
+      sideEffects: { kind: "writes", resource: "pg:orders", extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "42" }), extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "43" }) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -105,9 +102,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits freshness-violation when conflict detected", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: "pg:orders" },
-      extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "42" }),
-      extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "44" }),
+      sideEffects: { kind: "writes", resource: "pg:orders", extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "42" }), extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "44" }) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -159,8 +154,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("skips freshness events for skipped nodes", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders" },
-      extractWitness: () => ({ kind: "version", resource: "pg:orders", value: "1" }),
+      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => ({ kind: "version", resource: "pg:orders", value: "1" }) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -178,8 +172,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("does not crash when extractor throws", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders" },
-      extractWitness: () => { throw new Error("broken"); },
+      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => { throw new Error("broken"); } },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -214,8 +207,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("populates witness accumulator map by resource", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders" },
-      extractWitness: () => ({ kind: "version", resource: "pg:orders", value: "99" }),
+      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => ({ kind: "version", resource: "pg:orders", value: "99" }) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);

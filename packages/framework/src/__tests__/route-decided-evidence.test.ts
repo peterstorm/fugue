@@ -286,7 +286,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     }
   });
 
-  it("confidence extraction failure is non-fatal — upstreamConfidence falls back to null", async () => {
+  it("confidence extraction failure short-circuits wave with node-failed", async () => {
     const obs = new RecordingObserver();
     const dag = defineDag({
       id: "extract-throws",
@@ -309,10 +309,15 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     });
 
     const result = await runDagStateful(dag, null, mkCtx(obs));
-    expect(result.ok).toBe(true);
+    // Confidence extraction failure is now a config error — run fails fast.
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
 
-    const [route] = routeEvents(obs);
-    expect(route!.evidence.upstreamConfidence).toBeNull();
-    expect(route!.evidence.predicateResults[0]?.matched).toBe(true);
+    // node-error event emitted for the failure
+    const nodeErrors = obs.events.filter((e) => e.type === "node-error");
+    expect(nodeErrors.length).toBeGreaterThanOrEqual(1);
+    expect((nodeErrors[0] as any).error).toContain("confidence.extract failed");
   });
 });

@@ -19,7 +19,7 @@ import {
   IDENTITY_FILTER,
 } from "@ai-summary/framework";
 import type { LlmClient, TracingHandle, Checkpointer } from "@ai-summary/framework";
-import { NoopObserver } from "@ai-summary/framework";
+import { NoopObserver, runId as brandRunId } from "@ai-summary/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS } from "./config.js";
@@ -108,7 +108,7 @@ export const bootstrap = async () => {
         return r;
       },
       writeCheckpoint: async (runId: string, nodeId: string, value: unknown) => {
-        const r = await cp.saveNode(runId, nodeId, {
+        const r = await cp.saveNode(brandRunId(runId), nodeId, {
           nodeId,
           output: value,
           completedAt: new Date(),

@@ -394,12 +394,13 @@ export class OpenAILlmClient implements LlmClient {
       let raw: unknown;
       try {
         raw = JSON.parse(rawText);
-      } catch {
+      } catch (parseErr) {
+        const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
         return err({
           kind: "node-crash",
           retriability: "retriable",
           nodeId: resolveNodeId(req),
-          message: `Response was not valid JSON: ${rawText.slice(0, 200)}`,
+          message: `Not valid JSON (${parseMsg}): ${rawText.slice(0, 200)}`,
         });
       }
 
@@ -594,12 +595,13 @@ export class OpenAILlmClient implements LlmClient {
         let parsed: unknown;
         try {
           parsed = JSON.parse(text);
-        } catch {
+        } catch (parseErr) {
+          const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
           return err({
             kind: "node-crash",
             retriability: "retriable",
             nodeId: resolveNodeId(req),
-            message: `Final response was not valid JSON: ${text.slice(0, 200)}`,
+            message: `Not valid JSON (${parseMsg}): ${text.slice(0, 200)}`,
           });
         }
         const validated = req.schema.safeParse(parsed);

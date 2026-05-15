@@ -5,17 +5,17 @@ import type { FrameworkError } from "../types/errors.js";
 import { __brandNodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
 
-export interface TransformNodeConfig<I, O, Id extends NodeId = NodeId> {
-  readonly id: Id;
+export interface TransformNodeConfig<I, O> {
+  readonly id: string;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   readonly transform: (input: I) => Result<O, FrameworkError>;
 }
 
-export const createTransformNode = <I, O, const Id extends NodeId = NodeId>(
-  config: TransformNodeConfig<I, O, Id>,
-): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: Id & NodeId } => ({
-  id: __brandNodeId(config.id) as Id & NodeId,
+export const createTransformNode = <I, O>(
+  config: TransformNodeConfig<I, O>,
+): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: NodeId } => ({
+  id: __brandNodeId(config.id),
   kind: "transform",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,

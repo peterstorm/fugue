@@ -8,7 +8,6 @@ import type { RunId, NodeId, DagId } from "./ids.js";
 import type { ContentFilter } from "./content-filter.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
-import type { Witness } from "./freshness.js";
 
 export type { Tracer };
 
@@ -262,33 +261,6 @@ export interface NodeDef<
    * `DagDef.retryLimits` / `DagDef.defaultRetryLimit` when omitted.
    */
   readonly retry?: NodeRetryConfig;
-
-  // -------------------------------------------------------------------------
-  // Freshness witness extractors (Phase 3)
-  //
-  // Required for nodes that declare `sideEffects.kind === "reads"` or
-  // `sideEffects.kind === "writes"`. When present, the framework emits
-  // `witness-captured` / `write-attempted` / `freshness-violation` events.
-  // When absent, freshness tracking is silently skipped for the node.
-  // -------------------------------------------------------------------------
-
-  /**
-   * Extract a freshness witness from the node's output after successful
-   * execution. For `reads` nodes only.
-   *
-   * Example: `(output) => ({ kind: "version", resource: "postgres:orders:123", value: String(output.xmin) })`
-   */
-  readonly extractWitness?: (output: O) => Witness;
-  /**
-   * Declare which witness this write is conditioned on. Called with the
-   * node's assembled input before execution. For `writes` nodes only.
-   */
-  readonly extractConditionedOn?: (input: I) => Witness;
-  /**
-   * Extract the new witness after a successful write. Captures the new
-   * resource version that resulted from the mutation. For `writes` nodes only.
-   */
-  readonly extractNewWitness?: (output: O) => Witness;
 }
 
 /**

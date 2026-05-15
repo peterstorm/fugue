@@ -87,3 +87,57 @@ export type FrameworkError =
 // the type-only boundary (Capability lives in `types/node.ts` which itself
 // imports from this module only via the `FrameworkError` type alias).
 import type { Capability } from "./node.js";
+
+/**
+ * Human-readable single-line summary of a FrameworkError. Exhaustive —
+ * adding a new `kind` without a case here is a compile error via the
+ * `never` guard.
+ */
+export const formatFrameworkError = (e: FrameworkError): string => {
+  switch (e.kind) {
+    case "validation":
+      return `${e.message} (node '${e.nodeId}')`;
+    case "missing-default-edge":
+      return `node '${e.nodeId}' has conditional out-edges but no default edge`;
+    case "output-unreachable-under-routing":
+      return `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges (frontier at '${e.missedFromNode}')`;
+    case "duplicate-edge":
+      return `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`;
+    case "predicate-malformed":
+      return `${e.message} (node '${e.nodeId}')`;
+    case "cycle-detected":
+      return `cycle detected: ${e.nodeIds.join(" -> ")}`;
+    case "retry-exhausted":
+      return `node '${e.nodeId}' exhausted ${e.attempts} retries (root: ${e.rootErrorKind}): ${e.lastError}`;
+    case "node-crash":
+      return `node '${e.nodeId}' crashed (${e.retriability}): ${e.message}`;
+    case "aborted":
+      return `run aborted: ${e.reason}`;
+    case "rejected":
+      return `node '${e.nodeId}' rejected: ${e.reason}`;
+    case "transient":
+      return `node '${e.nodeId}' transient failure: ${e.message}`;
+    case "prompt-not-found":
+      return `prompt '${e.promptName}' not found: ${e.reason}`;
+    case "cache-error":
+      return `cache ${e.operation} failed: ${e.message}`;
+    case "invalid-reroute":
+      return `invalid reroute to '${e.targetNodeId}': ${e.message}`;
+    case "checkpoint-missing":
+      return `checkpoint missing for run '${e.runId}'`;
+    case "checkpoint-expired":
+      return `checkpoint for run '${e.runId}' expired at ${e.expiredAt.toISOString()}`;
+    case "checkpoint-corrupt":
+      return `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`;
+    case "checkpoint-version-mismatch":
+      return `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`;
+    case "checkpoint-write-failed":
+      return `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`;
+    case "missing-capability":
+      return `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`;
+    default: {
+      const _exhaustive: never = e;
+      return `unhandled error kind: ${JSON.stringify(_exhaustive)}`;
+    }
+  }
+};

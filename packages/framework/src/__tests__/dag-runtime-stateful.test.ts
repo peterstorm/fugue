@@ -753,19 +753,11 @@ describe("runDagStateful — observer events", () => {
   it("emits run-start, node-start, node-end, run-end events", async () => {
     const events: string[] = [];
     const observer = {
-      onRunStart: () => events.push("run-start"),
-      onNodeStart: () => events.push("node-start"),
-      onNodeEnd: () => events.push("node-end"),
-      onNodeSkipped: () => events.push("node-skipped"),
-      onNodeError: () => events.push("node-error"),
-      onSubSpan: () => {},
-      onRunEnd: () => events.push("run-end"),
-      onRouteDecided: () => {},
-      onNodePruned: () => {},
-      onWitnessCaptured: () => {},
-      onWriteAttempted: () => {},
-      onFreshnessViolation: () => {},
-      onHumanIntervention: () => {},
+      observe(e: { type: string }) {
+        if (["node-start", "node-end", "run-start", "run-end", "node-skipped", "node-error"].includes(e.type)) {
+          events.push(e.type);
+        }
+      },
     };
 
     const dag = makeDag({
@@ -784,19 +776,11 @@ describe("runDagStateful — observer events", () => {
   it("emits run-start exactly once per run (not duplicated by executor)", async () => {
     const events: string[] = [];
     const observer = {
-      onRunStart: () => events.push("run-start"),
-      onNodeStart: () => events.push("node-start"),
-      onNodeEnd: () => events.push("node-end"),
-      onNodeSkipped: () => events.push("node-skipped"),
-      onNodeError: () => events.push("node-error"),
-      onSubSpan: () => {},
-      onRunEnd: () => events.push("run-end"),
-      onRouteDecided: () => {},
-      onNodePruned: () => {},
-      onWitnessCaptured: () => {},
-      onWriteAttempted: () => {},
-      onFreshnessViolation: () => {},
-      onHumanIntervention: () => {},
+      observe(e: { type: string }) {
+        if (["node-start", "node-end", "run-start", "run-end", "node-skipped", "node-error"].includes(e.type)) {
+          events.push(e.type);
+        }
+      },
     };
 
     const dag = makeDag({
@@ -1050,19 +1034,9 @@ describe("runDagStateful — onHumanReview throws", () => {
   it("onHumanReview throw (0 retries) => err(retry-exhausted) with nodeId + node-error observer event", async () => {
     const nodeErrorEvents: string[] = [];
     const observer = {
-      onRunStart: () => {},
-      onNodeStart: () => {},
-      onNodeEnd: () => {},
-      onNodeSkipped: () => {},
-      onNodeError: (e: { nodeId: string }) => nodeErrorEvents.push(e.nodeId),
-      onSubSpan: () => {},
-      onRunEnd: () => {},
-      onRouteDecided: () => {},
-      onNodePruned: () => {},
-      onWitnessCaptured: () => {},
-      onWriteAttempted: () => {},
-      onFreshnessViolation: () => {},
-      onHumanIntervention: () => {},
+      observe(e: any) {
+        if (e.type === "node-error") nodeErrorEvents.push(e.nodeId);
+      },
     };
 
     const dag = makeDag({
@@ -1102,19 +1076,9 @@ describe("runDagStateful — onHumanReview throws", () => {
     const nodeErrorEvents: string[] = [];
 
     const observer = {
-      onRunStart: () => {},
-      onNodeStart: () => {},
-      onNodeEnd: () => {},
-      onNodeSkipped: () => {},
-      onNodeError: (e: { nodeId: string }) => nodeErrorEvents.push(e.nodeId),
-      onSubSpan: () => {},
-      onRunEnd: () => {},
-      onRouteDecided: () => {},
-      onNodePruned: () => {},
-      onWitnessCaptured: () => {},
-      onWriteAttempted: () => {},
-      onFreshnessViolation: () => {},
-      onHumanIntervention: () => {},
+      observe(e: any) {
+        if (e.type === "node-error") nodeErrorEvents.push(e.nodeId);
+      },
     };
 
     const dag = makeDag({
