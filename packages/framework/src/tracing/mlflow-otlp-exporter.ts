@@ -36,6 +36,10 @@ import {
   AI_HUMAN_ACTOR,
   AI_HUMAN_CONFIDENCE_BUCKET,
   AI_HUMAN_CONFIDENCE_SOURCE,
+  AI_ROUTE_CONFIDENCE_BUCKET,
+  AI_ROUTE_CONFIDENCE_SOURCE,
+  AI_FRESHNESS_VIOLATION,
+  AI_FRESHNESS_WITNESS_RESOURCE,
   GEN_AI_REQUEST_MODEL,
   GEN_AI_SYSTEM,
   GEN_AI_USAGE_INPUT_TOKENS,
@@ -376,6 +380,21 @@ export class MlflowOtlpExporter implements SpanExporter {
     if (seKind === "writes" || seKind === "external-call") {
       out["mlflow.side_effects"] = seKind;
     }
+
+    // Phase 2: Promote route confidence attributes to MLflow tags.
+    // Enables segmentation of routing decisions by confidence bucket and source.
+    const routeConfBucket = attrs[AI_ROUTE_CONFIDENCE_BUCKET] as string | undefined;
+    if (routeConfBucket) out["mlflow.route.confidence_bucket"] = routeConfBucket;
+    const routeConfSource = attrs[AI_ROUTE_CONFIDENCE_SOURCE] as string | undefined;
+    if (routeConfSource) out["mlflow.route.confidence_source"] = routeConfSource;
+
+    // Phase 3: Promote freshness signals to MLflow tags.
+    // Enables queries like "find runs with freshness violations" and
+    // "find all writes to a specific resource".
+    const freshnessViolation = attrs[AI_FRESHNESS_VIOLATION] as string | boolean | undefined;
+    if (freshnessViolation) out["mlflow.freshness.violation"] = true;
+    const freshnessResource = attrs[AI_FRESHNESS_WITNESS_RESOURCE] as string | undefined;
+    if (freshnessResource) out["mlflow.freshness.resource"] = freshnessResource;
 
     // Phase 4: Promote human intervention attributes to MLflow tags.
     // Enables queries like "show me all runs a human edited" and

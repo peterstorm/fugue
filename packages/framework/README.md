@@ -158,6 +158,18 @@ Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 - `@ai-summary/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
 - `setFrameworkLogger(...)` / `setFrameworkTracer(...)` — host-injectable logger + OTel tracer seams. Defaults are `console.*` and `trace.getTracer("ai-summary-framework")` respectively, matching prior behaviour; tests typically pass recording stubs.
 
+## State-Transition Observability
+
+Fugue implements Level 3 observability: for any production failure, a single event-log query answers *why the system believed the next step was safe*. Five primitives close the gap between "what happened" and "why it was believed safe":
+
+1. **Side-effects taxonomy** — every node declares `none`, `reads`, `writes`, or `external-call` with a resource identifier. Required field on `NodeDef`.
+2. **Bucketed confidence** — routing decisions carry colocated evidence: upstream output, confidence bucket (`high`/`medium`/`low`/`unknown`) with declared source, and per-predicate evaluation results.
+3. **Freshness witness contract** — `reads` nodes emit version witnesses; `writes` nodes declare which witness they're conditioned on; framework detects stale-read→write skew and emits `FreshnessViolationEvent`.
+4. **Human intervention telemetry** — `HumanInterventionEvent` captures what the human saw (confidence, side-effects, freshness state) alongside what they decided.
+5. **MLflow tag promotion** — all signals promoted to filterable MLflow tags (`mlflow.route.*`, `mlflow.freshness.*`, `mlflow.human.*`, `mlflow.side_effects`).
+
+See [`docs/observability/state-transitions.md`](../../docs/observability/state-transitions.md) for worked examples, dashboard queries, and node-author patterns.
+
 ## Test conventions
 
 - Redis-gated tests use `process.env.REDIS_URL` to skip cleanly when no Redis is reachable.

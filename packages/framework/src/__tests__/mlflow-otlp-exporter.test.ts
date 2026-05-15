@@ -17,6 +17,10 @@ import {
   AI_HUMAN_ACTOR,
   AI_HUMAN_CONFIDENCE_BUCKET,
   AI_HUMAN_CONFIDENCE_SOURCE,
+  AI_ROUTE_CONFIDENCE_BUCKET,
+  AI_ROUTE_CONFIDENCE_SOURCE,
+  AI_FRESHNESS_VIOLATION,
+  AI_FRESHNESS_WITNESS_RESOURCE,
 } from "../tracing/semantic-conventions.js";
 
 // --- Helpers ---
@@ -332,6 +336,57 @@ describe("MlflowOtlpExporter", () => {
       const attrs = exported[0].attributes as Record<string, unknown>;
       const humanKeys = Object.keys(attrs).filter((k) => k.startsWith("mlflow.human."));
       expect(humanKeys).toEqual([]);
+    });
+  });
+
+  describe("Phase 5 — route confidence and freshness tag promotion", () => {
+    it("promotes ai.route.confidence_bucket to mlflow.route.confidence_bucket", async () => {
+      const span = fakeSpan({ attributes: { [AI_ROUTE_CONFIDENCE_BUCKET]: "high" } });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      expect(attrs["mlflow.route.confidence_bucket"]).toBe("high");
+    });
+
+    it("promotes ai.route.confidence_source to mlflow.route.confidence_source", async () => {
+      const span = fakeSpan({
+        attributes: {
+          [AI_ROUTE_CONFIDENCE_BUCKET]: "medium",
+          [AI_ROUTE_CONFIDENCE_SOURCE]: "logprob",
+        },
+      });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      expect(attrs["mlflow.route.confidence_source"]).toBe("logprob");
+    });
+
+    it("no mlflow.route.* tags without route confidence attrs", async () => {
+      const span = fakeSpan({ attributes: { [AI_SPAN_TYPE]: "chain" } });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      const routeKeys = Object.keys(attrs).filter((k) => k.startsWith("mlflow.route."));
+      expect(routeKeys).toEqual([]);
+    });
+
+    it("promotes ai.freshness.violation to mlflow.freshness.violation when truthy", async () => {
+      const span = fakeSpan({ attributes: { [AI_FRESHNESS_VIOLATION]: "true" } });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      expect(attrs["mlflow.freshness.violation"]).toBe(true);
+    });
+
+    it("promotes ai.freshness.witness_resource to mlflow.freshness.resource", async () => {
+      const span = fakeSpan({ attributes: { [AI_FRESHNESS_WITNESS_RESOURCE]: "postgres:orders" } });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      expect(attrs["mlflow.freshness.resource"]).toBe("postgres:orders");
+    });
+
+    it("no mlflow.freshness.* tags without freshness attrs", async () => {
+      const span = fakeSpan({ attributes: { [AI_SPAN_TYPE]: "chain" } });
+      await collectExport(exporter, [span]);
+      const attrs = exported[0].attributes as Record<string, unknown>;
+      const freshnessKeys = Object.keys(attrs).filter((k) => k.startsWith("mlflow.freshness."));
+      expect(freshnessKeys).toEqual([]);
     });
   });
 });
