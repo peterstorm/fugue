@@ -394,6 +394,9 @@ describe("Wave 6.2 — ratio() accepts an injectable RNG for deterministic tests
         retryCount: 0,
         cacheHitCount: 0,
         totalCostUsd: 0,
+        freshnessViolationCount: 0,
+        humanInterventionCount: 0,
+        routeDecisionCount: 0,
       }),
     ).toBe(true);
   });
@@ -409,6 +412,9 @@ describe("Wave 6.2 — ratio() accepts an injectable RNG for deterministic tests
         retryCount: 0,
         cacheHitCount: 0,
         totalCostUsd: 0,
+        freshnessViolationCount: 0,
+        humanInterventionCount: 0,
+        routeDecisionCount: 0,
       }),
     ).toBe(false);
   });

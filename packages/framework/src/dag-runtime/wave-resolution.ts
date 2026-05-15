@@ -2,6 +2,7 @@
 // All functions are pure; no I/O.
 
 import type { DagPhase, DagMachineContext } from "./types.js";
+import { EXECUTOR_NODE_ID } from "./types.js";
 import { decideRoute, expandActive } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 import type { NodeId } from "../types/ids.js";
@@ -137,30 +138,33 @@ export const handleWaveDone = (
   const reviewQueue = collectHumanReviewQueue(newCtx, wave);
 
   if (reviewQueue.length > 0) {
-    const [firstNodeId, ...rest] = reviewQueue;
+    const firstNodeId = reviewQueue[0]!; // length > 0 guarantees defined
+    const rest = reviewQueue.slice(1);
     const nodeDef = newCtx.nodeById.get(firstNodeId);
-    if (nodeDef === undefined) {
+    if (nodeDef === undefined || nodeDef.humanReview === undefined) {
       return {
         state: {
           kind: "failed",
           error: {
             kind: "node-crash",
             retriability: "retriable",
-            nodeId: firstNodeId ?? "",
-            message: `node-not-found: ${firstNodeId}`,
+            nodeId: firstNodeId,
+            message: nodeDef === undefined
+              ? `node-not-found: ${firstNodeId}`
+              : `node '${firstNodeId}' missing humanReview config`,
           },
         },
         context: newCtx,
       };
     }
-    const nodeOutput = newOutputs.get(firstNodeId!);
+    const nodeOutput = newOutputs.get(firstNodeId);
 
     return {
       state: {
         kind: "awaiting-human",
-        nodeId: firstNodeId!,
+        nodeId: firstNodeId,
         output: nodeOutput,
-        prompt: nodeDef.humanReview!.prompt,
+        prompt: nodeDef.humanReview.prompt,
         pendingReviews: rest,
         wave,
       },
@@ -227,7 +231,7 @@ export const advanceToNextWave = (
           error: {
             kind: "node-crash",
             retriability: "retriable",
-            nodeId: "" as NodeId,
+            nodeId: EXECUTOR_NODE_ID,
             message: "output-missing: outputNodeId unset and no active node produced output",
           },
         },

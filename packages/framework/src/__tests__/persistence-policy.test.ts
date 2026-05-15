@@ -22,6 +22,9 @@ function makeSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     retryCount: 0,
     cacheHitCount: 3,
     totalCostUsd: 0.5,
+    freshnessViolationCount: 0,
+    humanInterventionCount: 0,
+    routeDecisionCount: 0,
     ...overrides,
   };
 }

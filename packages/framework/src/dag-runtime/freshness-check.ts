@@ -163,6 +163,7 @@ export const checkFreshness = (
  */
 export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly writes = new Map<string, WriteEntry[]>();
+  private readonly latest = new Map<string, WriteEntry>();
   private readonly maxEntries: number;
 
   constructor(opts?: { maxEntriesPerResource?: number }) {
@@ -172,43 +173,48 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   /** Record a successful write. Evicts oldest if over capacity. */
   async recordWrite(event: WriteAttemptedEvent): Promise<void> {
     const resource = event.newWitness.resource;
-    const entries = this.writes.get(resource) ?? [];
-    entries.push({
+    const entry: WriteEntry = {
       runId: event.runId,
       nodeId: event.nodeId,
       newWitness: event.newWitness,
       succeededAtMs: event.succeededAtMs,
-    });
+    };
+    const entries = this.writes.get(resource) ?? [];
+    entries.push(entry);
     // Evict oldest entries when over capacity
     if (entries.length > this.maxEntries) {
       entries.splice(0, entries.length - this.maxEntries);
     }
     this.writes.set(resource, entries);
+    this.latest.set(resource, entry);
   }
 
   /**
    * Check if a conditioned-on witness has been superseded by a more recent
-   * write that completed after `sinceMs`. Only the latest write to this
-   * resource matters — older writes may have values that were subsequently
-   * superseded. Returns the conflicting write entry, or `null`.
+   * write. Returns the conflicting write entry, or `null`.
+   *
+   * Fast path (sinceMs === 0): O(1) check against the latest write per resource.
+   * Slow path (sinceMs > 0): O(1) check against the last entry — entries are
+   * append-only (monotonically ordered by succeededAtMs), so the latest is
+   * always the last element.
    */
   async findConflict(
     resource: string,
     conditionedOnValue: string,
     sinceMs: number,
   ): Promise<WriteEntry | null> {
-    const entries = this.writes.get(resource) ?? [];
-    // Find the most recent write at or after sinceMs. For same-timestamp
-    // entries, the later-inserted one wins (matches checkFreshness behavior).
-    let latest: WriteEntry | null = null;
-    for (const entry of entries) {
-      if (entry.succeededAtMs >= sinceMs) {
-        if (!latest || entry.succeededAtMs >= latest.succeededAtMs) {
-          latest = entry;
-        }
-      }
+    // Fast path: sinceMs === 0 means "any write ever" — check latest directly
+    if (sinceMs === 0) {
+      const entry = this.latest.get(resource);
+      if (entry && entry.newWitness.value !== conditionedOnValue) return entry;
+      return null;
     }
-    if (latest && latest.newWitness.value !== conditionedOnValue) {
+    // Slow path: entries are append-only (monotonically ordered by succeededAtMs).
+    // The latest write is always the last element.
+    const entries = this.writes.get(resource) ?? [];
+    if (entries.length === 0) return null;
+    const latest = entries[entries.length - 1]!;
+    if (latest.succeededAtMs >= sinceMs && latest.newWitness.value !== conditionedOnValue) {
       return latest;
     }
     return null;
@@ -217,5 +223,6 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   /** Clear all entries. Useful for testing. */
   clear(): void {
     this.writes.clear();
+    this.latest.clear();
   }
 }

@@ -431,19 +431,25 @@ describe("runDagStateful — HITL approve-with-edit", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       // Validation failure from the executor flows through the hook-crash
-      // path; with retryLimit=0 it surfaces as node-crash carrying the
-      // validation message in the last-error trail.
+      // path; with retryLimit=0 it surfaces as retry-exhausted carrying the
+      // validation message, or directly as validation if it fast-fails.
       const isExpectedKind =
-        result.error.kind === "validation" || result.error.kind === "node-crash";
+        result.error.kind === "validation" ||
+        result.error.kind === "retry-exhausted" ||
+        result.error.kind === "node-crash";
       expect(isExpectedKind).toBe(true);
-      const msg =
-        result.error.kind === "validation"
-          ? result.error.message
-          : result.error.kind === "node-crash"
+      if (result.error.kind === "retry-exhausted") {
+        expect(result.error.lastError).toContain("approve-with-edit");
+      } else {
+        const msg =
+          result.error.kind === "validation"
             ? result.error.message
-            : "";
-      expect(msg).toContain("approve-with-edit");
-      expect(msg).toContain("schema");
+            : result.error.kind === "node-crash"
+              ? result.error.message
+              : "";
+        expect(msg).toContain("approve-with-edit");
+        expect(msg).toContain("schema");
+      }
     }
   });
 
@@ -1041,7 +1047,7 @@ describe("runDagStateful — per-node retry limits", () => {
 // ---------------------------------------------------------------------------
 
 describe("runDagStateful — onHumanReview throws", () => {
-  it("onHumanReview throw (0 retries) => err(node-crash) with nodeId + node-error observer event", async () => {
+  it("onHumanReview throw (0 retries) => err(retry-exhausted) with nodeId + node-error observer event", async () => {
     const nodeErrorEvents: string[] = [];
     const observer = {
       onRunStart: () => {},
@@ -1079,10 +1085,11 @@ describe("runDagStateful — onHumanReview throws", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
-      if (result.error.kind === "node-crash") {
+      expect(result.error.kind).toBe("retry-exhausted");
+      if (result.error.kind === "retry-exhausted") {
         expect(result.error.nodeId).toBe(N("review-node"));
-        expect(result.error.message).toBe("hook exploded");
+        expect(result.error.lastError).toBe("hook exploded");
+        expect(result.error.rootErrorKind).toBe("node-crash");
       }
     }
     expect(nodeErrorEvents).toContain("review-node");

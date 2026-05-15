@@ -194,6 +194,9 @@ export class TailSamplingProcessor implements SpanProcessor {
       retryCount,
       cacheHitCount: 0,
       totalCostUsd,
+      freshnessViolationCount: 0,
+      humanInterventionCount: 0,
+      routeDecisionCount: 0,
     };
   }
 

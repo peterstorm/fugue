@@ -95,11 +95,16 @@ export const compileDagToMachine = (
     isFailed,
     stateProgress,
     isRetryTransition,
-    // DagPhase values are plain JSON-stable objects (no Map/Set/Date), so the
-    // default stringify path is correct here. Encoding it explicitly removes
-    // the fallback inside `runStateMachine` and surfaces drift if a future
-    // phase variant introduces a non-stable field.
-    stateKey: (phase) => JSON.stringify(phase),
+    // DagPhase values are plain JSON-stable objects after Zod validation of
+    // outputs. If a non-serializable value ever leaks through (bug), fall back
+    // to a distinguishable key rather than throwing inside the runner loop.
+    stateKey: (phase) => {
+      try {
+        return JSON.stringify(phase);
+      } catch {
+        return `${phase.kind}:unserializable`;
+      }
+    },
   };
 
   return ok({ machine, initialContext, initialState: { kind: "pending" } });

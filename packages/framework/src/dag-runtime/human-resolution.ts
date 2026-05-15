@@ -158,30 +158,33 @@ const resolveHumanApproved = (
 ): WaveDoneResult => {
   // If there are more reviews pending in this wave, process the next one
   if (currentState.pendingReviews.length > 0) {
-    const [nextNodeId, ...rest] = currentState.pendingReviews;
+    const nextNodeId = currentState.pendingReviews[0]!; // length > 0 guarantees defined
+    const rest = currentState.pendingReviews.slice(1);
     const nodeDef = ctx.nodeById.get(nextNodeId);
-    if (nodeDef === undefined) {
+    if (nodeDef === undefined || nodeDef.humanReview === undefined) {
       return {
         state: {
           kind: "failed",
           error: {
             kind: "node-crash",
             retriability: "retriable",
-            nodeId: nextNodeId ?? "",
-            message: `node-not-found: ${nextNodeId}`,
+            nodeId: nextNodeId,
+            message: nodeDef === undefined
+              ? `node-not-found: ${nextNodeId}`
+              : `node '${nextNodeId}' in pendingReviews has no humanReview config`,
           },
         },
         context: ctx,
       };
     }
-    const nodeOutput = ctx.outputs.get(nextNodeId!);
+    const nodeOutput = ctx.outputs.get(nextNodeId);
 
     return {
       state: {
         kind: "awaiting-human",
-        nodeId: nextNodeId!,
+        nodeId: nextNodeId,
         output: nodeOutput,
-        prompt: nodeDef.humanReview!.prompt,
+        prompt: nodeDef.humanReview.prompt,
         pendingReviews: rest,
         wave: currentState.wave,
       },

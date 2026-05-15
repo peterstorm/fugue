@@ -21,11 +21,10 @@ import { decideRoute } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
 import type { Confidence } from "../types/confidence.js";
-import type { SideEffectKind } from "../types/side-effects.js";
-import type { HumanActionDetailed } from "../types/events.js";
-import { computeJsonPatch } from "../shared/json-patch.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
+import { emitHumanIntervention } from "./human-emission.js";
+import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
 
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
@@ -170,78 +169,6 @@ const callHumanReviewHook = async (
   return { type: "human-responded", nodeId, action } satisfies DagEvent;
 };
 
-
-// ---------------------------------------------------------------------------
-// emitHumanIntervention — Phase 4: human-intervention observer event
-// ---------------------------------------------------------------------------
-
-/**
- * Translate a DAG-layer `HumanAction` into the detailed observer-event
- * shape, then emit `HumanInterventionEvent`. Called in the executor after
- * `callHumanReviewHook` produces a successful `human-responded` event.
- */
-const emitHumanIntervention = (
-  phase: { nodeId: NodeId; output: unknown },
-  action: HumanAction,
-  nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
-  nodeCtx: NodeContext,
-  dagId: DagId,
-  nowFn: () => number,
-  awaitStartMs: number,
-  capturedWitnesses: readonly Witness[],
-): void => {
-  const stamp = (): Date => new Date(nowFn());
-  const nodeDef = nodeMap.get(phase.nodeId);
-
-  // Build HumanActionDetailed from the DAG-layer HumanAction
-  const detailed: HumanActionDetailed = match(action)
-    .with({ action: "approve" }, () => ({ kind: "approve" as const }))
-    .with({ action: "approve-with-edit" }, (a) => ({
-      kind: "approve-with-edit" as const,
-      originalOutput: phase.output,
-      replacedOutput: a.newOutput,
-      diff: computeJsonPatch(phase.output, a.newOutput),
-    }))
-    .with({ action: "reject" }, (a) => ({ kind: "reject" as const, reason: a.reason }))
-    .with({ action: "reroute" }, (a) => ({
-      kind: "reroute" as const,
-      targetNodeId: a.targetNodeId,
-      ...(a.reason !== undefined ? { reason: a.reason } : {}),
-    }))
-    .exhaustive();
-
-  // Extract confidence from the node's output
-  let nodeConfidence: Confidence | null = null;
-  if (nodeDef && nodeDef.confidence.mode === "value") {
-    try {
-      nodeConfidence = nodeDef.confidence.extract(phase.output);
-    } catch (e) {
-      fwLogger().warn(
-        `[emitHumanIntervention] confidence.extract failed for node '${phase.nodeId}': ${e instanceof Error ? e.message : e}`,
-      );
-      nodeConfidence = null;
-    }
-  }
-
-  // Side-effects kind
-  const nodeSideEffects: SideEffectKind = nodeDef?.sideEffects.kind ?? "none";
-
-  emit(nodeCtx, {
-    type: "human-intervention",
-    runId: nodeCtx.runId,
-    dagId,
-    nodeId: phase.nodeId,
-    action: detailed,
-    actor: action.actor ?? "unknown",
-    elapsedMsSinceAwait: nowFn() - awaitStartMs,
-    context: {
-      nodeConfidence,
-      nodeSideEffects,
-      priorWitnesses: [...capturedWitnesses],
-    },
-    timestamp: stamp(),
-  });
-};
 
 // ---------------------------------------------------------------------------
 // buildDagExecutor — FR-027 applied when state.kind === "retrying"
@@ -407,149 +334,6 @@ export const buildDagExecutor = (
         throw new Error("buildDagExecutor: unreachable — terminal failed");
       })
       .exhaustive();
-};
-
-// ---------------------------------------------------------------------------
-// emitFreshnessWitnessEvents — extracted from runWave for readability
-//
-// After all nodes in a wave succeed, emit witness events for reads and writes
-// nodes. For writes nodes, check the freshness index for conflicts BEFORE the
-// write's witness is recorded — so the conflict detection sees the state as
-// of write time.
-// ---------------------------------------------------------------------------
-
-const emitFreshnessWitnessEvents = async (
-  waveNodeIds: readonly NodeId[],
-  newOutputs: ReadonlyMap<NodeId, unknown>,
-  nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
-  machineCtx: DagMachineContext,
-  nodeCtx: NodeContext,
-  dagId: DagId,
-  nowFn: () => number,
-  freshnessIndex: FreshnessIndex,
-  skippedNodeIds: ReadonlySet<NodeId>,
-  witnessAccumulator?: Witness[],
-): Promise<void> => {
-  const stamp = (): Date => new Date(nowFn());
-  const priorOutputs = machineCtx.outputs;
-
-  for (const nodeId of waveNodeIds) {
-    // Skip nodes that didn't actually execute (checkpoint-resumed or
-    // already-completed from a prior wave). Their outputs are in newOutputs
-    // for the wave-done event, but freshness witnesses should only be
-    // emitted for nodes that actually performed I/O.
-    if (!newOutputs.has(nodeId) || skippedNodeIds.has(nodeId)) continue;
-    const nodeDef = nodeMap.get(nodeId);
-    if (!nodeDef) continue;
-
-    const output = newOutputs.get(nodeId);
-    const se = nodeDef.sideEffects;
-
-    await match(se)
-      .with({ kind: "reads" }, async () => {
-        if (!nodeDef.extractWitness) return;
-        try {
-          const witness: Witness = nodeDef.extractWitness(output);
-          emit(nodeCtx, {
-            type: "witness-captured",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            witness,
-            capturedAtMs: nowFn(),
-            timestamp: stamp(),
-          });
-          witnessAccumulator?.push(witness);
-        } catch (e) {
-          fwLogger().warn(
-            `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
-          );
-        }
-      })
-      .with({ kind: "writes" }, async () => {
-        if (!nodeDef.extractConditionedOn || !nodeDef.extractNewWitness) return;
-
-        // Step 1: Rebuild the node's input (framework invariant — should not fail)
-        let nodeInput: unknown;
-        try {
-          const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
-          const { required, optional } = incoming;
-          if (optional.length > 0) {
-            nodeInput = Object.fromEntries(
-              [...required, ...optional].map((d) => [d, priorOutputs.get(d as NodeId)]),
-            );
-          } else if (required.length === 0) {
-            nodeInput = machineCtx.initialInput;
-          } else if (required.length === 1) {
-            nodeInput = priorOutputs.get(required[0] as NodeId);
-          } else {
-            nodeInput = Object.fromEntries(required.map((d) => [d, priorOutputs.get(d as NodeId)]));
-          }
-        } catch (e) {
-          fwLogger().error(
-            `[emitFreshnessWitnessEvents] BUG: input reconstruction failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
-          );
-          return;
-        }
-
-        // Step 2: User-provided extractors
-        let conditionedOn: Witness;
-        let newWitness: Witness;
-        try {
-          conditionedOn = nodeDef.extractConditionedOn(nodeInput);
-          newWitness = nodeDef.extractNewWitness(output);
-        } catch (e) {
-          fwLogger().warn(
-            `[emitFreshnessWitnessEvents] extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
-          );
-          return;
-        }
-
-        // Step 3: Freshness conflict check + event emission
-        // sinceMs: 0 is intentional — within a run, all prior writes are relevant
-        // because topological ordering guarantees the read witness was captured
-        // before any writes in later waves.
-        const conflict = await freshnessIndex.findConflict(
-          conditionedOn.resource,
-          conditionedOn.value,
-          0,
-        );
-        if (conflict) {
-          emit(nodeCtx, {
-            type: "freshness-violation",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            resource: conditionedOn.resource,
-            conditionedOnWitness: conditionedOn,
-            conflictingWrite: {
-              runId: conflict.runId,
-              nodeId: conflict.nodeId,
-              newWitness: conflict.newWitness,
-              succeededAtMs: conflict.succeededAtMs,
-            },
-            detectedAtMs: nowFn(),
-            timestamp: stamp(),
-          });
-        }
-
-        const writeEvent = {
-          type: "write-attempted" as const,
-          runId: nodeCtx.runId,
-          dagId,
-          nodeId,
-          conditionedOn,
-          newWitness,
-          succeededAtMs: nowFn(),
-          timestamp: stamp(),
-        };
-        emit(nodeCtx, writeEvent);
-        await freshnessIndex.recordWrite(writeEvent);
-      })
-      .with({ kind: "none" }, () => { /* pure transform — no freshness tracking */ })
-      .with({ kind: "external-call" }, () => { /* external calls don't participate in witness contract */ })
-      .exhaustive();
-  }
 };
 
 // ---------------------------------------------------------------------------

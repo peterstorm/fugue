@@ -149,7 +149,16 @@ export class AnthropicLlmClient implements LlmClient {
         tool_choice: { type: "tool", name: "structured_output" },
       };
 
-      const response = await this.anthropic.messages.create(params, { signal: controller.signal });
+      const response = await withLlmSpan(
+        null,
+        { provider: "anthropic", model: req.model, operation: "chat" },
+        async () => {
+          const r = await this.anthropic.messages.create(params, { signal: controller.signal });
+          setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
+          setLlmResponseAttributes({ model: r.model, id: r.id });
+          return r;
+        },
+      );
 
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
@@ -321,7 +330,7 @@ export class AnthropicLlmClient implements LlmClient {
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       if (thinkingBlock?.type === "thinking") lastThinking = thinkingBlock.thinking;
 
-        messages.push({ role: "assistant", content: response.content });
+      messages.push({ role: "assistant", content: response.content });
 
       const toolCalls = parseToolCalls(response);
       if (toolCalls.length === 0) {

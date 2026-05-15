@@ -115,11 +115,14 @@ export interface CapabilityFields {
   readonly judgeLlm: LlmClient;
 }
 
-// Compile-time assertion that `Capability` (the discriminator union) and
-// `keyof CapabilityFields` (the record type) match exactly. Adding an entry
-// to one without the other turns the matching `_AssertCapabilitySync`
-// position into a non-`never` type, making the trailing assignment fail to
-// compile with a message that names the offending side.
+// ---------------------------------------------------------------------------
+// Compile-time bijection assertion: Capability ↔ CapabilityFields.
+//
+// Adding a key to one side without the other makes the `_capabilityCheck`
+// assignment fail with a descriptive type error. Runtime cost: zero (erased
+// by TypeScript). This pattern is the compile-time complement to
+// `validateCapabilities`' runtime check.
+// ---------------------------------------------------------------------------
 type _AssertCapabilitySync =
   | (Capability extends keyof CapabilityFields
       ? never

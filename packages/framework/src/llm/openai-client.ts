@@ -198,18 +198,12 @@ const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
 
 /**
- * Distinguish a *timeout*-induced abort from a caller-cancellation abort.
- * `postResponses` tags timeouts via a `WeakSet` so the outer
- * handlers can surface them as `transient` (retriable) rather than
- * `aborted` (terminal, user-initiated).
+ * Detect a timeout-induced error thrown by `postResponses`. Uses standard
+ * `Error.cause` (set to `"timeout"`) rather than a WeakSet — survives error
+ * wrapping and polyfill environments that may create fresh Error objects.
  */
-// WeakSet tracks timed-out errors without mutating the error object.
-// Object.assign(e, { __timedOut: true }) fails silently on frozen/sealed
-// AbortError objects in some environments.
-const timedOutErrors = new WeakSet<Error>();
-
-const isTimeoutAbort = (e: unknown): boolean =>
-  e instanceof Error && isAbort(e) && timedOutErrors.has(e);
+const isTimeoutError = (e: unknown): boolean =>
+  e instanceof Error && (e as { cause?: unknown }).cause === "timeout";
 
 /** Duck-typed 429 detection (see anthropic-client.ts for rationale). */
 const isRateLimit = (e: unknown): boolean =>
@@ -305,8 +299,7 @@ export class OpenAILlmClient implements LlmClient {
       // fetch boundary; without the tag the outer handler routes both to
       // `{ kind: "aborted" }` and a transient timeout looks like a user cancel.
       if (e instanceof Error && e.name === "AbortError" && timedOut && !signal?.aborted) {
-        timedOutErrors.add(e);
-        throw e;
+        throw new Error(`request timed out after ${this.requestTimeoutMs}ms`, { cause: "timeout" });
       }
       throw e;
     } finally {
@@ -346,7 +339,24 @@ export class OpenAILlmClient implements LlmClient {
         body.reasoning = { effort: "high", summary: "auto" };
       }
 
-      const httpResult = await this.postResponses(body, req.signal);
+      const httpResult = await withLlmSpan(
+        null,
+        { provider: "openai", model: req.model, operation: "chat" },
+        async () => {
+          const r = await this.postResponses(body, req.signal);
+          if (r.ok) {
+            const tIn = r.response.usage?.input_tokens ?? 0;
+            const tOut = r.response.usage?.output_tokens ?? 0;
+            setLlmUsageAttributes(tIn, tOut);
+            setLlmResponseAttributes({
+              model: r.response.model,
+              id: r.response.id,
+              finishReasons: r.response.status ? [r.response.status] : undefined,
+            });
+          }
+          return r;
+        },
+      );
       if (!httpResult.ok) {
         if (httpResult.status === 429) {
           return err({
@@ -413,7 +423,7 @@ export class OpenAILlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
-      if (isTimeoutAbort(error)) {
+      if (isTimeoutError(error)) {
         return err({
           kind: "transient",
           nodeId: resolveNodeId(req),
@@ -513,7 +523,7 @@ export class OpenAILlmClient implements LlmClient {
           },
         );
       } catch (error) {
-        if (isTimeoutAbort(error)) {
+        if (isTimeoutError(error)) {
           return err({
             kind: "transient",
             nodeId: resolveNodeId(req),

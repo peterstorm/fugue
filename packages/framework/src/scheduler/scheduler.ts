@@ -249,6 +249,12 @@ export function createCronScheduler(
     taskId: string,
     triggeredAt: Date,
   ): Promise<void> {
+    if (activeRegistry.size === 0) {
+      fwLogger().warn(
+        `[CronScheduler] resolveDependents("${taskId}") called with empty registry — was reconcile() called first?`,
+      );
+      return;
+    }
     // Mark the upstream task as completed — guard against store failures
     const upstreamTask = activeRegistry.get(taskId);
     const completedTtl = upstreamTask

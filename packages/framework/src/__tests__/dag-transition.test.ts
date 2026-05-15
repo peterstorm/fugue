@@ -1073,7 +1073,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     }
   });
 
-  it("awaiting-human + node-failed budget exhausted => terminal failed with node-crash", () => {
+  it("awaiting-human + node-failed budget exhausted => terminal failed with retry-exhausted", () => {
     const dag = makeDag({ defaultRetryLimit: 0 });
     const ctx = makeCtx({ dag });
     const phase = awaitingWithPrompt("a");
@@ -1082,10 +1082,11 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
 
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed") {
-      expect(result.state.error.kind).toBe("node-crash");
-      if (result.state.error.kind === "node-crash") {
+      expect(result.state.error.kind).toBe("retry-exhausted");
+      if (result.state.error.kind === "retry-exhausted") {
         expect(result.state.error.nodeId).toBe(N("a"));
-        expect(result.state.error.message).toBe("boom");
+        expect(result.state.error.lastError).toBe("boom");
+        expect(result.state.error.rootErrorKind).toBe("node-crash");
       }
     }
   });
@@ -1104,7 +1105,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     }
   });
 
-  it("awaiting-human + ERROR budget exhausted => terminal failed with node-crash", () => {
+  it("awaiting-human + ERROR budget exhausted => terminal failed with retry-exhausted", () => {
     const dag = makeDag({ defaultRetryLimit: 0 });
     const ctx = makeCtx({ dag });
     const phase = awaitingWithPrompt("a");
@@ -1113,7 +1114,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
 
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed") {
-      expect(result.state.error.kind).toBe("node-crash");
+      expect(result.state.error.kind).toBe("retry-exhausted");
     }
   });
 
@@ -1224,7 +1225,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
     }
   });
 
-  it("retrying-hook + node-failed when budget exhausted => terminal failed with node-crash", () => {
+  it("retrying-hook + node-failed when budget exhausted => terminal failed with retry-exhausted", () => {
     const dag = makeDag({ defaultRetryLimit: 2 });
     const ctx = makeCtx({ dag, retries: new Map([["a", 2]]) as any });
     const phase = retryingHookPhase(2);
@@ -1233,7 +1234,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
 
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed") {
-      expect(result.state.error.kind).toBe("node-crash");
+      expect(result.state.error.kind).toBe("retry-exhausted");
     }
   });
 

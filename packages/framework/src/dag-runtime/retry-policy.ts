@@ -188,16 +188,20 @@ export const handleHookCrash = (
     };
   }
 
-  // Retry budget exhausted — terminal failed with node-crash (FR-029a)
-  const message = error.kind === "node-crash" ? error.message : JSON.stringify(error);
+  // Retry budget exhausted — use `retry-exhausted` (same shape as handleNodeFailed)
+  // so consumers have one discriminant for all budget-exhaustion cases.
+  const lastError = error.kind === "node-crash" || error.kind === "transient"
+    ? error.message
+    : JSON.stringify(error);
   return {
     state: {
       kind: "failed",
       error: {
-        kind: "node-crash",
-        retriability: "retriable",
+        kind: "retry-exhausted",
         nodeId,
-        message,
+        attempts: currentAttempts + 1,
+        lastError,
+        rootErrorKind: error.kind,
       },
     },
     context: ctx,

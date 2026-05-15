@@ -27,6 +27,9 @@ export interface RunSummary {
   readonly retryCount: number;
   readonly cacheHitCount: number;
   readonly totalCostUsd: number;
+  readonly freshnessViolationCount: number;
+  readonly humanInterventionCount: number;
+  readonly routeDecisionCount: number;
 }
 
 export interface AggregateCounters {
@@ -81,6 +84,9 @@ export function computeRunSummary(
   let retryCount = 0;
   let cacheHitCount = 0;
   let totalCostUsd = 0;
+  let freshnessViolationCount = 0;
+  let humanInterventionCount = 0;
+  let routeDecisionCount = 0;
 
   const startCounts = new Map<string, number>();
 
@@ -105,6 +111,15 @@ export function computeRunSummary(
       case "node-skipped":
         nodeIds.add(e.nodeId);
         break;
+      case "freshness-violation":
+        freshnessViolationCount++;
+        break;
+      case "human-intervention":
+        humanInterventionCount++;
+        break;
+      case "route-decided":
+        routeDecisionCount++;
+        break;
     }
   }
 
@@ -120,6 +135,9 @@ export function computeRunSummary(
     retryCount,
     cacheHitCount,
     totalCostUsd,
+    freshnessViolationCount,
+    humanInterventionCount,
+    routeDecisionCount,
   };
 }
 

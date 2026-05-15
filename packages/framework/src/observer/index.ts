@@ -5,7 +5,7 @@
 // barrel below covers only the domain observer surface.
 
 export type { Observer } from "./observer.js";
-export { NoopObserver, RecordingObserver } from "./observer.js";
+export { NoopObserver, RecordingObserver, createObserver } from "./observer.js";
 export type { RunSummary, AggregateCounters } from "./buffered.js";
 export { BufferedObserver, computeRunSummary, dispatchEvent } from "./buffered.js";
 export type { PersistencePolicy } from "./policy.js";
