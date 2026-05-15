@@ -158,19 +158,25 @@ export const checkFreshness = (
  * Thread-safe within a single JS event loop (no concurrent mutation).
  * For cross-process detection, see Redis-backed freshness index.
  *
- * The index is bounded: each resource retains at most `maxEntriesPerResource`
- * write entries (default 1000). Oldest entries are evicted on overflow.
+ * Bounded in two dimensions:
+ *   - Each resource retains at most `maxEntriesPerResource` write entries (default 1000).
+ *   - The total number of tracked resources is capped at `maxResources` (default 10000).
+ *   Oldest resources are evicted on overflow.
  */
 export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly writes = new Map<string, WriteEntry[]>();
   private readonly latest = new Map<string, WriteEntry>();
   private readonly maxEntries: number;
+  private readonly maxResources: number;
+  /** Insertion-order tracking for LRU eviction of resources. */
+  private readonly resourceOrder: string[] = [];
 
-  constructor(opts?: { maxEntriesPerResource?: number }) {
+  constructor(opts?: { maxEntriesPerResource?: number; maxResources?: number }) {
     this.maxEntries = opts?.maxEntriesPerResource ?? 1000;
+    this.maxResources = opts?.maxResources ?? 10_000;
   }
 
-  /** Record a successful write. Evicts oldest if over capacity. */
+  /** Record a successful write. Evicts oldest entries per resource and oldest resources globally. */
   async recordWrite(event: WriteAttemptedEvent): Promise<void> {
     const resource = event.newWitness.resource;
     const entry: WriteEntry = {
@@ -179,9 +185,20 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
       newWitness: event.newWitness,
       succeededAtMs: event.succeededAtMs,
     };
+    if (!this.writes.has(resource)) {
+      // New resource — check global capacity before adding
+      if (this.writes.size >= this.maxResources) {
+        const oldest = this.resourceOrder.shift();
+        if (oldest) {
+          this.writes.delete(oldest);
+          this.latest.delete(oldest);
+        }
+      }
+      this.resourceOrder.push(resource);
+    }
     const entries = this.writes.get(resource) ?? [];
     entries.push(entry);
-    // Evict oldest entries when over capacity
+    // Evict oldest entries when over per-resource capacity
     if (entries.length > this.maxEntries) {
       entries.splice(0, entries.length - this.maxEntries);
     }
@@ -224,5 +241,6 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   clear(): void {
     this.writes.clear();
     this.latest.clear();
+    this.resourceOrder.length = 0;
   }
 }

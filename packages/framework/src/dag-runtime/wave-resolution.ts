@@ -77,7 +77,8 @@ export const handleWaveDone = (
   ctx: DagMachineContext,
   routingDecisions?: ReadonlyMap<NodeId, import("./conditional.js").Decision>,
 ): WaveDoneResult => {
-  const newOutputs = new Map([...ctx.outputs, ...outputs]);
+  const newOutputs = new Map(ctx.outputs);
+  for (const [k, v] of outputs) newOutputs.set(k, v);
 
   // Expand `activeNodeIds` along guarded out-edges. Prefer the executor's
   // precomputed decisions to avoid re-evaluating the same predicates twice

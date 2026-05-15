@@ -11,19 +11,12 @@
 import { match } from "ts-pattern";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import type { ObserverEvent } from "../types/events.js";
-import type { Observer } from "../observer/observer.js";
 import type { Witness } from "../types/freshness.js";
 import type { DagMachineContext } from "./types.js";
 import { type FreshnessIndex } from "./freshness-check.js";
-import { dispatchEvent } from "../observer/buffered.js";
 import { fwLogger } from "../logger.js";
-
-const emit = (ctx: NodeContext, event: ObserverEvent): void => {
-  if (ctx.observer) {
-    dispatchEvent(ctx.observer as Observer, event);
-  }
-};
+import { buildNodeInput } from "../shared/build-input.js";
+import { emit } from "./emit.js";
 
 export const emitFreshnessWitnessEvents = async (
   waveNodeIds: readonly NodeId[],
@@ -35,7 +28,7 @@ export const emitFreshnessWitnessEvents = async (
   nowFn: () => number,
   freshnessIndex: FreshnessIndex,
   skippedNodeIds: ReadonlySet<NodeId>,
-  witnessAccumulator?: Witness[],
+  witnessAccumulator?: Map<string, Witness>,
 ): Promise<void> => {
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
@@ -66,7 +59,7 @@ export const emitFreshnessWitnessEvents = async (
             capturedAtMs: nowFn(),
             timestamp: stamp(),
           });
-          witnessAccumulator?.push(witness);
+          witnessAccumulator?.set(witness.resource, witness);
         } catch (e) {
           fwLogger().warn(
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
@@ -76,22 +69,11 @@ export const emitFreshnessWitnessEvents = async (
       .with({ kind: "writes" }, async () => {
         if (!nodeDef.extractConditionedOn || !nodeDef.extractNewWitness) return;
 
-        // Step 1: Rebuild the node's input (framework invariant — should not fail)
+        // Step 1: Rebuild the node's input via the shared helper
         let nodeInput: unknown;
         try {
           const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
-          const { required, optional } = incoming;
-          if (optional.length > 0) {
-            nodeInput = Object.fromEntries(
-              [...required, ...optional].map((d) => [d, priorOutputs.get(d as NodeId)]),
-            );
-          } else if (required.length === 0) {
-            nodeInput = machineCtx.initialInput;
-          } else if (required.length === 1) {
-            nodeInput = priorOutputs.get(required[0] as NodeId);
-          } else {
-            nodeInput = Object.fromEntries(required.map((d) => [d, priorOutputs.get(d as NodeId)]));
-          }
+          nodeInput = buildNodeInput(machineCtx.initialInput, priorOutputs, incoming);
         } catch (e) {
           const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${e instanceof Error ? e.message : e}`;
           fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);

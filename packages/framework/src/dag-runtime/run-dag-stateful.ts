@@ -8,8 +8,8 @@
 // Add new behaviour to the matching helper, not here.
 
 import { match } from "ts-pattern";
-import type { JobLike, RunOptions } from "../state-machine/types.js";
-import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
+import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
+import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../types/dag.js";
@@ -33,9 +33,12 @@ import type { FreshnessIndex } from "./freshness-check.js";
 // ---------------------------------------------------------------------------
 
 export interface DagRunOpts
-  extends Omit<RunOptions<DagPhase, DagEvent, DagMachineContext>, "errorEventOf"> {
-  /** Provide a durable job backend (BullMQ, etc.). Falls back to in-memory when omitted. */
-  readonly jobLike?: JobLike<DagPhase, unknown, DagMachineContext>;
+  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf"> {
+  /** Provide a durable job backend (BullMQ, etc.). Falls back to in-memory when omitted.
+   * Typed against `DagMachineContextPersisted` — the serialization-safe subset.
+   * The runtime re-injects live DAG-derived fields (closures, schemas) on read.
+   */
+  readonly jobLike?: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
   /**
    * Human-review hook. Called when the DAG enters `awaiting-human`.
    * The resolved action is delivered to the machine as `human-responded`.
@@ -197,7 +200,7 @@ export const runDagStateful = async <I, O>(
       opts?.onTrace?.(t);
     };
 
-    const runOpts: RunOptions<DagPhase, DagEvent, DagMachineContext> = {
+    const runOpts: KernelRunOpts<DagPhase, DagEvent, DagMachineContext> = {
       beforeExecute: opts?.beforeExecute,
       classifyError: opts?.classifyError,
       onTrace,
@@ -219,7 +222,7 @@ export const runDagStateful = async <I, O>(
               dag,
               input,
               s.output,
-              context.outputs as unknown as Map<string, unknown>,
+              context.outputs,
               nodeCtx,
               meta,
               emitRunEnd,
@@ -257,12 +260,25 @@ export const runDagStateful = async <I, O>(
         )
         .exhaustive();
     } catch (e) {
-      // runStateMachine throws on terminal-failed (FR-007); also propagate beforeExecute abort.
-      // The failed state is NOT checkpointed (FR-005), so we capture it via onTrace above.
+      // The kernel throws on terminal-failed (FR-007) and beforeExecute abort.
+      // Split handling: abort gets `kind: "aborted"`, terminal-failed uses the
+      // structured error captured via onTrace (synchronous, always populated
+      // before the throw).
       const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
-      const error: FrameworkError = lastFailedState !== undefined
-        ? lastFailedState.error
-        : { kind: "node-crash", nodeId: EXECUTOR_NODE_ID, retriability: isAbort ? "non-retriable" : "retriable", message: e instanceof Error ? e.message : String(e) };
+      if (isAbort) {
+        const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
+        closeRootSpan(rootSpan, { kind: "error", error });
+        emitRunEnd("error");
+        return err(error);
+      }
+      // Terminal-failed: onTrace fires synchronously before the throw, so
+      // lastFailedState is guaranteed populated here.
+      const error: FrameworkError = lastFailedState?.error ?? {
+        kind: "node-crash",
+        nodeId: EXECUTOR_NODE_ID,
+        retriability: "retriable",
+        message: e instanceof Error ? e.message : String(e),
+      };
       closeRootSpan(rootSpan, { kind: "error", error });
       emitRunEnd("error");
       return err(error);

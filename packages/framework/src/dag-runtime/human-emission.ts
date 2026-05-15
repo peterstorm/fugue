@@ -7,20 +7,13 @@ import { match } from "ts-pattern";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import type { HumanAction } from "./types.js";
-import type { ObserverEvent, HumanActionDetailed } from "../types/events.js";
-import type { Observer } from "../observer/observer.js";
+import type { HumanActionDetailed } from "../types/events.js";
 import type { Confidence } from "../types/confidence.js";
 import type { SideEffectKind } from "../types/side-effects.js";
 import type { Witness } from "../types/freshness.js";
 import { computeJsonPatch } from "../shared/json-patch.js";
-import { dispatchEvent } from "../observer/buffered.js";
 import { fwLogger } from "../logger.js";
-
-const emit = (ctx: NodeContext, event: ObserverEvent): void => {
-  if (ctx.observer) {
-    dispatchEvent(ctx.observer as Observer, event);
-  }
-};
+import { emit } from "./emit.js";
 
 /**
  * Translate a DAG-layer `HumanAction` into the detailed observer-event

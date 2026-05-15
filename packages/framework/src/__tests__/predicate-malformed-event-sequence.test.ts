@@ -98,7 +98,7 @@ describe("predicate-malformed — caught at defineDag time", () => {
 });
 
 describe("predicate-malformed — runtime check throws when predicate check() throws", () => {
-  it("throwing check function records errorKind: 'threw' and falls through to default", async () => {
+  it("throwing check function records reason: 'threw' and falls through to default", async () => {
     const mkCtx = (observer: RecordingObserver): NodeContext => ({
       runId: "threw-run" as RunId,
       dagId: "threw-dag" as DagId,
@@ -141,15 +141,13 @@ describe("predicate-malformed — runtime check throws when predicate check() th
     const observer = new RecordingObserver();
     const result = await runDagStateful<unknown, string>(dag, null, mkCtx(observer));
 
-    // Default branch fires because the throwing predicate is recorded as non-match
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toBe("B");
-
-    const decided = observer.events.find((e) => e.type === "route-decided");
-    if (decided?.type === "route-decided") {
-      expect(decided.defaultTaken).toBe(true);
-      expect(decided.evidence.predicateResults[0]?.errorKind).toBe("threw");
-      expect(decided.evidence.predicateResults[0]?.matched).toBe(false);
+    // A throwing predicate is now treated as predicate-malformed (programming error)
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("predicate-malformed");
+      if (result.error.kind === "predicate-malformed") {
+        expect(result.error.message).toContain("threw an exception");
+      }
     }
   });
 });

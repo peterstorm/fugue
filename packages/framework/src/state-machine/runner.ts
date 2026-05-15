@@ -2,7 +2,7 @@
 // FR-004, FR-005, FR-006, FR-007, FR-011, FR-012
 
 import { createHash } from "node:crypto";
-import type { Machine, Executor, JobLike, RunOptions } from "./types.js";
+import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";
 import { fwLogger } from "../logger.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
@@ -52,7 +52,7 @@ export const runStateMachine = async <S, E, C>(
   job: JobLike<S, E, C>,
   machine: Machine<S, E, C>,
   executor: Executor<S, E, C>,
-  opts: RunOptions<S, E, C>,
+  opts: KernelRunOpts<S, E, C>,
 ): Promise<{ state: S; context: C }> => {
   const classify = opts.classifyError ?? defaultClassifyError;
   const nowFn = opts.now ?? Date.now;

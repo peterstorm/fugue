@@ -25,6 +25,7 @@ export type {
 } from "./spans.js";
 export { AnthropicLlmClient } from "./anthropic-client.js";
 export { OpenAILlmClient } from "./openai-client.js";
+export type { OpenAILlmClientOpts } from "./openai-client.js";
 export { FakeLlmClient } from "./fake-client.js";
 export type {
   FakeResponseProvider,

@@ -179,6 +179,37 @@ export const validateDagShape = (
     );
   }
 
+  // Freshness extractor consistency: writes nodes that declare extractNewWitness
+  // must also have extractConditionedOn (partial config is a bug). Reads nodes
+  // without extractWitness simply opt out of freshness tracking (valid for
+  // non-freshness-participating fetch nodes).
+  for (const [, node] of entries) {
+    if (
+      node.sideEffects.kind === "writes" &&
+      node.extractNewWitness &&
+      !node.extractConditionedOn
+    ) {
+      return err(
+        validationErr(
+          node.id,
+          `Node '${node.id}' declares extractNewWitness but is missing extractConditionedOn`,
+        ),
+      );
+    }
+    if (
+      node.sideEffects.kind === "writes" &&
+      node.extractConditionedOn &&
+      !node.extractNewWitness
+    ) {
+      return err(
+        validationErr(
+          node.id,
+          `Node '${node.id}' declares extractConditionedOn but is missing extractNewWitness`,
+        ),
+      );
+    }
+  }
+
   if (input.outputNodeId !== undefined) {
     const incomingAny = new Map<string, EdgeDef[]>();
     for (const id of nodeIds) incomingAny.set(id, []);

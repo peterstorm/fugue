@@ -120,11 +120,12 @@ export type DagEvent =
   | { readonly type: "ERROR"; readonly retriable: boolean; readonly error: string };
 
 // ---------------------------------------------------------------------------
-// DagMachineContext — immutable context threaded through the machine
+// DagMachineContextPersisted — the plain-data subset safe for serialization.
+// Does NOT contain closures (run functions, Zod schemas, predicate functions).
+// `DagMachineContext` extends this with live DAG-derived fields.
 // ---------------------------------------------------------------------------
 
-export interface DagMachineContext {
-  readonly dag: DagDef;
+export interface DagMachineContextPersisted {
   readonly waves: readonly (readonly NodeId[])[];
   readonly outputs: ReadonlyMap<NodeId, unknown>;
   readonly retries: ReadonlyMap<NodeId, number>;
@@ -136,6 +137,14 @@ export interface DagMachineContext {
    * in `outputs` and never get dispatched.
    */
   readonly activeNodeIds: ReadonlySet<NodeId>;
+}
+
+// ---------------------------------------------------------------------------
+// DagMachineContext — full runtime context with live DAG-derived fields.
+// ---------------------------------------------------------------------------
+
+export interface DagMachineContext extends DagMachineContextPersisted {
+  readonly dag: DagDef;
   /**
    * Precomputed `{ required, optional }` source partition per node, derived
    * from the edges at compile time. Used by `runNode` to assemble `nodeInput`

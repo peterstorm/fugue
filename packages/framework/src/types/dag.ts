@@ -1,5 +1,5 @@
 import type { NodeDef } from "./node.js";
-import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
+import type { EvalJudgeNodeDef } from "./eval-judge.js";
 import type {
   NodesRecord,
   OutputsByNodeId,
@@ -24,7 +24,7 @@ import { meetsConfidence } from "./confidence.js";
  * When `minConfidence` is set, the framework short-circuits: if the
  * upstream confidence bucket is below `minConfidence` (per
  * `CONFIDENCE_ORDER`), the predicate is recorded as `{ matched: false,
- * errorKind: "below-min-confidence" }` and the check function is never
+ * reason: "below-min-confidence" }` and the check function is never
  * called.
  *
  * @see RouteEvidence for how predicate results are recorded.
@@ -40,7 +40,7 @@ export interface Predicate<T> {
  *
  * Returns a result record suitable for inclusion in `RouteEvidence`.
  * The function is total — it catches exceptions from `check` and records
- * them as `errorKind: "threw"`.
+ * them as `reason: "threw"`.
  */
 export const evaluatePredicate = <T>(
   pred: Predicate<T>,
@@ -50,7 +50,7 @@ export const evaluatePredicate = <T>(
   readonly predicateLabel: string;
   readonly matched: boolean;
   readonly evaluatedConfidence: Confidence | null;
-  readonly errorKind?: "malformed" | "threw" | "below-min-confidence";
+  readonly reason?: "malformed" | "threw" | "below-min-confidence";
 } => {
   // Gate on minConfidence before calling check
   if (pred.minConfidence !== undefined) {
@@ -59,7 +59,7 @@ export const evaluatePredicate = <T>(
         predicateLabel: pred.label,
         matched: false,
         evaluatedConfidence: confidence,
-        errorKind: "below-min-confidence",
+        reason: "below-min-confidence",
       };
     }
   }
@@ -76,7 +76,7 @@ export const evaluatePredicate = <T>(
       predicateLabel: pred.label,
       matched: false,
       evaluatedConfidence: confidence,
-      errorKind: "threw",
+      reason: "threw",
     };
   }
 };

@@ -25,7 +25,11 @@ export const mapErr = <T, E, F>(
   fn: (error: E) => F,
 ): Result<T, F> => (r.ok ? r : err(fn(r.error)));
 
-/** @deprecated Prefer `unwrapOr`, `fold`, or explicit `isOk`/`isErr` checks. Throws on Err. */
+/**
+ * Extract the Ok value or throw. Not exported from the public barrel —
+ * prefer `unwrapOr`, `fold`, or explicit `isOk`/`isErr` checks.
+ * Available via direct path import for tests.
+ */
 export const unwrap = <T, E>(r: Result<T, E>): T => {
   if (r.ok) return r.value;
   throw new Error(`Called unwrap on Err: ${String(r.error)}`);

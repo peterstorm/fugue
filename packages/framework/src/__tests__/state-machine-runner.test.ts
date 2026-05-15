@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { runStateMachine } from "../state-machine/runner.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
-import type { Machine, Executor, RunOptions, TraceEvent } from "../state-machine/types.js";
+import type { Machine, Executor, KernelRunOpts, TraceEvent } from "../state-machine/types.js";
 
 // ---------------------------------------------------------------------------
 // Simple 3-state machine: pending -> running -> succeeded | failed
@@ -124,7 +124,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     const result = await runStateMachine(job, simpleMachine, executor, opts);
     expect(result.state.kind).toBe("succeeded");
     expect(call).toBe(2);
@@ -137,7 +137,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await runStateMachine(job, simpleMachine, executor, opts);
 
     // Final checkpointed state should be succeeded
@@ -153,7 +153,7 @@ describe("runStateMachine", () => {
       reason: "oops",
     });
 
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await expect(runStateMachine(job, simpleMachine, executor, opts)).rejects.toThrow();
 
     // Checkpointed state should remain "running" (before the failure)
@@ -172,7 +172,7 @@ describe("runStateMachine", () => {
     // Progress starts at 0; running state has progress 50 (but we start from running)
     // After running->failed, progress should NOT be updated to failed's value (0)
     // Since we start from running and there's no prior updateProgress call, progress stays at 0
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await expect(runStateMachine(job, simpleMachine, executor, opts)).rejects.toThrow();
 
     // updateProgress must NOT have been called for the failed transition
@@ -186,7 +186,7 @@ describe("runStateMachine", () => {
       reason: "boom",
     });
 
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await expect(runStateMachine(job, simpleMachine, executor, opts)).rejects.toThrow(
       /failed terminal state/i,
     );
@@ -198,7 +198,7 @@ describe("runStateMachine", () => {
       throw new Error("network timeout");
     };
 
-    const opts: RunOptions<State, Event, Context> = {
+    const opts: KernelRunOpts<State, Event, Context> = {
       errorEventOf: (c) => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
     };
 
@@ -226,7 +226,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<RetryState, RetryEvent, RetryContext> = {
+    const opts: KernelRunOpts<RetryState, RetryEvent, RetryContext> = {
       errorEventOf: (c) => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
     };
 
@@ -240,7 +240,7 @@ describe("runStateMachine", () => {
     const job = makeJob();
     const executor: Executor<State, Event, Context> = async () => ({ type: "START" });
 
-    const opts: RunOptions<State, Event, Context> = {
+    const opts: KernelRunOpts<State, Event, Context> = {
       errorEventOf: defaultErrorEventOf,
       beforeExecute: () => false,
     };
@@ -279,7 +279,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Event, Context> = {
+    const opts: KernelRunOpts<State, Event, Context> = {
       errorEventOf: defaultErrorEventOf,
       beforeExecute: () => true,
     };
@@ -325,7 +325,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<RetryState, RetryEvent, RetryContext> = {
+    const opts: KernelRunOpts<RetryState, RetryEvent, RetryContext> = {
       errorEventOf: (c) => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
       onTrace: (t) => traces.push(t),
     };
@@ -348,7 +348,7 @@ describe("runStateMachine", () => {
       return { type: "DONE" };
     };
 
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
     await runStateMachine(job, simpleMachine, executor, opts);
     expect(job.events).toHaveLength(2);
     expect((job.events[0].event as Event).type).toBe("START");
@@ -358,7 +358,7 @@ describe("runStateMachine", () => {
   it("resets retry counters on each invocation — fresh run does not inherit state (FR-011)", async () => {
     // Two separate invocations from same initial state; both must behave identically
     const initial = { state: { kind: "pending" } as State, context: { count: 0 } };
-    const opts: RunOptions<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
+    const opts: KernelRunOpts<State, Event, Context> = { errorEventOf: defaultErrorEventOf };
 
     const results: string[] = [];
     const traceOutcomes: Array<string[]> = [];
@@ -448,7 +448,7 @@ describe("runStateMachine", () => {
         return { type: "DONE" };
       };
 
-      const opts: RunOptions<State, Event, Context> = {
+      const opts: KernelRunOpts<State, Event, Context> = {
         errorEventOf: defaultErrorEventOf,
       };
 

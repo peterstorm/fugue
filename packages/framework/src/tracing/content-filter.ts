@@ -17,11 +17,9 @@
 // Type
 // ---------------------------------------------------------------------------
 
-/**
- * A function that scrubs/transforms content before it is written to a span.
- * Must be pure and side-effect free (called in hot path).
- */
-export type ContentFilter = (content: string) => string;
+// Re-export the type from its canonical home in `types/`.
+export type { ContentFilter } from "../types/content-filter.js";
+import type { ContentFilter } from "../types/content-filter.js";
 
 /** Pass-through filter — includes content unmodified. */
 export const IDENTITY_FILTER: ContentFilter = (s) => s;

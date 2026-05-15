@@ -12,7 +12,7 @@ import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { JobLike } from "../state-machine/types.js";
-import type { DagPhase, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
+import type { DagPhase, DagMachineContextPersisted, HumanAction } from "../dag-runtime/types.js";
 import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
 import { type Result, err } from "../types/result.js";
 import { runDagStateful, type DagRunOpts } from "../dag-runtime/run-dag-stateful.js";
@@ -35,7 +35,7 @@ export interface RunOptions {
    * `JobLike` is used (runtime semantics preserved; durability across worker
    * crashes is not).
    */
-  readonly jobLike?: JobLike<DagPhase, unknown, DagMachineContext>;
+  readonly jobLike?: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
   /**
    * Human-review hook — required when any node in the DAG declares
    * `humanReview`; rejected otherwise.

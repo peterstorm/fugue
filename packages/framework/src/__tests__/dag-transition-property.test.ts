@@ -191,4 +191,22 @@ describe("dagTransition — property: never throws", () => {
       { numRuns: 500 },
     );
   });
+
+  it("abort from any non-terminal phase yields failed+aborted", () => {
+    const arbNonTerminalPhase = arbDagPhase.filter(
+      (p) => p.kind !== "succeeded" && p.kind !== "failed",
+    );
+    fc.assert(
+      fc.property(arbNonTerminalPhase, (phase) => {
+        const abortEvent: DagEvent = { type: "abort", reason: "test-abort" };
+        const result = dagTransition(phase, abortEvent, minimalCtx);
+        return (
+          result.state.kind === "failed" &&
+          result.state.error.kind === "aborted" &&
+          (result.state.error as { reason: string }).reason === "test-abort"
+        );
+      }),
+      { numRuns: 1000 },
+    );
+  });
 });

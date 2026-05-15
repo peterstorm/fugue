@@ -1,11 +1,11 @@
 import type { z } from "zod";
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
-import type { Observer } from "../observer/observer.js";
+import type { Observer } from "./observer.js";
 import type { LlmClient } from "./llm.js";
-import type { Tracer } from "../tracing/tracer.js";
+import type { Tracer } from "./tracer.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
-import type { ContentFilter } from "../tracing/content-filter.js";
+import type { ContentFilter } from "./content-filter.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
 import type { Witness } from "./freshness.js";

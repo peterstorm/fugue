@@ -14,7 +14,6 @@ export {
   andThen,
   map,
   mapErr,
-  unwrap,
   unwrapOr,
   fold,
 } from "./result.js";
@@ -60,7 +59,7 @@ export { CONFIDENCE_ORDER, meetsConfidence } from "./confidence.js";
 export type { WitnessKind, Witness } from "./freshness.js";
 
 // ── JSON Patch ────────────────────────────────────────────────────────────
-export type { JsonPatchOp, JsonPatch } from "../shared/json-patch.js";
+export type { JsonPatchOp, JsonPatch } from "./json-patch.js";
 export { computeJsonPatch } from "../shared/json-patch.js";
 
 // ── Node authoring ────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ function isFrameworkError(value: unknown): value is FrameworkError {
     typeof value === "object" &&
     value !== null &&
     "kind" in value &&
-    typeof (value as any).kind === "string"
+    typeof (value as Record<string, unknown>).kind === "string"
   );
 }
 

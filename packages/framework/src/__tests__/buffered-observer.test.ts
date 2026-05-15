@@ -90,15 +90,14 @@ describe("BufferedObserver", () => {
     const buffered = new BufferedObserver(inner, neverFlush);
 
     buffered.onRunStart(runStart("r1"));
-    buffered.onNodeEnd(nodeEnd("n1", { cost_usd: 0.3 }, "r1"));
+    buffered.onNodeEnd(nodeEnd("n1", {}, "r1"));
     buffered.onRunEnd(runEnd("ok", "r1"));
 
     buffered.onRunStart(runStart("r2"));
-    buffered.onNodeEnd(nodeEnd("n1", { cost_usd: 0.7 }, "r2"));
+    buffered.onNodeEnd(nodeEnd("n1", {}, "r2"));
     buffered.onRunEnd(runEnd("ok", "r2"));
 
     expect(buffered.aggregates.runCount).toBe(2);
-    expect(buffered.aggregates.totalCostUsd).toBeCloseTo(1.0);
   });
 });
 
@@ -107,12 +106,12 @@ describe("computeRunSummary", () => {
     const events: ObserverEvent[] = [
       runStart(),
       nodeStart("n1"),
-      nodeEnd("n1", { cache_hit: true, cost_usd: 0.1 }),
+      nodeEnd("n1"),
       nodeStart("n2"),
-      nodeEnd("n2", { cache_hit: false, cost_usd: 0.2 }),
+      nodeEnd("n2"),
       // n1 retried
       nodeStart("n1"),
-      nodeEnd("n1", { cache_hit: true, cost_usd: 0.05 }),
+      nodeEnd("n1"),
     ];
 
     const summary = computeRunSummary(events, runEnd("ok"));
@@ -121,7 +120,5 @@ describe("computeRunSummary", () => {
     expect(summary.totalDuration).toBe(200);
     expect(summary.nodeCount).toBe(2); // n1 and n2
     expect(summary.retryCount).toBe(1); // n1 started twice
-    expect(summary.cacheHitCount).toBe(2); // two cache_hit=true
-    expect(summary.totalCostUsd).toBeCloseTo(0.35);
   });
 });

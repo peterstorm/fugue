@@ -167,7 +167,7 @@ export class TailSamplingProcessor implements SpanProcessor {
     let totalCostUsd = 0;
     for (const span of buffer.spans) {
       nameCount.set(span.name, (nameCount.get(span.name) ?? 0) + 1);
-      // Read cost from standard flat attribute
+      // Read cost from standard flat attribute set by enrichLlmSpan
       const cost = span.attributes[AI_LLM_COST_USD];
       if (typeof cost === "number") {
         totalCostUsd += cost;
@@ -192,7 +192,6 @@ export class TailSamplingProcessor implements SpanProcessor {
       totalDuration: endMs - startMs,
       nodeCount: buffer.spans.length,
       retryCount,
-      cacheHitCount: 0,
       totalCostUsd,
       freshnessViolationCount: 0,
       humanInterventionCount: 0,

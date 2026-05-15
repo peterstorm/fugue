@@ -5,7 +5,7 @@ import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
 import type { Witness } from "./freshness.js";
 import type { SideEffectKind } from "./side-effects.js";
-import type { JsonPatch } from "../shared/json-patch.js";
+import type { JsonPatch } from "./json-patch.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
@@ -102,7 +102,7 @@ export interface RouteEvidence {
     readonly predicateLabel: string;
     readonly matched: boolean;
     readonly evaluatedConfidence: Confidence | null;
-    readonly errorKind?: "malformed" | "threw" | "below-min-confidence";
+    readonly reason?: "malformed" | "threw" | "below-min-confidence";
   }>;
   readonly decidedAtMs: number;
 }

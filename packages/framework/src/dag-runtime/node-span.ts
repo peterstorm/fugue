@@ -17,6 +17,7 @@ import {
   NODE_KIND_TO_SPAN_TYPE,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
+import { fwLogger } from "../logger.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
 
 /** Per-node guardrail outcome produced by `withNodeSpan`. */
@@ -99,9 +100,10 @@ export const withNodeSpan = async (
     try {
       const idemKey = sideEffects.idempotencyKey(input);
       attrs[AI_NODE_IDEMPOTENCY_KEY] = idemKey;
-    } catch {
-      // Idempotency key evaluation failure is non-fatal — log would be ideal
-      // but we don't have a logger here; the attribute is simply absent.
+    } catch (e) {
+      fwLogger().warn(
+        `[withNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${e instanceof Error ? (e as Error).message : e}`,
+      );
     }
   }
 

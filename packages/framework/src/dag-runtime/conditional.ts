@@ -113,6 +113,17 @@ export const decideRoute = (
     }
   }
 
+  // A predicate that throws is a programming error — surface as malformed
+  // rather than silently falling to the default edge.
+  const threwResult = predicateResults.find(r => r.reason === "threw");
+  if (threwResult) {
+    return {
+      kind: "predicate-malformed",
+      fromNodeId,
+      message: `Predicate '${threwResult.predicateLabel}' threw an exception`,
+    };
+  }
+
   if (matchedEdge !== null) {
     const pruned = new Set<NodeId>();
     for (const g of guarded) if (g.to !== matchedEdge.to) pruned.add(g.to);

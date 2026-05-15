@@ -8,15 +8,13 @@ import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { ObserverEvent } from "../types/events.js";
-import type { Observer } from "../observer/observer.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { runNodeShared } from "./run-node.js";
 import { type NodeSpanOutcome } from "./node-span.js";
+import { emit } from "./emit.js";
 import { applyJitter } from "../shared/jitter.js";
-import { dispatchEvent } from "../observer/buffered.js";
 import { decideRoute } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
@@ -29,16 +27,6 @@ import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
 // ---------------------------------------------------------------------------
-// Observer helper
-// ---------------------------------------------------------------------------
-
-const emit = (ctx: NodeContext, event: ObserverEvent): void => {
-  if (ctx.observer) {
-    dispatchEvent(ctx.observer as Observer, event);
-  }
-};
-
-// ---------------------------------------------------------------------------
 // Backoff + jitter (FR-027)
 // ---------------------------------------------------------------------------
 
@@ -47,8 +35,11 @@ const DEFAULT_JITTER_RATIO = 0.2;
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
     if (signal?.aborted) { resolve(); return; }
-    const timer = setTimeout(resolve, ms);
     const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 
@@ -238,13 +229,16 @@ export const buildDagExecutor = (
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
   // Phase 4: Track captured witnesses for HumanInterventionEvent context.
-  // Accumulated as witness-captured events are emitted; read by the
-  // awaiting-human branch to populate context.priorWitnesses.
+  // Keyed by resource so only the latest witness per resource is retained—
+  // prevents unbounded growth for long-running DAGs with many reads nodes.
   // Witnesses accumulate across all waves for the lifetime of the executor,
   // so a human gate in a later wave sees all prior reads.
-  // TODO: For long-running DAGs with many reads nodes, consider deduplicating
-  // by resource (keep latest per resource) or capping with a sliding window.
-  const capturedWitnesses: Witness[] = [];
+  const capturedWitnesses = new Map<string, Witness>();
+
+  const waveConfig: RunWaveConfig = {
+    dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex,
+    witnessAccumulator: capturedWitnesses,
+  };
 
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
@@ -268,13 +262,13 @@ export const buildDagExecutor = (
         // `machineCtx.outputs` short-circuit to a `node-skipped` event with
         // their cached value, so only the failed node (plus any sibling that
         // co-failed and is still absent from outputs) actually re-runs.
-        return runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex, capturedWitnesses);
+        return runWave(p.wave, machineCtx, waveConfig);
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex, capturedWitnesses))
+      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, waveConfig))
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
@@ -291,7 +285,7 @@ export const buildDagExecutor = (
             dag.id,
             nowFn,
             awaitStartMs,
-            capturedWitnesses,
+            [...capturedWitnesses.values()],
           );
         }
         return event;
@@ -317,7 +311,7 @@ export const buildDagExecutor = (
             dag.id,
             nowFn,
             awaitStartMs,
-            capturedWitnesses,
+            [...capturedWitnesses.values()],
           );
         }
         return event;
@@ -337,21 +331,30 @@ export const buildDagExecutor = (
 };
 
 // ---------------------------------------------------------------------------
+// RunWaveConfig — configuration object for runWave to reduce parameter count
+// ---------------------------------------------------------------------------
+
+interface RunWaveConfig {
+  readonly dag: DagDef;
+  readonly nodeMap: Map<NodeId, NodeDef<unknown, unknown>>;
+  readonly nodeCtx: ValidatedNodeContext;
+  readonly recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
+  readonly resumeCheckpoint?: Map<string, unknown>;
+  readonly nowFn: () => number;
+  readonly freshnessIndex: FreshnessIndex;
+  readonly witnessAccumulator?: Map<string, Witness>;
+}
+
+// ---------------------------------------------------------------------------
 // runWave — run all nodes in a wave concurrently; return wave-done or node-failed
 // ---------------------------------------------------------------------------
 
 const runWave = async (
   waveIndex: number,
   machineCtx: DagMachineContext,
-  dag: DagDef,
-  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
-  nodeCtx: ValidatedNodeContext,
-  recordOutcomes: ((outcomes: readonly NodeSpanOutcome[]) => void) | undefined,
-  resumeCheckpoint: Map<string, unknown> | undefined,
-  nowFn: () => number,
-  freshnessIndex: FreshnessIndex,
-  witnessAccumulator?: Witness[],
+  config: RunWaveConfig,
 ): Promise<DagEvent> => {
+  const { dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator } = config;
   const stamp = (): Date => new Date(nowFn());
   // Filter to active nodes only. Pruned nodes are silently skipped — they
   // did not fire on this routing decision; downstream consumers that list
@@ -527,9 +530,18 @@ const runWave = async (
       try {
         upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
       } catch (e) {
-        fwLogger().warn(
-          `[runWave] confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
-        );
+        const message = `confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
+        fwLogger().warn(`[runWave] ${message}`);
+        emit(nodeCtx, {
+          type: "node-error",
+          runId: nodeCtx.runId,
+          dagId: dag.id,
+          nodeId,
+          sideEffects: nodeMap.get(nodeId)?.sideEffects,
+          timestamp: stamp(),
+          error: message,
+          frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message },
+        });
         upstreamConfidence = null;
       }
     }

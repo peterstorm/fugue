@@ -23,11 +23,19 @@ describe("createInMemoryJob — appendEvent dedup", () => {
     expect(job.events).toHaveLength(1);
   });
 
-  it("a different dedupKey resets the dedup window (only the most recent matters)", async () => {
+  it("dedup tracks all seen keys, not just the most recent", async () => {
     const job = createInMemoryJob({ state: "x", context: {} });
     await job.appendEvent({ type: "A" }, "k1");
     await job.appendEvent({ type: "B" }, "k2");
-    await job.appendEvent({ type: "A" }, "k1"); // older key — accepted
+    await job.appendEvent({ type: "A" }, "k1"); // already seen — deduped
+    expect(job.events).toHaveLength(2);
+  });
+
+  it("a genuinely new key after multiple appends is still accepted", async () => {
+    const job = createInMemoryJob({ state: "x", context: {} });
+    await job.appendEvent({ type: "A" }, "k1");
+    await job.appendEvent({ type: "B" }, "k2");
+    await job.appendEvent({ type: "C" }, "k3"); // new key — accepted
     expect(job.events).toHaveLength(3);
   });
 });

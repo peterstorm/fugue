@@ -19,6 +19,7 @@ import {
   type ToolCall,
   type ToolDispatchResult,
 } from "./tool-dispatch.js";
+import { zodToJsonSchema } from "./zod-schema.js";
 import {
   withLlmSpan,
   setLlmUsageAttributes,
@@ -33,12 +34,12 @@ type AnthropicResponse = Anthropic.Message;
 
 /** Append a JSON-Schema instruction to the system prompt so free-form text replies can be parsed. */
 const appendSchemaInstruction = (system: string, schema: z.ZodType<any>): string => {
-  const { $schema: _, ...json } = z.toJSONSchema(schema as any) as Record<string, unknown>;
+  const json = zodToJsonSchema(schema);
   return `${system}\n\nWhen you have the final answer, respond with ONLY a JSON object matching this schema (no prose, no code fences):\n${JSON.stringify(json)}`;
 };
 
 const toolToAnthropicSpec = (tool: ToolDef<any, any>): Anthropic.Tool => {
-  const { $schema: _, ...json } = z.toJSONSchema(tool.inputSchema as any) as Record<string, unknown>;
+  const json = zodToJsonSchema(tool.inputSchema);
   return {
     name: tool.name,
     description: tool.description,
@@ -132,8 +133,7 @@ export class AnthropicLlmClient implements LlmClient {
     }
 
     try {
-      const jsonSchema = z.toJSONSchema(req.schema as any) as Record<string, unknown>;
-      delete jsonSchema.$schema;
+      const jsonSchema = zodToJsonSchema(req.schema);
       const toolDef = {
         name: "structured_output",
         description: "Return the structured output",
@@ -150,7 +150,7 @@ export class AnthropicLlmClient implements LlmClient {
       };
 
       const response = await withLlmSpan(
-        null,
+        req.tracer ?? null,
         { provider: "anthropic", model: req.model, operation: "chat" },
         async () => {
           const r = await this.anthropic.messages.create(params, { signal: controller.signal });

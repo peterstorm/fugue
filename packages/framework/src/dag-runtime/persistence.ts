@@ -1,14 +1,16 @@
 // JobLike persistence adapter for DagMachineContext.
 //
-// DagMachineContext carries two fields that must NOT round-trip through
-// durable storage:
-//   - `dag`: contains `run` closures and Zod schemas that JSON-strip to `{}`
-//   - `incomingByNode`: derived from `dag.edges`, redundant with `dag`
+// `DagMachineContext` extends `DagMachineContextPersisted` with four
+// closure/derived fields that cannot survive JSON serialization:
+//   - `dag`: contains `run` closures and Zod schemas
+//   - `incomingByNode`: derived from `dag.edges`
+//   - `outgoingByNode`: contains Predicate functions on conditional edges
+//   - `nodeById`: contains `run` closures and Zod schemas
 //
-// `wrapDagJobLike` strips both fields on `updateData` and re-injects them
-// from the live call-site values on `data` read. The persisted snapshot
-// stays compact and schema-stable; transition-time code sees a fully-formed
-// context.
+// `wrapDagJobLike` accepts the inner `JobLike` typed against the persisted
+// shape and returns a wrapped `JobLike` typed against the full runtime shape.
+// On `updateData`, closure fields are stripped (type-safe via `DagMachineContextPersisted`).
+// On `get data()`, they are re-injected from the live DAG.
 //
 // On top of the strip/re-inject behaviour, the wrapper stamps the live DAG's
 // `dagFingerprint` onto the persisted context. On resume, the wrapper's
@@ -18,28 +20,23 @@
 // behaviour (ADR 0024 / pass-4 plan §4.6).
 
 import type { JobLike } from "../state-machine/types.js";
-import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
+import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { dagFingerprint } from "../checkpoint/fingerprint.js";
-import { computeIncomingByNode } from "./conditional.js";
+import { computeIncomingByNode, computeOutgoingByNode } from "./conditional.js";
 
 /**
- * The closure-only fields on `DagMachineContext` that are intentionally NOT
- * persisted by `JobLike` backends — `dag` carries Zod schemas and function
- * predicates, `incomingByNode` is recomputed from edges. Both are re-injected
- * on read via `wrapDagJobLike.get data()` from the live values at the call site.
+ * The persisted shape plus an optional fingerprint stamp. This is the type
+ * that actually lives in the durable backend (BullMQ job data, Redis, etc.).
  *
  * `__dagFingerprint` is stamped by `wrapDagJobLike.updateData` and compared
- * on resume by `verifyDagFingerprint`. Absent on legacy/first-write snapshots —
+ * on resume by `verifyDagFingerprint`. Absent on first-write snapshots —
  * treated as "no prior fingerprint" rather than a mismatch.
  */
-export type PersistableDagMachineContext = Omit<
-  DagMachineContext,
-  "dag" | "incomingByNode"
-> & {
+export type PersistedDagContext = DagMachineContextPersisted & {
   readonly __dagFingerprint?: string;
 };
 
@@ -55,61 +52,71 @@ export interface WrappedDagJobLike {
 }
 
 /**
- * Strip the closure-bearing fields before handing state to the durable
- * backend. The explicit return type makes adding a new non-persistable field
- * to `DagMachineContext` a compile error here, rather than a silent strip.
- *
- * `__dagFingerprint` is added by `wrapDagJobLike.updateData`; this function
- * intentionally does not stamp it, so callers that bypass the wrapper get a
- * fingerprint-free snapshot and the legacy-resume code path applies.
+ * Extract the plain-data fields from a full `DagMachineContext`. The return
+ * type is `DagMachineContextPersisted` — no cast required because the
+ * interface relationship is structural (DagMachineContext extends it).
  */
 export const stripNonPersistable = (
   ctx: DagMachineContext,
-): PersistableDagMachineContext => {
-  const { dag: _dag, incomingByNode: _ibn, ...rest } = ctx;
-  return rest;
-};
+): DagMachineContextPersisted => ({
+  waves: ctx.waves,
+  outputs: ctx.outputs,
+  retries: ctx.retries,
+  initialInput: ctx.initialInput,
+  activeNodeIds: ctx.activeNodeIds,
+});
 
 /**
- * Wrap a caller-supplied `JobLike` so the persisted snapshot stays compact and
- * schema-stable. The internal type cast on the write side (Omit-then-cast-as-full)
- * is the inverse of the re-injection on read — they compose to identity from
- * the runner's perspective. The wrapper also stamps `__dagFingerprint` on
- * every persisted snapshot; pair with `verifyDagFingerprint()` at run start
- * to detect a redeployed topology mid-run.
+ * Wrap a caller-supplied `JobLike` (typed against the persisted shape) so the
+ * runner sees a fully-formed `DagMachineContext`. The wrapper:
+ *
+ *   - `get data()`: re-injects `dag`, `incomingByNode`, `outgoingByNode`,
+ *     `nodeById` from the live DAG onto the persisted fields.
+ *   - `updateData()`: strips closure fields and stamps `__dagFingerprint`.
+ *
+ * The inner `JobLike` is typed `DagMachineContextPersisted` — the actual
+ * shape that survives serialization. No double-casts.
  */
 export const wrapDagJobLike = (
-  inner: JobLike<DagPhase, unknown, DagMachineContext>,
+  inner: JobLike<DagPhase, unknown, DagMachineContextPersisted>,
   dag: DagDef,
   runId: RunId,
 ): WrappedDagJobLike => {
   const incomingByNode = computeIncomingByNode(dag);
+  const outgoingByNode = computeOutgoingByNode(dag);
+  const nodeById = new Map(dag.nodes.map((n) => [n.id, n]));
   const expectedFingerprint = dagFingerprint(dag);
+
+  // Cached result of `get data()` — invalidated on `updateData`.
+  let cachedData: { state: DagPhase; context: DagMachineContext } | null = null;
 
   const job: JobLike<DagPhase, unknown, DagMachineContext> = {
     get data(): { state: DagPhase; context: DagMachineContext } {
+      if (cachedData !== null) return cachedData;
       const raw = inner.data;
-      // Re-inject the live dag + incomingByNode. The persisted raw.context
-      // is intentionally missing them (post-strip); live values win. The
-      // `__dagFingerprint` field stays on the returned context so subsequent
-      // `updateData` calls re-stamp it deterministically.
-      return {
+      // Re-inject the live DAG-derived fields. The persisted raw.context
+      // is `DagMachineContextPersisted` — missing closures; live values win.
+      cachedData = {
         state: raw.state,
-        context: { ...raw.context, dag, incomingByNode },
+        context: {
+          ...raw.context,
+          dag,
+          incomingByNode,
+          outgoingByNode,
+          nodeById,
+        },
       };
+      return cachedData;
     },
     async updateData(d: { state: DagPhase; context: DagMachineContext }): Promise<void> {
-      // The inner `JobLike` is typed against the full `DagMachineContext`, but
-      // we deliberately persist the stripped form; the live `dag` + `incoming`
-      // are re-injected on read. The cast is the boundary between the typed
-      // strip and the inner adapter's wider type.
-      const persistable: PersistableDagMachineContext = {
+      cachedData = null; // invalidate cache
+      const persistable: PersistedDagContext = {
         ...stripNonPersistable(d.context),
         __dagFingerprint: expectedFingerprint,
       };
       await inner.updateData({
         state: d.state,
-        context: persistable as unknown as DagMachineContext,
+        context: persistable,
       });
     },
     updateProgress: (pct: number) => inner.updateProgress(pct),
@@ -120,11 +127,11 @@ export const wrapDagJobLike = (
   return {
     job,
     verifyDagFingerprint(): Result<void, FrameworkError> {
-      const rawContext = inner.data.context as unknown as PersistableDagMachineContext;
+      const rawContext = inner.data.context as PersistedDagContext;
       const actual = rawContext.__dagFingerprint;
-      // Absent fingerprint = legacy snapshot or first write on a fresh job —
-      // accept and let `updateData` stamp the current value on the next
-      // checkpoint. Only a stamped *and* divergent value is a mismatch.
+      // Absent fingerprint = first write on a fresh job — accept and let
+      // `updateData` stamp the current value on the next checkpoint. Only a
+      // stamped *and* divergent value is a mismatch.
       if (actual !== undefined && actual !== expectedFingerprint) {
         return err({
           kind: "checkpoint-version-mismatch",

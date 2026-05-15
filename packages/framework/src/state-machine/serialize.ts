@@ -4,12 +4,24 @@
 
 const MAP_TAG = "__map__";
 const SET_TAG = "__set__";
+const DATE_TAG = "__date__";
+const UNDEFINED_TAG = "__undefined__";
 
 type SerializedMap = { __map__: Array<[unknown, unknown]> };
 type SerializedSet = { __set__: unknown[] };
+type SerializedDate = { __date__: string };
+type SerializedUndefined = { __undefined__: true };
 
-/** Serialize a value to a plain JSON-safe object, preserving Map/Set. */
+/** Serialize a value to a plain JSON-safe object, preserving Map/Set/Date/undefined. */
 export const serializeValue = (value: unknown): unknown => {
+  if (value === undefined) {
+    return { [UNDEFINED_TAG]: true } satisfies SerializedUndefined;
+  }
+
+  if (value instanceof Date) {
+    return { [DATE_TAG]: value.toISOString() } satisfies SerializedDate;
+  }
+
   if (value instanceof Map) {
     const entries: Array<[unknown, unknown]> = [];
     for (const [k, v] of value.entries()) {
@@ -41,7 +53,7 @@ export const serializeValue = (value: unknown): unknown => {
   return value;
 };
 
-/** Deserialize a value produced by serializeValue, restoring Map/Set. */
+/** Deserialize a value produced by serializeValue, restoring Map/Set/Date/undefined. */
 export const deserializeValue = (value: unknown): unknown => {
   if (value === null || value === undefined) return value;
 
@@ -51,6 +63,16 @@ export const deserializeValue = (value: unknown): unknown => {
 
   if (typeof value === "object") {
     const obj = value as Record<string, unknown>;
+
+    // Detect serialized undefined
+    if (UNDEFINED_TAG in obj && obj[UNDEFINED_TAG] === true) {
+      return undefined;
+    }
+
+    // Detect serialized Date
+    if (DATE_TAG in obj && typeof obj[DATE_TAG] === "string") {
+      return new Date(obj[DATE_TAG] as string);
+    }
 
     // Detect serialized Map
     if (MAP_TAG in obj && Array.isArray(obj[MAP_TAG])) {

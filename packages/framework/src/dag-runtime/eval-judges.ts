@@ -21,11 +21,13 @@ import {
 import { type DagRunMeta } from "./node-span.js";
 import { closeRootSpan, outcomeFromMeta } from "./run-telemetry.js";
 
+import type { NodeId } from "../types/ids.js";
+
 export const runEvalJudges = async (
   judges: readonly EvalJudgeNodeDef[],
   dagInput: unknown,
   dagOutput: unknown,
-  nodeOutputs: Map<string, unknown>,
+  nodeOutputs: ReadonlyMap<NodeId, unknown>,
   ctx: NodeContext,
 ): Promise<EvalJudgeResult[]> => {
   return Promise.all(
@@ -95,7 +97,7 @@ export const finalizeRunWithJudges = async (
   dag: DagDef,
   input: unknown,
   output: unknown,
-  contextOutputs: Map<string, unknown>,
+  nodeOutputs: ReadonlyMap<NodeId, unknown>,
   nodeCtx: NodeContext,
   meta: DagRunMeta,
   emitRunEnd: (status: "ok" | "error") => void,
@@ -106,7 +108,7 @@ export const finalizeRunWithJudges = async (
       dag.evalJudges,
       input,
       output,
-      contextOutputs,
+      nodeOutputs,
       nodeCtx,
     );
     const evalJudgeFailed = evalJudgeResults.some((r) => !r.passed);

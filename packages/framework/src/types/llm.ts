@@ -49,6 +49,11 @@ export interface LlmRequest<O> {
    * to the right place in the DAG.
    */
   readonly nodeId: NodeId;
+  /**
+   * Optional tracer for LLM span creation. When omitted or `null`, no OTel
+   * span is created for this call. Prefer passing `ctx.tracer` when available.
+   */
+  readonly tracer?: import("../tracing/tracer.js").Tracer | null;
 }
 
 export interface LlmResponse<O> {

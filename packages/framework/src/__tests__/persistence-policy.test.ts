@@ -20,8 +20,7 @@ function makeSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     totalDuration: 100,
     nodeCount: 3,
     retryCount: 0,
-    cacheHitCount: 3,
-    totalCostUsd: 0.5,
+    totalCostUsd: 0,
     freshnessViolationCount: 0,
     humanInterventionCount: 0,
     routeDecisionCount: 0,
@@ -54,9 +53,9 @@ describe("PersistencePolicy", () => {
     expect(hadRetry().shouldFlush(makeSummary({ retryCount: 2 }))).toBe(true);
   });
 
-  it("coldCache returns true when cacheHitCount < nodeCount", () => {
-    expect(coldCache().shouldFlush(makeSummary({ nodeCount: 3, cacheHitCount: 3 }))).toBe(false);
-    expect(coldCache().shouldFlush(makeSummary({ nodeCount: 3, cacheHitCount: 1 }))).toBe(true);
+  it("coldCache is deprecated and always returns true", () => {
+    expect(coldCache().shouldFlush(makeSummary())).toBe(true);
+    expect(coldCache().shouldFlush(makeSummary({ nodeCount: 3 }))).toBe(true);
   });
 
   it("anyOf returns true if any sub-policy true", () => {
@@ -74,8 +73,8 @@ describe("PersistencePolicy", () => {
   });
 
   it("custom works with arbitrary function", () => {
-    const policy = custom((s) => s.totalCostUsd > 1.0);
-    expect(policy.shouldFlush(makeSummary({ totalCostUsd: 0.5 }))).toBe(false);
-    expect(policy.shouldFlush(makeSummary({ totalCostUsd: 2.0 }))).toBe(true);
+    const policy = custom((s) => s.nodeCount > 5);
+    expect(policy.shouldFlush(makeSummary({ nodeCount: 3 }))).toBe(false);
+    expect(policy.shouldFlush(makeSummary({ nodeCount: 10 }))).toBe(true);
   });
 });

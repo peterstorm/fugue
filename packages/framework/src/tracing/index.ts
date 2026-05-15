@@ -5,7 +5,36 @@
 
 export { enrichLlmSpan } from "./span-enrich.js";
 export type { EnrichLlmSpanOpts } from "./span-enrich.js";
-export * from "./semantic-conventions.js";
+export {
+  // Framework-owned span attributes — consumers building custom exporters need these
+  AI_NODE_ID,
+  AI_NODE_KIND,
+  AI_SPAN_TYPE,
+  AI_DAG_ID,
+  AI_RUN_ID,
+  AI_LLM_COST_USD,
+  AI_LLM_HAS_THINKING,
+  AI_GUARDRAIL_PASSED,
+  AI_NODE_SIDE_EFFECTS_KIND,
+  AI_NODE_SIDE_EFFECTS_RESOURCE,
+  AI_NODE_IDEMPOTENCY_KEY,
+  AI_ROUTE_CONFIDENCE_BUCKET,
+  AI_ROUTE_CONFIDENCE_SOURCE,
+  AI_FRESHNESS_WITNESS_KIND,
+  AI_FRESHNESS_WITNESS_RESOURCE,
+  AI_FRESHNESS_WITNESS_VALUE,
+  AI_FRESHNESS_CONDITIONED_ON_VALUE,
+  AI_FRESHNESS_VIOLATION,
+  AI_HUMAN_ACTION,
+  AI_HUMAN_ACTOR,
+  AI_HUMAN_CONFIDENCE_BUCKET,
+  AI_HUMAN_CONFIDENCE_SOURCE,
+  NODE_KIND_TO_SPAN_TYPE,
+  // Span event names
+  EVENT_NODE_INPUT,
+  EVENT_NODE_OUTPUT,
+  EVENT_LLM_COST,
+} from "./semantic-conventions.js";
 
 // OTel pipeline setup
 export type { TracingConfig, TracingHandle } from "./init.js";

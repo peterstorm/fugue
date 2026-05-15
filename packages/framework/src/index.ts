@@ -22,7 +22,7 @@ export type { FrameworkLogger } from "./logger.js";
 // ---------------------------------------------------------------------------
 // State-machine kernel (NFR-021) — public surface only
 // ---------------------------------------------------------------------------
-export type { Machine, Executor, JobLike, RecordedEvent, RunOptions, TraceEvent } from "./state-machine/types.js";
+export type { Machine, Executor, JobLike, RecordedEvent, KernelRunOpts, TraceEvent } from "./state-machine/types.js";
 export { runStateMachine } from "./state-machine/runner.js";
 export { createInMemoryJob } from "./queue/in-memory-job.js";
 export type { InMemoryJob, InMemoryJobOptions } from "./queue/in-memory-job.js";
@@ -32,7 +32,7 @@ export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machi
 // `serializeValue` / `deserializeValue` are intentionally internal; import
 // from their concrete paths if you genuinely need them.
 export { toJson, fromJson } from "./state-machine/serialize.js";
-export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr, fold } from "./types/result.js";
+export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrapOr, fold } from "./types/result.js";
 
 // ---------------------------------------------------------------------------
 // DAG runtime (NFR-021) — public surface only
@@ -44,7 +44,7 @@ export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, map
 // Keeping them off the main barrel signals that reaching for them is a
 // deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
-export type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./dag-runtime/types.js";
+export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer (NFR-021)
@@ -85,7 +85,7 @@ export { createRedisStreamReader } from "./queue-bullmq/event-log.js";
 // Scheduler (NFR-021) — public surface only. `hasCycle` and `diffRegistry`
 // are scheduler internals; import directly from their files if needed.
 // ---------------------------------------------------------------------------
-export type { TaskConfig, TaskRegistry, RegistryDiff, CatchUpDecision } from "./scheduler/types.js";
+export type { TaskConfig, TaskRegistry, TaskRegistryStore, RegistryDiff, CatchUpDecision } from "./scheduler/types.js";
 export { decideCatchUp } from "./scheduler/catch-up.js";
 export type { CronScheduler, CronSchedulerOpts } from "./scheduler/scheduler.js";
 export { createCronScheduler } from "./scheduler/scheduler.js";

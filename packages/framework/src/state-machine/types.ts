@@ -85,7 +85,7 @@ export interface RecordedEvent<E> {
 
 // FR-012: beforeExecute hook — returning false aborts the run
 // FR-006: classifyError + errorEventOf for typed error wrapping
-export interface RunOptions<S, E, C> {
+export interface KernelRunOpts<S, E, C> {
   beforeExecute?: (state: S, context: C) => boolean;
   classifyError?: (error: unknown) => { retriable: boolean; message: string };
   onTrace?: (t: TraceEvent<S, E>) => void;

@@ -15,6 +15,23 @@ export interface TaskConfig {
 /** Registry of all known tasks — keyed by task id */
 export type TaskRegistry = ReadonlyMap<string, TaskConfig>;
 
+/**
+ * Shared task-registry store for cross-process dependent resolution.
+ * When provided to `CronSchedulerOpts`, `resolveDependents` reads from the
+ * store instead of the process-local `activeRegistry`. This enables
+ * multi-process deployments where the scheduler and workers run in separate
+ * processes.
+ *
+ * Single-process callers can omit this — the scheduler falls back to the
+ * process-local registry reconciled via `reconcile()`.
+ */
+export interface TaskRegistryStore {
+  /** Retrieve a single task config by id. Returns `null` if not found. */
+  get(taskId: string): Promise<TaskConfig | null>;
+  /** Retrieve the full registry. */
+  getAll(): Promise<TaskRegistry>;
+}
+
 /** Result of diffing two registries — three disjoint lists (FR-062) */
 export interface RegistryDiff {
   /** Tasks present in desired but not active — must be armed */

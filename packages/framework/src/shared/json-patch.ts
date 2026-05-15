@@ -1,23 +1,11 @@
 import { fwLogger } from "../logger.js";
 
-/**
- * Lightweight RFC 6902 JSON Patch types and diff computation.
- *
- * Used by `HumanInterventionEvent` to capture the structural diff between
- * original and replaced output on `approve-with-edit` actions. The framework
- * does not pull in a full JSON Patch library — this minimal implementation
- * covers the object-level diff needed for human-edit forensics.
- */
-
-export type JsonPatchOp =
-  | { readonly op: "add"; readonly path: string; readonly value: unknown }
-  | { readonly op: "remove"; readonly path: string }
-  | { readonly op: "replace"; readonly path: string; readonly value: unknown };
-
-export type JsonPatch = readonly JsonPatchOp[];
+// Re-export types from their canonical home in `types/`.
+export type { JsonPatchOp, JsonPatch } from "../types/json-patch.js";
+import type { JsonPatchOp, JsonPatch } from "../types/json-patch.js";
 
 /**
- * Compute a JSON Patch between two values with shallow patch granularity.
+ * Lightweight RFC 6902 JSON Patch diff computation.
  *
  * - Primitives and arrays: single `replace` at root (`/`).
  * - Objects: per-key `add` / `remove` / `replace` (one level deep).

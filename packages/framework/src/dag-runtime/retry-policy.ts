@@ -74,7 +74,11 @@ export const handleNodeFailed = (
   // Merge partial outputs from succeeded siblings so they are not re-run on retry.
   const ctxWithPartials: DagMachineContext =
     partialOutputs && partialOutputs.size > 0
-      ? { ...ctx, outputs: new Map([...ctx.outputs, ...partialOutputs]) }
+      ? (() => {
+          const merged = new Map(ctx.outputs);
+          for (const [k, v] of partialOutputs) merged.set(k, v);
+          return { ...ctx, outputs: merged };
+        })()
       : ctx;
 
   // Pre-increment retry counters for co-failed siblings so they consume the same

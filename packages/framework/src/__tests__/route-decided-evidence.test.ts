@@ -7,7 +7,7 @@
  * - upstreamConfidence is null when node declares confidence.mode === "none"
  * - predicateResults records per-predicate evaluation with label, matched, confidence
  * - minConfidence gating: below-min-confidence recorded when upstream bucket is too low
- * - Throwing check function records errorKind: "threw"
+ * - Throwing check function records reason: "threw"
  * - Default-taken case: all predicateResults show matched: false
  * - Multi-match case: first-match wins, all predicates still recorded
  */
@@ -209,7 +209,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     expect(route!.defaultTaken).toBe(true);
     const pred = route!.evidence.predicateResults[0];
     expect(pred?.matched).toBe(false);
-    expect(pred?.errorKind).toBe("below-min-confidence");
+    expect(pred?.reason).toBe("below-min-confidence");
     expect(pred?.evaluatedConfidence?.bucket).toBe("low");
   });
 
@@ -248,10 +248,10 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     expect(route!.defaultTaken).toBe(false);
     const pred = route!.evidence.predicateResults[0];
     expect(pred?.matched).toBe(true);
-    expect(pred?.errorKind).toBeUndefined();
+    expect(pred?.reason).toBeUndefined();
   });
 
-  it("throwing check function records errorKind: 'threw' and does not match", async () => {
+  it("throwing check function records reason: 'threw' and does not match", async () => {
     const obs = new RecordingObserver();
     const dag = defineDag({
       id: "throws",
@@ -275,14 +275,15 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     });
 
     const result = await runDagStateful(dag, null, mkCtx(obs));
-    expect(result.ok).toBe(true);
-
-    const [route] = routeEvents(obs);
-    expect(route!.defaultTaken).toBe(true);
-    const pred = route!.evidence.predicateResults[0];
-    expect(pred?.predicateLabel).toBe("boom");
-    expect(pred?.matched).toBe(false);
-    expect(pred?.errorKind).toBe("threw");
+    // A throwing predicate is now treated as predicate-malformed (programming error)
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("predicate-malformed");
+      if (result.error.kind === "predicate-malformed") {
+        expect(result.error.message).toContain("threw an exception");
+        expect(result.error.message).toContain("boom");
+      }
+    }
   });
 
   it("confidence extraction failure is non-fatal — upstreamConfidence falls back to null", async () => {

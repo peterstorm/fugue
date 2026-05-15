@@ -5,7 +5,7 @@
 
 import { parseExpression } from "cron-parser";
 import type { MarkerStore } from "../queue/types.js";
-import type { TaskConfig, TaskRegistry } from "./types.js";
+import type { TaskConfig, TaskRegistry, TaskRegistryStore } from "./types.js";
 import { diffRegistry } from "./diff.js";
 import { hasCycle } from "./cycle.js";
 import { fwLogger } from "../logger.js";
@@ -55,6 +55,16 @@ export interface CronSchedulerOpts {
    * `() => number` convention applies to observer + queue clocks.
    */
   now?: () => Date;
+  /**
+   * Shared task-registry store for cross-process dependent resolution.
+   * When provided, `resolveDependents` reads from this store instead of
+   * the process-local `activeRegistry`. Enables multi-process deployments
+   * where the scheduler and workers run in separate processes.
+   *
+   * When omitted, the scheduler uses the in-process `activeRegistry`
+   * reconciled via `reconcile()` — correct for single-process deployments.
+   */
+  registryStore?: TaskRegistryStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +128,7 @@ export function createCronScheduler(
     const current = activeRegistry.get(taskId);
     if (current === undefined) return; // task was removed mid-fire — drop the chain
     const triggeredAt = now();
-    handleFire(current, triggeredAt)
+    void handleFire(current, triggeredAt)
       .then(() => {
         consecutiveFailures.delete(current.id);
         const stillActive = activeRegistry.get(current.id);
@@ -249,14 +259,19 @@ export function createCronScheduler(
     taskId: string,
     triggeredAt: Date,
   ): Promise<void> {
-    if (activeRegistry.size === 0) {
+    // Prefer the shared store (cross-process) over the process-local registry.
+    const registry = opts.registryStore
+      ? await opts.registryStore.getAll()
+      : activeRegistry;
+
+    if (registry.size === 0) {
       fwLogger().warn(
         `[CronScheduler] resolveDependents("${taskId}") called with empty registry — was reconcile() called first?`,
       );
       return;
     }
     // Mark the upstream task as completed — guard against store failures
-    const upstreamTask = activeRegistry.get(taskId);
+    const upstreamTask = registry.get(taskId);
     const completedTtl = upstreamTask
       ? Math.ceil(upstreamTask.validForMs / 1000) + 60
       : 3600;
@@ -288,7 +303,7 @@ export function createCronScheduler(
     }
 
     // Find all tasks that directly depend on taskId
-    const dependentTasks = findDependents(taskId, activeRegistry);
+    const dependentTasks = findDependents(taskId, registry);
     if (dependentTasks.length === 0) return;
 
     // For each dependent, check if ALL its dependencies have completed

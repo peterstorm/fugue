@@ -19,6 +19,7 @@ import {
 } from "./tool-dispatch.js";
 import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
+import { zodToJsonSchema } from "./zod-schema.js";
 
 /**
  * Recursively adds `additionalProperties: false` to all object-type schemas.
@@ -40,7 +41,7 @@ function addAdditionalPropertiesFalse(schema: Record<string, unknown>): void {
 }
 
 const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
-  const { $schema: _, ...json } = z.toJSONSchema(schema as any) as Record<string, unknown>;
+  const json = zodToJsonSchema(schema);
   addAdditionalPropertiesFalse(json);
   return json;
 };
@@ -340,7 +341,7 @@ export class OpenAILlmClient implements LlmClient {
       }
 
       const httpResult = await withLlmSpan(
-        null,
+        req.tracer ?? null,
         { provider: "openai", model: req.model, operation: "chat" },
         async () => {
           const r = await this.postResponses(body, req.signal);

@@ -25,7 +25,7 @@ export interface RunSummary {
   readonly totalDuration: number;
   readonly nodeCount: number;
   readonly retryCount: number;
-  readonly cacheHitCount: number;
+  /** Sum of `ai.llm.cost_usd` from OTel spans. Zero when spans lack cost attributes. */
   readonly totalCostUsd: number;
   readonly freshnessViolationCount: number;
   readonly humanInterventionCount: number;
@@ -34,7 +34,6 @@ export interface RunSummary {
 
 export interface AggregateCounters {
   runCount: number;
-  totalCostUsd: number;
 }
 
 /**
@@ -82,8 +81,6 @@ export function computeRunSummary(
 ): RunSummary {
   const nodeIds = new Set<string>();
   let retryCount = 0;
-  let cacheHitCount = 0;
-  let totalCostUsd = 0;
   let freshnessViolationCount = 0;
   let humanInterventionCount = 0;
   let routeDecisionCount = 0;
@@ -98,15 +95,9 @@ export function computeRunSummary(
         startCounts.set(e.nodeId, count);
         break;
       }
-      case "node-end": {
+      case "node-end":
         nodeIds.add(e.nodeId);
-        const attrs = (e as NodeEndEvent & { attributes?: Record<string, unknown> }).attributes;
-        if (attrs) {
-          if (attrs["cache_hit"] === true) cacheHitCount++;
-          if (typeof attrs["cost_usd"] === "number") totalCostUsd += attrs["cost_usd"];
-        }
         break;
-      }
       case "node-error":
       case "node-skipped":
         nodeIds.add(e.nodeId);
@@ -133,8 +124,7 @@ export function computeRunSummary(
     totalDuration: runEnd.duration,
     nodeCount: nodeIds.size,
     retryCount,
-    cacheHitCount,
-    totalCostUsd,
+    totalCostUsd: 0, // populated by TailSamplingProcessor from OTel span attributes
     freshnessViolationCount,
     humanInterventionCount,
     routeDecisionCount,
@@ -154,19 +144,30 @@ export interface BufferedObserverOpts {
   readonly sweepIntervalMs?: number;
   /** Injectable clock; defaults to `Date.now`. Used by tests for deterministic eviction. */
   readonly now?: () => number;
+  /**
+   * Called when an event fails to replay to the inner observer. Receives the
+   * failed event and the error. Use this to wire a dead-letter sink (write to
+   * disk, push to a secondary queue) for events that would otherwise be lost.
+   * When omitted, failures are logged at error level and the event is dropped.
+   */
+  readonly onReplayFailure?: (event: ObserverEvent, error: unknown) => void;
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
 const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5min
 
-export class BufferedObserver implements Observer {
+export class BufferedObserver implements Observer, Disposable {
   private readonly buffers = new Map<string, RunBuffer>();
-  readonly aggregates: AggregateCounters = { runCount: 0, totalCostUsd: 0 };
+  readonly aggregates: AggregateCounters = { runCount: 0 };
   /** Buffers dropped because `run-end` never arrived within TTL. Useful for monitoring. */
   evicted = 0;
+  /** Count of events lost to dispatch failures during replay. Useful for monitoring. */
+  dispatchErrors = 0;
   private readonly ttlMs: number;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
   private readonly now: () => number;
+
+  private readonly onReplayFailure: ((event: ObserverEvent, error: unknown) => void) | null;
 
   constructor(
     private readonly inner: Observer,
@@ -175,6 +176,7 @@ export class BufferedObserver implements Observer {
   ) {
     this.ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
     this.now = opts?.now ?? Date.now;
+    this.onReplayFailure = opts?.onReplayFailure ?? null;
     const sweepMs = opts?.sweepIntervalMs ?? DEFAULT_SWEEP_MS;
     if (sweepMs > 0) {
       this.sweepHandle = setInterval(() => this.evictStale(), sweepMs);
@@ -188,6 +190,10 @@ export class BufferedObserver implements Observer {
   /** Stop the background sweep. Call when discarding the observer. */
   close(): void {
     if (this.sweepHandle) clearInterval(this.sweepHandle);
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   /** Drop run buffers that exceeded `ttlMs` without a run-end. */
@@ -265,7 +271,6 @@ export class BufferedObserver implements Observer {
     const summary = computeRunSummary(events, e);
 
     this.aggregates.runCount++;
-    this.aggregates.totalCostUsd += summary.totalCostUsd;
 
     try {
       if (this.policy.shouldFlush(summary)) {
@@ -275,7 +280,12 @@ export class BufferedObserver implements Observer {
             dispatchEvent(this.inner, buffered);
           } catch (err) {
             replayFailures++;
-            fwLogger().error(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+            this.dispatchErrors++;
+            if (this.onReplayFailure) {
+              this.onReplayFailure(buffered, err);
+            } else {
+              fwLogger().error(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
+            }
           }
         }
         if (replayFailures > 0) {

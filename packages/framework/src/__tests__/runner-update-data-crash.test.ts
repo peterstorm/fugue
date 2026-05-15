@@ -10,7 +10,7 @@
 import { describe, it, expect } from "bun:test";
 import { runStateMachine } from "../state-machine/runner.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
-import type { Machine, Executor, JobLike, RunOptions } from "../state-machine/types.js";
+import type { Machine, Executor, JobLike, KernelRunOpts } from "../state-machine/types.js";
 
 // ---------------------------------------------------------------------------
 // Minimal machine — pending -> running -> succeeded
@@ -42,7 +42,7 @@ const machine: Machine<State, Event, Ctx> = {
 const errorEventOf = (c: { retriable: boolean; message: string }): Event =>
   ({ type: "ERROR", retriable: c.retriable, message: c.message });
 
-const runOpts: RunOptions<State, Event, Ctx> = { errorEventOf };
+const runOpts: KernelRunOpts<State, Event, Ctx> = { errorEventOf };
 
 // ---------------------------------------------------------------------------
 // Fault-injecting wrapper — updateData throws on its first N invocations
