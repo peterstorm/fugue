@@ -1,4 +1,4 @@
-// Catch-up decision — FR-063
+// Catch-up decision — missed-fire recovery
 // Pure function: no I/O, no Date.now()
 
 import type { CatchUpDecision } from "./types.js";

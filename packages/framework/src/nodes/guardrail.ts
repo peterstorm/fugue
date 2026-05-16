@@ -5,6 +5,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 import { __brandNodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
+import { emit } from "../dag-runtime/emit.js";
 
 /** Individual check detail. */
 export interface GuardrailCheck {
@@ -111,8 +112,8 @@ export const createGuardrailNode = <I, T>(
     }
 
     // Emit guardrail-specific sub-span attributes via observer
-    if (ctx.observer && !result.passed) {
-      ctx.observer.observe({
+    if (!result.passed) {
+      emit(ctx, {
         type: "sub-span",
         runId: ctx.runId,
         dagId: ctx.dagId,

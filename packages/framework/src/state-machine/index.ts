@@ -9,7 +9,7 @@ export { runStateMachine } from "./runner.js";
 // Replay
 export { replayEvents, replayEventsUntil, replayEventSlice } from "./replay.js";
 
-// Serialization helpers (FR-010)
+// Serialization helpers
 export { serializeValue, deserializeValue, toJson, fromJson } from "./serialize.js";
 
 // Re-export Result/ok/err from types — Gap-1 fix

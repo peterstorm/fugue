@@ -51,7 +51,7 @@ describe("predicate-malformed — caught at defineDag time", () => {
         {
           from: "router",
           to: "a",
-          when: { label: "bad", check: "not-a-fn" } as any,
+          when: { label: "bad", version: 1, check: "not-a-fn" } as any,
         } as any,
         { from: "router", to: "b", kind: "default" },
       ],
@@ -72,7 +72,7 @@ describe("predicate-malformed — caught at defineDag time", () => {
         {
           from: "router",
           to: "a",
-          when: { label: "", check: () => true } as any,
+          when: { label: "", version: 1, check: () => true } as any,
         } as any,
         { from: "router", to: "b", kind: "default" },
       ],
@@ -130,6 +130,7 @@ describe("predicate-malformed — runtime check throws when predicate check() th
           to: "a",
           when: {
             label: "throws",
+            version: 1,
             check: () => { throw new Error("boom"); },
           } as any,
         },

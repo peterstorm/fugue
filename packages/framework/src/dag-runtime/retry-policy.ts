@@ -1,4 +1,4 @@
-// Retry-policy helpers — FR-026 (retry budget) + FR-027 (backoff) + FR-029a (hook crash).
+// Retry-policy helpers — retry budget, exponential backoff, hook-crash retry.
 // All functions are pure; no I/O.
 
 import type { DagMachineContext } from "./types.js";
@@ -127,6 +127,9 @@ export const handleNodeFailed = (
     error.kind === "node-crash" || error.kind === "transient"
       ? error.message
       : JSON.stringify(error);
+  const exhaustedRetries = new Map(ctxWithCoFailed.retries);
+  exhaustedRetries.set(nodeId, currentAttempts + 1);
+  const exhaustedCtx: DagMachineContext = { ...ctxWithCoFailed, retries: exhaustedRetries };
   return {
     state: {
       kind: "failed",
@@ -138,7 +141,7 @@ export const handleNodeFailed = (
         rootErrorKind: error.kind,
       },
     },
-    context: ctxWithCoFailed,
+    context: exhaustedCtx,
   };
 };
 
@@ -197,6 +200,9 @@ export const handleHookCrash = (
   const lastError = error.kind === "node-crash" || error.kind === "transient"
     ? error.message
     : JSON.stringify(error);
+  const exhaustedRetries = new Map(ctx.retries);
+  exhaustedRetries.set(nodeId, currentAttempts + 1);
+  const exhaustedCtx: DagMachineContext = { ...ctx, retries: exhaustedRetries };
   return {
     state: {
       kind: "failed",
@@ -208,6 +214,6 @@ export const handleHookCrash = (
         rootErrorKind: error.kind,
       },
     },
-    context: ctx,
+    context: exhaustedCtx,
   };
 };

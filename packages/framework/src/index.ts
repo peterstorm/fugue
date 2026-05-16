@@ -20,7 +20,7 @@ export { setFrameworkLogger, fwLogger } from "./logger.js";
 export type { FrameworkLogger } from "./logger.js";
 
 // ---------------------------------------------------------------------------
-// State-machine kernel (NFR-021) — public surface only
+// State-machine kernel — public surface only
 // ---------------------------------------------------------------------------
 export type { Machine, Executor, JobLike, RecordedEvent, KernelRunOpts, TraceEvent } from "./state-machine/types.js";
 export { runStateMachine } from "./state-machine/runner.js";
@@ -32,10 +32,9 @@ export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machi
 // `serializeValue` / `deserializeValue` are intentionally internal; import
 // from their concrete paths if you genuinely need them.
 export { toJson, fromJson } from "./state-machine/serialize.js";
-export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrapOr, fold } from "./types/result.js";
 
 // ---------------------------------------------------------------------------
-// DAG runtime (NFR-021) — public surface only
+// DAG runtime — public surface only
 //
 // `runDag` is the single sanctioned public entry. `runDagStateful`,
 // `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, and
@@ -47,7 +46,7 @@ export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, map
 export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
-// Queue layer (NFR-021)
+// Queue layer
 // ---------------------------------------------------------------------------
 export type {
   QueueBackend,
@@ -72,7 +71,7 @@ export {
 } from "./queue/in-memory.js";
 
 // ---------------------------------------------------------------------------
-// Queue-BullMQ adapter (NFR-021)
+// Queue-BullMQ adapter
 // ---------------------------------------------------------------------------
 export { createBullMQBackend } from "./queue-bullmq/adapter.js";
 export { defaultStreamKey, adaptBullMQJob } from "./queue-bullmq/job.js";
@@ -82,7 +81,7 @@ export { createRedisStreamReader } from "./queue-bullmq/event-log.js";
 // `EventLogReader` is exported from the queue/ layer above (its canonical home).
 
 // ---------------------------------------------------------------------------
-// Scheduler (NFR-021) — public surface only. `hasCycle` and `diffRegistry`
+// Scheduler — public surface only. `hasCycle` and `diffRegistry`
 // are scheduler internals; import directly from their files if needed.
 // ---------------------------------------------------------------------------
 export type { TaskConfig, TaskRegistry, TaskRegistryStore, RegistryDiff, CatchUpDecision } from "./scheduler/types.js";

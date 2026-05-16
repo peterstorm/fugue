@@ -56,9 +56,18 @@ export const emitHumanIntervention = (
     try {
       nodeConfidence = nodeDef.confidence.extract(phase.output);
     } catch (e) {
-      fwLogger().warn(
-        `[emitHumanIntervention] confidence.extract failed for node '${phase.nodeId}': ${e instanceof Error ? e.message : e}`,
-      );
+      const msg = `confidence.extract failed for node '${phase.nodeId}': ${e instanceof Error ? e.message : e}`;
+      fwLogger().warn(`[emitHumanIntervention] ${msg}`);
+      emit(nodeCtx, {
+        type: "node-error",
+        runId: nodeCtx.runId,
+        dagId,
+        nodeId: phase.nodeId,
+        sideEffects: nodeDef?.sideEffects,
+        timestamp: stamp(),
+        error: msg,
+        frameworkError: { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg },
+      });
       nodeConfidence = null;
     }
   }

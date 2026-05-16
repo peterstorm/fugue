@@ -69,7 +69,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         no: makeNode("no"),
       },
       edges: [
-        { from: "router", to: "yes", when: { label: "is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 0,
@@ -100,7 +100,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         no: makeNode("no"),
       },
       edges: [
-        { from: "router", to: "yes", when: { label: "is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 0,
@@ -128,8 +128,8 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         c: makeNode("c"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "kind-is-a", check: (v: any) => v?.kind === "a" } as any },
-        { from: "router", to: "b", when: { label: "kind-is-b", check: (v: any) => v?.kind === "b" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (v: any) => v?.kind === "a" } as any },
+        { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (v: any) => v?.kind === "b" } as any },
         { from: "router", to: "c", kind: "default" },
         { from: "a", to: "c" },
         { from: "b", to: "c" },
@@ -162,7 +162,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "kind-is-x", check: (v: any) => v?.kind === "x" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-x", version: 1, check: (v: any) => v?.kind === "x" } as any },
         { from: "router", to: "fallback", kind: "default" },
       ],
       defaultRetryLimit: 0,
@@ -195,6 +195,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           to: "a",
           when: {
             label: "high-conf-only",
+            version: 1,
             check: (v: any) => v?.kind === "yes",
             minConfidence: "high",
           } as any,
@@ -234,6 +235,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           to: "a",
           when: {
             label: "medium-conf-ok",
+            version: 1,
             check: (v: any) => v?.kind === "yes",
             minConfidence: "medium",
           } as any,
@@ -266,6 +268,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           to: "a",
           when: {
             label: "boom",
+            version: 1,
             check: () => { throw new Error("unexpected"); },
           } as any,
         },
@@ -302,7 +305,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "check", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "a", when: { label: "check", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "fallback", kind: "default" },
       ],
       defaultRetryLimit: 0,

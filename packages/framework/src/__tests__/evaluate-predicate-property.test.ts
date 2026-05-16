@@ -37,11 +37,11 @@ describe("evaluatePredicate — property tests", () => {
         fc.anything(),
         (label, confidence, output) => {
           const result = evaluatePredicate(
-            { label, check: () => true },
+            { label, version: 1, check: () => true },
             output,
             confidence,
           );
-          return result.predicateLabel === label;
+          return result.predicateLabel === label && result.predicateVersion === 1;
         },
       ),
     );
@@ -51,7 +51,7 @@ describe("evaluatePredicate — property tests", () => {
     fc.assert(
       fc.property(arbBucket, (minBucket) => {
         const result = evaluatePredicate(
-          { label: "test", check: () => true, minConfidence: minBucket },
+          { label: "test", version: 1, check: () => true, minConfidence: minBucket },
           "anything",
           null,
         );
@@ -63,7 +63,7 @@ describe("evaluatePredicate — property tests", () => {
   it("confidence below minConfidence → matched: false, reason: below-min-confidence", () => {
     // low is below medium and high; unknown is below everything
     const result1 = evaluatePredicate(
-      { label: "test", check: () => true, minConfidence: "high" },
+      { label: "test", version: 1, check: () => true, minConfidence: "high" },
       "val",
       { bucket: "low", source: "heuristic" },
     );
@@ -71,7 +71,7 @@ describe("evaluatePredicate — property tests", () => {
     expect(result1.reason).toBe("below-min-confidence");
 
     const result2 = evaluatePredicate(
-      { label: "test", check: () => true, minConfidence: "medium" },
+      { label: "test", version: 1, check: () => true, minConfidence: "medium" },
       "val",
       { bucket: "unknown", source: "heuristic" },
     );
@@ -83,7 +83,7 @@ describe("evaluatePredicate — property tests", () => {
     fc.assert(
       fc.property(fc.boolean(), (checkResult) => {
         const result = evaluatePredicate(
-          { label: "test", check: () => checkResult, minConfidence: "low" },
+          { label: "test", version: 1, check: () => checkResult, minConfidence: "low" },
           "val",
           { bucket: "high", source: "heuristic" },
         );
@@ -98,6 +98,7 @@ describe("evaluatePredicate — property tests", () => {
         const result = evaluatePredicate(
           {
             label: "boom",
+            version: 1,
             check: () => {
               throw new Error(errorMsg);
             },
@@ -121,6 +122,7 @@ describe("evaluatePredicate — property tests", () => {
         evaluatePredicate(
           {
             label: "check-runs",
+            version: 1,
             check: () => {
               called = true;
               return true;
@@ -138,7 +140,7 @@ describe("evaluatePredicate — property tests", () => {
     fc.assert(
       fc.property(arbConfidenceOrNull, (confidence) => {
         const result = evaluatePredicate(
-          { label: "test", check: () => true },
+          { label: "test", version: 1, check: () => true },
           "val",
           confidence,
         );

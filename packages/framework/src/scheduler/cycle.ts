@@ -1,4 +1,4 @@
-// Cycle detection — FR-061
+// Cycle detection — detect dependency loops in task registry
 // Pure function: no I/O, no Date.now()
 
 import type { TaskRegistry } from "./types.js";

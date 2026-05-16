@@ -627,16 +627,10 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     }
   });
 
-  it("onHumanReview hook supplied but no node declares humanReview returns validation error", async () => {
+  it("onHumanReview hook supplied but no node declares humanReview succeeds (hook ignored)", async () => {
     const dag = mkSimpleDag("hook-without-node");
     const result = await runDag(dag, {}, mkCtx(), { onHumanReview: noopReview });
-    expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe(N("__executor__"));
-      expect(result.error.message).toContain("no node declares");
-    } else {
-      throw new Error("expected node-crash error");
-    }
+    expect(result.ok).toBe(true);
   });
 
   it("resume + humanReview compose: A's checkpoint replays, reviewed node still gates", async () => {

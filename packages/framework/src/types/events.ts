@@ -100,6 +100,7 @@ export interface RouteEvidence {
   readonly upstreamConfidence: Confidence | null;
   readonly predicateResults: ReadonlyArray<{
     readonly predicateLabel: string;
+    readonly predicateVersion: number;
     readonly matched: boolean;
     readonly evaluatedConfidence: Confidence | null;
     readonly reason?: string;

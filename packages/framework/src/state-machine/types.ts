@@ -1,4 +1,4 @@
-// State-machine kernel types — FR-001, FR-002, FR-003, FR-004
+// State-machine kernel types — pure machine, executor, event journal, job handle
 
 import type { RunId } from "../types/ids.js";
 // Re-export so `state-machine` consumers can import `RunId` from a single

@@ -1,5 +1,5 @@
 // runStateMachine — the durable state-machine kernel loop
-// FR-004, FR-005, FR-006, FR-007, FR-011, FR-012
+// Transition loop, event sourcing, checkpoint persistence, idempotency, trace emission
 
 import { createHash } from "node:crypto";
 import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";

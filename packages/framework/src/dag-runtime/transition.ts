@@ -1,5 +1,6 @@
-// Pure DAG transition function — FR-021
-// Covers FR-026..FR-033 via the wave-resolution / retry-policy / human-resolution helpers.
+// Pure DAG transition function — no I/O, no side effects.
+// Covers retry logic, sequential HITL, approve/reject/reroute/abort via the
+// wave-resolution / retry-policy / human-resolution helpers.
 //
 // Uses ts-pattern for exhaustive matching on both DagPhase and DagEvent.
 // Adding a new DagPhase.kind or DagEvent.type without handling it here is a

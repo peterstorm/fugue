@@ -1,5 +1,5 @@
 // queue-bullmq barrel export
-// FR-045, FR-047, FR-048, AD-3
+// BullMQ adapter, job wrapper, event-log reader
 
 export { createBullMQBackend } from "./adapter.js";
 export { defaultStreamKey, adaptBullMQJob } from "./job.js";

@@ -1,4 +1,4 @@
-// Map/Set <-> JSON serialization helpers — FR-010
+// Map/Set <-> JSON serialization helpers
 // Ensures state and context containing Map/Set instances round-trip
 // through JSON without information loss (required for checkpoint persistence).
 

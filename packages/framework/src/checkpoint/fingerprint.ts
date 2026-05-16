@@ -17,22 +17,8 @@ import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
  */
 export const FRAMEWORK_VERSION = "2";
 
-/**
- * Key-sorted JSON serializer. Stable across runs for the same logical value:
- * `{a:1,b:2}` and `{b:2,a:1}` produce the same string.
- */
-const stableJson = (value: unknown): string => {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  const parts = keys.map(
-    (k) => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`,
-  );
-  return `{${parts.join(",")}}`;
-};
-
 const edgeKey = (e: EdgeDef): string => {
-  if (isConditionalEdge(e)) return `${e.from}->${e.to}|when:${stableJson(e.when)}`;
+  if (isConditionalEdge(e)) return `${e.from}->${e.to}|when:${e.when.label}:${e.when.version}`;
   if (isDefaultEdge(e)) return `${e.from}->${e.to}|default`;
   return `${e.from}->${e.to}`;
 };

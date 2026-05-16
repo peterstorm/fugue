@@ -50,12 +50,13 @@ export const beginRunTelemetry = (
   const runStart = nowFn();
 
   const emitRunEnd = (status: "ok" | "error"): void => {
+    const endMs = nowFn();
     dispatchEvent(nodeCtx.observer, {
       type: "run-end",
       runId: nodeCtx.runId,
       dagId: dag.id,
-      timestamp: new Date(nowFn()),
-      duration: nowFn() - runStart,
+      timestamp: new Date(endMs),
+      duration: endMs - runStart,
       status,
     });
   };

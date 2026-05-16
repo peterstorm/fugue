@@ -1,5 +1,5 @@
 // replayEvents — pure event-log fold for event-sourced replay
-// FR-003 (event log), US6
+// Event-log fold, deterministic state reconstruction
 //
 // All functions in this file are pure: no executor, no I/O, no side effects.
 // Replay reconstructs *machine state* from a recorded event log; it does NOT

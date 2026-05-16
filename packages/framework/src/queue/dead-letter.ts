@@ -1,5 +1,5 @@
-// Dead-letter handler — FR-044, SC-008
-// MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
+// Dead-letter handler — failed-job notification and routing
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** (enforced by check-imports.ts)
 
 import type { WorkerHandle, DeadLetterNotifier, DeadLetterOpts } from "./types.js";
 import { fwLogger } from "../logger.js";

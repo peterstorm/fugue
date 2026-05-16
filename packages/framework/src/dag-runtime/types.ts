@@ -1,4 +1,4 @@
-// DAG runtime types — FR-020
+// DAG runtime types
 // DagPhase, DagEvent, DagMachineContext, HumanAction
 
 import type { DagDef, EdgeDef } from "../types/dag.js";

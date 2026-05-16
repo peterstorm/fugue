@@ -1,4 +1,4 @@
-// Wave-resolution helpers — FR-026..FR-028 wave/HITL bookkeeping.
+// Wave-resolution helpers — wave scheduling, HITL bookkeeping, completion tracking.
 // All functions are pure; no I/O.
 
 import type { DagPhase, DagMachineContext } from "./types.js";

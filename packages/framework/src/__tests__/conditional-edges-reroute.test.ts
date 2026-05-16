@@ -67,7 +67,7 @@ describe("conditional edges — reroute", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 1,

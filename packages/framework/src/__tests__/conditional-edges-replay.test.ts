@@ -73,7 +73,7 @@ const makeDag = (kind: "yes" | "no"): DagDef =>
       }),
     },
     edges: [
-      { from: "router", to: "yes", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
+      { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
       { from: "router", to: "no", kind: "default" },
       { from: "yes", to: "merge" },
       { from: "no", to: "merge" },
@@ -148,7 +148,7 @@ describe("conditional edges — replay determinism", () => {
           }),
         },
         edges: [
-          { from: "router", to: "a", when: { label: `kind-is-${predicateKind}`, check: (v: any) => v?.kind === predicateKind } as any },
+          { from: "router", to: "a", when: { label: `kind-is-${predicateKind}`, version: 1, check: (v: any) => v?.kind === predicateKind } as any },
           { from: "router", to: "b", kind: "default" },
         ],
         defaultRetryLimit: 0,

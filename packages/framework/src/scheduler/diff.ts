@@ -1,4 +1,4 @@
-// Registry diff — FR-062
+// Registry diff — detect added/removed/changed tasks
 // Pure function: no I/O, no Date.now()
 
 import type { TaskConfig, TaskRegistry, RegistryDiff } from "./types.js";

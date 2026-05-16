@@ -32,11 +32,6 @@ export function hadRetry(): PersistencePolicy {
   return { shouldFlush: (s) => s.retryCount > 0 };
 }
 
-/** @deprecated cacheHitCount is no longer tracked in RunSummary. Always returns true. */
-export function coldCache(): PersistencePolicy {
-  return { shouldFlush: () => true };
-}
-
 export function anyOf(...policies: PersistencePolicy[]): PersistencePolicy {
   return { shouldFlush: (s) => policies.some((p) => p.shouldFlush(s)) };
 }

@@ -1,5 +1,5 @@
 // buildDagExecutor — DAG executor closure
-// FR-025: validate inputs/outputs; FR-027: exponential backoff with jitter
+// Validates inputs/outputs; exponential backoff with jitter on retries
 // Returns an Executor<DagPhase, DagEvent, DagMachineContext> that runs one wave per call.
 
 import { match } from "ts-pattern";
@@ -25,7 +25,7 @@ import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
 const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
 // ---------------------------------------------------------------------------
-// Backoff + jitter (FR-027)
+// Backoff + jitter
 // ---------------------------------------------------------------------------
 
 const DEFAULT_JITTER_RATIO = 0.2;

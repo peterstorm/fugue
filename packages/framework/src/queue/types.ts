@@ -1,5 +1,5 @@
-// Queue layer interfaces — FR-040, FR-041, FR-042, FR-043
-// MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
+// Queue layer interfaces — backend factory, runtime handles, worker lifecycle, markers
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** (enforced by check-imports.ts)
 
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 

@@ -71,21 +71,13 @@ export const runDag = async <I, O>(
   const hitlNodes = dag.nodes.filter((n) => n.humanReview !== undefined);
   const dagDeclaresHITL = hitlNodes.length > 0;
 
-  // HITL bidirectional contract — symmetric to keep mistakes loud.
+  // HITL contract — DAG declares human review but caller didn't supply the hook.
   if (dagDeclaresHITL && !opts?.onHumanReview) {
     return err({
       kind: "node-crash",
       retriability: "retriable",
       nodeId: EXECUTOR_NODE_ID,
       message: `[runDag] DAG declares humanReview node(s) [${hitlNodes.map((n) => n.id).join(", ")}] but no \`onHumanReview\` hook supplied`,
-    });
-  }
-  if (!dagDeclaresHITL && opts?.onHumanReview !== undefined) {
-    return err({
-      kind: "node-crash",
-      retriability: "retriable",
-      nodeId: EXECUTOR_NODE_ID,
-      message: "[runDag] `onHumanReview` hook supplied but no node declares `humanReview`",
     });
   }
 

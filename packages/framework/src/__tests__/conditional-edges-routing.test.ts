@@ -65,7 +65,7 @@ describe("conditional edges — 2-way routing", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no-branch", kind: "default" },
         { from: "yes-branch", to: "merge" },
         { from: "no-branch", to: "merge" },
@@ -122,7 +122,7 @@ describe("conditional edges — 2-way routing", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no-branch", kind: "default" },
         { from: "yes-branch", to: "merge" },
         { from: "no-branch", to: "merge" },
@@ -179,9 +179,9 @@ describe("conditional edges — 3-way routing", () => {
         }),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "kind-is-a", check: (v: any) => v?.kind === "a" } as any },
-        { from: "router", to: "b", when: { label: "kind-is-b", check: (v: any) => v?.kind === "b" } as any },
-        { from: "router", to: "c", when: { label: "kind-is-c", check: (v: any) => v?.kind === "c" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (v: any) => v?.kind === "a" } as any },
+        { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (v: any) => v?.kind === "b" } as any },
+        { from: "router", to: "c", when: { label: "kind-is-c", version: 1, check: (v: any) => v?.kind === "c" } as any },
         { from: "router", to: "d", kind: "default" },
         { from: "a", to: "merge" },
         { from: "b", to: "merge" },
@@ -217,6 +217,7 @@ describe("conditional edges — 3-way routing", () => {
           to: "match",
           when: {
             label: "kind-in-alpha-beta-gamma",
+            version: 1,
             check: (v: any) => ["alpha", "beta", "gamma"].includes(v?.kind),
           } as any,
         },
@@ -252,6 +253,7 @@ describe("conditional edges — 3-way routing", () => {
           to: "gold",
           when: {
             label: "kind-ok-tier-gold",
+            version: 1,
             check: (v: any) => v?.kind === "ok" && v?.tier === "gold",
           } as any,
         },
@@ -297,7 +299,7 @@ describe("conditional edges — branch-then-rejoin via optionalDeps", () => {
         }),
       },
       edges: [
-        { from: "router", to: "yes", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
         { from: "yes", to: "merge" },
         { from: "no", to: "merge" },
@@ -342,7 +344,7 @@ describe("conditional edges — malformed predicate at definition time", () => {
         {
           from: "router",
           to: "a",
-          when: { label: "bad", check: "not-a-function" } as any,
+          when: { label: "bad", version: 1, check: "not-a-function" } as any,
         } as any,
         { from: "router", to: "b", kind: "default" },
       ],
@@ -369,7 +371,7 @@ describe("conditional edges — malformed predicate at definition time", () => {
         {
           from: "router",
           to: "a",
-          when: { label: "bad", check: 42 } as any,
+          when: { label: "bad", version: 1, check: 42 } as any,
         } as any,
         { from: "router", to: "b", kind: "default" },
       ],

@@ -6,12 +6,11 @@
 **Related:** ADR 0009 (runtime routing by node config), ADR 0007 (legacy fast path), **ADR 0016 (structural-match predicates)**.
 
 > **Update (2026-05-10):** the `Guard = (output) => boolean` closure form
-> described below was a discipline contract for purity, not a system
-> guarantee. ADR 0016 replaces it with `Predicate<O>` — pure data, typed
-> against the upstream output schema, serializable, hashable, and visible
-> in observer events. The active-set runtime, else-totality, and
-> `optionalDeps` rules below are unchanged; only the `when` payload type
-> and the `guard-threw` error kind (renamed `predicate-malformed`) differ.
+> described below was replaced by a function-based `Predicate<T>` with
+> `{ label, version, check, minConfidence? }` — see `types/dag.ts` and
+> ADR 0028. The active-set runtime, else-totality, and routing rules below
+> are unchanged; only the `when` payload type and the `guard-threw` error
+> kind (renamed `predicate-malformed`) differ.
 
 ## Context
 
@@ -81,6 +80,6 @@ Two new observer events — `route-decided` and `node-pruned` — make per-branc
 
 ## Implementation notes
 
-- `decideRoute` (in `dag-runtime/conditional.ts`) is called twice per routing node per wave: once in `runWave` for observer emission, once in `handleWaveDone` for active-set update. Both calls are deterministic — guards are pure — and the duplication keeps the transition layer free of observer I/O.
+- `decideRoute` (in `dag-runtime/conditional.ts`) is computed once per routing node per wave by the executor. The precomputed `routingDecisions` are passed to `handleWaveDone` for active-set update, and to the observer for `route-decided` event emission. A fallback to inline re-evaluation exists for legacy event-log replay paths where `routingDecisions` is absent.
 - Reroute clears outputs/retries for nodes in waves ≥ target wave and re-seeds `activeNodeIds` from the surviving outputs. Earlier guard decisions are deterministic over the same outputs and converge to the pre-reroute active set up through `targetWave - 1`.
 - The fallback output (when `outputNodeId` is unset) walks back through waves picking the last active node with a recorded output, so a fully-pruned final wave doesn't strand the run.

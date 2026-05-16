@@ -1,5 +1,5 @@
-// createRedisMarkerStore — Redis-backed MarkerStore with TTL (FR-043)
-// Only queue-bullmq/** may import ioredis (FR-082)
+// createRedisMarkerStore — Redis-backed MarkerStore with TTL
+// Only queue-bullmq/** may import ioredis (enforced by check-imports.ts)
 
 import type Redis from "ioredis";
 import type { MarkerStore } from "../queue/types.js";

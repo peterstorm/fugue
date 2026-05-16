@@ -31,9 +31,8 @@ All new code lives under `packages/framework/src/` in six new sibling folders:
 packages/framework/src/
   state-machine/    # pure transition function, phase types, event types
   dag-runtime/      # stateful executor, journal, run-dag-stateful entry point
-  queue/            # Queue interface + shared types
+  queue/            # Queue interface + shared types + in-memory adapter
   queue-bullmq/     # BullMQ adapter (only folder allowed to import bullmq/ioredis)
-  queue-memory/     # in-process adapter for tests
   scheduler/        # cron / delayed-job scheduler
   executor/         # (existing) one-shot DAG walker — unchanged
   checkpoint/       # (existing) snapshot persistence — unchanged

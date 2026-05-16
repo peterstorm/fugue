@@ -1,5 +1,5 @@
 // createInMemoryJob — in-memory JobLike for tests and non-durable callers
-// FR-003
+// Provides event-journal append and in-memory recorded-event storage
 
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 

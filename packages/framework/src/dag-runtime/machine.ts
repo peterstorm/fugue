@@ -1,4 +1,4 @@
-// compileDagToMachine — FR-023 (DAG layer)
+// compileDagToMachine — compiles a DagDef into a state-machine Machine.
 // Produces a Machine<DagPhase, DagEvent, DagMachineContext> consumable by runStateMachine.
 
 import type { Machine } from "../state-machine/types.js";

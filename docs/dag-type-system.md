@@ -18,10 +18,9 @@ For the user-facing description, see `library-ux.md` §1.
 | `outputNodeId` references a known node | Edit time (literal id union) |
 | `retryLimits` keys reference known nodes | Edit time (mapped over literal keys) |
 | Record key matches `node.id` | Module load (validator) |
-| Deps ↔ edges symmetry, else-totality, output reachability, etc. | Module load (validator) |
+| Else-totality, output reachability, edge uniqueness | Module load (validator) |
 | Cycles | First call (`topoSort`) |
-| Guards are pure | Not enforced; convention + property tests |
-| `deps` references known nodes | Module load (validator) — **not** edit time |
+| Predicate version in fingerprint | Module load (fingerprint changes when `version` bumps) |
 
 Edit time means `tsc` produces a squiggle on the line. Module load means
 the moment the file containing the DAG is imported (so: tests run it; CI

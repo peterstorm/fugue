@@ -1,5 +1,5 @@
-// createRedisStreamReader — XRANGE-backed EventLogReader for replay (FR-048, AD-3)
-// Only queue-bullmq/** may import ioredis (FR-082)
+// createRedisStreamReader — XRANGE-backed EventLogReader for replay
+// Only queue-bullmq/** may import ioredis (enforced by check-imports.ts)
 
 import type Redis from "ioredis";
 import type { EventLogOpts, EventLogReader } from "../queue/types.js";

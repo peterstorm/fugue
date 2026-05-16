@@ -1,5 +1,5 @@
 /**
- * Boundary-import checker (FR-082)
+ * Boundary-import checker
  *
  * Enforces:
  *   - state-machine/** MUST NOT import bullmq, ioredis, or queue-bullmq/**

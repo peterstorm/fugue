@@ -618,9 +618,9 @@ describe("createCronScheduler — dependent markers.set(fired) failure does not 
     try {
       await scheduler.resolveDependents("A", fakeNow);
 
-      // error logged for B's fired marker failure
+      // error logged for B's fired marker failure (now retried 3 times via retryAsync)
       const hasBFiredError = errors.some((e) =>
-        e.includes('markers.set(fired) failed for dependent "B"'),
+        e.includes('markers.set(fired)') && e.includes('dependent "B"'),
       );
       expect(hasBFiredError).toBe(true);
 

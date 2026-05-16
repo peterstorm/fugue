@@ -1,6 +1,6 @@
-// Queue layer barrel — FR-040..FR-044
+// Queue layer barrel — interfaces, dead-letter, in-memory backend
 // Re-exports all public queue interfaces and helpers.
-// MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082).
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** (enforced by check-imports.ts).
 
 export type {
   QueueBackend,

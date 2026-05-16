@@ -1,6 +1,6 @@
-// CronScheduler — imperative shell — FR-064
+// CronScheduler — imperative shell
 // Uses cron-parser for next-fire-time calculation.
-// MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-080) —
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** —
 // enforced by scripts/check-imports.ts.
 
 import { parseExpression } from "cron-parser";
@@ -323,10 +323,13 @@ export function createCronScheduler(
         }
         const depFiredTtl = Math.ceil(dep.validForMs / 1000) + 60;
         try {
-          await markers.set(markerFiredKey(dep.id), depFiredTtl);
+          await retryAsync(
+            () => markers.set(markerFiredKey(dep.id), depFiredTtl),
+            { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(fired) dependent "${dep.id}"` },
+          );
         } catch (err) {
           fwLogger().error(
-            `[CronScheduler] markers.set(fired) failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued):`,
+            `[CronScheduler] markers.set(fired) permanently failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued — risk of duplicate execution):`,
             err,
           );
         }

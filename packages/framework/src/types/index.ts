@@ -1,8 +1,7 @@
-// Types barrel — explicit named exports. `export *` re-exports leaked internal
-// helpers (`brandAsDagDef`, `normalizeEdge`, `isOneOfMatch`,
-// `isUnconditionalEdge`) onto the framework's public surface; they are
-// reachable from their concrete file paths for any caller with a documented
-// need, but the barrel mirrors the README "Authoring surface" section.
+// Types barrel — explicit named exports. Internal helpers (`brandAsDagDef`,
+// `isUnconditionalEdge`) are reachable from their concrete file paths for
+// any caller with a documented need, but the barrel mirrors the README
+// "Authoring surface" section.
 
 // ── Result (Either) ────────────────────────────────────────────────────────
 export type { Result, Ok, Err } from "./result.js";
@@ -16,6 +15,8 @@ export {
   mapErr,
   unwrapOr,
   fold,
+  tryCatch,
+  tryCatchAsync,
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
@@ -96,9 +97,9 @@ export type {
   Predicate,
 } from "./dag.js";
 export { withRetryLimits } from "./dag.js";
-// `brandAsDagDef`, `normalizeEdge`, `isOneOfMatch`, `isUnconditionalEdge`,
-// `isConditionalEdge`, `isDefaultEdge`, and `DagDefShape` are internal —
-// imported directly from `./types/dag.js` where needed.
+// `brandAsDagDef`, `isUnconditionalEdge`, `isConditionalEdge`,
+// `isDefaultEdge`, and `DagDefShape` are internal — imported directly
+// from `./types/dag.js` where needed.
 
 // ── Branded identifiers ───────────────────────────────────────────────────
 export type { RunId, NodeId, DagId } from "./ids.js";

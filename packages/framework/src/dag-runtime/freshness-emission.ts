@@ -109,10 +109,19 @@ export const emitFreshnessWitnessEvents = async (
           conditionedOn = se.extractConditionedOn(nodeInput);
           newWitness = se.extractNewWitness(output);
         } catch (e) {
-          fwLogger().warn(
-            `[emitFreshnessWitnessEvents] extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`,
-          );
-          return;
+          const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
+          fwLogger().warn(`[emitFreshnessWitnessEvents] ${msg}`);
+          emit(nodeCtx, {
+            type: "node-error",
+            runId: nodeCtx.runId,
+            dagId,
+            nodeId,
+            sideEffects: nodeMap.get(nodeId)?.sideEffects,
+            timestamp: stamp(),
+            error: `freshness extractor failed: ${msg}`,
+            frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` },
+          });
+          return; // fail-closed: skip write recording to prevent undetectable stale writes
         }
 
         // Step 3: Freshness conflict check + event emission

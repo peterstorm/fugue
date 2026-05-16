@@ -32,7 +32,9 @@ export const mapErr = <T, E, F>(
  */
 export const unwrap = <T, E>(r: Result<T, E>): T => {
   if (r.ok) return r.value;
-  throw new Error(`Called unwrap on Err: ${String(r.error)}`);
+  throw new Error(
+    `Called unwrap on Err: ${typeof r.error === "object" && r.error !== null ? JSON.stringify(r.error) : String(r.error)}`,
+  );
 };
 
 export const unwrapOr = <T, E>(r: Result<T, E>, fallback: T): T =>
@@ -44,3 +46,21 @@ export const fold = <T, E, R>(
   onOk: (value: T) => R,
   onErr: (error: E) => R,
 ): R => (r.ok ? onOk(r.value) : onErr(r.error));
+
+/** Wrap a throwing function in a Result. Catches synchronous exceptions. */
+export const tryCatch = <T>(fn: () => T): Result<T, Error> => {
+  try {
+    return ok(fn());
+  } catch (e) {
+    return err(e instanceof Error ? e : new Error(String(e)));
+  }
+};
+
+/** Wrap an async throwing function in a Result. */
+export const tryCatchAsync = async <T>(fn: () => Promise<T>): Promise<Result<T, Error>> => {
+  try {
+    return ok(await fn());
+  } catch (e) {
+    return err(e instanceof Error ? e : new Error(String(e)));
+  }
+};

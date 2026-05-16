@@ -32,6 +32,8 @@ import { meetsConfidence } from "./confidence.js";
  */
 export interface Predicate<T> {
   readonly label: string;
+  /** Bump when check logic changes. Included in DAG fingerprint for resume safety. */
+  readonly version: number;
   readonly check: (value: T, confidence: Confidence | null) => boolean;
   readonly minConfidence?: ConfidenceBucket;
 }
@@ -49,6 +51,7 @@ export const evaluatePredicate = <T>(
   confidence: Confidence | null,
 ): {
   readonly predicateLabel: string;
+  readonly predicateVersion: number;
   readonly matched: boolean;
   readonly evaluatedConfidence: Confidence | null;
   readonly reason?: string;
@@ -58,6 +61,7 @@ export const evaluatePredicate = <T>(
     if (confidence === null || !meetsConfidence(confidence.bucket, pred.minConfidence)) {
       return {
         predicateLabel: pred.label,
+        predicateVersion: pred.version,
         matched: false,
         evaluatedConfidence: confidence,
         reason: "below-min-confidence",
@@ -69,6 +73,7 @@ export const evaluatePredicate = <T>(
     const matched = pred.check(output, confidence);
     return {
       predicateLabel: pred.label,
+      predicateVersion: pred.version,
       matched,
       evaluatedConfidence: confidence,
     };
@@ -76,6 +81,7 @@ export const evaluatePredicate = <T>(
     const msg = e instanceof Error ? e.message : String(e);
     return {
       predicateLabel: pred.label,
+      predicateVersion: pred.version,
       matched: false,
       evaluatedConfidence: confidence,
       reason: `threw: ${msg}`,
@@ -130,25 +136,6 @@ export type EdgeDefRawInput =
   | { readonly from: string; readonly to: string; readonly kind: "conditional"; readonly when: Predicate<unknown> }
   | { readonly from: string; readonly to: string; readonly kind: "default" };
 
-/**
- * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. The
- * conditional branch is detected by presence of `when`; the default branch
- * by explicit `kind === "default"`; everything else is unconditional.
- */
-export const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
-  if ("kind" in e && e.kind === "default") {
-    return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "default" };
-  }
-  if ("when" in e) {
-    return {
-      from: __brandNodeId(e.from),
-      to: __brandNodeId(e.to),
-      kind: "conditional",
-      when: e.when,
-    };
-  }
-  return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "unconditional" };
-};
 
 // ---------------------------------------------------------------------------
 // DagDefInput — what authors construct, what `defineDag` accepts.

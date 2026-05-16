@@ -39,7 +39,7 @@ const conditionalEdge = (from: string, to: string, check: (v: any) => boolean): 
   from: N(from),
   to: N(to),
   kind: "conditional",
-  when: { label: "test-pred", check },
+  when: { label: "test-pred", version: 1, check },
 });
 
 const defaultEdge = (from: string, to: string): EdgeDef => ({

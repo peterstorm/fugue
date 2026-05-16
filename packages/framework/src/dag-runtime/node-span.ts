@@ -1,6 +1,7 @@
 import { SpanStatusCode } from "@opentelemetry/api";
 import { fwTracer } from "../tracing/global-tracer.js";
 import type { Result } from "../types/result.js";
+import { err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeResult } from "../nodes/eval-judge.js";
 import type { ContentFilter } from "../tracing/content-filter.js";
@@ -19,6 +20,8 @@ import {
 } from "../tracing/semantic-conventions.js";
 import { fwLogger } from "../logger.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
+import type { NodeId } from "../types/ids.js";
+import { __brandNodeId } from "../types/ids.js";
 
 /** Per-node guardrail outcome produced by `withNodeSpan`. */
 export interface NodeSpanOutcome {
@@ -126,7 +129,18 @@ export const withNodeSpan = async (
       } catch (e) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) });
         span.end();
-        throw e;
+        const message = e instanceof Error ? e.message : String(e);
+        const stack = e instanceof Error ? e.stack : undefined;
+        return {
+          result: err({
+            kind: "node-crash" as const,
+            nodeId: __brandNodeId(nodeId),
+            retriability: "retriable" as const,
+            message,
+            ...(stack ? { stack } : {}),
+          }),
+          outcome: EMPTY_OUTCOME,
+        };
       }
       if (result.ok) {
         span.addEvent(

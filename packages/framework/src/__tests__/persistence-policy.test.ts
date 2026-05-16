@@ -6,7 +6,6 @@ import {
   errorOnly,
   ratio,
   hadRetry,
-  coldCache,
   anyOf,
   allOf,
   custom,
@@ -51,11 +50,6 @@ describe("PersistencePolicy", () => {
   it("hadRetry returns true when retryCount > 0", () => {
     expect(hadRetry().shouldFlush(makeSummary({ retryCount: 0 }))).toBe(false);
     expect(hadRetry().shouldFlush(makeSummary({ retryCount: 2 }))).toBe(true);
-  });
-
-  it("coldCache is deprecated and always returns true", () => {
-    expect(coldCache().shouldFlush(makeSummary())).toBe(true);
-    expect(coldCache().shouldFlush(makeSummary({ nodeCount: 3 }))).toBe(true);
   });
 
   it("anyOf returns true if any sub-policy true", () => {

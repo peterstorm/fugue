@@ -5,7 +5,7 @@ import type {
   EdgeDef,
   EdgeDefRawInput,
 } from "../types/dag.js";
-import { brandAsDagDef, normalizeEdge } from "../types/dag.js";
+import { brandAsDagDef } from "../types/dag.js";
 import type { NodesRecord } from "../types/dag-internals.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
@@ -13,6 +13,26 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { __brandNodeId, __brandDagId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
+
+/**
+ * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. Private
+ * to this module — only called after `validateDagShape` has confirmed that
+ * `from`/`to` reference known node IDs.
+ */
+const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
+  if ("kind" in e && e.kind === "default") {
+    return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "default" };
+  }
+  if ("when" in e) {
+    return {
+      from: __brandNodeId(e.from),
+      to: __brandNodeId(e.to),
+      kind: "conditional",
+      when: e.when,
+    };
+  }
+  return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "unconditional" };
+};
 
 const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
   kind: "validation" as const,
@@ -33,8 +53,8 @@ const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
  *   - Every node with at least one conditional out-edge MUST have exactly
  *     one `kind: "default"` out-edge (else-totality).
  *   - At most one edge per `(from, to)` pair.
- *   - Conditional `when` must be a non-empty plain object (structural
- *     predicate — see ADR 0016).
+ *   - Conditional `when` must be a well-formed function-based predicate
+ *     with `{ label, version, check, minConfidence? }`.
  *   - `outputNodeId` (when set) must be reachable along unconditional +
  *     default edges only — predicates may bypass nodes, never the output.
  *
@@ -113,12 +133,20 @@ export const validateDagShape = (
         ),
       );
     }
-    const p = pred as { label?: unknown; check?: unknown; minConfidence?: unknown };
+    const p = pred as { label?: unknown; check?: unknown; version?: unknown; minConfidence?: unknown };
     if (typeof p.label !== "string" || p.label.length === 0) {
       return err(
         validationErr(
           e.from,
           `Edge '${e.from}' -> '${e.to}' predicate is missing a non-empty 'label'`,
+        ),
+      );
+    }
+    if (typeof p.version !== "number" || !Number.isInteger(p.version) || p.version < 0) {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' predicate is missing a valid 'version' (non-negative integer)`,
         ),
       );
     }

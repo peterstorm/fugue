@@ -1,4 +1,4 @@
-// Human-resolution helpers — FR-029..FR-032 approve / reject / reroute.
+// Human-resolution helpers — approve / reject / reroute.
 // All functions are pure; no I/O.
 
 import { match } from "ts-pattern";

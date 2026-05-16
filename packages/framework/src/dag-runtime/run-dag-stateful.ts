@@ -1,5 +1,5 @@
 // runDagStateful — orchestrates the DAG executor with the state-machine runner.
-// FR-023, FR-024, FR-025, FR-027.
+// Stateful DAG lifecycle, input/output validation, retry with backoff.
 //
 // This file is intentionally orchestration-only. The helpers it composes:
 //   - persistence.ts        — wrapDagJobLike / stripNonPersistable

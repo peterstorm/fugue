@@ -1,4 +1,4 @@
-// DAG runtime layer barrel export — FR-020
+// DAG runtime layer barrel export
 
 // Types
 export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";

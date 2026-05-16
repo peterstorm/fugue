@@ -1,5 +1,5 @@
-// In-memory QueueBackend, adaptInMemoryJob, and MarkerStore — FR-040, FR-043, Gap-4
-// MUST NOT import bullmq, ioredis, or queue-bullmq/** (FR-082)
+// In-memory QueueBackend, adaptInMemoryJob, and MarkerStore
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** (enforced by check-imports.ts)
 
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 import { createInMemoryJob, type InMemoryJob, type InMemoryJobOptions } from "./in-memory-job.js";

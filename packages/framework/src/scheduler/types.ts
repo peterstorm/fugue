@@ -1,5 +1,5 @@
-// Scheduler types — FR-060
-// MUST NOT import bullmq, ioredis (FR-080)
+// Scheduler types
+// MUST NOT import bullmq, ioredis (enforced by check-imports.ts)
 
 /** Periodic task configuration */
 export interface TaskConfig {

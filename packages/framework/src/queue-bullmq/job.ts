@@ -1,5 +1,5 @@
 // adaptBullMQJob — JobLike adapter for BullMQ Job, event log via Redis Streams
-// FR-047, FR-048, AD-3
+// Wraps BullMQ Job as JobLike with stream-backed event journal
 
 import type { Job } from "bullmq";
 import type Redis from "ioredis";

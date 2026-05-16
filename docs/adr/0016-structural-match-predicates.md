@@ -1,6 +1,6 @@
 # ADR 0016: Structural-match predicates for conditional edges
 
-**Status:** Accepted
+**Status:** Superseded by ADR 0028 (function-based predicates with confidence gating)
 **Date:** 2026-05-10
 **Plan ref:** `docs/plans/2026-05-10-structural-predicates.md`
 **Supersedes:** ADR 0015's `when: Guard` closure form (rest of ADR 0015 unchanged).

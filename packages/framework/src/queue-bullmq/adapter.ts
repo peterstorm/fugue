@@ -1,6 +1,6 @@
 // createBullMQBackend — QueueBackend adapter over BullMQ Queue/Worker
-// FR-045, FR-047, AD-3
-// Only queue-bullmq/** may import bullmq/ioredis (FR-082)
+// Validates inputs, wraps BullMQ jobs as JobLike, manages worker lifecycle
+// Only queue-bullmq/** may import bullmq/ioredis (enforced by check-imports.ts)
 
 import { Queue, Worker } from "bullmq";
 import type { ConnectionOptions } from "bullmq";

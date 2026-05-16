@@ -22,7 +22,7 @@ const mkNode = (id: string) =>
 // Well-formed predicate used wherever the test just needs *some* conditional
 // edge. Cast through `any` to build edge arrays in the simple `DagDefInput`
 // shape without threading per-edge type inference.
-const SOME = { label: "some-pred", check: () => true } as any;
+const SOME = { label: "some-pred", version: 1, check: () => true } as any;
 
 describe("validateDagShape — conditional edges", () => {
   it("rejects missing default edge when conditionals exist", () => {
@@ -130,7 +130,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "", check: () => true } as any },
+        { from: "a", to: "b", when: { label: "", version: 1, check: () => true } as any },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -138,6 +138,26 @@ describe("validateDagShape — conditional edges", () => {
     expect(r.ok).toBe(false);
     if (!r.ok && r.error.kind === "validation") {
       expect(r.error.message).toContain("label");
+    }
+  });
+
+  it("rejects a predicate with missing version", () => {
+    const dag: DagDefInput = {
+      id: "no-version",
+      nodes: {
+        a: mkNode("a"),
+        b: mkNode("b"),
+        c: mkNode("c"),
+      },
+      edges: [
+        { from: "a", to: "b", when: { label: "foo", check: () => true } as any },
+        { from: "a", to: "c", kind: "default" },
+      ],
+    };
+    const r = validateDagShape(dag);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.error.kind === "validation") {
+      expect(r.error.message).toContain("version");
     }
   });
 
@@ -150,7 +170,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "foo" } as any },
+        { from: "a", to: "b", when: { label: "foo", version: 1 } as any },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -190,7 +210,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "test", check: () => true, minConfidence: "super-high" } as any },
+        { from: "a", to: "b", when: { label: "test", version: 1, check: () => true, minConfidence: "super-high" } as any },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -211,7 +231,7 @@ describe("validateDagShape — conditional edges", () => {
         merge: mkNode("merge"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "kind-is-yes", check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "b", kind: "default" },
         { from: "a", to: "merge" },
         { from: "b", to: "merge" },
@@ -231,7 +251,7 @@ describe("validateDagShape — conditional edges", () => {
         b: mkNode("b"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "high-conf-route", check: () => true, minConfidence: "medium" } as any },
+        { from: "router", to: "a", when: { label: "high-conf-route", version: 1, check: () => true, minConfidence: "medium" } as any },
         { from: "router", to: "b", kind: "default" },
       ],
     };
