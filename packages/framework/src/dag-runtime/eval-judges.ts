@@ -129,15 +129,21 @@ export const finalizeRunWithJudges = async (
  * `setStatus` failure must not block `end()`, an `end()` failure must not
  * block `emitRunEnd`, etc — otherwise the OTel span leaks open and
  * BufferedObserver retains the run buffer until its TTL.
+ *
+ * Returns a typed `BackgroundResult` so callers can inspect judge outcomes.
  */
 export const runFinalizeInBackground = (
-  finalize: () => Promise<unknown>,
+  finalize: () => Promise<DagRunMeta>,
   rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
-): Promise<void> =>
+): Promise<import("./run-dag-stateful.js").BackgroundResult> =>
   finalize()
-    .then(() => undefined)
-    .catch((e) => {
+    .then((meta): import("./run-dag-stateful.js").BackgroundResult => ({
+      judgesPassed: !meta.evalJudgeFailed,
+      judgesCrashed: meta.evalJudgeResults?.some((r) => !!(r as any).crash) ?? false,
+      meta,
+    }))
+    .catch((e): import("./run-dag-stateful.js").BackgroundResult => {
       fwLogger().error("[runDagStateful] background finalize failed:", e);
       try {
         rootSpan.setStatus({
@@ -166,4 +172,9 @@ export const runFinalizeInBackground = (
           emitErr,
         );
       }
+      return {
+        judgesPassed: false,
+        judgesCrashed: true,
+        meta: { guardrailFailed: false, guardrailWarnings: [], evalJudgeFailed: true, evalJudgeResults: [] },
+      };
     });

@@ -5,6 +5,7 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { confidence } from "../types/confidence.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { ok } from "../types/result.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -222,7 +223,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const dag = makeDag({
       confidence: {
         mode: "value" as const,
-        extract: () => ({ bucket: "high" as const, source: "heuristic" as const }),
+        extract: () => confidence("high", "heuristic"),
       },
     });
     const observer = new RecordingObserver();
@@ -235,10 +236,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     expect(result.ok).toBe(true);
     const evt = findInterventionEvent(observer.events);
     expect(evt).toBeDefined();
-    expect(evt!.context.nodeConfidence).toEqual({
-      bucket: "high",
-      source: "heuristic",
-    });
+    expect(evt!.context.nodeConfidence).toEqual(confidence("high", "heuristic"));
   });
 
   test("context.nodeConfidence is null when node has confidence mode=none", async () => {

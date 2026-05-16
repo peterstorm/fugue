@@ -12,6 +12,8 @@ import { match } from "ts-pattern";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import type { Witness } from "../types/freshness.js";
+import type { FrameworkError } from "../types/errors.js";
+import { type Result, ok, err } from "../types/result.js";
 import type { DagMachineContext } from "./types.js";
 import { type FreshnessIndex } from "./freshness-check.js";
 import { fwLogger } from "../logger.js";
@@ -30,7 +32,7 @@ export const emitFreshnessWitnessEvents = async (
   freshnessIndex: FreshnessIndex,
   skippedNodeIds: ReadonlySet<NodeId>,
   witnessAccumulator?: Map<string, Witness>,
-): Promise<void> => {
+): Promise<Result<void, FrameworkError>> => {
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
 
@@ -190,6 +192,7 @@ export const emitFreshnessWitnessEvents = async (
           fwLogger().error(
             `[emitFreshnessWitnessEvents] freshnessIndex.recordWrite failed for node '${nodeId}': ${msg}`,
           );
+          const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness recordWrite failed: ${msg}` };
           emit(nodeCtx, {
             type: "node-error",
             runId: nodeCtx.runId,
@@ -198,12 +201,14 @@ export const emitFreshnessWitnessEvents = async (
             sideEffects: nodeMap.get(nodeId)?.sideEffects,
             timestamp: stamp(),
             error: `freshness recordWrite failed: ${msg}`,
-            frameworkError: { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness recordWrite failed: ${msg}` },
+            frameworkError: fwError,
           });
+          return err(fwError);
         }
       })
       .with({ kind: "none" }, () => { /* pure transform — no freshness tracking */ })
       .with({ kind: "external-call" }, () => { /* external calls don't participate in witness contract */ })
       .exhaustive();
   }
+  return ok(undefined);
 };

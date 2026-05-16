@@ -29,6 +29,7 @@ const DEFAULT_MAX_LEN = 10000;
  * ARGV[4] = dedupKey ("" when no dedup)
  * ARGV[5] = type
  * ARGV[6] = payload
+ * ARGV[7] = dedup scan depth (number of recent entries to check)
  */
 const APPEND_EVENT_SCRIPT = `
 local stream = KEYS[1]
@@ -38,13 +39,14 @@ local entryId = ARGV[3]
 local dedupKey = ARGV[4]
 local entryType = ARGV[5]
 local payload = ARGV[6]
+local dedupDepth = tonumber(ARGV[7]) or 8
 
 if dedupKey ~= "" then
-  local last = redis.call("XREVRANGE", stream, "+", "-", "COUNT", 1)
-  if last and #last > 0 then
-    local fields = last[1][2]
-    for i = 1, #fields, 2 do
-      if fields[i] == "dedupKey" and fields[i+1] == dedupKey then
+  local entries = redis.call("XREVRANGE", stream, "+", "-", "COUNT", dedupDepth)
+  for i = 1, #entries do
+    local fields = entries[i][2]
+    for j = 1, #fields, 2 do
+      if fields[j] == "dedupKey" and fields[j+1] == dedupKey then
         return "skipped"
       end
     end
@@ -195,6 +197,7 @@ export function adaptBullMQJob<S, C>(
         dedupKey ?? "",
         type,
         payload,
+        "8", // dedup scan depth — covers interleaving from concurrent traces
       ];
 
       const runScript = async (): Promise<unknown> => {

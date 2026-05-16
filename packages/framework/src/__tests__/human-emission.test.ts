@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { emitHumanIntervention } from "../dag-runtime/human-emission.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { nodeId, runId, dagId } from "../types/ids.js";
+import { confidence } from "../types/confidence.js";
 import type { NodeDef } from "../types/node.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import type { HumanInterventionEvent } from "../types/events.js";
@@ -113,7 +114,7 @@ describe("emitHumanIntervention", () => {
     const nodeDef = makeNodeDef({
       confidence: {
         mode: "value",
-        extract: () => ({ bucket: "high", source: "logprob" }),
+        extract: () => confidence("high", "logprob"),
       },
     });
     const nodeMap = new Map([[NID, nodeDef]]);
@@ -124,7 +125,7 @@ describe("emitHumanIntervention", () => {
     );
 
     const evt = obs.events.find((e) => e.type === "human-intervention") as HumanInterventionEvent;
-    expect(evt.context.nodeConfidence).toEqual({ bucket: "high", source: "logprob" });
+    expect(evt.context.nodeConfidence).toEqual(confidence("high", "logprob"));
   });
 
   it("sets null confidence when extract throws", () => {

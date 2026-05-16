@@ -173,7 +173,7 @@ const runOnce = async (shape: Shape, seedTag: number): Promise<Recording> => {
     mkCtx(observer),
     {
       onTrace,
-      onBackground: shape.background ? (p) => { bgPromise = p; } : undefined,
+      onBackground: shape.background ? (p: Promise<any>) => { bgPromise = p; } : undefined,
     },
   );
 

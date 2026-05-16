@@ -21,17 +21,37 @@ export function createRedisMarkerStore(redis: Redis): MarkerStore {
           `ttlSeconds must be a finite positive number, got ${ttlSeconds}`,
         );
       }
-      // SET key value EX ttl — overwrites existing key and resets TTL
-      await redis.set(key, "1", "EX", Math.ceil(ttlSeconds));
+      try {
+        await redis.set(key, "1", "EX", Math.ceil(ttlSeconds));
+      } catch (e) {
+        throw new Error(
+          `[RedisMarkerStore] set failed for key "${key}": ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e },
+        );
+      }
     },
 
     async exists(key: string): Promise<boolean> {
-      const count = await redis.exists(key);
-      return count > 0;
+      try {
+        const count = await redis.exists(key);
+        return count > 0;
+      } catch (e) {
+        throw new Error(
+          `[RedisMarkerStore] exists failed for key "${key}": ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e },
+        );
+      }
     },
 
     async delete(key: string): Promise<void> {
-      await redis.del(key);
+      try {
+        await redis.del(key);
+      } catch (e) {
+        throw new Error(
+          `[RedisMarkerStore] delete failed for key "${key}": ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e },
+        );
+      }
     },
   };
 }

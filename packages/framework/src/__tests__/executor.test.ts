@@ -714,7 +714,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     // legacy fast path. Caller-bound timeouts (HTTP request signal) no longer
     // block on judges + span finalization.
     const dag = mkSimpleDag("onbg-jl");
-    let bgCaptured: Promise<void> | undefined;
+    let bgCaptured: Promise<any> | undefined;
     const result = await runDag(dag, {}, mkCtx(), {
       onBackground: (p) => { bgCaptured = p; },
       retryLimits: { A: 2 }, // routes to SM path

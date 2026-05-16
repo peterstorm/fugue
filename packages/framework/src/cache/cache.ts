@@ -1,11 +1,17 @@
 // Cache interface + InMemoryCache for testing
 
+import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 
 export interface Cache {
-  get<T>(key: string): Promise<Result<T | null, FrameworkError>>;
+  /**
+   * Get a cached value, validated against the provided schema.
+   * Returns null on miss. Treats schema-drift (validation failure) as a miss
+   * so stale-shaped data doesn't crash callers.
+   */
+  get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>>;
   set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>>;
 }
 
@@ -23,14 +29,17 @@ export class InMemoryCache implements Cache {
     this.now = opts?.now ?? Date.now;
   }
 
-  async get<T>(key: string): Promise<Result<T | null, FrameworkError>> {
+  async get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>> {
     const entry = this.store.get(key);
     if (!entry) return ok(null);
     if (this.now() > entry.expiresAt) {
       this.store.delete(key);
       return ok(null);
     }
-    return ok(JSON.parse(entry.value) as T);
+    const parsed = JSON.parse(entry.value);
+    const validated = schema.safeParse(parsed);
+    if (!validated.success) return ok(null); // schema drift → treat as miss
+    return ok(validated.data);
   }
 
   async set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>> {

@@ -5,7 +5,8 @@
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./advanced": "./src/advanced.ts"
+    "./advanced": "./src/advanced.ts",
+    "./bullmq": "./src/bullmq.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

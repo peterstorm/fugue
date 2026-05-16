@@ -9,8 +9,7 @@ import type { NodeId, RunId } from "./ids.js";
 import type { FrameworkError } from "./errors.js";
 import type { Capability } from "./node.js";
 
-const toNodeId = (nid: string | NodeId): NodeId =>
-  typeof nid === "object" ? nid : brandNodeId(nid);
+const toNodeId = (nid: string | NodeId): NodeId => brandNodeId(nid as string);
 
 /** Ergonomic factories for constructing FrameworkError values with string node IDs. */
 export const frameworkError = {

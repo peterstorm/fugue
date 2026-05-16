@@ -17,6 +17,8 @@ export {
   fold,
   tryCatch,
   tryCatchAsync,
+  sequence,
+  collectAll,
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
@@ -56,7 +58,7 @@ export type {
   ConfidenceSource,
   Confidence,
 } from "./confidence.js";
-export { CONFIDENCE_ORDER, meetsConfidence } from "./confidence.js";
+export { CONFIDENCE_ORDER, meetsConfidence, confidence } from "./confidence.js";
 
 // ── Freshness witness types ───────────────────────────────────────────────
 export type { WitnessKind, Witness } from "./freshness.js";

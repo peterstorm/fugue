@@ -64,3 +64,24 @@ export const tryCatchAsync = async <T>(fn: () => Promise<T>): Promise<Result<T, 
     return err(e instanceof Error ? e : new Error(String(e)));
   }
 };
+
+/** Collect a list of Results into a Result of list. Short-circuits on first Err. */
+export const sequence = <T, E>(results: readonly Result<T, E>[]): Result<T[], E> => {
+  const values: T[] = [];
+  for (const r of results) {
+    if (!r.ok) return r;
+    values.push(r.value);
+  }
+  return ok(values);
+};
+
+/** Collect all Results — returns all values if all ok, all errors if any failed. */
+export const collectAll = <T, E>(results: readonly Result<T, E>[]): Result<T[], E[]> => {
+  const values: T[] = [];
+  const errors: E[] = [];
+  for (const r of results) {
+    if (r.ok) values.push(r.value);
+    else errors.push(r.error);
+  }
+  return errors.length === 0 ? ok(values) : err(errors);
+};

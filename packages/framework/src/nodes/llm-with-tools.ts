@@ -83,14 +83,6 @@ export const createLlmWithToolsNode = <I, O>(
     }
 
     const llmClient: LlmClient = ctx.llm;
-    if (!llmClient.sendWithTools) {
-      return err({
-        kind: "node-crash" as const,
-        nodeId: id,
-        retriability: "non-retriable" as const,
-        message: "llm.sendWithTools not available on context",
-      });
-    }
 
     // Resolve system + user prompts. Registry (when present) takes
     // precedence; fall back to inline configuration when the registry entry

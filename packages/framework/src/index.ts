@@ -71,14 +71,10 @@ export {
 } from "./queue/in-memory.js";
 
 // ---------------------------------------------------------------------------
-// Queue-BullMQ adapter
+// Queue-BullMQ adapter — moved to `@ai-summary/framework/bullmq` subpath.
+// Consumers that need durable BullMQ queues import from the subpath to avoid
+// pulling bullmq/ioredis into their dependency graph.
 // ---------------------------------------------------------------------------
-export { createBullMQBackend } from "./queue-bullmq/adapter.js";
-export { defaultStreamKey, adaptBullMQJob } from "./queue-bullmq/job.js";
-export type { AdaptBullMQJobOpts } from "./queue-bullmq/job.js";
-export { createRedisMarkerStore } from "./queue-bullmq/markers.js";
-export { createRedisStreamReader } from "./queue-bullmq/event-log.js";
-// `EventLogReader` is exported from the queue/ layer above (its canonical home).
 
 // ---------------------------------------------------------------------------
 // Scheduler — public surface only. `hasCycle` and `diffRegistry`

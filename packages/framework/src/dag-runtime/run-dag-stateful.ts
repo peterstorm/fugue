@@ -28,13 +28,25 @@ import { validateCapabilities } from "../shared/capabilities.js";
 import { wrapDagJobLike } from "./persistence.js";
 import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.js";
 import type { FreshnessIndex } from "./freshness-check.js";
+import { sha256DedupKey } from "../shared/dedup-key.js";
+import { fwLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
 // ---------------------------------------------------------------------------
 
+/** Result of background judge finalization, surfaced via `onBackground`. */
+export interface BackgroundResult {
+  /** True when all judges returned `passed: true`. */
+  readonly judgesPassed: boolean;
+  /** True when any judge crashed (threw unexpectedly). */
+  readonly judgesCrashed: boolean;
+  /** Full run meta including eval-judge results and guardrail state. */
+  readonly meta: DagRunMeta;
+}
+
 export interface DagRunOpts
-  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf"> {
+  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf" | "computeDedupKey" | "logger"> {
   /** Provide a durable job backend (BullMQ, etc.). Falls back to in-memory when omitted.
    * Typed against `DagMachineContextPersisted` — the serialization-safe subset.
    * The runtime re-injects live DAG-derived fields (closures, schemas) on read.
@@ -56,10 +68,11 @@ export interface DagRunOpts
   readonly retryLimits?: Readonly<Record<string, number>>;
   /**
    * When supplied, eval-judges run in the background after the run resolves
-   * `ok`. The hook receives a promise that resolves once judges + span
-   * finalization complete. When omitted, judges still run before resolution.
+   * `ok`. The hook receives a promise that resolves with a typed result
+   * indicating whether judges passed, crashed, or failed quality gates.
+   * When omitted, judges still run before resolution.
    */
-  readonly onBackground?: (p: Promise<void>) => void;
+  readonly onBackground?: (p: Promise<BackgroundResult>) => void;
   /**
    * Checkpoint replay for crash-resume scenarios. When provided, nodes whose
    * ids appear in this Map are skipped on first encounter: their cached
@@ -194,6 +207,8 @@ export const runDagStateful = async <I, O>(
       onTrace: opts?.onTrace,
       errorEventOf,
       now: opts?.now,
+      computeDedupKey: sha256DedupKey,
+      logger: fwLogger(),
     };
 
     try {

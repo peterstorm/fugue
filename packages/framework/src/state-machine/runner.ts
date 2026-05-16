@@ -1,9 +1,7 @@
 // runStateMachine — the durable state-machine kernel loop
 // Transition loop, event sourcing, checkpoint persistence, idempotency, trace emission
 
-import { createHash } from "node:crypto";
 import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";
-import { fwLogger } from "../logger.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
   retriable: true,
@@ -11,15 +9,12 @@ const defaultClassifyError = (error: unknown): { retriable: boolean; message: st
 });
 
 /**
- * Deterministic per-transition key. Stamped on every `appendEvent` call so
- * adapters can dedup if the worker crashes between `appendEvent` and
- * `updateData` (and the same transition gets re-derived on restart).
- *
- * Inputs: the prior `stateKey`, the per-state attempt counter, and the event
- * type tag. These three together uniquely identify a transition slot. 16 hex
- * chars is plenty for collision resistance within a single job's stream.
+ * Fallback dedup key when no `computeDedupKey` is injected via opts.
+ * Uses string concatenation (no crypto) so the kernel stays runtime-agnostic.
+ * Callers wanting collision-resistant keys (e.g., the DAG runtime) inject a
+ * SHA-256 variant via `KernelRunOpts.computeDedupKey`.
  */
-const computeDedupKey = (
+const fallbackDedupKey = (
   prevStateKey: string,
   attemptNumber: number,
   event: unknown,
@@ -28,8 +23,7 @@ const computeDedupKey = (
     typeof (event as { type?: unknown })?.type === "string"
       ? (event as { type: string }).type
       : "<event>";
-  const key = `${prevStateKey}|${attemptNumber}|${eventType}`;
-  return createHash("sha256").update(key).digest("hex").slice(0, 16);
+  return `${prevStateKey}|${attemptNumber}|${eventType}`;
 };
 
 /**
@@ -57,6 +51,8 @@ export const runStateMachine = async <S, E, C>(
   const classify = opts.classifyError ?? defaultClassifyError;
   const nowFn = opts.now ?? Date.now;
   const stamp = (): Date => new Date(nowFn());
+  const dedupKeyFn = opts.computeDedupKey ?? fallbackDedupKey;
+  const log = opts.logger ?? { warn: () => {}, error: () => {} };
 
   // FR-011: retry counters are per-invocation (fresh map = counters start
   // at 0 for every queue-level attempt).
@@ -80,7 +76,7 @@ export const runStateMachine = async <S, E, C>(
               timestamp: stamp(),
             });
           } catch (traceErr) {
-            fwLogger().error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
           }
         }
         throw new Error("runStateMachine: aborted by beforeExecute hook");
@@ -149,7 +145,7 @@ export const runStateMachine = async <S, E, C>(
     // Replay consumers see at-most-once delivery.
     if (!isFailed) {
       const attemptNumber = retryCounters.get(dedupSlot) ?? 0;
-      const dedupKey = computeDedupKey(prevStateKey, attemptNumber, event);
+      const dedupKey = dedupKeyFn(prevStateKey, attemptNumber, event);
       await job.appendEvent(event, dedupKey);
       await job.updateData({ state, context });
       // Do not persist progress for failed states — the runner throws below
@@ -173,7 +169,7 @@ export const runStateMachine = async <S, E, C>(
           timestamp: stamp(),
         });
       } catch (traceErr) {
-        fwLogger().error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+        log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
       }
     }
 

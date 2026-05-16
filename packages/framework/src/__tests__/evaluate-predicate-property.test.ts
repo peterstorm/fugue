@@ -11,6 +11,7 @@
 import { describe, it, expect } from "bun:test";
 import fc from "fast-check";
 import { evaluatePredicate } from "../types/dag.js";
+import { confidence } from "../types/confidence.js";
 import type { Confidence, ConfidenceBucket, ConfidenceSource } from "../types/confidence.js";
 
 const arbBucket = fc.constantFrom<ConfidenceBucket>("high", "medium", "low", "unknown");
@@ -25,7 +26,7 @@ const arbSource = fc.constantFrom<ConfidenceSource>(
 const arbConfidence: fc.Arbitrary<Confidence> = fc.record({
   bucket: arbBucket,
   source: arbSource,
-});
+}).map(({ bucket, source }) => confidence(bucket, source));
 const arbConfidenceOrNull = fc.option(arbConfidence, { nil: null });
 
 describe("evaluatePredicate — property tests", () => {
@@ -65,7 +66,7 @@ describe("evaluatePredicate — property tests", () => {
     const result1 = evaluatePredicate(
       { label: "test", version: 1, check: () => true, minConfidence: "high" },
       "val",
-      { bucket: "low", source: "heuristic" },
+      confidence("low", "heuristic"),
     );
     expect(result1.matched).toBe(false);
     expect(result1.reason).toBe("below-min-confidence");
@@ -73,7 +74,7 @@ describe("evaluatePredicate — property tests", () => {
     const result2 = evaluatePredicate(
       { label: "test", version: 1, check: () => true, minConfidence: "medium" },
       "val",
-      { bucket: "unknown", source: "heuristic" },
+      confidence("unknown", "heuristic"),
     );
     expect(result2.matched).toBe(false);
     expect(result2.reason).toBe("below-min-confidence");
@@ -85,7 +86,7 @@ describe("evaluatePredicate — property tests", () => {
         const result = evaluatePredicate(
           { label: "test", version: 1, check: () => checkResult, minConfidence: "low" },
           "val",
-          { bucket: "high", source: "heuristic" },
+          confidence("high", "heuristic"),
         );
         return result.matched === checkResult && result.reason === undefined;
       }),

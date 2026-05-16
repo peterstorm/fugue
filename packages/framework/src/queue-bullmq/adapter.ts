@@ -164,6 +164,45 @@ export function createBullMQBackend(
       fwLogger().error("[BullMQ] Worker internal error:", err);
     });
 
+    // Single `worker.on("failed")` listener with internal dispatch.
+    // Eliminates double-invocation and ordering dependencies from the prior
+    // dual-listener pattern.
+    const failedHandlers: Array<(id: string, err: unknown, attempts: number, max: number) => Promise<void> | void> = [];
+    const exhaustedHandlers: Array<(id: string, err: unknown, attempts: number) => Promise<void> | void> = [];
+
+    worker.on("failed", (job, error) => {
+      if (!job?.id) {
+        worker.emit(
+          "error",
+          new Error(`[BullMQ] "failed" event with no job id on queue "${name}"`),
+        );
+        return;
+      }
+      const id = job.id;
+      const attemptsMade = job.attemptsMade ?? 1;
+      const max = job.opts?.attempts ?? 1;
+
+      if (attemptsMade >= max) {
+        for (const handler of exhaustedHandlers) {
+          Promise.resolve(handler(id, error, attemptsMade)).catch((handlerErr) => {
+            worker.emit(
+              "error",
+              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
+            );
+          });
+        }
+      } else {
+        for (const handler of failedHandlers) {
+          Promise.resolve(handler(id, error, attemptsMade, max)).catch((handlerErr) => {
+            worker.emit(
+              "error",
+              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
+            );
+          });
+        }
+      }
+    });
+
     return {
       onFailed(
         handler: (
@@ -173,28 +212,7 @@ export function createBullMQBackend(
           max: number,
         ) => Promise<void> | void,
       ): void {
-        worker.on("failed", (job, error) => {
-          if (!job?.id) {
-            worker.emit(
-              "error",
-              new Error(`[BullMQ] "failed" event with no job id on queue "${name}"`),
-            );
-            return;
-          }
-          const id = job.id;
-          const attemptsMade = job.attemptsMade ?? 1;
-          // Per-job max — BullMQ resolves this from EnqueueOpts.attempts ??
-          // QueueOpts.defaultAttempts (via defaultJobOptions) ?? 1.
-          const max = job.opts?.attempts ?? 1;
-          // Mid-retry only — onExhausted fires when the budget is gone.
-          if (attemptsMade >= max) return;
-          Promise.resolve(handler(id, error, attemptsMade, max)).catch((handlerErr) => {
-            worker.emit(
-              "error",
-              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
-            );
-          });
-        });
+        failedHandlers.push(handler);
       },
 
       onExhausted(
@@ -204,19 +222,7 @@ export function createBullMQBackend(
           attempts: number,
         ) => Promise<void> | void,
       ): void {
-        worker.on("failed", (job, error) => {
-          if (!job?.id) return; // onFailed already emitted the error
-          const id = job.id;
-          const attemptsMade = job.attemptsMade ?? 1;
-          const max = job.opts?.attempts ?? 1;
-          if (attemptsMade < max) return;
-          Promise.resolve(handler(id, error, attemptsMade)).catch((handlerErr) => {
-            worker.emit(
-              "error",
-              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
-            );
-          });
-        });
+        exhaustedHandlers.push(handler);
       },
 
       onError(handler: (err: Error) => void): void {

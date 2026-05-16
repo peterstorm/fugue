@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import Redis from "ioredis";
 import { join, resolve } from "node:path";
+import { z } from "zod";
 import {
   AnthropicLlmClient,
   OpenAILlmClient,
@@ -93,7 +94,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     // are no longer ambiguous with cache misses.
     contextCache = {
       get: async (key: string) => {
-        const r = await cache.get(key);
+        const r = await cache.get(key, z.unknown());
         if (!r.ok) {
           log.warn(`[cache] get failed for key=${key}: ${r.error.kind}`);
           return { hit: false } as const;

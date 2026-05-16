@@ -96,6 +96,18 @@ export interface KernelRunOpts<S, E, C> {
    * deterministic trace durations can supply a stub; defaults to `Date.now`.
    */
   now?: () => number;
+  /**
+   * Deterministic per-transition dedup key. Injected by the shell so the
+   * kernel stays runtime-agnostic (no node:crypto). When omitted, the runner
+   * uses a simple string-concat fallback (unique but not collision-resistant).
+   */
+  computeDedupKey?: (prevStateKey: string, attemptNumber: number, event: E) => string;
+  /**
+   * Logger for kernel-internal warnings (e.g., onTrace threw). The kernel
+   * has zero ambient state — all dependencies are explicit. Defaults to
+   * silent no-op so the kernel is side-effect-free when no logger is wired.
+   */
+  logger?: { warn: (msg: string, ...args: unknown[]) => void; error: (msg: string, ...args: unknown[]) => void };
 }
 
 // AD-4: Post-transition trace event with FROM + TO state

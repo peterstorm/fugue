@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
+import { z } from "zod";
 import Redis from "ioredis";
 import { RedisCache } from "../cache/redis-cache.js";
 import { InMemoryCache } from "../cache/cache.js";
@@ -16,7 +17,7 @@ function cacheSuite(name: string, factory: () => Cache) {
     });
 
     test("get returns null on miss", async () => {
-      const result = await cache.get("nonexistent");
+      const result = await cache.get("nonexistent", z.unknown());
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.value).toBeNull();
     });
@@ -26,7 +27,7 @@ function cacheSuite(name: string, factory: () => Cache) {
       const setRes = await cache.set("k1", data, 60);
       expect(setRes.ok).toBe(true);
 
-      const getRes = await cache.get<typeof data>("k1");
+      const getRes = await cache.get("k1", z.object({ foo: z.number(), bar: z.array(z.number()) }));
       expect(getRes.ok).toBe(true);
       if (getRes.ok) expect(getRes.value).toEqual(data);
     });
@@ -35,7 +36,7 @@ function cacheSuite(name: string, factory: () => Cache) {
       const setRes = await cache.set("k2", "hello", 60);
       expect(setRes.ok).toBe(true);
 
-      const getRes = await cache.get<string>("k2");
+      const getRes = await cache.get("k2", z.string());
       expect(getRes.ok).toBe(true);
       if (getRes.ok) expect(getRes.value).toBe("hello");
     });
@@ -52,7 +53,7 @@ describe("InMemoryCache TTL", () => {
     await cache.set("ttl-key", "value", 0); // 0 second TTL = already expired
     // Small delay to ensure expiry
     await new Promise((r) => setTimeout(r, 10));
-    const res = await cache.get("ttl-key");
+    const res = await cache.get("ttl-key", z.string());
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.value).toBeNull();
   });
@@ -133,7 +134,7 @@ describeRedis("RedisCache", () => {
   });
 
   test("get returns null on miss", async () => {
-    const result = await cache.get(`${TEST_PREFIX}nonexistent`);
+    const result = await cache.get(`${TEST_PREFIX}nonexistent`, z.unknown());
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBeNull();
   });
@@ -143,7 +144,7 @@ describeRedis("RedisCache", () => {
     const setRes = await cache.set(`${TEST_PREFIX}k1`, data, 60);
     expect(setRes.ok).toBe(true);
 
-    const getRes = await cache.get<typeof data>(`${TEST_PREFIX}k1`);
+    const getRes = await cache.get(`${TEST_PREFIX}k1`, z.object({ foo: z.number(), bar: z.array(z.number()) }));
     expect(getRes.ok).toBe(true);
     if (getRes.ok) expect(getRes.value).toEqual(data);
   });
@@ -158,7 +159,7 @@ describeRedis("RedisCache", () => {
   test("expired key returns null", async () => {
     await cache.set(`${TEST_PREFIX}exp`, "val", 1);
     await new Promise((r) => setTimeout(r, 1100));
-    const res = await cache.get(`${TEST_PREFIX}exp`);
+    const res = await cache.get(`${TEST_PREFIX}exp`, z.string());
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.value).toBeNull();
   });

@@ -17,6 +17,7 @@ import { z } from "zod";
 import type { RunId, DagId } from "../types/ids.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { RouteDecidedEvent } from "../types/events.js";
+import { confidence } from "../types/confidence.js";
 import type { Confidence } from "../types/confidence.js";
 import { ok } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
@@ -85,7 +86,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
 
   it("upstreamConfidence is populated when router has confidence: { mode: 'value' }", async () => {
     const obs = new RecordingObserver();
-    const expectedConf: Confidence = { bucket: "high", source: "heuristic" };
+    const expectedConf: Confidence = confidence("high", "heuristic");
     const dag = defineDag({
       id: "with-conf",
       nodes: {
@@ -120,7 +121,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           run: async () => ok({ kind: "b" }),
           confidence: {
             mode: "value",
-            extract: () => ({ bucket: "medium" as const, source: "self-reported-bucket" as const }),
+            extract: () => confidence("medium", "self-reported-bucket"),
           },
         }),
         a: makeNode("a", { inputSchema: z.object({ router: z.any().optional() }) }),
@@ -183,7 +184,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           run: async () => ok({ kind: "yes" }),
           confidence: {
             mode: "value",
-            extract: () => ({ bucket: "low" as const, source: "self-reported-bucket" as const }),
+            extract: () => confidence("low", "self-reported-bucket"),
           },
         }),
         a: makeNode("a", { inputSchema: z.object({ router: z.any().optional() }) }),
@@ -223,7 +224,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           run: async () => ok({ kind: "yes" }),
           confidence: {
             mode: "value",
-            extract: () => ({ bucket: "high" as const, source: "logprob" as const }),
+            extract: () => confidence("high", "logprob"),
           },
         }),
         a: makeNode("a", { inputSchema: z.object({ router: z.any().optional() }) }),

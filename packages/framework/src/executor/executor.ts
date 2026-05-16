@@ -29,7 +29,7 @@ export interface RunOptions {
     readonly checkpoint: Map<string, unknown>;
   };
   /** Called with a promise that resolves when background work (eval-judge) completes. */
-  readonly onBackground?: (p: Promise<void>) => void;
+  readonly onBackground?: (p: Promise<import("../dag-runtime/run-dag-stateful.js").BackgroundResult>) => void;
   /**
    * Durable job handle for checkpoint/resume. When omitted, an in-memory
    * `JobLike` is used (runtime semantics preserved; durability across worker

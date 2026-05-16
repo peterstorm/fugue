@@ -87,22 +87,21 @@ describe("Wave 1.1 — onTrace exceptions do not escape the kernel loop", () => 
       return e;
     };
 
-    const original = console.error;
     const errors: string[] = [];
-    console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+    const testLogger = {
+      warn: (msg: string) => { errors.push(msg); },
+      error: (msg: string) => { errors.push(msg); },
+    };
 
-    try {
-      const result = await runStateMachine(job, machine, executor, {
-        errorEventOf: (c): E => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
-        onTrace: () => {
-          throw new Error("simulated onTrace failure");
-        },
-      });
-      expect(result.state).toEqual({ kind: "succeeded" });
-      expect(errors.some((e) => e.includes("onTrace threw"))).toBe(true);
-    } finally {
-      console.error = original;
-    }
+    const result = await runStateMachine(job, machine, executor, {
+      errorEventOf: (c): E => ({ type: "ERROR", retriable: c.retriable, message: c.message }),
+      onTrace: () => {
+        throw new Error("simulated onTrace failure");
+      },
+      logger: testLogger,
+    });
+    expect(result.state).toEqual({ kind: "succeeded" });
+    expect(errors.some((e) => e.includes("onTrace threw"))).toBe(true);
   });
 });
 
@@ -427,13 +426,13 @@ describe("Wave 6.2 — InMemoryCache accepts an injectable now() seam", () => {
     let t = 1000;
     const cache = new InMemoryCache({ now: () => t });
     await cache.set("k", "v", 1); // 1s TTL → expires at t=2000
-    expect((await cache.get<string>("k")).ok ? (await cache.get<string>("k")) : null).toBeTruthy();
+    expect((await cache.get("k", z.string())).ok ? (await cache.get("k", z.string())) : null).toBeTruthy();
 
-    const beforeExpiry = await cache.get<string>("k");
+    const beforeExpiry = await cache.get("k", z.string());
     expect(beforeExpiry.ok && beforeExpiry.value).toBe("v");
 
     t = 2500; // past TTL
-    const afterExpiry = await cache.get<string>("k");
+    const afterExpiry = await cache.get("k", z.string());
     expect(afterExpiry.ok && afterExpiry.value).toBe(null);
   });
 });

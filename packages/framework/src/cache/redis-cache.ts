@@ -1,6 +1,7 @@
 // Redis-backed Cache implementation
 
 import type Redis from "ioredis";
+import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
@@ -16,12 +17,19 @@ const cacheError = (operation: string, message: string): FrameworkError => ({
 export class RedisCache implements Cache {
   constructor(private readonly redis: Redis) {}
 
-  async get<T>(key: string): Promise<Result<T | null, FrameworkError>> {
+  async get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>> {
     try {
       const raw = await this.redis.get(key);
       if (raw === null) return ok(null);
       const parsed: unknown = JSON.parse(raw);
-      return ok(parsed as T);
+      const validated = schema.safeParse(parsed);
+      if (!validated.success) {
+        fwLogger().warn(
+          `[RedisCache.get] key="${key}" schema validation failed (treating as miss): ${validated.error.message}`,
+        );
+        return ok(null); // schema drift → treat as miss
+      }
+      return ok(validated.data);
     } catch (e) {
       const message = `key="${key}": ${e instanceof Error ? e.message : String(e)}`;
       fwLogger().warn(`[RedisCache.get] ${message}`);

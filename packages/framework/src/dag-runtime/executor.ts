@@ -507,9 +507,16 @@ const runWave = async (
       skippedNodeIds.add(nodeId);
     }
   }
-  await emitFreshnessWitnessEvents(
+  const freshnessResult = await emitFreshnessWitnessEvents(
     waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator,
   );
+  if (!freshnessResult.ok) {
+    return {
+      type: "node-failed",
+      nodeId: freshnessResult.error.kind === "node-crash" ? freshnessResult.error.nodeId : waveNodeIds[0],
+      error: freshnessResult.error,
+    };
+  }
 
   // Compute routing decisions for all source nodes with conditional out-edges.
   // Emits route-decided and node-pruned observer events. Short-circuits on

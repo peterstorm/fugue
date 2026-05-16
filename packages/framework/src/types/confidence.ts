@@ -21,12 +21,31 @@ export type ConfidenceSource =
   | "ensemble-agreement"        // N/M samples agreed
   | "heuristic";                // deterministic rule
 
-export interface Confidence {
+declare const __confidenceBrand: unique symbol;
+
+export type Confidence = {
   readonly bucket: ConfidenceBucket;
   readonly source: ConfidenceSource;
   /** Original value, forensics only — never compared by framework. */
   readonly raw?: number | string;
-}
+} & { readonly [__confidenceBrand]: void };
+
+/** Smart constructor — the only sanctioned way to create a Confidence value. */
+export const confidence = (
+  bucket: ConfidenceBucket,
+  source: ConfidenceSource,
+  raw?: number | string,
+): Confidence => ({ bucket, source, ...(raw !== undefined ? { raw } : {}) }) as Confidence;
+
+/**
+ * @internal — Bypass validation for trusted internal code (deserialization,
+ * replay). NOT part of the public API.
+ */
+export const __brandConfidence = (c: {
+  bucket: ConfidenceBucket;
+  source: ConfidenceSource;
+  raw?: number | string;
+}): Confidence => c as Confidence;
 
 /**
  * Total ordering for predicate gating. Higher is more confident.
