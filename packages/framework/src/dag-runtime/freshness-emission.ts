@@ -15,6 +15,7 @@ import type { Witness } from "../types/freshness.js";
 import type { DagMachineContext } from "./types.js";
 import { type FreshnessIndex } from "./freshness-check.js";
 import { fwLogger } from "../logger.js";
+import { formatFrameworkError } from "../types/errors.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
 
@@ -118,15 +119,14 @@ export const emitFreshnessWitnessEvents = async (
         // sinceMs: 0 is intentional — within a run, all prior writes are relevant
         // because topological ordering guarantees the read witness was captured
         // before any writes in later waves.
-        let conflict: Awaited<ReturnType<typeof freshnessIndex.findConflict>> | null = null;
-        try {
-          conflict = await freshnessIndex.findConflict(
-            conditionedOn.resource,
-            conditionedOn.value,
-            0,
-          );
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+        let conflict: import("../dag-runtime/freshness-check.js").WriteEntry | null = null;
+        const conflictResult = await freshnessIndex.findConflict(
+          conditionedOn.resource,
+          conditionedOn.value,
+          0,
+        );
+        if (!conflictResult.ok) {
+          const msg = formatFrameworkError(conflictResult.error);
           fwLogger().error(
             `[emitFreshnessWitnessEvents] freshnessIndex.findConflict failed for node '${nodeId}', resource '${conditionedOn.resource}': ${msg}`,
           );
@@ -142,6 +142,8 @@ export const emitFreshnessWitnessEvents = async (
           });
           // Fail-closed: treat as conflict to prevent stale writes through
           conflict = { runId: nodeCtx.runId, nodeId, newWitness: conditionedOn, succeededAtMs: 0 };
+        } else {
+          conflict = conflictResult.value;
         }
         if (conflict) {
           emit(nodeCtx, {
@@ -173,10 +175,9 @@ export const emitFreshnessWitnessEvents = async (
           timestamp: stamp(),
         };
         emit(nodeCtx, writeEvent);
-        try {
-          await freshnessIndex.recordWrite(writeEvent);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+        const writeResult = await freshnessIndex.recordWrite(writeEvent);
+        if (!writeResult.ok) {
+          const msg = formatFrameworkError(writeResult.error);
           fwLogger().error(
             `[emitFreshnessWitnessEvents] freshnessIndex.recordWrite failed for node '${nodeId}': ${msg}`,
           );

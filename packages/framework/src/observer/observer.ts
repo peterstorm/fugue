@@ -58,3 +58,40 @@ export function createObserver(handlers: EventHandlers): Observer {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Exhaustive handler factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Exhaustive handler map — requires a handler for every `ObserverEvent` type.
+ * Adding a new event variant to `ObserverEvent` without handling it here is
+ * a compile error. Use `createObserver` for partial handling.
+ */
+type ExhaustiveEventHandlers = {
+  readonly [K in ObserverEvent["type"]]: (
+    event: Extract<ObserverEvent, { type: K }>,
+  ) => void;
+};
+
+/**
+ * Factory for creating an Observer that requires a handler for every event
+ * type. Unlike `createObserver`, omitting a handler is a compile error.
+ * Use this for production observers that should handle every event.
+ *
+ * ```ts
+ * const obs = createExhaustiveObserver({
+ *   "run-start": (e) => { ... },
+ *   "node-start": (e) => { ... },
+ *   // ... all 13 event types required
+ * });
+ * ```
+ */
+export function createExhaustiveObserver(handlers: ExhaustiveEventHandlers): Observer {
+  return {
+    observe(event: ObserverEvent): void {
+      const handler = handlers[event.type] as (e: ObserverEvent) => void;
+      handler(event);
+    },
+  };
+}

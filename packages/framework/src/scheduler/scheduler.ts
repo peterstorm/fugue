@@ -9,6 +9,7 @@ import type { TaskConfig, TaskRegistry, TaskRegistryStore } from "./types.js";
 import { diffRegistry } from "./diff.js";
 import { hasCycle } from "./cycle.js";
 import { fwLogger } from "../logger.js";
+import { retryAsync } from "../shared/retry-async.js";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -270,36 +271,21 @@ export function createCronScheduler(
       );
       return;
     }
-    // Mark the upstream task as completed — guard against store failures
+    // Mark the upstream task as completed
     const upstreamTask = registry.get(taskId);
     const completedTtl = upstreamTask
       ? Math.ceil(upstreamTask.validForMs / 1000) + 60
       : 3600;
     try {
-      await markers.set(markerCompletedKey(taskId), completedTtl);
-    } catch (err1) {
-      // Retry up to 2 more times with linear backoff before abandoning.
-      let markerSet = false;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        fwLogger().error(
-          `[CronScheduler] markers.set(completed) failed for task "${taskId}" (attempt ${attempt}/3):`,
-          attempt === 1 ? err1 : undefined,
-        );
-        await new Promise(r => setTimeout(r, 500 * attempt));
-        try {
-          await markers.set(markerCompletedKey(taskId), completedTtl);
-          markerSet = true;
-          break;
-        } catch (retryErr) {
-          if (attempt === 2) {
-            fwLogger().error(
-              `[CronScheduler] markers.set(completed) permanently failed for task "${taskId}" after 3 attempts — dependent chain abandoned:`,
-              retryErr,
-            );
-          }
-        }
-      }
-      if (!markerSet) return;
+      await retryAsync(
+        () => markers.set(markerCompletedKey(taskId), completedTtl),
+        { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(completed) task="${taskId}"` },
+      );
+    } catch {
+      fwLogger().error(
+        `[CronScheduler] markers.set(completed) permanently failed for task "${taskId}" after 3 attempts — dependent chain abandoned`,
+      );
+      return;
     }
 
     // Find all tasks that directly depend on taskId
@@ -325,22 +311,13 @@ export function createCronScheduler(
         const alreadyFired = await markers.exists(markerFiredKey(dep.id));
         if (alreadyFired) continue;
 
-        // Enqueue first — only mark fired on success. Retry up to 3 attempts.
-        let enqueued = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            await enqueue(dep, triggeredAt);
-            enqueued = true;
-            break;
-          } catch (err) {
-            fwLogger().error(
-              `[CronScheduler] enqueue failed for dependent task "${dep.id}" (attempt ${attempt + 1}/3):`,
-              err,
-            );
-            if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-          }
-        }
-        if (!enqueued) {
+        // Enqueue first — only mark fired on success.
+        try {
+          await retryAsync(
+            () => enqueue(dep, triggeredAt),
+            { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler enqueue dependent "${dep.id}"` },
+          );
+        } catch {
           fwLogger().error(`[CronScheduler] enqueue permanently failed for dependent "${dep.id}" — skipped`);
           continue;
         }

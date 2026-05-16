@@ -184,7 +184,10 @@ export const runStateMachine = async <S, E, C>(
     // complexity at every boundary for a pattern that only applies here.
     // See ADR 0005 + ADR 0007 for the full two-layer retry rationale.
     if (isFailed) {
-      throw new Error(`State machine reached failed terminal state: ${JSON.stringify(state)}`);
+      throw new Error(
+        `State machine reached failed terminal state: ${JSON.stringify(state)}`,
+        { cause: { state, context } },
+      );
     }
 
     // If terminal-succeeded, fall through to return below

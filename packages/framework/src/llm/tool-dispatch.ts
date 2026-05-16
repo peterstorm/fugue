@@ -2,6 +2,7 @@ import type { NodeContext } from "../types/node.js";
 import type { ToolDef, ToolContext } from "../types/llm.js";
 import { __brandNodeId } from "../types/ids.js";
 import { withToolSpan, setToolIoAttributes } from "./spans.js";
+import { dispatchEvent } from "../observer/buffered.js";
 
 /**
  * The dispatcher receives a wide `NodeContext` from the LLM client (cycle
@@ -70,24 +71,24 @@ export async function dispatchToolCall(
     };
   } catch (e) {
     ctx.logger.warn(`[tool-dispatch] Tool '${call.name}' threw: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
-    // Emit observer event so tool failures appear in telemetry
-    if (ctx.observer) {
-      ctx.observer.observe({
-        type: "sub-span",
-        runId: ctx.runId,
-        dagId: ctx.dagId,
-        nodeId: __brandNodeId(`tool:${call.name}`),
-        parentSpanId: call.id,
-        kind: "CHAIN",
-        timestamp: new Date(),
-        duration: 0,
-        attributes: {
-          "tool.error": true,
-          "tool.name": call.name,
-          "tool.error_message": e instanceof Error ? e.message : String(e),
-        },
-      });
-    }
+    // Emit observer event so tool failures appear in telemetry.
+    // Use dispatchEvent (error-isolating wrapper) so an observer failure
+    // does not replace the original tool error.
+    dispatchEvent(ctx.observer, {
+      type: "sub-span",
+      runId: ctx.runId,
+      dagId: ctx.dagId,
+      nodeId: __brandNodeId(`tool:${call.name}`),
+      parentSpanId: call.id,
+      kind: "CHAIN",
+      timestamp: new Date(),
+      duration: 0,
+      attributes: {
+        "tool.error": true,
+        "tool.name": call.name,
+        "tool.error_message": e instanceof Error ? e.message : String(e),
+      },
+    });
     return errResult(call, e instanceof Error ? e.message : String(e));
   }
 }

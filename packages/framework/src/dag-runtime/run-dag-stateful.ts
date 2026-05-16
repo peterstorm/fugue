@@ -17,6 +17,7 @@ import type { NodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
+import { FrameworkAugmentedError } from "../types/errors.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
@@ -187,23 +188,10 @@ export const runDagStateful = async <I, O>(
       error: classified.message,
     });
 
-    // Capture the last failed state via onTrace so we can extract the error
-    // even though the failed state is not checkpointed (FR-005)
-    let lastFailedState: Extract<DagPhase, { kind: "failed" }> | undefined;
-
-    const onTrace = (
-      t: import("../state-machine/types.js").TraceEvent<DagPhase, DagEvent>,
-    ): void => {
-      if (t.nextState.kind === "failed") {
-        lastFailedState = t.nextState as Extract<DagPhase, { kind: "failed" }>;
-      }
-      opts?.onTrace?.(t);
-    };
-
     const runOpts: KernelRunOpts<DagPhase, DagEvent, DagMachineContext> = {
       beforeExecute: opts?.beforeExecute,
       classifyError: opts?.classifyError,
-      onTrace,
+      onTrace: opts?.onTrace,
       errorEventOf,
       now: opts?.now,
     };
@@ -271,9 +259,12 @@ export const runDagStateful = async <I, O>(
         emitRunEnd("error");
         return err(error);
       }
-      // Terminal-failed: onTrace fires synchronously before the throw, so
-      // lastFailedState is guaranteed populated here.
-      const error: FrameworkError = lastFailedState?.error ?? {
+      // Terminal-failed: the kernel attaches { state, context } to Error.cause.
+      const cause = (e as Error)?.cause as { state?: DagPhase } | undefined;
+      const failedState = cause?.state?.kind === "failed"
+        ? (cause.state as Extract<DagPhase, { kind: "failed" }>)
+        : undefined;
+      const error: FrameworkError = failedState?.error ?? {
         kind: "node-crash",
         nodeId: EXECUTOR_NODE_ID,
         retriability: "retriable",
@@ -336,12 +327,10 @@ export const runDagAsWorkerJob = async <I, O>(
       result.error.kind === "node-crash"
         ? result.error.message
         : JSON.stringify(result.error);
-    const thrownError = new Error(`runDagAsWorkerJob: DAG '${dag.id}' failed: ${detail}`, {
-      cause: result.error,
-    });
-    // Attach structured error so BullMQ serialization preserves it
-    (thrownError as any).frameworkErrorKind = result.error.kind;
-    (thrownError as any).frameworkError = JSON.stringify(result.error);
+    const thrownError = new FrameworkAugmentedError(
+      `runDagAsWorkerJob: DAG '${dag.id}' failed: ${detail}`,
+      result.error,
+    );
     throw thrownError;
   }
   return result.value;

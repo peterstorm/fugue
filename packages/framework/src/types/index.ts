@@ -20,7 +20,7 @@ export {
 
 // ── Errors ────────────────────────────────────────────────────────────────
 export type { FrameworkError } from "./errors.js";
-export { formatFrameworkError } from "./errors.js";
+export { formatFrameworkError, FrameworkAugmentedError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
 // ── Span kinds ────────────────────────────────────────────────────────────

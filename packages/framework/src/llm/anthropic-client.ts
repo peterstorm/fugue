@@ -26,6 +26,8 @@ import {
   setLlmRequestAttributes,
   setLlmResponseAttributes,
 } from "./spans.js";
+import { classifyLlmError } from "./llm-errors.js";
+import { createTimeoutSignal } from "./with-timeout.js";
 
 const ANTHROPIC_MAX_TOKENS = 16384;
 
@@ -89,21 +91,9 @@ const lastTextBlock = (response: AnthropicResponse): string | undefined => {
 const stripCodeFences = (text: string): string =>
   text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
 
-const isAbort = (e: unknown): boolean =>
-  e instanceof APIUserAbortError ||
-  (e instanceof Error && e.name === "AbortError");
-
-/**
- * Detect HTTP 429 from the Anthropic SDK so callers can distinguish
- * "transient, retry me" from "permanent crash."
- *
- * The SDK throws `RateLimitError extends APIError<429, ...>` whose `status`
- * field is `429`. We duck-type on `.status === 429` so injected fakes from
- * tests don't need to subclass the SDK's class hierarchy.
- */
-const isRateLimit = (e: unknown): boolean =>
-  typeof (e as { status?: unknown })?.status === "number" &&
-  (e as { status: number }).status === 429;
+/** Anthropic SDK abort predicate — `APIUserAbortError` name differs from standard `AbortError`. */
+const isAnthropicAbort = (e: unknown): boolean =>
+  e instanceof APIUserAbortError;
 
 const resolveNodeId = (req: { readonly nodeId: NodeId }): NodeId =>
   req.nodeId;
@@ -116,21 +106,7 @@ export class AnthropicLlmClient implements LlmClient {
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    // Manual timeout with a flag so we can distinguish timeout-aborts
-    // (retriable / transient) from caller-initiated aborts (terminal).
-    // Same pattern as openai-client.ts.
-    const controller = new AbortController();
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, this.requestTimeoutMs);
-    const callerSignal = req.signal;
-    const onCallerAbort = () => controller.abort();
-    if (callerSignal) {
-      if (callerSignal.aborted) controller.abort();
-      else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
-    }
+    const t = createTimeoutSignal(this.requestTimeoutMs, req.signal);
 
     try {
       const jsonSchema = zodToJsonSchema(req.schema);
@@ -153,7 +129,7 @@ export class AnthropicLlmClient implements LlmClient {
         req.tracer ?? null,
         { provider: "anthropic", model: req.model, operation: "chat" },
         async () => {
-          const r = await this.anthropic.messages.create(params, { signal: controller.signal });
+          const r = await this.anthropic.messages.create(params, { signal: t.signal });
           setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
           setLlmResponseAttributes({ model: r.model, id: r.id });
           return r;
@@ -193,34 +169,14 @@ export class AnthropicLlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
-      if (isAbort(error) && timedOut && !callerSignal?.aborted) {
-        // Timeout-induced abort — retriable transient failure.
-        return err({
-          kind: "transient",
-          nodeId: resolveNodeId(req),
-          message: "request timed out",
-        });
-      }
-      if (isAbort(error)) {
-        return err({ kind: "aborted", reason: "signal" });
-      }
-      if (isRateLimit(error)) {
-        return err({
-          kind: "transient",
-          nodeId: resolveNodeId(req),
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-      return err({
-        kind: "node-crash",
-        retriability: "retriable",
-        nodeId: resolveNodeId(req),
-        message: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+      return classifyLlmError(error, resolveNodeId(req), {
+        timedOut: t.timedOut(),
+        callerAborted: req.signal?.aborted,
+        timeoutMs: this.requestTimeoutMs,
+        isAbortOverride: isAnthropicAbort,
       });
     } finally {
-      clearTimeout(timeout);
-      callerSignal?.removeEventListener("abort", onCallerAbort);
+      t.cleanup();
     }
   }
 
@@ -263,19 +219,8 @@ export class AnthropicLlmClient implements LlmClient {
         tool_choice: toolChoice,
       };
 
-      // Manual timeout per-turn — same pattern as sendStructured.
-      const turnController = new AbortController();
-      let turnTimedOut = false;
-      const turnTimeout = setTimeout(() => {
-        turnTimedOut = true;
-        turnController.abort();
-      }, this.requestTimeoutMs);
       const turnCallerSignal = req.signal ?? ctx.signal;
-      const onTurnCallerAbort = () => turnController.abort();
-      if (turnCallerSignal) {
-        if (turnCallerSignal.aborted) turnController.abort();
-        else turnCallerSignal.addEventListener("abort", onTurnCallerAbort, { once: true });
-      }
+      const t = createTimeoutSignal(this.requestTimeoutMs, turnCallerSignal);
 
       let response: AnthropicResponse;
       try {
@@ -284,7 +229,7 @@ export class AnthropicLlmClient implements LlmClient {
           { provider: "anthropic", model: req.model, operation: "chat" },
           async () => {
             setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
-            const r = await this.anthropic.messages.create(params, { signal: turnController.signal });
+            const r = await this.anthropic.messages.create(params, { signal: t.signal });
             setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
             setLlmResponseAttributes({
               model: r.model,
@@ -295,33 +240,14 @@ export class AnthropicLlmClient implements LlmClient {
           },
         );
       } catch (e) {
-        if (isAbort(e) && turnTimedOut && !turnCallerSignal?.aborted) {
-          return err({
-            kind: "transient",
-            nodeId: resolveNodeId(req),
-            message: "request timed out",
-          });
-        }
-        if (isAbort(e)) {
-          return err({ kind: "aborted", reason: "signal" });
-        }
-        if (isRateLimit(e)) {
-          return err({
-            kind: "transient",
-            nodeId: resolveNodeId(req),
-            message: e instanceof Error ? e.message : String(e),
-          });
-        }
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: resolveNodeId(req),
-          message: e instanceof Error ? e.message : String(e),
-          stack: e instanceof Error ? e.stack : undefined,
+        return classifyLlmError(e, resolveNodeId(req), {
+          timedOut: t.timedOut(),
+          callerAborted: turnCallerSignal?.aborted,
+          timeoutMs: this.requestTimeoutMs,
+          isAbortOverride: isAnthropicAbort,
         });
       } finally {
-        clearTimeout(turnTimeout);
-        turnCallerSignal?.removeEventListener("abort", onTurnCallerAbort);
+        t.cleanup();
       }
 
       totalTokensIn += response.usage.input_tokens;

@@ -254,6 +254,9 @@ export const buildDagExecutor = (
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter, nodeCtx.signal);
+        if (nodeCtx.signal?.aborted) {
+          return { type: "abort", reason: "signal" } satisfies DagEvent;
+        }
 
         // `runWave` is called for the whole wave, but iterates with a
         // succeeded-output guard: siblings already present in
@@ -298,6 +301,9 @@ export const buildDagExecutor = (
         const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
         const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
         await sleep(delayWithJitter, nodeCtx.signal);
+        if (nodeCtx.signal?.aborted) {
+          return { type: "abort", reason: "signal" } satisfies DagEvent;
+        }
         const awaitStartMs = nowFn();
         const event = await callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
         if (event.type === "human-responded") {

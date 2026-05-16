@@ -1,142 +1,141 @@
-// Wave 7 §7.5 — capability-typed NodeContext: run-start validation.
-//
-// A node declaring `requires: ["llm"]` against a no-llm NodeContext must
-// fail before `node.run` is ever invoked, with
-// `Err({ kind: "missing-capability", capability: "llm", nodeId })`.
+/**
+ * Unit tests for `validateCapabilities`.
+ *
+ * Validates:
+ * - All capabilities present → Ok with ValidatedNodeContext
+ * - Single missing capability → Err with that capability
+ * - Multiple missing capabilities → Err listing all
+ * - Empty requires (pure transforms) → always Ok
+ * - Capability present but null → treated as missing
+ */
 
 import { describe, it, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
-import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
+import { N, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { validateCapabilities } from "../shared/capabilities.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
-import { ok, err } from "../types/result.js";
-import type { NodeContext, NodeDef } from "../types/node.js";
+import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
+import type { LlmClient } from "../types/llm.js";
 import type { FrameworkError } from "../types/errors.js";
+import { isOk, isErr } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
-const noLlmCtx = (): NodeContext => ({
-  runId: "r" as RunId,
-  dagId: "d" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null,
-  logger: { warn: () => {}, error: () => {} },
+const noop = async () => ({ ok: true as const, value: undefined });
+const noopTracer = { startSpan: () => ({ end: () => {}, setAttribute: () => {}, setStatus: () => {}, recordException: () => {}, isRecording: () => false }) } as any;
+
+const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown, unknown> => ({
+  id: N(id),
+  kind: "transform",
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown(),
+  run: noop as any,
+  requires: requires as any,
+  sideEffects: NO_SIDE_EFFECTS,
+  confidence: NO_CONFIDENCE,
 });
 
-describe("capability-typed NodeContext (Wave 7 §7.5)", () => {
-  it("node with requires:[\"llm\"] against a no-llm context fails at run start", async () => {
-    let ranBody = false;
-    const node: NodeDef<unknown, unknown, FrameworkError, readonly ["llm"]> = {
-      id: N("needs-llm"),
-      kind: "llm",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-      requires: ["llm"] as const, sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async () => {
-        ranBody = true;
-        return ok("never");
-      },
-    };
-    const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
+const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => ({
+  runId: "r1" as any,
+  dagId: "d1" as any,
+  logger: { warn: () => {}, error: () => {} },
+  tracer: noopTracer,
+  observer: new NoopObserver(),
+  cache: null,
+  llm: null,
+  prompts: null,
+  judgeLlm: null,
+  ...overrides,
+});
 
-    const result = await runDagStateful(dag, null, noLlmCtx());
+const fakeLlm = {} as LlmClient;
 
-    expect(result.ok).toBe(false);
+describe("validateCapabilities", () => {
+  it("empty requires → Ok", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", [])],
+      edges: [],
+    });
+    const result = validateCapabilities(dag, makeCtx());
+    expect(isOk(result)).toBe(true);
+  });
+
+  it("all required capabilities present → Ok", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["llm", "cache"])],
+      edges: [],
+    });
+    const result = validateCapabilities(dag, makeCtx({
+      llm: fakeLlm,
+      cache: { get: async () => ({ hit: false }), set: async () => ({ ok: true, value: undefined } as any) },
+    }));
+    expect(isOk(result)).toBe(true);
+  });
+
+  it("single missing capability → Err with missing-capability kind", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["llm"])],
+      edges: [],
+    });
+    const result = validateCapabilities(dag, makeCtx());
+    expect(isErr(result)).toBe(true);
     if (!result.ok) {
       expect(result.error.kind).toBe("missing-capability");
       if (result.error.kind === "missing-capability") {
         expect(result.error.capability).toBe("llm");
-        expect(result.error.nodeId).toBe(N("needs-llm"));
+        expect(result.error.nodeId).toBe(N("a"));
+        expect(result.error.missing).toHaveLength(1);
       }
     }
-    // The node body must not have run — validation happens before any node executes.
-    expect(ranBody).toBe(false);
   });
 
-  it("node with requires:[\"prompts\"] against a no-prompts context fails at run start", async () => {
-    const node: NodeDef<unknown, unknown, FrameworkError, readonly ["prompts"]> = {
-      id: N("needs-prompts"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-      requires: ["prompts"] as const, sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async () => ok("never"),
-    };
-    const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
-
-    const result = await runDagStateful(dag, null, noLlmCtx());
-    expect(result.ok).toBe(false);
+  it("multiple missing capabilities across nodes → all surfaced", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [
+        makeNode("a", ["llm"]),
+        makeNode("b", ["cache", "prompts"]),
+      ],
+      edges: [],
+    });
+    const result = validateCapabilities(dag, makeCtx());
+    expect(isErr(result)).toBe(true);
     if (!result.ok && result.error.kind === "missing-capability") {
-      expect(result.error.capability).toBe("prompts");
-      expect(result.error.nodeId).toBe(N("needs-prompts"));
+      expect(result.error.missing).toHaveLength(3);
+      const caps = result.error.missing.map(m => m.capability).sort();
+      expect(caps).toEqual(["cache", "llm", "prompts"]);
     }
   });
 
-  it("node with requires:[] always passes capability validation", async () => {
-    const node: NodeDef<unknown, unknown, FrameworkError, readonly []> = {
-      id: N("pure"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-      requires: [] as const, sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async () => ok("ok"),
-    };
-    const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
-    const result = await runDagStateful(dag, null, noLlmCtx());
-    expect(result.ok).toBe(true);
+  it("capability field present but null → treated as missing", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["llm"])],
+      edges: [],
+    });
+    const result = validateCapabilities(dag, makeCtx({ llm: null }));
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("missing-capability");
+    }
   });
 
-  it("first missing capability is surfaced (multiple unsatisfied requirements)", async () => {
-    const node: NodeDef<unknown, unknown, FrameworkError, readonly ["llm", "cache"]> = {
-      id: N("multi"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-      requires: ["llm", "cache"] as const, sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async () => ok("never"),
-    };
-    const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
-    const result = await runDagStateful(dag, null, noLlmCtx());
-    expect(result.ok).toBe(false);
+  it("first miss is surfaced at top-level nodeId/capability fields", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [
+        makeNode("a", ["llm"]),
+        makeNode("b", ["cache"]),
+      ],
+      edges: [],
+    });
+    const result = validateCapabilities(dag, makeCtx());
     if (!result.ok && result.error.kind === "missing-capability") {
-      // First in `requires` order — `llm` precedes `cache`.
+      // First miss should be node "a" / "llm" since nodes are iterated in order
+      expect(result.error.nodeId).toBe(N("a"));
       expect(result.error.capability).toBe("llm");
     }
-  });
-
-  it("satisfied capability passes validation and the node runs", async () => {
-    let ranBody = false;
-    const fakeLlm = {
-      sendStructured: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "x" as NodeId, message: "no" }),
-    };
-    const node: NodeDef<unknown, unknown, FrameworkError, readonly ["llm"]> = {
-      id: N("uses-llm"),
-      kind: "llm",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-      requires: ["llm"] as const, sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async (_input, ctx) => {
-        ranBody = true;
-        // ctx.llm is typed non-null here — no need to null-check.
-        expect(ctx.llm).toBeTruthy();
-        return ok("ran");
-      },
-    };
-    const dag = defineDagFromArray({ id: "cap", nodes: [node], edges: [] });
-
-    const ctx: NodeContext = { ...noLlmCtx(), llm: fakeLlm as unknown as NodeContext["llm"] };
-    const result = await runDagStateful(dag, null, ctx);
-
-    expect(ranBody).toBe(true);
-    expect(result.ok).toBe(true);
   });
 });

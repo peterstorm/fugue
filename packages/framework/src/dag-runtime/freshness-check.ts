@@ -14,6 +14,9 @@
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
 import type { Witness } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
+import type { Result } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
+import { ok } from "../types/result.js";
 
 export interface FreshnessConflict {
   /** The write node that is conditioned on a stale witness. */
@@ -56,7 +59,7 @@ export interface WriteEntry {
 
 export interface FreshnessIndex {
   /** Record a successful write for future conflict detection. */
-  recordWrite(event: WriteAttemptedEvent): Promise<void>;
+  recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>>;
   /**
    * Check if a conditioned-on witness has been superseded by a write that
    * completed after `sinceMs`. Returns the first conflicting write, or `null`.
@@ -65,7 +68,7 @@ export interface FreshnessIndex {
     resource: string,
     conditionedOnValue: string,
     sinceMs: number,
-  ): Promise<WriteEntry | null>;
+  ): Promise<Result<WriteEntry | null, FrameworkError>>;
 }
 
 /**
@@ -170,6 +173,8 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly maxResources: number;
   /** Insertion-order tracking for LRU eviction of resources. */
   private readonly resourceOrder: string[] = [];
+  /** Cursor into resourceOrder for O(1) amortized eviction. */
+  private evictCursor = 0;
 
   constructor(opts?: { maxEntriesPerResource?: number; maxResources?: number }) {
     this.maxEntries = opts?.maxEntriesPerResource ?? 1000;
@@ -177,7 +182,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   }
 
   /** Record a successful write. Evicts oldest entries per resource and oldest resources globally. */
-  async recordWrite(event: WriteAttemptedEvent): Promise<void> {
+  async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const resource = event.newWitness.resource;
     const entry: WriteEntry = {
       runId: event.runId,
@@ -188,10 +193,21 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     if (!this.writes.has(resource)) {
       // New resource — check global capacity before adding
       if (this.writes.size >= this.maxResources) {
-        const oldest = this.resourceOrder.shift();
-        if (oldest) {
-          this.writes.delete(oldest);
-          this.latest.delete(oldest);
+        // O(1) amortized: advance cursor past deleted/stale entries
+        while (this.evictCursor < this.resourceOrder.length) {
+          const candidate = this.resourceOrder[this.evictCursor]!;
+          this.evictCursor++;
+          if (this.writes.has(candidate)) {
+            this.writes.delete(candidate);
+            this.latest.delete(candidate);
+            break;
+          }
+        }
+        // Compact: when cursor has consumed more than half the array, trim
+        // the consumed prefix so resourceOrder does not grow unboundedly.
+        if (this.evictCursor > this.resourceOrder.length / 2) {
+          this.resourceOrder.splice(0, this.evictCursor);
+          this.evictCursor = 0;
         }
       }
       this.resourceOrder.push(resource);
@@ -204,6 +220,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     }
     this.writes.set(resource, entries);
     this.latest.set(resource, entry);
+    return ok(undefined);
   }
 
   /**
@@ -219,22 +236,22 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     resource: string,
     conditionedOnValue: string,
     sinceMs: number,
-  ): Promise<WriteEntry | null> {
+  ): Promise<Result<WriteEntry | null, FrameworkError>> {
     // Fast path: sinceMs === 0 means "any write ever" — check latest directly
     if (sinceMs === 0) {
       const entry = this.latest.get(resource);
-      if (entry && entry.newWitness.value !== conditionedOnValue) return entry;
-      return null;
+      if (entry && entry.newWitness.value !== conditionedOnValue) return ok(entry);
+      return ok(null);
     }
     // Slow path: entries are append-only (monotonically ordered by succeededAtMs).
     // The latest write is always the last element.
     const entries = this.writes.get(resource) ?? [];
-    if (entries.length === 0) return null;
+    if (entries.length === 0) return ok(null);
     const latest = entries[entries.length - 1]!;
     if (latest.succeededAtMs >= sinceMs && latest.newWitness.value !== conditionedOnValue) {
-      return latest;
+      return ok(latest);
     }
-    return null;
+    return ok(null);
   }
 
   /** Clear all entries. Useful for testing. */
@@ -242,5 +259,6 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     this.writes.clear();
     this.latest.clear();
     this.resourceOrder.length = 0;
+    this.evictCursor = 0;
   }
 }

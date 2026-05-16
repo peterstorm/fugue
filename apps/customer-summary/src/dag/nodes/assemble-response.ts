@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createTransformNode, ok } from "@ai-summary/framework";
+import { createTransformNode, ok, fwLogger } from "@ai-summary/framework";
 import type { Result, FrameworkError, GuardrailResult } from "@ai-summary/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
 import type { SummaryResponse } from "../../schemas/response.js";
@@ -42,7 +42,7 @@ export const createAssembleResponseNode = (customerId: string) =>
           const guardrail = input["grounding-guardrail"];
           if (guardrail === undefined || guardrail.kind === "skipped" || guardrail.kind === "failed") {
             // Guardrail output missing, skipped, or failed — degrade gracefully
-            console.warn(`[assemble-response] guardrail ${guardrail?.kind ?? "missing"} for customer ${customerId}`);
+            fwLogger().warn(`[assemble-response] guardrail ${guardrail?.kind ?? "missing"} for customer ${customerId}`);
             return ok({ status: "degraded" as const, customerId, message: "Guardrail data unavailable" });
           }
           const synthesis = guardrail.value;

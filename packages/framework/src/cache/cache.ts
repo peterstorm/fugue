@@ -5,7 +5,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 
 export interface Cache {
-  get<T>(key: string, validate?: (v: unknown) => boolean): Promise<Result<T | null, FrameworkError>>;
+  get<T>(key: string): Promise<Result<T | null, FrameworkError>>;
   set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>>;
 }
 

@@ -1,11 +1,13 @@
 import { bootstrap } from "./bootstrap.js";
+import { consoleAppLogger } from "./logger.js";
 
+const log = consoleAppLogger;
 let bootstrapResult: Awaited<ReturnType<typeof bootstrap>>;
 
 try {
-  bootstrapResult = await bootstrap();
+  bootstrapResult = await bootstrap(log);
 } catch (e) {
-  console.error("Fatal: bootstrap failed", e);
+  log.error("Fatal: bootstrap failed", e);
   process.exit(1);
 }
 
@@ -14,7 +16,7 @@ const { app, config, shutdown } = bootstrapResult;
 // Graceful shutdown — flush pending traces on SIGTERM/SIGINT
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, async () => {
-    console.log(`Received ${sig}, shutting down...`);
+    log.info(`Received ${sig}, shutting down...`);
     await shutdown();
     process.exit(0);
   });
@@ -25,4 +27,4 @@ export default {
   fetch: app.fetch,
 };
 
-console.log(`Customer summary server running on port ${config.PORT}`);
+log.info(`Customer summary server running on port ${config.PORT}`);

@@ -141,3 +141,23 @@ export const formatFrameworkError = (e: FrameworkError): string => {
     }
   }
 };
+
+/**
+ * Error subclass thrown by `runDagAsWorkerJob` so queue adapters (BullMQ)
+ * can access the structured framework error after serialization round-trips.
+ *
+ * Queue workers catch this and see typed fields (`frameworkErrorKind`,
+ * `frameworkErrorJson`) instead of parsing the message string. The original
+ * `FrameworkError` is also available via `Error.cause`.
+ */
+export class FrameworkAugmentedError extends Error {
+  readonly frameworkErrorKind: FrameworkError["kind"];
+  readonly frameworkErrorJson: string;
+
+  constructor(message: string, error: FrameworkError) {
+    super(message, { cause: error });
+    this.name = "FrameworkAugmentedError";
+    this.frameworkErrorKind = error.kind;
+    this.frameworkErrorJson = JSON.stringify(error);
+  }
+}

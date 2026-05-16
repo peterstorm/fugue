@@ -16,16 +16,11 @@ const cacheError = (operation: string, message: string): FrameworkError => ({
 export class RedisCache implements Cache {
   constructor(private readonly redis: Redis) {}
 
-  async get<T>(key: string, validate?: (v: unknown) => boolean): Promise<Result<T | null, FrameworkError>> {
+  async get<T>(key: string): Promise<Result<T | null, FrameworkError>> {
     try {
       const raw = await this.redis.get(key);
       if (raw === null) return ok(null);
       const parsed: unknown = JSON.parse(raw);
-      if (validate && !validate(parsed)) {
-        const message = `key="${key}": cached value failed shape validation`;
-        fwLogger().error(`[RedisCache.get] ${message}`);
-        return err(cacheError("get-validation", message));
-      }
       return ok(parsed as T);
     } catch (e) {
       const message = `key="${key}": ${e instanceof Error ? e.message : String(e)}`;

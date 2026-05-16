@@ -13,6 +13,7 @@ import {
   checkFreshness,
   InMemoryFreshnessIndex,
 } from "../dag-runtime/freshness-check.js";
+import { unwrap } from "../types/result.js";
 import type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
@@ -144,13 +145,13 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
           const index = new InMemoryFreshnessIndex();
           let indexConflicts = 0;
           for (const event of events) {
-            const conflict = await index.findConflict(
+            const conflict = unwrap(await index.findConflict(
               event.conditionedOn.resource,
               event.conditionedOn.value,
               0,
-            );
+            ));
             if (conflict) indexConflicts++;
-            await index.recordWrite(event);
+            unwrap(await index.recordWrite(event));
           }
 
           // Use checkFreshness for the same set

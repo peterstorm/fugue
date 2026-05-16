@@ -6,6 +6,7 @@ import type {
   ConsistentNodes,
 } from "./dag-internals.js";
 import type { DagId, NodeId } from "./ids.js";
+import { __brandNodeId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 import { meetsConfidence } from "./confidence.js";
 
@@ -135,16 +136,18 @@ export type EdgeDefRawInput =
  * by explicit `kind === "default"`; everything else is unconditional.
  */
 export const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
-  if ("kind" in e && e.kind === "default") return e as EdgeDef;
+  if ("kind" in e && e.kind === "default") {
+    return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "default" };
+  }
   if ("when" in e) {
     return {
-      from: e.from as NodeId,
-      to: e.to as NodeId,
+      from: __brandNodeId(e.from),
+      to: __brandNodeId(e.to),
       kind: "conditional",
       when: e.when,
     };
   }
-  return { from: e.from as NodeId, to: e.to as NodeId, kind: "unconditional" };
+  return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "unconditional" };
 };
 
 // ---------------------------------------------------------------------------

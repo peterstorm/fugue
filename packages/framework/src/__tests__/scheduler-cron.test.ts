@@ -479,7 +479,8 @@ describe("createCronScheduler — resolveDependents per-dependent error path", (
       },
     });
 
-    // A has two dependents: B and C. B's enqueue will throw, C should still be enqueued.
+    // A has two dependents: B and C. B's first enqueue attempt will throw,
+    // but retryAsync will succeed on the second attempt.
     const reg = makeRegistry([
       { id: "A" },
       { id: "B", dependsOn: ["A"] },
@@ -490,12 +491,13 @@ describe("createCronScheduler — resolveDependents per-dependent error path", (
     try {
       await scheduler.resolveDependents("A", fakeNow);
 
-      // C must still have been enqueued even though B's enqueue threw
+      // Both B and C must be enqueued (B succeeds on retry)
+      expect(enqueuedIds).toContain("B");
       expect(enqueuedIds).toContain("C");
 
-      // error must be logged
-      const hasDepError = errors.some((e) => e.includes("enqueue failed for dependent task"));
-      expect(hasDepError).toBe(true);
+      // retryAsync logs the per-attempt failure
+      const hasRetryError = errors.some((e) => e.includes("attempt 1/3 failed"));
+      expect(hasRetryError).toBe(true);
     } finally {
       console.error = originalConsoleError;
       scheduler.stop();
@@ -535,8 +537,8 @@ describe("createCronScheduler — markers.set(completed) failure in resolveDepen
     try {
       await scheduler.resolveDependents("A", fakeNow);
 
-      // error logged
-      const hasCompletedError = errors.some((e) => e.includes("markers.set(completed) failed"));
+      // error logged — retryAsync logs per-attempt failures, scheduler logs permanent failure
+      const hasCompletedError = errors.some((e) => e.includes("markers.set(completed)") && e.includes("failed"));
       expect(hasCompletedError).toBe(true);
 
       // no dependents enqueued

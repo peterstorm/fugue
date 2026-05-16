@@ -6,6 +6,8 @@ import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapte
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
 import { createSummaryDag } from "./dag/summary-dag.js";
+import type { AppLogger } from "./logger.js";
+import { consoleAppLogger } from "./logger.js";
 
 // --- Request validation ---
 
@@ -39,12 +41,15 @@ export interface AppDeps {
   readonly checkpointer?: Checkpointer | null;
   /** Content filter for trace span data. When set, content is included after filtering. */
   readonly contentFilter?: ContentFilter | null;
+  /** Application logger. Defaults to console-backed logger when omitted. */
+  readonly logger?: AppLogger;
 }
 
 // --- Create Hono app ---
 
 export const createApp = (deps: AppDeps): Hono => {
   const app = new Hono();
+  const log = deps.logger ?? consoleAppLogger;
 
   app.post("/summarize", async (c) => {
     let body: unknown;
@@ -91,7 +96,7 @@ export const createApp = (deps: AppDeps): Hono => {
       if (resume_run_id) {
         const loaded = await checkpointer.load(brandRunId(resume_run_id));
         if (!loaded.ok) {
-          console.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+          log.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
           // checkpoint-version-mismatch and checkpoint-expired are *semantic*
           // failures (the stored checkpoint is incompatible with the current
           // DAG / framework / TTL); callers must start fresh, not retry. 409
@@ -126,7 +131,7 @@ export const createApp = (deps: AppDeps): Hono => {
           // written. Replaying cached node outputs into the current shape would
           // skip validation against evolved schemas. 409 so callers know to
           // start a fresh run, not retry the same id.
-          console.warn(
+          log.warn(
             `[/summarize] checkpoint identity mismatch run=${resume_run_id} ` +
             `meta.dagId=${meta.dagId} dag.id=${dag.id} ` +
             `meta.nodeCount=${meta.nodeCount} dag.nodeCount=${dag.nodes.length} ` +
@@ -149,7 +154,7 @@ export const createApp = (deps: AppDeps): Hono => {
           frameworkVersion: FRAMEWORK_VERSION,
         });
         if (!metaResult.ok) {
-          console.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
+          log.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
           return c.json({ error: "Checkpoint store unavailable", requestId: runId }, 503);
         }
       }
@@ -179,7 +184,7 @@ export const createApp = (deps: AppDeps): Hono => {
         result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts);
       } catch (e) {
         if (abortController.signal.aborted) {
-          console.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
+          log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
           return c.json({ error: "Request timeout", requestId: runId }, 504);
         }
         throw e;
@@ -188,19 +193,19 @@ export const createApp = (deps: AppDeps): Hono => {
       }
 
       if (abortController.signal.aborted) {
-        console.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
+        log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
         return c.json({ error: "Request timeout", requestId: runId }, 504);
       }
 
       if (!result.ok) {
         // Framework error — 500 (log detail server-side, return generic message)
-        console.error("[/summarize] DAG error:", JSON.stringify(result.error));
+        log.error("[/summarize] DAG error:", JSON.stringify(result.error));
         return c.json({ error: "Internal server error", requestId: runId }, 500);
       }
 
       return c.json(result.value, 200);
     } catch (e) {
-      console.error("[/summarize] Unexpected error:", e);
+      log.error("[/summarize] Unexpected error:", e);
       return c.json({ error: "Internal server error" }, 500);
     }
   });
@@ -212,31 +217,21 @@ export const createApp = (deps: AppDeps): Hono => {
   // Readiness: 503 only when a dependency required to serve traffic is down.
   // Redis (queues / checkpoints / cache) is required; MLflow (tracing) is
   // informational and never gates readiness — losing it must not remove pods.
+  const checkReadiness = async () => {
+    const redisOk = deps.health?.checkRedis
+      ? await deps.health.checkRedis().catch(() => false)
+      : true;
+    const mlflowOk = deps.health?.checkMlflow
+      ? await deps.health.checkMlflow().catch(() => false)
+      : true;
+    const httpStatus = redisOk ? 200 : 503;
+    const status: string = redisOk ? (mlflowOk ? "ready" : "ready-degraded") : "not-ready";
+    return { status, redis: redisOk, mlflow: mlflowOk, httpStatus } as const;
+  };
+
   app.get("/readyz", async (c) => {
-    const redisOk = deps.health?.checkRedis
-      ? await deps.health.checkRedis().catch(() => false)
-      : true;
-    const mlflowOk = deps.health?.checkMlflow
-      ? await deps.health.checkMlflow().catch(() => false)
-      : true;
-
-    const httpStatus = redisOk ? 200 : 503;
-    const status = redisOk ? (mlflowOk ? "ready" : "ready-degraded") : "not-ready";
-    return c.json({ status, redis: redisOk, mlflow: mlflowOk }, httpStatus);
-  });
-
-  // /healthz preserved as readiness alias for back-compat with existing probes.
-  app.get("/healthz", async (c) => {
-    const redisOk = deps.health?.checkRedis
-      ? await deps.health.checkRedis().catch(() => false)
-      : true;
-    const mlflowOk = deps.health?.checkMlflow
-      ? await deps.health.checkMlflow().catch(() => false)
-      : true;
-
-    const httpStatus = redisOk ? 200 : 503;
-    const status = redisOk ? (mlflowOk ? "ready" : "ready-degraded") : "not-ready";
-    return c.json({ status, redis: redisOk, mlflow: mlflowOk }, httpStatus);
+    const r = await checkReadiness();
+    return c.json({ status: r.status, redis: r.redis, mlflow: r.mlflow }, r.httpStatus);
   });
 
   return app;

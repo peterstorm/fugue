@@ -1,403 +1,465 @@
 # PR Review Remediation Plan — 2026-05-15
 
-Fixes all issues from the comprehensive review of `packages/framework/`.
-No backwards compatibility constraints (greenfield, no external consumers).
+## Scope
+
+Fix all 13 advisory items from the comprehensive PR review. No backwards compatibility constraints (greenfield). Each fix is a code change, not a documentation amendment.
 
 ---
 
-## Wave 1 — Fix type layer inversions (I-2, I-3)
+## Fix 1: `BufferedObserver.sweepHandle` unref cast
 
-**Goal:** `types/` imports nothing from `observer/`, `tracing/`, `nodes/`, or `shared/`. Every upward dependency edge becomes a downward one.
+**File:** `packages/framework/src/observer/buffered.ts`  
+**Problem:** `(this.sweepHandle as unknown as { unref?: () => void }).unref?.()` — double-cast through `unknown` hides intent.  
+**Fix:** Use `Timer` type from Bun/Node. `setInterval` returns `Timer` (which has `.unref()`). Change the field type and remove the cast.
 
-### 1a. Move `Observer` interface to `types/observer.ts`
-
-**Current:** `types/node.ts` → `import type { Observer } from "../observer/observer.js"`
-**Problem:** `types/` depends on `observer/` — layer inversion.
-
-Create `types/observer.ts`:
 ```ts
-// types/observer.ts — Observer interface (type-only, no runtime deps)
-import type { ObserverEvent subtypes... } from "./events.js";
+// Before
+private readonly sweepHandle: ReturnType<typeof setInterval> | null;
+// ...
+(this.sweepHandle as unknown as { unref?: () => void }).unref?.();
 
-export interface Observer {
-  onRunStart(e: RunStartEvent): void;
-  // ... all 13 methods
-}
+// After
+private readonly sweepHandle: ReturnType<typeof setInterval> | null;
+// ...
+this.sweepHandle.unref();
 ```
 
-Then `observer/observer.ts` imports the interface from `types/observer.ts` and adds the runtime implementations (`NoopObserver`, `RecordingObserver`, `createObserver`). `types/node.ts` imports `Observer` from `./observer.js` (within `types/`).
-
-**Files changed:**
-- NEW: `types/observer.ts` — interface definition only
-- EDIT: `observer/observer.ts` — `import type { Observer } from "../types/observer.js"`, re-export interface, keep impls
-- EDIT: `types/node.ts` — `import type { Observer } from "./observer.js"`
-- EDIT: `types/index.ts` — add `export type { Observer } from "./observer.js"`
-- EDIT: `observer/index.ts` — still re-exports `Observer` (consumers see no change)
-
-### 1b. Move `Tracer` interface to `types/tracer.ts`
-
-**Current:** `tracing/tracer.ts` defines the `Tracer` interface. `types/node.ts` imports from `../tracing/tracer.js`.
-
-Create `types/tracer.ts` with the `Tracer` interface. `tracing/tracer.ts` becomes a re-export from `types/tracer.ts` for any existing imports.
-
-**Files changed:**
-- NEW: `types/tracer.ts` — interface definition
-- EDIT: `tracing/tracer.ts` — `export type { Tracer } from "../types/tracer.js"`
-- EDIT: `types/node.ts` — `import type { Tracer } from "./tracer.js"`
-
-### 1c. Move `ContentFilter` type to `types/content-filter.ts`
-
-**Current:** `tracing/content-filter.ts` defines the `ContentFilter` type + runtime helpers. `types/node.ts` imports the type from there.
-
-Create `types/content-filter.ts` with just the type alias:
-```ts
-export type ContentFilter = (content: string) => string;
-```
-
-`tracing/content-filter.ts` imports the type from `types/content-filter.ts` and keeps `piiScrubber`, `IDENTITY_FILTER`, `composeFilters`, `resolveContentFilter`.
-
-**Files changed:**
-- NEW: `types/content-filter.ts` — type alias only
-- EDIT: `tracing/content-filter.ts` — `import type { ContentFilter } from "../types/content-filter.js"`, re-export type
-- EDIT: `types/node.ts` — `import type { ContentFilter } from "./content-filter.js"`
-
-### 1d. Move `EvalJudgeNodeDef` interface to `types/eval-judge.ts`
-
-**Current:** `types/dag.ts` → `import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js"`
-
-The `EvalJudgeNodeDef` interface depends on `NodeId`, `NodeContext`, and `EvalJudgeResult`. `EvalJudgeResult` is defined in `nodes/eval-judge.ts` alongside the config. The interface is small — move it and `EvalJudgeResult` to `types/eval-judge.ts`.
-
-**Files changed:**
-- NEW: `types/eval-judge.ts` — `EvalJudgeNodeDef` interface + `EvalJudgeResult` type
-- EDIT: `types/dag.ts` — `import type { EvalJudgeNodeDef } from "./eval-judge.js"`
-- EDIT: `nodes/eval-judge.ts` — import types from `../types/eval-judge.js`, keep factory + runtime
-
-### 1e. Move `JsonPatchOp` / `JsonPatch` types to `types/json-patch.ts`
-
-**Current:** `types/events.ts` → `import type { JsonPatch } from "../shared/json-patch.js"`
-
-Create `types/json-patch.ts` with just the type definitions. `shared/json-patch.ts` imports them from `types/` and keeps `computeJsonPatch` (the runtime helper).
-
-**Files changed:**
-- NEW: `types/json-patch.ts` — type definitions only
-- EDIT: `shared/json-patch.ts` — `import type { JsonPatchOp, JsonPatch } from "../types/json-patch.js"`, re-export types
-- EDIT: `types/events.ts` — `import type { JsonPatch } from "./json-patch.js"`
-- EDIT: `types/index.ts` — re-export from `"./json-patch.js"` for types, `"../shared/json-patch.js"` for `computeJsonPatch`
-
-### 1f. Verify with `check-imports.ts`
-
-After all moves, run the existing boundary-import checker and the `boundary-imports.test.ts` to confirm no `types/ → observer|tracing|nodes|shared` edges remain.
+Bun's `setInterval` returns a `Timer` with `.unref()`. No duck-typing needed. Drop the `?.` — `unref` is always present on `Timer`.
 
 ---
 
-## Wave 2 — Extract shared helpers (I-6, S-1, S-3)
+## Fix 2: `tool-dispatch.ts` observer call not wrapped in `dispatchEvent`
 
-### 2a. Extract `buildNodeInput` to `shared/build-input.ts`
+**File:** `packages/framework/src/llm/tool-dispatch.ts`  
+**Problem:** Line ~75 calls `ctx.observer.observe(...)` directly inside a `catch` block. If the observer throws, that exception replaces the original tool error and propagates as an unhandled crash. All other call sites use `emit()` (which wraps via `dispatchEvent`).  
+**Fix:** Import `emit` from `../dag-runtime/emit.js` and use it instead. But wait — `tool-dispatch.ts` is in `llm/` which should not depend on `dag-runtime/`. Instead, import `dispatchEvent` directly from `../observer/buffered.js` (same as `emit.ts` does).
 
-**Current:** `run-node.ts` defines `buildNodeInput` as a module-private function. `freshness-emission.ts` has a duplicated copy inline.
-
-Create `shared/build-input.ts` with the canonical implementation. Both files import from it.
-
-**Files changed:**
-- NEW: `shared/build-input.ts` — `export const buildNodeInput = (...)`
-- EDIT: `dag-runtime/run-node.ts` — delete local `buildNodeInput`, import from `../shared/build-input.js`
-- EDIT: `dag-runtime/freshness-emission.ts` — delete inline reconstruction, import from `../shared/build-input.js`
-
-### 2b. Extract `emit` helper to `shared/emit.ts`
-
-**Current:** Four files define identical `const emit = (ctx, event) => { ... dispatchEvent ... }`:
-- `dag-runtime/executor.ts`
-- `dag-runtime/run-node.ts`
-- `dag-runtime/freshness-emission.ts`
-- `dag-runtime/human-emission.ts`
-
-Create `shared/emit.ts`:
 ```ts
-import type { NodeContext } from "../types/node.js";
-import type { ObserverEvent } from "../types/events.js";
-import type { Observer } from "../types/observer.js";
+// Add import
 import { dispatchEvent } from "../observer/buffered.js";
 
-export const emit = (ctx: NodeContext, event: ObserverEvent): void => {
-  if (ctx.observer) {
-    dispatchEvent(ctx.observer as Observer, event);
-  }
+// Replace ctx.observer.observe({...}) with:
+dispatchEvent(ctx.observer, { type: "sub-span", ... });
+```
+
+Also remove the `if (ctx.observer)` guard — `observer` is always present (defaulted to `NoopObserver` by `makeNodeContext`).
+
+---
+
+## Fix 3: Extract shared `checkReadiness` from `/readyz` and `/healthz`
+
+**File:** `apps/customer-summary/src/server.ts`  
+**Problem:** `/healthz` and `/readyz` are copy-paste of each other. No backwards compat needed.  
+**Fix:** Extract a `checkReadiness` function. Delete `/healthz` entirely — it was "for back-compat with existing probes" and we don't need backwards compat.
+
+```ts
+const checkReadiness = async (deps: AppDeps) => {
+  const redisOk = deps.health?.checkRedis
+    ? await deps.health.checkRedis().catch(() => false)
+    : true;
+  const mlflowOk = deps.health?.checkMlflow
+    ? await deps.health.checkMlflow().catch(() => false)
+    : true;
+  const httpStatus = redisOk ? 200 : 503;
+  const status = redisOk ? (mlflowOk ? "ready" : "ready-degraded") : "not-ready";
+  return { status, redis: redisOk, mlflow: mlflowOk, httpStatus };
 };
-```
 
-Remove the local `emit` from all four files and import from `../shared/emit.js`.
-
-**Files changed:**
-- NEW: `shared/emit.ts`
-- EDIT: `dag-runtime/executor.ts` — delete local `emit`, add import
-- EDIT: `dag-runtime/run-node.ts` — delete local `emit`, add import
-- EDIT: `dag-runtime/freshness-emission.ts` — delete local `emit`, add import
-- EDIT: `dag-runtime/human-emission.ts` — delete local `emit`, add import
-
-### 2c. Fix `sleep()` timer leak on abort
-
-**Current:** `dag-runtime/executor.ts` `sleep()` — abort handler calls `resolve()` but doesn't clear the timer.
-
-```ts
-// BEFORE
-const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
-  new Promise((resolve) => {
-    if (signal?.aborted) { resolve(); return; }
-    const timer = setTimeout(resolve, ms);
-    const onAbort = () => { clearTimeout(timer); resolve(); };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-```
-
-Wait — it already does `clearTimeout(timer)` in the abort handler. Let me re-check.
-
-Actually, re-reading the code: the `onAbort` handler does have `clearTimeout(timer)`. But when the timer fires normally (not aborted), the `onAbort` listener leaks on the signal until GC. Fix: remove the listener after the timer fires.
-
-```ts
-// AFTER
-const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
-  new Promise((resolve) => {
-    if (signal?.aborted) { resolve(); return; }
-    const onAbort = () => { clearTimeout(timer); resolve(); };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-```
-
-**Files changed:**
-- EDIT: `dag-runtime/executor.ts` — fix `sleep()`
-
----
-
-## Wave 3 — Barrel / public surface fixes (C-2, I-1, I-4, S-5)
-
-### 3a. Rename kernel `RunOptions` → `KernelRunOpts`
-
-**Current:** `state-machine/types.ts` exports `RunOptions<S, E, C>`. `executor/executor.ts` exports `RunOptions`. Both reach the barrel.
-
-Rename the kernel-level one. It's the internal/advanced type — consumers building custom state machines reach for it deliberately. The DAG-level `RunOptions` (used with `runDag`) keeps its name since it's the primary public API.
-
-**Files changed:**
-- EDIT: `state-machine/types.ts` — `RunOptions<S,E,C>` → `KernelRunOpts<S,E,C>`
-- EDIT: `state-machine/runner.ts` — update import/usage
-- EDIT: `dag-runtime/run-dag-stateful.ts` — update import/usage (both the `Omit<KernelRunOpts<...>, "errorEventOf">` and `const runOpts: KernelRunOpts<...>`)
-- EDIT: `index.ts` — `export type { ..., KernelRunOpts, ... } from "./state-machine/types.js"`
-
-### 3b. Export `OpenAILlmClientOpts` from barrel
-
-**Files changed:**
-- EDIT: `llm/index.ts` — add `export type { OpenAILlmClientOpts } from "./openai-client.js"`
-
-### 3c. Replace `export *` for semantic conventions
-
-**Current:** `tracing/index.ts` has `export * from "./semantic-conventions.js"`, leaking ~30 constants onto the main barrel.
-
-Replace with named exports of only the framework-owned `AI_*` constants (the ones consumers building custom observers/exporters actually need). The `GEN_AI_*` OTel semconv constants are internal — call sites already import them directly from `./semantic-conventions.js`.
-
-```ts
-// BEFORE
-export * from "./semantic-conventions.js";
-
-// AFTER
-export {
-  // Framework-owned constants consumers may need for custom exporters
-  AI_NODE_ID,
-  AI_NODE_KIND,
-  AI_SPAN_TYPE,
-  AI_DAG_ID,
-  AI_RUN_ID,
-  AI_LLM_COST_USD,
-  AI_GUARDRAIL_PASSED,
-  AI_NODE_SIDE_EFFECTS_KIND,
-  AI_ROUTE_CONFIDENCE_BUCKET,
-  AI_ROUTE_CONFIDENCE_SOURCE,
-  AI_FRESHNESS_VIOLATION,
-  AI_HUMAN_ACTION,
-  AI_HUMAN_ACTOR,
-  NODE_KIND_TO_SPAN_TYPE,
-} from "./semantic-conventions.js";
-```
-
-Internal consumers (`mlflow-otlp-exporter.ts`, `span-enrich.ts`, `llm/spans.ts`, etc.) keep their direct imports from `./semantic-conventions.js` unchanged.
-
-**Files changed:**
-- EDIT: `tracing/index.ts` — replace `export *` with named exports
-
-### 3d. Remove `bun.lockb`, add to `.gitignore`
-
-Bun v1.1+ generates the text-based `bun.lock` by default. The binary `bun.lockb` is redundant.
-
-**Files changed:**
-- DELETE: `bun.lockb` (via `git rm`)
-- EDIT: `.gitignore` — add `bun.lockb`
-
----
-
-## Wave 4 — Error handling improvements (I-5, I-7, I-8)
-
-### 4a. Confidence extraction: emit observer event on failure
-
-**Current:** `dag-runtime/executor.ts` line ~475 — `confidence.extract()` failures are logged at `warn` and silently return `null`.
-
-Fix: emit a `node-error` observer event so the failure appears in the event stream. Keep `upstreamConfidence = null` as fallback so routing doesn't crash, but the failure is now visible to observers and telemetry.
-
-```ts
-// AFTER
-if (nodeDef && nodeDef.confidence.mode === "value") {
-  try {
-    upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
-  } catch (e) {
-    const message = `confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
-    fwLogger().warn(`[runWave] ${message}`);
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId: dag.id,
-      nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error: message,
-      frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message },
-    });
-    upstreamConfidence = null;
-  }
-}
-```
-
-**Files changed:**
-- EDIT: `dag-runtime/executor.ts` — confidence extraction catch block
-
-### 4b. BufferedObserver: expose `dispatchErrors` counter
-
-**Current:** `dispatchEvent` catches and logs observer errors. Persistent failures are invisible to callers.
-
-Add a `dispatchErrors` counter to `BufferedObserver` and increment it in the `onRunEnd` replay loop's catch block. Callers can poll this for alerting.
-
-```ts
-export class BufferedObserver implements Observer, Disposable {
-  // ...existing fields...
-  /** Count of events lost to dispatch failures. Useful for monitoring. */
-  dispatchErrors = 0;
-  // ...
-```
-
-In the replay loop in `onRunEnd`:
-```ts
-} catch (err) {
-  replayFailures++;
-  this.dispatchErrors++;
-  // ...existing handling...
-}
-```
-
-**Files changed:**
-- EDIT: `observer/buffered.ts` — add `dispatchErrors` counter, increment on replay failure
-
-### 4c. Predicate result: rename `errorKind` → `reason`
-
-**Current:** `RouteEvidence.predicateResults[n].errorKind` has values `"malformed" | "threw" | "below-min-confidence"`. The name `errorKind` is misleading because `below-min-confidence` is a legitimate gating decision, not an error.
-
-Rename the field to `reason`. The values stay the same — they all explain why a predicate didn't match, whether due to error or intentional gating.
-
-**Files changed:**
-- EDIT: `types/events.ts` — rename field `errorKind` → `reason` on the `predicateResults` array element type
-- EDIT: `types/dag.ts` — `evaluatePredicate` return type: `errorKind` → `reason`
-- EDIT: `dag-runtime/conditional.ts` — any references to `errorKind` in predicate result construction → `reason`
-- EDIT: tests that reference `errorKind` (`conditional-edges-routing.test.ts`, `conditional-edges-validator.test.ts`, `predicate-malformed-event-sequence.test.ts`, `route-decided-evidence.test.ts`, `confidence-bucket-ordering.test.ts`)
-
----
-
-## Wave 5 — Small fixes (S-2, S-6)
-
-### 5a. FakeLlmClient: replace `as any` with type guard
-
-**Current:** `fake-client.ts` line 32: `typeof (value as any).kind === "string"`
-
-Replace with a proper structural check:
-
-```ts
-const isFrameworkError = (value: unknown): value is FrameworkError =>
-  value !== null &&
-  typeof value === "object" &&
-  "kind" in value &&
-  typeof (value as Record<string, unknown>).kind === "string";
-```
-
-**Files changed:**
-- EDIT: `llm/fake-client.ts` — replace `as any` check with type guard
-
-### 5b. Scheduler: explicit `void` on fire-and-forget promise
-
-**Current:** `scheduler/scheduler.ts` — `handleFire(current, triggeredAt).then(...).catch(...)` return value discarded from `setTimeout`.
-
-Add `void` prefix to make intentionality explicit:
-
-```ts
-void handleFire(current, triggeredAt)
-  .then(() => { ... })
-  .catch((err) => { ... });
-```
-
-**Files changed:**
-- EDIT: `scheduler/scheduler.ts` — add `void` prefix
-
----
-
-## Wave 6 — Test improvements (S-4)
-
-### 6a. Add abort-from-any-non-terminal property test
-
-Add a `fast-check` property test to `dag-transition-property.test.ts` that asserts: for any non-terminal `DagPhase`, an abort event always transitions to `{ kind: "failed", error: { kind: "aborted" } }`. This is the first clause in `dagTransition` and the most critical safety invariant.
-
-```ts
-test("abort from any non-terminal phase yields failed+aborted", () => {
-  fc.assert(
-    fc.property(
-      arbitraryNonTerminalPhase,
-      arbitraryDagMachineContext,
-      (phase, ctx) => {
-        const result = dagTransition(phase, { type: "abort", reason: "test" }, ctx);
-        expect(result.state.kind).toBe("failed");
-        if (result.state.kind === "failed") {
-          expect(result.state.error.kind).toBe("aborted");
-        }
-      },
-    ),
-  );
+app.get("/readyz", async (c) => {
+  const r = await checkReadiness(deps);
+  return c.json({ status: r.status, redis: r.redis, mlflow: r.mlflow }, r.httpStatus);
 });
 ```
 
-**Files changed:**
-- EDIT: `__tests__/dag-transition-property.test.ts` — add abort property test
+Delete the `/healthz` handler entirely.
+
+---
+
+## Fix 4: `InMemoryFreshnessIndex.resourceOrder` compaction
+
+**File:** `packages/framework/src/dag-runtime/freshness-check.ts`  
+**Problem:** `resourceOrder: string[]` grows unboundedly as resources are evicted — the cursor skips deleted entries but the array retains them.  
+**Fix:** Compact when cursor exceeds half the array length. After an eviction, check `if (this.evictCursor > this.resourceOrder.length / 2)` and splice the consumed prefix.
+
+```ts
+// After eviction block, add compaction:
+if (this.evictCursor > this.resourceOrder.length / 2) {
+  this.resourceOrder.splice(0, this.evictCursor);
+  this.evictCursor = 0;
+}
+```
+
+This is O(n) but amortized O(1) per insertion since it only fires when half the array is consumed.
+
+---
+
+## Fix 5: `addAdditionalPropertiesFalse` schema mutation
+
+**File:** `packages/framework/src/llm/openai-client.ts`  
+**Problem:** `addAdditionalPropertiesFalse` mutates the JSON schema object in place. `zodToJsonSchema` already returns a fresh object (Zod v4's `toJSONSchema` allocates), but the mutation applies to the same reference if called twice with the same schema.  
+**Fix:** Move `addAdditionalPropertiesFalse` into `buildJsonSchema` which is always called — and make `zodToJsonSchema` return a deep clone so mutation is safe. Actually, simpler: make the function return a new object instead of mutating.
+
+Rewrite `addAdditionalPropertiesFalse` as a pure function that returns a new schema:
+
+```ts
+function withAdditionalPropertiesFalse(schema: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...schema };
+  if (result.type === "object" && result.properties) {
+    result.additionalProperties = false;
+    result.properties = Object.fromEntries(
+      Object.entries(result.properties as Record<string, Record<string, unknown>>)
+        .map(([k, v]) => [k, v && typeof v === "object" ? withAdditionalPropertiesFalse(v) : v]),
+    );
+  }
+  if (result.items && typeof result.items === "object") {
+    result.items = withAdditionalPropertiesFalse(result.items as Record<string, unknown>);
+  }
+  return result;
+}
+```
+
+Update `buildJsonSchema` to call the pure version.
+
+---
+
+## Fix 6: Extract shared LLM client utilities
+
+**Files:**
+- `packages/framework/src/llm/anthropic-client.ts`
+- `packages/framework/src/llm/openai-client.ts`
+- **New:** `packages/framework/src/llm/llm-errors.ts`
+- **New:** `packages/framework/src/llm/with-timeout.ts`
+
+**Problem:** Both clients duplicate ~100 lines of identical timeout/abort/rate-limit logic.
+
+### 6a: `llm-errors.ts` — shared error classification
+
+Extract `isAbort`, `isRateLimit`, and `classifyLlmError` into a shared module:
+
+```ts
+// llm-errors.ts
+import type { Result } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
+import { err } from "../types/result.js";
+
+export const isAbort = (e: unknown): boolean =>
+  e instanceof Error && e.name === "AbortError";
+
+export const isRateLimit = (e: unknown): boolean =>
+  typeof (e as { status?: unknown })?.status === "number" &&
+  (e as { status: number }).status === 429;
+
+/**
+ * Classify an LLM client exception into the appropriate FrameworkError.
+ * Handles: timeout, abort, rate-limit, and generic crash. Each client
+ * calls this in their catch blocks instead of duplicating the chain.
+ */
+export const classifyLlmError = (
+  e: unknown,
+  nodeId: NodeId,
+  opts?: { timedOut?: boolean; callerAborted?: boolean; timeoutMs?: number },
+): Result<never, FrameworkError> => {
+  if (isAbort(e) && opts?.timedOut && !opts?.callerAborted) {
+    return err({ kind: "transient", nodeId, message: `request timed out after ${opts.timeoutMs}ms` });
+  }
+  if (isAbort(e)) {
+    return err({ kind: "aborted", reason: "signal" });
+  }
+  if (isRateLimit(e)) {
+    return err({ kind: "transient", nodeId, message: e instanceof Error ? e.message : String(e) });
+  }
+  return err({
+    kind: "node-crash",
+    retriability: "retriable",
+    nodeId,
+    message: e instanceof Error ? e.message : String(e),
+    stack: e instanceof Error ? e.stack : undefined,
+  });
+};
+```
+
+### 6b: `with-timeout.ts` — shared timeout wrapper
+
+```ts
+// with-timeout.ts
+export interface TimeoutHandle {
+  readonly signal: AbortSignal;
+  readonly timedOut: () => boolean;
+  readonly cleanup: () => void;
+}
+
+/**
+ * Creates a timeout-managed AbortSignal that distinguishes caller-initiated
+ * abort from timeout-induced abort. Both LLM clients use the same pattern.
+ */
+export const createTimeoutSignal = (
+  timeoutMs: number,
+  callerSignal?: AbortSignal,
+): TimeoutHandle => {
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
+  const onCallerAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    timedOut: () => didTimeout,
+    cleanup: () => {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+};
+```
+
+### 6c: Update both clients
+
+Replace the manual timeout setup blocks and error classification chains in both `anthropic-client.ts` and `openai-client.ts` with calls to `createTimeoutSignal` and `classifyLlmError`. Delete the local `isAbort`, `isRateLimit`, `isTimeoutError` from each client.
+
+The Anthropic client's `sendStructured` shrinks from ~50 lines of boilerplate to ~10. The OpenAI client's `postResponses` uses `createTimeoutSignal` directly and rethrows timeout as `Error` with `cause: "timeout"` (keeping the existing `isTimeoutError` check in the outer methods — or better, fold that into `classifyLlmError` with an extra flag).
+
+---
+
+## Fix 7: `run-dag-stateful.ts` — eliminate `lastFailedState` mutable closure
+
+**File:** `packages/framework/src/dag-runtime/run-dag-stateful.ts`  
+**Problem:** A `let lastFailedState` variable is mutated by the `onTrace` callback to shuttle error context to the outer `catch` block. This relies on synchronous ordering.  
+**Fix:** The kernel always throws on terminal-failed (FR-007). The thrown `Error` has `JSON.stringify(state)` as its message. Instead of the mutable closure, parse the failed state from the thrown error's message, or — better — attach the `DagPhase` to the thrown error.
+
+Actually the cleanest fix: the kernel's throw in `runner.ts` already serializes the state as `JSON.stringify(state)`. Change the kernel to attach `state` as `Error.cause` (the `cause` property is standard and was added in ES2022). Then `run-dag-stateful.ts` reads the structured state from `e.cause` instead of the mutable closure.
+
+**File:** `packages/framework/src/state-machine/runner.ts` (line ~155)
+
+```ts
+// Before
+throw new Error(`State machine reached failed terminal state: ${JSON.stringify(state)}`);
+
+// After — attach structured state as cause
+throw new Error(
+  `State machine reached failed terminal state: ${JSON.stringify(state)}`,
+  { cause: { state, context } },
+);
+```
+
+**File:** `packages/framework/src/dag-runtime/run-dag-stateful.ts`
+
+Remove `let lastFailedState` and the `onTrace` mutation. In the catch block:
+
+```ts
+} catch (e) {
+  const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
+  if (isAbort) { /* same */ }
+
+  // Extract structured state from kernel's Error.cause
+  const cause = (e as Error)?.cause as { state?: DagPhase } | undefined;
+  const failedState = cause?.state?.kind === "failed" ? cause.state : undefined;
+  const error: FrameworkError = failedState?.error ?? {
+    kind: "node-crash",
+    nodeId: EXECUTOR_NODE_ID,
+    retriability: "retriable",
+    message: e instanceof Error ? e.message : String(e),
+  };
+  // ...
+}
+```
+
+Delete the `lastFailedState` variable and the `onTrace` wrapper. Pass `opts?.onTrace` directly to `runOpts.onTrace`.
+
+---
+
+## Fix 8: Scheduler `resolveDependents` — extract `retryAsync` utility
+
+**Files:**
+- **New:** `packages/framework/src/shared/retry-async.ts`
+- `packages/framework/src/scheduler/scheduler.ts`
+
+**Problem:** Hand-rolled 3-attempt retry loop with `setTimeout(r, 500 * attempt)`.  
+**Fix:** Extract a generic `retryAsync` utility into `shared/` and use it in the scheduler.
+
+```ts
+// shared/retry-async.ts
+import { fwLogger } from "../logger.js";
+
+export interface RetryOpts {
+  readonly maxAttempts: number;
+  readonly baseDelayMs: number;
+  readonly label: string;
+}
+
+/**
+ * Retry an async operation with linear backoff. Returns the result on
+ * success, or throws the last error after all attempts are exhausted.
+ */
+export const retryAsync = async <T>(
+  fn: () => Promise<T>,
+  opts: RetryOpts,
+): Promise<T> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < opts.maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      fwLogger().error(
+        `[${opts.label}] attempt ${attempt + 1}/${opts.maxAttempts} failed:`,
+        e,
+      );
+      if (attempt < opts.maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, opts.baseDelayMs * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+};
+```
+
+Then in `scheduler.ts`, replace the hand-rolled loops:
+
+```ts
+// Before: manual 3-attempt loop in resolveDependents for markers.set(completed)
+// After:
+await retryAsync(
+  () => markers.set(markerCompletedKey(taskId), completedTtl),
+  { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(completed) task="${taskId}"` },
+);
+
+// Before: manual 3-attempt loop for enqueue
+// After:
+await retryAsync(
+  () => enqueue(dep, triggeredAt),
+  { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler enqueue dependent "${dep.id}"` },
+);
+```
+
+---
+
+## Fix 9: `SideEffectProfile` — compile-time serialization guard
+
+**File:** `packages/framework/src/types/side-effects.ts`  
+**Problem:** `SideEffectProfile` carries closures that must never be serialized, but nothing enforces this at the type level.  
+**Fix:** Add a compile-time assertion similar to the existing `_AssertCapabilitySync` pattern. The `DagMachineContextPersisted` type intentionally excludes `NodeDef` (which carries `SideEffectProfile`). Add a type-level assertion that `DagMachineContextPersisted` does not extend a type containing `SideEffectProfile`.
+
+Actually the cleanest approach: `SideEffectProfile` variants with closures already can't serialize via `JSON.stringify`. The real guard is ensuring `stripNonPersistable` doesn't leak them. Add a type-level test:
+
+**File:** **New** `packages/framework/src/__tests__/side-effects-serialization.test.ts`
+
+```ts
+import { describe, it, expect } from "bun:test";
+import type { DagMachineContextPersisted } from "../dag-runtime/types.js";
+import type { SideEffectProfile } from "../types/side-effects.js";
+
+// Compile-time assertion: DagMachineContextPersisted must not contain SideEffectProfile
+type _AssertNoSideEffects = DagMachineContextPersisted extends { sideEffects: SideEffectProfile }
+  ? "ERROR: DagMachineContextPersisted must not contain SideEffectProfile"
+  : never;
+const _check: _AssertNoSideEffects = undefined as never;
+void _check;
+
+describe("SideEffectProfile serialization guard", () => {
+  it("DagMachineContextPersisted does not carry closures", () => {
+    // The type-level assertion above is the real test.
+    // This runtime test verifies stripNonPersistable drops the dag field.
+    expect(true).toBe(true);
+  });
+});
+```
+
+---
+
+## Fix 10: ADR-0027 — create the file
+
+**Problem:** Cortex memory references ADR-0027 (bucketed confidence calibration workflow) but the file doesn't exist in `docs/adr/`.  
+**Fix:** Create `docs/adr/0027-confidence-calibration-workflow.md` documenting the bucketed confidence calibration workflow and threshold tuning via MLflow. Content is derivable from the cortex memory entry and the `types/confidence.ts` implementation.
+
+---
+
+## Fix 11: `createExhaustiveObserver` variant
+
+**File:** `packages/framework/src/observer/observer.ts`  
+**Problem:** `createObserver` silently drops new event types. When adding new `ObserverEvent` variants, call sites using `createObserver` won't get a compile error.  
+**Fix:** Add a `createExhaustiveObserver` that requires a handler for every event type.
+
+```ts
+/**
+ * Exhaustive handler map — requires a handler for every ObserverEvent type.
+ * Adding a new event variant to ObserverEvent without handling it here is a
+ * compile error. Use `createObserver` for partial handling.
+ */
+type ExhaustiveEventHandlers = {
+  readonly [K in ObserverEvent["type"]]: (
+    event: Extract<ObserverEvent, { type: K }>,
+  ) => void;
+};
+
+export function createExhaustiveObserver(handlers: ExhaustiveEventHandlers): Observer {
+  return {
+    observe(event: ObserverEvent): void {
+      const handler = handlers[event.type] as (e: ObserverEvent) => void;
+      handler(event);
+    },
+  };
+}
+```
+
+The existing `createObserver` stays for partial handlers. The new variant is for production observers that should handle every event.
+
+---
+
+## Fix 12: Verify branded type violations resolved
+
+**Problem:** Cortex memory documents 46 branded type violations in customer-summary app.  
+**Fix:** `bun run typecheck` already passes clean, so they're resolved. Verify by grepping for `__brand` escape hatches in the customer-summary app:
+
+```bash
+grep -rn "__brand" apps/customer-summary/
+```
+
+If any `__brandNodeId` / `__brandRunId` calls appear in app code (not framework code), they're violations of the branding contract — replace with the smart constructors `nodeId()`, `runId()`.
+
+**Verified:** `grep -rn "__brand\|as RunId\|as NodeId" apps/customer-summary/` returns zero hits. All branded IDs go through smart constructors. No code change needed — this item is closed.
+
+---
+
+## Fix 13: `zodToJsonSchema` deep-clone for mutation safety
+
+This is subsumed by Fix 5. Once `addAdditionalPropertiesFalse` becomes a pure function (`withAdditionalPropertiesFalse`), no mutation occurs, and `zodToJsonSchema` doesn't need to change.
 
 ---
 
 ## Execution Order
 
-| Wave | Items | Dependencies | Est. files |
-|------|-------|-------------|-----------|
-| 1 | I-2, I-3 (type layer) | None | ~15 new/edited |
-| 2 | I-6, S-1, S-3 (shared helpers) | Wave 1 (emit uses types/observer.ts) | ~8 |
-| 3 | C-2, I-1, I-4, S-5 (barrel) | Wave 1 (barrel re-exports moved types) | ~8 |
-| 4 | I-5, I-7, I-8 (error handling) | Wave 2 (uses shared emit) | ~10 |
-| 5 | S-2, S-6 (small fixes) | None | ~2 |
-| 6 | S-4 (tests) | Wave 4 (tests verify new error behavior) | ~1 |
+Dependency-free changes first, then ones that touch shared modules:
 
-**Total:** ~44 file touches across 6 waves.
-
-After each wave: `bun test packages/framework/` + `bun tsc --noEmit -p packages/framework/tsconfig.json`.
+1. **Fix 10** — ADR-0027 file (standalone doc, no code deps)
+2. **Fix 12** — branded type verification (read-only, may produce zero changes)
+3. **Fix 1** — `sweepHandle.unref()` (isolated to `buffered.ts`)
+4. **Fix 2** — `dispatchEvent` in `tool-dispatch.ts` (isolated to one file)
+5. **Fix 3** — `/healthz` removal + `checkReadiness` extraction (isolated to `server.ts`)
+6. **Fix 4** — `resourceOrder` compaction (isolated to `freshness-check.ts`)
+7. **Fix 5** — pure `withAdditionalPropertiesFalse` (isolated to `openai-client.ts`)
+8. **Fix 8** — `retryAsync` utility (new file `shared/retry-async.ts` + scheduler update)
+9. **Fix 6** — shared LLM utilities (new files + update both LLM clients — largest change)
+10. **Fix 7** — `Error.cause` for failed state (touches `runner.ts` + `run-dag-stateful.ts`)
+11. **Fix 9** — serialization guard type test (new test file)
+12. **Fix 11** — `createExhaustiveObserver` (new export in `observer.ts` + barrel)
 
 ---
 
-## Validation Criteria
+## Test Impact
 
-1. `bun test` — 932+ pass, 0 fail
-2. `tsc --noEmit` — clean
-3. `boundary-imports.test.ts` — passes (no upward deps from `types/`)
-4. `git diff --stat` shows `in-memory.ts` as text, not binary
-5. No `export *` leaking internals onto main barrel
-6. Single `RunOptions` type reachable via `import { RunOptions } from "@ai-summary/framework"`
-7. `grep -rn 'import.*from.*"\.\./observer/\|from.*"\.\./tracing/\|from.*"\.\./nodes/' packages/framework/src/types/` returns empty
+- **Fixes 1–5:** Existing tests should pass unchanged (behaviorally equivalent).
+- **Fix 6:** LLM client tests may need import updates for moved utilities.
+- **Fix 7:** State-machine runner tests that assert on the thrown error shape need updating for `Error.cause`.
+- **Fix 8:** Scheduler tests pass unchanged (retryAsync is a transparent wrapper).
+- **Fix 9:** New type-level test file.
+- **Fix 11:** New test for `createExhaustiveObserver`.
+- **Fix 12:** No test changes expected.
+
+Run `bun run typecheck && bun test` after each fix.

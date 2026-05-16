@@ -9,8 +9,13 @@ export interface RunSummary {
   readonly totalDuration: number;
   readonly nodeCount: number;
   readonly retryCount: number;
-  /** Sum of `ai.llm.cost_usd` from OTel spans. Zero when spans lack cost attributes. */
-  readonly totalCostUsd: number;
+  /**
+   * Sum of LLM cost from OTel spans. Present only when computed by
+   * `TailSamplingProcessor` (which reads `ai.llm.cost_usd` from span
+   * attributes). `undefined` in the `BufferedObserver` path because
+   * observer events don't carry cost data.
+   */
+  readonly totalCostUsd?: number;
   readonly freshnessViolationCount: number;
   readonly humanInterventionCount: number;
   readonly routeDecisionCount: number;
@@ -97,7 +102,6 @@ export function computeRunSummary(
     totalDuration: runEnd.duration,
     nodeCount: nodeIds.size,
     retryCount,
-    totalCostUsd: 0, // populated by TailSamplingProcessor from OTel span attributes
     freshnessViolationCount,
     humanInterventionCount,
     routeDecisionCount,
@@ -154,7 +158,7 @@ export class BufferedObserver implements Observer, Disposable {
     if (sweepMs > 0) {
       this.sweepHandle = setInterval(() => this.evictStale(), sweepMs);
       // Don't keep the event loop alive purely to sweep an idle observer.
-      (this.sweepHandle as unknown as { unref?: () => void }).unref?.();
+      this.sweepHandle.unref();
     } else {
       this.sweepHandle = null;
     }

@@ -23,10 +23,13 @@ import { NoopObserver, runId as brandRunId } from "@ai-summary/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS } from "./config.js";
+import { consoleAppLogger } from "./logger.js";
+import type { AppLogger } from "./logger.js";
 
 const LLM_CACHE_TTL = 3600; // 1 hour
 
-export const bootstrap = async () => {
+export const bootstrap = async (injectedLogger?: AppLogger) => {
+  const log = injectedLogger ?? consoleAppLogger;
   const config = loadConfig();
 
   const fixturesDir = resolve(config.FIXTURES_DIR);
@@ -41,9 +44,9 @@ export const bootstrap = async () => {
       experimentId: config.MLFLOW_EXPERIMENT_ID,
     });
     tracing = await initTracing({ exporter, policy });
-    console.log(`Tracing initialized — MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})`);
+    log.info(`Tracing initialized — MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})`);
   } catch (e) {
-    console.warn("Tracing initialization failed — continuing without tracing:", e);
+    log.warn("Tracing initialization failed — continuing without tracing:", e);
   }
 
   // --- Redis (cache + checkpointer) ---
@@ -68,7 +71,7 @@ export const bootstrap = async () => {
     // readiness has to ping per request. Authoritative state lives in flags
     // updated by ready/end/error events.
     redis.on("error", (e: unknown) => {
-      console.error(`[redis] connection error: ${e instanceof Error ? e.message : String(e)}`);
+      log.error(`[redis] connection error: ${e instanceof Error ? e.message : String(e)}`);
       redisHealthy = false;
     });
     redis.on("ready", () => {
@@ -78,7 +81,7 @@ export const bootstrap = async () => {
       redisHealthy = false;
     });
     await redis.connect();
-    console.log(`Redis connected at ${config.REDIS_URL}`);
+    log.info(`Redis connected at ${config.REDIS_URL}`);
     redisHealthy = true;
 
     const cache = new RedisCache(redis);
@@ -92,7 +95,7 @@ export const bootstrap = async () => {
       get: async (key: string) => {
         const r = await cache.get(key);
         if (!r.ok) {
-          console.warn(`[cache] get failed for key=${key}: ${r.error.kind}`);
+          log.warn(`[cache] get failed for key=${key}: ${r.error.kind}`);
           return { hit: false } as const;
         }
         // RedisCache.get returns ok(null) on miss, ok(value) on hit.
@@ -103,7 +106,7 @@ export const bootstrap = async () => {
       set: async (key: string, value: unknown) => {
         const r = await cache.set(key, value, LLM_CACHE_TTL);
         if (!r.ok) {
-          console.warn(`[cache] set failed for key=${key}: ${r.error.kind}`);
+          log.warn(`[cache] set failed for key=${key}: ${r.error.kind}`);
         }
         return r;
       },
@@ -114,12 +117,12 @@ export const bootstrap = async () => {
           completedAt: new Date(),
         });
         if (!r.ok) {
-          console.warn(`[checkpoint] write failed for run=${runId} node=${nodeId}: ${r.error.kind}`);
+          log.warn(`[checkpoint] write failed for run=${runId} node=${nodeId}: ${r.error.kind}`);
         }
       },
     };
   } catch (e) {
-    console.warn("Redis connection failed — running without cache/checkpointing:", e);
+    log.warn("Redis connection failed — running without cache/checkpointing:", e);
     checkpointer = null;
   }
 
@@ -136,7 +139,7 @@ export const bootstrap = async () => {
   if (synthesisPrompt.ok) {
     prompts.set("synthesis", synthesisPrompt.value.text);
   } else {
-    console.error("Failed to load synthesis prompt:", synthesisPrompt.error);
+    log.error("Failed to load synthesis prompt:", synthesisPrompt.error);
   }
   const evalRubricPrompt = await promptRegistry.load("summary-eval-rubric");
   if (evalRubricPrompt.ok) {
@@ -146,7 +149,7 @@ export const bootstrap = async () => {
   if (synthesisSystemPrompt.ok) {
     prompts.set("synthesis-system", synthesisSystemPrompt.value.text);
   } else {
-    console.error("Failed to load synthesis-system prompt:", synthesisSystemPrompt.error);
+    log.error("Failed to load synthesis-system prompt:", synthesisSystemPrompt.error);
   }
   // Note: eval rubric kept in prompts registry for reference but no longer used in-pipeline.
   // Quality evaluation is handled by MLflow's built-in scorer (post-hoc, async).
@@ -168,19 +171,19 @@ export const bootstrap = async () => {
       baseUrl: azureBaseUrl,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
     });
-    console.log(`Using Azure OpenAI LLM client (deployment: ${deployment}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
+    log.info(`Using Azure OpenAI LLM client (deployment: ${deployment}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
   } else if (provider === "openai" && config.OPENAI_API_KEY) {
     llm = new OpenAILlmClient({
       apiKey: config.OPENAI_API_KEY,
       baseUrl: "https://api.openai.com/v1",
     });
-    console.log(`Using OpenAI LLM client (model: ${model})`);
+    log.info(`Using OpenAI LLM client (model: ${model})`);
   } else if (provider === "anthropic" && config.ANTHROPIC_API_KEY) {
     const raw = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
     llm = new AnthropicLlmClient(raw as any);
-    console.log(`Using Anthropic LLM client (model: ${model})${tracing ? " [traced]" : ""}`);
+    log.info(`Using Anthropic LLM client (model: ${model})${tracing ? " [traced]" : ""}`);
   } else {
-    console.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);
+    log.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);
     llm = new FakeLlmClient(new Map());
   }
 
@@ -194,7 +197,7 @@ export const bootstrap = async () => {
     if (providerSupportsThinking) {
       thinkingDep = { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS };
     } else {
-      console.warn(`[config] ENABLE_THINKING ignored: not implemented for provider "${provider}"`);
+      log.warn(`[config] ENABLE_THINKING ignored: not implemented for provider "${provider}"`);
     }
   }
 
@@ -208,6 +211,7 @@ export const bootstrap = async () => {
     cache: contextCache,
     checkpointer,
     observer: new NoopObserver(),
+    logger: log,
     // Read the env-derived flag once at bootstrap; the framework no longer
     // touches process.env. When LLM_TRACE_PROMPTS is true, content passes
     // through unchanged; otherwise the PII scrubber strips sensitive patterns
@@ -232,7 +236,7 @@ export const bootstrap = async () => {
   // Graceful shutdown
   const shutdown = async () => {
     if (tracing) {
-      console.log("Flushing traces...");
+      log.info("Flushing traces...");
       await tracing.flush();
       await tracing.shutdown();
     }

@@ -20,30 +20,32 @@ import {
 import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 import { zodToJsonSchema } from "./zod-schema.js";
+import { classifyLlmError } from "./llm-errors.js";
+import { createTimeoutSignal } from "./with-timeout.js";
 
 /**
- * Recursively adds `additionalProperties: false` to all object-type schemas.
- * Required by Azure OpenAI structured output (strict mode).
- * Zod v4's toJSONSchema already adds it at the top level but not always nested.
+ * Pure recursive transform: adds `additionalProperties: false` to all
+ * object-type schemas. Required by Azure OpenAI structured output (strict
+ * mode). Returns a new object — the input is never mutated.
  */
-function addAdditionalPropertiesFalse(schema: Record<string, unknown>): void {
-  if (schema.type === "object" && schema.properties) {
-    schema.additionalProperties = false;
-    for (const prop of Object.values(schema.properties as Record<string, Record<string, unknown>>)) {
-      if (prop && typeof prop === "object") {
-        addAdditionalPropertiesFalse(prop);
-      }
-    }
+function withAdditionalPropertiesFalse(schema: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...schema };
+  if (result.type === "object" && result.properties) {
+    result.additionalProperties = false;
+    result.properties = Object.fromEntries(
+      Object.entries(result.properties as Record<string, Record<string, unknown>>)
+        .map(([k, v]) => [k, v && typeof v === "object" ? withAdditionalPropertiesFalse(v) : v]),
+    );
   }
-  if (schema.items && typeof schema.items === "object") {
-    addAdditionalPropertiesFalse(schema.items as Record<string, unknown>);
+  if (result.items && typeof result.items === "object") {
+    result.items = withAdditionalPropertiesFalse(result.items as Record<string, unknown>);
   }
+  return result;
 }
 
 const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
   const json = zodToJsonSchema(schema);
-  addAdditionalPropertiesFalse(json);
-  return json;
+  return withAdditionalPropertiesFalse(json);
 };
 
 const toolToOpenAiSpec = (tool: ToolDef<any, any>): Record<string, unknown> => ({
@@ -195,22 +197,6 @@ const extractReasoning = (
   return block.summary.map((s) => s.text ?? "").join("\n");
 };
 
-const isAbort = (e: unknown): boolean =>
-  e instanceof Error && e.name === "AbortError";
-
-/**
- * Detect a timeout-induced error thrown by `postResponses`. Uses standard
- * `Error.cause` (set to `"timeout"`) rather than a WeakSet — survives error
- * wrapping and polyfill environments that may create fresh Error objects.
- */
-const isTimeoutError = (e: unknown): boolean =>
-  e instanceof Error && (e as { cause?: unknown }).cause === "timeout";
-
-/** Duck-typed 429 detection (see anthropic-client.ts for rationale). */
-const isRateLimit = (e: unknown): boolean =>
-  typeof (e as { status?: unknown })?.status === "number" &&
-  (e as { status: number }).status === 429;
-
 const resolveNodeId = (req: { readonly nodeId: NodeId }): NodeId =>
   req.nodeId;
 
@@ -272,17 +258,7 @@ export class OpenAILlmClient implements LlmClient {
     | { ok: false; status: number; bodyText: string }
   > {
     const { url, headers } = this.buildRequestConfig();
-    const controller = new AbortController();
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, this.requestTimeoutMs);
-    const onCallerAbort = () => controller.abort();
-    if (signal) {
-      if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", onCallerAbort, { once: true });
-    }
+    const t = createTimeoutSignal(this.requestTimeoutMs, signal);
 
     let httpRes: Response;
     try {
@@ -290,22 +266,18 @@ export class OpenAILlmClient implements LlmClient {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal: t.signal,
       });
     } catch (e) {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onCallerAbort);
-      // Distinguish caller-cancellation (caller's `signal.aborted`) from a
-      // request that timed out on our side. Both surface as AbortError at the
-      // fetch boundary; without the tag the outer handler routes both to
-      // `{ kind: "aborted" }` and a transient timeout looks like a user cancel.
-      if (e instanceof Error && e.name === "AbortError" && timedOut && !signal?.aborted) {
+      // Distinguish caller-cancellation from timeout. Both surface as
+      // AbortError at the fetch boundary; tag the timeout so the outer
+      // handler can classify it as transient.
+      if (e instanceof Error && e.name === "AbortError" && t.timedOut() && !signal?.aborted) {
         throw new Error(`request timed out after ${this.requestTimeoutMs}ms`, { cause: "timeout" });
       }
       throw e;
     } finally {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onCallerAbort);
+      t.cleanup();
     }
 
     if (!httpRes.ok) {
@@ -425,29 +397,8 @@ export class OpenAILlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
-      if (isTimeoutError(error)) {
-        return err({
-          kind: "transient",
-          nodeId: resolveNodeId(req),
-          message: `request timed out after ${this.requestTimeoutMs}ms`,
-        });
-      }
-      if (isAbort(error)) {
-        return err({ kind: "aborted", reason: "signal" });
-      }
-      if (isRateLimit(error)) {
-        return err({
-          kind: "transient",
-          nodeId: resolveNodeId(req),
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-      return err({
-        kind: "node-crash",
-        retriability: "retriable",
-        nodeId: resolveNodeId(req),
-        message: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+      return classifyLlmError(error, resolveNodeId(req), {
+        timeoutMs: this.requestTimeoutMs,
       });
     }
   }
@@ -525,29 +476,8 @@ export class OpenAILlmClient implements LlmClient {
           },
         );
       } catch (error) {
-        if (isTimeoutError(error)) {
-          return err({
-            kind: "transient",
-            nodeId: resolveNodeId(req),
-            message: `request timed out after ${this.requestTimeoutMs}ms`,
-          });
-        }
-        if (isAbort(error)) {
-          return err({ kind: "aborted", reason: "signal" });
-        }
-        if (isRateLimit(error)) {
-          return err({
-            kind: "transient",
-            nodeId: resolveNodeId(req),
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: resolveNodeId(req),
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
+        return classifyLlmError(error, resolveNodeId(req), {
+          timeoutMs: this.requestTimeoutMs,
         });
       }
 

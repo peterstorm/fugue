@@ -23,6 +23,9 @@ import type { WriteAttemptedEvent } from "../types/events.js";
 import type { FreshnessIndex, WriteEntry } from "../dag-runtime/freshness-check.js";
 import type { WitnessKind } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
+import type { Result } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
+import { ok, err } from "../types/result.js";
 import { __brandRunId, __brandNodeId } from "../types/ids.js";
 import { fwLogger } from "../logger.js";
 
@@ -84,7 +87,6 @@ export class RedisFreshnessIndex implements FreshnessIndex {
   private scriptSha: string | null = null;
   private _consecutiveFailures = 0;
   private _lastError: Error | null = null;
-  private _degradedChecks = 0;
 
   /** Number of consecutive Redis failures. Resets on success. */
   get consecutiveFailures(): number {
@@ -94,15 +96,6 @@ export class RedisFreshnessIndex implements FreshnessIndex {
   /** Last observed error, or null if healthy. */
   get lastError(): Error | null {
     return this._lastError;
-  }
-
-  /**
-   * Number of findConflict calls that returned "no conflict" due to Redis
-   * failure rather than an actual absence of conflict. When non-zero, freshness
-   * detection is degraded — violations may go undetected.
-   */
-  get degradedChecks(): number {
-    return this._degradedChecks;
   }
 
   constructor(private readonly redis: Redis) {}
@@ -122,7 +115,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     }
   }
 
-  async recordWrite(event: WriteAttemptedEvent): Promise<void> {
+  async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const key = KEY_PREFIX + event.newWitness.resource;
     const member = encodeMember(
       event.runId,
@@ -165,13 +158,14 @@ export class RedisFreshnessIndex implements FreshnessIndex {
         }
       }
       this.onSuccess();
+      return ok(undefined);
     } catch (e) {
       this.onFailure(e);
-      // Non-fatal — log and continue. The write still proceeds; freshness
-      // detection degrades to best-effort.
-      fwLogger().error(
-        `[RedisFreshnessIndex] recordWrite failed for resource '${event.newWitness.resource}': ${e instanceof Error ? e.message : e}`,
-      );
+      return err({
+        kind: "cache-error",
+        operation: "freshness:recordWrite",
+        message: `resource '${event.newWitness.resource}': ${e instanceof Error ? e.message : String(e)}`,
+      });
     }
   }
 
@@ -179,7 +173,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     resource: string,
     conditionedOnValue: string,
     sinceMs: number,
-  ): Promise<WriteEntry | null> {
+  ): Promise<Result<WriteEntry | null, FrameworkError>> {
     const key = KEY_PREFIX + resource;
 
     try {
@@ -204,7 +198,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
         const decoded = decodeMember(memberStr);
         if (decoded && decoded.witnessValue !== conditionedOnValue) {
           this.onSuccess();
-          return {
+          return ok({
             runId: decoded.runId,
             nodeId: decoded.nodeId,
             newWitness: {
@@ -213,21 +207,19 @@ export class RedisFreshnessIndex implements FreshnessIndex {
               value: decoded.witnessValue,
             },
             succeededAtMs: score,
-          };
+          });
         }
       }
 
       this.onSuccess();
-      return null;
+      return ok(null);
     } catch (e) {
       this.onFailure(e);
-      this._degradedChecks++;
-      // Non-fatal — return null means "couldn't check" not "no conflict".
-      // The degradedChecks counter surfaces this for health monitoring.
-      fwLogger().error(
-        `[RedisFreshnessIndex] findConflict failed for resource '${resource}' — freshness NOT checked (degradedChecks=${this._degradedChecks}): ${e instanceof Error ? e.message : e}`,
-      );
-      return null;
+      return err({
+        kind: "cache-error",
+        operation: "freshness:findConflict",
+        message: `resource '${resource}': ${e instanceof Error ? e.message : String(e)}`,
+      });
     }
   }
 }
