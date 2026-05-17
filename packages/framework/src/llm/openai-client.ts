@@ -40,6 +40,22 @@ function withAdditionalPropertiesFalse(schema: Record<string, unknown>): Record<
   if (result.items && typeof result.items === "object") {
     result.items = withAdditionalPropertiesFalse(result.items as Record<string, unknown>);
   }
+  // Handle composition keywords (anyOf, oneOf, allOf) — Zod v4 renders
+  // z.union, z.discriminatedUnion, z.optional as these.
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    if (Array.isArray(result[key])) {
+      result[key] = (result[key] as Record<string, unknown>[]).map(withAdditionalPropertiesFalse);
+    }
+  }
+  // Handle $defs / definitions (shared schema references)
+  for (const key of ["$defs", "definitions"] as const) {
+    if (result[key] && typeof result[key] === "object" && !Array.isArray(result[key])) {
+      result[key] = Object.fromEntries(
+        Object.entries(result[key] as Record<string, Record<string, unknown>>)
+          .map(([k, v]) => [k, v && typeof v === "object" ? withAdditionalPropertiesFalse(v) : v]),
+      );
+    }
+  }
   return result;
 }
 

@@ -196,7 +196,7 @@ export const runDagStateful = async <I, O>(
 
     // errorEventOf adapter — converts classified errors to DagEvent ERROR
     const errorEventOf = (classified: { retriable: boolean; message: string }): DagEvent => ({
-      type: "ERROR",
+      type: "executor-error",
       retriable: classified.retriable,
       error: classified.message,
     });

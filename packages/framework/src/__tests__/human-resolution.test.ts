@@ -31,6 +31,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
   incomingByNode: overrides.incomingByNode ?? new Map(),
   outgoingByNode: overrides.outgoingByNode ?? new Map(),
   nodeById: overrides.nodeById ?? new Map(),
+  retryConfigs: overrides.retryConfigs ?? new Map(),
   ...overrides,
 });
 

@@ -24,10 +24,7 @@ export class RedisCache implements Cache {
       const parsed: unknown = JSON.parse(raw);
       const validated = schema.safeParse(parsed);
       if (!validated.success) {
-        fwLogger().warn(
-          `[RedisCache.get] key="${key}" schema validation failed (treating as miss): ${validated.error.message}`,
-        );
-        return ok(null); // schema drift → treat as miss
+        return err(cacheError("get-schema-mismatch", `key="${key}": ${validated.error.message}`));
       }
       return ok(validated.data);
     } catch (e) {

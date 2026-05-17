@@ -42,7 +42,17 @@ const OBSERVER_STRICT =
  */
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
   try {
-    observer.observe(event);
+    const result: unknown = observer.observe(event);
+    // Guard: if observe() returns a thenable despite void signature, catch its rejection
+    // to prevent unhandled promise rejections from crashing the process.
+    if (result !== null && result !== undefined && typeof (result as { catch?: unknown }).catch === "function") {
+      (result as Promise<void>).catch((e) => {
+        fwLogger().error(
+          `[observer] async observe() rejected for ${event.type} — Observer.observe must be synchronous:`,
+          e instanceof Error ? e.message : e,
+        );
+      });
+    }
   } catch (e) {
     fwLogger().error(
       `[observer] dispatchEvent failed for ${event.type}:`,

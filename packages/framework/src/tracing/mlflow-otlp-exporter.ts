@@ -321,7 +321,16 @@ export class MlflowOtlpExporter implements SpanExporter {
           resultCallback({ code: 1, error: this.failedPermanently ?? undefined });
           return;
         }
-        inner.export(wrapped, resultCallback);
+        inner.export(wrapped, (result) => {
+          if (result.code !== 0) {
+            this.droppedSpanCount += spans.length;
+            fwLogger().warn(
+              `[MlflowOtlpExporter] Inner exporter failed for ${spans.length} span(s):`,
+              result.error?.message ?? "unknown error",
+            );
+          }
+          resultCallback(result);
+        });
       })
       .catch((err) => {
         fwLogger().error("[MlflowOtlpExporter] Failed to initialize OTLP exporter:", err);

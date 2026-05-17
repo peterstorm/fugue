@@ -102,6 +102,9 @@ export function createCronScheduler(
   // Per-task consecutive unexpected-failure count, drives the exponential
   // backoff (capped at BACKOFF_CAP_MS). Reset on any successful handleFire.
   const consecutiveFailures = new Map<string, number>();
+  // In-memory fallback for markers.set(fired) failures: prevents duplicate
+  // enqueue within the same process when the persistent marker store is down.
+  const inMemoryFiredFallback = new Set<string>();
   // Current active registry (tasks currently armed)
   let activeRegistry: TaskRegistry = new Map();
 
@@ -281,9 +284,10 @@ export function createCronScheduler(
         () => markers.set(markerCompletedKey(taskId), completedTtl),
         { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(completed) task="${taskId}"` },
       );
-    } catch {
+    } catch (e) {
       fwLogger().error(
-        `[CronScheduler] markers.set(completed) permanently failed for task "${taskId}" after 3 attempts — dependent chain abandoned`,
+        `[CronScheduler] markers.set(completed) permanently failed for task "${taskId}" after 3 attempts — dependent chain abandoned:`,
+        e,
       );
       return;
     }
@@ -308,7 +312,8 @@ export function createCronScheduler(
         if (!allDepsCompleted) continue;
 
         // Only enqueue if not already fired
-        const alreadyFired = await markers.exists(markerFiredKey(dep.id));
+        const alreadyFired = await markers.exists(markerFiredKey(dep.id)).catch(() => false)
+          || inMemoryFiredFallback.has(dep.id);
         if (alreadyFired) continue;
 
         // Enqueue first — only mark fired on success.
@@ -317,8 +322,8 @@ export function createCronScheduler(
             () => enqueue(dep, triggeredAt),
             { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler enqueue dependent "${dep.id}"` },
           );
-        } catch {
-          fwLogger().error(`[CronScheduler] enqueue permanently failed for dependent "${dep.id}" — skipped`);
+        } catch (e) {
+          fwLogger().error(`[CronScheduler] enqueue permanently failed for dependent "${dep.id}" — skipped:`, e);
           continue;
         }
         const depFiredTtl = Math.ceil(dep.validForMs / 1000) + 60;
@@ -328,8 +333,11 @@ export function createCronScheduler(
             { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(fired) dependent "${dep.id}"` },
           );
         } catch (err) {
+          // Persistent marker failed — set in-memory fallback to prevent
+          // same-process duplicate on next resolveDependents cycle.
+          inMemoryFiredFallback.add(dep.id);
           fwLogger().error(
-            `[CronScheduler] markers.set(fired) permanently failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued — risk of duplicate execution):`,
+            `[CronScheduler] markers.set(fired) permanently failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued — in-memory fallback set):`,
             err,
           );
         }
@@ -346,6 +354,7 @@ export function createCronScheduler(
     }
     timers.clear();
     consecutiveFailures.clear();
+    inMemoryFiredFallback.clear();
     activeRegistry = new Map();
   }
 

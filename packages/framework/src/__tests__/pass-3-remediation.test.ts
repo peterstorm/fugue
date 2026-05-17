@@ -285,7 +285,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
 
     try {
       await runStateMachine(job, compiled.value.machine, executor, {
-        errorEventOf: ({ retriable, message }) => ({ type: "ERROR" as const, retriable, error: message }),
+        errorEventOf: ({ retriable, message }) => ({ type: "executor-error" as const, retriable, error: message }),
       });
     } catch {
       /* runner throws on terminal-failed — expected */
@@ -653,8 +653,8 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
           ]);
           const compiled = compileDagToMachine(dag, null);
           if (!compiled.ok) return false;
-          const d0 = computeBackoffMs(N("n"), attempt, compiled.value.initialContext.dag);
-          const d1 = computeBackoffMs(N("n"), attempt + 1, compiled.value.initialContext.dag);
+          const d0 = computeBackoffMs(N("n"), attempt, compiled.value.initialContext.retryConfigs);
+          const d1 = computeBackoffMs(N("n"), attempt + 1, compiled.value.initialContext.retryConfigs);
           return d1 >= d0;
         },
       ),
@@ -671,9 +671,9 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
     if (!compiled.ok) throw new Error("compile failed");
 
     // attempt 0 → 100, attempt 1 → 200, attempt 2 → 400, attempt 3+ → 400
-    expect(computeBackoffMs(N("n"), 0, compiled.value.initialContext.dag)).toBe(100);
-    expect(computeBackoffMs(N("n"), 2, compiled.value.initialContext.dag)).toBe(400);
-    expect(computeBackoffMs(N("n"), 99, compiled.value.initialContext.dag)).toBe(400);
+    expect(computeBackoffMs(N("n"), 0, compiled.value.initialContext.retryConfigs)).toBe(100);
+    expect(computeBackoffMs(N("n"), 2, compiled.value.initialContext.retryConfigs)).toBe(400);
+    expect(computeBackoffMs(N("n"), 99, compiled.value.initialContext.retryConfigs)).toBe(400);
   });
 });
 

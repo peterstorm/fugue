@@ -12,6 +12,9 @@ import type { WaveDoneResult } from "./wave-resolution.js";
 
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000] as const;
 
+/** Per-node retry config (plain data, serializable). */
+export type RetryConfigs = ReadonlyMap<NodeId, { readonly backoffMs: readonly number[]; readonly jitterRatio: number }>;
+
 /**
  * Returns the base delay; the DAG executor applies random jitter via
  * `baseDelay * (1 + jitterRatio * Math.random())`.
@@ -19,12 +22,10 @@ const DEFAULT_BACKOFF_MS = [1000, 2000, 4000] as const;
 export const computeBackoffMs = (
   nodeId: NodeId,
   attempt: number,
-  dag: DagMachineContext["dag"],
-  nodeById?: ReadonlyMap<NodeId, import("../types/node.js").NodeDef<unknown, unknown>>,
+  retryConfigs: RetryConfigs,
 ): number => {
-  const nodeDef = nodeById?.get(nodeId) ?? dag.nodes.find((n) => n.id === nodeId);
-  const backoffMs = nodeDef?.retry?.backoffMs ?? DEFAULT_BACKOFF_MS;
-
+  const config = retryConfigs.get(nodeId);
+  const backoffMs = config?.backoffMs ?? DEFAULT_BACKOFF_MS;
   const baseDelay = backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? backoffMs[backoffMs.length - 1] ?? 1000;
   return baseDelay;
 };
@@ -105,7 +106,7 @@ export const handleNodeFailed = (
     const newRetries = new Map(ctxWithCoFailed.retries);
     newRetries.set(nodeId, currentAttempts + 1);
     const newCtx: DagMachineContext = { ...ctxWithCoFailed, retries: newRetries };
-    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctxWithCoFailed.dag, ctxWithCoFailed.nodeById);
+    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctxWithCoFailed.retryConfigs);
 
     return {
       state: {
@@ -178,7 +179,7 @@ export const handleHookCrash = (
     const newRetries = new Map(ctx.retries);
     newRetries.set(nodeId, currentAttempts + 1);
     const newCtx: DagMachineContext = { ...ctx, retries: newRetries };
-    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctx.dag, ctx.nodeById);
+    const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctx.retryConfigs);
 
     return {
       state: {

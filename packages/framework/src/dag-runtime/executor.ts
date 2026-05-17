@@ -389,6 +389,7 @@ const runWave = async (
   // Run all wave nodes concurrently
   const settled = await Promise.all(
     waveNodeIds.map(async (nodeId) => {
+      try {
       // Skip nodes already successfully completed in this wave
       // (they already appear in machineCtx.outputs with correct values)
       if (priorOutputs.has(nodeId)) {
@@ -433,6 +434,26 @@ const runWave = async (
         { checkpoint: resumeCheckpoint, writeCheckpoint: true, now: nowFn },
       );
       return { nodeId, result, outcome };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const crash: FrameworkError = {
+          kind: "node-crash",
+          nodeId,
+          message: `unexpected executor error: ${message}`,
+          retriability: "retriable",
+          stack: e instanceof Error ? e.stack : undefined,
+        };
+        emit(nodeCtx, {
+          type: "node-error",
+          runId: nodeCtx.runId,
+          dagId: dag.id,
+          nodeId,
+          timestamp: stamp(),
+          error: message,
+          frameworkError: crash,
+        });
+        return { nodeId, result: err(crash) as Result<unknown, FrameworkError>, outcome: EMPTY_OUTCOME };
+      }
     }),
   );
 

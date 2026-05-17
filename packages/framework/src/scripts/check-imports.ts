@@ -66,14 +66,21 @@ const RULES: BoundaryRule[] = [
   {
     scope: [
       "state-machine",
-      "dag-runtime/transition.ts",
-      "dag-runtime/wave-resolution.ts",
-      "dag-runtime/retry-policy.ts",
-      "dag-runtime/human-resolution.ts",
-      "dag-runtime/machine.ts",
+      "dag-runtime",
+    ],
+    scopeExcludes: [
+      // These are the imperative shell — they legitimately use OTel:
+      "dag-runtime/executor.ts",
+      "dag-runtime/run-dag-stateful.ts",
+      "dag-runtime/run-telemetry.ts",
+      "dag-runtime/node-span.ts",
+      "dag-runtime/eval-judges.ts",
+      "dag-runtime/freshness-emission.ts",
+      "dag-runtime/human-emission.ts",
+      "dag-runtime/route-emission.ts",
     ],
     forbiddenModules: ["@opentelemetry/"],
-    reason: "Pure-core modules must not depend on OTel; tracing belongs to the imperative shell.",
+    reason: "Pure-core modules must not depend on OTel; tracing belongs to the imperative shell. Add new shell files to scopeExcludes.",
   },
   {
     scope: ["scheduler"],

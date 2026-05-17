@@ -53,6 +53,7 @@ const makeMachineCtx = (): DagMachineContext => ({
   ]),
   outgoingByNode: new Map(),
   nodeById: new Map(),
+  retryConfigs: new Map(),
 });
 
 describe("emitFreshnessWitnessEvents", () => {

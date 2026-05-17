@@ -56,8 +56,36 @@ export const emitRoutingDecisions = (
     const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
     if (!outgoing.some(isConditionalEdge)) continue;
 
-    // Extract upstream confidence from the node definition
+    const output = newOutputs.get(nodeId);
+
+    // Runtime type-safety guard: validate output against the source node's
+    // outputSchema before passing it to predicates (which are typed as
+    // Predicate<unknown> at runtime due to heterogeneous DAGs). This catches
+    // wiring bugs where the wrong node's output reaches a predicate.
     const nodeDef = nodeMap.get(nodeId);
+    if (nodeDef) {
+      const outputCheck = nodeDef.outputSchema.safeParse(output);
+      if (!outputCheck.success) {
+        const message = `output schema validation failed before predicate evaluation for node '${nodeId}': ${outputCheck.error.message}`;
+        const schemaErr: FrameworkError = { kind: "predicate-malformed", nodeId, message };
+        emit(nodeCtx, {
+          type: "node-error",
+          runId: nodeCtx.runId,
+          dagId,
+          nodeId,
+          sideEffects: nodeDef.sideEffects,
+          timestamp: stamp(),
+          error: message,
+          frameworkError: schemaErr,
+        });
+        return {
+          decisions: routingDecisions,
+          earlyFailure: { type: "node-failed", nodeId, error: schemaErr },
+        };
+      }
+    }
+
+    // Extract upstream confidence from the node definition
     let upstreamConfidence: Confidence | null = null;
     if (nodeDef && nodeDef.confidence.mode === "value") {
       try {

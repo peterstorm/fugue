@@ -40,6 +40,17 @@ function cacheSuite(name: string, factory: () => Cache) {
       expect(getRes.ok).toBe(true);
       if (getRes.ok) expect(getRes.value).toBe("hello");
     });
+
+    test("get returns cache-error on schema mismatch", async () => {
+      await cache.set("drift-key", { name: "old-shape" }, 60);
+      // Ask for a different schema than what was stored:
+      const result = await cache.get("drift-key", z.object({ count: z.number() }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("cache-error");
+        expect((result.error as { operation: string }).operation).toBe("get-schema-mismatch");
+      }
+    });
   });
 }
 

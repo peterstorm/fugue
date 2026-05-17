@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { handleNodeFailed, handleHookCrash, computeBackoffMs, getRetryLimit } from "../dag-runtime/retry-policy.js";
+import { handleNodeFailed, handleHookCrash, computeBackoffMs, getRetryLimit, type RetryConfigs } from "../dag-runtime/retry-policy.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { DagDef } from "../types/dag.js";
@@ -19,6 +19,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
   incomingByNode: new Map(),
   outgoingByNode: new Map(),
   nodeById: new Map(),
+  retryConfigs: new Map(),
   ...overrides,
 });
 
@@ -146,12 +147,12 @@ describe("handleHookCrash", () => {
 
 describe("computeBackoffMs", () => {
   it("returns default backoff schedule", () => {
-    const dag = { nodes: [], retryLimits: {} } as unknown as DagDef;
-    expect(computeBackoffMs(N("n"), 0, dag)).toBe(1000);
-    expect(computeBackoffMs(N("n"), 1, dag)).toBe(2000);
-    expect(computeBackoffMs(N("n"), 2, dag)).toBe(4000);
+    const configs: RetryConfigs = new Map();
+    expect(computeBackoffMs(N("n"), 0, configs)).toBe(1000);
+    expect(computeBackoffMs(N("n"), 1, configs)).toBe(2000);
+    expect(computeBackoffMs(N("n"), 2, configs)).toBe(4000);
     // Clamps to last entry
-    expect(computeBackoffMs(N("n"), 10, dag)).toBe(4000);
+    expect(computeBackoffMs(N("n"), 10, configs)).toBe(4000);
   });
 });
 

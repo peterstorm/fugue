@@ -64,6 +64,7 @@ export const stripNonPersistable = (
   retries: ctx.retries,
   initialInput: ctx.initialInput,
   activeNodeIds: ctx.activeNodeIds,
+  retryConfigs: ctx.retryConfigs,
 });
 
 /**

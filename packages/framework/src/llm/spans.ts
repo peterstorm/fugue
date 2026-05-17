@@ -135,9 +135,11 @@ export const setLlmResponseAttributes = (meta: LlmResponseMeta): void => {
   }
 };
 
-const MAX_TOOL_IO_BYTES = 8192;
+/** @internal Exported for testing. */
+export const MAX_TOOL_IO_BYTES = 8192;
 
-const stringifyOrTruncate = (value: unknown): string => {
+/** @internal Exported for testing. */
+export const stringifyOrTruncate = (value: unknown): string => {
   let s: string;
   try {
     s = JSON.stringify(value) ?? "";

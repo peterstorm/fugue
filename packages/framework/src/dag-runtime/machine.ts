@@ -77,6 +77,15 @@ export const compileDagToMachine = (
 
   const waves: readonly (readonly NodeId[])[] = sortResult.value;
 
+  const retryConfigs = new Map(
+    dag.nodes
+      .filter((n) => n.retry)
+      .map((n) => [n.id, {
+        backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000],
+        jitterRatio: n.retry!.jitterRatio ?? 0.2,
+      }] as const),
+  );
+
   const initialContext: DagMachineContext = {
     dag,
     waves,
@@ -87,6 +96,7 @@ export const compileDagToMachine = (
     incomingByNode: computeIncomingByNode(dag),
     outgoingByNode: computeOutgoingByNode(dag),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
+    retryConfigs,
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {

@@ -55,7 +55,8 @@ export const createApp = (deps: AppDeps): Hono => {
     let body: unknown;
     try {
       body = await c.req.json();
-    } catch {
+    } catch (e) {
+      log.warn(`[/summarize] Request body parse failed: ${e instanceof Error ? e.message : String(e)}`);
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
@@ -161,7 +162,7 @@ export const createApp = (deps: AppDeps): Hono => {
 
       const timeoutMs = 60_000; // 60s request timeout
       const abortController = new AbortController();
-      const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+      const timeout = setTimeout(() => abortController.abort("timeout"), timeoutMs);
 
       const ctx: NodeContext = makeNodeContext({
         runId,
@@ -192,18 +193,19 @@ export const createApp = (deps: AppDeps): Hono => {
         clearTimeout(timeout);
       }
 
+      if (result.ok) {
+        return c.json(result.value, 200);
+      }
+
+      // Result is err — determine whether it was timeout-caused:
       if (abortController.signal.aborted) {
         log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
         return c.json({ error: "Request timeout", requestId: runId }, 504);
       }
 
-      if (!result.ok) {
-        // Framework error — 500 (log detail server-side, return generic message)
-        log.error("[/summarize] DAG error:", JSON.stringify(result.error));
-        return c.json({ error: "Internal server error", requestId: runId }, 500);
-      }
-
-      return c.json(result.value, 200);
+      // Framework error — 500 (log detail server-side, return generic message)
+      log.error("[/summarize] DAG error:", JSON.stringify(result.error));
+      return c.json({ error: "Internal server error", requestId: runId }, 500);
     } catch (e) {
       log.error("[/summarize] Unexpected error:", e);
       return c.json({ error: "Internal server error" }, 500);

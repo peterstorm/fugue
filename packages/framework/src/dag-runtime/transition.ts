@@ -64,7 +64,7 @@ export const dagTransition = (
       const r = handleNodeFailed(p.wave, e.nodeId, e.error, ctx, e.partialOutputs, e.coFailedNodeIds);
       return { state: r.state, context: r.context };
     })
-    .with([{ kind: "running" }, { type: "ERROR" }], ([, e]) => executorCrash(e, ctx))
+    .with([{ kind: "running" }, { type: "executor-error" }], ([, e]) => executorCrash(e, ctx))
     .with([{ kind: "running" }, P._], ([p]) => stay(p, ctx))
 
     // ─── retrying ───────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ export const dagTransition = (
       const r = handleNodeFailed(p.wave, e.nodeId, e.error, ctx, e.partialOutputs, e.coFailedNodeIds);
       return { state: r.state, context: r.context };
     })
-    .with([{ kind: "retrying" }, { type: "ERROR" }], ([, e]) => executorCrash(e, ctx))
+    .with([{ kind: "retrying" }, { type: "executor-error" }], ([, e]) => executorCrash(e, ctx))
     .with([{ kind: "retrying" }, P._], ([p]) => stay(p, ctx))
 
     // ─── awaiting-human ─────────────────────────────────────────────────
@@ -91,7 +91,7 @@ export const dagTransition = (
       const r = handleHookCrash(p.nodeId, p.output, p.prompt, e.error, ctx, p.pendingReviews, p.wave);
       return { state: r.state, context: r.context };
     })
-    .with([{ kind: "awaiting-human" }, { type: "ERROR" }], ([p, e]) => {
+    .with([{ kind: "awaiting-human" }, { type: "executor-error" }], ([p, e]) => {
       const syntheticError = {
         kind: "node-crash" as const,
         nodeId: p.nodeId,
@@ -122,7 +122,7 @@ export const dagTransition = (
       const r = handleHookCrash(p.nodeId, p.output, p.prompt, e.error, ctx, p.pendingReviews, p.wave);
       return { state: r.state, context: r.context };
     })
-    .with([{ kind: "retrying-hook" }, { type: "ERROR" }], ([p, e]) => {
+    .with([{ kind: "retrying-hook" }, { type: "executor-error" }], ([p, e]) => {
       const syntheticError = {
         kind: "node-crash" as const,
         nodeId: p.nodeId,

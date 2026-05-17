@@ -3,13 +3,20 @@
 import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import { ok } from "../types/result.js";
+import { ok, err } from "../types/result.js";
+
+const schemaMismatchError = (key: string, message: string): FrameworkError => ({
+  kind: "cache-error",
+  operation: "get-schema-mismatch",
+  message: `key="${key}": ${message}`,
+});
 
 export interface Cache {
   /**
    * Get a cached value, validated against the provided schema.
-   * Returns null on miss. Treats schema-drift (validation failure) as a miss
-   * so stale-shaped data doesn't crash callers.
+   * Returns `ok(null)` on miss. Returns `err({ kind: "cache-error", operation: "get-schema-mismatch" })`
+   * when the key exists but fails schema validation (e.g. after a deploy changes the schema).
+   * Callers who want fall-through-to-recompute on drift should match on that specific error.
    */
   get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>>;
   set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>>;
@@ -38,7 +45,7 @@ export class InMemoryCache implements Cache {
     }
     const parsed = JSON.parse(entry.value);
     const validated = schema.safeParse(parsed);
-    if (!validated.success) return ok(null); // schema drift → treat as miss
+    if (!validated.success) return err(schemaMismatchError(key, validated.error.message));
     return ok(validated.data);
   }
 

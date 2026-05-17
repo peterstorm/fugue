@@ -195,6 +195,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
+      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
     };
   };
 
@@ -246,13 +247,14 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
+      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
     };
   };
 
   it("retriable: false produces node-crash with retriable: false on the failed terminal", () => {
     const result = dagTransition(
       { kind: "running", wave: 0 },
-      { type: "ERROR", retriable: false, error: "boom" },
+      { type: "executor-error", retriable: false, error: "boom" },
       baseCtx(),
     );
     expect(result.state.kind).toBe("failed");
@@ -537,6 +539,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
+      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
     };
   };
 

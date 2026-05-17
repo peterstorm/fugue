@@ -117,7 +117,7 @@ export type DagEvent =
     }
   | { readonly type: "human-responded"; readonly nodeId: NodeId; readonly action: HumanAction }
   | { readonly type: "abort"; readonly reason: string }
-  | { readonly type: "ERROR"; readonly retriable: boolean; readonly error: string };
+  | { readonly type: "executor-error"; readonly retriable: boolean; readonly error: string };
 
 // ---------------------------------------------------------------------------
 // DagMachineContextPersisted — the plain-data subset safe for serialization.
@@ -137,6 +137,12 @@ export interface DagMachineContextPersisted {
    * in `outputs` and never get dispatched.
    */
   readonly activeNodeIds: ReadonlySet<NodeId>;
+  /**
+   * Per-node retry configuration (plain data, serializable). Populated at
+   * compile time from `NodeDef.retry`. Used by `retry-policy.ts` so the
+   * pure transition layer never reaches into live `NodeDef` objects.
+   */
+  readonly retryConfigs: ReadonlyMap<NodeId, { readonly backoffMs: readonly number[]; readonly jitterRatio: number }>;
 }
 
 // ---------------------------------------------------------------------------

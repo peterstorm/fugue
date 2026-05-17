@@ -53,6 +53,7 @@ const minimalCtx: DagMachineContext = {
     [N("a"), minimalNodeDef("a") as any],
     [N("b"), minimalNodeDef("b") as any],
   ]),
+  retryConfigs: new Map(),
 };
 
 // ---------------------------------------------------------------------------
@@ -147,7 +148,7 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
     reason: fc.string({ maxLength: 20 }),
   }),
   fc.record({
-    type: fc.constant("ERROR" as const),
+    type: fc.constant("executor-error" as const),
     retriable: fc.boolean(),
     error: fc.string({ maxLength: 20 }),
   }),

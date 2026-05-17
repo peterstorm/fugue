@@ -15,6 +15,7 @@ import {
   waveIndexOf,
 } from "../dag-runtime/wave-resolution.js";
 import { handleNodeFailed, computeBackoffMs, getRetryLimit } from "../dag-runtime/retry-policy.js";
+import type { RetryConfigs } from "../dag-runtime/retry-policy.js";
 import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
@@ -93,6 +94,11 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     outgoingByNode: computeOutgoingByNode(dag),
     incomingByNode: new Map(),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
+    retryConfigs: new Map(
+      dag.nodes
+        .filter((n) => n.retry)
+        .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
+    ),
     ...overrides,
   };
 };
@@ -277,7 +283,7 @@ describe("dagTransition — running", () => {
   });
 
   it("ERROR event from running => failed (node-crash)", () => {
-    const event: DagEvent = { type: "ERROR", retriable: true, error: "executor blew up" };
+    const event: DagEvent = { type: "executor-error", retriable: true, error: "executor blew up" };
     const result = dagTransition(running(0), event, makeCtx());
     expect(result.state.kind).toBe("failed");
   });
@@ -325,7 +331,7 @@ describe("dagTransition — retrying", () => {
 
   it("ERROR event during retrying => failed", () => {
     const phase: DagPhase = { kind: "retrying", wave: 0, nodeId: "a" as NodeId, attempt: 1, nextDelayMs: 1000 };
-    const event: DagEvent = { type: "ERROR", retriable: false, error: "crash" };
+    const event: DagEvent = { type: "executor-error", retriable: false, error: "crash" };
     const result = dagTransition(phase, event, makeCtx());
     expect(result.state.kind).toBe("failed");
   });
@@ -810,11 +816,18 @@ describe("collectHumanReviewQueue", () => {
 // computeBackoffMs — unit tests
 // ---------------------------------------------------------------------------
 
+/** Build a RetryConfigs map from a DagDef for use in computeBackoffMs tests. */
+const retryConfigsFrom = (dag: DagDef): RetryConfigs =>
+  new Map(
+    dag.nodes
+      .filter((n) => n.retry)
+      .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
+  );
+
 describe("computeBackoffMs", () => {
   it("returns base delay (no jitter) when no node retry config", () => {
-    const dag = makeDag();
-    const ctx = makeCtx({ dag });
-    const delay = computeBackoffMs(N("a"), 0, ctx.dag);
+    const configs: RetryConfigs = new Map();
+    const delay = computeBackoffMs(N("a"), 0, configs);
     // Default: [1000, 2000, 4000] — returns base 1000 (executor applies jitter)
     expect(delay).toBe(1000);
   });
@@ -823,8 +836,7 @@ describe("computeBackoffMs", () => {
     const dag = makeDag({
       nodes: [makeNode("a", { retry: { backoffMs: [500, 1000], jitterRatio: 0.1 } })],
     });
-    const delay = computeBackoffMs(N("a"), 0, dag);
-    // Base: 500 (executor applies jitter separately)
+    const delay = computeBackoffMs(N("a"), 0, retryConfigsFrom(dag));
     expect(delay).toBe(500);
   });
 
@@ -832,8 +844,7 @@ describe("computeBackoffMs", () => {
     const dag = makeDag({
       nodes: [makeNode("a", { retry: { backoffMs: [100, 200], jitterRatio: 0 } })],
     });
-    const delay = computeBackoffMs(N("a"), 10, dag); // attempt 10, only 2 entries
-    // Last entry: 200 (base, no jitter)
+    const delay = computeBackoffMs(N("a"), 10, retryConfigsFrom(dag));
     expect(delay).toBe(200);
   });
 
@@ -841,10 +852,11 @@ describe("computeBackoffMs", () => {
     const dag = makeDag({
       nodes: [makeNode("a", { retry: { backoffMs: [100, 500, 2000] } })],
     });
-    expect(computeBackoffMs(N("a"), 0, dag)).toBe(100);
-    expect(computeBackoffMs(N("a"), 1, dag)).toBe(500);
-    expect(computeBackoffMs(N("a"), 2, dag)).toBe(2000);
-    expect(computeBackoffMs(N("a"), 5, dag)).toBe(2000); // clamped
+    const configs = retryConfigsFrom(dag);
+    expect(computeBackoffMs(N("a"), 0, configs)).toBe(100);
+    expect(computeBackoffMs(N("a"), 1, configs)).toBe(500);
+    expect(computeBackoffMs(N("a"), 2, configs)).toBe(2000);
+    expect(computeBackoffMs(N("a"), 5, configs)).toBe(2000); // clamped
   });
 });
 
@@ -1095,7 +1107,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     const dag = makeDag({ defaultRetryLimit: 2 });
     const ctx = makeCtx({ dag });
     const phase = awaitingWithPrompt("a");
-    const event: DagEvent = { type: "ERROR", retriable: true, error: "hook network failure" };
+    const event: DagEvent = { type: "executor-error", retriable: true, error: "hook network failure" };
     const result = dagTransition(phase, event, ctx);
 
     expect(result.state.kind).toBe("retrying-hook");
@@ -1109,7 +1121,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     const dag = makeDag({ defaultRetryLimit: 0 });
     const ctx = makeCtx({ dag });
     const phase = awaitingWithPrompt("a");
-    const event: DagEvent = { type: "ERROR", retriable: false, error: "hook blew up" };
+    const event: DagEvent = { type: "executor-error", retriable: false, error: "hook blew up" };
     const result = dagTransition(phase, event, ctx);
 
     expect(result.state.kind).toBe("failed");
