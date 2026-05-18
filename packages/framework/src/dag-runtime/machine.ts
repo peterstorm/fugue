@@ -109,6 +109,7 @@ export const compileDagToMachine = (
         .map(n => [n.id, n.humanReview!.prompt] as const),
     ),
     edges: dag.edges,
+    confidenceByNode: new Map(),
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {

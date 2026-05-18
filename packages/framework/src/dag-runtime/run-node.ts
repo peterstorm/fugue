@@ -94,7 +94,11 @@ export const runNodeShared = async (
     return { result: ok(validated.value), outcome: EMPTY_OUTCOME };
   }
 
-  const nodeInput = buildNodeInput(dagInput, outputs, incoming);
+  const nodeInputResult = buildNodeInput(dagInput, outputs, incoming, nodeId);
+  if (!nodeInputResult.ok) {
+    return { result: nodeInputResult, outcome: EMPTY_OUTCOME };
+  }
+  const nodeInput = nodeInputResult.value;
 
   const inputResult = validateInput(node.inputSchema, nodeInput, nodeId);
   if (!inputResult.ok) {

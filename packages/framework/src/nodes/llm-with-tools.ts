@@ -14,7 +14,7 @@ import { runLlmCallPipeline } from "./llm-pipeline.js";
  *
  * - prompt resolution from the registry (or inline `system`/`buildUser`),
  * - cache lookup keyed on prompt + model + input + tool-name fingerprint,
- * - the FR-021 single-shot validation retry,
+ * - the FR-021b single-shot validation retry (re-prompt on schema failure),
  * - GenAI semconv span enrichment (delegated to `LlmClient.sendWithTools`).
  */
 /**
@@ -134,7 +134,7 @@ export const createLlmWithToolsNode = <I, O>(
           ...(config.thinking ? { thinking: config.thinking } : {}),
           ...(ctx.signal ? { signal: ctx.signal } : {}),
         };
-        return llmClient.sendWithTools!(req, ctx);
+        return llmClient.sendWithTools(req, ctx);
       },
       ctx,
     );

@@ -58,6 +58,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
       (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => [n.id, n.humanReview!.prompt] as const),
     ),
     edges: dag.edges ?? [],
+    confidenceByNode: new Map(),
     ...overrides,
   };
 };

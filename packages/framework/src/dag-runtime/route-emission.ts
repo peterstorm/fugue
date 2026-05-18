@@ -23,6 +23,8 @@ import { emit } from "./emit.js";
 export interface RoutingPhaseResult {
   /** Per-source-node routing decisions. Empty map when no conditional edges fired. */
   readonly decisions: ReadonlyMap<NodeId, Decision>;
+  /** Per-node extracted confidence values for persisting into the transition context. */
+  readonly confidenceValues: ReadonlyMap<NodeId, Confidence | null>;
   /** When a predicate is malformed or confidence extraction fails, short-circuit wave. */
   readonly earlyFailure?: Extract<DagEvent, { type: "node-failed" }>;
 }
@@ -50,6 +52,7 @@ export const emitRoutingDecisions = (
 ): RoutingPhaseResult => {
   const stamp = (): Date => new Date(nowFn());
   const routingDecisions = new Map<NodeId, Decision>();
+  const confidenceValues = new Map<NodeId, Confidence | null>();
 
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
@@ -80,6 +83,7 @@ export const emitRoutingDecisions = (
         });
         return {
           decisions: routingDecisions,
+          confidenceValues,
           earlyFailure: { type: "node-failed", nodeId, error: schemaErr },
         };
       }
@@ -105,10 +109,12 @@ export const emitRoutingDecisions = (
         });
         return {
           decisions: routingDecisions,
+          confidenceValues,
           earlyFailure: { type: "node-failed", nodeId, error: crashErr },
         };
       }
     }
+    confidenceValues.set(nodeId, upstreamConfidence);
 
     const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing, upstreamConfidence);
     if (decision.kind === "predicate-malformed") {
@@ -129,6 +135,7 @@ export const emitRoutingDecisions = (
       });
       return {
         decisions: routingDecisions,
+        confidenceValues,
         earlyFailure: {
           type: "node-failed",
           nodeId,
@@ -165,5 +172,5 @@ export const emitRoutingDecisions = (
     }
   }
 
-  return { decisions: routingDecisions };
+  return { decisions: routingDecisions, confidenceValues };
 };

@@ -83,7 +83,7 @@ type ExhaustiveEventHandlers = {
  * const obs = createExhaustiveObserver({
  *   "run-start": (e) => { ... },
  *   "node-start": (e) => { ... },
- *   // ... all 13 event types required
+ *   // ... handler required for every ObserverEvent type (compiler-enforced)
  * });
  * ```
  */

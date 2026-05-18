@@ -105,6 +105,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
     humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
     edges: dag.edges,
+    confidenceByNode: new Map(),
     ...overrides,
   };
 };

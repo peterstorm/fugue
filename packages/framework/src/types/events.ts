@@ -208,6 +208,8 @@ export type HumanActionDetailed =
  *
  * This is the Phase 4 capstone: the `context` field is the payoff for
  * Phases 1–3 (sideEffects, confidence, freshness) happening first.
+ *
+ * @see docs/adr/0026-human-intervention-telemetry.md
  */
 export interface HumanInterventionEvent {
   readonly type: "human-intervention";

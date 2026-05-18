@@ -27,7 +27,7 @@ export {
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
-export type { FrameworkError } from "./errors.js";
+export type { FrameworkError, FrameworkErrorKind } from "./errors.js";
 export { formatFrameworkError, FrameworkAugmentedError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
@@ -112,4 +112,4 @@ export { withRetryLimits } from "./dag.js";
 
 // ── Branded identifiers ───────────────────────────────────────────────────
 export type { RunId, NodeId, DagId } from "./ids.js";
-export { runId, nodeId, dagId } from "./ids.js";
+export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, ID_PATTERN } from "./ids.js";

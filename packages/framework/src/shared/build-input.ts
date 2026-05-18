@@ -4,6 +4,11 @@
 // `dag-runtime/freshness-emission.ts` (witness extraction).
 
 import type { IncomingSources } from "./incoming.js";
+import type { Result } from "../types/result.js";
+import { ok, err } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
+import { __brandNodeId } from "../types/ids.js";
 
 /**
  * Build a node's input value from its incoming sources.
@@ -22,31 +27,39 @@ import type { IncomingSources } from "./incoming.js";
  * sources always force the keyed shape because their presence isn't known
  * statically — a node can't branch on whether `input` is bare-or-keyed at
  * runtime.
+ *
+ * Returns `Err` with `retriability: "non-retriable"` when a required source
+ * is missing — this indicates checkpoint corruption or a framework ordering
+ * bug, not a transient failure.
  */
 export const buildNodeInput = (
   dagInput: unknown,
   outputs: ReadonlyMap<string, unknown>,
   incoming: IncomingSources,
-): unknown => {
+  nodeId: string,
+): Result<unknown, FrameworkError> => {
   const { required, optional } = incoming;
 
   // Assert all required sources produced output (wave ordering guarantees this;
   // assertion catches checkpoint corruption or framework ordering bugs)
   for (const dep of required) {
     if (!outputs.has(dep)) {
-      throw new Error(
-        `BUG: required source '${dep}' has no output in the outputs map. ` +
-        `This indicates checkpoint corruption or a framework ordering bug.`,
-      );
+      return err({
+        kind: "node-crash" as const,
+        nodeId: __brandNodeId(nodeId),
+        retriability: "non-retriable" as const,
+        message: `BUG: required source '${dep}' has no output in the outputs map. ` +
+          `This indicates checkpoint corruption or a framework ordering bug.`,
+      });
     }
   }
 
   if (optional.length > 0) {
-    return Object.fromEntries(
+    return ok(Object.fromEntries(
       [...required, ...optional].map((d) => [d, outputs.get(d)]),
-    );
+    ));
   }
-  if (required.length === 0) return dagInput;
-  if (required.length === 1) return outputs.get(required[0]!);
-  return Object.fromEntries(required.map((d) => [d, outputs.get(d)]));
+  if (required.length === 0) return ok(dagInput);
+  if (required.length === 1) return ok(outputs.get(required[0]!));
+  return ok(Object.fromEntries(required.map((d) => [d, outputs.get(d)])));
 };

@@ -13,8 +13,8 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput("dag-level-input", new Map(), {
       required: [],
       optional: [],
-    });
-    expect(result).toBe("dag-level-input");
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: "dag-level-input" });
   });
 
   it("single required source → returns bare upstream value", () => {
@@ -22,8 +22,8 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(null, outputs, {
       required: ["fetch"],
       optional: [],
-    });
-    expect(result).toEqual({ data: 42 });
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: { data: 42 } });
   });
 
   it("two required sources → returns keyed object", () => {
@@ -34,8 +34,8 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(null, outputs, {
       required: ["a", "b"],
       optional: [],
-    });
-    expect(result).toEqual({ a: "valueA", b: "valueB" });
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: { a: "valueA", b: "valueB" } });
   });
 
   it("optional sources present → keyed object with values", () => {
@@ -46,8 +46,8 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(null, outputs, {
       required: ["a"],
       optional: ["opt"],
-    });
-    expect(result).toEqual({ a: "valueA", opt: "optValue" });
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: { a: "valueA", opt: "optValue" } });
   });
 
   it("optional sources missing → keyed object with undefined", () => {
@@ -55,8 +55,8 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(null, outputs, {
       required: ["a"],
       optional: ["opt"],
-    });
-    expect(result).toEqual({ a: "valueA", opt: undefined });
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: { a: "valueA", opt: undefined } });
   });
 
   it("optional forces keyed shape even with 0 required", () => {
@@ -64,16 +64,22 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput("dagInput", outputs, {
       required: [],
       optional: ["opt"],
-    });
-    expect(result).toEqual({ opt: "yes" });
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: { opt: "yes" } });
   });
 
-  it("throws when required source is missing from outputs", () => {
-    expect(() =>
-      buildNodeInput(null, new Map(), {
-        required: ["missing"],
-        optional: [],
-      }),
-    ).toThrow("BUG: required source 'missing' has no output");
+  it("returns non-retriable error when required source is missing", () => {
+    const result = buildNodeInput(null, new Map(), {
+      required: ["missing"],
+      optional: [],
+    }, "test-node");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("BUG: required source 'missing' has no output");
+      }
+    }
   });
 });

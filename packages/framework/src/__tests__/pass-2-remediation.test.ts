@@ -202,6 +202,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
       humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
       edges: dag.edges,
+      confidenceByNode: new Map(),
     };
   };
 
@@ -260,6 +261,7 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
       humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
       edges: dag.edges,
+      confidenceByNode: new Map(),
     };
   };
 
@@ -558,6 +560,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
       humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
       edges: dag.edges,
+      confidenceByNode: new Map(),
     };
   };
 

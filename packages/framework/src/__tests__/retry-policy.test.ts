@@ -28,6 +28,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     humanReviewNodeIds: new Set(),
     humanReviewPrompts: new Map(),
     edges: dag.edges ?? [],
+    confidenceByNode: new Map(),
     ...overrides,
   };
 };

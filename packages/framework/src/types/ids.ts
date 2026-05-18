@@ -11,6 +11,9 @@
 // every id flowing through the system has been explicitly validated or
 // branded at its point of origin.
 
+import type { Result } from "./result.js";
+import { ok, err } from "./result.js";
+
 declare const __runIdBrand: unique symbol;
 declare const __nodeIdBrand: unique symbol;
 declare const __dagIdBrand: unique symbol;
@@ -23,6 +26,9 @@ export type DagId = string & { readonly [__dagIdBrand]: void };
 // jumping through encoding hoops. The regex stays restrictive enough that
 // IDs remain URL-safe and printable in operator UIs.
 const ID_REGEX = /^[A-Za-z0-9_:-]{1,128}$/;
+
+/** The regex used to validate all framework identifiers. Exported for client-side validation reuse. */
+export const ID_PATTERN = ID_REGEX;
 
 const validate = (kind: string, s: string): void => {
   if (typeof s !== "string" || !ID_REGEX.test(s)) {
@@ -65,3 +71,25 @@ export const __brandRunId = (s: string): RunId => s as RunId;
 export const __brandNodeId = (s: string): NodeId => s as NodeId;
 /** @internal See `__brandRunId`. */
 export const __brandDagId = (s: string): DagId => s as DagId;
+
+// ---------------------------------------------------------------------------
+// Result-returning variants — for parse boundaries where throwing is undesirable.
+// ---------------------------------------------------------------------------
+
+/** Parse a string into a RunId, returning a Result instead of throwing. */
+export const tryRunId = (s: string): Result<RunId, string> =>
+  typeof s === "string" && ID_REGEX.test(s)
+    ? ok(s as RunId)
+    : err(`Invalid runId "${s}": must match ${ID_REGEX.source}`);
+
+/** Parse a string into a NodeId, returning a Result instead of throwing. */
+export const tryNodeId = (s: string): Result<NodeId, string> =>
+  typeof s === "string" && ID_REGEX.test(s)
+    ? ok(s as NodeId)
+    : err(`Invalid nodeId "${s}": must match ${ID_REGEX.source}`);
+
+/** Parse a string into a DagId, returning a Result instead of throwing. */
+export const tryDagId = (s: string): Result<DagId, string> =>
+  typeof s === "string" && ID_REGEX.test(s)
+    ? ok(s as DagId)
+    : err(`Invalid dagId "${s}": must match ${ID_REGEX.source}`);

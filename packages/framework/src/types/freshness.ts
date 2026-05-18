@@ -9,6 +9,8 @@
  * resource at a point in time. Reads emit witnesses; writes declare which
  * witness they are conditioned on. The framework compares witnesses by
  * `(resource, value)` equality to detect stale-read → write hazards.
+ *
+ * @see docs/adr/0025-freshness-witness-contract.md
  */
 
 export type WitnessKind =

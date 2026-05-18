@@ -15,6 +15,7 @@ export interface FetchNodeConfig<I, O> {
   readonly sideEffects?: SideEffectProfile;
 }
 
+/** Create a fetch node that retrieves external state (API, database). Defaults to `sideEffects: { kind: "reads", resource: id }`. */
 export const createFetchNode = <I, O>(
   config: FetchNodeConfig<I, O>,
 ): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: NodeId } => ({

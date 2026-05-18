@@ -152,6 +152,8 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   const evalRubricPrompt = await promptRegistry.load("summary-eval-rubric");
   if (evalRubricPrompt.ok) {
     prompts.set("summary-eval-rubric", evalRubricPrompt.value.text);
+  } else {
+    log.warn("Failed to load summary-eval-rubric prompt:", evalRubricPrompt.error);
   }
   const synthesisSystemPrompt = await promptRegistry.load("synthesis-system");
   if (synthesisSystemPrompt.ok) {
@@ -236,7 +238,10 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
         try {
           const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`);
           return res.ok;
-        } catch { return false; }
+        } catch (e) {
+          log.debug(`[health] MLflow unreachable: ${e instanceof Error ? e.message : String(e)}`);
+          return false;
+        }
       },
     },
   };

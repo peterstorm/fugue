@@ -117,7 +117,8 @@ const handleReroute = (
       if (!survivingOutputs.has(nodeId)) continue;
       const outgoing = ctx.outgoingByNode.get(nodeId) ?? [];
       if (!outgoing.some(isConditionalEdge)) continue;
-      const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing);
+      const upstreamConfidence = ctx.confidenceByNode.get(nodeId) ?? null;
+      const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing, upstreamConfidence);
       if (decision.kind === "predicate-malformed") {
         return {
           state: {

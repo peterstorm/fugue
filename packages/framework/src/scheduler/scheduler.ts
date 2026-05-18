@@ -29,8 +29,8 @@ export interface CronScheduler {
    */
   resolveDependents(taskId: string, triggeredAt: Date): Promise<void>;
 
-  /** Cancel all active timers and clear internal state. */
-  stop(): void;
+  /** Cancel all active timers, await in-flight fires, and clear internal state. */
+  stop(): Promise<void>;
 }
 
 export interface CronSchedulerOpts {
@@ -99,6 +99,8 @@ export function createCronScheduler(
 
   // Map from taskId → active timer handle
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  // In-flight handleFire promises — awaited on stop() for graceful shutdown.
+  const inFlight = new Set<Promise<void>>();
   // Per-task consecutive unexpected-failure count, drives the exponential
   // backoff (capped at BACKOFF_CAP_MS). Reset on any successful handleFire.
   const consecutiveFailures = new Map<string, number>();
@@ -133,7 +135,7 @@ export function createCronScheduler(
       const current = activeRegistry.get(taskId);
       if (current === undefined) return; // task was removed mid-fire — drop the chain
       const triggeredAt = now();
-      void handleFire(current, triggeredAt)
+      const p = handleFire(current, triggeredAt)
         .then(() => {
           consecutiveFailures.delete(current.id);
           const stillActive = activeRegistry.get(current.id);
@@ -145,7 +147,9 @@ export function createCronScheduler(
           consecutiveFailures.set(current.id, n);
           const stillActive = activeRegistry.get(current.id);
           if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
-        });
+        })
+        .finally(() => { inFlight.delete(p); });
+      inFlight.add(p);
     } catch (e) {
       fwLogger().error(`[CronScheduler] onTimerFire threw synchronously for "${taskId}":`, e);
       const n = (consecutiveFailures.get(taskId) ?? 0) + 1;
@@ -363,11 +367,12 @@ export function createCronScheduler(
     }
   }
 
-  function stop(): void {
+  async function stop(): Promise<void> {
     for (const handle of timers.values()) {
       clearTimeout(handle);
     }
     timers.clear();
+    await Promise.allSettled([...inFlight]);
     consecutiveFailures.clear();
     inMemoryFiredFallback.clear();
     activeRegistry = new Map();

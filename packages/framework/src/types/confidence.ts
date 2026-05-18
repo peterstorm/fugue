@@ -10,6 +10,8 @@
  *
  * Raw numeric values are preserved for forensics but never compared by the
  * framework.
+ *
+ * @see docs/adr/0027-confidence-calibration-workflow.md
  */
 
 export type ConfidenceBucket = "high" | "medium" | "low" | "unknown";
@@ -32,18 +34,33 @@ export type Confidence = {
 } & { readonly [__confidenceBrand]: void };
 
 /** Smart constructor — the only sanctioned way to create a Confidence value. */
-export const confidence = (
+export function confidence(
+  bucket: ConfidenceBucket,
+  source: "self-reported-numeric" | "logprob",
+  raw: number,
+): Confidence;
+export function confidence(
+  bucket: ConfidenceBucket,
+  source: ConfidenceSource,
+  raw: number | string,
+): Confidence;
+export function confidence(
   bucket: ConfidenceBucket,
   source: ConfidenceSource,
   raw?: number | string,
-): Confidence => {
+): Confidence;
+export function confidence(
+  bucket: ConfidenceBucket,
+  source: ConfidenceSource,
+  raw?: number | string,
+): Confidence {
   if (source === "self-reported-numeric" && typeof raw === "number" && (raw < 0 || raw > 1)) {
     throw new RangeError(
       `confidence raw value for "self-reported-numeric" must be in [0, 1], got ${raw}`,
     );
   }
   return ({ bucket, source, ...(raw !== undefined ? { raw } : {}) }) as Confidence;
-};
+}
 
 /**
  * @internal — Bypass validation for trusted internal code (deserialization,

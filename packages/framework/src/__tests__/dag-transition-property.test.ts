@@ -60,6 +60,7 @@ const minimalCtx: DagMachineContext = {
   humanReviewNodeIds: new Set(),
   humanReviewPrompts: new Map(),
   edges: minimalDag.edges,
+  confidenceByNode: new Map(),
 };
 
 // ---------------------------------------------------------------------------

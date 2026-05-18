@@ -127,8 +127,8 @@ export const withNodeSpan = async (
       try {
         result = await fn();
       } catch (e) {
-        try { span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) }); } catch { /* OTel failure must not mask node error */ }
-        try { span.end(); } catch { /* same */ }
+        try { span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) }); } catch (spanErr) { fwLogger().debug("[withNodeSpan] span.setStatus failed:", spanErr); }
+        try { span.end(); } catch (spanErr) { fwLogger().debug("[withNodeSpan] span.end failed — span may leak:", spanErr); }
         const message = e instanceof Error ? e.message : String(e);
         const stack = e instanceof Error ? e.stack : undefined;
         return {

@@ -83,6 +83,9 @@ export type FrameworkError =
       readonly missing: readonly { readonly nodeId: NodeId; readonly capability: Capability }[];
     };
 
+/** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
+export type FrameworkErrorKind = FrameworkError["kind"];
+
 // Imported here rather than at top of file to avoid a circular reference at
 // the type-only boundary (Capability lives in `types/node.ts` which itself
 // imports from this module only via the `FrameworkError` type alias).

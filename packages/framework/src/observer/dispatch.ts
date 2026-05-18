@@ -29,7 +29,9 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
         );
         if (OBSERVER_STRICT) {
           const error = e instanceof Error ? e : new Error(String(e));
-          setTimeout(() => { throw error; }, 0);
+          error.message = `[OBSERVER_STRICT] Observer.observe() returned a rejected Promise for event '${event.type}'. ` +
+            `Observer.observe MUST be synchronous. Original: ${error.message}`;
+          queueMicrotask(() => { throw error; });
         }
       });
     }

@@ -175,3 +175,115 @@ describe("tap / tapErr", () => {
     expect(calls).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Additional combinators: sequenceFirst, sequenceAll, orElse, andThenAsync, mapAsync
+// ---------------------------------------------------------------------------
+
+import {
+  sequenceFirst,
+  sequenceAll,
+  orElse,
+  andThenAsync,
+  mapAsync,
+} from "../types/result.js";
+
+describe("sequenceFirst", () => {
+  it("returns ok(values[]) when all results are Ok", () => {
+    const results = [ok(1), ok(2), ok(3)];
+    expect(sequenceFirst(results)).toEqual(ok([1, 2, 3]));
+  });
+
+  it("short-circuits on the first Err", () => {
+    const results: Result<number, string>[] = [ok(1), err("boom"), ok(3)];
+    expect(sequenceFirst(results)).toEqual(err("boom"));
+  });
+
+  it("returns the earliest Err when multiple exist", () => {
+    const results: Result<number, string>[] = [ok(1), err("first"), err("second")];
+    expect(sequenceFirst(results)).toEqual(err("first"));
+  });
+
+  it("returns ok([]) for an empty array", () => {
+    expect(sequenceFirst([])).toEqual(ok([]));
+  });
+});
+
+describe("sequenceAll", () => {
+  it("returns ok(values[]) when all results are Ok", () => {
+    const results = [ok("a"), ok("b")];
+    expect(sequenceAll(results)).toEqual(ok(["a", "b"]));
+  });
+
+  it("returns err(allErrors[]) when any results are Err", () => {
+    const results: Result<number, string>[] = [ok(1), err("e1"), ok(3), err("e2")];
+    expect(sequenceAll(results)).toEqual(err(["e1", "e2"]));
+  });
+
+  it("returns ok([]) for an empty array", () => {
+    expect(sequenceAll([])).toEqual(ok([]));
+  });
+
+  it("collects all errors, not just the first", () => {
+    const results: Result<number, string>[] = [err("a"), err("b"), err("c")];
+    const r = sequenceAll(results);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("orElse", () => {
+  it("passes Ok through without calling recovery fn", () => {
+    const r = orElse(ok(42) as Result<number, string>, (_e) => ok(0));
+    expect(r).toEqual(ok(42));
+  });
+
+  it("calls recovery fn on Err and returns its result", () => {
+    const r = orElse(err("oops") as Result<number, string>, (e) => ok(e.length));
+    expect(r).toEqual(ok(4));
+  });
+
+  it("recovery fn can return a new Err", () => {
+    const r = orElse(err("oops") as Result<number, string>, (_e) => err("still broken") as Result<number, string>);
+    expect(r).toEqual(err("still broken"));
+  });
+});
+
+describe("andThenAsync", () => {
+  it("chains async fn on Ok", async () => {
+    const r = await andThenAsync(ok(5), async (v) => ok(v * 2));
+    expect(r).toEqual(ok(10));
+  });
+
+  it("short-circuits on Err without calling fn", async () => {
+    let called = false;
+    const r = await andThenAsync(err("nope") as Result<number, string>, async (_v) => {
+      called = true;
+      return ok(99);
+    });
+    expect(r).toEqual(err("nope"));
+    expect(called).toBe(false);
+  });
+
+  it("async fn can return Err", async () => {
+    const r = await andThenAsync(ok(5), async (_v) => err("async fail") as Result<number, string>);
+    expect(r).toEqual(err("async fail"));
+  });
+});
+
+describe("mapAsync", () => {
+  it("transforms value on Ok via async fn", async () => {
+    const r = await mapAsync(ok("hello"), async (s) => s.toUpperCase());
+    expect(r).toEqual(ok("HELLO"));
+  });
+
+  it("passes through Err without calling fn", async () => {
+    let called = false;
+    const r = await mapAsync(err("nope") as Result<string, string>, async (_s) => {
+      called = true;
+      return "never";
+    });
+    expect(r).toEqual(err("nope"));
+    expect(called).toBe(false);
+  });
+});

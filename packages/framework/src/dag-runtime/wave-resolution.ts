@@ -110,7 +110,8 @@ export const handleWaveDone = (
     const outgoing = ctx.outgoingByNode.get(nodeId) ?? [];
     const hasGuards = outgoing.some(isConditionalEdge);
     if (!hasGuards) continue;
-    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing);
+    const upstreamConfidence = ctx.confidenceByNode.get(nodeId) ?? null;
+    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing, upstreamConfidence);
     if (decision.kind === "predicate-malformed") {
       return {
         state: {

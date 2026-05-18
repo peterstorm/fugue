@@ -12,6 +12,7 @@ export interface TransformNodeConfig<I, O> {
   readonly transform: (input: I) => Result<O, FrameworkError>;
 }
 
+/** Create a pure transformation node with no side effects. Maps input → output without I/O. */
 export const createTransformNode = <I, O>(
   config: TransformNodeConfig<I, O>,
 ): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: NodeId } => ({

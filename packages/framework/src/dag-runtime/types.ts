@@ -96,6 +96,12 @@ export type DagEvent =
        * back to inline `decideRoute` calls.
        */
       readonly routingDecisions?: ReadonlyMap<NodeId, Decision>;
+      /**
+       * Per-node extracted confidence. Populated by the executor’s routing
+       * phase so the pure transition layer can pass upstream confidence to
+       * `decideRoute` on fallback paths without calling closures.
+       */
+      readonly confidenceValues?: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
     }
   | {
       readonly type: "node-failed";
@@ -157,6 +163,12 @@ export interface DagMachineContextPersisted {
   readonly humanReviewPrompts: ReadonlyMap<NodeId, string>;
   /** Edges (data only — predicates are never called by the transition layer). */
   readonly edges: readonly EdgeDef[];
+  /**
+   * Per-node extracted confidence values. Populated by the executor at wave
+   * completion time so the pure transition layer can pass upstream confidence
+   * to `decideRoute` without calling closure-based `confidence.extract()`. 
+   */
+  readonly confidenceByNode: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
 }
 
 // ---------------------------------------------------------------------------

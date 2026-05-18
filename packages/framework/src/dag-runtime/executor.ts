@@ -553,5 +553,6 @@ const runWave = async (
     wave: waveIndex,
     outputs: newOutputs,
     routingDecisions: routing.decisions.size > 0 ? routing.decisions : undefined,
+    confidenceValues: routing.confidenceValues.size > 0 ? routing.confidenceValues : undefined,
   };
 };

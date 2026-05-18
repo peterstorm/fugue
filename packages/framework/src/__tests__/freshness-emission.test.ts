@@ -60,6 +60,7 @@ const makeMachineCtx = (): DagMachineContext => ({
   humanReviewNodeIds: new Set(),
   humanReviewPrompts: new Map(),
   edges: [],
+  confidenceByNode: new Map(),
 });
 
 describe("emitFreshnessWitnessEvents", () => {

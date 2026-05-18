@@ -88,12 +88,10 @@ export const emitFreshnessWitnessEvents = async (
         if (!se.extractConditionedOn || !se.extractNewWitness) return ok(undefined);
 
         // Step 1: Rebuild the node's input via the shared helper
-        let nodeInput: unknown;
-        try {
-          const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
-          nodeInput = buildNodeInput(machineCtx.initialInput, priorOutputs, incoming);
-        } catch (e) {
-          const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${e instanceof Error ? e.message : e}`;
+        const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
+        const inputResult = buildNodeInput(machineCtx.initialInput, priorOutputs, incoming, nodeId);
+        if (!inputResult.ok) {
+          const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${inputResult.error.kind === "node-crash" ? inputResult.error.message : "unknown"}`;
           fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
           emit(nodeCtx, {
             type: "node-error",
@@ -103,11 +101,12 @@ export const emitFreshnessWitnessEvents = async (
             sideEffects: nodeMap.get(nodeId)?.sideEffects,
             timestamp: stamp(),
             error: message,
-            frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message },
+            frameworkError: inputResult.error,
           });
           // Config/authoring bug — node already succeeded, skip witness tracking.
           return ok(undefined);
         }
+        const nodeInput = inputResult.value;
 
         // Step 2: User-provided extractors
         let conditionedOn: Witness;

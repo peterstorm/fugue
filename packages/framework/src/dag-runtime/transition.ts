@@ -12,9 +12,22 @@ import { handleWaveDone } from "./wave-resolution.js";
 import { handleNodeFailed, handleHookCrash } from "./retry-policy.js";
 import { handleHumanResponse } from "./human-resolution.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
+import type { Confidence } from "../types/confidence.js";
+import type { NodeId } from "../types/ids.js";
 
 type TransitionResult = { state: DagPhase; context: DagTransitionContext };
 const stay = (phase: DagPhase, ctx: DagTransitionContext): TransitionResult => ({ state: phase, context: ctx });
+
+/** Merge new confidence values into the context’s accumulated map. Pure. */
+const mergeConfidence = (
+  ctx: DagTransitionContext,
+  values: ReadonlyMap<NodeId, Confidence | null> | undefined,
+): DagTransitionContext => {
+  if (!values || values.size === 0) return ctx;
+  const merged = new Map(ctx.confidenceByNode);
+  for (const [k, v] of values) merged.set(k, v);
+  return { ...ctx, confidenceByNode: merged };
+};
 
 const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagTransitionContext): TransitionResult => ({
   state: {
@@ -32,7 +45,7 @@ const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagTra
 /**
  * Pure DAG state transition. No I/O — all branches produce the next (state, context) pair.
  *
- * FR-021: pure, no side effects.
+ * FR-021: pure transition function, no side effects.
  * FR-026..FR-033: retry logic, sequential HITL, approve/reject/reroute/abort.
  */
 export const dagTransition = (
@@ -57,7 +70,8 @@ export const dagTransition = (
 
     // ─── running ────────────────────────────────────────────────────────
     .with([{ kind: "running" }, { type: "wave-done" }], ([, e]) => {
-      const r = handleWaveDone(e.wave, e.outputs, ctx, e.routingDecisions);
+      const updatedCtx = mergeConfidence(ctx, e.confidenceValues);
+      const r = handleWaveDone(e.wave, e.outputs, updatedCtx, e.routingDecisions);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "running" }, { type: "node-failed" }], ([p, e]) => {
@@ -69,7 +83,8 @@ export const dagTransition = (
 
     // ─── retrying ───────────────────────────────────────────────────────
     .with([{ kind: "retrying" }, { type: "wave-done" }], ([, e]) => {
-      const r = handleWaveDone(e.wave, e.outputs, ctx, e.routingDecisions);
+      const updatedCtx = mergeConfidence(ctx, e.confidenceValues);
+      const r = handleWaveDone(e.wave, e.outputs, updatedCtx, e.routingDecisions);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "retrying" }, { type: "node-failed" }], ([p, e]) => {

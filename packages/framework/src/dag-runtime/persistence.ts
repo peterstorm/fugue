@@ -71,6 +71,7 @@ export const stripNonPersistable = (
   humanReviewNodeIds: ctx.humanReviewNodeIds,
   humanReviewPrompts: ctx.humanReviewPrompts,
   edges: ctx.edges,
+  confidenceByNode: ctx.confidenceByNode,
 });
 
 /**

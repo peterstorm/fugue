@@ -114,6 +114,17 @@ export interface BufferedObserverOpts {
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
 const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5min
 
+/**
+ * Buffered observer that accumulates per-run events and flushes them according
+ * to a persistence policy (tail-based sampling). Implements `Observer` for event
+ * ingestion and `Disposable` for resource cleanup.
+ *
+ * Lifecycle: construct → observe(events) → close() / [Symbol.dispose]()
+ *
+ * Events are buffered by runId. On `run-end`, the persistence policy decides
+ * whether to flush the run's events to the downstream exporter. Stale runs
+ * (no events for `staleSweepMs`) are evicted to bound memory.
+ */
 export class BufferedObserver implements Observer, Disposable {
   private readonly buffers = new Map<string, RunBuffer>();
   readonly aggregates: AggregateCounters = { runCount: 0 };
