@@ -15,6 +15,7 @@ import type { LlmResponse } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { type Result, ok, err } from "../types/result.js";
 import { enrichLlmSpan } from "../tracing/index.js";
+import { formatFrameworkError } from "../types/errors.js";
 
 const DEFAULT_CACHE_TTL_SEC = 86400;
 
@@ -97,7 +98,7 @@ export const runLlmCallPipeline = async <O>(
         kind: "retry-exhausted" as const,
         nodeId: config.nodeId,
         attempts: 2,
-        lastError: "message" in result.error ? result.error.message : String(result.error),
+        lastError: formatFrameworkError(result.error),
         rootErrorKind: result.error.kind,
       });
     }

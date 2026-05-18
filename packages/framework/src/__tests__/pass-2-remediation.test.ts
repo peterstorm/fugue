@@ -196,6 +196,12 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
       retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
+      outputNodeId: dag.outputNodeId,
+      defaultRetryLimit: dag.defaultRetryLimit,
+      retryLimits: dag.retryLimits,
+      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
+      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
+      edges: dag.edges,
     };
   };
 
@@ -248,6 +254,12 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
       retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
+      outputNodeId: dag.outputNodeId,
+      defaultRetryLimit: dag.defaultRetryLimit,
+      retryLimits: dag.retryLimits,
+      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
+      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
+      edges: dag.edges,
     };
   };
 
@@ -540,6 +552,12 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       outgoingByNode: computeOutgoingByNode(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
       retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
+      outputNodeId: dag.outputNodeId,
+      defaultRetryLimit: dag.defaultRetryLimit,
+      retryLimits: dag.retryLimits,
+      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
+      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
+      edges: dag.edges,
     };
   };
 

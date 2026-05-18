@@ -98,10 +98,28 @@ export const compileDagToMachine = (
     outgoingByNode: computeOutgoingByNode(dag),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     retryConfigs,
+    // Plain-data fields for the pure transition layer (no closures)
+    outputNodeId: dag.outputNodeId,
+    defaultRetryLimit: dag.defaultRetryLimit,
+    retryLimits: dag.retryLimits,
+    humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
+    humanReviewPrompts: new Map(
+      dag.nodes
+        .filter(n => n.humanReview !== undefined)
+        .map(n => [n.id, n.humanReview!.prompt] as const),
+    ),
+    edges: dag.edges,
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {
-    transition: dagTransition,
+    transition: (state, event, ctx) => {
+      // dagTransition operates on the narrower DagTransitionContext (no closures).
+      // DagMachineContext structurally satisfies DagTransitionContext. The returned
+      // context is DagTransitionContext; spread with the live fields to reconstruct
+      // the full DagMachineContext.
+      const result = dagTransition(state, event, ctx);
+      return { state: result.state, context: { ...ctx, ...result.context } };
+    },
     isTerminal,
     isFailed,
     stateProgress,

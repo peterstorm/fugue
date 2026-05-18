@@ -127,8 +127,8 @@ export const withNodeSpan = async (
       try {
         result = await fn();
       } catch (e) {
-        span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) });
-        span.end();
+        try { span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) }); } catch { /* OTel failure must not mask node error */ }
+        try { span.end(); } catch { /* same */ }
         const message = e instanceof Error ? e.message : String(e);
         const stack = e instanceof Error ? e.stack : undefined;
         return {

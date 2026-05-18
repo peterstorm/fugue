@@ -7,16 +7,16 @@
 // compile error via `.exhaustive()`.
 
 import { match, P } from "ts-pattern";
-import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
+import type { DagPhase, DagEvent, DagTransitionContext } from "./types.js";
 import { handleWaveDone } from "./wave-resolution.js";
 import { handleNodeFailed, handleHookCrash } from "./retry-policy.js";
 import { handleHumanResponse } from "./human-resolution.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 
-type TransitionResult = { state: DagPhase; context: DagMachineContext };
-const stay = (phase: DagPhase, ctx: DagMachineContext): TransitionResult => ({ state: phase, context: ctx });
+type TransitionResult = { state: DagPhase; context: DagTransitionContext };
+const stay = (phase: DagPhase, ctx: DagTransitionContext): TransitionResult => ({ state: phase, context: ctx });
 
-const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagMachineContext): TransitionResult => ({
+const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagTransitionContext): TransitionResult => ({
   state: {
     kind: "failed",
     error: {
@@ -38,7 +38,7 @@ const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagMac
 export const dagTransition = (
   phase: DagPhase,
   event: DagEvent,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
 ): TransitionResult =>
   match([phase, event] as const)
     // ─── FR-033: abort from any non-terminal state ──────────────────────

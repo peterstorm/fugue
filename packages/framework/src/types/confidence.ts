@@ -3,7 +3,8 @@
  *
  * The framework currency is a **semantic bucket with declared provenance**,
  * not a raw numeric probability. LLM-emitted numeric self-confidence is
- * well-documented to be miscalibrated (Tian et al. 2023); the framework
+ * well-documented to be miscalibrated (Tian et al., "Just Ask for Calibration",
+ * NeurIPS 2023); the framework
  * never compares raw numbers directly. Predicates gate on bucket ordering;
  * dashboards segment calibration by source.
  *
@@ -35,7 +36,14 @@ export const confidence = (
   bucket: ConfidenceBucket,
   source: ConfidenceSource,
   raw?: number | string,
-): Confidence => ({ bucket, source, ...(raw !== undefined ? { raw } : {}) }) as Confidence;
+): Confidence => {
+  if (source === "self-reported-numeric" && typeof raw === "number" && (raw < 0 || raw > 1)) {
+    throw new RangeError(
+      `confidence raw value for "self-reported-numeric" must be in [0, 1], got ${raw}`,
+    );
+  }
+  return ({ bucket, source, ...(raw !== undefined ? { raw } : {}) }) as Confidence;
+};
 
 /**
  * @internal — Bypass validation for trusted internal code (deserialization,

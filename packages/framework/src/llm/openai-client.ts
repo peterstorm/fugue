@@ -59,6 +59,10 @@ function withAdditionalPropertiesFalse(schema: Record<string, unknown>): Record<
   return result;
 }
 
+/** Safely truncate API error body to prevent data leakage through error propagation paths. */
+const truncateErrorBody = (body: string, maxLen = 200): string =>
+  body.length > maxLen ? body.slice(0, maxLen) + "…[truncated]" : body;
+
 const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
   const json = zodToJsonSchema(schema);
   return withAdditionalPropertiesFalse(json);
@@ -369,14 +373,14 @@ export class OpenAILlmClient implements LlmClient {
           return err({
             kind: "transient",
             nodeId: resolveNodeId(req),
-            message: `${httpResult.status} ${httpResult.bodyText}`,
+            message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
         return err({
           kind: "node-crash",
           retriability: "retriable",
           nodeId: resolveNodeId(req),
-          message: `${httpResult.status} ${httpResult.bodyText}`,
+          message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
         });
       }
       const response = httpResult.response;
@@ -520,14 +524,14 @@ export class OpenAILlmClient implements LlmClient {
           return err({
             kind: "transient",
             nodeId: resolveNodeId(req),
-            message: `${httpResult.status} ${httpResult.bodyText}`,
+            message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
         return err({
           kind: "node-crash",
           retriability: "retriable",
           nodeId: resolveNodeId(req),
-          message: `${httpResult.status} ${httpResult.bodyText}`,
+          message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
         });
       }
 

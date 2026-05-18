@@ -88,7 +88,7 @@ describe("conditional edges — 2-way routing", () => {
       // Phase 2: evidence colocated with routing decision
       expect(routeDecided[0].evidence.predicateResults).toHaveLength(1);
       expect(routeDecided[0].evidence.predicateResults[0]?.predicateLabel).toBe("kind-is-yes");
-      expect(routeDecided[0].evidence.predicateResults[0]?.matched).toBe(true);
+      expect(routeDecided[0].evidence.predicateResults[0]?.outcome).toBe("matched");
       expect(routeDecided[0].evidence.upstreamConfidence).toBeNull(); // router has confidence: none
     }
 
@@ -140,7 +140,7 @@ describe("conditional edges — 2-way routing", () => {
     if (decided?.type === "route-decided") {
       expect(decided.defaultTaken).toBe(true);
       // No predicate matched
-      expect(decided.evidence.predicateResults.every((r) => !r.matched)).toBe(true);
+      expect(decided.evidence.predicateResults.every((r) => r.outcome === "not-matched")).toBe(true);
     }
   });
 });

@@ -14,7 +14,8 @@ export { compileDagToMachine } from "./dag-runtime/machine.js";
 export { buildDagExecutor } from "./dag-runtime/executor.js";
 export { dagTransition } from "./dag-runtime/transition.js";
 
-// Internal topology helper. Re-exported here for callers building custom
-// schedulers / static analyses on top of a DagDef. Not on the main barrel —
-// most consumers never need it.
+/**
+ * Topological sort into parallel-executable waves. Returns `Result` on cycle.
+ * Use when building custom schedulers or static DAG analyses.
+ */
 export { topoSort } from "./shared/topo.js";

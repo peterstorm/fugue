@@ -143,11 +143,11 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     expect(route!.evidence.predicateResults).toHaveLength(2);
     // First predicate (kind-is-a) should NOT match
     expect(route!.evidence.predicateResults[0]?.predicateLabel).toBe("kind-is-a");
-    expect(route!.evidence.predicateResults[0]?.matched).toBe(false);
+    expect(route!.evidence.predicateResults[0]?.outcome).toBe("not-matched");
     expect(route!.evidence.predicateResults[0]?.evaluatedConfidence?.bucket).toBe("medium");
     // Second predicate (kind-is-b) SHOULD match
     expect(route!.evidence.predicateResults[1]?.predicateLabel).toBe("kind-is-b");
-    expect(route!.evidence.predicateResults[1]?.matched).toBe(true);
+    expect(route!.evidence.predicateResults[1]?.outcome).toBe("matched");
     // Chosen targets should be b only
     expect([...route!.chosenTargets]).toContain(N("b"));
     expect(route!.defaultTaken).toBe(false);
@@ -172,7 +172,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     await runDagStateful(dag, null, mkCtx(obs));
     const [route] = routeEvents(obs);
     expect(route!.defaultTaken).toBe(true);
-    expect(route!.evidence.predicateResults.every((r) => !r.matched)).toBe(true);
+    expect(route!.evidence.predicateResults.every((r) => r.outcome === "not-matched")).toBe(true);
   });
 
   it("minConfidence gating: below-min-confidence recorded when upstream confidence is too low", async () => {
@@ -210,8 +210,8 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     const [route] = routeEvents(obs);
     expect(route!.defaultTaken).toBe(true);
     const pred = route!.evidence.predicateResults[0];
-    expect(pred?.matched).toBe(false);
-    expect(pred?.reason).toBe("below-min-confidence");
+    expect(pred?.outcome).toBe("below-min-confidence");
+    expect(pred?.outcome).toBe("below-min-confidence");
     expect(pred?.evaluatedConfidence?.bucket).toBe("low");
   });
 
@@ -250,8 +250,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     const [route] = routeEvents(obs);
     expect(route!.defaultTaken).toBe(false);
     const pred = route!.evidence.predicateResults[0];
-    expect(pred?.matched).toBe(true);
-    expect(pred?.reason).toBeUndefined();
+    expect(pred?.outcome).toBe("matched");
   });
 
   it("throwing check function records reason: 'threw' and does not match", async () => {

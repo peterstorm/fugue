@@ -14,7 +14,6 @@ export {
   errorOnly,
   ratio,
   hadRetry,
-  // coldCache removed — was deprecated, always returned true
   anyOf,
   allOf,
   custom,

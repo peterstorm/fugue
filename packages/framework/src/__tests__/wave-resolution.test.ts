@@ -35,19 +35,32 @@ const mkEdge = (from: string, to: string): EdgeDef => ({
   kind: "unconditional",
 });
 
-const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => ({
-  waves: overrides.waves ?? [],
-  outputs: overrides.outputs ?? new Map(),
-  retries: overrides.retries ?? new Map(),
-  initialInput: null,
-  activeNodeIds: overrides.activeNodeIds ?? new Set(),
-  dag: overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef),
-  incomingByNode: overrides.incomingByNode ?? new Map(),
-  outgoingByNode: overrides.outgoingByNode ?? new Map(),
-  nodeById: overrides.nodeById ?? new Map(),
-  retryConfigs: overrides.retryConfigs ?? new Map(),
-  ...overrides,
-});
+const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
+  const dag = overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef);
+  return {
+    waves: overrides.waves ?? [],
+    outputs: overrides.outputs ?? new Map(),
+    retries: overrides.retries ?? new Map(),
+    initialInput: null,
+    activeNodeIds: overrides.activeNodeIds ?? new Set(),
+    dag,
+    incomingByNode: overrides.incomingByNode ?? new Map(),
+    outgoingByNode: overrides.outgoingByNode ?? new Map(),
+    nodeById: overrides.nodeById ?? new Map(),
+    retryConfigs: overrides.retryConfigs ?? new Map(),
+    outputNodeId: dag.outputNodeId,
+    defaultRetryLimit: dag.defaultRetryLimit,
+    retryLimits: dag.retryLimits,
+    humanReviewNodeIds: overrides.humanReviewNodeIds ?? new Set(
+      (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => n.id),
+    ),
+    humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
+      (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => [n.id, n.humanReview!.prompt] as const),
+    ),
+    edges: dag.edges ?? [],
+    ...overrides,
+  };
+};
 
 // ---------------------------------------------------------------------------
 // activeWaveNodes
@@ -95,6 +108,8 @@ describe("collectHumanReviewQueue", () => {
     const ctx = mkCtx({
       waves: [[N("c"), N("a"), N("b")]],
       activeNodeIds: nodeSet(["a", "b", "c"]),
+      humanReviewNodeIds: new Set([N("a"), N("c")]),
+      humanReviewPrompts: new Map([[N("a"), "review a"], [N("c"), "review c"]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b")],
@@ -155,6 +170,8 @@ describe("handleWaveDone — human review queue", () => {
     const ctx = mkCtx({
       waves: [[N("a"), N("b")]],
       activeNodeIds: nodeSet(["a", "b"]),
+      humanReviewNodeIds: new Set([N("a")]),
+      humanReviewPrompts: new Map([[N("a"), "review a"]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b")],
@@ -176,6 +193,8 @@ describe("handleWaveDone — human review queue", () => {
     const ctx = mkCtx({
       waves: [[N("c"), N("a")]],
       activeNodeIds: nodeSet(["a", "c"]),
+      humanReviewNodeIds: new Set([N("a"), N("c")]),
+      humanReviewPrompts: new Map([[N("a"), "a"], [N("c"), "c"]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "a" } })],
         ["c", mkNodeDef("c", { humanReview: { prompt: "c" } })],

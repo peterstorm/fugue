@@ -143,13 +143,47 @@ export interface DagMachineContextPersisted {
    * pure transition layer never reaches into live `NodeDef` objects.
    */
   readonly retryConfigs: ReadonlyMap<NodeId, { readonly backoffMs: readonly number[]; readonly jitterRatio: number }>;
+  /**
+   * Plain-data fields extracted from DagDef at compile time for the pure
+   * transition layer. These replace direct `ctx.dag` access — preventing
+   * the transition from accidentally capturing live closures.
+   */
+  readonly outputNodeId: NodeId | undefined;
+  readonly defaultRetryLimit: number | undefined;
+  readonly retryLimits: Readonly<Record<string, number>> | undefined;
+  /** Node IDs that declare human review (data only — no closures). */
+  readonly humanReviewNodeIds: ReadonlySet<NodeId>;
+  /** Human review prompts by node ID (plain data, extracted at compile time). */
+  readonly humanReviewPrompts: ReadonlyMap<NodeId, string>;
+  /** Edges (data only — predicates are never called by the transition layer). */
+  readonly edges: readonly EdgeDef[];
 }
 
 // ---------------------------------------------------------------------------
 // DagMachineContext — full runtime context with live DAG-derived fields.
 // ---------------------------------------------------------------------------
 
-export interface DagMachineContext extends DagMachineContextPersisted {
+// ---------------------------------------------------------------------------
+// DagTransitionContext — the subset visible to the PURE transition layer.
+// Contains persisted state + precomputed maps. Does NOT contain `dag` (which
+// carries NodeDef.run closures) or `nodeById` (same closures). This type
+// boundary prevents the transition from accidentally serializing live closures.
+// ---------------------------------------------------------------------------
+
+export interface DagTransitionContext extends DagMachineContextPersisted {
+  /**
+   * Precomputed adjacency: `nodeId → out-edges`. Built once at compile time so
+   * routing decisions don't pay an O(edges) linear scan each call.
+   */
+  readonly outgoingByNode: ReadonlyMap<NodeId, readonly EdgeDef[]>;
+}
+
+// ---------------------------------------------------------------------------
+// DagMachineContext — full runtime context with live DAG-derived fields.
+// Used by the executor (imperative shell) which needs `nodeById` for `run()`.
+// ---------------------------------------------------------------------------
+
+export interface DagMachineContext extends DagTransitionContext {
   readonly dag: DagDef;
   /**
    * Precomputed `{ required, optional }` source partition per node, derived
@@ -159,16 +193,8 @@ export interface DagMachineContext extends DagMachineContextPersisted {
    */
   readonly incomingByNode: ReadonlyMap<NodeId, IncomingSources>;
   /**
-   * Precomputed adjacency: `nodeId → out-edges`. Built once at compile time so
-   * routing decisions (run per active node per wave, both in the executor's
-   * `runWave` and the transition layer's `handleWaveDone` + reroute paths)
-   * don't pay an O(edges) linear scan each call.
-   */
-  readonly outgoingByNode: ReadonlyMap<NodeId, readonly EdgeDef[]>;
-  /**
    * Precomputed node-id → NodeDef lookup. Built once at compile time so
-   * retry-policy, wave-resolution, and human-resolution can do O(1) lookups
-   * instead of O(n) `dag.nodes.find()` per call.
+   * the executor can do O(1) lookups for `node.run()` dispatch.
    */
   readonly nodeById: ReadonlyMap<NodeId, import("../types/node.js").NodeDef<unknown, unknown>>;
 }

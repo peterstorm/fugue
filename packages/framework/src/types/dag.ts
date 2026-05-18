@@ -9,7 +9,6 @@ import type { DagId, NodeId } from "./ids.js";
 import { __brandNodeId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 import { meetsConfidence } from "./confidence.js";
-import { fwLogger } from "../logger.js";
 
 // Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
 // are imported above but NOT re-exported. They live in `./dag-internals.ts`,
@@ -40,32 +39,40 @@ export interface Predicate<T> {
 }
 
 /**
+ * Discriminated result from evaluating a predicate against a node's output.
+ * Used in `RouteEvidence` and by the transition layer to detect predicate bugs.
+ */
+export type PredicateResult = {
+  readonly predicateLabel: string;
+  readonly predicateVersion: number;
+  readonly evaluatedConfidence: Confidence | null;
+} & (
+  | { readonly outcome: "matched" }
+  | { readonly outcome: "not-matched" }
+  | { readonly outcome: "below-min-confidence" }
+  | { readonly outcome: "threw"; readonly message: string }
+);
+
+/**
  * Evaluate a predicate against a node's output with confidence gating.
  *
- * Returns a result record suitable for inclusion in `RouteEvidence`.
- * The function is total — it catches exceptions from `check` and records
- * them as `reason: "threw"`.
+ * Returns a discriminated `PredicateResult`. The `outcome: "threw"` variant
+ * signals a predicate implementation bug — the caller should surface a
+ * `predicate-malformed` error instead of silently taking the default edge.
  */
 export const evaluatePredicate = <T>(
   pred: Predicate<T>,
   output: T,
   confidence: Confidence | null,
-): {
-  readonly predicateLabel: string;
-  readonly predicateVersion: number;
-  readonly matched: boolean;
-  readonly evaluatedConfidence: Confidence | null;
-  readonly reason?: string;
-} => {
+): PredicateResult => {
   // Gate on minConfidence before calling check
   if (pred.minConfidence !== undefined) {
     if (confidence === null || !meetsConfidence(confidence.bucket, pred.minConfidence)) {
       return {
         predicateLabel: pred.label,
         predicateVersion: pred.version,
-        matched: false,
         evaluatedConfidence: confidence,
-        reason: "below-min-confidence",
+        outcome: "below-min-confidence",
       };
     }
   }
@@ -75,18 +82,17 @@ export const evaluatePredicate = <T>(
     return {
       predicateLabel: pred.label,
       predicateVersion: pred.version,
-      matched,
       evaluatedConfidence: confidence,
+      outcome: matched ? "matched" : "not-matched",
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    fwLogger().warn(`[evaluatePredicate] Predicate "${pred.label}" (v${pred.version}) threw: ${msg}`);
     return {
       predicateLabel: pred.label,
       predicateVersion: pred.version,
-      matched: false,
       evaluatedConfidence: confidence,
-      reason: `threw: ${msg}`,
+      outcome: "threw",
+      message: msg,
     };
   }
 };

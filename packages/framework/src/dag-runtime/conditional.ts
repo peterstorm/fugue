@@ -107,7 +107,7 @@ export const decideRoute = (
     const result = evaluatePredicate(e.when, output, upstreamConfidence);
     predicateResults.push(result);
 
-    if (result.matched && matchedEdge === null) {
+    if (result.outcome === "matched" && matchedEdge === null) {
       matchedEdge = e;
       // Continue evaluating remaining predicates for evidence completeness
     }
@@ -115,13 +115,12 @@ export const decideRoute = (
 
   // A predicate that throws is a programming error — surface as malformed
   // rather than silently falling to the default edge.
-  const threwResult = predicateResults.find(r => r.reason?.startsWith("threw"));
-  if (threwResult) {
-    const detail = threwResult.reason?.startsWith("threw: ") ? threwResult.reason.slice(7) : "unknown";
+  const threwResult = predicateResults.find(r => r.outcome === "threw");
+  if (threwResult && threwResult.outcome === "threw") {
     return {
       kind: "predicate-malformed",
       fromNodeId,
-      message: `Predicate '${threwResult.predicateLabel}' threw an exception: ${detail}`,
+      message: `Predicate '${threwResult.predicateLabel}' threw an exception: ${threwResult.message}`,
     };
   }
 
@@ -179,22 +178,50 @@ const buildIncoming = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
  * later when their predicate fires.
  *
  * Wave-0 entry points are nodes with no incoming edges of any kind.
+ *
+ * Accepts either a `DagDef` (for compile-time) or raw `edges` + precomputed
+ * `outgoing` map (for the pure transition layer which has no access to `DagDef`).
  */
-export const seedInitialActiveSet = (dag: DagDef): ReadonlySet<NodeId> => {
-  const incoming = buildIncoming(dag);
-  const outgoing = buildOutgoing(dag);
+export function seedInitialActiveSet(dag: DagDef): ReadonlySet<NodeId>;
+export function seedInitialActiveSet(edges: readonly EdgeDef[], outgoing: ReadonlyMap<NodeId, readonly EdgeDef[]>): ReadonlySet<NodeId>;
+export function seedInitialActiveSet(
+  dagOrEdges: DagDef | readonly EdgeDef[],
+  precomputedOutgoing?: ReadonlyMap<NodeId, readonly EdgeDef[]>,
+): ReadonlySet<NodeId> {
+  let edges: readonly EdgeDef[];
+  let outgoing: ReadonlyMap<NodeId, readonly EdgeDef[]>;
+  let nodeIds: readonly NodeId[];
+
+  if (Array.isArray(dagOrEdges)) {
+    edges = dagOrEdges;
+    outgoing = precomputedOutgoing!;
+    // Derive node ids from edges (all unique from/to)
+    const ids = new Set<NodeId>();
+    for (const e of edges) { ids.add(e.from); ids.add(e.to); }
+    nodeIds = [...ids];
+  } else {
+    const dag = dagOrEdges as DagDef;
+    edges = dag.edges;
+    outgoing = buildOutgoing(dag);
+    nodeIds = dag.nodes.map(n => n.id);
+  }
+
+  // Build incoming count
+  const incomingCount = new Map<NodeId, number>();
+  for (const id of nodeIds) incomingCount.set(id, 0);
+  for (const e of edges) incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
 
   const seeds: NodeId[] = [];
-  for (const n of dag.nodes) {
-    if ((incoming.get(n.id)?.length ?? 0) === 0) seeds.push(n.id);
+  for (const id of nodeIds) {
+    if ((incomingCount.get(id) ?? 0) === 0) seeds.push(id);
   }
 
   const active = new Set<NodeId>(seeds);
   const stack = [...seeds];
   while (stack.length > 0) {
     const cur = stack.pop()!;
-    const edges = outgoing.get(cur) ?? [];
-    for (const e of edges) {
+    const curEdges = outgoing.get(cur) ?? [];
+    for (const e of curEdges) {
       if (!isUnconditionalEdge(e)) continue;
       if (!active.has(e.to)) {
         active.add(e.to);
@@ -203,23 +230,17 @@ export const seedInitialActiveSet = (dag: DagDef): ReadonlySet<NodeId> => {
     }
   }
   return active;
-};
+}
 
 /**
  * Expand `prev` to include `chosenTargets` and every node forward-reachable
  * from those targets along unconditional edges only. Idempotent.
- *
- * When `outgoing` is provided (from `DagMachineContext.outgoingByNode`), avoids
- * rebuilding the adjacency map. Falls back to `buildOutgoing(dag)` when the
- * caller doesn't have a precomputed map.
  */
 export const expandActive = (
-  dag: DagDef,
+  outgoing: ReadonlyMap<NodeId, readonly EdgeDef[]>,
   prev: ReadonlySet<NodeId>,
   chosenTargets: Iterable<NodeId>,
-  outgoing?: ReadonlyMap<NodeId, readonly EdgeDef[]>,
 ): ReadonlySet<NodeId> => {
-  const adjacency = outgoing ?? buildOutgoing(dag);
   const next = new Set(prev);
   const stack: NodeId[] = [];
   for (const t of chosenTargets) {
@@ -230,7 +251,7 @@ export const expandActive = (
   }
   while (stack.length > 0) {
     const cur = stack.pop()!;
-    const edges = adjacency.get(cur) ?? [];
+    const edges = outgoing.get(cur) ?? [];
     for (const e of edges) {
       if (!isUnconditionalEdge(e)) continue;
       if (!next.has(e.to)) {

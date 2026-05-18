@@ -1,7 +1,7 @@
 // Wave-resolution helpers — wave scheduling, HITL bookkeeping, completion tracking.
 // All functions are pure; no I/O.
 
-import type { DagPhase, DagMachineContext } from "./types.js";
+import type { DagPhase, DagTransitionContext } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import { decideRoute, expandActive } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
@@ -13,7 +13,7 @@ import type { NodeId } from "../types/ids.js";
 
 export interface WaveDoneResult {
   readonly state: DagPhase;
-  readonly context: DagMachineContext;
+  readonly context: DagTransitionContext;
 }
 
 // ---------------------------------------------------------------------------
@@ -21,15 +21,15 @@ export interface WaveDoneResult {
 // ---------------------------------------------------------------------------
 
 /** Return the node-ids in a given wave, sorted ascending (for deterministic review order). */
-export const waveNodes = (ctx: DagMachineContext, wave: number): readonly NodeId[] =>
+export const waveNodes = (ctx: DagTransitionContext, wave: number): readonly NodeId[] =>
   ctx.waves[wave] ?? [];
 
 /** Active subset of a wave (filters out pruned nodes). */
-export const activeWaveNodes = (ctx: DagMachineContext, wave: number): readonly NodeId[] =>
+export const activeWaveNodes = (ctx: DagTransitionContext, wave: number): readonly NodeId[] =>
   waveNodes(ctx, wave).filter((id) => ctx.activeNodeIds.has(id));
 
 /** The index of the wave that contains a given nodeId, or -1 if not found. */
-export const waveIndexOf = (ctx: DagMachineContext, nodeId: NodeId): number =>
+export const waveIndexOf = (ctx: DagTransitionContext, nodeId: NodeId): number =>
   ctx.waves.findIndex((w) => w.includes(nodeId));
 
 // ---------------------------------------------------------------------------
@@ -41,16 +41,13 @@ export const waveIndexOf = (ctx: DagMachineContext, nodeId: NodeId): number =>
  * Returns them sorted so we always process them deterministically.
  */
 export const collectHumanReviewQueue = (
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
   wave: number,
 ): readonly NodeId[] => {
   const nodes = activeWaveNodes(ctx, wave);
   return nodes
-    .filter((id) => {
-      const def = ctx.nodeById.get(id);
-      return def?.humanReview !== undefined;
-    })
-    .sort() as NodeId[]; // ascending node-id order per FR-028
+    .filter((id) => ctx.humanReviewNodeIds.has(id))
+    .sort() as NodeId[];
 };
 
 // ---------------------------------------------------------------------------
@@ -74,7 +71,7 @@ export const collectHumanReviewQueue = (
 export const handleWaveDone = (
   wave: number,
   outputs: ReadonlyMap<NodeId, unknown>,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
   routingDecisions?: ReadonlyMap<NodeId, import("./conditional.js").Decision>,
 ): WaveDoneResult => {
   const newOutputs = new Map(ctx.outputs);
@@ -105,7 +102,7 @@ export const handleWaveDone = (
           context: { ...ctx, outputs: newOutputs },
         };
       }
-      nextActive = expandActive(ctx.dag, nextActive, provided.chosenTargets, ctx.outgoingByNode);
+      nextActive = expandActive(ctx.outgoingByNode, nextActive, provided.chosenTargets);
       continue;
     }
 
@@ -127,10 +124,10 @@ export const handleWaveDone = (
         context: { ...ctx, outputs: newOutputs },
       };
     }
-    nextActive = expandActive(ctx.dag, nextActive, decision.chosenTargets, ctx.outgoingByNode);
+    nextActive = expandActive(ctx.outgoingByNode, nextActive, decision.chosenTargets);
   }
 
-  const newCtx: DagMachineContext = {
+  const newCtx: DagTransitionContext = {
     ...ctx,
     outputs: newOutputs,
     activeNodeIds: nextActive,
@@ -139,10 +136,9 @@ export const handleWaveDone = (
   const reviewQueue = collectHumanReviewQueue(newCtx, wave);
 
   if (reviewQueue.length > 0) {
-    const firstNodeId = reviewQueue[0]!; // length > 0 guarantees defined
+    const firstNodeId = reviewQueue[0]!;
     const rest = reviewQueue.slice(1);
-    const nodeDef = newCtx.nodeById.get(firstNodeId);
-    if (nodeDef === undefined || nodeDef.humanReview === undefined) {
+    if (!newCtx.humanReviewNodeIds.has(firstNodeId)) {
       return {
         state: {
           kind: "failed",
@@ -150,22 +146,21 @@ export const handleWaveDone = (
             kind: "node-crash",
             retriability: "retriable",
             nodeId: firstNodeId,
-            message: nodeDef === undefined
-              ? `node-not-found: ${firstNodeId}`
-              : `node '${firstNodeId}' missing humanReview config`,
+            message: `node '${firstNodeId}' missing humanReview config`,
           },
         },
         context: newCtx,
       };
     }
     const nodeOutput = newOutputs.get(firstNodeId);
+    const prompt = newCtx.humanReviewPrompts.get(firstNodeId) ?? "";
 
     return {
       state: {
         kind: "awaiting-human",
         nodeId: firstNodeId,
         output: nodeOutput,
-        prompt: nodeDef.humanReview.prompt,
+        prompt,
         pendingReviews: rest,
         wave,
       },
@@ -182,15 +177,15 @@ export const handleWaveDone = (
 
 export const advanceToNextWave = (
   currentWave: number,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
 ): WaveDoneResult => {
   const nextWave = currentWave + 1;
 
   if (nextWave >= ctx.waves.length) {
     // All waves done — pick the output
-    if (ctx.dag.outputNodeId !== undefined) {
+    if (ctx.outputNodeId !== undefined) {
       // Explicit outputNodeId configured — require it to be present in outputs
-      const outputNodeId = ctx.dag.outputNodeId;
+      const outputNodeId = ctx.outputNodeId;
       if (!ctx.outputs.has(outputNodeId)) {
         return {
           state: {

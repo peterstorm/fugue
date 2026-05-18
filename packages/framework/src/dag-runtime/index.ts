@@ -1,7 +1,7 @@
 // DAG runtime layer barrel export
 
 // Types
-export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";
+export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, DagTransitionContext, HumanAction } from "./types.js";
 
 // Pure transition
 export { dagTransition } from "./transition.js";
@@ -20,7 +20,7 @@ export { handleHumanResponse } from "./human-resolution.js";
 // Machine compiler
 export { compileDagToMachine } from "./machine.js";
 
-// Gap-2 fix: re-export topoSort (already returns Result on cycle) for consumers who need it
+// Re-export topoSort for consumers building custom static analyses (returns Result on cycle)
 export { topoSort } from "../shared/topo.js";
 
 // DAG executor closure

@@ -2,10 +2,10 @@
  * Property tests for `evaluatePredicate` with confidence gating.
  *
  * Validates:
- * - minConfidence gating: null confidence or below-min → matched: false
- * - check exceptions → matched: false with "threw:" reason
+ * - minConfidence gating: null confidence or below-min → outcome: "below-min-confidence"
+ * - check exceptions → outcome: "threw" with message
  * - predicateLabel always preserved in output
- * - when check returns true/false → matched reflects it
+ * - when check returns true/false → outcome reflects it
  */
 
 import { describe, it, expect } from "bun:test";
@@ -48,7 +48,7 @@ describe("evaluatePredicate — property tests", () => {
     );
   });
 
-  it("null confidence with minConfidence set → matched: false, reason: below-min-confidence", () => {
+  it("null confidence with minConfidence set → outcome: below-min-confidence", () => {
     fc.assert(
       fc.property(arbBucket, (minBucket) => {
         const result = evaluatePredicate(
@@ -56,31 +56,29 @@ describe("evaluatePredicate — property tests", () => {
           "anything",
           null,
         );
-        return result.matched === false && result.reason === "below-min-confidence";
+        return result.outcome === "below-min-confidence";
       }),
     );
   });
 
-  it("confidence below minConfidence → matched: false, reason: below-min-confidence", () => {
+  it("confidence below minConfidence → outcome: below-min-confidence", () => {
     // low is below medium and high; unknown is below everything
     const result1 = evaluatePredicate(
       { label: "test", version: 1, check: () => true, minConfidence: "high" },
       "val",
       confidence("low", "heuristic"),
     );
-    expect(result1.matched).toBe(false);
-    expect(result1.reason).toBe("below-min-confidence");
+    expect(result1.outcome).toBe("below-min-confidence");
 
     const result2 = evaluatePredicate(
       { label: "test", version: 1, check: () => true, minConfidence: "medium" },
       "val",
       confidence("unknown", "heuristic"),
     );
-    expect(result2.matched).toBe(false);
-    expect(result2.reason).toBe("below-min-confidence");
+    expect(result2.outcome).toBe("below-min-confidence");
   });
 
-  it("confidence meets minConfidence → check is called and result reflects it", () => {
+  it("confidence meets minConfidence → check is called and outcome reflects it", () => {
     fc.assert(
       fc.property(fc.boolean(), (checkResult) => {
         const result = evaluatePredicate(
@@ -88,12 +86,12 @@ describe("evaluatePredicate — property tests", () => {
           "val",
           confidence("high", "heuristic"),
         );
-        return result.matched === checkResult && result.reason === undefined;
+        return result.outcome === (checkResult ? "matched" : "not-matched");
       }),
     );
   });
 
-  it("check that throws → matched: false, reason starts with 'threw:'", () => {
+  it("check that throws → outcome: threw with message", () => {
     fc.assert(
       fc.property(fc.string({ minLength: 1 }), (errorMsg) => {
         const result = evaluatePredicate(
@@ -108,9 +106,8 @@ describe("evaluatePredicate — property tests", () => {
           null,
         );
         return (
-          result.matched === false &&
-          result.reason !== undefined &&
-          result.reason.startsWith("threw:")
+          result.outcome === "threw" &&
+          result.message === errorMsg
         );
       }),
     );

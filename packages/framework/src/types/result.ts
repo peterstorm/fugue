@@ -103,3 +103,21 @@ export const tapErr = <T, E>(r: Result<T, E>, fn: (error: E) => void): Result<T,
   if (!r.ok) fn(r.error);
   return r;
 };
+
+/** Error recovery: on Err, try an alternative computation. */
+export const orElse = <T, E, F>(
+  r: Result<T, E>,
+  fn: (error: E) => Result<T, F>,
+): Result<T, F> => (r.ok ? r : fn(r.error));
+
+/** Async andThen — for chaining async Result-producing functions. */
+export const andThenAsync = async <T, U, E>(
+  r: Result<T, E>,
+  fn: (value: T) => Promise<Result<U, E>>,
+): Promise<Result<U, E>> => (r.ok ? fn(r.value) : r);
+
+/** Async map — for chaining async transformations on Ok values. */
+export const mapAsync = async <T, U, E>(
+  r: Result<T, E>,
+  fn: (value: T) => Promise<U>,
+): Promise<Result<U, E>> => (r.ok ? ok(await fn(r.value)) : r);

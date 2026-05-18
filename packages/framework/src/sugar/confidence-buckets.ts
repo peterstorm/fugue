@@ -19,8 +19,12 @@ import { type Confidence, confidence } from "../types/confidence.js";
 export const bucketFromProbability = (
   p: number,
   thresholds: { high: number; medium: number } = { high: 0.85, medium: 0.6 },
-): ConfidenceBucket =>
-  p >= thresholds.high ? "high" : p >= thresholds.medium ? "medium" : "low";
+): ConfidenceBucket => {
+  if (p < 0 || p > 1) {
+    throw new RangeError(`bucketFromProbability: p must be in [0, 1], got ${p}`);
+  }
+  return p >= thresholds.high ? "high" : p >= thresholds.medium ? "medium" : "low";
+};
 
 /**
  * Convert a probability [0, 1] directly into a branded Confidence value.

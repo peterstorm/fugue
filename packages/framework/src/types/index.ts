@@ -11,14 +11,19 @@ export {
   isOk,
   isErr,
   andThen,
+  andThenAsync,
   map,
+  mapAsync,
   mapErr,
   unwrapOr,
   fold,
+  orElse,
   tryCatch,
   tryCatchAsync,
   sequenceFirst,
   sequenceAll,
+  tap,
+  tapErr,
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
@@ -97,6 +102,7 @@ export type {
   EdgeDefInput,
   EdgeDefRawInput,
   Predicate,
+  PredicateResult,
 } from "./dag.js";
 export { withRetryLimits } from "./dag.js";
 // `brandAsDagDef`, `isUnconditionalEdge`, `isConditionalEdge`,

@@ -123,22 +123,22 @@ describe("bucketFromProbability — edge inputs", () => {
     expect(bucketFromProbability(NaN)).toBe("low");
   });
 
-  it("Infinity → high (Infinity >= any finite threshold)", () => {
-    expect(bucketFromProbability(Infinity)).toBe("high");
+  it("Infinity → throws RangeError", () => {
+    expect(() => bucketFromProbability(Infinity)).toThrow(RangeError);
   });
 
-  it("-Infinity → low (-Infinity >= threshold is always false)", () => {
-    expect(bucketFromProbability(-Infinity)).toBe("low");
+  it("-Infinity → throws RangeError", () => {
+    expect(() => bucketFromProbability(-Infinity)).toThrow(RangeError);
   });
 
-  it("negative values → low", () => {
-    expect(bucketFromProbability(-1)).toBe("low");
-    expect(bucketFromProbability(-0.5)).toBe("low");
+  it("negative values → throws RangeError", () => {
+    expect(() => bucketFromProbability(-1)).toThrow(RangeError);
+    expect(() => bucketFromProbability(-0.5)).toThrow(RangeError);
   });
 
-  it("values > 1 → high (no clamping)", () => {
-    expect(bucketFromProbability(2)).toBe("high");
-    expect(bucketFromProbability(100)).toBe("high");
+  it("values > 1 → throws RangeError", () => {
+    expect(() => bucketFromProbability(2)).toThrow(RangeError);
+    expect(() => bucketFromProbability(100)).toThrow(RangeError);
   });
 
   it("zero → low", () => {

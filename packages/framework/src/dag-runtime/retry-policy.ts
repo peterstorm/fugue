@@ -1,7 +1,7 @@
 // Retry-policy helpers — retry budget, exponential backoff, hook-crash retry.
 // All functions are pure; no I/O.
 
-import type { DagMachineContext } from "./types.js";
+import type { DagTransitionContext } from "./types.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { WaveDoneResult } from "./wave-resolution.js";
@@ -31,10 +31,10 @@ export const computeBackoffMs = (
 };
 
 /** Get retry limit for a node (per-node override > DAG default > 0). */
-export const getRetryLimit = (nodeId: NodeId, ctx: DagMachineContext): number => {
-  const perNode = ctx.dag.retryLimits?.[nodeId];
+export const getRetryLimit = (nodeId: NodeId, ctx: DagTransitionContext): number => {
+  const perNode = ctx.retryLimits?.[nodeId];
   if (perNode !== undefined) return perNode;
-  return ctx.dag.defaultRetryLimit ?? 0;
+  return ctx.defaultRetryLimit ?? 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ export const handleNodeFailed = (
   currentWave: number,
   nodeId: NodeId,
   error: FrameworkError,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
   partialOutputs?: ReadonlyMap<NodeId, unknown>,
   coFailedNodeIds?: ReadonlyArray<NodeId>,
 ): WaveDoneResult => {
@@ -73,7 +73,7 @@ export const handleNodeFailed = (
   }
 
   // Merge partial outputs from succeeded siblings so they are not re-run on retry.
-  const ctxWithPartials: DagMachineContext =
+  const ctxWithPartials: DagTransitionContext =
     partialOutputs && partialOutputs.size > 0
       ? (() => {
           const merged = new Map(ctx.outputs);
@@ -85,7 +85,7 @@ export const handleNodeFailed = (
   // Pre-increment retry counters for co-failed siblings so they consume the same
   // retry slot as the primary failure. Without this, siblings see retries.get(id) === 0
   // on their first re-attempt, giving them retryLimit+1 total executions.
-  const ctxWithCoFailed: DagMachineContext =
+  const ctxWithCoFailed: DagTransitionContext =
     coFailedNodeIds && coFailedNodeIds.length > 0
       ? (() => {
           const newRetries = new Map(ctxWithPartials.retries);
@@ -105,7 +105,7 @@ export const handleNodeFailed = (
     // Still within retry budget — increment and retry
     const newRetries = new Map(ctxWithCoFailed.retries);
     newRetries.set(nodeId, currentAttempts + 1);
-    const newCtx: DagMachineContext = { ...ctxWithCoFailed, retries: newRetries };
+    const newCtx: DagTransitionContext = { ...ctxWithCoFailed, retries: newRetries };
     const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctxWithCoFailed.retryConfigs);
 
     return {
@@ -130,7 +130,7 @@ export const handleNodeFailed = (
       : JSON.stringify(error);
   const exhaustedRetries = new Map(ctxWithCoFailed.retries);
   exhaustedRetries.set(nodeId, currentAttempts + 1);
-  const exhaustedCtx: DagMachineContext = { ...ctxWithCoFailed, retries: exhaustedRetries };
+  const exhaustedCtx: DagTransitionContext = { ...ctxWithCoFailed, retries: exhaustedRetries };
   return {
     state: {
       kind: "failed",
@@ -168,7 +168,7 @@ export const handleHookCrash = (
   output: unknown,
   prompt: string,
   error: FrameworkError,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
   pendingReviews: readonly NodeId[] = [],
   wave: number = 0,
 ): WaveDoneResult => {
@@ -178,7 +178,7 @@ export const handleHookCrash = (
   if (currentAttempts < limit) {
     const newRetries = new Map(ctx.retries);
     newRetries.set(nodeId, currentAttempts + 1);
-    const newCtx: DagMachineContext = { ...ctx, retries: newRetries };
+    const newCtx: DagTransitionContext = { ...ctx, retries: newRetries };
     const nextDelayMs = computeBackoffMs(nodeId, currentAttempts, ctx.retryConfigs);
 
     return {
@@ -203,7 +203,7 @@ export const handleHookCrash = (
     : JSON.stringify(error);
   const exhaustedRetries = new Map(ctx.retries);
   exhaustedRetries.set(nodeId, currentAttempts + 1);
-  const exhaustedCtx: DagMachineContext = { ...ctx, retries: exhaustedRetries };
+  const exhaustedCtx: DagTransitionContext = { ...ctx, retries: exhaustedRetries };
   return {
     state: {
       kind: "failed",

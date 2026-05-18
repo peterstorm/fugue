@@ -65,6 +65,12 @@ export const stripNonPersistable = (
   initialInput: ctx.initialInput,
   activeNodeIds: ctx.activeNodeIds,
   retryConfigs: ctx.retryConfigs,
+  outputNodeId: ctx.outputNodeId,
+  defaultRetryLimit: ctx.defaultRetryLimit,
+  retryLimits: ctx.retryLimits,
+  humanReviewNodeIds: ctx.humanReviewNodeIds,
+  humanReviewPrompts: ctx.humanReviewPrompts,
+  edges: ctx.edges,
 });
 
 /**

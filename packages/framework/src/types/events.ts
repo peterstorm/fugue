@@ -98,13 +98,7 @@ export interface RunEndEvent {
 export interface RouteEvidence {
   readonly upstreamOutput: unknown;
   readonly upstreamConfidence: Confidence | null;
-  readonly predicateResults: ReadonlyArray<{
-    readonly predicateLabel: string;
-    readonly predicateVersion: number;
-    readonly matched: boolean;
-    readonly evaluatedConfidence: Confidence | null;
-    readonly reason?: string;
-  }>;
+  readonly predicateResults: ReadonlyArray<import("./dag.js").PredicateResult>;
   readonly decidedAtMs: number;
 }
 

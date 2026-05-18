@@ -320,7 +320,14 @@ export function createCronScheduler(
         if (!allDepsCompleted) continue;
 
         // Only enqueue if not already fired
-        const alreadyFired = await markers.exists(markerFiredKey(dep.id)).catch(() => false)
+        const alreadyFired = await markers.exists(markerFiredKey(dep.id))
+          .catch((e) => {
+            fwLogger().warn(
+              `[CronScheduler] markers.exists(fired) failed for "${dep.id}" — treating as not-fired (enqueue is idempotent):`,
+              e instanceof Error ? e.message : e,
+            );
+            return false;
+          })
           || inMemoryFiredFallback.has(dep.id);
         if (alreadyFired) continue;
 

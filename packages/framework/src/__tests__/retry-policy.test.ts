@@ -9,19 +9,28 @@ import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
 // Minimal context factory
 // ---------------------------------------------------------------------------
 
-const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => ({
-  waves: [],
-  outputs: new Map(),
-  retries: overrides.retries ?? new Map(),
-  initialInput: null,
-  activeNodeIds: new Set(),
-  dag: overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], retryLimits: {}, defaultRetryLimit: 0 } as unknown as DagDef),
-  incomingByNode: new Map(),
-  outgoingByNode: new Map(),
-  nodeById: new Map(),
-  retryConfigs: new Map(),
-  ...overrides,
-});
+const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
+  const dag = overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], retryLimits: {}, defaultRetryLimit: 0 } as unknown as DagDef);
+  return {
+    waves: [],
+    outputs: new Map(),
+    retries: overrides.retries ?? new Map(),
+    initialInput: null,
+    activeNodeIds: new Set(),
+    dag,
+    incomingByNode: new Map(),
+    outgoingByNode: new Map(),
+    nodeById: new Map(),
+    retryConfigs: new Map(),
+    outputNodeId: dag.outputNodeId,
+    defaultRetryLimit: dag.defaultRetryLimit,
+    retryLimits: dag.retryLimits,
+    humanReviewNodeIds: new Set(),
+    humanReviewPrompts: new Map(),
+    edges: dag.edges ?? [],
+    ...overrides,
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Fast-fail error kinds

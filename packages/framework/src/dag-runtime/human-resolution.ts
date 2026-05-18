@@ -2,7 +2,7 @@
 // All functions are pure; no I/O.
 
 import { match } from "ts-pattern";
-import type { DagPhase, DagMachineContext, HumanAction } from "./types.js";
+import type { DagPhase, DagTransitionContext, HumanAction } from "./types.js";
 import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
 import { isConditionalEdge } from "../types/dag.js";
 import type { NodeId } from "../types/ids.js";
@@ -19,7 +19,7 @@ import {
 export const handleHumanResponse = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
   action: HumanAction,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
 ): WaveDoneResult =>
   match(action)
     .with({ action: "approve" }, () => resolveHumanApproved(currentState, ctx))
@@ -28,7 +28,7 @@ export const handleHumanResponse = (
       // Replace the reviewed node's output in the outputs map (FR-029)
       const newOutputs = new Map(ctx.outputs);
       newOutputs.set(currentState.nodeId, newOutput);
-      const newCtx: DagMachineContext = { ...ctx, outputs: newOutputs };
+      const newCtx: DagTransitionContext = { ...ctx, outputs: newOutputs };
       return resolveHumanApproved(currentState, newCtx);
     })
 
@@ -58,7 +58,7 @@ export const handleHumanResponse = (
 const handleReroute = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
   targetNodeId: NodeId,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
 ): WaveDoneResult => {
   const targetWave = waveIndexOf(ctx, targetNodeId);
 
@@ -110,7 +110,7 @@ const handleReroute = (
   const survivingOutputs = new Map(
     [...ctx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
   );
-  let reseededActive = seedInitialActiveSet(ctx.dag);
+  let reseededActive = seedInitialActiveSet(ctx.edges, ctx.outgoingByNode);
   for (let w = 0; w < targetWave; w++) {
     for (const nodeId of ctx.waves[w] ?? []) {
       if (!reseededActive.has(nodeId)) continue;
@@ -131,11 +131,11 @@ const handleReroute = (
           context: ctx,
         };
       }
-      reseededActive = expandActive(ctx.dag, reseededActive, decision.chosenTargets, ctx.outgoingByNode);
+      reseededActive = expandActive(ctx.outgoingByNode, reseededActive, decision.chosenTargets);
     }
   }
 
-  const newCtx: DagMachineContext = {
+  const newCtx: DagTransitionContext = {
     ...ctx,
     outputs: survivingOutputs,
     retries: new Map([...ctx.retries].filter(([nodeId]) => beforeTargetWave(nodeId))),
@@ -154,14 +154,13 @@ const handleReroute = (
 
 const resolveHumanApproved = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
-  ctx: DagMachineContext,
+  ctx: DagTransitionContext,
 ): WaveDoneResult => {
   // If there are more reviews pending in this wave, process the next one
   if (currentState.pendingReviews.length > 0) {
-    const nextNodeId = currentState.pendingReviews[0]!; // length > 0 guarantees defined
+    const nextNodeId = currentState.pendingReviews[0]!;
     const rest = currentState.pendingReviews.slice(1);
-    const nodeDef = ctx.nodeById.get(nextNodeId);
-    if (nodeDef === undefined || nodeDef.humanReview === undefined) {
+    if (!ctx.humanReviewNodeIds.has(nextNodeId)) {
       return {
         state: {
           kind: "failed",
@@ -169,22 +168,21 @@ const resolveHumanApproved = (
             kind: "node-crash",
             retriability: "retriable",
             nodeId: nextNodeId,
-            message: nodeDef === undefined
-              ? `node-not-found: ${nextNodeId}`
-              : `node '${nextNodeId}' in pendingReviews has no humanReview config`,
+            message: `node '${nextNodeId}' in pendingReviews has no humanReview config`,
           },
         },
         context: ctx,
       };
     }
     const nodeOutput = ctx.outputs.get(nextNodeId);
+    const prompt = ctx.humanReviewPrompts.get(nextNodeId) ?? "";
 
     return {
       state: {
         kind: "awaiting-human",
         nodeId: nextNodeId,
         output: nodeOutput,
-        prompt: nodeDef.humanReview.prompt,
+        prompt,
         pendingReviews: rest,
         wave: currentState.wave,
       },

@@ -21,19 +21,32 @@ const mkNodeDef = (id: string, opts?: { humanReview?: { prompt: string } }): Nod
   ...(opts?.humanReview ? { humanReview: opts.humanReview } : {}),
 });
 
-const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => ({
-  waves: overrides.waves ?? [],
-  outputs: overrides.outputs ?? new Map(),
-  retries: overrides.retries ?? new Map(),
-  initialInput: null,
-  activeNodeIds: overrides.activeNodeIds ?? new Set(),
-  dag: overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef),
-  incomingByNode: overrides.incomingByNode ?? new Map(),
-  outgoingByNode: overrides.outgoingByNode ?? new Map(),
-  nodeById: overrides.nodeById ?? new Map(),
-  retryConfigs: overrides.retryConfigs ?? new Map(),
-  ...overrides,
-});
+const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
+  const dag = overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef);
+  return {
+    waves: overrides.waves ?? [],
+    outputs: overrides.outputs ?? new Map(),
+    retries: overrides.retries ?? new Map(),
+    initialInput: null,
+    activeNodeIds: overrides.activeNodeIds ?? new Set(),
+    dag,
+    incomingByNode: overrides.incomingByNode ?? new Map(),
+    outgoingByNode: overrides.outgoingByNode ?? new Map(),
+    nodeById: overrides.nodeById ?? new Map(),
+    retryConfigs: overrides.retryConfigs ?? new Map(),
+    outputNodeId: dag.outputNodeId,
+    defaultRetryLimit: dag.defaultRetryLimit,
+    retryLimits: dag.retryLimits,
+    humanReviewNodeIds: overrides.humanReviewNodeIds ?? new Set(
+      (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => n.id),
+    ),
+    humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
+      (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => [n.id, n.humanReview!.prompt] as const),
+    ),
+    edges: dag.edges ?? [],
+    ...overrides,
+  };
+};
 
 const mkAwaitingHuman = (
   nodeId: string,
@@ -281,6 +294,8 @@ describe("handleHumanResponse — pending reviews", () => {
       waves: [[N("a"), N("b")]],
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       activeNodeIds: nodeSet(["a", "b"]),
+      humanReviewNodeIds: new Set([N("a"), N("b")]),
+      humanReviewPrompts: new Map([[N("a"), "review a"], [N("b"), "review b"]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b", { humanReview: { prompt: "review b" } })],
@@ -323,9 +338,11 @@ describe("handleHumanResponse — pending reviews", () => {
       waves: [[N("a"), N("b")]],
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       activeNodeIds: nodeSet(["a", "b"]),
+      humanReviewNodeIds: new Set([N("a")]),
+      humanReviewPrompts: new Map([[N("a"), "r"]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "r" } })],
-        // "b" intentionally missing from nodeById
+        // "b" intentionally not in humanReviewNodeIds
       ]),
       dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
     });
@@ -335,7 +352,7 @@ describe("handleHumanResponse — pending reviews", () => {
     if (result.state.kind === "failed") {
       expect(result.state.error.kind).toBe("node-crash");
       if (result.state.error.kind === "node-crash") {
-        expect(result.state.error.message).toContain("node-not-found");
+        expect(result.state.error.message).toContain("no humanReview config");
       }
     }
   });

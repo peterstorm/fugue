@@ -47,7 +47,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     tracing = await initTracing({ exporter, policy });
     log.info(`Tracing initialized — MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})`);
   } catch (e) {
-    log.warn("Tracing initialization failed — continuing without tracing:", e);
+    log.error("Tracing initialization failed — continuing without tracing:", e);
   }
 
   // --- Redis (cache + checkpointer) ---
@@ -118,7 +118,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
           completedAt: new Date(),
         });
         if (!r.ok) {
-          log.warn(`[checkpoint] write failed for run=${runId} node=${nodeId}: ${r.error.kind}`);
+          throw new Error(
+            `checkpoint write failed for run=${runId} node=${nodeId}: ${r.error.kind}${
+              r.error.kind === "cache-error" ? ` — ${r.error.message}` : ""
+            }`,
+          );
         }
       },
     };

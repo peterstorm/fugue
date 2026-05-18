@@ -54,6 +54,12 @@ const minimalCtx: DagMachineContext = {
     [N("b"), minimalNodeDef("b") as any],
   ]),
   retryConfigs: new Map(),
+  outputNodeId: N("b"),
+  defaultRetryLimit: undefined,
+  retryLimits: undefined,
+  humanReviewNodeIds: new Set(),
+  humanReviewPrompts: new Map(),
+  edges: minimalDag.edges,
 };
 
 // ---------------------------------------------------------------------------

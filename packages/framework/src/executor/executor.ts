@@ -2,8 +2,8 @@
 // `runDagStateful` (ADR-0021). Responsibilities:
 //   1. Bidirectional HITL contract — reject if the DAG declares `humanReview`
 //      without an `onHumanReview` hook, and reject the inverse.
-//   2. Durability advisory (ADR-0019) — warn when the DAG declares retries
-//      or conditional edges but the caller did not provide a durable jobLike.
+//   2. Durability advisory — warn when the DAG declares retries or conditional
+//      edges but the caller did not provide a durable jobLike.
 //   3. Translate the public `resume: { runId, checkpoint }` shape into
 //      `runDagStateful`'s `resumeCheckpoint`.
 
@@ -48,7 +48,7 @@ export interface RunOptions {
   readonly retryLimits?: Readonly<Record<string, number>>;
   /**
    * Suppress the "DAG declares retries/conditional edges but no `jobLike`"
-   * warning (ADR 0019). Default `false`. Set to `true` when in-memory
+   * warning. Default `false`. Set to `true` when in-memory
    * semantics are the deliberate intent (tests, transient batch jobs).
    */
   readonly suppressRoutingWarnings?: boolean;
@@ -81,7 +81,7 @@ export const runDag = async <I, O>(
     });
   }
 
-  // ADR-0019 advisory — durability across crashes requires a durable jobLike.
+  // Durability advisory — durability across crashes requires a durable jobLike.
   // The in-memory fallback preserves runtime semantics but not durability.
   const dagDeclaresRetries =
     dag.defaultRetryLimit !== undefined ||

@@ -17,7 +17,7 @@ import {
 import { handleNodeFailed, computeBackoffMs, getRetryLimit } from "../dag-runtime/retry-policy.js";
 import type { RetryConfigs } from "../dag-runtime/retry-policy.js";
 import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
-import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "../dag-runtime/types.js";
+import type { DagPhase, DagEvent, DagMachineContext, DagTransitionContext, HumanAction } from "../dag-runtime/types.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -99,6 +99,12 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
         .filter((n) => n.retry)
         .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
     ),
+    outputNodeId: dag.outputNodeId,
+    defaultRetryLimit: dag.defaultRetryLimit,
+    retryLimits: dag.retryLimits,
+    humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
+    humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
+    edges: dag.edges,
     ...overrides,
   };
 };
@@ -1012,7 +1018,7 @@ describe("dagTransition — full round-trip", () => {
     const dag = makeDag({ defaultRetryLimit: 1 });
     const ctx = makeCtx({ dag });
     let phase: DagPhase = { kind: "running", wave: 0 };
-    let currentCtx = ctx;
+    let currentCtx: DagTransitionContext = ctx;
 
     // first failure
     let r = dagTransition(phase, { type: "node-failed", nodeId: "a" as NodeId, error: nodeFailedError }, currentCtx);
@@ -1032,7 +1038,7 @@ describe("dagTransition — full round-trip", () => {
     });
     const ctx = makeCtx({ dag, waves: [[N("a")]] });
     let phase: DagPhase = { kind: "running", wave: 0 };
-    let currentCtx = ctx;
+    let currentCtx: DagTransitionContext = ctx;
 
     // wave done => awaiting-human
     let r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", "result"]]) as any }, currentCtx);

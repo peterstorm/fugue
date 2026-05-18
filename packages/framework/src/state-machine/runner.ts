@@ -178,7 +178,7 @@ export const runStateMachine = async <S, E, C>(
     // this and triggers its built-in retry mechanism. Returning a Result
     // would require every queue adapter to unwrap and re-throw, adding
     // complexity at every boundary for a pattern that only applies here.
-    // See ADR 0005 + ADR 0007 for the full two-layer retry rationale.
+    // See ADR 0005 for the two-layer retry rationale.
     if (isFailed) {
       throw new Error(
         `State machine reached failed terminal state: ${JSON.stringify(state)}`,
