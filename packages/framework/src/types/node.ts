@@ -64,7 +64,7 @@ export type CacheLookup =
   | { readonly hit: true; readonly value: unknown }
   | { readonly hit: false };
 
-/** Cache adapter expected by framework nodes (LLM cache + checkpoint). */
+/** Cache adapter for ephemeral LLM response caching. */
 export interface ContextCacheAdapter {
   readonly get: (key: string) => Promise<CacheLookup>;
   readonly set: (
@@ -72,7 +72,11 @@ export interface ContextCacheAdapter {
     value: unknown,
     ttlSec?: number,
   ) => Promise<Result<void, FrameworkError>>;
-  readonly writeCheckpoint?: (runId: RunId, nodeId: NodeId, value: unknown) => Promise<void>;
+}
+
+/** Durable checkpoint writer — persists node outputs for crash-resume. */
+export interface CheckpointWriter {
+  readonly write: (runId: RunId, nodeId: NodeId, value: unknown) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +148,7 @@ export interface BaseNodeContext {
   readonly tracer: Tracer;
   readonly observer: Observer;
   readonly cache: ContextCacheAdapter | null;
+  readonly checkpointWriter?: CheckpointWriter | null;
   readonly llm: LlmClient | null;
   readonly prompts: PromptAccess | null;
   readonly judgeLlm: LlmClient | null;
@@ -275,6 +280,7 @@ export type NodeContextInit = {
   readonly tracer?: Tracer;
   readonly observer?: Observer;
   readonly cache?: ContextCacheAdapter | null;
+  readonly checkpointWriter?: CheckpointWriter | null;
   readonly llm?: LlmClient | null;
   readonly prompts?: PromptAccess | null;
   readonly judgeLlm?: LlmClient | null;

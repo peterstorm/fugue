@@ -7,7 +7,8 @@
 export type { Observer } from "./observer.js";
 export { NoopObserver, RecordingObserver, createObserver, createExhaustiveObserver } from "./observer.js";
 export type { RunSummary, AggregateCounters } from "./buffered.js";
-export { BufferedObserver, computeRunSummary, dispatchEvent } from "./buffered.js";
+export { BufferedObserver, computeRunSummary } from "./buffered.js";
+export { dispatchEvent } from "./dispatch.js";
 export type { PersistencePolicy } from "./policy.js";
 export {
   alwaysOn,

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { ok } from "../types/result.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
-import { runDag } from "../executor/executor.js";
+import { runDag } from "../executor/run-dag.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";

@@ -86,6 +86,7 @@ export type {
   TypedNodeContext,
   NodeContextInit,
   ContextCacheAdapter,
+  CheckpointWriter,
   CacheLookup,
   PromptAccess,
   Logger,

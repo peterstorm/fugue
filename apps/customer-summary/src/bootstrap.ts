@@ -19,7 +19,7 @@ import {
   piiScrubber,
   IDENTITY_FILTER,
 } from "@ai-summary/framework";
-import type { LlmClient, TracingHandle, Checkpointer } from "@ai-summary/framework";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter } from "@ai-summary/framework";
 import { NoopObserver, runId as brandRunId } from "@ai-summary/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
@@ -56,6 +56,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   // the app, but readiness MUST report not-ready so traffic does not land here.
   // The /summarize handler also rejects requests when checkpointer is null.
   let contextCache: ContextCache | null = null;
+  let checkpointWriter: CheckpointWriter | null = null;
   let checkpointer: Checkpointer | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ioredis CJS/ESM interop requires dynamic handling
   let redis: any = null;
@@ -111,7 +112,9 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
         }
         return r;
       },
-      writeCheckpoint: async (runId: string, nodeId: string, value: unknown) => {
+    };
+    checkpointWriter = {
+      write: async (runId: string, nodeId: string, value: unknown) => {
         const r = await cp.saveNode(brandRunId(runId), nodeId, {
           nodeId,
           output: value,
@@ -214,6 +217,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     judgeModel: config.EVAL_JUDGE_MODEL ?? model,
     thinking: thinkingDep,
     cache: contextCache,
+    checkpointWriter,
     checkpointer,
     observer: new NoopObserver(),
     logger: log,

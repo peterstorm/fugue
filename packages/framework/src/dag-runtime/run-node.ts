@@ -9,7 +9,7 @@
 //     `node-skipped`, and returns the cached value.
 //
 //   - `writeCheckpoint` — when true, after successful run + output validation,
-//     calls `ctx.cache.writeCheckpoint(runId, nodeId, output)`. On failure,
+//     calls `ctx.checkpointWriter.write(runId, nodeId, output)`. On failure,
 //     emits `node-error` with a `checkpoint-write-failed:` prefix and returns
 //     `Err({ kind: "checkpoint-write-failed" })`.
 //
@@ -194,9 +194,9 @@ export const runNodeShared = async (
       return outputResult;
     }
 
-    if (opts.writeCheckpoint && ctx.cache?.writeCheckpoint) {
+    if (opts.writeCheckpoint && ctx.checkpointWriter) {
       try {
-        await ctx.cache.writeCheckpoint(ctx.runId, nodeId, outputResult.value);
+        await ctx.checkpointWriter.write(ctx.runId, nodeId, outputResult.value);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         const cpwError: FrameworkError = {

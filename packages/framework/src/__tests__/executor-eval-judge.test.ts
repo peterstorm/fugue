@@ -2,7 +2,7 @@ import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import { runDag } from "../../src/executor/executor.js";
+import { runDag } from "../../src/executor/run-dag.js";
 import { createTransformNode } from "../../src/nodes/transform.js";
 import { createEvalJudgeNode } from "../../src/nodes/eval-judge.js";
 import type { EvalJudgeResponse } from "../../src/nodes/eval-judge.js";

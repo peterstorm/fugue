@@ -327,9 +327,19 @@ export class OpenAILlmClient implements LlmClient {
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // Pre-flight: schema construction is deterministic — non-retriable on failure
+    let schema: Record<string, unknown>;
     try {
-      const schema = buildJsonSchema(req.schema as z.ZodType<any>);
+      schema = buildJsonSchema(req.schema as z.ZodType<any>);
+    } catch (e) {
+      return err({
+        kind: "validation",
+        nodeId: resolveNodeId(req),
+        message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
 
+    try {
       const body: Record<string, unknown> = {
         model: req.model,
         input: [
@@ -468,8 +478,16 @@ export class OpenAILlmClient implements LlmClient {
     let totalTokensIn = 0;
     let totalTokensOut = 0;
     let lastThinking: string | undefined;
+    const deadline = req.deadlineMs ? Date.now() + req.deadlineMs : Infinity;
 
     for (let turn = 0; turn < maxIterations; turn++) {
+      if (Date.now() >= deadline) {
+        return err({
+          kind: "transient",
+          nodeId: resolveNodeId(req),
+          message: `Total deadline of ${req.deadlineMs}ms exceeded after ${turn} turns`,
+        });
+      }
       if (req.signal?.aborted || ctx.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }

@@ -4,7 +4,7 @@
 
 import type { NodeContext } from "../types/node.js";
 import type { ObserverEvent } from "../types/events.js";
-import { dispatchEvent } from "../observer/buffered.js";
+import { dispatchEvent } from "../observer/dispatch.js";
 
 export const emit = (ctx: NodeContext, event: ObserverEvent): void => {
   dispatchEvent(ctx.observer, event);

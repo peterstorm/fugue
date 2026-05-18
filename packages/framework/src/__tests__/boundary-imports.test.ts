@@ -228,11 +228,11 @@ describe("FR-082 extractImports — synthetic fixtures", () => {
   it("detects dag-runtime/ importing from ../executor/", () => {
     const dir = setup({
       "dag-runtime/bad-executor-import.ts":
-        `import { runDag } from "../executor/executor.js";\n`,
+        `import { runDag } from "../executor/run-dag.js";\n`,
     });
     const { violations } = checkImports(dir);
     expect(violations).toHaveLength(1);
-    expect(violations[0].importSpecifier).toBe("../executor/executor.js");
+    expect(violations[0].importSpecifier).toBe("../executor/run-dag.js");
     expect(violations[0].file).toContain("dag-runtime/bad-executor-import.ts");
   });
 

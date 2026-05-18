@@ -7,7 +7,7 @@ import { z } from "zod";
 import { ok } from "../types/result.js";
 import type { NodeContext } from "../types/node.js";
 import type { Observer } from "../observer/observer.js";
-import { runDag } from "../executor/executor.js";
+import { runDag } from "../executor/run-dag.js";
 import { defineDag } from "../executor/define-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 

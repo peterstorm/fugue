@@ -2,6 +2,8 @@ import type { ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
 import { fwLogger } from "../logger.js";
+import { dispatchEvent } from "./dispatch.js";
+export { dispatchEvent } from "./dispatch.js";
 
 export interface RunSummary {
   readonly runId: string;
@@ -26,48 +28,10 @@ export interface AggregateCounters {
 }
 
 /**
- * When `OBSERVER_STRICT=1` is set in the environment, dispatchEvent rethrows
- * any observer failure instead of catching. Useful in tests and dev to surface
- * programming bugs in observer impls that would otherwise be silently absorbed.
- * Off in production by default.
+ * When `OBSERVER_STRICT=1` is set in the environment, the BufferedObserver
+ * rethrows any observer failure instead of catching. Useful in tests and dev
+ * to surface programming bugs in observer impls. Off in production by default.
  */
-const OBSERVER_STRICT =
-  typeof process !== "undefined" && process.env?.OBSERVER_STRICT === "1";
-
-/**
- * Error-isolating dispatch wrapper. Calls `observer.observe(event)` and
- * catches any failure — production observers MUST be failure-tolerant (runs
- * continue). Under `OBSERVER_STRICT=1` the error is re-thrown after logging
- * so tests surface programming bugs in observer implementations.
- */
-export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
-  try {
-    const result: unknown = observer.observe(event);
-    // Guard: if observe() returns a thenable despite void signature, catch its rejection
-    // to prevent unhandled promise rejections from crashing the process.
-    if (result !== null && result !== undefined && typeof (result as { catch?: unknown }).catch === "function") {
-      (result as Promise<void>).catch((e) => {
-        fwLogger().error(
-          `[observer] async observe() rejected for ${event.type} — Observer.observe must be synchronous:`,
-          e instanceof Error ? e.message : e,
-        );
-        if (OBSERVER_STRICT) {
-          // Schedule as uncaught exception — a throw inside .catch() would be
-          // an unhandled rejection (not an exception), confusing error handlers
-          // and potentially being swallowed by Node's default rejection mode.
-          const error = e instanceof Error ? e : new Error(String(e));
-          setTimeout(() => { throw error; }, 0);
-        }
-      });
-    }
-  } catch (e) {
-    fwLogger().error(
-      `[observer] dispatchEvent failed for ${event.type}:`,
-      e instanceof Error && e.stack ? e.stack : e,
-    );
-    if (OBSERVER_STRICT) throw e;
-  }
-}
 
 /** Pure: compute RunSummary from buffered events and the RunEndEvent. */
 export function computeRunSummary(

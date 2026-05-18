@@ -5,7 +5,7 @@ import { ok, err } from "../types/result.js";
 import type { NodeContext, NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
-import { runDag } from "../executor/executor.js";
+import { runDag } from "../executor/run-dag.js";
 import { topoSort } from "../shared/topo.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
@@ -404,11 +404,13 @@ describe("runDag", () => {
     const cache = {
       get: async () => ({ hit: false } as const),
       set: async () => ok(undefined),
-      writeCheckpoint: async (runId: string, nodeId: string, output: unknown) => {
+    };
+    const checkpointWriter = {
+      write: async (runId: string, nodeId: string, output: unknown) => {
         checkpoints.push({ runId, nodeId, output });
       },
     };
-    const ctx = mkCtx({ cache, runId: "ckpt-run" as RunId });
+    const ctx = mkCtx({ cache, checkpointWriter, runId: "ckpt-run" as RunId });
     const result = await runDag(dag, { value: 1 }, ctx);
     expect(result.ok).toBe(true);
 
@@ -484,10 +486,8 @@ describe("runDag", () => {
   // node would re-execute, breaking the idempotency contract the checkpoint is
   // supposed to provide. Now the legacy path surfaces err(checkpoint-write-failed).
   it("checkpoint write failure surfaces as err(checkpoint-write-failed)", async () => {
-    const failingCache = {
-      get: async () => ({ hit: false } as const),
-      set: async () => ok(undefined),
-      writeCheckpoint: async () => { throw new Error("Redis timeout"); },
+    const failingCheckpointWriter = {
+      write: async () => { throw new Error("Redis timeout"); },
     };
     const dag = defineDagFromArray({
       id: "checkpoint-fail",
@@ -496,7 +496,7 @@ describe("runDag", () => {
       ],
       edges: [],
     });
-    const result = await runDag(dag, {}, mkCtx({ cache: failingCache }));
+    const result = await runDag(dag, {}, mkCtx({ checkpointWriter: failingCheckpointWriter }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-write-failed");

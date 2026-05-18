@@ -26,6 +26,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => ({
   tracer: init.tracer ?? noopTracer,
   observer: init.observer ?? noopObserver,
   cache: init.cache ?? null,
+  checkpointWriter: init.checkpointWriter ?? null,
   llm: init.llm ?? null,
   prompts: init.prompts ?? null,
   judgeLlm: init.judgeLlm ?? null,

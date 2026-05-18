@@ -173,6 +173,8 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly maxResources: number;
   /** Insertion-order tracking for LRU eviction of resources. */
   private readonly resourceOrder: string[] = [];
+  /** O(1) membership check to prevent duplicate entries in resourceOrder. */
+  private readonly resourceSet = new Set<string>();
   /** Cursor into resourceOrder for O(1) amortized eviction. */
   private evictCursor = 0;
 
@@ -202,6 +204,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
           if (this.writes.has(candidate)) {
             this.writes.delete(candidate);
             this.latest.delete(candidate);
+            this.resourceSet.delete(candidate);
             evicted = true;
             break;
           }
@@ -212,6 +215,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
           if (firstKey !== undefined) {
             this.writes.delete(firstKey);
             this.latest.delete(firstKey);
+            this.resourceSet.delete(firstKey);
           }
         }
         // Compact: when cursor has consumed more than half the array, trim
@@ -221,7 +225,10 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
           this.evictCursor = 0;
         }
       }
-      this.resourceOrder.push(resource);
+      if (!this.resourceSet.has(resource)) {
+        this.resourceOrder.push(resource);
+        this.resourceSet.add(resource);
+      }
     }
     const entries = this.writes.get(resource) ?? [];
     entries.push(entry);

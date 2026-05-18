@@ -123,8 +123,10 @@ export interface SendWithToolsRequest<O> {
   readonly tools: readonly ToolDef<any, any>[];
   /** Final structured-output schema. */
   readonly schema: z.ZodType<O>;
-  /** Cap on tool-use turns. Default 10. Exceed → Err({ kind: "transient" }). */
+  /** Cap on tool-use turns. Default 10. Exceed → Err({ kind: "node-crash", retriability: "non-retriable" }). */
   readonly maxIterations?: number;
+  /** Total wall-clock deadline across all turns (ms). Default: unlimited. Exceed → Err({ kind: "transient" }). */
+  readonly deadlineMs?: number;
   /** Anthropic-only — extended thinking. Ignored by other providers. */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   /** Cancellation. Aborted mid-loop returns Err({ kind: "aborted" }). */

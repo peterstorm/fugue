@@ -219,8 +219,16 @@ export class AnthropicLlmClient implements LlmClient {
     let totalTokensOut = 0;
     let lastThinking: string | undefined;
     let lastRawText = "";
+    const deadline = req.deadlineMs ? Date.now() + req.deadlineMs : Infinity;
 
     for (let turn = 0; turn < maxIterations; turn++) {
+      if (Date.now() >= deadline) {
+        return err({
+          kind: "transient",
+          nodeId: resolveNodeId(req),
+          message: `Total deadline of ${req.deadlineMs}ms exceeded after ${turn} turns`,
+        });
+      }
       if (req.signal?.aborted || ctx.signal?.aborted) {
         return err({ kind: "aborted", reason: "signal" });
       }
