@@ -48,9 +48,10 @@ export const emitFreshnessWitnessEvents = async (
     const output = newOutputs.get(nodeId);
     const se = nodeDef.sideEffects;
 
-    await match(se)
+    const branchResult = await match(se)
+      .returnType<Promise<Result<void, FrameworkError>>>()
       .with({ kind: "reads" }, async (se) => {
-        if (!se.extractWitness) return;
+        if (!se.extractWitness) return ok(undefined);
         try {
           const witness: Witness = se.extractWitness(output);
           emit(nodeCtx, {
@@ -79,9 +80,12 @@ export const emitFreshnessWitnessEvents = async (
             frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` },
           });
         }
+        // Reads failures are non-fatal: the node succeeded, only witness
+        // tracking failed. The node-error event surfaces it for post-mortem.
+        return ok(undefined);
       })
       .with({ kind: "writes" }, async (se) => {
-        if (!se.extractConditionedOn || !se.extractNewWitness) return;
+        if (!se.extractConditionedOn || !se.extractNewWitness) return ok(undefined);
 
         // Step 1: Rebuild the node's input via the shared helper
         let nodeInput: unknown;
@@ -101,7 +105,8 @@ export const emitFreshnessWitnessEvents = async (
             error: message,
             frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message },
           });
-          return;
+          // Config/authoring bug — node already succeeded, skip witness tracking.
+          return ok(undefined);
         }
 
         // Step 2: User-provided extractors
@@ -123,7 +128,8 @@ export const emitFreshnessWitnessEvents = async (
             error: `freshness extractor failed: ${msg}`,
             frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` },
           });
-          return; // fail-closed: skip write recording to prevent undetectable stale writes
+          // Config/authoring bug — node already succeeded, skip witness tracking.
+          return ok(undefined);
         }
 
         // Step 3: Freshness conflict check + event emission
@@ -205,10 +211,13 @@ export const emitFreshnessWitnessEvents = async (
           });
           return err(fwError);
         }
+        return ok(undefined);
       })
-      .with({ kind: "none" }, () => { /* pure transform — no freshness tracking */ })
-      .with({ kind: "external-call" }, () => { /* external calls don't participate in witness contract */ })
+      .with({ kind: "none" }, async () => ok(undefined))
+      .with({ kind: "external-call" }, async () => ok(undefined))
       .exhaustive();
+
+    if (!branchResult.ok) return branchResult;
   }
   return ok(undefined);
 };

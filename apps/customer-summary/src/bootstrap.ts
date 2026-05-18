@@ -181,7 +181,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     log.info(`Using OpenAI LLM client (model: ${model})`);
   } else if (provider === "anthropic" && config.ANTHROPIC_API_KEY) {
     const raw = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
-    llm = new AnthropicLlmClient(raw as any);
+    llm = new AnthropicLlmClient(raw);
     log.info(`Using Anthropic LLM client (model: ${model})${tracing ? " [traced]" : ""}`);
   } else {
     log.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);

@@ -1,5 +1,20 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { APIUserAbortError } from "@anthropic-ai/sdk";
+
+/**
+ * Structural interface for the Anthropic SDK client. Accepts any object with
+ * a `messages.create` method matching the Anthropic SDK shape. This avoids
+ * TypeScript's `#private` incompatibility when the SDK is resolved under
+ * different module resolution modes (e.g., app vs framework workspace).
+ */
+export interface AnthropicSdkLike {
+  messages: {
+    create(
+      body: Anthropic.MessageCreateParamsNonStreaming,
+      options?: { signal?: AbortSignal | null },
+    ): Promise<Anthropic.Message>;
+  };
+}
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -101,7 +116,7 @@ const resolveNodeId = (req: { readonly nodeId: NodeId }): NodeId =>
 export class AnthropicLlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
 
-  constructor(private readonly anthropic: Anthropic, opts?: { requestTimeoutMs?: number }) {
+  constructor(private readonly anthropic: AnthropicSdkLike, opts?: { requestTimeoutMs?: number }) {
     this.requestTimeoutMs = opts?.requestTimeoutMs ?? 120_000;
   }
 

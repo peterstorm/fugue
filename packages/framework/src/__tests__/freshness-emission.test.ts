@@ -1,13 +1,13 @@
 import { describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
-import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
+import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { nodeId, runId, dagId } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent } from "../types/events.js";
 import { z } from "zod";
-import { ok } from "../types/result.js";
+import { ok, err } from "../types/result.js";
 
 const NID_READ = nodeId("read-node");
 const NID_WRITE = nodeId("write-node");
@@ -222,5 +222,66 @@ describe("emitFreshnessWitnessEvents", () => {
 
     expect(accumulator.has("pg:orders")).toBe(true);
     expect(accumulator.get("pg:orders")!.value).toBe("99");
+  });
+
+  it("returns Err when freshnessIndex.recordWrite fails", async () => {
+    const obs = new RecordingObserver();
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: "pg:orders",
+        extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "1" }),
+        extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "2" }),
+      },
+    });
+    const nodeMap = new Map([[NID_WRITE, writeNode]]);
+    const machineCtx = makeMachineCtx();
+    // Provide read node output so buildNodeInput succeeds (Step 1)
+    const ctxWithOutput = { ...machineCtx, outputs: new Map([[NID_READ, { version: 1 }]]) };
+    const newOutputs = new Map([[NID_WRITE, {}]]);
+
+    // Failing freshness index — recordWrite returns Err
+    const failingIndex: FreshnessIndex = {
+      recordWrite: async () => err({ kind: "cache-error", operation: "recordWrite", message: "Redis down" }),
+      findConflict: async () => ok(null),
+    };
+
+    const result = await emitFreshnessWitnessEvents(
+      [NID_WRITE], newOutputs, nodeMap as any, ctxWithOutput,
+      makeCtx(obs) as any, DID, Date.now, failingIndex, new Set(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
+    expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+  });
+
+  it("returns Ok when extractor throws (non-fatal authoring bug)", async () => {
+    const obs = new RecordingObserver();
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: "pg:orders",
+        extractConditionedOn: () => { throw new Error("broken extractor"); },
+        extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "2" }),
+      },
+    });
+    const nodeMap = new Map([[NID_WRITE, writeNode]]);
+    const machineCtx = makeMachineCtx();
+    // Provide read node output so buildNodeInput succeeds (Step 1)
+    const ctxWithOutput = { ...machineCtx, outputs: new Map([[NID_READ, { version: 1 }]]) };
+    const newOutputs = new Map([[NID_WRITE, {}]]);
+    const index = new InMemoryFreshnessIndex();
+
+    const result = await emitFreshnessWitnessEvents(
+      [NID_WRITE], newOutputs, nodeMap as any, ctxWithOutput,
+      makeCtx(obs) as any, DID, Date.now, index, new Set(),
+    );
+
+    // Extractor failure is non-fatal — emits node-error but returns Ok
+    expect(result.ok).toBe(true);
+    expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
   });
 });

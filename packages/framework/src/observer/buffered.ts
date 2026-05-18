@@ -52,7 +52,11 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
           e instanceof Error ? e.message : e,
         );
         if (OBSERVER_STRICT) {
-          throw e instanceof Error ? e : new Error(String(e));
+          // Schedule as uncaught exception — a throw inside .catch() would be
+          // an unhandled rejection (not an exception), confusing error handlers
+          // and potentially being swallowed by Node's default rejection mode.
+          const error = e instanceof Error ? e : new Error(String(e));
+          setTimeout(() => { throw error; }, 0);
         }
       });
     }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { ok, err, isOk, isErr, andThen, map, mapErr, unwrap, unwrapOr, fold } from "../types/result.js";
+import {
+  ok, err, isOk, isErr, andThen, map, mapErr,
+  unwrap, unwrapOr, fold, tryCatch, tryCatchAsync,
+  tap, tapErr,
+} from "../types/result.js";
+import type { Result } from "../types/result.js";
 
 describe("Result", () => {
   it("ok() creates Ok", () => {
@@ -76,5 +81,97 @@ describe("Result", () => {
   it("fold calls onErr for Err", () => {
     const r = fold(err("boom"), (v) => `val:${v}`, (e) => `err:${e}`);
     expect(r).toBe("err:boom");
+  });
+});
+
+describe("tryCatch", () => {
+  it("wraps successful computation as Ok", () => {
+    const r = tryCatch(() => 42);
+    expect(r).toEqual({ ok: true, value: 42 });
+  });
+
+  it("catches thrown Error as Err<Error>", () => {
+    const r = tryCatch(() => { throw new Error("boom"); });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBeInstanceOf(Error);
+      expect(r.error.message).toBe("boom");
+    }
+  });
+
+  it("catches non-Error throws as wrapped Error", () => {
+    const r = tryCatch(() => { throw "string-error"; });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe("string-error");
+  });
+
+  it("applies mapError when provided", () => {
+    const r = tryCatch(
+      () => { throw new Error("raw"); },
+      (e) => `mapped: ${(e as Error).message}`,
+    );
+    expect(r).toEqual({ ok: false, error: "mapped: raw" });
+  });
+
+  it("returns Ok when mapError provided but no throw", () => {
+    const r = tryCatch(() => 5, () => "never");
+    expect(r).toEqual({ ok: true, value: 5 });
+  });
+});
+
+describe("tryCatchAsync", () => {
+  it("wraps resolved promise as Ok", async () => {
+    const r = await tryCatchAsync(async () => 99);
+    expect(r).toEqual({ ok: true, value: 99 });
+  });
+
+  it("catches rejected promise as Err", async () => {
+    const r = await tryCatchAsync(async () => { throw new Error("async-boom"); });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe("async-boom");
+  });
+
+  it("catches non-Error async throws", async () => {
+    const r = await tryCatchAsync(async () => { throw "raw-string"; });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe("raw-string");
+  });
+
+  it("applies mapError for async failures", async () => {
+    const r = await tryCatchAsync(
+      async () => { throw new Error("raw"); },
+      (e) => ({ code: "FAIL", msg: (e as Error).message }),
+    );
+    expect(r).toEqual({ ok: false, error: { code: "FAIL", msg: "raw" } });
+  });
+});
+
+describe("tap / tapErr", () => {
+  it("tap calls fn on Ok and returns same Result", () => {
+    const calls: number[] = [];
+    const r = tap(ok(5), (v) => calls.push(v));
+    expect(r).toEqual(ok(5));
+    expect(calls).toEqual([5]);
+  });
+
+  it("tap skips fn on Err", () => {
+    const calls: number[] = [];
+    const r = tap(err("x") as Result<number, string>, (v) => calls.push(v));
+    expect(r).toEqual(err("x"));
+    expect(calls).toEqual([]);
+  });
+
+  it("tapErr calls fn on Err and returns same Result", () => {
+    const calls: string[] = [];
+    const r = tapErr(err("oops"), (e) => calls.push(e));
+    expect(r).toEqual(err("oops"));
+    expect(calls).toEqual(["oops"]);
+  });
+
+  it("tapErr skips fn on Ok", () => {
+    const calls: string[] = [];
+    const r = tapErr(ok(1) as Result<number, string>, (e) => calls.push(e));
+    expect(r).toEqual(ok(1));
+    expect(calls).toEqual([]);
   });
 });

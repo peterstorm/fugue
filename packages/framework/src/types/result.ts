@@ -91,3 +91,15 @@ export const sequenceAll = <T, E>(results: readonly Result<T, E>[]): Result<T[],
   }
   return errors.length === 0 ? ok(values) : err(errors);
 };
+
+/** Execute a side effect on Ok values without breaking the pipeline. */
+export const tap = <T, E>(r: Result<T, E>, fn: (value: T) => void): Result<T, E> => {
+  if (r.ok) fn(r.value);
+  return r;
+};
+
+/** Execute a side effect on Err values without breaking the pipeline. */
+export const tapErr = <T, E>(r: Result<T, E>, fn: (error: E) => void): Result<T, E> => {
+  if (!r.ok) fn(r.error);
+  return r;
+};

@@ -87,7 +87,7 @@ export const validateDagShape = (
     }
   }
 
-  const nodeIds = new Set(entries.map(([id]) => id as NodeId));
+  const nodeIds = new Set(entries.map(([id]) => __brandNodeId(id)));
   // Normalize edges into the tagged-discriminant runtime form. The input may
   // carry the implicit-unconditional or implicit-conditional (`when`-only)
   // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
@@ -194,14 +194,14 @@ export const validateDagShape = (
       continue;
     }
     if (defaults.length !== 1) {
-      return err({ kind: "missing-default-edge", nodeId: id as NodeId });
+      return err({ kind: "missing-default-edge", nodeId: id });
     }
   }
 
-  if (input.outputNodeId !== undefined && !nodeIds.has(input.outputNodeId as NodeId)) {
+  if (input.outputNodeId !== undefined && !nodeIds.has(__brandNodeId(input.outputNodeId))) {
     return err(
       validationErr(
-        input.outputNodeId as NodeId,
+        __brandNodeId(input.outputNodeId),
         `outputNodeId '${input.outputNodeId}' is not a node in DAG '${input.id}'`,
       ),
     );
@@ -262,7 +262,7 @@ export const validateDagShape = (
       }
     }
 
-    if (!reachable.has(input.outputNodeId as NodeId)) {
+    if (!reachable.has(__brandNodeId(input.outputNodeId))) {
       // Walk backward from the output along unconditional + default edges to
       // find the first node that has no unconditional/default inbound. That
       // node is the actual frontier — the place where routing diverged from
@@ -293,8 +293,8 @@ export const validateDagShape = (
       }
       return err({
         kind: "output-unreachable-under-routing",
-        outputNodeId: input.outputNodeId as NodeId,
-        missedFromNode: frontier as NodeId,
+        outputNodeId: __brandNodeId(input.outputNodeId),
+        missedFromNode: __brandNodeId(frontier),
       });
     }
   }
@@ -308,7 +308,7 @@ export const validateDagShape = (
     id: __brandDagId(input.id),
     nodes: entries.map(([, n]) => n),
     edges,
-    ...(input.outputNodeId !== undefined ? { outputNodeId: input.outputNodeId as NodeId } : {}),
+    ...(input.outputNodeId !== undefined ? { outputNodeId: __brandNodeId(input.outputNodeId) } : {}),
     ...(input.evalJudges !== undefined ? { evalJudges: input.evalJudges } : {}),
     ...(input.retryLimits !== undefined
       ? { retryLimits: input.retryLimits as Readonly<Record<string, number>> }

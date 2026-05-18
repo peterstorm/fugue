@@ -231,6 +231,11 @@ export class MlflowOtlpExporter implements SpanExporter {
     return this.failedPermanently;
   }
 
+  /** True when the exporter has permanently failed and all future spans will be dropped. */
+  get isDegraded(): boolean {
+    return this.failedPermanently !== null;
+  }
+
   /**
    * Cumulative JSON parse failures observed on `mlflow.spanInputs` /
    * `mlflow.spanOutputs` data fields, per-instance. Tests assert isolation
