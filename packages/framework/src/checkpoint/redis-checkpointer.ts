@@ -88,8 +88,11 @@ return 1
 export class RedisCheckpointer implements Checkpointer {
   /** EVALSHA hash, populated on first saveNode (lazy SCRIPT LOAD). */
   private saveNodeSha: string | null = null;
+  private readonly now: () => number;
 
-  constructor(private readonly redis: Redis) {}
+  constructor(private readonly redis: Redis, opts?: { readonly now?: () => number }) {
+    this.now = opts?.now ?? Date.now;
+  }
 
   async load(
     runId: RunId,
@@ -148,8 +151,8 @@ export class RedisCheckpointer implements Checkpointer {
       }
     }
 
-    const now = new Date();
-    if (now.getTime() - createdAt.getTime() > TTL_SECONDS * 1000) {
+    const nowMs = this.now();
+    if (nowMs - createdAt.getTime() > TTL_SECONDS * 1000) {
       return err({
         kind: "checkpoint-expired" as const,
         runId,

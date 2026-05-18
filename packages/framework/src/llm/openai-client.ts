@@ -134,6 +134,24 @@ type ResponsesOutputItem =
   | ReasoningBlock
   | { readonly type: string };
 
+interface FunctionCallOutputItem {
+  readonly type: "function_call_output";
+  readonly call_id: string;
+  readonly output: string;
+}
+
+/**
+ * Discriminated conversation item union for the Responses API multi-turn loop.
+ * Every `.push()` into the conversation array is type-checked against this
+ * union; the single `as ConversationItem[]` cast at the `body.input` boundary
+ * is the only widening point.
+ */
+type ConversationItem =
+  | { readonly role: "developer"; readonly content: string }
+  | { readonly role: "user"; readonly content: string }
+  | ResponsesOutputItem
+  | FunctionCallOutputItem;
+
 interface ResponsesUsage {
   readonly input_tokens?: number;
   readonly output_tokens?: number;
@@ -185,9 +203,9 @@ const parseToolCalls = (output: readonly ResponsesOutputItem[]): ToolCall[] => {
 
 const buildToolResultItems = (
   results: readonly ToolDispatchResult[],
-): Array<Record<string, unknown>> =>
+): Array<FunctionCallOutputItem> =>
   results.map((r) => ({
-    type: "function_call_output",
+    type: "function_call_output" as const,
     call_id: r.id,
     output:
       typeof r.content === "string" ? r.content : JSON.stringify(r.content),
@@ -438,7 +456,7 @@ export class OpenAILlmClient implements LlmClient {
     const toolSpecs = req.tools.map(toolToOpenAiSpec);
     const toolChoice = toolChoiceToOpenAi(req.toolChoice);
 
-    const conversation: Array<Record<string, unknown>> = [
+    const conversation: ConversationItem[] = [
       { role: "developer", content: req.system },
       { role: "user", content: req.user },
     ];
@@ -521,10 +539,8 @@ export class OpenAILlmClient implements LlmClient {
       if (reasoning) lastThinking = reasoning;
 
       // Echo all output items into the conversation so subsequent turns see
-      // them. The cast to Record<string, unknown> is a boundary widening —
-      // the conversation array carries items of varying shapes that the API
-      // expects as opaque JSON-encoded objects.
-      for (const item of output) conversation.push(item as Record<string, unknown>);
+      // them. Each ResponsesOutputItem satisfies ConversationItem via the union.
+      for (const item of output) conversation.push(item);
 
       const toolCalls = parseToolCalls(output);
 

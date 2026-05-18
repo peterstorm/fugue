@@ -337,8 +337,18 @@ export function createInMemoryEventLogReader(backend: InMemoryBackend): EventLog
  * In-memory MarkerStore. TTL expiry uses `setTimeout`/`clearTimeout` so it
  * is compatible with `vi.useFakeTimers()`.
  */
-export function createInMemoryMarkerStore(): MarkerStore {
+export interface InMemoryMarkerStoreHandle extends MarkerStore, Disposable {
+  /** Cancel all pending TTL timers. Call when discarding the store. */
+  close(): void;
+}
+
+export function createInMemoryMarkerStore(): InMemoryMarkerStoreHandle {
   const markers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const close = (): void => {
+    for (const handle of markers.values()) clearTimeout(handle);
+    markers.clear();
+  };
 
   return {
     async set(key: string, ttlSeconds: number): Promise<void> {
@@ -368,6 +378,12 @@ export function createInMemoryMarkerStore(): MarkerStore {
         clearTimeout(handle);
         markers.delete(key);
       }
+    },
+
+    close,
+
+    [Symbol.dispose](): void {
+      close();
     },
   };
 }

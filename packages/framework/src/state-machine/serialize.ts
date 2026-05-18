@@ -72,7 +72,11 @@ export const deserializeValue = (value: unknown): unknown => {
 
     // Detect serialized Date
     if (DATE_TAG in obj && typeof obj[DATE_TAG] === "string") {
-      return new Date(obj[DATE_TAG] as string);
+      const d = new Date(obj[DATE_TAG] as string);
+      if (isNaN(d.getTime())) {
+        throw new Error(`deserializeValue: invalid date string "${obj[DATE_TAG]}"`);
+      }
+      return d;
     }
 
     // Detect serialized Map

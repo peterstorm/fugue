@@ -129,22 +129,30 @@ export function createCronScheduler(
   // Returns null if the task has been removed entirely; the caller should
   // simply stop the chain in that case.
   function onTimerFire(taskId: string): void {
-    const current = activeRegistry.get(taskId);
-    if (current === undefined) return; // task was removed mid-fire — drop the chain
-    const triggeredAt = now();
-    void handleFire(current, triggeredAt)
-      .then(() => {
-        consecutiveFailures.delete(current.id);
-        const stillActive = activeRegistry.get(current.id);
-        if (stillActive !== undefined) rescheduleTask(stillActive, triggeredAt);
-      })
-      .catch((err) => {
-        fwLogger().error(`[CronScheduler] timer callback failed for "${current.id}":`, err);
-        const n = (consecutiveFailures.get(current.id) ?? 0) + 1;
-        consecutiveFailures.set(current.id, n);
-        const stillActive = activeRegistry.get(current.id);
-        if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
-      });
+    try {
+      const current = activeRegistry.get(taskId);
+      if (current === undefined) return; // task was removed mid-fire — drop the chain
+      const triggeredAt = now();
+      void handleFire(current, triggeredAt)
+        .then(() => {
+          consecutiveFailures.delete(current.id);
+          const stillActive = activeRegistry.get(current.id);
+          if (stillActive !== undefined) rescheduleTask(stillActive, triggeredAt);
+        })
+        .catch((err) => {
+          fwLogger().error(`[CronScheduler] timer callback failed for "${current.id}":`, err);
+          const n = (consecutiveFailures.get(current.id) ?? 0) + 1;
+          consecutiveFailures.set(current.id, n);
+          const stillActive = activeRegistry.get(current.id);
+          if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
+        });
+    } catch (e) {
+      fwLogger().error(`[CronScheduler] onTimerFire threw synchronously for "${taskId}":`, e);
+      const n = (consecutiveFailures.get(taskId) ?? 0) + 1;
+      consecutiveFailures.set(taskId, n);
+      const stillActive = activeRegistry.get(taskId);
+      if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
+    }
   }
 
   function scheduleTask(task: TaskConfig): void {

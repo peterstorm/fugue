@@ -17,8 +17,8 @@ export {
   fold,
   tryCatch,
   tryCatchAsync,
-  sequence,
-  collectAll,
+  sequenceFirst,
+  sequenceAll,
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────

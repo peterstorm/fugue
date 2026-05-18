@@ -5,6 +5,7 @@
 import { match } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
+import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -534,7 +535,7 @@ const runWave = async (
   if (!freshnessResult.ok) {
     return {
       type: "node-failed",
-      nodeId: freshnessResult.error.kind === "node-crash" ? freshnessResult.error.nodeId : waveNodeIds[0],
+      nodeId: freshnessResult.error.kind === "node-crash" ? freshnessResult.error.nodeId : (waveNodeIds[0] ?? EXECUTOR_NODE_ID),
       error: freshnessResult.error,
     };
   }

@@ -193,14 +193,25 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     if (!this.writes.has(resource)) {
       // New resource — check global capacity before adding
       if (this.writes.size >= this.maxResources) {
-        // O(1) amortized: advance cursor past deleted/stale entries
-        while (this.evictCursor < this.resourceOrder.length) {
+        // Bounded scan: try up to 100 candidates before falling back to Map iteration order
+        const MAX_SCAN = 100;
+        let evicted = false;
+        for (let i = 0; i < MAX_SCAN && this.evictCursor < this.resourceOrder.length; i++) {
           const candidate = this.resourceOrder[this.evictCursor]!;
           this.evictCursor++;
           if (this.writes.has(candidate)) {
             this.writes.delete(candidate);
             this.latest.delete(candidate);
+            evicted = true;
             break;
+          }
+        }
+        // Fallback: if scan budget exhausted, evict the first live key via Map iteration
+        if (!evicted) {
+          const firstKey = this.writes.keys().next().value;
+          if (firstKey !== undefined) {
+            this.writes.delete(firstKey);
+            this.latest.delete(firstKey);
           }
         }
         // Compact: when cursor has consumed more than half the array, trim

@@ -51,6 +51,9 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
           `[observer] async observe() rejected for ${event.type} — Observer.observe must be synchronous:`,
           e instanceof Error ? e.message : e,
         );
+        if (OBSERVER_STRICT) {
+          throw e instanceof Error ? e : new Error(String(e));
+        }
       });
     }
   } catch (e) {

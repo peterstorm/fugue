@@ -24,4 +24,5 @@ export {
   adaptInMemoryJob,
   createInMemoryMarkerStore,
   type InMemoryBackend,
+  type InMemoryMarkerStoreHandle,
 } from "./in-memory.js";

@@ -140,7 +140,7 @@ export const runFinalizeInBackground = (
   finalize()
     .then((meta): import("./run-dag-stateful.js").BackgroundResult => ({
       judgesPassed: !meta.evalJudgeFailed,
-      judgesCrashed: meta.evalJudgeResults?.some((r) => !!(r as any).crash) ?? false,
+      judgesCrashed: meta.evalJudgeResults?.some((r) => r.crash !== undefined) ?? false,
       meta,
     }))
     .catch((e): import("./run-dag-stateful.js").BackgroundResult => {

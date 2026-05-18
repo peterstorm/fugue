@@ -48,25 +48,31 @@ export const fold = <T, E, R>(
 ): R => (r.ok ? onOk(r.value) : onErr(r.error));
 
 /** Wrap a throwing function in a Result. Catches synchronous exceptions. */
-export const tryCatch = <T>(fn: () => T): Result<T, Error> => {
+export function tryCatch<T>(fn: () => T): Result<T, Error>;
+export function tryCatch<T, E>(fn: () => T, mapError: (e: unknown) => E): Result<T, E>;
+export function tryCatch<T, E = Error>(fn: () => T, mapError?: (e: unknown) => E): Result<T, E> {
   try {
     return ok(fn());
   } catch (e) {
-    return err(e instanceof Error ? e : new Error(String(e)));
+    if (mapError) return err(mapError(e));
+    return err((e instanceof Error ? e : new Error(String(e))) as E);
   }
-};
+}
 
 /** Wrap an async throwing function in a Result. */
-export const tryCatchAsync = async <T>(fn: () => Promise<T>): Promise<Result<T, Error>> => {
+export function tryCatchAsync<T>(fn: () => Promise<T>): Promise<Result<T, Error>>;
+export function tryCatchAsync<T, E>(fn: () => Promise<T>, mapError: (e: unknown) => E): Promise<Result<T, E>>;
+export async function tryCatchAsync<T, E = Error>(fn: () => Promise<T>, mapError?: (e: unknown) => E): Promise<Result<T, E>> {
   try {
     return ok(await fn());
   } catch (e) {
-    return err(e instanceof Error ? e : new Error(String(e)));
+    if (mapError) return err(mapError(e));
+    return err((e instanceof Error ? e : new Error(String(e))) as E);
   }
-};
+}
 
 /** Collect a list of Results into a Result of list. Short-circuits on first Err. */
-export const sequence = <T, E>(results: readonly Result<T, E>[]): Result<T[], E> => {
+export const sequenceFirst = <T, E>(results: readonly Result<T, E>[]): Result<T[], E> => {
   const values: T[] = [];
   for (const r of results) {
     if (!r.ok) return r;
@@ -76,7 +82,7 @@ export const sequence = <T, E>(results: readonly Result<T, E>[]): Result<T[], E>
 };
 
 /** Collect all Results — returns all values if all ok, all errors if any failed. */
-export const collectAll = <T, E>(results: readonly Result<T, E>[]): Result<T[], E[]> => {
+export const sequenceAll = <T, E>(results: readonly Result<T, E>[]): Result<T[], E[]> => {
   const values: T[] = [];
   const errors: E[] = [];
   for (const r of results) {

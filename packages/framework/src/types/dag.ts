@@ -9,6 +9,7 @@ import type { DagId, NodeId } from "./ids.js";
 import { __brandNodeId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 import { meetsConfidence } from "./confidence.js";
+import { fwLogger } from "../logger.js";
 
 // Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
 // are imported above but NOT re-exported. They live in `./dag-internals.ts`,
@@ -79,6 +80,7 @@ export const evaluatePredicate = <T>(
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    fwLogger().warn(`[evaluatePredicate] Predicate "${pred.label}" (v${pred.version}) threw: ${msg}`);
     return {
       predicateLabel: pred.label,
       predicateVersion: pred.version,

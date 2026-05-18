@@ -10,6 +10,7 @@ import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
 import { computeIncomingByNode, computeOutgoingByNode, seedInitialActiveSet } from "./conditional.js";
+import { match } from "ts-pattern";
 
 // ---------------------------------------------------------------------------
 // stateProgress — maps DagPhase to a 0–100 progress value
@@ -105,23 +106,20 @@ export const compileDagToMachine = (
     isFailed,
     stateProgress,
     isRetryTransition,
-    // DagPhase values are plain JSON-stable objects after Zod validation of
-    // outputs. If a non-serializable value ever leaks through (bug), fall back
-    // to a distinguishable key rather than throwing inside the runner loop.
-    stateKey: (phase) => {
-      try {
-        return JSON.stringify(phase);
-      } catch (e) {
-        // DagPhase is always JSON-serializable after Zod validation. A failure
-        // here is a framework invariant violation — fail loud rather than
-        // silently corrupting retry counters and dedup keys.
-        throw new Error(
-          `[compileDagToMachine] stateKey serialization INVARIANT VIOLATION for phase kind="${phase.kind}": ` +
-            `${e instanceof Error ? e.message : e}. Non-serializable value leaked into DagPhase.`,
-          { cause: e },
-        );
-      }
-    },
+    // DagPhase key derivation — uses discriminant fields only to avoid
+    // serializing large `output: unknown` payloads on every transition.
+    // ts-pattern `.exhaustive()` guarantees a compile error if a new
+    // DagPhase variant is added without handling it here.
+    stateKey: (phase) =>
+      match(phase)
+        .with({ kind: "pending" }, () => "pending")
+        .with({ kind: "running" }, (p) => `running:${p.wave}`)
+        .with({ kind: "retrying" }, (p) => `retrying:${p.wave}:${p.nodeId}:${p.attempt}`)
+        .with({ kind: "retrying-hook" }, (p) => `retrying-hook:${p.nodeId}:${p.attempt}`)
+        .with({ kind: "awaiting-human" }, (p) => `awaiting-human:${p.nodeId}:${p.wave}`)
+        .with({ kind: "succeeded" }, () => "succeeded")
+        .with({ kind: "failed" }, (p) => `failed:${p.error.kind}`)
+        .exhaustive(),
   };
 
   return ok({ machine, initialContext, initialState: { kind: "pending" } });

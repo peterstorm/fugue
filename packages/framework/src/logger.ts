@@ -40,6 +40,9 @@ let _logger: FrameworkLogger = consoleLogger;
  * `undefined` is rejected to prevent accidental nulling-out.
  */
 export const setFrameworkLogger = (logger: FrameworkLogger): void => {
+  if (logger == null) {
+    throw new TypeError("setFrameworkLogger: logger must not be null or undefined");
+  }
   _logger = logger;
 };
 
