@@ -3,7 +3,7 @@
 
 import type { DagPhase, DagMachineContextPersisted } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
-import { expandActive } from "./conditional.js";
+import { expandActive } from "./topology.js";
 import type { NodeId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------

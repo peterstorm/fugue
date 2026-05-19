@@ -12,7 +12,7 @@
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
+import type { NodeId, DagId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import type { DagMachineContext, DagEvent } from "./types.js";
@@ -41,6 +41,24 @@ export interface WaveConfig {
   readonly nowFn: () => number;
   readonly freshnessIndex: FreshnessIndex;
   readonly witnessAccumulator?: Map<string, Witness>;
+}
+
+/**
+ * Per-wave-invocation context assembled at the top of `executeWave`.
+ * Concentrates everything the post-dispatch pipeline (freshness + routing)
+ * needs into one object, eliminating 10-param / 7-param positional calls.
+ */
+export interface PostWaveContext {
+  readonly waveNodeIds: readonly NodeId[];
+  readonly nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
+  readonly nodeCtx: ValidatedNodeContext;
+  readonly machineCtx: DagMachineContext;
+  readonly dagId: DagId;
+  readonly nowFn: () => number;
+  readonly freshnessIndex: FreshnessIndex;
+  readonly witnessAccumulator?: Map<string, Witness>;
+  readonly resumeCheckpoint?: Map<string, unknown>;
+  readonly priorOutputs: ReadonlyMap<NodeId, unknown>;
 }
 
 export interface WaveResult {
@@ -221,8 +239,15 @@ export const executeWave = async (
       skippedNodeIds.add(nodeId);
     }
   }
+
+  const postWaveCtx: PostWaveContext = {
+    waveNodeIds, nodeMap, nodeCtx, machineCtx,
+    dagId: dag.id, nowFn, freshnessIndex, witnessAccumulator,
+    resumeCheckpoint, priorOutputs,
+  };
+
   const freshnessResult = await emitFreshnessWitnessEvents(
-    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator,
+    postWaveCtx, newOutputs, skippedNodeIds,
   );
   if (!freshnessResult.ok) {
     return {
@@ -239,7 +264,7 @@ export const executeWave = async (
   // Routing decisions
   // -------------------------------------------------------------------------
   const routing = emitRoutingDecisions(
-    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn,
+    postWaveCtx, newOutputs,
   );
   if (routing.earlyFailure) {
     return { event: routing.earlyFailure, outcomes };

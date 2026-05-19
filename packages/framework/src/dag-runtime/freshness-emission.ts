@@ -20,8 +20,21 @@ import { fwLogger } from "../logger.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
+import type { PostWaveContext } from "./wave-execution.js";
 
-export const emitFreshnessWitnessEvents = async (
+/**
+ * Emit freshness witness events for all reads/writes nodes in a wave.
+ *
+ * Accepts either:
+ *   - `(PostWaveContext, newOutputs, skippedNodeIds)` — new compact signature
+ *   - `(waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dagId, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator?)` — legacy positional
+ */
+export function emitFreshnessWitnessEvents(
+  ctx: PostWaveContext,
+  newOutputs: ReadonlyMap<NodeId, unknown>,
+  skippedNodeIds: ReadonlySet<NodeId>,
+): Promise<Result<void, FrameworkError>>;
+export function emitFreshnessWitnessEvents(
   waveNodeIds: readonly NodeId[],
   newOutputs: ReadonlyMap<NodeId, unknown>,
   nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
@@ -32,7 +45,56 @@ export const emitFreshnessWitnessEvents = async (
   freshnessIndex: FreshnessIndex,
   skippedNodeIds: ReadonlySet<NodeId>,
   witnessAccumulator?: Map<string, Witness>,
-): Promise<Result<void, FrameworkError>> => {
+): Promise<Result<void, FrameworkError>>;
+export async function emitFreshnessWitnessEvents(
+  ctxOrWaveNodeIds: PostWaveContext | readonly NodeId[],
+  newOutputsOrNewOutputs: ReadonlyMap<NodeId, unknown>,
+  skippedOrNodeMap: ReadonlySet<NodeId> | ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
+  machineCtxArg?: DagMachineContext,
+  nodeCtxArg?: NodeContext,
+  dagIdArg?: DagId,
+  nowFnArg?: () => number,
+  freshnessIndexArg?: FreshnessIndex,
+  skippedNodeIdsArg?: ReadonlySet<NodeId>,
+  witnessAccumulatorArg?: Map<string, Witness>,
+): Promise<Result<void, FrameworkError>> {
+  // Resolve overload: if first arg is an array, it's the legacy positional signature
+  let waveNodeIds: readonly NodeId[];
+  let newOutputs: ReadonlyMap<NodeId, unknown>;
+  let nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
+  let machineCtx: DagMachineContext;
+  let nodeCtx: NodeContext;
+  let dagId: DagId;
+  let nowFn: () => number;
+  let freshnessIndex: FreshnessIndex;
+  let skippedNodeIds: ReadonlySet<NodeId>;
+  let witnessAccumulator: Map<string, Witness> | undefined;
+
+  if (Array.isArray(ctxOrWaveNodeIds)) {
+    waveNodeIds = ctxOrWaveNodeIds;
+    newOutputs = newOutputsOrNewOutputs;
+    nodeMap = skippedOrNodeMap as ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
+    machineCtx = machineCtxArg!;
+    nodeCtx = nodeCtxArg!;
+    dagId = dagIdArg!;
+    nowFn = nowFnArg!;
+    freshnessIndex = freshnessIndexArg!;
+    skippedNodeIds = skippedNodeIdsArg!;
+    witnessAccumulator = witnessAccumulatorArg;
+  } else {
+    const ctx = ctxOrWaveNodeIds as PostWaveContext;
+    waveNodeIds = ctx.waveNodeIds;
+    newOutputs = newOutputsOrNewOutputs;
+    nodeMap = ctx.nodeMap;
+    machineCtx = ctx.machineCtx;
+    nodeCtx = ctx.nodeCtx;
+    dagId = ctx.dagId;
+    nowFn = ctx.nowFn;
+    freshnessIndex = ctx.freshnessIndex;
+    skippedNodeIds = skippedOrNodeMap as ReadonlySet<NodeId>;
+    witnessAccumulator = ctx.witnessAccumulator;
+  }
+
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
 

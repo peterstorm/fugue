@@ -235,6 +235,62 @@ export const buildDagExecutor = (
     witnessAccumulator: capturedWitnesses,
   };
 
+  // ---------------------------------------------------------------------------
+  // sleepWithAbortCheck — shared sleep + signal abort pattern
+  // ---------------------------------------------------------------------------
+
+  const sleepWithAbortCheck = async (delayMs: number, nodeId: NodeId): Promise<DagEvent | null> => {
+    const nodeDef = nodeMap.get(nodeId);
+    const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
+    const delayWithJitter = applyJitter(delayMs, jitterRatio, random);
+    await sleep(delayWithJitter, nodeCtx.signal);
+    if (nodeCtx.signal?.aborted) {
+      return { type: "abort", reason: "signal" } satisfies DagEvent;
+    }
+    return null;
+  };
+
+  // ---------------------------------------------------------------------------
+  // handleHumanGate — unified human-review handler for awaiting-human + retrying-hook.
+  // Owns: optional sleep → hook call → enrich → emit telemetry → return event.
+  // ---------------------------------------------------------------------------
+
+  const handleHumanGate = async (
+    phaseKind: "awaiting-human" | "retrying-hook",
+    nodeId: NodeId,
+    output: unknown,
+    prompt: string,
+    machineCtx: DagMachineContext,
+    delayMs?: number,
+  ): Promise<DagEvent> => {
+    // Optional sleep (retrying-hook only)
+    if (delayMs !== undefined) {
+      const abortEvent = await sleepWithAbortCheck(delayMs, nodeId);
+      if (abortEvent) return abortEvent;
+    }
+
+    const awaitStartMs = nowFn();
+    let event = await callHumanReviewHook(phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+    event = enrichHumanRespondedEvent(event, machineCtx);
+    if (event.type === "human-responded") {
+      emitHumanIntervention(
+        { nodeId, output },
+        event.action,
+        nodeMap,
+        nodeCtx,
+        dag.id,
+        nowFn,
+        awaitStartMs,
+        [...capturedWitnesses.values()],
+      );
+    }
+    return event;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Executor closure
+  // ---------------------------------------------------------------------------
+
   return async (phase: DagPhase, machineCtx: DagMachineContext): Promise<DagEvent> =>
     match(phase)
       // -----------------------------------------------------------------------
@@ -247,13 +303,8 @@ export const buildDagExecutor = (
       // FR-027: delay = nextDelayMs * (1 ± jitterRatio) — symmetric jitter via applyJitter
       // -----------------------------------------------------------------------
       .with({ kind: "retrying" }, async (p) => {
-        const nodeDef = nodeMap.get(p.nodeId);
-        const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
-        const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
-        await sleep(delayWithJitter, nodeCtx.signal);
-        if (nodeCtx.signal?.aborted) {
-          return { type: "abort", reason: "signal" } satisfies DagEvent;
-        }
+        const abortEvent = await sleepWithAbortCheck(p.nextDelayMs, p.nodeId);
+        if (abortEvent) return abortEvent;
 
         const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
         recordOutcomes?.(outcomes);
@@ -272,54 +323,15 @@ export const buildDagExecutor = (
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
       // -----------------------------------------------------------------------
-      .with({ kind: "awaiting-human" }, async (p) => {
-        const awaitStartMs = nowFn();
-        let event = await callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
-        event = enrichHumanRespondedEvent(event, machineCtx);
-        if (event.type === "human-responded") {
-          emitHumanIntervention(
-            { nodeId: p.nodeId, output: p.output },
-            event.action,
-            nodeMap,
-            nodeCtx,
-            dag.id,
-            nowFn,
-            awaitStartMs,
-            [...capturedWitnesses.values()],
-          );
-        }
-        return event;
-      })
+      .with({ kind: "awaiting-human" }, (p) =>
+        handleHumanGate("awaiting-human", p.nodeId, p.output, p.prompt, machineCtx))
 
       // -----------------------------------------------------------------------
       // retrying-hook: sleep with jitter then re-call the onHumanReview hook.
       // The node is NOT re-run — only the hook is retried (FR-029a).
       // -----------------------------------------------------------------------
-      .with({ kind: "retrying-hook" }, async (p) => {
-        const nodeDef = nodeMap.get(p.nodeId);
-        const jitterRatio = nodeDef?.retry?.jitterRatio ?? DEFAULT_JITTER_RATIO;
-        const delayWithJitter = applyJitter(p.nextDelayMs, jitterRatio, random);
-        await sleep(delayWithJitter, nodeCtx.signal);
-        if (nodeCtx.signal?.aborted) {
-          return { type: "abort", reason: "signal" } satisfies DagEvent;
-        }
-        const awaitStartMs = nowFn();
-        let event = await callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
-        event = enrichHumanRespondedEvent(event, machineCtx);
-        if (event.type === "human-responded") {
-          emitHumanIntervention(
-            { nodeId: p.nodeId, output: p.output },
-            event.action,
-            nodeMap,
-            nodeCtx,
-            dag.id,
-            nowFn,
-            awaitStartMs,
-            [...capturedWitnesses.values()],
-          );
-        }
-        return event;
-      })
+      .with({ kind: "retrying-hook" }, (p) =>
+        handleHumanGate("retrying-hook", p.nodeId, p.output, p.prompt, machineCtx, p.nextDelayMs))
 
       // -----------------------------------------------------------------------
       // Terminal states — unreachable per runner's isTerminal guard.

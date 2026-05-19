@@ -3,6 +3,12 @@
 //
 // This file is intentionally orchestration-only. It composes helpers from
 // sibling modules; add new behaviour to the matching helper, not here.
+//
+// Internal decomposition:
+//   prepareDagRun     — pre-flight: retry merge, telemetry, capability check
+//   resolveJob        — job handle: caller-supplied or fresh in-memory
+//   handleTerminalState — match terminal state: judges, error, invariant violation
+//   handleKernelError — catch block: abort vs terminal-failed
 
 import { match } from "ts-pattern";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
@@ -10,7 +16,7 @@ import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted,
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../types/dag.js";
-import type { NodeContext } from "../types/node.js";
+import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -27,6 +33,7 @@ import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.
 import type { FreshnessIndex } from "./freshness-check.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
+import type { CompiledDagMachine } from "./machine.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -93,7 +100,147 @@ export interface DagRunOpts
 }
 
 // ---------------------------------------------------------------------------
-// runDagStateful
+// prepareDagRun — pre-flight: merge retry limits, emit run-start, validate capabilities
+// ---------------------------------------------------------------------------
+
+interface PreparedRun {
+  readonly effectiveDag: DagDef;
+  readonly validatedCtx: ValidatedNodeContext;
+  readonly emitRunEnd: (status: "ok" | "error") => void;
+}
+
+const prepareDagRun = (
+  dag: DagDef,
+  nodeCtx: NodeContext,
+  opts?: Pick<DagRunOpts, "retryLimits" | "now">,
+): Result<PreparedRun, FrameworkError> => {
+  const effectiveDag: DagDef =
+    opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
+
+  // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
+  // run-start/run-end pair.
+  const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
+
+  // Capability validation. On success, hands back a phantom-branded token.
+  const capCheck = validateCapabilities(effectiveDag, nodeCtx);
+  if (!capCheck.ok) {
+    emitRunEnd("error");
+    return err(capCheck.error);
+  }
+
+  return ok({ effectiveDag, validatedCtx: capCheck.value, emitRunEnd });
+};
+
+// ---------------------------------------------------------------------------
+// resolveJob — resolve the durable job handle (caller-supplied or in-memory)
+// ---------------------------------------------------------------------------
+
+const resolveJob = (
+  compiled: CompiledDagMachine,
+  effectiveDag: DagDef,
+  nodeCtx: NodeContext,
+  opts?: Pick<DagRunOpts, "jobLike">,
+): Result<JobLike<DagPhase, unknown, DagMachineContext>, FrameworkError> => {
+  if (opts?.jobLike) {
+    const wrapped = wrapDagJobLike(opts.jobLike, effectiveDag, nodeCtx.runId);
+    const fingerprintCheck = wrapped.verifyDagFingerprint();
+    if (!fingerprintCheck.ok) return err(fingerprintCheck.error);
+    return ok(wrapped.job);
+  }
+  return ok(
+    createInMemoryJob<DagPhase, DagMachineContext>({
+      state: compiled.initialState,
+      context: compiled.initialContext,
+    }),
+  );
+};
+
+// ---------------------------------------------------------------------------
+// handleTerminalState — match on terminal phase: success→judges, failure→error
+// ---------------------------------------------------------------------------
+
+interface TerminalDeps {
+  readonly rootSpan: import("@opentelemetry/api").Span;
+  readonly dag: DagDef;
+  readonly input: unknown;
+  readonly nodeCtx: NodeContext;
+  readonly meta: DagRunMeta;
+  readonly emitRunEnd: (status: "ok" | "error") => void;
+  readonly opts?: DagRunOpts;
+}
+
+const handleTerminalState = <O>(
+  state: DagPhase,
+  context: DagMachineContext,
+  deps: TerminalDeps,
+): Promise<Result<O, FrameworkError>> =>
+  match(state)
+    .returnType<Promise<Result<O, FrameworkError>>>()
+    .with({ kind: "succeeded" }, async (s) => {
+      const finalize = (): Promise<DagRunMeta> =>
+        finalizeRunWithJudges(
+          deps.rootSpan, deps.dag, deps.input, s.output,
+          context.outputs, deps.nodeCtx, deps.meta, deps.emitRunEnd,
+        );
+
+      if (deps.opts?.onBackground) {
+        deps.opts.onBackground(runFinalizeInBackground(finalize, deps.rootSpan, deps.emitRunEnd));
+      } else {
+        await finalize();
+      }
+      return ok(s.output as O);
+    })
+    .with({ kind: "failed" }, async (s) => {
+      closeRootSpan(deps.rootSpan, { kind: "error", error: s.error });
+      deps.emitRunEnd("error");
+      return err(s.error);
+    })
+    .with({ kind: "pending" }, async (s) =>
+      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
+    .with({ kind: "running" }, async (s) =>
+      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
+    .with({ kind: "retrying" }, async (s) =>
+      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
+    .with({ kind: "retrying-hook" }, async (s) =>
+      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, s.nodeId))
+    .with({ kind: "awaiting-human" }, async (s) =>
+      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
+    .exhaustive();
+
+// ---------------------------------------------------------------------------
+// handleKernelError — catch block: abort vs terminal-failed
+// ---------------------------------------------------------------------------
+
+const handleKernelError = <O>(
+  e: unknown,
+  rootSpan: import("@opentelemetry/api").Span,
+  emitRunEnd: (status: "ok" | "error") => void,
+): Result<O, FrameworkError> => {
+  const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
+  if (isAbort) {
+    const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
+    closeRootSpan(rootSpan, { kind: "error", error });
+    emitRunEnd("error");
+    return err(error);
+  }
+  // Terminal-failed: the kernel attaches { state, context } to Error.cause.
+  const cause = (e as Error)?.cause as { state?: DagPhase } | undefined;
+  const failedState = cause?.state?.kind === "failed"
+    ? (cause.state as Extract<DagPhase, { kind: "failed" }>)
+    : undefined;
+  const error: FrameworkError = failedState?.error ?? {
+    kind: "node-crash",
+    nodeId: EXECUTOR_NODE_ID,
+    retriability: "retriable",
+    message: e instanceof Error ? e.message : String(e),
+  };
+  closeRootSpan(rootSpan, { kind: "error", error });
+  emitRunEnd("error");
+  return err(error);
+};
+
+// ---------------------------------------------------------------------------
+// runDagStateful — the orchestrator pipeline
 // ---------------------------------------------------------------------------
 
 /**
@@ -104,9 +251,13 @@ export interface DagRunOpts
  * Returns `ok(output)` when the DAG reaches `succeeded`, `err(error)` when
  * the machine ends in a `failed` terminal state.
  *
- * Observer events (run-start, node-start, node-end, node-error, run-end) are
- * emitted here so consumers see the full run-start / node-start / node-end /
- * run-end stream regardless of the execution path.
+ * Pipeline:
+ *   1. prepareDagRun — merge retries, emit run-start, validate capabilities
+ *   2. startRunSpan  — OTel root span
+ *   3. compile       — topo sort, build initial context
+ *   4. resolveJob    — caller-supplied or in-memory JobLike
+ *   5. execute       — build executor, run state machine kernel
+ *   6. terminal      — handle succeeded/failed/unexpected
  */
 export const runDagStateful = async <I, O>(
   dag: DagDef,
@@ -114,47 +265,36 @@ export const runDagStateful = async <I, O>(
   nodeCtx: NodeContext,
   opts?: DagRunOpts,
 ): Promise<Result<O, FrameworkError>> => {
-  // Merge call-time retryLimits (takes precedence) into dag before compiling.
-  // getRetryLimit reads from ctx.dag.retryLimits, so this is the correct wiring point.
-  // withRetryLimits preserves the DagDef brand instead of laundering it via spread.
-  const effectiveDag: DagDef =
-    opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
+  // 1. Pre-flight
+  const prepared = prepareDagRun(dag, nodeCtx, opts);
+  if (!prepared.ok) return prepared;
+  const { effectiveDag, validatedCtx, emitRunEnd } = prepared.value;
 
-  // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
-  // run-start/run-end pair. Otherwise observers see neither and the failure is
-  // invisible from the event stream.
-  const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
-
-  // Capability validation at run start. On success, hands back a phantom-
-  // branded `ValidatedNodeContext` token — `runNodeShared` requires it, so
-  // any code path that bypasses this check fails to typecheck.
-  const capCheck = validateCapabilities(effectiveDag, nodeCtx);
-  if (!capCheck.ok) {
-    emitRunEnd("error");
-    return err(capCheck.error);
-  }
-  const validatedCtx = capCheck.value;
-
+  // 2. OTel root span wraps compilation + execution
   return startRunSpan(dag, nodeCtx, async (rootSpan): Promise<Result<O, FrameworkError>> => {
-    // Compile inside the span so topo errors are funneled through the same
-    // observer/trace path as runtime failures.
+    // 3. Compile
     const compiled = compileDagToMachine(effectiveDag, input);
     if (!compiled.ok) {
       closeRootSpan(rootSpan, { kind: "error", error: compiled.error });
       emitRunEnd("error");
       return err(compiled.error);
     }
-    const { machine, initialContext, initialState } = compiled.value;
 
-    // Per-run meta — carries guardrail/eval-judge state for rootSpan finalization.
-    // Held in `let` so each wave can fold in its outcomes via recordOutcomes;
-    // the inner DagRunMeta value remains immutable.
+    // 4. Resolve job
+    const jobResult = resolveJob(compiled.value, effectiveDag, nodeCtx, opts);
+    if (!jobResult.ok) {
+      closeRootSpan(rootSpan, { kind: "error", error: jobResult.error });
+      emitRunEnd("error");
+      return err(jobResult.error);
+    }
+    const job = jobResult.value;
+
+    // 5. Build executor + run kernel
     let meta: DagRunMeta = createDagRunMeta();
     const recordOutcomes = (outcomes: readonly NodeSpanOutcome[]): void => {
       meta = foldOutcomes(meta, outcomes);
     };
 
-    // Build the executor closure (uses the validated-capabilities token).
     const executor = buildDagExecutor(effectiveDag, validatedCtx, {
       onHumanReview: opts?.onHumanReview,
       recordOutcomes,
@@ -164,34 +304,6 @@ export const runDagStateful = async <I, O>(
       freshnessIndex: opts?.freshnessIndex,
     });
 
-    // Resolve the job handle — caller-supplied or fresh in-memory.
-    //
-    // When `opts.jobLike` is provided, the runner reads
-    // `job.data` (the checkpointed state + context) — `initialState` and
-    // `initialContext` are unused. In particular, the call-time `input`
-    // argument is intentionally ignored on resume; the resumed run's
-    // `ctx.initialInput` comes from the original enqueue's checkpoint.
-    // `compileDagToMachine` is still called above so the DAG's topology
-    // (cycle detection) is re-validated on every entry; the resulting
-    // `initialContext` is then dropped for resumed runs.
-    let job: JobLike<DagPhase, unknown, DagMachineContext>;
-    if (opts?.jobLike) {
-      const wrapped = wrapDagJobLike(opts.jobLike, effectiveDag, nodeCtx.runId);
-      const fingerprintCheck = wrapped.verifyDagFingerprint();
-      if (!fingerprintCheck.ok) {
-        closeRootSpan(rootSpan, { kind: "error", error: fingerprintCheck.error });
-        emitRunEnd("error");
-        return err(fingerprintCheck.error);
-      }
-      job = wrapped.job;
-    } else {
-      job = createInMemoryJob<DagPhase, DagMachineContext>({
-        state: initialState,
-        context: initialContext,
-      });
-    }
-
-    // errorEventOf adapter — converts classified errors to DagEvent ERROR
     const errorEventOf = (classified: { retriable: boolean; message: string }): DagEvent => ({
       type: "executor-error",
       retriable: classified.retriable,
@@ -209,82 +321,14 @@ export const runDagStateful = async <I, O>(
     };
 
     try {
-      const { state, context } = await runStateMachine(job, machine, executor, runOpts);
+      const { state, context } = await runStateMachine(job, compiled.value.machine, executor, runOpts);
 
-      return await match(state)
-        .returnType<Promise<Result<O, FrameworkError>>>()
-        .with({ kind: "succeeded" }, async (s) => {
-          // Background mode (onBackground supplied) resolves the caller before
-          // judges finish, so request-bound timeouts don't block on judge I/O.
-          const finalize = (): Promise<DagRunMeta> =>
-            finalizeRunWithJudges(
-              rootSpan,
-              dag,
-              input,
-              s.output,
-              context.outputs,
-              nodeCtx,
-              meta,
-              emitRunEnd,
-            );
-
-          if (opts?.onBackground) {
-            opts.onBackground(runFinalizeInBackground(finalize, rootSpan, emitRunEnd));
-          } else {
-            await finalize();
-          }
-          return ok(s.output as O);
-        })
-        // state.kind === "failed" — can happen when job was pre-loaded with a failed state
-        // (runStateMachine skips the loop entirely when already terminal)
-        .with({ kind: "failed" }, async (s) => {
-          closeRootSpan(rootSpan, { kind: "error", error: s.error });
-          emitRunEnd("error");
-          return err(s.error);
-        })
-        // Unexpected non-terminal states — should not be reached
-        .with({ kind: "pending" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
-        )
-        .with({ kind: "running" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
-        )
-        .with({ kind: "retrying" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
-        )
-        .with({ kind: "retrying-hook" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, s.nodeId),
-        )
-        .with({ kind: "awaiting-human" }, async (s) =>
-          unexpectedNonTerminal(rootSpan, emitRunEnd, s.kind, EXECUTOR_NODE_ID),
-        )
-        .exhaustive();
+      // 6. Handle terminal state
+      return handleTerminalState<O>(state, context, {
+        rootSpan, dag, input, nodeCtx, meta, emitRunEnd, opts,
+      });
     } catch (e) {
-      // The kernel throws on terminal-failed (FR-007) and beforeExecute abort.
-      // Split handling: abort gets `kind: "aborted"`, terminal-failed uses the
-      // structured error captured via onTrace (synchronous, always populated
-      // before the throw).
-      const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
-      if (isAbort) {
-        const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
-        closeRootSpan(rootSpan, { kind: "error", error });
-        emitRunEnd("error");
-        return err(error);
-      }
-      // Terminal-failed: the kernel attaches { state, context } to Error.cause.
-      const cause = (e as Error)?.cause as { state?: DagPhase } | undefined;
-      const failedState = cause?.state?.kind === "failed"
-        ? (cause.state as Extract<DagPhase, { kind: "failed" }>)
-        : undefined;
-      const error: FrameworkError = failedState?.error ?? {
-        kind: "node-crash",
-        nodeId: EXECUTOR_NODE_ID,
-        retriability: "retriable",
-        message: e instanceof Error ? e.message : String(e),
-      };
-      closeRootSpan(rootSpan, { kind: "error", error });
-      emitRunEnd("error");
-      return err(error);
+      return handleKernelError<O>(e, rootSpan, emitRunEnd);
     }
   });
 };

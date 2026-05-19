@@ -9,7 +9,7 @@ import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
-import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj, seedInitialActiveSet } from "./conditional.js";
+import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj, seedInitialActiveSet } from "./topology.js";
 import { match } from "ts-pattern";
 
 // ---------------------------------------------------------------------------

@@ -10,10 +10,11 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import type { Confidence } from "../types/confidence.js";
 import type { DagMachineContext, DagEvent } from "./types.js";
-import type { Decision } from "./conditional.js";
-import { decideRoute } from "./conditional.js";
+import type { Decision } from "./routing.js";
+import { decideRoute } from "./routing.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { emit } from "./emit.js";
+import type { PostWaveContext } from "./wave-execution.js";
 
 /**
  * Result of the routing-decision phase. Contains the per-source-node
@@ -31,17 +32,16 @@ export interface RoutingPhaseResult {
 
 /**
  * Compute routing decisions for all wave nodes that have conditional out-edges.
- * For each such node:
- *   1. Extract upstream confidence from the node definition (with error handling)
- *   2. Call `decideRoute` to evaluate predicates
- *   3. Short-circuit on `predicate-malformed` (config error, not transient)
- *   4. Emit `route-decided` observer event with full evidence
- *   5. Emit `node-pruned` for each pruned target
  *
- * Returns the decisions map for the `wave-done` event, or an early failure
- * event for predicate-malformed errors.
+ * Accepts either:
+ *   - `(PostWaveContext, newOutputs)` — new compact signature
+ *   - `(waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dagId, nowFn)` — legacy positional
  */
-export const emitRoutingDecisions = (
+export function emitRoutingDecisions(
+  ctx: PostWaveContext,
+  newOutputs: ReadonlyMap<NodeId, unknown>,
+): RoutingPhaseResult;
+export function emitRoutingDecisions(
   waveNodeIds: readonly NodeId[],
   newOutputs: ReadonlyMap<NodeId, unknown>,
   nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
@@ -49,7 +49,43 @@ export const emitRoutingDecisions = (
   nodeCtx: NodeContext,
   dagId: DagId,
   nowFn: () => number,
-): RoutingPhaseResult => {
+): RoutingPhaseResult;
+export function emitRoutingDecisions(
+  ctxOrWaveNodeIds: PostWaveContext | readonly NodeId[],
+  newOutputsArg: ReadonlyMap<NodeId, unknown>,
+  nodeMapArg?: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
+  machineCtxArg?: DagMachineContext,
+  nodeCtxArg?: NodeContext,
+  dagIdArg?: DagId,
+  nowFnArg?: () => number,
+): RoutingPhaseResult {
+  let waveNodeIds: readonly NodeId[];
+  let newOutputs: ReadonlyMap<NodeId, unknown>;
+  let nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
+  let machineCtx: DagMachineContext;
+  let nodeCtx: NodeContext;
+  let dagId: DagId;
+  let nowFn: () => number;
+
+  if (Array.isArray(ctxOrWaveNodeIds)) {
+    waveNodeIds = ctxOrWaveNodeIds;
+    newOutputs = newOutputsArg;
+    nodeMap = nodeMapArg!;
+    machineCtx = machineCtxArg!;
+    nodeCtx = nodeCtxArg!;
+    dagId = dagIdArg!;
+    nowFn = nowFnArg!;
+  } else {
+    const ctx = ctxOrWaveNodeIds as PostWaveContext;
+    waveNodeIds = ctx.waveNodeIds;
+    newOutputs = newOutputsArg;
+    nodeMap = ctx.nodeMap;
+    machineCtx = ctx.machineCtx;
+    nodeCtx = ctx.nodeCtx;
+    dagId = ctx.dagId;
+    nowFn = ctx.nowFn;
+  }
+
   const stamp = (): Date => new Date(nowFn());
   const routingDecisions = new Map<NodeId, Decision>();
   const confidenceValues = new Map<NodeId, Confidence | null>();

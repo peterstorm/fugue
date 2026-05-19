@@ -7,7 +7,8 @@
 import type { DagMachineContext, DagEvent } from "./types.js";
 import type { NodeId } from "../types/ids.js";
 import { isConditionalEdge } from "../types/dag.js";
-import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
+import { decideRoute } from "./routing.js";
+import { expandActive, seedInitialActiveSet } from "./topology.js";
 
 // ---------------------------------------------------------------------------
 // computeRerouteActiveSet — precompute the active-node set for reroute actions.

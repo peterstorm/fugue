@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from "bun:test";
 import fc from "fast-check";
-import { evaluatePredicate } from "../dag-runtime/conditional.js";
+import { evaluatePredicate } from "../dag-runtime/routing.js";
 import { confidence } from "../types/confidence.js";
 import type { Confidence, ConfidenceBucket, ConfidenceSource } from "../types/confidence.js";
 

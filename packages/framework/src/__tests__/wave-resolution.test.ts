@@ -8,7 +8,7 @@ import {
 } from "../dag-runtime/wave-resolution.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
-import type { Decision } from "../dag-runtime/conditional.js";
+import type { Decision } from "../dag-runtime/routing.js";
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";

@@ -14,7 +14,7 @@ import { createInMemoryBackend } from "../queue/in-memory.js";
 
 import { dagTransition } from "../dag-runtime/transition.js";
 import { handleNodeFailed } from "../dag-runtime/retry-policy.js";
-import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/conditional.js";
+import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 
 import { defineDag } from "../executor/define-dag.js";

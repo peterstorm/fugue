@@ -1,7 +1,10 @@
 // DAG runtime layer barrel export
 
 // Types
-export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";
+export type {
+  DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction,
+  DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState,
+} from "./types.js";
 
 // Pure transition
 export { dagTransition } from "./transition.js";
@@ -35,11 +38,16 @@ export type { DagRunOpts } from "./run-dag-stateful.js";
 export { checkFreshness, InMemoryFreshnessIndex } from "./freshness-check.js";
 export type { FreshnessIndex, FreshnessConflict, FreshnessCheckResult, WriteEntry } from "./freshness-check.js";
 
-// Conditional-edge runtime helpers (ADR 0015)
+// Routing decision logic (ADR 0015)
 export {
   decideRoute,
+  evaluatePredicate,
+  type Decision,
+} from "./routing.js";
+
+// Topology helpers
+export {
   expandActive,
   outgoingOf,
   seedInitialActiveSet,
-  type Decision,
-} from "./conditional.js";
+} from "./topology.js";

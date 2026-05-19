@@ -26,7 +26,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { RunId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { dagFingerprint } from "../checkpoint/fingerprint.js";
-import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj } from "./conditional.js";
+import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj } from "./topology.js";
 
 /**
  * The persisted shape plus an optional fingerprint stamp. This is the type

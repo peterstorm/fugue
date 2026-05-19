@@ -3,7 +3,8 @@
 
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { Decision, IncomingSources } from "./conditional.js";
+import type { Decision } from "./routing.js";
+import type { IncomingSources } from "./topology.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 
@@ -135,45 +136,22 @@ export type DagEvent =
   | { readonly type: "executor-error"; readonly retriable: boolean; readonly error: string };
 
 // ---------------------------------------------------------------------------
-// DagMachineContextPersisted — the plain-data subset safe for serialization.
-// Does NOT contain closures (run functions, Zod schemas, predicate functions).
-// `DagMachineContext` extends this with live DAG-derived fields.
+// Context slice types — focused sub-records of DagMachineContextPersisted.
 //
-// The pure transition layer operates on this type directly — no intermediate
-// type exists. See ADR-0029 for the rationale.
+// Each slice groups fields by concern so transition helpers can declare narrow
+// dependencies. `DagMachineContextPersisted` extends all slices — structurally
+// identical to the monolithic definition it replaces. Existing code that reads
+// `ctx.waves`, `ctx.retries`, etc. compiles without changes.
+//
+// Benefits:
+//   - Transition helpers declare which slice they need → narrower test fixtures
+//   - New features add to a sub-record; unrelated consumers don't see the field
+//   - The slice names document what each transition helper depends on
 // ---------------------------------------------------------------------------
 
-export interface DagMachineContextPersisted {
+/** Topology facts computed once at compile time. Immutable after construction. */
+export interface DagTopology {
   readonly waves: readonly (readonly NodeId[])[];
-  readonly outputs: ReadonlyMap<NodeId, unknown>;
-  readonly retries: ReadonlyMap<NodeId, number>;
-  readonly initialInput: unknown;
-  /**
-   * Subset of node ids that should still run. Seeded at compile time to every
-   * node forward-reachable from wave 0 along unconditional edges; expanded as
-   * conditional/default edges fire after each wave. Pruned nodes never appear
-   * in `outputs` and never get dispatched.
-   */
-  readonly activeNodeIds: ReadonlySet<NodeId>;
-  /**
-   * Per-node retry configuration (plain data, serializable). Populated at
-   * compile time from `NodeDef.retry`. Used by `retry-policy.ts` so the
-   * pure transition layer never reaches into live `NodeDef` objects.
-   */
-  readonly retryConfigs: ReadonlyMap<NodeId, { readonly backoffMs: readonly number[]; readonly jitterRatio: number }>;
-  /**
-   * Plain-data fields extracted from DagDef at compile time for the pure
-   * transition layer. These replace direct `ctx.dag` access — preventing
-   * the transition from accidentally capturing live closures.
-   */
-  readonly outputNodeId: NodeId | undefined;
-  readonly defaultRetryLimit: number | undefined;
-  readonly retryLimits: Readonly<Record<string, number>> | undefined;
-  /** Node IDs that declare human review (data only — no closures). */
-  readonly humanReviewNodeIds: ReadonlySet<NodeId>;
-  /** Human review prompts by node ID (plain data, extracted at compile time). */
-  readonly humanReviewPrompts: ReadonlyMap<NodeId, string>;
-  /** Edges (data only — predicates are never called by the transition layer). */
   readonly edges: readonly EdgeDef[];
   /**
    * Closure-free unconditional adjacency. Maps each node to the targets of its
@@ -182,12 +160,62 @@ export interface DagMachineContextPersisted {
    * predicate closures. Computed once at compile time.
    */
   readonly unconditionalAdj: ReadonlyMap<NodeId, readonly NodeId[]>;
+  /** Explicit output node. If omitted, falls back to last active node. */
+  readonly outputNodeId: NodeId | undefined;
+}
+
+/** Per-node retry configuration and accumulated attempt state. */
+export interface DagRetryState {
+  readonly retries: ReadonlyMap<NodeId, number>;
+  /**
+   * Per-node retry configuration (plain data, serializable). Populated at
+   * compile time from `NodeDef.retry`. Used by `retry-policy.ts` so the
+   * pure transition layer never reaches into live `NodeDef` objects.
+   */
+  readonly retryConfigs: ReadonlyMap<NodeId, { readonly backoffMs: readonly number[]; readonly jitterRatio: number }>;
+  readonly defaultRetryLimit: number | undefined;
+  readonly retryLimits: Readonly<Record<string, number>> | undefined;
+}
+
+/** Human-review gate configuration (plain data, no closures). */
+export interface DagHumanGateConfig {
+  /** Node IDs that declare human review (data only — no closures). */
+  readonly humanReviewNodeIds: ReadonlySet<NodeId>;
+  /** Human review prompts by node ID (plain data, extracted at compile time). */
+  readonly humanReviewPrompts: ReadonlyMap<NodeId, string>;
+}
+
+/** Routing/active-set state that evolves per wave. */
+export interface DagRoutingState {
+  /**
+   * Subset of node ids that should still run. Seeded at compile time to every
+   * node forward-reachable from wave 0 along unconditional edges; expanded as
+   * conditional/default edges fire after each wave.
+   */
+  readonly activeNodeIds: ReadonlySet<NodeId>;
   /**
    * Per-node extracted confidence values. Populated by the executor at wave
    * completion time so the pure transition layer can read precomputed
    * confidence without calling closure-based `confidence.extract()`.
    */
   readonly confidenceByNode: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
+}
+
+// ---------------------------------------------------------------------------
+// DagMachineContextPersisted — the plain-data subset safe for serialization.
+// Does NOT contain closures (run functions, Zod schemas, predicate functions).
+// `DagMachineContext` extends this with live DAG-derived fields.
+//
+// The pure transition layer operates on this type directly — no intermediate
+// type exists. See ADR-0029 for the rationale.
+//
+// Composed from focused slice types (DagTopology, DagRetryState,
+// DagHumanGateConfig, DagRoutingState) plus per-run state (outputs, initialInput).
+// ---------------------------------------------------------------------------
+
+export interface DagMachineContextPersisted extends DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState {
+  readonly outputs: ReadonlyMap<NodeId, unknown>;
+  readonly initialInput: unknown;
 }
 
 // ---------------------------------------------------------------------------
