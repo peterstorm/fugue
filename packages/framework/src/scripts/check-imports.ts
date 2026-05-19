@@ -144,6 +144,21 @@ const RULES: BoundaryRule[] = [
     reason:
       "types/ is a lower layer; it must not import from dag-runtime/ or executor/. Pure utilities belong in shared/.",
   },
+  // Anti-leak: the public main-barrel files and intermediate barrels in
+  // cache/ and checkpoint/ must not pull `ioredis` into their import graph.
+  // The Redis adapter files themselves are exempt; only the `/redis` and
+  // `/bullmq` subpath barrels are permitted entry points.
+  {
+    scope: ["index.ts", "advanced.ts", "testing.ts", "cache", "checkpoint"],
+    scopeExcludes: [
+      "cache/redis-cache.ts",
+      "checkpoint/redis-checkpointer.ts",
+      "checkpoint/redis-freshness-index.ts",
+    ],
+    forbiddenModules: ["ioredis"],
+    reason:
+      "ioredis is reachable only from the `/redis` and `/bullmq` subpath barrels. The main barrel and intermediate cache/, checkpoint/ barrels must stay Redis-free so default-bundle consumers do not pay for it.",
+  },
 ];
 
 /** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */

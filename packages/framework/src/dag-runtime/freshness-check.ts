@@ -12,64 +12,12 @@
  */
 
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
-import type { Witness } from "../types/freshness.js";
-import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
+import type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntry } from "../types/freshness.js";
 
-export interface FreshnessConflict {
-  /** The write node that is conditioned on a stale witness. */
-  readonly writeNodeId: NodeId;
-  readonly writeRunId: RunId;
-  readonly resource: string;
-  readonly conditionedOnWitness: Witness;
-  /** The conflicting write that superseded the conditioned-on witness. */
-  readonly conflictingWrite: {
-    readonly runId: RunId;
-    readonly nodeId: NodeId;
-    readonly newWitness: Witness;
-    readonly succeededAtMs: number;
-  };
-}
-
-export interface FreshnessCheckResult {
-  readonly conflicts: readonly FreshnessConflict[];
-}
-
-/** Write log entry, keyed by resource. Returned by freshness index lookups. */
-export interface WriteEntry {
-  readonly runId: RunId;
-  readonly nodeId: NodeId;
-  readonly newWitness: Witness;
-  readonly succeededAtMs: number;
-}
-
-// ---------------------------------------------------------------------------
-// FreshnessIndex port
-//
-// Defines the contract for freshness-write tracking. The in-memory
-// implementation is the default (single-process); a Redis-backed adapter
-// enables cross-process detection (see checkpoint/redis-freshness-index.ts).
-//
-// Both methods return `Promise<...>`. The in-memory implementation uses
-// trivially-async methods to satisfy the same interface as the Redis adapter
-// without requiring callers to handle sync/async differently.
-// ---------------------------------------------------------------------------
-
-export interface FreshnessIndex {
-  /** Record a successful write for future conflict detection. */
-  recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>>;
-  /**
-   * Check if a conditioned-on witness has been superseded by a write that
-   * completed after `sinceMs`. Returns the first conflicting write, or `null`.
-   */
-  findConflict(
-    resource: string,
-    conditionedOnValue: string,
-    sinceMs: number,
-  ): Promise<Result<WriteEntry | null, FrameworkError>>;
-}
+export type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntry };
 
 /**
  * Scan a sequence of witness-captured and write-attempted events to detect

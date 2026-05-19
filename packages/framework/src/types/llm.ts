@@ -13,6 +13,7 @@ import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { NodeContext, TypedNodeContext } from "./node.js";
 import type { NodeId } from "./ids.js";
+import type { Tracer } from "./tracer.js";
 
 // ---------------------------------------------------------------------------
 // Branded `ToolName`
@@ -51,7 +52,7 @@ export interface LlmRequest<O> {
    * Optional tracer for LLM span creation. When omitted or `null`, no OTel
    * span is created for this call. Prefer passing `ctx.tracer` when available.
    */
-  readonly tracer?: import("../tracing/tracer.js").Tracer | null;
+  readonly tracer?: Tracer | null;
 }
 
 export interface LlmResponse<O> {

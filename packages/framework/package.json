@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./advanced": "./src/advanced.ts",
     "./bullmq": "./src/bullmq.ts",
+    "./redis": "./src/redis.ts",
     "./testing": "./src/testing.ts"
   },
   "scripts": {

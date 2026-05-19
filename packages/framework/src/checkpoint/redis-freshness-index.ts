@@ -20,8 +20,7 @@
 
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { FreshnessIndex, WriteEntry } from "../dag-runtime/freshness-check.js";
-import type { WitnessKind } from "../types/freshness.js";
+import type { FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";

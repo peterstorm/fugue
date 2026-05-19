@@ -29,12 +29,12 @@ export { topoSort } from "../shared/topo.js";
 // DAG executor closure
 export { buildDagExecutor } from "./executor.js";
 
-// runDagStateful orchestrator — re-exported via executor/run-dag.ts and advanced.ts.
-// Direct imports from this file remain valid for internal use.
-export { runDagStateful } from "./run-dag-stateful.js";
-export type { DagRunOpts } from "./run-dag-stateful.js";
+// runDagStateful is the internal kernel-mode entry point. It is reachable via
+// direct file imports (`dag-runtime/run-dag-stateful.js`) for tests and the
+// public wrapper in `executor/run-dag.ts`. It is intentionally NOT re-exported
+// from this barrel — the public surface for orchestrator concerns is `runDag`.
 
-// Freshness witness contract (Phase 3)
+// Freshness witness contract
 export { checkFreshness, InMemoryFreshnessIndex } from "./freshness-check.js";
 export type { FreshnessIndex, FreshnessConflict, FreshnessCheckResult, WriteEntry } from "./freshness-check.js";
 

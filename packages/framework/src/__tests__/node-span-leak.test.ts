@@ -1,15 +1,15 @@
 import { describe, expect, test, afterEach } from "bun:test";
 import { setFrameworkTracer, __resetFrameworkTracer } from "../tracing/global-tracer.js";
-import { withNodeSpan } from "../dag-runtime/node-span.js";
+import { withTracedNodeSpan } from "../dag-runtime/node-span.js";
 import { ok } from "../types/result.js";
 
 /**
- * Wave 1.1 regression test. Before the fix, `withNodeSpan` did
+ * Wave 1.1 regression test. Before the fix, `withTracedNodeSpan` did
  * `const result = await fn()` with no `try/catch` around `fn()` itself —
  * under `OBSERVER_STRICT=1` (or any other re-thrown failure inside the
  * node), `span.end()` never ran and the OTel pipeline leaked spans.
  *
- * This test runs `withNodeSpan` with an `fn()` that throws and asserts
+ * This test runs `withTracedNodeSpan` with an `fn()` that throws and asserts
  * the recording tracer observes a balanced start/end pair.
  */
 
@@ -40,7 +40,7 @@ const makeFakeTracer = (recorded: RecordedSpan[]) => {
   };
 };
 
-describe("withNodeSpan span leak under thrown fn (Wave 1.1)", () => {
+describe("withTracedNodeSpan span leak under thrown fn (Wave 1.1)", () => {
   afterEach(() => {
     __resetFrameworkTracer();
   });
@@ -49,7 +49,7 @@ describe("withNodeSpan span leak under thrown fn (Wave 1.1)", () => {
     const recorded: RecordedSpan[] = [];
     setFrameworkTracer(makeFakeTracer(recorded) as unknown as Parameters<typeof setFrameworkTracer>[0]);
 
-    const { result } = await withNodeSpan("n1", "transform", { in: 1 }, null, { kind: "none" }, async () => {
+    const { result } = await withTracedNodeSpan("n1", "transform", { in: 1 }, null, { kind: "none" }, async () => {
       throw new Error("observer-strict rethrow");
     });
 
@@ -69,7 +69,7 @@ describe("withNodeSpan span leak under thrown fn (Wave 1.1)", () => {
     const recorded: RecordedSpan[] = [];
     setFrameworkTracer(makeFakeTracer(recorded) as unknown as Parameters<typeof setFrameworkTracer>[0]);
 
-    const { result } = await withNodeSpan("n1", "transform", { in: 1 }, null, { kind: "none" }, async () =>
+    const { result } = await withTracedNodeSpan("n1", "transform", { in: 1 }, null, { kind: "none" }, async () =>
       ok({ out: 2 }),
     );
     expect(result.ok).toBe(true);

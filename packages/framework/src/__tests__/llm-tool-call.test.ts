@@ -465,7 +465,7 @@ describe("sendWithTools span emission (GenAI semconv)", () => {
   });
 
   // ADR-0023 nesting invariant: when an outer "node" context is active —
-  // production wraps sendWithTools in withNodeSpan — every CHAT_MODEL and TOOL
+  // production wraps sendWithTools in withTracedNodeSpan — every CHAT_MODEL and TOOL
   // span produced by the loop must nest under that ambient span. Tool spans
   // open *after* the LLM span that requested them has ended, so the correct
   // tree is `node → {chat₁, tool₁, tool₂, chat₂, …}` (siblings under the node)
@@ -565,7 +565,7 @@ describe("sendWithTools span emission (GenAI semconv)", () => {
 describe("sendWithTools convergence", () => {
   test("K tool turns then final produces Ok with sum of token usage", async () => {
     for (const K of [0, 1, 5, 9]) {
-      const script: any[] = [];
+      const script: import("../llm/fake-client.js").FakeTurn[] = [];
       for (let i = 0; i < K; i++) {
         script.push({
           type: "tool_use",

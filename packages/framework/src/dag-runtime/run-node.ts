@@ -1,8 +1,7 @@
-// runNodeShared — single implementation of per-node execution shared by
-// `executor/executor.ts` (the public `runDag` entry point) and
-// `dag-runtime/executor.ts` (the state-machine path).
+// runNodeShared — single implementation of per-node execution.
+// Sole caller: `dag-runtime/wave-execution.ts`.
 //
-// Behavioral differences between the two callers are expressed as `opts`:
+// Behavioral options:
 //
 //   - `checkpoint` — when provided and contains `node.id`, the node skips
 //     execution, validates the cached value against `outputSchema`, emits
@@ -24,11 +23,9 @@ import type { NodeId, DagId } from "../types/ids.js";
 import { emit } from "./emit.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
 import { buildNodeInput } from "../shared/build-input.js";
-import { withNodeSpan, type NodeSpanOutcome } from "./node-span.js";
+import { withTracedNodeSpan, EMPTY_OUTCOME, type NodeSpanOutcome } from "./node-span.js";
 import { resolveContentFilter } from "../tracing/content-filter.js";
 import type { IncomingSources } from "../shared/incoming.js";
-
-const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
 
 export interface RunNodeOpts {
   /**
@@ -117,7 +114,7 @@ export const runNodeShared = async (
     return { result: inputResult, outcome: EMPTY_OUTCOME };
   }
 
-  return withNodeSpan(nodeId, node.kind, inputResult.value, resolveContentFilter(ctx), node.sideEffects, async () => {
+  return withTracedNodeSpan(nodeId, node.kind, inputResult.value, resolveContentFilter(ctx), node.sideEffects, async () => {
     const nodeStart = nowFn();
     emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, sideEffects: node.sideEffects, timestamp: stamp() });
 

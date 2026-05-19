@@ -11,6 +11,7 @@
 //   handleKernelError — catch block: abort vs terminal-failed
 
 import { match } from "ts-pattern";
+import type { Span } from "@opentelemetry/api";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
@@ -20,7 +21,6 @@ import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
-import { FrameworkAugmentedError } from "../types/errors.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { runStateMachine } from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
@@ -160,7 +160,7 @@ const resolveJob = (
 // ---------------------------------------------------------------------------
 
 interface TerminalDeps {
-  readonly rootSpan: import("@opentelemetry/api").Span;
+  readonly rootSpan: Span;
   readonly dag: DagDef;
   readonly input: unknown;
   readonly nodeCtx: NodeContext;
@@ -213,7 +213,7 @@ const handleTerminalState = <O>(
 
 const handleKernelError = <O>(
   e: unknown,
-  rootSpan: import("@opentelemetry/api").Span,
+  rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
 ): Result<O, FrameworkError> => {
   const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
@@ -338,7 +338,7 @@ export const runDagStateful = async <I, O>(
 // ---------------------------------------------------------------------------
 
 const unexpectedNonTerminal = <O>(
-  rootSpan: import("@opentelemetry/api").Span,
+  rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
   kind: string,
   nodeId: NodeId,
@@ -355,39 +355,3 @@ const unexpectedNonTerminal = <O>(
   return err(error);
 };
 
-// ---------------------------------------------------------------------------
-// runDagAsWorkerJob — queue worker entry point
-// ---------------------------------------------------------------------------
-
-/**
- * Wrapper around `runDagStateful` for use inside a queue worker's `process`
- * callback. Re-throws on `err` so the queue (BullMQ) sees the failure and
- * applies its retry / DLQ policy.
- *
- * Why this exists:
- *   `runDagStateful` returns `Result<O, FrameworkError>`. A worker that simply
- *   awaits it without rethrowing on `!ok` will **silently ack failed jobs**,
- *   bypassing queue-level `attempts` and dead-letter handlers. Use this helper
- *   from `createWorker(name, async (job) => runDagAsWorkerJob(...))` so failed
- *   runs reach `WorkerHandle.onFailed`.
- */
-export const runDagAsWorkerJob = async <I, O>(
-  dag: DagDef,
-  input: I,
-  nodeCtx: NodeContext,
-  opts?: DagRunOpts,
-): Promise<O> => {
-  const result = await runDagStateful<I, O>(dag, input, nodeCtx, opts);
-  if (!result.ok) {
-    const detail =
-      result.error.kind === "node-crash"
-        ? result.error.message
-        : JSON.stringify(result.error);
-    const thrownError = new FrameworkAugmentedError(
-      `runDagAsWorkerJob: DAG '${dag.id}' failed: ${detail}`,
-      result.error,
-    );
-    throw thrownError;
-  }
-  return result.value;
-};

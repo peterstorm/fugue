@@ -1041,7 +1041,7 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
 describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () => {
   redisIt("crash mid-DAG, reopen, finish remaining nodes via live nodeMap.get", async () => {
     // Lazy imports to keep this section self-contained.
-    const { runDagAsWorkerJob } = await import("../../dag-runtime/run-dag-stateful.js");
+    const { runDagAsWorkerJob } = await import("../../executor/run-dag.js");
     const { defineDagFromArray } = await import("../../executor/define-dag.js");
     const { z } = await import("zod");
     const { ok, err } = await import("../../types/result.js");

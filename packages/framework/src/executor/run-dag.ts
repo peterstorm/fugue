@@ -96,12 +96,6 @@ export interface RunOptions {
   readonly onTrace?: KernelRunOpts<DagPhase, DagEvent, DagMachineContext>["onTrace"];
 }
 
-/**
- * @deprecated Use `RunOptions` directly. `DagRunOpts` is retained as an alias
- * for backward compatibility on the `/advanced` subpath.
- */
-export type DagRunOpts = RunOptions;
-
 export const runDag = async <I, O>(
   dag: DagDef,
   input: I,

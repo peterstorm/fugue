@@ -231,10 +231,3 @@ export const withTracedNodeSpan = async (
   );
 };
 
-// ---------------------------------------------------------------------------
-// Backward compatibility — withNodeSpan is an alias for withTracedNodeSpan.
-// Existing callers (run-node.ts) continue to work without changes.
-// ---------------------------------------------------------------------------
-
-/** @deprecated Use `withTracedNodeSpan` + `classifyGuardrailOutcome` separately. */
-export const withNodeSpan = withTracedNodeSpan;
