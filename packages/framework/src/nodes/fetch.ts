@@ -3,7 +3,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
 
 export interface FetchNodeConfig<I, O> {
@@ -19,7 +19,7 @@ export interface FetchNodeConfig<I, O> {
 export const createFetchNode = <I, O>(
   config: FetchNodeConfig<I, O>,
 ): NodeDef<I, O, FrameworkError, readonly []> & { readonly id: NodeId } => ({
-  id: __brandNodeId(config.id),
+  id: nodeId(config.id),
   kind: "fetch",
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,

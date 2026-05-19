@@ -76,19 +76,17 @@ const toolToOpenAiSpec = (tool: ToolDef<any, any>): Record<string, unknown> => (
   strict: false,
 });
 
+import { match } from "ts-pattern";
+
 const toolChoiceToOpenAi = (
   choice: SendWithToolsRequest<any>["toolChoice"],
-): string => {
-  switch (choice) {
-    case "any":
-      return "required";
-    case "none":
-      return "none";
-    case "auto":
-    case undefined:
-      return "auto";
-  }
-};
+): string =>
+  match(choice)
+    .with("any", () => "required")
+    .with("none", () => "none")
+    .with("auto", () => "auto")
+    .with(undefined, () => "auto")
+    .exhaustive();
 
 // ---------------------------------------------------------------------------
 // Responses API output shapes
@@ -447,6 +445,7 @@ export class OpenAILlmClient implements LlmClient {
     } catch (error) {
       return classifyLlmError(error, resolveNodeId(req), {
         timeoutMs: this.requestTimeoutMs,
+        callerAborted: req.signal?.aborted,
       });
     }
   }

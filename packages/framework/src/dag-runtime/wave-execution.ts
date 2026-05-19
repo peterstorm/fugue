@@ -13,7 +13,7 @@ import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import type { DagMachineContext, DagEvent } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
@@ -25,6 +25,9 @@ import { emitRoutingDecisions } from "./route-emission.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex } from "./freshness-check.js";
 import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
+
+/** Sentinel for wave-level invariant violations. */
+const WAVE_NODE_ID: NodeId = nodeId("__wave__");
 
 // ---------------------------------------------------------------------------
 // WaveConfig — configuration object for executeWave
@@ -74,8 +77,8 @@ export const executeWave = async (
     return {
       event: {
         type: "node-failed",
-        nodeId: __brandNodeId("__wave__"),
-        error: { kind: "node-crash", nodeId: __brandNodeId("__wave__"), message, retriability: "non-retriable" },
+        nodeId: WAVE_NODE_ID,
+        error: { kind: "node-crash", nodeId: WAVE_NODE_ID, message, retriability: "non-retriable" },
       },
       outcomes: [],
     };

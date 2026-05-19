@@ -1,11 +1,8 @@
 // runDagStateful — orchestrates the DAG executor with the state-machine runner.
 // Stateful DAG lifecycle, input/output validation, retry with backoff.
 //
-// This file is intentionally orchestration-only. The helpers it composes:
-//   - persistence.ts        — wrapDagJobLike / stripNonPersistable
-//   - run-telemetry.ts      — root-span lifecycle + run-start/run-end emission
-//   - eval-judges.ts        — judge runner + finalizeRunWithJudges + background wrapper
-// Add new behaviour to the matching helper, not here.
+// This file is intentionally orchestration-only. It composes helpers from
+// sibling modules; add new behaviour to the matching helper, not here.
 
 import { match } from "ts-pattern";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";

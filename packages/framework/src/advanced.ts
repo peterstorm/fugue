@@ -12,7 +12,7 @@ export type { BackgroundResult, DagRunOpts } from "./executor/run-dag.js";
 
 /**
  * @deprecated Use `runDag` from the main barrel with full `RunOptions`.
- * Retained for backward compatibility — delegates to `runDag` internally.
+ * Retained for backward compatibility — this is a re-exported alias.
  */
 export { runDag as runDagStateful } from "./executor/run-dag.js";
 export type { RunOptions as DagRunStatefulOpts } from "./executor/run-dag.js";

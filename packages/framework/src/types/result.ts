@@ -121,3 +121,7 @@ export const mapAsync = async <T, U, E>(
   r: Result<T, E>,
   fn: (value: T) => Promise<U>,
 ): Promise<Result<U, E>> => (r.ok ? ok(await fn(r.value)) : r);
+
+/** Lift a nullable value into a Result. Returns Err(error) for null/undefined. */
+export const fromNullable = <T, E>(value: T | null | undefined, error: E): Result<T, E> =>
+  value != null ? ok(value) : err(error);

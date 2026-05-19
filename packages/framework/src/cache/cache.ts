@@ -43,7 +43,13 @@ export class InMemoryCache implements Cache {
       this.store.delete(key);
       return ok(null);
     }
-    const parsed = JSON.parse(entry.value);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(entry.value);
+    } catch (e) {
+      const message = `key="${key}": JSON.parse failed: ${e instanceof Error ? e.message : String(e)}`;
+      return err({ kind: "cache-error", operation: "get", message });
+    }
     const validated = schema.safeParse(parsed);
     if (!validated.success) return err(schemaMismatchError(key, validated.error.message));
     return ok(validated.data);

@@ -70,6 +70,8 @@ export interface ToolUseLoopConfig<O> {
   readonly maxIterations: number;
   readonly deadlineMs?: number;
   readonly signal?: AbortSignal;
+  /** Injectable clock for deadline enforcement. Defaults to `Date.now`. */
+  readonly now?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,11 +112,12 @@ export const toolUseLoop = async <O>(
   let totalTokensIn = 0;
   let totalTokensOut = 0;
   let lastThinking: string | undefined;
-  const deadline = config.deadlineMs ? Date.now() + config.deadlineMs : Infinity;
+  const nowFn = config.now ?? Date.now;
+  const deadline = config.deadlineMs ? nowFn() + config.deadlineMs : Infinity;
 
   for (let turn = 0; turn < config.maxIterations; turn++) {
     // Deadline check
-    if (Date.now() >= deadline) {
+    if (nowFn() >= deadline) {
       return err({
         kind: "transient",
         nodeId: config.nodeId,

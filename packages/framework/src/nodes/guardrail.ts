@@ -3,7 +3,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
 import { emit } from "../dag-runtime/emit.js";
 
@@ -86,7 +86,7 @@ export interface GuardrailNodeConfig<I, T> {
 export const createGuardrailNode = <I, T>(
   config: GuardrailNodeConfig<I, T>,
 ): NodeDef<I, GuardrailResult<T>, FrameworkError, readonly []> & { readonly id: NodeId } => {
-  const id = __brandNodeId(config.id);
+  const id = nodeId(config.id);
   return {
   id,
   kind: "guardrail",

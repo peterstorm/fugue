@@ -26,8 +26,8 @@ Types and entry points that workflow authors touch.
 - `Capability`, `CapabilityFields`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
 - `RunId`, `NodeId`, `DagId` plus the `runId`, `nodeId`, `dagId` smart constructors — branded identifiers; raw strings cross the boundary at the entry points (`defineDag`, `makeNodeContext`, `runDag`) and become branded once.
 - `ContextCacheAdapter`, `CacheLookup`, `PromptAccess`, `Logger`, `Tracer` — pluggable seams.
-- `ObserverEvent` (and the per-event types `RunStartEvent`, `NodeStartEvent`, `NodeEndEvent`, `NodeSkippedEvent`, `NodeErrorEvent`, `SubSpanEvent`, `RunEndEvent`, `RouteDecidedEvent`, `NodePrunedEvent`), `SpanKind` — the typed event envelope flowing through the `Observer` interface (which lives under `observer/`).
-- `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `map`, `mapErr`, `unwrap`, `unwrapOr` — the `Either` shape used everywhere errors are returned (no exceptions across module boundaries).
+- `ObserverEvent` (and the per-event types `RunStartEvent`, `NodeStartEvent`, `NodeEndEvent`, `NodeSkippedEvent`, `NodeErrorEvent`, `SubSpanEvent`, `RunEndEvent`, `RouteDecidedEvent`, `NodePrunedEvent`, `WitnessCapturedEvent`, `WriteAttemptedEvent`, `FreshnessViolationEvent`, `HumanInterventionEvent`), `SpanKind` — the typed event envelope flowing through the `Observer` interface (which lives under `observer/`).
+- `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `andThenAsync`, `map`, `mapAsync`, `mapErr`, `unwrapOr`, `fold`, `orElse`, `tryCatch`, `tryCatchAsync`, `sequenceFirst`, `sequenceAll`, `tap`, `tapErr`, `fromNullable` — the `Either` shape used everywhere errors are returned (no exceptions across module boundaries). (`unwrap` is available via direct path import for tests but intentionally excluded from the barrel.)
 - `FrameworkError` (re-exported from `types/errors.js`) — discriminated error union.
 
 Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `NodesRecord`) live in `types/dag-internals.ts` and are intentionally not re-exported.
@@ -36,7 +36,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
 - `validateDagShape`, `recordFromNodeArray` — pure validation utilities.
-- `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is on `DagRunOpts` for the advanced kernel-mode entries — see below.)
+- `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is available on `RunOptions`.)
 
 ### `nodes/`
 

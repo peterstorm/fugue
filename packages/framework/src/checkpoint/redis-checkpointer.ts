@@ -44,16 +44,23 @@ const serializeMeta = (meta: RunMeta): string =>
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
   const stored: StoredMeta = JSON.parse(raw);
+  const startedAt = new Date(stored.startedAt);
+  const createdAt = new Date(stored.createdAt);
+  if (isNaN(startedAt.getTime()) || isNaN(createdAt.getTime())) {
+    throw new Error(
+      `Invalid date in checkpoint meta: startedAt=${stored.startedAt}, createdAt=${stored.createdAt}`,
+    );
+  }
   return {
     meta: {
       dagId: stored.dagId,
-      startedAt: new Date(stored.startedAt),
+      startedAt,
       nodeCount: stored.nodeCount,
       ...(stored.subject !== undefined ? { subject: stored.subject } : {}),
       ...(stored.dagFingerprint !== undefined ? { dagFingerprint: stored.dagFingerprint } : {}),
       ...(stored.frameworkVersion !== undefined ? { frameworkVersion: stored.frameworkVersion } : {}),
     },
-    createdAt: new Date(stored.createdAt),
+    createdAt,
   };
 };
 
@@ -66,10 +73,14 @@ const serializeNode = (state: NodeState): string =>
 
 const deserializeNode = (raw: string): NodeState => {
   const stored: StoredNodeState = JSON.parse(raw);
+  const completedAt = new Date(stored.completedAt);
+  if (isNaN(completedAt.getTime())) {
+    throw new Error(`Invalid date in checkpoint node: completedAt=${stored.completedAt}`);
+  }
   return {
     nodeId: stored.nodeId,
     output: stored.output,
-    completedAt: new Date(stored.completedAt),
+    completedAt,
   };
 };
 

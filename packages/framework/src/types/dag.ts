@@ -6,9 +6,7 @@ import type {
   ConsistentNodes,
 } from "./dag-internals.js";
 import type { DagId, NodeId } from "./ids.js";
-import { __brandNodeId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
-import { meetsConfidence } from "./confidence.js";
 
 // Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
 // are imported above but NOT re-exported. They live in `./dag-internals.ts`,
@@ -53,49 +51,9 @@ export type PredicateResult = {
   | { readonly outcome: "threw"; readonly message: string }
 );
 
-/**
- * Evaluate a predicate against a node's output with confidence gating.
- *
- * Returns a discriminated `PredicateResult`. The `outcome: "threw"` variant
- * signals a predicate implementation bug — the caller should surface a
- * `predicate-malformed` error instead of silently taking the default edge.
- */
-export const evaluatePredicate = <T>(
-  pred: Predicate<T>,
-  output: T,
-  confidence: Confidence | null,
-): PredicateResult => {
-  // Gate on minConfidence before calling check
-  if (pred.minConfidence !== undefined) {
-    if (confidence === null || !meetsConfidence(confidence.bucket, pred.minConfidence)) {
-      return {
-        predicateLabel: pred.label,
-        predicateVersion: pred.version,
-        evaluatedConfidence: confidence,
-        outcome: "below-min-confidence",
-      };
-    }
-  }
-
-  try {
-    const matched = pred.check(output, confidence);
-    return {
-      predicateLabel: pred.label,
-      predicateVersion: pred.version,
-      evaluatedConfidence: confidence,
-      outcome: matched ? "matched" : "not-matched",
-    };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return {
-      predicateLabel: pred.label,
-      predicateVersion: pred.version,
-      evaluatedConfidence: confidence,
-      outcome: "threw",
-      message: msg,
-    };
-  }
-};
+// evaluatePredicate has been moved to `dag-runtime/conditional.ts` where
+// it belongs (it contains business logic, not type definitions). Import from
+// `dag-runtime/conditional.js` directly.
 
 /**
  * Edge variants (runtime shape, after `defineDag` strips literal id types).

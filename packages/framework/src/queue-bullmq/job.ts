@@ -132,7 +132,15 @@ export function adaptBullMQJob<S, C>(
     get data(): { state: S; context: C } {
       // BullMQ stores the value enqueued/written via updateData. We tag Map/Set
       // on write (serializeValue), so reading must invert that tagging.
-      const raw = deserializeValue(bullJob.data);
+      let raw: unknown;
+      try {
+        raw = deserializeValue(bullJob.data);
+      } catch (e) {
+        throw new Error(
+          `[adaptBullMQJob] deserializeValue failed for queue "${queueName}" job "${bullJob.id}": ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e },
+        );
+      }
       if (validateData) {
         const result = validateData(raw);
         if (!result.ok) {

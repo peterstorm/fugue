@@ -1,5 +1,5 @@
 // buildDagExecutor — DAG executor closure
-// Validates inputs/outputs; exponential backoff with jitter on retries
+// Orchestrates wave execution, retry backoff with jitter, and human-review hook dispatch.
 // Returns an Executor<DagPhase, DagEvent, DagMachineContext> that runs one wave per call.
 
 import { match } from "ts-pattern";
@@ -7,18 +7,16 @@ import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import { isConditionalEdge } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import { __brandNodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { emit } from "./emit.js";
 import { applyJitter } from "../shared/jitter.js";
 import { fwLogger } from "../logger.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
-import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
+import { computeRerouteActiveSet, enrichHumanRespondedEvent } from "./reroute.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
@@ -159,63 +157,6 @@ const callHumanReviewHook = async (
 
 
 // ---------------------------------------------------------------------------
-// computeRerouteActiveSet — precompute the active-node set for reroute actions.
-// Called by the executor so the pure transition never evaluates predicates.
-// ---------------------------------------------------------------------------
-
-const computeRerouteActiveSet = (
-  targetNodeId: NodeId,
-  machineCtx: DagMachineContext,
-): ReadonlySet<NodeId> | undefined => {
-  const targetWave = machineCtx.waves.findIndex((w) => w.includes(targetNodeId));
-  if (targetWave === -1 || targetWave > (machineCtx.waves.length - 1)) return undefined;
-
-  const waveByNodeId = new Map<NodeId, number>();
-  for (let w = 0; w < machineCtx.waves.length; w++) {
-    for (const id of machineCtx.waves[w]) waveByNodeId.set(id, w);
-  }
-  const beforeTargetWave = (nodeId: NodeId): boolean =>
-    (waveByNodeId.get(nodeId) ?? -1) < targetWave;
-
-  const survivingOutputs = new Map(
-    [...machineCtx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
-  );
-
-  let reseededActive = seedInitialActiveSet(machineCtx.dag);
-  for (let w = 0; w < targetWave; w++) {
-    for (const nodeId of machineCtx.waves[w] ?? []) {
-      if (!reseededActive.has(nodeId)) continue;
-      if (!survivingOutputs.has(nodeId)) continue;
-      const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
-      if (!outgoing.some(isConditionalEdge)) continue;
-      const upstreamConfidence = machineCtx.confidenceByNode.get(nodeId) ?? null;
-      const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing, upstreamConfidence);
-      if (decision.kind === "predicate-malformed") {
-        // On malformed predicate, return undefined — the transition will
-        // fall back to its current active set (safe but imprecise).
-        return undefined;
-      }
-      reseededActive = expandActive(machineCtx.unconditionalAdj, reseededActive, decision.chosenTargets);
-    }
-  }
-  return reseededActive;
-};
-
-/**
- * Enrich a human-responded event with `rerouteActiveSet` for reroute actions.
- * Called by the executor after receiving a successful human-responded event.
- */
-const enrichHumanRespondedEvent = (
-  event: DagEvent,
-  machineCtx: DagMachineContext,
-): DagEvent => {
-  if (event.type !== "human-responded") return event;
-  if (event.action.action !== "reroute") return event;
-  const rerouteActiveSet = computeRerouteActiveSet(event.action.targetNodeId, machineCtx);
-  return { ...event, rerouteActiveSet };
-};
-
-// ---------------------------------------------------------------------------
 // buildDagExecutor — FR-027 applied when state.kind === "retrying"
 // ---------------------------------------------------------------------------
 
@@ -303,7 +244,7 @@ export const buildDagExecutor = (
 
       // -----------------------------------------------------------------------
       // retrying: sleep with jitter then re-run the failing node in its wave
-      // FR-027: delay = nextDelayMs * (1 + jitterRatio * random)
+      // FR-027: delay = nextDelayMs * (1 ± jitterRatio) — symmetric jitter via applyJitter
       // -----------------------------------------------------------------------
       .with({ kind: "retrying" }, async (p) => {
         const nodeDef = nodeMap.get(p.nodeId);

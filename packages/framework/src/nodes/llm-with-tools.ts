@@ -5,7 +5,7 @@ import type { NodeId } from "../types/ids.js";
 import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../shared/hash.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import { runLlmCallPipeline } from "./llm-pipeline.js";
 
 /**
@@ -68,7 +68,7 @@ export type LlmWithToolsNodeConfig<I, O> =
 export const createLlmWithToolsNode = <I, O>(
   config: LlmWithToolsNodeConfig<I, O>,
 ): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: NodeId } => {
-  const id = __brandNodeId(config.id);
+  const id = nodeId(config.id);
   return {
   id,
   kind: "llm",

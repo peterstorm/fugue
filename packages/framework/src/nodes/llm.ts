@@ -5,7 +5,7 @@ import type { NodeId } from "../types/ids.js";
 import type { LlmRequest } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
 import { stableHash } from "../shared/hash.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import { runLlmCallPipeline } from "./llm-pipeline.js";
 
 /**
@@ -50,7 +50,7 @@ export const interpolatePrompt = (template: string, vars: Record<string, unknown
 export const createLlmNode = <I, O>(
   config: LlmNodeConfig<I, O>,
 ): NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & { readonly id: NodeId } => {
-  const id = __brandNodeId(config.id);
+  const id = nodeId(config.id);
   return {
   id,
   kind: "llm",

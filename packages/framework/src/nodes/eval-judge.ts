@@ -15,10 +15,11 @@
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
 import type { LlmClient, LlmRequest } from "../types/llm.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
 import { enrichLlmSpan } from "../tracing/index.js";
+import { dispatchEvent } from "../observer/dispatch.js";
 
 // Re-export types from their canonical home in `types/`.
 export type { EvalJudgeResult, EvalJudgeNodeDef, EvalJudgeNodeConfig } from "../types/eval-judge.js";
@@ -45,11 +46,11 @@ const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 /** Emit an observer event when the judge skips (fail-open). */
 const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): void => {
   if (ctx.observer) {
-    ctx.observer.observe({
+    dispatchEvent(ctx.observer, {
       type: "sub-span",
       runId: ctx.runId,
       dagId: ctx.dagId,
-      nodeId: __brandNodeId(judgeId),
+      nodeId: nodeId(judgeId),
       parentSpanId: judgeId,
       kind: "EVALUATOR",
       timestamp: new Date(),
@@ -117,7 +118,7 @@ export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number
  */
 export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeDef => {
   const threshold = config.threshold ?? DEFAULT_THRESHOLD;
-  const brandedId = __brandNodeId(config.id);
+  const brandedId = nodeId(config.id);
 
   return {
     id: brandedId,

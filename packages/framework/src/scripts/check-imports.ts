@@ -98,6 +98,20 @@ const RULES: BoundaryRule[] = [
     reason:
       "dag-runtime/** must not import from executor/** — executor wraps dag-runtime, not the other way. Use shared/ for pure utilities consumed by both.",
   },
+  // `types/` is the pure domain-type layer. It must not reach into runtime
+  // modules (dag-runtime, shared, executor) — only other types/ files.
+  {
+    scope: ["types"],
+    scopeExcludes: [
+      // The barrel re-exports `computeJsonPatch` from shared/ as part of the
+      // public API surface. The function is pure (no side effects) and lives
+      // in shared/ for historical reasons.
+      "types/index.ts",
+    ],
+    forbiddenModules: ["../dag-runtime", "../shared", "../executor"],
+    reason:
+      "types/** is the pure type layer — must not import runtime or utility modules. Move logic to dag-runtime/ or shared/ instead.",
+  },
   // `shared/` must stay free of telemetry concerns: the modules that used to
   // mint spans (`shared/run-node.ts`, `shared/node-span.ts`) moved into
   // `dag-runtime/` during pass 3. Anything in `shared/` is consumed by both

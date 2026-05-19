@@ -2,6 +2,9 @@
 // Ensures state and context containing Map/Set instances round-trip
 // through JSON without information loss (required for checkpoint persistence).
 
+import type { Result } from "../types/result.js";
+import { tryCatch } from "../types/result.js";
+
 const MAP_TAG = "__map__";
 const SET_TAG = "__set__";
 const DATE_TAG = "__date__";
@@ -113,6 +116,10 @@ export const deserializeValue = (value: unknown): unknown => {
 export const toJson = (value: unknown): string =>
   JSON.stringify(serializeValue(value));
 
-/** Deserialize from JSON string — inverse of toJson. */
+/** Deserialize from JSON string — inverse of toJson. Throws on malformed JSON. */
 export const fromJson = (json: string): unknown =>
   deserializeValue(JSON.parse(json));
+
+/** Safe variant of `fromJson` — returns a Result instead of throwing on malformed input. */
+export const tryFromJson = (json: string): Result<unknown, Error> =>
+  tryCatch(() => deserializeValue(JSON.parse(json)));

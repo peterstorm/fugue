@@ -61,11 +61,10 @@ export const collectHumanReviewQueue = (
  * 2. If there are humanReview nodes, enter `awaiting-human` for the first one.
  * 3. Otherwise advance to next wave or `succeeded`.
  *
- * `routingDecisions`, when supplied by the executor, is the per-source-node
- * routing decision computed once during wave execution. The transition reads
- * `chosenTargets` to expand `activeNodeIds` instead of re-evaluating predicates.
- * When omitted (e.g. legacy event-log replays without the field), the
- * transition falls back to recomputing decisions on the fly.
+ * `routingDecisions` is the per-source-node routing decision computed once
+ * during wave execution (ADR-0029: mandatory, never re-evaluate predicates).
+ * The transition reads `chosenTargets` to expand `activeNodeIds`. Nodes
+ * without conditional out-edges simply have no entry — expansion is a no-op.
  */
 export const handleWaveDone = (
   wave: number,
@@ -128,6 +127,9 @@ export const handleWaveDone = (
         context: newCtx,
       };
     }
+    // nodeOutput may be `undefined` when a node returns `ok(undefined)` — this
+    // is valid per DagPhase.awaiting-human.output: unknown. The human reviewer
+    // receives whatever the node produced, including undefined.
     const nodeOutput = newOutputs.get(firstNodeId);
     const prompt = newCtx.humanReviewPrompts.get(firstNodeId) ?? "";
 

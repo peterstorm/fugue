@@ -3,6 +3,7 @@ import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
 import { fwLogger } from "../logger.js";
 import { dispatchEvent } from "./dispatch.js";
+import { match } from "ts-pattern";
 export { dispatchEvent } from "./dispatch.js";
 
 export interface RunSummary {
@@ -27,12 +28,6 @@ export interface AggregateCounters {
   runCount: number;
 }
 
-/**
- * When `OBSERVER_STRICT=1` is set in the environment, the BufferedObserver
- * rethrows any observer failure instead of catching. Useful in tests and dev
- * to surface programming bugs in observer impls. Off in production by default.
- */
-
 /** Pure: compute RunSummary from buffered events and the RunEndEvent. */
 export function computeRunSummary(
   events: readonly ObserverEvent[],
@@ -47,30 +42,19 @@ export function computeRunSummary(
   const startCounts = new Map<string, number>();
 
   for (const e of events) {
-    switch (e.type) {
-      case "node-start": {
-        nodeIds.add(e.nodeId);
-        const count = (startCounts.get(e.nodeId) ?? 0) + 1;
-        startCounts.set(e.nodeId, count);
-        break;
-      }
-      case "node-end":
-        nodeIds.add(e.nodeId);
-        break;
-      case "node-error":
-      case "node-skipped":
-        nodeIds.add(e.nodeId);
-        break;
-      case "freshness-violation":
-        freshnessViolationCount++;
-        break;
-      case "human-intervention":
-        humanInterventionCount++;
-        break;
-      case "route-decided":
-        routeDecisionCount++;
-        break;
-    }
+    match(e)
+      .with({ type: "node-start" }, (ev) => {
+        nodeIds.add(ev.nodeId);
+        const count = (startCounts.get(ev.nodeId) ?? 0) + 1;
+        startCounts.set(ev.nodeId, count);
+      })
+      .with({ type: "node-end" }, (ev) => { nodeIds.add(ev.nodeId); })
+      .with({ type: "node-error" }, (ev) => { nodeIds.add(ev.nodeId); })
+      .with({ type: "node-skipped" }, (ev) => { nodeIds.add(ev.nodeId); })
+      .with({ type: "freshness-violation" }, () => { freshnessViolationCount++; })
+      .with({ type: "human-intervention" }, () => { humanInterventionCount++; })
+      .with({ type: "route-decided" }, () => { routeDecisionCount++; })
+      .otherwise(() => { /* no-op for run-start, run-end, sub-span, node-pruned, witness-captured, write-attempted */ });
   }
 
   for (const count of startCounts.values()) {

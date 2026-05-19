@@ -11,7 +11,7 @@ import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import { __brandNodeId, __brandDagId } from "../types/ids.js";
+import { nodeId, tryNodeId, dagId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 
 /**
@@ -21,17 +21,17 @@ import { type Result, ok, err } from "../types/result.js";
  */
 const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
   if ("kind" in e && e.kind === "default") {
-    return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "default" };
+    return { from: nodeId(e.from), to: nodeId(e.to), kind: "default" };
   }
   if ("when" in e) {
     return {
-      from: __brandNodeId(e.from),
-      to: __brandNodeId(e.to),
+      from: nodeId(e.from),
+      to: nodeId(e.to),
       kind: "conditional",
       when: e.when,
     };
   }
-  return { from: __brandNodeId(e.from), to: __brandNodeId(e.to), kind: "unconditional" };
+  return { from: nodeId(e.from), to: nodeId(e.to), kind: "unconditional" };
 };
 
 const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
@@ -72,11 +72,20 @@ export const validateDagShape = (
   ][];
 
   if (entries.length === 0) {
-    return err(validationErr(__brandNodeId("__dag__"), `DAG '${input.id}' has no nodes`));
+    return err(validationErr(nodeId("__dag__"), `DAG '${input.id}' has no nodes`));
   }
 
-  // Record-key vs node.id consistency.
+  // Record-key vs node.id consistency + key format validation.
   for (const [key, node] of entries) {
+    const keyValid = tryNodeId(key);
+    if (!keyValid.ok) {
+      return err(
+        validationErr(
+          nodeId("__dag__"),
+          `nodes['${key}'] has invalid id: ${keyValid.error}`,
+        ),
+      );
+    }
     if (node.id !== key) {
       return err(
         validationErr(
@@ -87,7 +96,7 @@ export const validateDagShape = (
     }
   }
 
-  const nodeIds = new Set(entries.map(([id]) => __brandNodeId(id)));
+  const nodeIds = new Set(entries.map(([id]) => nodeId(id)));
   // Normalize edges into the tagged-discriminant runtime form. The input may
   // carry the implicit-unconditional or implicit-conditional (`when`-only)
   // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
@@ -198,10 +207,10 @@ export const validateDagShape = (
     }
   }
 
-  if (input.outputNodeId !== undefined && !nodeIds.has(__brandNodeId(input.outputNodeId))) {
+  if (input.outputNodeId !== undefined && !nodeIds.has(nodeId(input.outputNodeId))) {
     return err(
       validationErr(
-        __brandNodeId(input.outputNodeId),
+        nodeId(input.outputNodeId),
         `outputNodeId '${input.outputNodeId}' is not a node in DAG '${input.id}'`,
       ),
     );
@@ -262,7 +271,7 @@ export const validateDagShape = (
       }
     }
 
-    if (!reachable.has(__brandNodeId(input.outputNodeId))) {
+    if (!reachable.has(nodeId(input.outputNodeId))) {
       // Walk backward from the output along unconditional + default edges to
       // find the first node that has no unconditional/default inbound. That
       // node is the actual frontier — the place where routing diverged from
@@ -293,8 +302,8 @@ export const validateDagShape = (
       }
       return err({
         kind: "output-unreachable-under-routing",
-        outputNodeId: __brandNodeId(input.outputNodeId),
-        missedFromNode: __brandNodeId(frontier),
+        outputNodeId: nodeId(input.outputNodeId),
+        missedFromNode: nodeId(frontier),
       });
     }
   }
@@ -305,10 +314,10 @@ export const validateDagShape = (
   // compile error here, rather than a silent pass-through that would only
   // surface when something tried to read the missing field at runtime.
   const unbranded: DagDefShape = {
-    id: __brandDagId(input.id),
+    id: dagId(input.id),
     nodes: entries.map(([, n]) => n),
     edges,
-    ...(input.outputNodeId !== undefined ? { outputNodeId: __brandNodeId(input.outputNodeId) } : {}),
+    ...(input.outputNodeId !== undefined ? { outputNodeId: nodeId(input.outputNodeId) } : {}),
     ...(input.evalJudges !== undefined ? { evalJudges: input.evalJudges } : {}),
     ...(input.retryLimits !== undefined
       ? { retryLimits: input.retryLimits as Readonly<Record<string, number>> }

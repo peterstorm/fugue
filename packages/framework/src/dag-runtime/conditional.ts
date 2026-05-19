@@ -1,19 +1,69 @@
 // Conditional-edge runtime helpers.
 // All functions are pure; no I/O.
 
-import type { DagDef, EdgeDef, Predicate } from "../types/dag.js";
+import type { DagDef, EdgeDef, Predicate, PredicateResult } from "../types/dag.js";
 import {
   isConditionalEdge,
   isDefaultEdge,
   isUnconditionalEdge,
-  evaluatePredicate,
 } from "../types/dag.js";
 import type { NodeId } from "../types/ids.js";
 import type { IncomingSources } from "../shared/incoming.js";
 import type { Confidence } from "../types/confidence.js";
+import { meetsConfidence } from "../types/confidence.js";
 import type { RouteEvidence } from "../types/events.js";
 
 export type { IncomingSources };
+
+// ---------------------------------------------------------------------------
+// evaluatePredicate — predicate evaluation with confidence gating.
+// Moved here from types/dag.ts (which re-exports for backward compatibility)
+// because it contains business logic that belongs in the runtime layer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Evaluate a predicate against a node's output with confidence gating.
+ *
+ * Returns a discriminated `PredicateResult`. The `outcome: "threw"` variant
+ * signals a predicate implementation bug — the caller should surface a
+ * `predicate-malformed` error instead of silently taking the default edge.
+ */
+export const evaluatePredicate = <T>(
+  pred: Predicate<T>,
+  output: T,
+  confidence: Confidence | null,
+): PredicateResult => {
+  // Gate on minConfidence before calling check
+  if (pred.minConfidence !== undefined) {
+    if (confidence === null || !meetsConfidence(confidence.bucket, pred.minConfidence)) {
+      return {
+        predicateLabel: pred.label,
+        predicateVersion: pred.version,
+        evaluatedConfidence: confidence,
+        outcome: "below-min-confidence",
+      };
+    }
+  }
+
+  try {
+    const matched = pred.check(output, confidence);
+    return {
+      predicateLabel: pred.label,
+      predicateVersion: pred.version,
+      evaluatedConfidence: confidence,
+      outcome: matched ? "matched" : "not-matched",
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      predicateLabel: pred.label,
+      predicateVersion: pred.version,
+      evaluatedConfidence: confidence,
+      outcome: "threw",
+      message: msg,
+    };
+  }
+};
 
 export type Decision =
   | {

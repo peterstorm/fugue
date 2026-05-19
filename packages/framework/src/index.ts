@@ -31,14 +31,14 @@ export { replayEvents, replayEventsUntil, replayEventSlice } from "./state-machi
 // helpers for callers building custom JobLike backends. The lower-level
 // `serializeValue` / `deserializeValue` are intentionally internal; import
 // from their concrete paths if you genuinely need them.
-export { toJson, fromJson } from "./state-machine/serialize.js";
+export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 
 // ---------------------------------------------------------------------------
 // DAG runtime — public surface only
 //
-// `runDag` is the single sanctioned public entry. `runDagStateful`,
-// `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, and
-// `dagTransition` live on the `@ai-summary/framework/advanced` subpath
+// `runDag` and `runDagAsWorkerJob` are the sanctioned public entries.
+// `runDagStateful` (deprecated), `compileDagToMachine`, `buildDagExecutor`,
+// and `dagTransition` live on the `@ai-summary/framework/advanced` subpath
 // for callers building custom machines on the kernel — see `./advanced.ts`.
 // Keeping them off the main barrel signals that reaching for them is a
 // deliberate choice, not an accident from a wildcard import.

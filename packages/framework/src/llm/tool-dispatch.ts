@@ -1,6 +1,6 @@
 import type { NodeContext } from "../types/node.js";
 import type { ToolDef, ToolContext } from "../types/llm.js";
-import { __brandNodeId } from "../types/ids.js";
+import { nodeId } from "../types/ids.js";
 import { withToolSpan, setToolIoAttributes } from "./spans.js";
 import { dispatchEvent } from "../observer/buffered.js";
 
@@ -78,7 +78,7 @@ export async function dispatchToolCall(
       type: "sub-span",
       runId: ctx.runId,
       dagId: ctx.dagId,
-      nodeId: __brandNodeId(`tool:${call.name}`),
+      nodeId: nodeId(`tool:${call.name}`),
       parentSpanId: call.id,
       kind: "CHAIN",
       timestamp: new Date(),

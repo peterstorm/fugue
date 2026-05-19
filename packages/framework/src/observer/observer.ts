@@ -5,6 +5,23 @@ export type { Observer } from "../types/observer.js";
 import type { Observer } from "../types/observer.js";
 
 // ---------------------------------------------------------------------------
+// Design note: Observer vs OTel tracing (dual-channel architecture)
+//
+// The Observer carries **domain events** (run lifecycle, routing decisions,
+// freshness witnesses, human interventions). OTel spans in `tracing/` carry
+// **infrastructure telemetry** (LLM token costs, latency, span hierarchies).
+//
+// These are intentionally separate channels:
+// - Observer events are consumed by application-level logic (BufferedObserver,
+//   tail sampling, run summaries).
+// - OTel spans are consumed by observability backends (Jaeger, MLflow OTLP).
+//
+// Cost data (token counts, USD) lives only on OTel spans. Domain routing
+// decisions live only on Observer events. `RunSummary.totalCostUsd` is
+// populated only when the TailSamplingProcessor bridges the two channels.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Concrete implementations
 // ---------------------------------------------------------------------------
 

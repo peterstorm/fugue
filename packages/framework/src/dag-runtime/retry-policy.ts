@@ -16,8 +16,8 @@ const DEFAULT_BACKOFF_MS = [1000, 2000, 4000] as const;
 export type RetryConfigs = ReadonlyMap<NodeId, { readonly backoffMs: readonly number[]; readonly jitterRatio: number }>;
 
 /**
- * Returns the base delay; the DAG executor applies random jitter via
- * `baseDelay * (1 + jitterRatio * Math.random())`.
+ * Returns the base delay; the DAG executor applies symmetric jitter via
+ * `applyJitter`: `baseDelay * (1 + (2·random()-1) * jitterRatio)`.
  */
 export const computeBackoffMs = (
   nodeId: NodeId,

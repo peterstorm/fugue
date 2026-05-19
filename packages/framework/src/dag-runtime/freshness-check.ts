@@ -277,6 +277,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     this.writes.clear();
     this.latest.clear();
     this.resourceOrder.length = 0;
+    this.resourceSet.clear();
     this.evictCursor = 0;
   }
 }
