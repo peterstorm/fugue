@@ -6,6 +6,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { toolUseLoop, type ToolLoopProvider, type TurnResult } from "../llm/tool-use-loop.js";
+import { toolName } from "../llm/tools.js";
 import { z } from "zod";
 import { ok, err, isOk, isErr } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -99,7 +100,7 @@ describe("toolUseLoop", () => {
   test("iteration limit exhausted → non-retriable error", async () => {
     const result = await toolUseLoop(
       infiniteToolProvider(),
-      { nodeId: N("n1"), model: "m", schema, tools: [{ name: "tool", description: "t", inputSchema: z.object({}), run: async () => ok("") }], maxIterations: 3 },
+      { nodeId: N("n1"), model: "m", schema, tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("") }], maxIterations: 3 },
       makeCtx(),
     );
     expect(result.ok).toBe(false);
@@ -136,7 +137,7 @@ describe("toolUseLoop", () => {
         nodeId: N("n1"),
         model: "m",
         schema,
-        tools: [{ name: "tool", description: "t", inputSchema: z.object({}), run: async () => ok("") }],
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("") }],
         maxIterations: 100,
         deadlineMs: 1200, // deadline at time 2200
         now: nowFn,
@@ -173,7 +174,7 @@ describe("toolUseLoop", () => {
         nodeId: N("n1"),
         model: "m",
         schema,
-        tools: [{ name: "test_tool", description: "t", inputSchema: z.object({}), run: async () => ok("result") }],
+        tools: [{ name: toolName("test_tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("result") }],
         maxIterations: 10,
       },
       makeCtx(),
@@ -264,7 +265,7 @@ describe("toolUseLoop", () => {
     };
     const result = await toolUseLoop(
       provider,
-      { nodeId: N("n1"), model: "m", schema, tools: [{ name: "tool", description: "t", inputSchema: z.object({}), run: async () => ok("r") }], maxIterations: 5 },
+      { nodeId: N("n1"), model: "m", schema, tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }], maxIterations: 5 },
       makeCtx(),
     );
     expect(result.ok).toBe(true);

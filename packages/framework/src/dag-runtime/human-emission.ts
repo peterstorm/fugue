@@ -1,7 +1,13 @@
-// emitHumanIntervention — Phase 4: human-intervention observer event
+// emitHumanIntervention — human-intervention observer event.
 //
-// Extracted from executor.ts for readability. Event-emission helper
-// decoupled from the executor closure.
+// Translates a DAG-layer `HumanAction` into the detailed observer-event shape
+// and emits `HumanInterventionEvent`. Called by the executor after
+// `callHumanReviewHook` produces a successful `human-responded` event.
+//
+// Fail-closed: a throwing confidence extractor or a missing `nodeDef` is an
+// authoring/framework bug that must surface — return `Err` so the executor
+// can convert the human-gate result into a `node-failed` event instead of
+// silently producing a misleading observer event.
 
 import { match } from "ts-pattern";
 import type { NodeDef, NodeContext } from "../types/node.js";
@@ -11,15 +17,12 @@ import type { HumanActionDetailed } from "../types/events.js";
 import type { Confidence } from "../types/confidence.js";
 import type { SideEffectKind } from "../types/side-effects.js";
 import type { Witness } from "../types/freshness.js";
+import type { FrameworkError } from "../types/errors.js";
+import { type Result, ok, err } from "../types/result.js";
 import { computeJsonPatch } from "../shared/json-patch.js";
 import { fwLogger } from "../logger.js";
 import { emit } from "./emit.js";
 
-/**
- * Translate a DAG-layer `HumanAction` into the detailed observer-event
- * shape, then emit `HumanInterventionEvent`. Called in the executor after
- * `callHumanReviewHook` produces a successful `human-responded` event.
- */
 export const emitHumanIntervention = (
   phase: { nodeId: NodeId; output: unknown },
   action: HumanAction,
@@ -29,11 +32,26 @@ export const emitHumanIntervention = (
   nowFn: () => number,
   awaitStartMs: number,
   capturedWitnesses: readonly Witness[],
-): void => {
+): Result<void, FrameworkError> => {
   const stamp = (): Date => new Date(nowFn());
   const nodeDef = nodeMap.get(phase.nodeId);
 
-  // Build HumanActionDetailed from the DAG-layer HumanAction
+  if (!nodeDef) {
+    const msg = `internal: node '${phase.nodeId}' missing from nodeMap during human-intervention emit`;
+    fwLogger().error(`[emitHumanIntervention] ${msg}`);
+    const fwError: FrameworkError = { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg };
+    emit(nodeCtx, {
+      type: "node-error",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId: phase.nodeId,
+      timestamp: stamp(),
+      error: msg,
+      frameworkError: fwError,
+    });
+    return err(fwError);
+  }
+
   const detailed: HumanActionDetailed = match(action)
     .with({ action: "approve" }, () => ({ kind: "approve" as const }))
     .with({ action: "approve-with-edit" }, (a) => ({
@@ -50,30 +68,29 @@ export const emitHumanIntervention = (
     }))
     .exhaustive();
 
-  // Extract confidence from the node's output
   let nodeConfidence: Confidence | null = null;
-  if (nodeDef && nodeDef.confidence.mode === "value") {
+  if (nodeDef.confidence.mode === "value") {
     try {
       nodeConfidence = nodeDef.confidence.extract(phase.output);
     } catch (e) {
       const msg = `confidence.extract failed for node '${phase.nodeId}': ${e instanceof Error ? e.message : e}`;
-      fwLogger().warn(`[emitHumanIntervention] ${msg}`);
+      fwLogger().error(`[emitHumanIntervention] ${msg}`);
+      const fwError: FrameworkError = { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg };
       emit(nodeCtx, {
         type: "node-error",
         runId: nodeCtx.runId,
         dagId,
         nodeId: phase.nodeId,
-        sideEffects: nodeDef?.sideEffects,
+        sideEffects: nodeDef.sideEffects,
         timestamp: stamp(),
         error: msg,
-        frameworkError: { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg },
+        frameworkError: fwError,
       });
-      nodeConfidence = null;
+      return err(fwError);
     }
   }
 
-  // Side-effects kind
-  const nodeSideEffects: SideEffectKind = nodeDef?.sideEffects.kind ?? "none";
+  const nodeSideEffects: SideEffectKind = nodeDef.sideEffects.kind;
 
   emit(nodeCtx, {
     type: "human-intervention",
@@ -90,4 +107,5 @@ export const emitHumanIntervention = (
     },
     timestamp: stamp(),
   });
+  return ok(undefined);
 };

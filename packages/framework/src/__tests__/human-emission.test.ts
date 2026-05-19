@@ -29,7 +29,7 @@ const makeCtx = (observer: RecordingObserver) => ({
   runId: RID,
   dagId: DID,
   logger: { warn: () => {}, error: () => {} },
-  tracer: { startActiveSpan: (_n: string, _o: any, fn: any) => fn({ setAttribute: () => {}, addEvent: () => {}, setStatus: () => {}, end: () => {} }) } as any,
+  tracer: { startActiveSpan: (_n: string, _o: unknown, fn: (s: unknown) => unknown) => fn({ setAttribute: () => {}, addEvent: () => {}, setStatus: () => {}, end: () => {} }) } as unknown,
   observer,
   cache: null,
   llm: null,
@@ -128,7 +128,7 @@ describe("emitHumanIntervention", () => {
     expect(evt.context.nodeConfidence).toEqual(confidence("high", "logprob", 0.92));
   });
 
-  it("sets null confidence when extract throws", () => {
+  it("fail-closed: returns Err and emits node-error when confidence.extract throws", () => {
     const obs = new RecordingObserver();
     const nodeDef = makeNodeDef({
       confidence: {
@@ -138,26 +138,44 @@ describe("emitHumanIntervention", () => {
     });
     const nodeMap = new Map([[NID, nodeDef]]);
 
-    emitHumanIntervention(
+    const result = emitHumanIntervention(
       { nodeId: NID, output: {} },
       { action: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
     );
 
-    const evt = obs.events.find((e) => e.type === "human-intervention") as HumanInterventionEvent;
-    expect(evt.context.nodeConfidence).toBeNull();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("confidence.extract failed");
+      }
+    }
+    const errEvt = obs.events.find((e) => e.type === "node-error");
+    expect(errEvt).toBeDefined();
+    const intervention = obs.events.find((e) => e.type === "human-intervention");
+    expect(intervention).toBeUndefined();
   });
 
-  it("defaults sideEffects to 'none' when nodeDef is missing", () => {
+  it("fail-closed: returns Err when nodeDef is missing (framework-bug guard)", () => {
     const obs = new RecordingObserver();
     const nodeMap = new Map<any, any>(); // empty — node not found
 
-    emitHumanIntervention(
+    const result = emitHumanIntervention(
       { nodeId: NID, output: {} },
       { action: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
     );
 
-    const evt = obs.events.find((e) => e.type === "human-intervention") as HumanInterventionEvent;
-    expect(evt.context.nodeSideEffects).toBe("none");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("missing from nodeMap");
+      }
+    }
+    const intervention = obs.events.find((e) => e.type === "human-intervention");
+    expect(intervention).toBeUndefined();
   });
 
   it("includes priorWitnesses in context", () => {

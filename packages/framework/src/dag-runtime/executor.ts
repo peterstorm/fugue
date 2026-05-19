@@ -16,7 +16,7 @@ import { applyJitter } from "../shared/jitter.js";
 import { fwLogger } from "../logger.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
-import { computeRerouteActiveSet, enrichHumanRespondedEvent } from "./reroute.js";
+import { enrichHumanRespondedEvent } from "./reroute.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
@@ -277,9 +277,13 @@ export const buildDagExecutor = (
 
     const awaitStartMs = nowFn();
     let event = await callHumanReviewHook(phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
-    event = enrichHumanRespondedEvent(event, machineCtx);
+    const enrichResult = enrichHumanRespondedEvent(event, machineCtx);
+    if (enrichResult.kind === "err") {
+      return { type: "node-failed", nodeId: enrichResult.nodeId, error: enrichResult.error } satisfies DagEvent;
+    }
+    event = enrichResult.event;
     if (event.type === "human-responded") {
-      emitHumanIntervention(
+      const emitResult = emitHumanIntervention(
         { nodeId, output },
         event.action,
         nodeMap,
@@ -289,6 +293,9 @@ export const buildDagExecutor = (
         awaitStartMs,
         [...capturedWitnesses.values()],
       );
+      if (!emitResult.ok) {
+        return { type: "node-failed", nodeId, error: emitResult.error } satisfies DagEvent;
+      }
     }
     return event;
   };

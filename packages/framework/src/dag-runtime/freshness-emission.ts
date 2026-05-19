@@ -1,16 +1,13 @@
-// emitFreshnessWitnessEvents — Phase 3: freshness witness emission
-//
-// Extracted from executor.ts for readability. Event-emission helper
-// decoupled from the executor closure. Performs I/O via FreshnessIndex port.
+// emitFreshnessWitnessEvents — freshness witness emission.
 //
 // After all nodes in a wave succeed, emit witness events for reads and writes
 // nodes. For writes nodes, check the freshness index for conflicts BEFORE the
 // write's witness is recorded — so the conflict detection sees the state as
 // of write time.
 //
-// Fail-closed policy: if extractWitness/extractConditionedOn/extractNewWitness
-// throws, the wave fails. The authoring bug must be fixed; silently proceeding
-// without witness data would allow stale writes downstream.
+// Fail-closed (ADR-0025): if any extractor throws OR the freshness index is
+// unavailable, the wave aborts. Synthesizing a fake conflict or proceeding
+// silently would allow undetectable stale writes.
 
 import { match } from "ts-pattern";
 import type { NodeDef } from "../types/node.js";
@@ -142,7 +139,6 @@ export async function emitFreshnessWitnessEvents(
         // sinceMs: 0 is intentional — within a run, all prior writes are relevant
         // because topological ordering guarantees the read witness was captured
         // before any writes in later waves.
-        let conflict: import("../dag-runtime/freshness-check.js").WriteEntry | null = null;
         const conflictResult = await freshnessIndex.findConflict(
           conditionedOn.resource,
           conditionedOn.value,
@@ -153,6 +149,10 @@ export async function emitFreshnessWitnessEvents(
           fwLogger().error(
             `[emitFreshnessWitnessEvents] freshnessIndex.findConflict failed for node '${nodeId}', resource '${conditionedOn.resource}': ${msg}`,
           );
+          // Fail-closed: index unavailable → abort the wave. Proceeding without
+          // conflict detection would allow undetectable stale writes; synthesizing
+          // a fake conflict event would mislead consumers. ADR-0025.
+          const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness check unavailable: ${msg}` };
           emit(nodeCtx, {
             type: "node-error",
             runId: nodeCtx.runId,
@@ -160,14 +160,12 @@ export async function emitFreshnessWitnessEvents(
             nodeId,
             sideEffects: nodeMap.get(nodeId)?.sideEffects,
             timestamp: stamp(),
-            error: `freshness conflict check failed (assumed conflict): ${msg}`,
-            frameworkError: { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness check unavailable: ${msg}` },
+            error: `freshness conflict check failed: ${msg}`,
+            frameworkError: fwError,
           });
-          // Fail-closed: treat as conflict to prevent stale writes through
-          conflict = { runId: nodeCtx.runId, nodeId, newWitness: conditionedOn, succeededAtMs: 0 };
-        } else {
-          conflict = conflictResult.value;
+          return err(fwError);
         }
+        const conflict = conflictResult.value;
         if (conflict) {
           emit(nodeCtx, {
             type: "freshness-violation",

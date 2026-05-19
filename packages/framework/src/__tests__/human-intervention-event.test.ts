@@ -361,7 +361,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     expect(evt!.actor).toBe("bob");
   });
 
-  test("S15: confidence extraction failure emits event with null confidence", async () => {
+  test("S15: confidence extraction failure is fail-closed — run fails, no intervention event", async () => {
     const dag = makeDag({
       confidence: {
         mode: "value" as const,
@@ -377,9 +377,15 @@ describe("Phase 4 — HumanInterventionEvent", () => {
       onHumanReview: async () => ({ action: "approve" as const }),
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    // The error may surface as node-crash directly, or wrapped as retry-exhausted
+    // if the framework re-enters retry on a non-retriable node-crash.
+    if (!result.ok) {
+      expect(["node-crash", "retry-exhausted"]).toContain(result.error.kind);
+    }
     const evt = findInterventionEvent(observer.events);
-    expect(evt).toBeDefined();
-    expect(evt!.context.nodeConfidence).toBeNull();
+    expect(evt).toBeUndefined();
+    const errEvt = observer.events.find((e) => e.type === "node-error");
+    expect(errEvt).toBeDefined();
   });
 });
