@@ -26,7 +26,14 @@ const arbSource = fc.constantFrom<ConfidenceSource>(
 const arbConfidence: fc.Arbitrary<Confidence> = fc.record({
   bucket: arbBucket,
   source: arbSource,
-}).map(({ bucket, source }) => confidence(bucket, source));
+  raw: fc.double({ min: 0, max: 1, noNaN: true }),
+}).map(({ bucket, source, raw }) => {
+  // logprob and self-reported-numeric require a numeric raw value
+  if (source === "logprob" || source === "self-reported-numeric") {
+    return confidence(bucket, source, raw);
+  }
+  return confidence(bucket, source, raw);
+});
 const arbConfidenceOrNull = fc.option(arbConfidence, { nil: null });
 
 describe("evaluatePredicate — property tests", () => {

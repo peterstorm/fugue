@@ -10,9 +10,9 @@ import { dispatchEvent } from "../observer/buffered.js";
  * `ToolContext` (= `TypedNodeContext<["llm"]>`). Cast at this single seam.
  *
  * Contract: callers (LLM-with-tools nodes) MUST have `llm` in their
- * `requires` so `ctx.llm` is non-null. Tools that read `ctx.llm` and find it
- * null get a runtime error — which correctly surfaces the violated contract
- * rather than masking it via a null-tolerant type.
+ * `requires` so `ctx.llm` is non-null. If a tool attempts to use `ctx.llm`
+ * and finds it null, the tool's own null-access will surface the bug.
+ * We do NOT guard here because many tools are pure and never touch `ctx.llm`.
  */
 const asToolContext = (ctx: NodeContext): ToolContext => ctx as ToolContext;
 

@@ -5,6 +5,7 @@ import { RecordingObserver } from "../observer/observer.js";
 import { nodeId, runId, dagId } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
+import type { PostWaveContext } from "../dag-runtime/wave-execution.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent } from "../types/events.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -31,7 +32,7 @@ const makeCtx = (observer: RecordingObserver) => ({
   runId: RID,
   dagId: DID,
   logger: { warn: () => {}, error: () => {} },
-  tracer: { startActiveSpan: (_n: string, _o: any, fn: any) => fn({ setAttribute: () => {}, addEvent: () => {}, setStatus: () => {}, end: () => {} }) } as any,
+  tracer: { startActiveSpan: (_n: string, _o: unknown, fn: (span: unknown) => unknown) => fn({ setAttribute: () => {}, addEvent: () => {}, setStatus: () => {}, end: () => {} }) } as unknown as import("../types/tracer.js").Tracer,
   observer,
   cache: null,
   llm: null,
@@ -64,20 +65,38 @@ const makeMachineCtx = (): DagMachineContext => ({
   confidenceByNode: new Map(),
 });
 
+/** Build a PostWaveContext from test parameters. */
+const makePostWaveCtx = (
+  waveNodeIds: typeof NID_READ[],
+  nodeMap: Map<typeof NID_READ, NodeDef<unknown, unknown>>,
+  machineCtx: DagMachineContext,
+  observer: RecordingObserver,
+  freshnessIndex: FreshnessIndex,
+  witnessAccumulator?: Map<string, any>,
+): PostWaveContext => ({
+  waveNodeIds,
+  nodeMap,
+  nodeCtx: makeCtx(observer) as any,
+  machineCtx,
+  dagId: DID,
+  nowFn: Date.now,
+  freshnessIndex,
+  witnessAccumulator,
+  priorOutputs: machineCtx.outputs,
+});
+
 describe("emitFreshnessWitnessEvents", () => {
   it("emits witness-captured for reads node with extractWitness", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: (output: any) => ({ kind: "version", resource: "pg:orders", value: String(output.version) }) },
+      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: (output: unknown) => ({ kind: "version", resource: "pg:orders", value: String((output as { version: number }).version) }) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, { version: 42 }]]);
     const index = new InMemoryFreshnessIndex();
 
-    await emitFreshnessWitnessEvents(
-      [NID_READ], newOutputs, nodeMap as any, makeMachineCtx(),
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_READ], nodeMap as any, makeMachineCtx(), obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     const captured = obs.events.filter((e) => e.type === "witness-captured") as WitnessCapturedEvent[];
     expect(captured).toHaveLength(1);
@@ -97,10 +116,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const newOutputs = new Map([[NID_WRITE, { ok: true }]]);
     const index = new InMemoryFreshnessIndex();
 
-    await emitFreshnessWitnessEvents(
-      [NID_WRITE], newOutputs, nodeMap as any, ctxWithOutput,
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     const writes = obs.events.filter((e) => e.type === "write-attempted") as WriteAttemptedEvent[];
     expect(writes).toHaveLength(1);
@@ -131,10 +148,8 @@ describe("emitFreshnessWitnessEvents", () => {
       timestamp: new Date(),
     });
 
-    await emitFreshnessWitnessEvents(
-      [NID_WRITE], newOutputs, nodeMap as any, ctxWithOutput,
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     const violations = obs.events.filter((e) => e.type === "freshness-violation") as FreshnessViolationEvent[];
     expect(violations).toHaveLength(1);
@@ -152,10 +167,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const newOutputs = new Map([[NID_READ, {}]]);
     const index = new InMemoryFreshnessIndex();
 
-    await emitFreshnessWitnessEvents(
-      [NID_READ], newOutputs, nodeMap as any, makeMachineCtx(),
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_READ], nodeMap as any, makeMachineCtx(), obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     expect(obs.events.filter((e) => e.type === "witness-captured")).toHaveLength(0);
   });
@@ -170,15 +183,13 @@ describe("emitFreshnessWitnessEvents", () => {
     const index = new InMemoryFreshnessIndex();
     const skipped = new Set([NID_READ]);
 
-    await emitFreshnessWitnessEvents(
-      [NID_READ], newOutputs, nodeMap as any, makeMachineCtx(),
-      makeCtx(obs) as any, DID, Date.now, index, skipped,
-    );
+    const ctx = makePostWaveCtx([NID_READ], nodeMap as any, makeMachineCtx(), obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, skipped);
 
     expect(obs.events).toHaveLength(0);
   });
 
-  it("does not crash when extractor throws", async () => {
+  it("returns Err when extractor throws (fail-closed)", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
       sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => { throw new Error("broken"); } },
@@ -187,13 +198,16 @@ describe("emitFreshnessWitnessEvents", () => {
     const newOutputs = new Map([[NID_READ, {}]]);
     const index = new InMemoryFreshnessIndex();
 
-    // Should not throw — failure is logged and skipped
-    await emitFreshnessWitnessEvents(
-      [NID_READ], newOutputs, nodeMap as any, makeMachineCtx(),
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_READ], nodeMap as any, makeMachineCtx(), obs, index);
+    const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
+    // Fail-closed: extractor failure aborts the wave
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
     expect(obs.events.filter((e) => e.type === "witness-captured")).toHaveLength(0);
+    expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
   });
 
   it("no events for pure transform (kind: none)", async () => {
@@ -205,10 +219,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const newOutputs = new Map([[NID_PURE, {}]]);
     const index = new InMemoryFreshnessIndex();
 
-    await emitFreshnessWitnessEvents(
-      [NID_PURE], newOutputs, nodeMap as any, makeMachineCtx(),
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_PURE], nodeMap as any, makeMachineCtx(), obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     expect(obs.events).toHaveLength(0);
   });
@@ -223,10 +235,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const index = new InMemoryFreshnessIndex();
     const accumulator = new Map<string, any>();
 
-    await emitFreshnessWitnessEvents(
-      [NID_READ], newOutputs, nodeMap as any, makeMachineCtx(),
-      makeCtx(obs) as any, DID, Date.now, index, new Set(), accumulator,
-    );
+    const ctx = makePostWaveCtx([NID_READ], nodeMap as any, makeMachineCtx(), obs, index, accumulator);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     expect(accumulator.has("pg:orders")).toBe(true);
     expect(accumulator.get("pg:orders")!.value).toBe("99");
@@ -254,10 +264,8 @@ describe("emitFreshnessWitnessEvents", () => {
       findConflict: async () => ok(null),
     };
 
-    const result = await emitFreshnessWitnessEvents(
-      [NID_WRITE], newOutputs, nodeMap as any, ctxWithOutput,
-      makeCtx(obs) as any, DID, Date.now, failingIndex, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, failingIndex);
+    const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -266,7 +274,7 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
   });
 
-  it("returns Ok when extractor throws (non-fatal authoring bug)", async () => {
+  it("returns Err when writes extractor throws (fail-closed)", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
       sideEffects: {
@@ -283,13 +291,14 @@ describe("emitFreshnessWitnessEvents", () => {
     const newOutputs = new Map([[NID_WRITE, {}]]);
     const index = new InMemoryFreshnessIndex();
 
-    const result = await emitFreshnessWitnessEvents(
-      [NID_WRITE], newOutputs, nodeMap as any, ctxWithOutput,
-      makeCtx(obs) as any, DID, Date.now, index, new Set(),
-    );
+    const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, index);
+    const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
-    // Extractor failure is non-fatal — emits node-error but returns Ok
-    expect(result.ok).toBe(true);
+    // Fail-closed: extractor failure aborts the wave
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
   });
 });

@@ -133,11 +133,15 @@ export const runStateMachine = async <S, E, C>(
       retryCounters.set(dedupSlot, (retryCounters.get(dedupSlot) ?? 0) + 1);
     }
 
-    // FR-005: checkpoint after every successful (non-failed) transition.
-    // FR-005: MUST NOT checkpoint when resulting state is terminal-failed.
+    // FR-005: checkpoint after every successful transition.
     // Order: appendEvent FIRST so the audit/event log is never missing a transition
     // whose post-state is already persisted. If appendEvent fails, the state is not
     // advanced and the queue layer can retry from the prior state.
+    //
+    // Guard: `!isFailed` means terminal-failed states are NOT checkpointed
+    // (FR-005 requirement). Terminal-succeeded states ARE checkpointed here
+    // because they satisfy `!isFailed` — the runner then breaks out of the
+    // loop normally on the `isTerminal` check below.
     //
     // appendEvent carries a deterministic `dedupKey` so a worker crash between
     // `appendEvent` and `updateData` does not duplicate the event on retry —

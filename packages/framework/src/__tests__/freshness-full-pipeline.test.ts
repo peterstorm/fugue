@@ -242,11 +242,13 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
 });
 
 // ---------------------------------------------------------------------------
-// 6.3 — Extractor failure during DAG run
+// 6.3 — Extractor failure during DAG run (fail-closed)
+// Extractor failures are authoring bugs. Proceeding without witness data
+// would allow stale writes downstream, so the run aborts.
 // ---------------------------------------------------------------------------
 
-describe("Freshness extractor failure resilience", () => {
-  test("extractWitness throwing does not crash the run", async () => {
+describe("Freshness extractor failure (fail-closed)", () => {
+  test("extractWitness throwing fails the run", async () => {
     const dag = defineDag({
       id: "extractor-fail",
       nodes: {
@@ -270,17 +272,20 @@ describe("Freshness extractor failure resilience", () => {
 
     const result = await runDagStateful(dag, null, ctx);
 
-    // Run succeeds despite extractor failure
-    expect(result.ok).toBe(true);
+    // Run fails — fail-closed: broken extractor aborts the wave
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
 
-    // No witness-captured event emitted (silently skipped)
-    const witnessCaptured = observer.events.find(
-      (e) => e.type === "witness-captured",
+    // node-error event emitted for the failure
+    const nodeError = observer.events.find(
+      (e) => e.type === "node-error",
     );
-    expect(witnessCaptured).toBeUndefined();
+    expect(nodeError).toBeDefined();
   });
 
-  test("extractConditionedOn throwing does not crash the run", async () => {
+  test("extractConditionedOn throwing fails the run", async () => {
     const dag = defineDag({
       id: "conditioned-fail",
       nodes: {
@@ -307,10 +312,13 @@ describe("Freshness extractor failure resilience", () => {
 
     const result = await runDagStateful(dag, null, ctx);
 
-    // Run succeeds despite extractor failure
-    expect(result.ok).toBe(true);
+    // Run fails — fail-closed: broken extractor aborts the wave
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
 
-    // No write-attempted event emitted (silently skipped)
+    // No write-attempted event emitted (failed before reaching write)
     const writeAttempted = observer.events.find(
       (e) => e.type === "write-attempted",
     );

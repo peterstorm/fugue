@@ -224,7 +224,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           run: async () => ok({ kind: "yes" }),
           confidence: {
             mode: "value",
-            extract: () => confidence("high", "logprob"),
+            extract: () => confidence("high", "logprob", 0.95),
           },
         }),
         a: makeNode("a", { inputSchema: z.object({ router: z.any().optional() }) }),

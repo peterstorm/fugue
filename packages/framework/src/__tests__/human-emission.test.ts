@@ -114,7 +114,7 @@ describe("emitHumanIntervention", () => {
     const nodeDef = makeNodeDef({
       confidence: {
         mode: "value",
-        extract: () => confidence("high", "logprob"),
+        extract: () => confidence("high", "logprob", 0.92),
       },
     });
     const nodeMap = new Map([[NID, nodeDef]]);
@@ -125,7 +125,7 @@ describe("emitHumanIntervention", () => {
     );
 
     const evt = obs.events.find((e) => e.type === "human-intervention") as HumanInterventionEvent;
-    expect(evt.context.nodeConfidence).toEqual(confidence("high", "logprob"));
+    expect(evt.context.nodeConfidence).toEqual(confidence("high", "logprob", 0.92));
   });
 
   it("sets null confidence when extract throws", () => {

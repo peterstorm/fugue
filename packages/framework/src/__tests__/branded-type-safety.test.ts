@@ -63,9 +63,11 @@ describe("Branded type compile-time safety", () => {
 
   test("confidence() produces a valid Confidence", () => {
     // This should compile — confidence() is the smart constructor
-    const c: Confidence = confidence("high", "logprob");
+    // logprob source requires a numeric raw value
+    const c: Confidence = confidence("high", "logprob", 0.95);
     expect(c.bucket).toBe("high");
     expect(c.source).toBe("logprob");
+    expect(c.raw).toBe(0.95);
   });
 
   test("smart constructors produce valid branded types", () => {

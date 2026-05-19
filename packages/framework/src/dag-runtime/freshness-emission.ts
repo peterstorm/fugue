@@ -7,15 +7,17 @@
 // nodes. For writes nodes, check the freshness index for conflicts BEFORE the
 // write's witness is recorded — so the conflict detection sees the state as
 // of write time.
+//
+// Fail-closed policy: if extractWitness/extractConditionedOn/extractNewWitness
+// throws, the wave fails. The authoring bug must be fixed; silently proceeding
+// without witness data would allow stale writes downstream.
 
 import { match } from "ts-pattern";
-import type { NodeDef, NodeContext } from "../types/node.js";
-import type { NodeId, DagId } from "../types/ids.js";
+import type { NodeDef } from "../types/node.js";
+import type { NodeId } from "../types/ids.js";
 import type { Witness } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
-import type { DagMachineContext } from "./types.js";
-import { type FreshnessIndex } from "./freshness-check.js";
 import { fwLogger } from "../logger.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { buildNodeInput } from "../shared/build-input.js";
@@ -25,76 +27,17 @@ import type { PostWaveContext } from "./wave-execution.js";
 /**
  * Emit freshness witness events for all reads/writes nodes in a wave.
  *
- * Accepts either:
- *   - `(PostWaveContext, newOutputs, skippedNodeIds)` — new compact signature
- *   - `(waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dagId, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator?)` — legacy positional
+ * Fail-closed: extractor failures surface as `Err` and abort the wave.
+ * The authoring bug (broken extractor) must be fixed before the DAG
+ * can proceed — silently proceeding would allow downstream writes nodes
+ * to operate without the witness data they need for conflict detection.
  */
-export function emitFreshnessWitnessEvents(
+export async function emitFreshnessWitnessEvents(
   ctx: PostWaveContext,
   newOutputs: ReadonlyMap<NodeId, unknown>,
   skippedNodeIds: ReadonlySet<NodeId>,
-): Promise<Result<void, FrameworkError>>;
-export function emitFreshnessWitnessEvents(
-  waveNodeIds: readonly NodeId[],
-  newOutputs: ReadonlyMap<NodeId, unknown>,
-  nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
-  machineCtx: DagMachineContext,
-  nodeCtx: NodeContext,
-  dagId: DagId,
-  nowFn: () => number,
-  freshnessIndex: FreshnessIndex,
-  skippedNodeIds: ReadonlySet<NodeId>,
-  witnessAccumulator?: Map<string, Witness>,
-): Promise<Result<void, FrameworkError>>;
-export async function emitFreshnessWitnessEvents(
-  ctxOrWaveNodeIds: PostWaveContext | readonly NodeId[],
-  newOutputsOrNewOutputs: ReadonlyMap<NodeId, unknown>,
-  skippedOrNodeMap: ReadonlySet<NodeId> | ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
-  machineCtxArg?: DagMachineContext,
-  nodeCtxArg?: NodeContext,
-  dagIdArg?: DagId,
-  nowFnArg?: () => number,
-  freshnessIndexArg?: FreshnessIndex,
-  skippedNodeIdsArg?: ReadonlySet<NodeId>,
-  witnessAccumulatorArg?: Map<string, Witness>,
 ): Promise<Result<void, FrameworkError>> {
-  // Resolve overload: if first arg is an array, it's the legacy positional signature
-  let waveNodeIds: readonly NodeId[];
-  let newOutputs: ReadonlyMap<NodeId, unknown>;
-  let nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
-  let machineCtx: DagMachineContext;
-  let nodeCtx: NodeContext;
-  let dagId: DagId;
-  let nowFn: () => number;
-  let freshnessIndex: FreshnessIndex;
-  let skippedNodeIds: ReadonlySet<NodeId>;
-  let witnessAccumulator: Map<string, Witness> | undefined;
-
-  if (Array.isArray(ctxOrWaveNodeIds)) {
-    waveNodeIds = ctxOrWaveNodeIds;
-    newOutputs = newOutputsOrNewOutputs;
-    nodeMap = skippedOrNodeMap as ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
-    machineCtx = machineCtxArg!;
-    nodeCtx = nodeCtxArg!;
-    dagId = dagIdArg!;
-    nowFn = nowFnArg!;
-    freshnessIndex = freshnessIndexArg!;
-    skippedNodeIds = skippedNodeIdsArg!;
-    witnessAccumulator = witnessAccumulatorArg;
-  } else {
-    const ctx = ctxOrWaveNodeIds as PostWaveContext;
-    waveNodeIds = ctx.waveNodeIds;
-    newOutputs = newOutputsOrNewOutputs;
-    nodeMap = ctx.nodeMap;
-    machineCtx = ctx.machineCtx;
-    nodeCtx = ctx.nodeCtx;
-    dagId = ctx.dagId;
-    nowFn = ctx.nowFn;
-    freshnessIndex = ctx.freshnessIndex;
-    skippedNodeIds = skippedOrNodeMap as ReadonlySet<NodeId>;
-    witnessAccumulator = ctx.witnessAccumulator;
-  }
-
+  const { waveNodeIds, nodeMap, nodeCtx, machineCtx, dagId, nowFn, freshnessIndex, witnessAccumulator } = ctx;
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
 
@@ -131,6 +74,7 @@ export async function emitFreshnessWitnessEvents(
           fwLogger().warn(
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${msg}`,
           );
+          const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` };
           emit(nodeCtx, {
             type: "node-error",
             runId: nodeCtx.runId,
@@ -139,11 +83,12 @@ export async function emitFreshnessWitnessEvents(
             sideEffects: nodeMap.get(nodeId)?.sideEffects,
             timestamp: stamp(),
             error: `extractWitness failed: ${msg}`,
-            frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` },
+            frameworkError: fwError,
           });
+          // Fail-closed: downstream writes nodes need this witness for conflict
+          // detection. Proceeding without it would silently allow stale writes.
+          return err(fwError);
         }
-        // Reads failures are non-fatal: the node succeeded, only witness
-        // tracking failed. The node-error event surfaces it for post-mortem.
         return ok(undefined);
       })
       .with({ kind: "writes" }, async (se) => {
@@ -165,8 +110,7 @@ export async function emitFreshnessWitnessEvents(
             error: message,
             frameworkError: inputResult.error,
           });
-          // Config/authoring bug — node already succeeded, skip witness tracking.
-          return ok(undefined);
+          return err(inputResult.error);
         }
         const nodeInput = inputResult.value;
 
@@ -179,6 +123,7 @@ export async function emitFreshnessWitnessEvents(
         } catch (e) {
           const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
           fwLogger().warn(`[emitFreshnessWitnessEvents] ${msg}`);
+          const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` };
           emit(nodeCtx, {
             type: "node-error",
             runId: nodeCtx.runId,
@@ -187,10 +132,10 @@ export async function emitFreshnessWitnessEvents(
             sideEffects: nodeMap.get(nodeId)?.sideEffects,
             timestamp: stamp(),
             error: `freshness extractor failed: ${msg}`,
-            frameworkError: { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` },
+            frameworkError: fwError,
           });
-          // Config/authoring bug — node already succeeded, skip witness tracking.
-          return ok(undefined);
+          // Fail-closed: broken extractors are an authoring bug that must be fixed.
+          return err(fwError);
         }
 
         // Step 3: Freshness conflict check + event emission
@@ -281,4 +226,4 @@ export async function emitFreshnessWitnessEvents(
     if (!branchResult.ok) return branchResult;
   }
   return ok(undefined);
-};
+}

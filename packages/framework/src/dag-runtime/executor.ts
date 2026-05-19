@@ -228,6 +228,12 @@ export const buildDagExecutor = (
   // prevents unbounded growth for long-running DAGs with many reads nodes.
   // Witnesses accumulate across all waves for the lifetime of the executor,
   // so a human gate in a later wave sees all prior reads.
+  //
+  // Concurrent reads within the same wave: when multiple nodes in one wave
+  // read the same resource, the last to complete wins (Map.set semantics).
+  // This is safe because same-wave nodes execute at the same logical instant;
+  // the latest witness value is the freshest. For deterministic ordering in
+  // tests, sort witnesses by capturedAtMs.
   const capturedWitnesses = new Map<string, Witness>();
 
   const waveConfig: WaveConfig = {

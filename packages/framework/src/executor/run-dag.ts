@@ -3,10 +3,11 @@
 // All DAG runs flow through this function (ADR-0021). Responsibilities:
 //   1. Pre-flight validation: HITL contract, durability advisory.
 //   2. Translate options into the kernel's internal DagRunOpts.
-//   3. Delegate to `runDagStateful` for the state-machine kernel invocation.
+//   3. Delegate to `runDagStateful` (in dag-runtime/run-dag-stateful.ts)
+//      for the state-machine kernel invocation.
 //
-// `runDagStateful` and `runDagAsWorkerJob` on the `/advanced` subpath are
-// thin wrappers around this function for backward compatibility.
+// `runDagAsWorkerJob` (on the `/advanced` subpath) wraps this function,
+// rethrowing on Err so the queue layer sees the failure.
 
 import type { DagDef } from "../types/dag.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";

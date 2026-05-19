@@ -2,9 +2,11 @@ import { describe, it, expect } from "bun:test";
 import { emitRoutingDecisions } from "../dag-runtime/route-emission.js";
 import { RecordingObserver } from "../observer/observer.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
-import type { NodeId, DagId, RunId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import type { EdgeDef } from "../types/dag.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
+import type { PostWaveContext } from "../dag-runtime/wave-execution.js";
+import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -14,12 +16,12 @@ import { N, R, D } from "./_id-helpers.js";
 const makeNodeDef = (overrides?: Partial<NodeDef<unknown, unknown>>): NodeDef<unknown, unknown> => ({
   id: N("n"),
   kind: "transform",
-  inputSchema: { safeParse: (v: any) => ({ success: true, data: v }) } as any,
-  outputSchema: { safeParse: (v: any) => ({ success: true, data: v }) } as any,
-  requires: [] as any,
+  inputSchema: { safeParse: (v: unknown) => ({ success: true, data: v }) } as NodeDef<unknown, unknown>["inputSchema"],
+  outputSchema: { safeParse: (v: unknown) => ({ success: true, data: v }) } as NodeDef<unknown, unknown>["outputSchema"],
+  requires: [] as const,
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  run: async () => ({ ok: true, value: null } as any),
+  run: async () => ({ ok: true, value: null } as const),
   ...overrides,
 });
 
@@ -27,7 +29,7 @@ const makeCtx = (observer: RecordingObserver): NodeContext => ({
   runId: R("r1"),
   dagId: D("d1"),
   observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() } as unknown as NodeContext["tracer"],
   judgeLlm: null,
   cache: null,
   prompts: null,
@@ -35,7 +37,7 @@ const makeCtx = (observer: RecordingObserver): NodeContext => ({
   logger: { warn: () => {}, error: () => {} },
 });
 
-const conditionalEdge = (from: string, to: string, check: (v: any) => boolean): EdgeDef => ({
+const conditionalEdge = (from: string, to: string, check: (v: unknown) => boolean): EdgeDef => ({
   from: N(from),
   to: N(to),
   kind: "conditional",
@@ -54,6 +56,23 @@ const unconditionalEdge = (from: string, to: string): EdgeDef => ({
   kind: "unconditional",
 });
 
+/** Build a PostWaveContext from test parameters. */
+const makePostWaveCtx = (
+  waveNodeIds: NodeId[],
+  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
+  outgoingByNode: Map<NodeId, readonly EdgeDef[]>,
+  observer: RecordingObserver,
+): PostWaveContext => ({
+  waveNodeIds,
+  nodeMap,
+  nodeCtx: makeCtx(observer) as unknown as PostWaveContext["nodeCtx"],
+  machineCtx: { outgoingByNode } as unknown as DagMachineContext,
+  dagId: D("d1"),
+  nowFn: Date.now,
+  freshnessIndex: new InMemoryFreshnessIndex(),
+  priorOutputs: new Map(),
+});
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -61,15 +80,8 @@ const unconditionalEdge = (from: string, to: string): EdgeDef => ({
 describe("emitRoutingDecisions", () => {
   it("empty waveNodeIds → empty decisions, no earlyFailure", () => {
     const obs = new RecordingObserver();
-    const result = emitRoutingDecisions(
-      [],
-      new Map(),
-      new Map(),
-      { outgoingByNode: new Map() } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
-    );
+    const ctx = makePostWaveCtx([], new Map(), new Map(), obs);
+    const result = emitRoutingDecisions(ctx, new Map());
 
     expect(result.decisions.size).toBe(0);
     expect(result.earlyFailure).toBeUndefined();
@@ -78,15 +90,13 @@ describe("emitRoutingDecisions", () => {
 
   it("node in wave but not in newOutputs → skipped", () => {
     const obs = new RecordingObserver();
-    const result = emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a")],
-      new Map(), // a has no output
       new Map([[N("a"), makeNodeDef()]]),
-      { outgoingByNode: new Map([[N("a"), [conditionalEdge("a", "b", () => true), defaultEdge("a", "c")]]]) } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([[N("a"), [conditionalEdge("a", "b", () => true), defaultEdge("a", "c")]]]),
+      obs,
     );
+    const result = emitRoutingDecisions(ctx, new Map()); // a has no output
 
     expect(result.decisions.size).toBe(0);
     expect(obs.events).toHaveLength(0);
@@ -94,15 +104,13 @@ describe("emitRoutingDecisions", () => {
 
   it("node with only unconditional edges → skipped (no routing needed)", () => {
     const obs = new RecordingObserver();
-    const result = emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a")],
-      new Map([[N("a"), { value: 1 }]]),
       new Map([[N("a"), makeNodeDef()]]),
-      { outgoingByNode: new Map([[N("a"), [unconditionalEdge("a", "b")]]]) } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([[N("a"), [unconditionalEdge("a", "b")]]]),
+      obs,
     );
+    const result = emitRoutingDecisions(ctx, new Map([[N("a"), { value: 1 }]]));
 
     expect(result.decisions.size).toBe(0);
     expect(obs.events).toHaveLength(0);
@@ -114,16 +122,13 @@ describe("emitRoutingDecisions", () => {
       conditionalEdge("a", "yes", () => true),
       defaultEdge("a", "no"),
     ];
-
-    const result = emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a")],
-      new Map([[N("a"), { value: "hi" }]]),
       new Map([[N("a"), makeNodeDef()]]),
-      { outgoingByNode: new Map([[N("a"), edges]]) } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([[N("a"), edges]]),
+      obs,
     );
+    const result = emitRoutingDecisions(ctx, new Map([[N("a"), { value: "hi" }]]));
 
     expect(result.decisions.size).toBe(1);
     expect(result.decisions.has(N("a"))).toBe(true);
@@ -131,7 +136,7 @@ describe("emitRoutingDecisions", () => {
 
     const routeDecided = obs.events.filter((e) => e.type === "route-decided");
     expect(routeDecided).toHaveLength(1);
-    expect((routeDecided[0] as any).chosenTargets).toContain(N("yes"));
+    expect((routeDecided[0] as unknown as { chosenTargets: readonly NodeId[] }).chosenTargets).toContain(N("yes"));
   });
 
   it("pruned targets emit node-pruned events", () => {
@@ -141,20 +146,17 @@ describe("emitRoutingDecisions", () => {
       conditionalEdge("a", "no", () => false),
       defaultEdge("a", "fallback"),
     ];
-
-    emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a")],
-      new Map([[N("a"), { value: "hi" }]]),
       new Map([[N("a"), makeNodeDef()]]),
-      { outgoingByNode: new Map([[N("a"), edges]]) } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([[N("a"), edges]]),
+      obs,
     );
+    emitRoutingDecisions(ctx, new Map([[N("a"), { value: "hi" }]]));
 
     const pruned = obs.events.filter((e) => e.type === "node-pruned");
     expect(pruned.length).toBeGreaterThanOrEqual(1);
-    expect((pruned[0] as any).nodeId).toBe(N("no"));
+    expect((pruned[0] as { nodeId: NodeId }).nodeId).toBe(N("no"));
   });
 
   it("confidence.extract throws → earlyFailure with node-crash", () => {
@@ -169,16 +171,13 @@ describe("emitRoutingDecisions", () => {
       conditionalEdge("a", "yes", () => true),
       defaultEdge("a", "no"),
     ];
-
-    const result = emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a")],
-      new Map([[N("a"), { value: 1 }]]),
       new Map([[N("a"), nodeDef]]),
-      { outgoingByNode: new Map([[N("a"), edges]]) } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([[N("a"), edges]]),
+      obs,
     );
+    const result = emitRoutingDecisions(ctx, new Map([[N("a"), { value: 1 }]]));
 
     expect(result.earlyFailure).toBeDefined();
     expect(result.earlyFailure!.type).toBe("node-failed");
@@ -194,16 +193,13 @@ describe("emitRoutingDecisions", () => {
       conditionalEdge("a", "yes", () => { throw new Error("pred-boom"); }),
       defaultEdge("a", "no"),
     ];
-
-    const result = emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a")],
-      new Map([[N("a"), { value: 1 }]]),
       new Map([[N("a"), makeNodeDef()]]),
-      { outgoingByNode: new Map([[N("a"), edges]]) } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([[N("a"), edges]]),
+      obs,
     );
+    const result = emitRoutingDecisions(ctx, new Map([[N("a"), { value: 1 }]]));
 
     expect(result.earlyFailure).toBeDefined();
     expect(result.earlyFailure!.error.kind).toBe("predicate-malformed");
@@ -215,20 +211,18 @@ describe("emitRoutingDecisions", () => {
       conditionalEdge("b", "target", () => true),
       defaultEdge("b", "fallback"),
     ];
-
-    const result = emitRoutingDecisions(
+    const ctx = makePostWaveCtx(
       [N("a"), N("b")],
-      new Map([[N("a"), "out-a"], [N("b"), "out-b"]]),
       new Map([[N("a"), makeNodeDef()], [N("b"), makeNodeDef()]]),
-      {
-        outgoingByNode: new Map([
-          [N("a"), [unconditionalEdge("a", "c")]],  // no conditional edges
-          [N("b"), edges],                            // has conditional edges
-        ]),
-      } as any,
-      makeCtx(obs),
-      D("d1"),
-      Date.now,
+      new Map([
+        [N("a"), [unconditionalEdge("a", "c")]],  // no conditional edges
+        [N("b"), edges],                            // has conditional edges
+      ]),
+      obs,
+    );
+    const result = emitRoutingDecisions(
+      ctx,
+      new Map([[N("a"), "out-a"], [N("b"), "out-b"]]),
     );
 
     // Only b gets routing decisions

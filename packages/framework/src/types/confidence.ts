@@ -59,6 +59,11 @@ export function confidence(
       `confidence raw value for "self-reported-numeric" must be in [0, 1], got ${raw}`,
     );
   }
+  if (source === "logprob" && (raw === undefined || typeof raw !== "number")) {
+    throw new TypeError(
+      `confidence source "logprob" requires a numeric raw value, got ${raw === undefined ? "undefined" : typeof raw}`,
+    );
+  }
   return ({ bucket, source, ...(raw !== undefined ? { raw } : {}) }) as Confidence;
 }
 
