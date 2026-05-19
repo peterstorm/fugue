@@ -46,6 +46,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     dag,
     incomingByNode: overrides.incomingByNode ?? new Map(),
     outgoingByNode: overrides.outgoingByNode ?? new Map(),
+    unconditionalAdj: overrides.unconditionalAdj ?? new Map(),
     nodeById: overrides.nodeById ?? new Map(),
     retryConfigs: overrides.retryConfigs ?? new Map(),
     outputNodeId: dag.outputNodeId,
@@ -157,7 +158,7 @@ describe("handleWaveDone — output merge", () => {
       dag: { id: D("test"), nodes: [], edges: [], outputNodeId: N("b") } as unknown as DagDef,
     });
     const newOutputs = nodeMap([["a", "new-a"]]);
-    const result = handleWaveDone(0, newOutputs, ctx);
+    const result = handleWaveDone(0, newOutputs, ctx, new Map());
     expect(result.context.outputs.get(N("a"))).toBe("new-a");
   });
 });
@@ -180,7 +181,7 @@ describe("handleWaveDone — human review queue", () => {
       dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
     });
     const outputs = nodeMap([["a", "output-a"], ["b", "output-b"]]);
-    const result = handleWaveDone(0, outputs, ctx);
+    const result = handleWaveDone(0, outputs, ctx, new Map());
     expect(result.state.kind).toBe("awaiting-human");
     if (result.state.kind === "awaiting-human") {
       expect(result.state.nodeId).toBe(N("a"));
@@ -203,7 +204,7 @@ describe("handleWaveDone — human review queue", () => {
       dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
     });
     const outputs = nodeMap([["a", "A"], ["c", "C"]]);
-    const result = handleWaveDone(0, outputs, ctx);
+    const result = handleWaveDone(0, outputs, ctx, new Map());
     expect(result.state.kind).toBe("awaiting-human");
     if (result.state.kind === "awaiting-human") {
       expect(result.state.nodeId).toBe(N("a"));

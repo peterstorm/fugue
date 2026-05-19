@@ -235,9 +235,11 @@ export function seedInitialActiveSet(
 /**
  * Expand `prev` to include `chosenTargets` and every node forward-reachable
  * from those targets along unconditional edges only. Idempotent.
+ *
+ * Uses `unconditionalAdj` (closure-free, serializable) for the walk.
  */
 export const expandActive = (
-  outgoing: ReadonlyMap<NodeId, readonly EdgeDef[]>,
+  unconditionalAdj: ReadonlyMap<NodeId, readonly NodeId[]>,
   prev: ReadonlySet<NodeId>,
   chosenTargets: Iterable<NodeId>,
 ): ReadonlySet<NodeId> => {
@@ -251,12 +253,10 @@ export const expandActive = (
   }
   while (stack.length > 0) {
     const cur = stack.pop()!;
-    const edges = outgoing.get(cur) ?? [];
-    for (const e of edges) {
-      if (!isUnconditionalEdge(e)) continue;
-      if (!next.has(e.to)) {
-        next.add(e.to);
-        stack.push(e.to);
+    for (const to of (unconditionalAdj.get(cur) ?? [])) {
+      if (!next.has(to)) {
+        next.add(to);
+        stack.push(to);
       }
     }
   }
@@ -286,6 +286,25 @@ export const computeOutgoingByNode = (
     const bucket = map.get(e.from);
     if (bucket) bucket.push(e);
     else map.set(e.from, [e]);
+  }
+  return map;
+};
+
+/**
+ * Compile-time closure-free adjacency builder. Maps each node to the target
+ * node IDs of its unconditional out-edges only. Used by the pure transition
+ * layer (`expandActive`, `seedInitialActiveSet`) which never evaluates
+ * predicate closures. Serializable.
+ */
+export const computeUnconditionalAdj = (
+  dag: DagDef,
+): ReadonlyMap<NodeId, readonly NodeId[]> => {
+  const map = new Map<NodeId, NodeId[]>();
+  for (const e of dag.edges) {
+    if (!isUnconditionalEdge(e)) continue;
+    const bucket = map.get(e.from);
+    if (bucket) bucket.push(e.to);
+    else map.set(e.from, [e.to]);
   }
   return map;
 };

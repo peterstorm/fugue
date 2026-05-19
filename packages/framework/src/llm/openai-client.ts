@@ -11,7 +11,6 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import { ensureToolNames } from "./tools.js";
 import {
   dispatchToolCallsWithSpans,
   type ToolCall,
@@ -22,6 +21,7 @@ import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./
 import { zodToJsonSchema } from "./zod-schema.js";
 import { classifyLlmError } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
+import { toolUseLoop } from "./tool-use-loop.js";
 
 /**
  * Pure recursive transform: adds `additionalProperties: false` to all
@@ -455,16 +455,6 @@ export class OpenAILlmClient implements LlmClient {
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    try {
-      ensureToolNames(req.tools);
-    } catch (e) {
-      return err({
-        kind: "validation",
-        nodeId: resolveNodeId(req),
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-
     const maxIterations = req.maxIterations ?? 10;
     const finalSchema = buildJsonSchema(req.schema as z.ZodType<any>);
     const toolSpecs = req.tools.map(toolToOpenAiSpec);
@@ -475,149 +465,102 @@ export class OpenAILlmClient implements LlmClient {
       { role: "user", content: req.user },
     ];
 
-    let totalTokensIn = 0;
-    let totalTokensOut = 0;
-    let lastThinking: string | undefined;
-    const deadline = req.deadlineMs ? Date.now() + req.deadlineMs : Infinity;
-
-    for (let turn = 0; turn < maxIterations; turn++) {
-      if (Date.now() >= deadline) {
-        return err({
-          kind: "transient",
-          nodeId: resolveNodeId(req),
-          message: `Total deadline of ${req.deadlineMs}ms exceeded after ${turn} turns`,
-        });
-      }
-      if (req.signal?.aborted || ctx.signal?.aborted) {
-        return err({ kind: "aborted", reason: "signal" });
-      }
-
-      const body: Record<string, unknown> = {
-        model: req.model,
-        input: conversation,
-        tools: toolSpecs,
-        tool_choice: toolChoice,
-        text: {
-          format: {
-            type: "json_schema",
-            name: "structured_output",
-            strict: true,
-            schema: finalSchema,
+    const provider: import("./tool-use-loop.js").ToolLoopProvider = {
+      call: async (_turn: number) => {
+        const body: Record<string, unknown> = {
+          model: req.model,
+          input: conversation,
+          tools: toolSpecs,
+          tool_choice: toolChoice,
+          text: {
+            format: {
+              type: "json_schema",
+              name: "structured_output",
+              strict: true,
+              schema: finalSchema,
+            },
           },
-        },
-      };
+        };
 
-      if (req.thinking?.type === "enabled") {
-        body.reasoning = { effort: "high", summary: "auto" };
-      }
+        if (req.thinking?.type === "enabled") {
+          body.reasoning = { effort: "high", summary: "auto" };
+        }
 
-      let httpResult: Awaited<ReturnType<typeof this.postResponses>>;
-      try {
-        httpResult = await withLlmSpan(
-          ctx.tracer ?? null,
-          { provider: "openai", model: req.model, operation: "chat" },
-          async () => {
-            const r = await this.postResponses(body, req.signal ?? ctx.signal);
-            if (r.ok) {
-              const tokensIn = r.response.usage?.input_tokens ?? 0;
-              const tokensOut = r.response.usage?.output_tokens ?? 0;
-              setLlmUsageAttributes(tokensIn, tokensOut);
-              setLlmResponseAttributes({
-                model: r.response.model,
-                id: r.response.id,
-                finishReasons: r.response.status ? [r.response.status] : undefined,
-              });
-            }
-            return r;
-          },
-        );
-      } catch (error) {
-        return classifyLlmError(error, resolveNodeId(req), {
-          timeoutMs: this.requestTimeoutMs,
-        });
-      }
+        let httpResult: Awaited<ReturnType<typeof this.postResponses>>;
+        try {
+          httpResult = await withLlmSpan(
+            ctx.tracer ?? null,
+            { provider: "openai", model: req.model, operation: "chat" },
+            async () => {
+              const r = await this.postResponses(body, req.signal ?? ctx.signal);
+              if (r.ok) {
+                const tokensIn = r.response.usage?.input_tokens ?? 0;
+                const tokensOut = r.response.usage?.output_tokens ?? 0;
+                setLlmUsageAttributes(tokensIn, tokensOut);
+                setLlmResponseAttributes({
+                  model: r.response.model,
+                  id: r.response.id,
+                  finishReasons: r.response.status ? [r.response.status] : undefined,
+                });
+              }
+              return r;
+            },
+          );
+        } catch (error) {
+          return classifyLlmError(error, resolveNodeId(req), {
+            timeoutMs: this.requestTimeoutMs,
+          });
+        }
 
-      if (!httpResult.ok) {
-        if (httpResult.status === 429) {
+        if (!httpResult.ok) {
+          if (httpResult.status === 429) {
+            return err({
+              kind: "transient",
+              nodeId: resolveNodeId(req),
+              message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
+            });
+          }
           return err({
-            kind: "transient",
+            kind: "node-crash",
+            retriability: "retriable",
             nodeId: resolveNodeId(req),
             message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: resolveNodeId(req),
-          message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-        });
-      }
 
-      const response = httpResult.response;
-      const output: readonly ResponsesOutputItem[] = response.output ?? [];
-      totalTokensIn += response.usage?.input_tokens ?? 0;
-      totalTokensOut += response.usage?.output_tokens ?? 0;
-      const reasoning = extractReasoning(output);
-      if (reasoning) lastThinking = reasoning;
+        const response = httpResult.response;
+        const output: readonly ResponsesOutputItem[] = response.output ?? [];
+        const tokensIn = response.usage?.input_tokens ?? 0;
+        const tokensOut = response.usage?.output_tokens ?? 0;
+        const reasoning = extractReasoning(output);
 
-      // Echo all output items into the conversation so subsequent turns see
-      // them. Each ResponsesOutputItem satisfies ConversationItem via the union.
-      for (const item of output) conversation.push(item);
+        // Echo all output items into the conversation
+        for (const item of output) conversation.push(item);
 
-      const toolCalls = parseToolCalls(output);
+        const toolCalls = parseToolCalls(output);
+        const textContent = toolCalls.length === 0 ? extractFinalText(output) : undefined;
 
-      if (toolCalls.length === 0) {
-        const text = extractFinalText(output);
-        if (!text) {
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: resolveNodeId(req),
-            message: "OpenAI final turn had no text output",
-          });
-        }
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(text);
-        } catch (parseErr) {
-          const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: resolveNodeId(req),
-            message: `Not valid JSON (${parseMsg}): ${text.slice(0, 200)}`,
-          });
-        }
-        const validated = req.schema.safeParse(parsed);
-        if (!validated.success) {
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: resolveNodeId(req),
-            message: `Schema validation failed: ${validated.error.message}`,
-          });
-        }
         return ok({
-          output: validated.data as O,
-          tokensIn: totalTokensIn,
-          tokensOut: totalTokensOut,
-          thinking: lastThinking,
-          rawText: text,
+          toolCalls,
+          textContent,
+          tokensIn,
+          tokensOut,
+          thinking: reasoning,
         });
-      }
+      },
+      appendToolResults: (results) => {
+        for (const item of buildToolResultItems(results)) conversation.push(item);
+      },
+    };
 
-      const results = await dispatchToolCallsWithSpans(toolCalls, req.tools, ctx, { model: req.model });
-      for (const item of buildToolResultItems(results)) conversation.push(item);
-    }
-
-    // A model that did not converge within `maxIterations` turns will not
-    // converge on retry without prompt changes — classify as permanent so the
-    // DAG fast-fails instead of consuming the retry budget.
-    return err({
-      kind: "node-crash",
+    return toolUseLoop(provider, {
       nodeId: resolveNodeId(req),
-      message: `Tool-call iteration limit (${maxIterations}) reached`,
-      retriability: "non-retriable",
-    });
+      model: req.model,
+      schema: req.schema,
+      tools: req.tools,
+      maxIterations,
+      deadlineMs: req.deadlineMs,
+      signal: req.signal,
+    }, ctx);
   }
 }

@@ -1,10 +1,9 @@
 // Wave-resolution helpers — wave scheduling, HITL bookkeeping, completion tracking.
 // All functions are pure; no I/O.
 
-import type { DagPhase, DagTransitionContext } from "./types.js";
+import type { DagPhase, DagMachineContextPersisted } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
-import { decideRoute, expandActive } from "./conditional.js";
-import { isConditionalEdge } from "../types/dag.js";
+import { expandActive } from "./conditional.js";
 import type { NodeId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
@@ -13,7 +12,7 @@ import type { NodeId } from "../types/ids.js";
 
 export interface WaveDoneResult {
   readonly state: DagPhase;
-  readonly context: DagTransitionContext;
+  readonly context: DagMachineContextPersisted;
 }
 
 // ---------------------------------------------------------------------------
@@ -21,15 +20,15 @@ export interface WaveDoneResult {
 // ---------------------------------------------------------------------------
 
 /** Return the node-ids in a given wave, sorted ascending (for deterministic review order). */
-export const waveNodes = (ctx: DagTransitionContext, wave: number): readonly NodeId[] =>
+export const waveNodes = (ctx: DagMachineContextPersisted, wave: number): readonly NodeId[] =>
   ctx.waves[wave] ?? [];
 
 /** Active subset of a wave (filters out pruned nodes). */
-export const activeWaveNodes = (ctx: DagTransitionContext, wave: number): readonly NodeId[] =>
+export const activeWaveNodes = (ctx: DagMachineContextPersisted, wave: number): readonly NodeId[] =>
   waveNodes(ctx, wave).filter((id) => ctx.activeNodeIds.has(id));
 
 /** The index of the wave that contains a given nodeId, or -1 if not found. */
-export const waveIndexOf = (ctx: DagTransitionContext, nodeId: NodeId): number =>
+export const waveIndexOf = (ctx: DagMachineContextPersisted, nodeId: NodeId): number =>
   ctx.waves.findIndex((w) => w.includes(nodeId));
 
 // ---------------------------------------------------------------------------
@@ -41,7 +40,7 @@ export const waveIndexOf = (ctx: DagTransitionContext, nodeId: NodeId): number =
  * Returns them sorted so we always process them deterministically.
  */
 export const collectHumanReviewQueue = (
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
   wave: number,
 ): readonly NodeId[] => {
   const nodes = activeWaveNodes(ctx, wave);
@@ -71,64 +70,40 @@ export const collectHumanReviewQueue = (
 export const handleWaveDone = (
   wave: number,
   outputs: ReadonlyMap<NodeId, unknown>,
-  ctx: DagTransitionContext,
-  routingDecisions?: ReadonlyMap<NodeId, import("./conditional.js").Decision>,
+  ctx: DagMachineContextPersisted,
+  routingDecisions: ReadonlyMap<NodeId, import("./conditional.js").Decision>,
 ): WaveDoneResult => {
   const newOutputs = new Map(ctx.outputs);
   for (const [k, v] of outputs) newOutputs.set(k, v);
 
-  // Expand `activeNodeIds` along guarded out-edges. Prefer the executor's
-  // precomputed decisions to avoid re-evaluating the same predicates twice
-  // per wave. Fall back to in-line decideRoute when absent.
+  // Expand `activeNodeIds` along guarded out-edges using the executor's
+  // precomputed decisions (ADR-0029: mandatory, never re-evaluate predicates).
   let nextActive = ctx.activeNodeIds;
   for (const nodeId of activeWaveNodes(ctx, wave)) {
     if (!newOutputs.has(nodeId)) continue;
-    const provided = routingDecisions?.get(nodeId);
-    if (provided !== undefined) {
-      if (provided.kind === "predicate-malformed") {
-        // Defensive: the executor short-circuits malformed predicates to
-        // `node-failed` rather than emitting `wave-done`, so this branch is
-        // unreachable in normal operation. Surface it to terminal `failed`
-        // anyway in case a hand-crafted event ever carries one through.
-        return {
-          state: {
-            kind: "failed",
-            error: {
-              kind: "predicate-malformed",
-              nodeId: provided.fromNodeId,
-              message: provided.message,
-            },
-          },
-          context: { ...ctx, outputs: newOutputs },
-        };
-      }
-      nextActive = expandActive(ctx.outgoingByNode, nextActive, provided.chosenTargets);
-      continue;
-    }
-
-    // Fallback: no precomputed decision, evaluate inline.
-    const outgoing = ctx.outgoingByNode.get(nodeId) ?? [];
-    const hasGuards = outgoing.some(isConditionalEdge);
-    if (!hasGuards) continue;
-    const upstreamConfidence = ctx.confidenceByNode.get(nodeId) ?? null;
-    const decision = decideRoute(nodeId, newOutputs.get(nodeId), outgoing, upstreamConfidence);
-    if (decision.kind === "predicate-malformed") {
+    const provided = routingDecisions.get(nodeId);
+    if (provided === undefined) continue;
+    if (provided.kind === "predicate-malformed") {
+      // Defensive: the executor short-circuits malformed predicates to
+      // `node-failed` rather than emitting `wave-done`, so this branch is
+      // unreachable in normal operation. Surface it to terminal `failed`
+      // anyway in case a hand-crafted event ever carries one through.
       return {
         state: {
           kind: "failed",
           error: {
             kind: "predicate-malformed",
-            nodeId: decision.fromNodeId,
-            message: decision.message,
+            nodeId: provided.fromNodeId,
+            message: provided.message,
           },
         },
         context: { ...ctx, outputs: newOutputs },
       };
     }
-    nextActive = expandActive(ctx.outgoingByNode, nextActive, decision.chosenTargets);
+    nextActive = expandActive(ctx.unconditionalAdj, nextActive, provided.chosenTargets);
   }
 
-  const newCtx: DagTransitionContext = {
+  const newCtx: DagMachineContextPersisted = {
     ...ctx,
     outputs: newOutputs,
     activeNodeIds: nextActive,
@@ -178,7 +153,7 @@ export const handleWaveDone = (
 
 export const advanceToNextWave = (
   currentWave: number,
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
 ): WaveDoneResult => {
   const nextWave = currentWave + 1;
 

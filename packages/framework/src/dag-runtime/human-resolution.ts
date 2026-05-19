@@ -1,10 +1,8 @@
 // Human-resolution helpers — approve / reject / reroute.
-// All functions are pure; no I/O.
+// All functions are pure; no I/O, no predicate evaluation.
 
 import { match } from "ts-pattern";
-import type { DagPhase, DagTransitionContext, HumanAction } from "./types.js";
-import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
-import { isConditionalEdge } from "../types/dag.js";
+import type { DagPhase, DagMachineContextPersisted, HumanAction } from "./types.js";
 import type { NodeId } from "../types/ids.js";
 import {
   type WaveDoneResult,
@@ -19,7 +17,8 @@ import {
 export const handleHumanResponse = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
   action: HumanAction,
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
+  rerouteActiveSet?: ReadonlySet<NodeId>,
 ): WaveDoneResult =>
   match(action)
     .with({ action: "approve" }, () => resolveHumanApproved(currentState, ctx))
@@ -28,7 +27,7 @@ export const handleHumanResponse = (
       // Replace the reviewed node's output in the outputs map (FR-029)
       const newOutputs = new Map(ctx.outputs);
       newOutputs.set(currentState.nodeId, newOutput);
-      const newCtx: DagTransitionContext = { ...ctx, outputs: newOutputs };
+      const newCtx: DagMachineContextPersisted = { ...ctx, outputs: newOutputs };
       return resolveHumanApproved(currentState, newCtx);
     })
 
@@ -46,19 +45,24 @@ export const handleHumanResponse = (
     }))
 
     .with({ action: "reroute" }, ({ targetNodeId }) =>
-      handleReroute(currentState, targetNodeId, ctx),
+      handleReroute(currentState, targetNodeId, ctx, rerouteActiveSet),
     )
 
     .exhaustive();
 
 // ---------------------------------------------------------------------------
 // handleReroute — FR-031, FR-032 backward / forward reroute resolution
+//
+// The active-set computation for reroutes (which requires predicate evaluation)
+// is performed by the executor and passed in as `rerouteActiveSet`. The
+// transition layer never evaluates predicate closures (ADR-0029).
 // ---------------------------------------------------------------------------
 
 const handleReroute = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
   targetNodeId: NodeId,
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
+  rerouteActiveSet?: ReadonlySet<NodeId>,
 ): WaveDoneResult => {
   const targetWave = waveIndexOf(ctx, targetNodeId);
 
@@ -102,41 +106,16 @@ const handleReroute = (
   const beforeTargetWave = (nodeId: NodeId): boolean =>
     (waveByNodeId.get(nodeId) ?? -1) < targetWave;
 
-  // Recompute activeNodeIds from the seed and re-expand using outputs that
-  // survived the reroute (waves < targetWave). Guard decisions for those
-  // earlier nodes are deterministic — same outputs, same guards, same
-  // chosen targets — so the active set converges to the pre-reroute value
-  // for all nodes in waves < targetWave.
   const survivingOutputs = new Map(
     [...ctx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
   );
-  let reseededActive = seedInitialActiveSet(ctx.edges, ctx.outgoingByNode);
-  for (let w = 0; w < targetWave; w++) {
-    for (const nodeId of ctx.waves[w] ?? []) {
-      if (!reseededActive.has(nodeId)) continue;
-      if (!survivingOutputs.has(nodeId)) continue;
-      const outgoing = ctx.outgoingByNode.get(nodeId) ?? [];
-      if (!outgoing.some(isConditionalEdge)) continue;
-      const upstreamConfidence = ctx.confidenceByNode.get(nodeId) ?? null;
-      const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing, upstreamConfidence);
-      if (decision.kind === "predicate-malformed") {
-        return {
-          state: {
-            kind: "failed",
-            error: {
-              kind: "predicate-malformed",
-              nodeId: decision.fromNodeId,
-              message: decision.message,
-            },
-          },
-          context: ctx,
-        };
-      }
-      reseededActive = expandActive(ctx.outgoingByNode, reseededActive, decision.chosenTargets);
-    }
-  }
 
-  const newCtx: DagTransitionContext = {
+  // The executor precomputes the active set by re-evaluating predicates for
+  // prior waves. If not provided (shouldn't happen in normal operation),
+  // fall back to the current active set (safe but imprecise).
+  const reseededActive = rerouteActiveSet ?? ctx.activeNodeIds;
+
+  const newCtx: DagMachineContextPersisted = {
     ...ctx,
     outputs: survivingOutputs,
     retries: new Map([...ctx.retries].filter(([nodeId]) => beforeTargetWave(nodeId))),
@@ -155,7 +134,7 @@ const handleReroute = (
 
 const resolveHumanApproved = (
   currentState: Extract<DagPhase, { kind: "awaiting-human" }>,
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
 ): WaveDoneResult => {
   // If there are more reviews pending in this wave, process the next one
   if (currentState.pendingReviews.length > 0) {

@@ -1,7 +1,7 @@
 // DAG runtime layer barrel export
 
 // Types
-export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, DagTransitionContext, HumanAction } from "./types.js";
+export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";
 
 // Pure transition
 export { dagTransition } from "./transition.js";
@@ -26,7 +26,8 @@ export { topoSort } from "../shared/topo.js";
 // DAG executor closure
 export { buildDagExecutor } from "./executor.js";
 
-// runDagStateful orchestrator
+// runDagStateful orchestrator — re-exported via executor/run-dag.ts and advanced.ts.
+// Direct imports from this file remain valid for internal use.
 export { runDagStateful } from "./run-dag-stateful.js";
 export type { DagRunOpts } from "./run-dag-stateful.js";
 

@@ -7,8 +7,15 @@
 // signposted: reaching for these is a deliberate decision, not an accident
 // from a wildcard import.
 
-export { runDagStateful, runDagAsWorkerJob } from "./dag-runtime/run-dag-stateful.js";
-export type { DagRunOpts, BackgroundResult } from "./dag-runtime/run-dag-stateful.js";
+export { runDagAsWorkerJob } from "./executor/run-dag.js";
+export type { BackgroundResult, DagRunOpts } from "./executor/run-dag.js";
+
+/**
+ * @deprecated Use `runDag` from the main barrel with full `RunOptions`.
+ * Retained for backward compatibility — delegates to `runDag` internally.
+ */
+export { runDag as runDagStateful } from "./executor/run-dag.js";
+export type { RunOptions as DagRunStatefulOpts } from "./executor/run-dag.js";
 
 export { compileDagToMachine } from "./dag-runtime/machine.js";
 export { buildDagExecutor } from "./dag-runtime/executor.js";

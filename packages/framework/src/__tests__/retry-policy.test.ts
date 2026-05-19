@@ -20,6 +20,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     dag,
     incomingByNode: new Map(),
     outgoingByNode: new Map(),
+    unconditionalAdj: new Map(),
     nodeById: new Map(),
     retryConfigs: new Map(),
     outputNodeId: dag.outputNodeId,

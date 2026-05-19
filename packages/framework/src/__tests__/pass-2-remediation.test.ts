@@ -14,7 +14,7 @@ import { createInMemoryBackend } from "../queue/in-memory.js";
 
 import { dagTransition } from "../dag-runtime/transition.js";
 import { handleNodeFailed } from "../dag-runtime/retry-policy.js";
-import { computeOutgoingByNode } from "../dag-runtime/conditional.js";
+import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/conditional.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 
 import { defineDag } from "../executor/define-dag.js";
@@ -194,6 +194,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       activeNodeIds: new Set(["a"]) as any,
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
+    unconditionalAdj: computeUnconditionalAdj(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
       retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
       outputNodeId: dag.outputNodeId,
@@ -253,6 +254,7 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       activeNodeIds: new Set(["a"]) as any,
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
+    unconditionalAdj: computeUnconditionalAdj(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
       retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
       outputNodeId: dag.outputNodeId,
@@ -552,6 +554,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       activeNodeIds: new Set(["a", "b"]) as any,
       incomingByNode: new Map(),
       outgoingByNode: computeOutgoingByNode(dag),
+    unconditionalAdj: computeUnconditionalAdj(dag),
       nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
       retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
       outputNodeId: dag.outputNodeId,

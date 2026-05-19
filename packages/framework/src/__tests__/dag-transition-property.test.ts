@@ -49,6 +49,7 @@ const minimalCtx: DagMachineContext = {
   activeNodeIds: new Set([N("a"), N("b")]),
   incomingByNode: new Map([[N("a"), { required: [], optional: [] }], [N("b"), { required: ["a"], optional: [] }]]),
   outgoingByNode: new Map([[N("a"), minimalDag.edges], [N("b"), []]]),
+  unconditionalAdj: new Map([[N("a"), [N("b")]]]),
   nodeById: new Map([
     [N("a"), minimalNodeDef("a") as any],
     [N("b"), minimalNodeDef("b") as any],
@@ -139,6 +140,7 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
     type: fc.constant("wave-done" as const),
     wave: fc.nat(5),
     outputs: fc.constant(new Map<NodeId, unknown>()),
+    routingDecisions: fc.constant(new Map()),
   }),
   fc.record({
     type: fc.constant("node-failed" as const),

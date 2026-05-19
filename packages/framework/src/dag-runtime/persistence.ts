@@ -26,7 +26,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { RunId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { dagFingerprint } from "../checkpoint/fingerprint.js";
-import { computeIncomingByNode, computeOutgoingByNode } from "./conditional.js";
+import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj } from "./conditional.js";
 
 /**
  * The persisted shape plus an optional fingerprint stamp. This is the type
@@ -71,6 +71,7 @@ export const stripNonPersistable = (
   humanReviewNodeIds: ctx.humanReviewNodeIds,
   humanReviewPrompts: ctx.humanReviewPrompts,
   edges: ctx.edges,
+  unconditionalAdj: ctx.unconditionalAdj,
   confidenceByNode: ctx.confidenceByNode,
 });
 
@@ -92,6 +93,7 @@ export const wrapDagJobLike = (
 ): WrappedDagJobLike => {
   const incomingByNode = computeIncomingByNode(dag);
   const outgoingByNode = computeOutgoingByNode(dag);
+  const unconditionalAdj = computeUnconditionalAdj(dag);
   const nodeById = new Map(dag.nodes.map((n) => [n.id, n]));
   const expectedFingerprint = dagFingerprint(dag);
 
@@ -111,6 +113,7 @@ export const wrapDagJobLike = (
           dag,
           incomingByNode,
           outgoingByNode,
+          unconditionalAdj,
           nodeById,
         },
       };

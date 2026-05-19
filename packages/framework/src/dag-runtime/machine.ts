@@ -9,7 +9,7 @@ import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
-import { computeIncomingByNode, computeOutgoingByNode, seedInitialActiveSet } from "./conditional.js";
+import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj, seedInitialActiveSet } from "./conditional.js";
 import { match } from "ts-pattern";
 
 // ---------------------------------------------------------------------------
@@ -96,6 +96,7 @@ export const compileDagToMachine = (
     activeNodeIds: seedInitialActiveSet(dag),
     incomingByNode: computeIncomingByNode(dag),
     outgoingByNode: computeOutgoingByNode(dag),
+    unconditionalAdj: computeUnconditionalAdj(dag),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     retryConfigs,
     // Plain-data fields for the pure transition layer (no closures)
@@ -114,9 +115,9 @@ export const compileDagToMachine = (
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {
     transition: (state, event, ctx) => {
-      // dagTransition operates on the narrower DagTransitionContext (no closures).
-      // DagMachineContext structurally satisfies DagTransitionContext. The returned
-      // context is DagTransitionContext; spread with the live fields to reconstruct
+      // dagTransition operates on DagMachineContextPersisted (no closures).
+      // DagMachineContext structurally satisfies it. The returned context is
+      // DagMachineContextPersisted; spread with the live fields to reconstruct
       // the full DagMachineContext.
       const result = dagTransition(state, event, ctx);
       return { state: result.state, context: { ...ctx, ...result.context } };

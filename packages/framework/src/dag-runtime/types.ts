@@ -91,11 +91,10 @@ export type DagEvent =
        * one conditional/default edge appear here; unconditional-only sources
        * are omitted (no decision was needed).
        *
-       * Optional for forward-compatibility with hand-crafted wave-done events
-       * (e.g. event-log replay paths); when omitted the transition falls
-       * back to inline `decideRoute` calls.
+       * Mandatory (ADR-0029): the pure transition layer never evaluates
+       * predicates — all routing is decided by the executor and carried here.
        */
-      readonly routingDecisions?: ReadonlyMap<NodeId, Decision>;
+      readonly routingDecisions: ReadonlyMap<NodeId, Decision>;
       /**
        * Per-node extracted confidence. Populated by the executor’s routing
        * phase so the pure transition layer can pass upstream confidence to
@@ -121,7 +120,18 @@ export type DagEvent =
        */
       readonly coFailedNodeIds?: ReadonlyArray<NodeId>;
     }
-  | { readonly type: "human-responded"; readonly nodeId: NodeId; readonly action: HumanAction }
+  | {
+      readonly type: "human-responded";
+      readonly nodeId: NodeId;
+      readonly action: HumanAction;
+      /**
+       * Precomputed active-node set for reroute actions. When `action.action === "reroute"`,
+       * the executor computes the reseeded active set (re-evaluating predicates for prior
+       * waves) and carries it here so the pure transition layer never calls predicate closures.
+       * Absent for non-reroute actions.
+       */
+      readonly rerouteActiveSet?: ReadonlySet<NodeId>;
+    }
   | { readonly type: "abort"; readonly reason: string }
   | { readonly type: "executor-error"; readonly retriable: boolean; readonly error: string };
 
@@ -129,6 +139,9 @@ export type DagEvent =
 // DagMachineContextPersisted — the plain-data subset safe for serialization.
 // Does NOT contain closures (run functions, Zod schemas, predicate functions).
 // `DagMachineContext` extends this with live DAG-derived fields.
+//
+// The pure transition layer operates on this type directly — no intermediate
+// type exists. See ADR-0029 for the rationale.
 // ---------------------------------------------------------------------------
 
 export interface DagMachineContextPersisted {
@@ -164,39 +177,39 @@ export interface DagMachineContextPersisted {
   /** Edges (data only — predicates are never called by the transition layer). */
   readonly edges: readonly EdgeDef[];
   /**
+   * Closure-free unconditional adjacency. Maps each node to the targets of its
+   * unconditional out-edges. Used by `expandActive` and `seedInitialActiveSet`
+   * in the transition layer for forward-reachability walks without evaluating
+   * predicate closures. Computed once at compile time.
+   */
+  readonly unconditionalAdj: ReadonlyMap<NodeId, readonly NodeId[]>;
+  /**
    * Per-node extracted confidence values. Populated by the executor at wave
-   * completion time so the pure transition layer can pass upstream confidence
-   * to `decideRoute` without calling closure-based `confidence.extract()`. 
+   * completion time so the pure transition layer can read precomputed
+   * confidence without calling closure-based `confidence.extract()`.
    */
   readonly confidenceByNode: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
 }
 
 // ---------------------------------------------------------------------------
 // DagMachineContext — full runtime context with live DAG-derived fields.
+// Used by the executor (imperative shell) which needs `nodeById` for `run()`
+// and `outgoingByNode` for predicate evaluation and reroute computation.
+//
+// The pure transition layer operates on `DagMachineContextPersisted` directly.
+// `DagMachineContext` adds closure-carrying fields that cannot survive
+// serialization: the live DAG (with `run` functions), the outgoing adjacency
+// (with predicate closures), and the node lookup map.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// DagTransitionContext — the subset visible to the PURE transition layer.
-// Contains persisted state + precomputed maps. Does NOT contain `dag` (which
-// carries NodeDef.run closures) or `nodeById` (same closures). This type
-// boundary prevents the transition from accidentally serializing live closures.
-// ---------------------------------------------------------------------------
-
-export interface DagTransitionContext extends DagMachineContextPersisted {
+export interface DagMachineContext extends DagMachineContextPersisted {
+  readonly dag: DagDef;
   /**
-   * Precomputed adjacency: `nodeId → out-edges`. Built once at compile time so
-   * routing decisions don't pay an O(edges) linear scan each call.
+   * Precomputed adjacency: `nodeId → out-edges` (includes predicate closures).
+   * Built once at compile time. Used by the executor for routing-decision
+   * computation and reroute active-set reseeding.
    */
   readonly outgoingByNode: ReadonlyMap<NodeId, readonly EdgeDef[]>;
-}
-
-// ---------------------------------------------------------------------------
-// DagMachineContext — full runtime context with live DAG-derived fields.
-// Used by the executor (imperative shell) which needs `nodeById` for `run()`.
-// ---------------------------------------------------------------------------
-
-export interface DagMachineContext extends DagTransitionContext {
-  readonly dag: DagDef;
   /**
    * Precomputed `{ required, optional }` source partition per node, derived
    * from the edges at compile time. Used by `runNode` to assemble `nodeInput`

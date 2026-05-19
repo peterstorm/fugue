@@ -28,7 +28,6 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import { ensureToolNames } from "./tools.js";
 import {
   dispatchToolCallsWithSpans,
   type ToolCall,
@@ -43,6 +42,7 @@ import {
 } from "./spans.js";
 import { classifyLlmError } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
+import { toolUseLoop } from "./tool-use-loop.js";
 
 const ANTHROPIC_MAX_TOKENS = 16384;
 
@@ -199,143 +199,73 @@ export class AnthropicLlmClient implements LlmClient {
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    try {
-      ensureToolNames(req.tools);
-    } catch (e) {
-      return err({
-        kind: "validation",
-        nodeId: resolveNodeId(req),
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-
     const maxIterations = req.maxIterations ?? 10;
     const system = appendSchemaInstruction(req.system, req.schema as z.ZodType<any>);
     const toolSpecs = req.tools.map(toolToAnthropicSpec);
     const toolChoice = toolChoiceToAnthropic(req.toolChoice);
     const messages: AnthropicMessage[] = [{ role: "user", content: req.user }];
 
-    let totalTokensIn = 0;
-    let totalTokensOut = 0;
-    let lastThinking: string | undefined;
-    let lastRawText = "";
-    const deadline = req.deadlineMs ? Date.now() + req.deadlineMs : Infinity;
+    const provider: import("./tool-use-loop.js").ToolLoopProvider = {
+      call: async (_turn: number) => {
+        const turnCallerSignal = req.signal ?? ctx.signal;
+        const t = createTimeoutSignal(this.requestTimeoutMs, turnCallerSignal);
 
-    for (let turn = 0; turn < maxIterations; turn++) {
-      if (Date.now() >= deadline) {
-        return err({
-          kind: "transient",
-          nodeId: resolveNodeId(req),
-          message: `Total deadline of ${req.deadlineMs}ms exceeded after ${turn} turns`,
-        });
-      }
-      if (req.signal?.aborted || ctx.signal?.aborted) {
-        return err({ kind: "aborted", reason: "signal" });
-      }
-
-      const params: Anthropic.MessageCreateParams = {
-        model: req.model,
-        max_tokens: ANTHROPIC_MAX_TOKENS,
-        system,
-        messages,
-        tools: toolSpecs,
-        tool_choice: toolChoice,
-      };
-
-      const turnCallerSignal = req.signal ?? ctx.signal;
-      const t = createTimeoutSignal(this.requestTimeoutMs, turnCallerSignal);
-
-      let response: AnthropicResponse;
-      try {
-        response = await withLlmSpan(
-          ctx.tracer ?? null,
-          { provider: "anthropic", model: req.model, operation: "chat" },
-          async () => {
-            setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
-            const r = await this.anthropic.messages.create(params, { signal: t.signal });
-            setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
-            setLlmResponseAttributes({
-              model: r.model,
-              id: r.id,
-              finishReasons: r.stop_reason ? [r.stop_reason] : undefined,
-            });
-            return r;
-          },
-        );
-      } catch (e) {
-        return classifyLlmError(e, resolveNodeId(req), {
-          timedOut: t.timedOut(),
-          callerAborted: turnCallerSignal?.aborted,
-          timeoutMs: this.requestTimeoutMs,
-          isAbortOverride: isAnthropicAbort,
-        });
-      } finally {
-        t.cleanup();
-      }
-
-      totalTokensIn += response.usage.input_tokens;
-      totalTokensOut += response.usage.output_tokens;
-
-      const thinkingBlock = response.content.find((b) => b.type === "thinking");
-      if (thinkingBlock?.type === "thinking") lastThinking = thinkingBlock.thinking;
-
-      messages.push({ role: "assistant", content: response.content });
-
-      const toolCalls = parseToolCalls(response);
-      if (toolCalls.length === 0) {
-        // Final turn — parse JSON answer.
-        const text = lastTextBlock(response);
-        if (text === undefined) {
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: resolveNodeId(req),
-            message: "Anthropic final turn had no text block to parse",
-          });
-        }
-        lastRawText = text;
-        let parsed: unknown;
+        let response: AnthropicResponse;
         try {
-          parsed = JSON.parse(stripCodeFences(text));
-        } catch (parseErr) {
-          const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: resolveNodeId(req),
-            message: `Not valid JSON (${parseMsg}): ${text.slice(0, 200)}`,
+          response = await withLlmSpan(
+            ctx.tracer ?? null,
+            { provider: "anthropic", model: req.model, operation: "chat" },
+            async () => {
+              setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
+              const r = await this.anthropic.messages.create(
+                { model: req.model, max_tokens: ANTHROPIC_MAX_TOKENS, system, messages, tools: toolSpecs, tool_choice: toolChoice },
+                { signal: t.signal },
+              );
+              setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
+              setLlmResponseAttributes({ model: r.model, id: r.id, finishReasons: r.stop_reason ? [r.stop_reason] : undefined });
+              return r;
+            },
+          );
+        } catch (e) {
+          return classifyLlmError(e, resolveNodeId(req), {
+            timedOut: t.timedOut(),
+            callerAborted: turnCallerSignal?.aborted,
+            timeoutMs: this.requestTimeoutMs,
+            isAbortOverride: isAnthropicAbort,
           });
+        } finally {
+          t.cleanup();
         }
-        const validated = req.schema.safeParse(parsed);
-        if (!validated.success) {
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: resolveNodeId(req),
-            message: `Schema validation failed: ${validated.error.message}`,
-          });
-        }
+
+        const thinkingBlock = response.content.find((b) => b.type === "thinking");
+        const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
+
+        messages.push({ role: "assistant", content: response.content });
+
+        const toolCalls = parseToolCalls(response);
+        const textContent = toolCalls.length === 0 ? lastTextBlock(response) : undefined;
+
         return ok({
-          output: validated.data as O,
-          tokensIn: totalTokensIn,
-          tokensOut: totalTokensOut,
-          thinking: lastThinking,
-          rawText: lastRawText,
+          toolCalls,
+          textContent,
+          tokensIn: response.usage.input_tokens,
+          tokensOut: response.usage.output_tokens,
+          thinking,
         });
-      }
+      },
+      appendToolResults: (results) => {
+        messages.push(buildToolResultMessage(results));
+      },
+    };
 
-      const results = await dispatchToolCallsWithSpans(toolCalls, req.tools, ctx, { model: req.model });
-      messages.push(buildToolResultMessage(results));
-    }
-
-    // A model that did not converge within `maxIterations` turns will not
-    // converge on retry without prompt changes — classify as permanent so the
-    // DAG fast-fails instead of consuming the retry budget.
-    return err({
-      kind: "node-crash",
+    return toolUseLoop(provider, {
       nodeId: resolveNodeId(req),
-      message: `Tool-call iteration limit (${maxIterations}) reached`,
-      retriability: "non-retriable",
-    });
+      model: req.model,
+      schema: req.schema,
+      tools: req.tools,
+      maxIterations,
+      deadlineMs: req.deadlineMs,
+      signal: req.signal,
+    }, ctx);
   }
 }

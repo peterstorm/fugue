@@ -6,7 +6,7 @@ import { describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { N, R, D, nodeMap, nodeSet, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
-import { computeOutgoingByNode } from "../dag-runtime/conditional.js";
+import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/conditional.js";
 import {
   handleWaveDone,
   advanceToNextWave,
@@ -17,7 +17,7 @@ import {
 import { handleNodeFailed, computeBackoffMs, getRetryLimit } from "../dag-runtime/retry-policy.js";
 import type { RetryConfigs } from "../dag-runtime/retry-policy.js";
 import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
-import type { DagPhase, DagEvent, DagMachineContext, DagTransitionContext, HumanAction } from "../dag-runtime/types.js";
+import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "../dag-runtime/types.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -92,6 +92,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     initialInput: null,
     activeNodeIds: new Set(dag.nodes.map((n) => n.id)),
     outgoingByNode: computeOutgoingByNode(dag),
+    unconditionalAdj: computeUnconditionalAdj(dag),
     incomingByNode: new Map(),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
     retryConfigs: new Map(
@@ -153,7 +154,7 @@ describe("dagTransition — pending", () => {
 
   it("unexpected event in pending => stay pending", () => {
     const phase: DagPhase = { kind: "pending" };
-    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map() };
+    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map(), routingDecisions: new Map() };
     const ctx = makeCtx();
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toEqual({ kind: "pending" });
@@ -208,7 +209,7 @@ describe("dagTransition — abort (FR-033)", () => {
 describe("dagTransition — running", () => {
   it("wave-done without human-review nodes => advance to next wave", () => {
     const ctx = makeCtx();
-    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map([["a", 42]]) as any };
+    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map([["a", 42]]) as any, routingDecisions: new Map() };
     const result = dagTransition(running(0), event, ctx);
     expect(result.state).toEqual({ kind: "running", wave: 1 });
     expect(result.context.outputs.get(N("a"))).toBe(42);
@@ -216,7 +217,7 @@ describe("dagTransition — running", () => {
 
   it("wave-done on last wave => succeeded", () => {
     const ctx = makeCtx();
-    const event: DagEvent = { type: "wave-done", wave: 2, outputs: new Map([["c", "final"]]) as any };
+    const event: DagEvent = { type: "wave-done", wave: 2, outputs: new Map([["c", "final"]]) as any, routingDecisions: new Map() };
     const result = dagTransition(running(2), event, ctx);
     expect(result.state).toMatchObject({ kind: "succeeded" });
   });
@@ -228,7 +229,7 @@ describe("dagTransition — running", () => {
       waves: [[N("a")], [N("b")], [N("c")]],
       outputs: new Map([["b", "b-output"]]) as any,
     });
-    const event: DagEvent = { type: "wave-done", wave: 2, outputs: new Map([["c", "c-output"]]) as any };
+    const event: DagEvent = { type: "wave-done", wave: 2, outputs: new Map([["c", "c-output"]]) as any, routingDecisions: new Map() };
     const result = dagTransition(running(2), event, ctx);
     expect(result.state).toMatchObject({ kind: "succeeded", output: "b-output" });
   });
@@ -309,7 +310,7 @@ describe("dagTransition — running", () => {
 describe("dagTransition — retrying", () => {
   it("wave-done after retry => advance", () => {
     const phase: DagPhase = { kind: "retrying", wave: 0, nodeId: "a" as NodeId, attempt: 1, nextDelayMs: 1000 };
-    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map([["a", "ok"]]) as any };
+    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map([["a", "ok"]]) as any, routingDecisions: new Map() };
     const result = dagTransition(phase, event, makeCtx());
     expect(result.state.kind).toBe("running");
   });
@@ -548,7 +549,7 @@ describe("dagTransition — terminal no-ops", () => {
 
   it("any event in failed => no-op", () => {
     const phase: DagPhase = { kind: "failed", error: nodeFailedError };
-    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map() };
+    const event: DagEvent = { type: "wave-done", wave: 0, outputs: new Map(), routingDecisions: new Map() };
     const result = dagTransition(phase, event, makeCtx());
     expect(result.state).toEqual(phase);
   });
@@ -561,7 +562,7 @@ describe("dagTransition — terminal no-ops", () => {
 describe("handleWaveDone", () => {
   it("no human-review nodes => advances to next wave", () => {
     const ctx = makeCtx();
-    const result = handleWaveDone(0, new Map([["a", 1]]) as any, ctx);
+    const result = handleWaveDone(0, new Map([["a", 1]]) as any, ctx, new Map());
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
     expect(result.context.outputs.get(N("a"))).toBe(1);
   });
@@ -579,7 +580,7 @@ describe("handleWaveDone", () => {
       waves: [[N("a"), N("z")]],
       outputs: new Map([["a", "a-out"], ["z", "z-out"]]) as any,
     });
-    const result = handleWaveDone(0, new Map([["a", "a-out"], ["z", "z-out"]]) as any, ctx);
+    const result = handleWaveDone(0, new Map([["a", "a-out"], ["z", "z-out"]]) as any, ctx, new Map());
     // "a" should come before "z" (sorted ascending)
     expect(result.state).toMatchObject({ kind: "awaiting-human", nodeId: "a" as NodeId });
     if (result.state.kind === "awaiting-human") {
@@ -589,7 +590,7 @@ describe("handleWaveDone", () => {
 
   it("last wave => succeeded", () => {
     const ctx = makeCtx({ waves: [[N("a")]] });
-    const result = handleWaveDone(0, new Map([["a", "out"]]) as any, ctx);
+    const result = handleWaveDone(0, new Map([["a", "out"]]) as any, ctx, new Map());
     expect(result.state.kind).toBe("succeeded");
   });
 });
@@ -1001,17 +1002,17 @@ describe("dagTransition — full round-trip", () => {
     phase = r.state;
 
     // wave 0 done
-    r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", 1]]) as any }, r.context);
+    r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", 1]]) as any, routingDecisions: new Map() }, r.context);
     expect(r.state).toMatchObject({ kind: "running", wave: 1 });
     phase = r.state;
 
     // wave 1 done
-    r = dagTransition(phase, { type: "wave-done", wave: 1, outputs: new Map([["b", 2]]) as any }, r.context);
+    r = dagTransition(phase, { type: "wave-done", wave: 1, outputs: new Map([["b", 2]]) as any, routingDecisions: new Map() }, r.context);
     expect(r.state).toMatchObject({ kind: "running", wave: 2 });
     phase = r.state;
 
     // wave 2 done
-    r = dagTransition(phase, { type: "wave-done", wave: 2, outputs: new Map([["c", 3]]) as any }, r.context);
+    r = dagTransition(phase, { type: "wave-done", wave: 2, outputs: new Map([["c", 3]]) as any, routingDecisions: new Map() }, r.context);
     expect(r.state.kind).toBe("succeeded");
   });
 
@@ -1019,7 +1020,7 @@ describe("dagTransition — full round-trip", () => {
     const dag = makeDag({ defaultRetryLimit: 1 });
     const ctx = makeCtx({ dag });
     let phase: DagPhase = { kind: "running", wave: 0 };
-    let currentCtx: DagTransitionContext = ctx;
+    let currentCtx: DagMachineContextPersisted = ctx;
 
     // first failure
     let r = dagTransition(phase, { type: "node-failed", nodeId: "a" as NodeId, error: nodeFailedError }, currentCtx);
@@ -1028,7 +1029,7 @@ describe("dagTransition — full round-trip", () => {
     currentCtx = r.context;
 
     // retry succeeds — wave done
-    r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", "recovered"]]) as any }, currentCtx);
+    r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", "recovered"]]) as any, routingDecisions: new Map() }, currentCtx);
     expect(r.state).toMatchObject({ kind: "running", wave: 1 });
   });
 
@@ -1039,10 +1040,10 @@ describe("dagTransition — full round-trip", () => {
     });
     const ctx = makeCtx({ dag, waves: [[N("a")]] });
     let phase: DagPhase = { kind: "running", wave: 0 };
-    let currentCtx: DagTransitionContext = ctx;
+    let currentCtx: DagMachineContextPersisted = ctx;
 
     // wave done => awaiting-human
-    let r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", "result"]]) as any }, currentCtx);
+    let r = dagTransition(phase, { type: "wave-done", wave: 0, outputs: new Map([["a", "result"]]) as any, routingDecisions: new Map() }, currentCtx);
     expect(r.state.kind).toBe("awaiting-human");
     phase = r.state;
     currentCtx = r.context;

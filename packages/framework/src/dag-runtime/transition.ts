@@ -1,4 +1,4 @@
-// Pure DAG transition function — no I/O, no side effects.
+// Pure DAG transition function - no I/O, no side effects.
 // Covers retry logic, sequential HITL, approve/reject/reroute/abort via the
 // wave-resolution / retry-policy / human-resolution helpers.
 //
@@ -7,7 +7,7 @@
 // compile error via `.exhaustive()`.
 
 import { match, P } from "ts-pattern";
-import type { DagPhase, DagEvent, DagTransitionContext } from "./types.js";
+import type { DagPhase, DagEvent, DagMachineContextPersisted } from "./types.js";
 import { handleWaveDone } from "./wave-resolution.js";
 import { handleNodeFailed, handleHookCrash } from "./retry-policy.js";
 import { handleHumanResponse } from "./human-resolution.js";
@@ -15,21 +15,21 @@ import { EXECUTOR_NODE_ID } from "./types.js";
 import type { Confidence } from "../types/confidence.js";
 import type { NodeId } from "../types/ids.js";
 
-type TransitionResult = { state: DagPhase; context: DagTransitionContext };
-const stay = (phase: DagPhase, ctx: DagTransitionContext): TransitionResult => ({ state: phase, context: ctx });
+type TransitionResult = { state: DagPhase; context: DagMachineContextPersisted };
+const stay = (phase: DagPhase, ctx: DagMachineContextPersisted): TransitionResult => ({ state: phase, context: ctx });
 
-/** Merge new confidence values into the context’s accumulated map. Pure. */
+/** Merge new confidence values into the context's accumulated map. Pure. */
 const mergeConfidence = (
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
   values: ReadonlyMap<NodeId, Confidence | null> | undefined,
-): DagTransitionContext => {
+): DagMachineContextPersisted => {
   if (!values || values.size === 0) return ctx;
   const merged = new Map(ctx.confidenceByNode);
   for (const [k, v] of values) merged.set(k, v);
   return { ...ctx, confidenceByNode: merged };
 };
 
-const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagTransitionContext): TransitionResult => ({
+const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagMachineContextPersisted): TransitionResult => ({
   state: {
     kind: "failed",
     error: {
@@ -43,7 +43,7 @@ const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagTra
 });
 
 /**
- * Pure DAG state transition. No I/O — all branches produce the next (state, context) pair.
+ * Pure DAG state transition. No I/O - all branches produce the next (state, context) pair.
  *
  * FR-021: pure transition function, no side effects.
  * FR-026..FR-033: retry logic, sequential HITL, approve/reject/reroute/abort.
@@ -51,7 +51,7 @@ const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagTra
 export const dagTransition = (
   phase: DagPhase,
   event: DagEvent,
-  ctx: DagTransitionContext,
+  ctx: DagMachineContextPersisted,
 ): TransitionResult =>
   match([phase, event] as const)
     // ─── FR-033: abort from any non-terminal state ──────────────────────
@@ -97,7 +97,7 @@ export const dagTransition = (
     // ─── awaiting-human ─────────────────────────────────────────────────
     .with([{ kind: "awaiting-human" }, { type: "human-responded" }], ([p, e]) => {
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
-      const r = handleHumanResponse(p, e.action, ctx);
+      const r = handleHumanResponse(p, e.action, ctx, e.rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "awaiting-human" }, { type: "node-failed" }], ([p, e]) => {
@@ -129,7 +129,7 @@ export const dagTransition = (
         pendingReviews: p.pendingReviews,
         wave: p.wave,
       };
-      const r = handleHumanResponse(awaitingState, e.action, ctx);
+      const r = handleHumanResponse(awaitingState, e.action, ctx, e.rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "retrying-hook" }, { type: "node-failed" }], ([p, e]) => {

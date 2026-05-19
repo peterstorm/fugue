@@ -7,23 +7,21 @@ import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
+import { isConditionalEdge } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
-import { runNodeShared } from "./run-node.js";
-import { type NodeSpanOutcome } from "./node-span.js";
 import { emit } from "./emit.js";
 import { applyJitter } from "../shared/jitter.js";
 import { fwLogger } from "../logger.js";
-import { emitRoutingDecisions } from "./route-emission.js";
+import { emitHumanIntervention } from "./human-emission.js";
+import { executeWave, type WaveConfig } from "./wave-execution.js";
+import { decideRoute, expandActive, seedInitialActiveSet } from "./conditional.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
-import { emitHumanIntervention } from "./human-emission.js";
-import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
-
-const EMPTY_OUTCOME: NodeSpanOutcome = { guardrailFailed: false, guardrailWarnings: [] };
+import { type NodeSpanOutcome } from "./node-span.js";
 
 // ---------------------------------------------------------------------------
 // Backoff + jitter
@@ -161,6 +159,63 @@ const callHumanReviewHook = async (
 
 
 // ---------------------------------------------------------------------------
+// computeRerouteActiveSet — precompute the active-node set for reroute actions.
+// Called by the executor so the pure transition never evaluates predicates.
+// ---------------------------------------------------------------------------
+
+const computeRerouteActiveSet = (
+  targetNodeId: NodeId,
+  machineCtx: DagMachineContext,
+): ReadonlySet<NodeId> | undefined => {
+  const targetWave = machineCtx.waves.findIndex((w) => w.includes(targetNodeId));
+  if (targetWave === -1 || targetWave > (machineCtx.waves.length - 1)) return undefined;
+
+  const waveByNodeId = new Map<NodeId, number>();
+  for (let w = 0; w < machineCtx.waves.length; w++) {
+    for (const id of machineCtx.waves[w]) waveByNodeId.set(id, w);
+  }
+  const beforeTargetWave = (nodeId: NodeId): boolean =>
+    (waveByNodeId.get(nodeId) ?? -1) < targetWave;
+
+  const survivingOutputs = new Map(
+    [...machineCtx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
+  );
+
+  let reseededActive = seedInitialActiveSet(machineCtx.dag);
+  for (let w = 0; w < targetWave; w++) {
+    for (const nodeId of machineCtx.waves[w] ?? []) {
+      if (!reseededActive.has(nodeId)) continue;
+      if (!survivingOutputs.has(nodeId)) continue;
+      const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
+      if (!outgoing.some(isConditionalEdge)) continue;
+      const upstreamConfidence = machineCtx.confidenceByNode.get(nodeId) ?? null;
+      const decision = decideRoute(nodeId, survivingOutputs.get(nodeId), outgoing, upstreamConfidence);
+      if (decision.kind === "predicate-malformed") {
+        // On malformed predicate, return undefined — the transition will
+        // fall back to its current active set (safe but imprecise).
+        return undefined;
+      }
+      reseededActive = expandActive(machineCtx.unconditionalAdj, reseededActive, decision.chosenTargets);
+    }
+  }
+  return reseededActive;
+};
+
+/**
+ * Enrich a human-responded event with `rerouteActiveSet` for reroute actions.
+ * Called by the executor after receiving a successful human-responded event.
+ */
+const enrichHumanRespondedEvent = (
+  event: DagEvent,
+  machineCtx: DagMachineContext,
+): DagEvent => {
+  if (event.type !== "human-responded") return event;
+  if (event.action.action !== "reroute") return event;
+  const rerouteActiveSet = computeRerouteActiveSet(event.action.targetNodeId, machineCtx);
+  return { ...event, rerouteActiveSet };
+};
+
+// ---------------------------------------------------------------------------
 // buildDagExecutor — FR-027 applied when state.kind === "retrying"
 // ---------------------------------------------------------------------------
 
@@ -234,8 +289,8 @@ export const buildDagExecutor = (
   // so a human gate in a later wave sees all prior reads.
   const capturedWitnesses = new Map<string, Witness>();
 
-  const waveConfig: RunWaveConfig = {
-    dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex,
+  const waveConfig: WaveConfig = {
+    dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
     witnessAccumulator: capturedWitnesses,
   };
 
@@ -259,25 +314,27 @@ export const buildDagExecutor = (
           return { type: "abort", reason: "signal" } satisfies DagEvent;
         }
 
-        // `runWave` is called for the whole wave, but iterates with a
-        // succeeded-output guard: siblings already present in
-        // `machineCtx.outputs` short-circuit to a `node-skipped` event with
-        // their cached value, so only the failed node (plus any sibling that
-        // co-failed and is still absent from outputs) actually re-runs.
-        return runWave(p.wave, machineCtx, waveConfig);
+        const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
+        recordOutcomes?.(outcomes);
+        return event;
       })
 
       // -----------------------------------------------------------------------
       // running: run the current wave
       // -----------------------------------------------------------------------
-      .with({ kind: "running" }, (p) => runWave(p.wave, machineCtx, waveConfig))
+      .with({ kind: "running" }, async (p) => {
+        const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
+        recordOutcomes?.(outcomes);
+        return event;
+      })
 
       // -----------------------------------------------------------------------
       // awaiting-human: dispatch the review hook
       // -----------------------------------------------------------------------
       .with({ kind: "awaiting-human" }, async (p) => {
         const awaitStartMs = nowFn();
-        const event = await callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        let event = await callHumanReviewHook("awaiting-human", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        event = enrichHumanRespondedEvent(event, machineCtx);
         if (event.type === "human-responded") {
           emitHumanIntervention(
             { nodeId: p.nodeId, output: p.output },
@@ -306,7 +363,8 @@ export const buildDagExecutor = (
           return { type: "abort", reason: "signal" } satisfies DagEvent;
         }
         const awaitStartMs = nowFn();
-        const event = await callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        let event = await callHumanReviewHook("retrying-hook", p.nodeId, p.output, p.prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+        event = enrichHumanRespondedEvent(event, machineCtx);
         if (event.type === "human-responded") {
           emitHumanIntervention(
             { nodeId: p.nodeId, output: p.output },
@@ -335,224 +393,3 @@ export const buildDagExecutor = (
       .exhaustive();
 };
 
-// ---------------------------------------------------------------------------
-// RunWaveConfig — configuration object for runWave to reduce parameter count
-// ---------------------------------------------------------------------------
-
-interface RunWaveConfig {
-  readonly dag: DagDef;
-  readonly nodeMap: Map<NodeId, NodeDef<unknown, unknown>>;
-  readonly nodeCtx: ValidatedNodeContext;
-  readonly recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
-  readonly resumeCheckpoint?: Map<string, unknown>;
-  readonly nowFn: () => number;
-  readonly freshnessIndex: FreshnessIndex;
-  readonly witnessAccumulator?: Map<string, Witness>;
-}
-
-// ---------------------------------------------------------------------------
-// runWave — run all nodes in a wave concurrently; return wave-done or node-failed
-// ---------------------------------------------------------------------------
-
-const runWave = async (
-  waveIndex: number,
-  machineCtx: DagMachineContext,
-  config: RunWaveConfig,
-): Promise<DagEvent> => {
-  const { dag, nodeMap, nodeCtx, recordOutcomes, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator } = config;
-  const stamp = (): Date => new Date(nowFn());
-  // Filter to active nodes only. Pruned nodes are silently skipped — they
-  // did not fire on this routing decision; downstream consumers that list
-  // them as `optional` sources in `incomingByNode` see `undefined`.
-  //
-  // An out-of-bounds waveIndex is an invariant violation (the runtime asks
-  // for a wave the compiled DAG does not have). Surface it loudly rather
-  // than emitting a `wave-done` with no outputs, which would silently advance
-  // the run and either fail with `output-missing` or — worse — succeed with
-  // stale output from a prior wave.
-  if (waveIndex < 0 || waveIndex >= machineCtx.waves.length) {
-    const message = `out-of-bounds waveIndex: ${waveIndex} (have ${machineCtx.waves.length} waves)`;
-    fwLogger().error(`[runWave] ${message}`);
-    return {
-      type: "node-failed",
-      nodeId: __brandNodeId("__wave__"),
-      error: { kind: "node-crash", nodeId: __brandNodeId("__wave__"), message, retriability: "non-retriable" },
-    };
-  }
-  const allWaveNodeIds = machineCtx.waves[waveIndex] ?? [];
-  const waveNodeIds = allWaveNodeIds.filter((id) => machineCtx.activeNodeIds.has(id));
-
-  // Snapshot prior-wave outputs so concurrent nodes in this wave can't
-  // observe each other's results mid-execution. Each node reads only from
-  // the frozen snapshot; the caller merges successes after Promise.all.
-  const priorOutputs: ReadonlyMap<NodeId, unknown> = machineCtx.outputs;
-
-  // Run all wave nodes concurrently
-  const settled = await Promise.all(
-    waveNodeIds.map(async (nodeId) => {
-      try {
-      // Skip nodes already successfully completed in this wave
-      // (they already appear in machineCtx.outputs with correct values)
-      if (priorOutputs.has(nodeId)) {
-        // Already have output — re-emit node-skipped for observability
-        emit(nodeCtx, {
-          type: "node-skipped",
-          runId: nodeCtx.runId,
-          dagId: dag.id,
-          nodeId,
-          timestamp: stamp(),
-          reason: "already-completed",
-        });
-        return {
-          nodeId,
-          result: ok(priorOutputs.get(nodeId)) as Result<unknown, FrameworkError>,
-          outcome: EMPTY_OUTCOME,
-        };
-      }
-
-      const node = nodeMap.get(nodeId);
-      if (!node) {
-        return {
-          nodeId,
-          result: err({
-            kind: "node-crash" as const,
-            nodeId,
-            message: `node-not-found: ${nodeId}`,
-            retriability: "non-retriable" as const,
-          }) as Result<unknown, FrameworkError>,
-          outcome: EMPTY_OUTCOME,
-        };
-      }
-
-      const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
-      const { result, outcome } = await runNodeShared(
-        node,
-        machineCtx.initialInput,
-        nodeCtx,
-        dag.id,
-        priorOutputs,
-        incoming,
-        { checkpoint: resumeCheckpoint, writeCheckpoint: true, now: nowFn },
-      );
-      return { nodeId, result, outcome };
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        const crash: FrameworkError = {
-          kind: "node-crash",
-          nodeId,
-          message: `unexpected executor error: ${message}`,
-          retriability: "retriable",
-          stack: e instanceof Error ? e.stack : undefined,
-        };
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId: dag.id,
-          nodeId,
-          timestamp: stamp(),
-          error: message,
-          frameworkError: crash,
-        });
-        return { nodeId, result: err(crash) as Result<unknown, FrameworkError>, outcome: EMPTY_OUTCOME };
-      }
-    }),
-  );
-
-  // Fold this wave's outcomes into run-level meta after Promise.all.
-  if (recordOutcomes) {
-    recordOutcomes(settled.map((s) => s.outcome));
-  }
-
-  const results = settled.map(({ nodeId, result }) => ({ nodeId, result }));
-
-  // Collect new outputs + check for failures.
-  // - Collect all succeeded sibling outputs before returning the first failure,
-  //   so they can be persisted into ctx.outputs and skipped on retry.
-  // - Collect ALL failures (not just the first) so co-failed siblings get their
-  //   retry counters pre-incremented, preventing off-by-one retry accounting.
-  const newOutputs = new Map<NodeId, unknown>();
-  const failures: Array<{ nodeId: NodeId; error: FrameworkError }> = [];
-
-  for (const { nodeId, result } of results) {
-    if (result.ok) {
-      newOutputs.set(nodeId, result.value);
-    } else {
-      failures.push({ nodeId, error: result.error });
-    }
-  }
-
-  if (failures.length > 0) {
-    const [primary, ...siblings] = failures as [{ nodeId: NodeId; error: FrameworkError }, ...{ nodeId: NodeId; error: FrameworkError }[]];
-
-    // Emit node-error for each sibling failure beyond the primary so operators can observe them.
-    for (const sibling of siblings) {
-      emit(nodeCtx, {
-        type: "node-error",
-        runId: nodeCtx.runId,
-        dagId: dag.id,
-        nodeId: sibling.nodeId,
-        sideEffects: nodeMap.get(sibling.nodeId)?.sideEffects,
-        timestamp: stamp(),
-        error: sibling.error.kind === "node-crash" ? sibling.error.message : JSON.stringify(sibling.error),
-        frameworkError: sibling.error,
-      });
-    }
-
-    // Build partialOutputs: succeeded siblings (excludes already-known outputs from prior waves
-    // since those are already in machineCtx.outputs; only new outputs from this wave execution).
-    const partialOutputs = new Map<NodeId, unknown>();
-    for (const [id, val] of newOutputs) {
-      if (!machineCtx.outputs.has(id)) {
-        partialOutputs.set(id, val);
-      }
-    }
-
-    const coFailedNodeIds = siblings.map((s) => s.nodeId);
-
-    return {
-      type: "node-failed",
-      nodeId: primary.nodeId,
-      error: primary.error,
-      partialOutputs: partialOutputs.size > 0 ? partialOutputs : undefined,
-      coFailedNodeIds: coFailedNodeIds.length > 0 ? coFailedNodeIds : undefined,
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Freshness witness emission (Phase 3)
-  // -------------------------------------------------------------------------
-  // Build the set of nodes that were skipped (checkpoint-resumed or already
-  // completed) so freshness events are only emitted for nodes that actually ran.
-  const skippedNodeIds = new Set<NodeId>();
-  for (const nodeId of waveNodeIds) {
-    if (priorOutputs.has(nodeId) || resumeCheckpoint?.has(nodeId)) {
-      skippedNodeIds.add(nodeId);
-    }
-  }
-  const freshnessResult = await emitFreshnessWitnessEvents(
-    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn, freshnessIndex, skippedNodeIds, witnessAccumulator,
-  );
-  if (!freshnessResult.ok) {
-    return {
-      type: "node-failed",
-      nodeId: freshnessResult.error.kind === "node-crash" ? freshnessResult.error.nodeId : (waveNodeIds[0] ?? EXECUTOR_NODE_ID),
-      error: freshnessResult.error,
-    };
-  }
-
-  // Compute routing decisions for all source nodes with conditional out-edges.
-  // Emits route-decided and node-pruned observer events. Short-circuits on
-  // predicate-malformed (config error, not transient).
-  const routing = emitRoutingDecisions(
-    waveNodeIds, newOutputs, nodeMap, machineCtx, nodeCtx, dag.id, nowFn,
-  );
-  if (routing.earlyFailure) return routing.earlyFailure;
-
-  return {
-    type: "wave-done",
-    wave: waveIndex,
-    outputs: newOutputs,
-    routingDecisions: routing.decisions.size > 0 ? routing.decisions : undefined,
-    confidenceValues: routing.confidenceValues.size > 0 ? routing.confidenceValues : undefined,
-  };
-};

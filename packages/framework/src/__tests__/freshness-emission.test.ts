@@ -52,6 +52,7 @@ const makeMachineCtx = (): DagMachineContext => ({
     [NID_PURE, { required: [], optional: [] }],
   ]),
   outgoingByNode: new Map(),
+  unconditionalAdj: new Map(),
   nodeById: new Map(),
   retryConfigs: new Map(),
   outputNodeId: undefined,
