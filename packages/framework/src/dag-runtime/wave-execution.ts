@@ -152,7 +152,7 @@ export const executeWave = async (
           dag.id,
           priorOutputs,
           incoming,
-          { checkpoint: resumeCheckpoint, writeCheckpoint: true, now: nowFn },
+          { checkpoint: resumeCheckpoint, now: nowFn },
         );
         return { nodeId, result, outcome };
       } catch (e) {

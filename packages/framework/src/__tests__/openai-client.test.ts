@@ -56,9 +56,11 @@ const jsonResponse = (
 
 // `sendWithTools` now takes the full `NodeContext` (ADR 0024).
 import { makeNodeContext } from "../shared/index.js";
+import { stubLlmClient } from "./_llm-mocks.js";
 const RUNTIME = makeNodeContext({
   runId: "openai-test-run" as RunId,
   dagId: "openai-test-dag" as DagId,
+  llm: stubLlmClient,
 });
 
 const makeMessageOutput = (text: string) => ({

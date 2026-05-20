@@ -9,6 +9,7 @@ import type { ToolDef, SendWithToolsRequest } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import type { NodeContext, Tracer } from "../types/node.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { stubLlmClient } from "./_llm-mocks.js";
 
 beforeAll(() => {
   // Register an async-hooks context manager so trace.getActiveSpan() in span helpers
@@ -26,7 +27,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null,
+  llm: stubLlmClient,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });

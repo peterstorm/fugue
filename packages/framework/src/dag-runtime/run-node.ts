@@ -7,12 +7,14 @@
 //     execution, validates the cached value against `outputSchema`, emits
 //     `node-skipped`, and returns the cached value.
 //
-//   - `writeCheckpoint` — when true, after successful run + output validation,
-//     calls `ctx.checkpointWriter.write(runId, nodeId, output)`. On failure,
-//     emits `node-error` with a `checkpoint-write-failed:` prefix and returns
-//     `Err({ kind: "checkpoint-write-failed" })`.
+// Checkpoint write: after a successful run + output validation, the node calls
+// `ctx.checkpointWriter.write(runId, nodeId, output)` whenever a
+// `checkpointWriter` is wired on the context. A write failure emits
+// `node-error` with a `checkpoint-write-failed:` prefix and returns
+// `Err({ kind: "checkpoint-write-failed" })`. No writer wired → no write;
+// checkpointing is driven solely by the presence of the writer.
 //
-// Both callers always emit the same `node-start | node-end | node-error` event
+// The caller always emits the same `node-start | node-end | node-error` event
 // sequence — there is no caller-specific event suppression.
 
 import type { Result } from "../types/result.js";
@@ -35,12 +37,6 @@ export interface RunNodeOpts {
    * was written).
    */
   readonly checkpoint?: Map<string, unknown>;
-  /**
-   * When true, after successful run + output validation, the runtime calls
-   * `ctx.cache.writeCheckpoint(runId, nodeId, output)`. A write failure
-   * surfaces as a `checkpoint-write-failed` error.
-   */
-  readonly writeCheckpoint?: boolean;
   /**
    * Wall-clock source for observer-event `timestamp` fields and node duration
    * measurement. Threaded through from `DagRunOpts.now` / `RunOptions.now`;
@@ -195,7 +191,7 @@ export const runNodeShared = async (
       return outputResult;
     }
 
-    if (opts.writeCheckpoint && ctx.checkpointWriter) {
+    if (ctx.checkpointWriter) {
       try {
         await ctx.checkpointWriter.write(ctx.runId, nodeId, outputResult.value);
       } catch (e) {

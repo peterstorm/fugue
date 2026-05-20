@@ -453,7 +453,12 @@ export class MlflowOtlpExporter implements SpanExporter {
       return;
     }
     if (!this.innerPromise) return;
-    const inner = await this.innerPromise.catch(() => null);
+    const inner = await this.innerPromise.catch((e) => {
+      fwLogger().warn(
+        `[MlflowOtlpExporter] inner exporter unavailable during shutdown(): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    });
     if (inner?.shutdown) await inner.shutdown();
   }
 
@@ -467,7 +472,12 @@ export class MlflowOtlpExporter implements SpanExporter {
       return;
     }
     if (!this.innerPromise) return;
-    const inner = await this.innerPromise.catch(() => null);
+    const inner = await this.innerPromise.catch((e) => {
+      fwLogger().warn(
+        `[MlflowOtlpExporter] inner exporter unavailable during forceFlush(): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    });
     const flush = (inner as { forceFlush?: () => Promise<void> } | null)?.forceFlush;
     if (flush) await flush.call(inner);
   }

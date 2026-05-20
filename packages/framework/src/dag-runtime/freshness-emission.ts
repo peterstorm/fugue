@@ -89,7 +89,28 @@ export async function emitFreshnessWitnessEvents(
         return ok(undefined);
       })
       .with({ kind: "writes" }, async (se) => {
-        if (!se.extractConditionedOn || !se.extractNewWitness) return ok(undefined);
+        // Neither extractor → the node opts out of freshness tracking entirely.
+        if (!se.extractConditionedOn && !se.extractNewWitness) return ok(undefined);
+        // Exactly one extractor is an authoring error: a lone extractor can
+        // never produce a conflict check, so freshness tracking would be
+        // silently disabled. Fail closed. (validate-dag also rejects this at
+        // defineDag time; this is defense-in-depth for hand-built DAGs.)
+        if (!se.extractConditionedOn || !se.extractNewWitness) {
+          const message = `writes node '${nodeId}' declares only one of extractConditionedOn/extractNewWitness — both are required for freshness tracking`;
+          const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
+          fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
+          emit(nodeCtx, {
+            type: "node-error",
+            runId: nodeCtx.runId,
+            dagId,
+            nodeId,
+            sideEffects: nodeMap.get(nodeId)?.sideEffects,
+            timestamp: stamp(),
+            error: message,
+            frameworkError: fwError,
+          });
+          return err(fwError);
+        }
 
         // Step 1: Rebuild the node's input via the shared helper
         const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };

@@ -10,11 +10,21 @@ import { dispatchEvent } from "../observer/buffered.js";
  * `ToolContext` (= `TypedNodeContext<["llm"]>`). Cast at this single seam.
  *
  * Contract: callers (LLM-with-tools nodes) MUST have `llm` in their
- * `requires` so `ctx.llm` is non-null. If a tool attempts to use `ctx.llm`
- * and finds it null, the tool's own null-access will surface the bug.
- * We do NOT guard here because many tools are pure and never touch `ctx.llm`.
+ * `requires` so `ctx.llm` is non-null. The cast `ctx as ToolContext` is
+ * unsound on its own — a node missing `requires: ["llm"]` would produce a
+ * `ToolContext` whose `ctx.llm` is actually `null`. Guard here so the
+ * authoring error surfaces with a clear message at the dispatch seam rather
+ * than as an opaque `null.method()` crash deep inside a tool.
  */
-const asToolContext = (ctx: NodeContext): ToolContext => ctx as ToolContext;
+const asToolContext = (ctx: NodeContext): ToolContext => {
+  if (!ctx.llm) {
+    throw new Error(
+      `dispatchToolCallsWithSpans: ctx.llm is null for run '${ctx.runId}'. ` +
+        `The LLM-with-tools node must declare requires: ["llm"].`,
+    );
+  }
+  return ctx as ToolContext;
+};
 
 export interface ToolCall {
   readonly id: string;

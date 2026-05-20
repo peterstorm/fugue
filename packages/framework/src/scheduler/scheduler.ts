@@ -104,9 +104,6 @@ export function createCronScheduler(
   // Per-task consecutive unexpected-failure count, drives the exponential
   // backoff (capped at BACKOFF_CAP_MS). Reset on any successful handleFire.
   const consecutiveFailures = new Map<string, number>();
-  // In-memory fallback for markers.set(fired) failures: prevents duplicate
-  // enqueue within the same process when the persistent marker store is down.
-  const inMemoryFiredFallback = new Set<string>();
   // Current active registry (tasks currently armed)
   let activeRegistry: TaskRegistry = new Map();
 
@@ -323,17 +320,19 @@ export function createCronScheduler(
         }
         if (!allDepsCompleted) continue;
 
-        // Only enqueue if not already fired
-        const alreadyFired = await markers.exists(markerFiredKey(dep.id))
+        // Only enqueue if not already fired. A failed exists() check must NOT
+        // default to "not fired" — that races duplicate enqueues across
+        // processes. Skip this cycle; the next scheduler tick retries once the
+        // marker store recovers.
+        const firedResult = await markers.exists(markerFiredKey(dep.id))
           .catch((e) => {
-            fwLogger().warn(
-              `[CronScheduler] markers.exists(fired) failed for "${dep.id}" — treating as not-fired (enqueue is idempotent):`,
+            fwLogger().error(
+              `[CronScheduler] markers.exists(fired) failed for "${dep.id}" — skipping enqueue this cycle:`,
               e instanceof Error ? e.message : e,
             );
-            return false;
-          })
-          || inMemoryFiredFallback.has(dep.id);
-        if (alreadyFired) continue;
+            return "unknown" as const;
+          });
+        if (firedResult === "unknown" || firedResult === true) continue;
 
         // Enqueue first — only mark fired on success.
         try {
@@ -352,11 +351,11 @@ export function createCronScheduler(
             { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(fired) dependent "${dep.id}"` },
           );
         } catch (err) {
-          // Persistent marker failed — set in-memory fallback to prevent
-          // same-process duplicate on next resolveDependents cycle.
-          inMemoryFiredFallback.add(dep.id);
+          // The job is already enqueued but the fired-marker did not persist.
+          // A later resolveDependents cycle may re-enqueue once the marker
+          // store recovers — the marker store is the single source of truth.
           fwLogger().error(
-            `[CronScheduler] markers.set(fired) permanently failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued — in-memory fallback set):`,
+            `[CronScheduler] markers.set(fired) permanently failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued):`,
             err,
           );
         }
@@ -374,7 +373,6 @@ export function createCronScheduler(
     timers.clear();
     await Promise.allSettled([...inFlight]);
     consecutiveFailures.clear();
-    inMemoryFiredFallback.clear();
     activeRegistry = new Map();
   }
 

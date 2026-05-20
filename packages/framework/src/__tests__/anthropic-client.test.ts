@@ -226,9 +226,11 @@ describe("AnthropicLlmClient.sendStructured", () => {
 // framework's sanctioned constructor so tests can't accidentally pass a
 // stub that no longer satisfies the contract.
 import { makeNodeContext } from "../shared/index.js";
+import { stubLlmClient } from "./_llm-mocks.js";
 const RUNTIME = makeNodeContext({
   runId: "anthropic-test-run" as RunId,
   dagId: "anthropic-test-dag" as DagId,
+  llm: stubLlmClient,
 });
 
 const makeTool = (

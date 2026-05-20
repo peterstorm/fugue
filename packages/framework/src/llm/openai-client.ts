@@ -384,6 +384,16 @@ export class OpenAILlmClient implements LlmClient {
             message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
+        // Non-429 4xx (401/403/422/...) is a deterministic client error —
+        // retrying burns the budget without changing the outcome.
+        if (httpResult.status >= 400 && httpResult.status < 500) {
+          return err({
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: resolveNodeId(req),
+            message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
+          });
+        }
         return err({
           kind: "node-crash",
           retriability: "retriable",
@@ -508,6 +518,7 @@ export class OpenAILlmClient implements LlmClient {
         } catch (error) {
           return classifyLlmError(error, resolveNodeId(req), {
             timeoutMs: this.requestTimeoutMs,
+            callerAborted: (req.signal ?? ctx.signal)?.aborted,
           });
         }
 
@@ -515,6 +526,16 @@ export class OpenAILlmClient implements LlmClient {
           if (httpResult.status === 429) {
             return err({
               kind: "transient",
+              nodeId: resolveNodeId(req),
+              message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
+            });
+          }
+          // Non-429 4xx (401/403/422/...) is a deterministic client error —
+          // retrying burns the budget without changing the outcome.
+          if (httpResult.status >= 400 && httpResult.status < 500) {
+            return err({
+              kind: "node-crash",
+              retriability: "non-retriable",
               nodeId: resolveNodeId(req),
               message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
             });

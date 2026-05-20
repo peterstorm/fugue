@@ -9,6 +9,7 @@ import type { NodeContext } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { ToolCall } from "../llm/tool-dispatch.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { stubLlmClient } from "./_llm-mocks.js";
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,
@@ -18,7 +19,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null,
+  llm: stubLlmClient,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
@@ -56,7 +57,11 @@ describe("dispatchToolCall", () => {
 
   test("emits observer sub-span when tool throws", async () => {
     const events: unknown[] = [];
-    const observer = { observe(e: any) { if (e.type === "sub-span") events.push(e); } };
+    const observer = {
+      observe(e: unknown) {
+        if ((e as { type?: string }).type === "sub-span") events.push(e);
+      },
+    };
 
     const call: ToolCall = { id: "c1", name: "fail", input: { msg: "hi" } };
     await dispatchToolCall(call, [failTool], makeCtx({ observer }));

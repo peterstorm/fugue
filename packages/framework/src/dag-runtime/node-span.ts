@@ -38,6 +38,7 @@ import {
 import { fwLogger } from "../logger.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
 import type { NodeId } from "../types/ids.js";
+import { nodeId as brandNodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
@@ -165,9 +166,22 @@ export const withTracedNodeSpan = async (
       const idemKey = sideEffects.idempotencyKey(input);
       attrs[AI_NODE_IDEMPOTENCY_KEY] = idemKey;
     } catch (e) {
-      fwLogger().warn(
-        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${e instanceof Error ? (e as Error).message : e}`,
+      // Fail closed: the idempotency key is the dedup signal infrastructure
+      // uses for writes / external calls. Running the node without it risks a
+      // double-write or duplicate external call. Abort the node instead.
+      const msg = e instanceof Error ? e.message : String(e);
+      fwLogger().error(
+        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${msg}`,
       );
+      return {
+        result: err({
+          kind: "node-crash",
+          nodeId: brandNodeId(nodeId),
+          retriability: "non-retriable",
+          message: `idempotencyKey extractor threw for node '${nodeId}': ${msg}`,
+        }),
+        outcome: EMPTY_OUTCOME,
+      };
     }
   }
 

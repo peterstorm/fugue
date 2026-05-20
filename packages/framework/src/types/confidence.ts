@@ -14,6 +14,8 @@
  * @see docs/adr/0027-confidence-calibration-workflow.md
  */
 
+import { type Result, ok, err } from "./result.js";
+
 export type ConfidenceBucket = "high" | "medium" | "low" | "unknown";
 
 export type ConfidenceSource =
@@ -68,14 +70,49 @@ export function confidence(
 }
 
 /**
- * @internal — Bypass validation for trusted internal code (deserialization,
- * replay). NOT part of the public API.
+ * @internal — Bypass ALL validation. ONLY for hot deserialization / replay
+ * paths where the payload provenance is already trusted and profiling shows
+ * the validation cost matters. Prefer `__brandConfidence` everywhere else: an
+ * unchecked corrupt value (e.g. `source: "logprob"` with no `raw`) silently
+ * violates the documented invariants and is impossible to trace later.
  */
-export const __brandConfidence = (c: {
+export const __brandConfidenceUnchecked = (c: {
   bucket: ConfidenceBucket;
   source: ConfidenceSource;
   raw?: number | string;
 }): Confidence => c as Confidence;
+
+const CONFIDENCE_SOURCES: readonly ConfidenceSource[] = [
+  "self-reported-bucket",
+  "self-reported-numeric",
+  "logprob",
+  "classifier-probability",
+  "ensemble-agreement",
+  "heuristic",
+];
+
+/**
+ * @internal — Brand a plain object as `Confidence` after validating its
+ * discriminant fields. Use for deserialization / replay where the payload may
+ * be corrupt (a stale checkpoint, a hand-edited file). Returns `Err` with a
+ * human-readable reason rather than minting an invalid value.
+ */
+export const __brandConfidence = (c: {
+  bucket: string;
+  source: string;
+  raw?: number | string;
+}): Result<Confidence, string> => {
+  if (!(c.bucket in CONFIDENCE_ORDER)) {
+    return err(`unknown confidence bucket '${c.bucket}'`);
+  }
+  if (!(CONFIDENCE_SOURCES as readonly string[]).includes(c.source)) {
+    return err(`unknown confidence source '${c.source}'`);
+  }
+  if (c.source === "logprob" && typeof c.raw !== "number") {
+    return err(`confidence source 'logprob' requires a numeric 'raw' value`);
+  }
+  return ok(c as Confidence);
+};
 
 /**
  * Total ordering for predicate gating. Higher is more confident.
