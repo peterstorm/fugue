@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-catch-ignore",
+  "description": "Disallow empty catch blocks that silently swallow errors",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "catch\\s*\\([^)]*\\)\\s*\\{\\s*\\}",
+  "flags": "",
+  "fixHint": "Handle the error explicitly: log it, return err(...), or re-throw. Silent catch blocks hide bugs. If intentional, add a comment explaining why.",
+  "enabled": true
+}

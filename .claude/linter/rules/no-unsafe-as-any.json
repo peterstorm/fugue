@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "no-unsafe-as-any",
+  "description": "Disallow 'as any' casts — use 'as unknown as T' with explanation, or proper type narrowing",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "\\bas\\s+any\\b",
+  "flags": "",
+  "fixHint": "Replace 'as any' with proper type narrowing, a generic constraint, or 'as unknown as SpecificType' with a comment explaining why the cast is sound",
+  "enabled": true,
+  "excludePatterns": ["scripts/", ".test.ts", ".spec.ts"]
+}

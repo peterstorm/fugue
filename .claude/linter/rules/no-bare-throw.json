@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-bare-throw",
+  "description": "Disallow throwing raw errors in framework code — use Result/FrameworkError instead",
+  "extensions": [".ts"],
+  "pattern": "^\\s*throw new (Error|TypeError|RangeError)\\(",
+  "flags": "",
+  "fixHint": "Return err({ kind: '...', ... }) instead of throwing. Exceptions should only cross boundaries at the imperative shell (executor, runner). If this IS the shell boundary, add a comment explaining why.",
+  "enabled": false
+}
