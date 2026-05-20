@@ -98,11 +98,20 @@ gates, freshness-aware state management, and production observability.
 | `executor/` | `types/`, `shared/`, `dag-runtime/`, `state-machine/` | Public API (`defineDag`, `runDag`) |
 | `llm/` | `types/` | LLM client implementations |
 | `observer/` | `types/` | Observer implementations |
-| `checkpoint/` | `types/` | Redis persistence |
-| `cache/` | `types/` | Response caching |
+| `checkpoint/` | `types/` | Checkpoint persistence — in-memory + Redis adapter |
+| `cache/` | `types/` | Response caching — in-memory + Redis adapter |
 | `queue/` | `types/`, `state-machine/` | Queue abstractions |
-| `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter (only module importing bullmq/ioredis) |
+| `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
 | `tracing/` | `types/` | OpenTelemetry integration |
+
+**Subpath exports.** The main barrel (`@ai-summary/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
+
+| Subpath | Exports | Optional peer dep |
+|---------|---------|-------------------|
+| `@ai-summary/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
+| `@ai-summary/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
+
+`check-imports.ts` enforces that `ioredis` is reachable only from `cache/redis-cache.ts`, `checkpoint/redis-*.ts`, and `queue-bullmq/`.
 
 ### Key Invariants
 
@@ -113,3 +122,4 @@ gates, freshness-aware state management, and production observability.
 5. **Branded types prevent argument-swap bugs** — `RunId`, `NodeId`, `DagId` are incompatible at compile time.
 6. **Capability validation happens once at run start** — before any `node.run` is called.
 7. **Freshness is fail-closed** — extractor failures abort the wave; proceeding without witness data would allow stale writes.
+8. **Pre-release: no backward-compat shims** — internal renames are first-class refactors, not aliased. No `@deprecated` re-exports for code that has not shipped.

@@ -70,7 +70,7 @@ export const handleWaveDone = (
   wave: number,
   outputs: ReadonlyMap<NodeId, unknown>,
   ctx: DagMachineContextPersisted,
-  routingDecisions: ReadonlyMap<NodeId, import("./conditional.js").Decision>,
+  routingDecisions: ReadonlyMap<NodeId, import("./routing.js").Decision>,
 ): WaveDoneResult => {
   const newOutputs = new Map(ctx.outputs);
   for (const [k, v] of outputs) newOutputs.set(k, v);

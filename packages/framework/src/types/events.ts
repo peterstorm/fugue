@@ -124,7 +124,7 @@ export interface NodePrunedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Freshness witness events (Phase 3)
+// Freshness witness events
 // ---------------------------------------------------------------------------
 
 /**
@@ -180,7 +180,7 @@ export interface FreshnessViolationEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Human intervention event (Phase 4)
+// Human intervention event
 // ---------------------------------------------------------------------------
 
 /**
@@ -206,8 +206,8 @@ export type HumanActionDetailed =
  * answers "what did the human see when they approved this?" without joining
  * across separate events.
  *
- * This is the Phase 4 capstone: the `context` field is the payoff for
- * Phases 1–3 (sideEffects, confidence, freshness) happening first.
+ * The `context` field bundles sideEffects, confidence, and freshness state
+ * so the event is self-contained — no cross-event joins needed at read time.
  *
  * @see docs/adr/0026-human-intervention-telemetry.md
  */

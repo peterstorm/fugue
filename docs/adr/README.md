@@ -42,6 +42,10 @@ Start with these to understand the runtime as it stands today:
 | [0023](0023-genai-semconv-source-of-truth.md) | OTel GenAI semconv as source of truth for LLM telemetry | Accepted |
 | [0024](0024-llm-types-in-types-layer.md) | LLM types in types layer | Accepted |
 | [0025](0025-freshness-witness-contract.md) | Freshness witness contract (Phase 3) | Accepted |
+| [0026](0026-human-intervention-telemetry.md) | Human intervention as first-class telemetry | Accepted |
+| [0027](0027-confidence-calibration-workflow.md) | Bucketed confidence calibration workflow | Accepted |
+| [0028](0028-function-based-predicates.md) | Function-based predicates with confidence gating | Accepted |
+| [0029](0029-mandatory-routing-decisions.md) | Mandatory routing decisions on wave-done | Accepted |
 
 ## Conventions
 
@@ -53,6 +57,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-05-11: all 23 ADRs present, no gaps, no duplicates. Cross-references (`git grep "ADR 00"`) all resolve. The duplicate-0008 collision flagged in `docs/plans/2026-05-10-pr-review-remediation.md` was resolved before this index was written; only `0008-event-envelope-and-time.md` occupies slot 0008 and `0013-onhumanreview-hook-crash-retry.md` occupies slot 0013.
+Verified 2026-05-20: all 29 ADRs present, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. The duplicate-0008 collision flagged in `docs/plans/2026-05-10-pr-review-remediation.md` was resolved before this index was written; only `0008-event-envelope-and-time.md` occupies slot 0008 and `0013-onhumanreview-hook-crash-retry.md` occupies slot 0013.
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

@@ -223,7 +223,7 @@ export const buildDagExecutor = (
   const nowFn = hooks?.now ?? Date.now;
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
-  // Phase 4: Track captured witnesses for HumanInterventionEvent context.
+  // Track captured witnesses for HumanInterventionEvent context.
   // Keyed by resource so only the latest witness per resource is retained—
   // prevents unbounded growth for long-running DAGs with many reads nodes.
   // Witnesses accumulate across all waves for the lifetime of the executor,
