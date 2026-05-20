@@ -301,4 +301,38 @@ describe("emitFreshnessWitnessEvents", () => {
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
   });
+
+  it("returns Err and synthesizes no freshness-violation when findConflict fails (fail-closed)", async () => {
+    const obs = new RecordingObserver();
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: "pg:orders",
+        extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "1" }),
+        extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "2" }),
+      },
+    });
+    const nodeMap = new Map([[NID_WRITE, writeNode]]);
+    const machineCtx = makeMachineCtx();
+    const ctxWithOutput = { ...machineCtx, outputs: new Map([[NID_READ, { version: 1 }]]) };
+    const newOutputs = new Map([[NID_WRITE, {}]]);
+
+    // findConflict fails (e.g. a Redis outage). Fail-closed: the wave must
+    // abort rather than synthesize a fake conflict with succeededAtMs: 0.
+    const failingIndex: FreshnessIndex = {
+      recordWrite: async () => ok(undefined),
+      findConflict: async () => err({ kind: "cache-error", operation: "findConflict", message: "Redis down" }),
+    };
+
+    const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, failingIndex);
+    const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+    }
+    expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+    // A failed conflict check must NOT be reported as a freshness-violation.
+    expect(obs.events.some((e) => e.type === "freshness-violation")).toBe(false);
+  });
 });

@@ -119,3 +119,19 @@ describe("dispatchToolCallsWithSpans", () => {
     expect(results[0].content).toEqual({ echo: "x" });
   });
 });
+
+describe("asToolContext null-llm guard", () => {
+  test("dispatchToolCallsWithSpans throws an authoring error when ctx.llm is null", async () => {
+    const calls: ToolCall[] = [{ id: "c1", name: "echo", input: { msg: "hi" } }];
+    await expect(
+      dispatchToolCallsWithSpans(calls, [echoTool], makeCtx({ llm: null })),
+    ).rejects.toThrow(/ctx\.llm is null/);
+  });
+
+  test("the guard names the missing requires declaration", async () => {
+    const calls: ToolCall[] = [{ id: "c1", name: "echo", input: { msg: "hi" } }];
+    await expect(
+      dispatchToolCallsWithSpans(calls, [echoTool], makeCtx({ llm: null })),
+    ).rejects.toThrow(/requires: \["llm"\]/);
+  });
+});

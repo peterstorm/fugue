@@ -67,8 +67,14 @@ export async function dispatchToolCall(
     return errResult(call, `invalid_input: ${inputParse.error.message}`);
   }
 
+  // Narrow to ToolContext up-front, outside the try/catch: a null `ctx.llm`
+  // is an authoring error (the node is missing `requires: ["llm"]`), not a
+  // recoverable per-tool failure. It must propagate, not be swallowed into an
+  // is_error result the model would then try to "recover" from.
+  const toolCtx = asToolContext(ctx);
+
   try {
-    const output = await tool.run(inputParse.data, asToolContext(ctx));
+    const output = await tool.run(inputParse.data, toolCtx);
     const outputParse = tool.outputSchema.safeParse(output);
     if (!outputParse.success) {
       return errResult(call, `invalid_output: ${outputParse.error.message}`);

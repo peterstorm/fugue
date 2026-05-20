@@ -13,11 +13,12 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
+import { stubLlmClient } from "./_llm-mocks.js";
 
 const schema = z.object({ answer: z.string() });
 
 const makeCtx = () =>
-  makeNodeContext({ runId: "test-run", dagId: "test-dag" });
+  makeNodeContext({ runId: "test-run", dagId: "test-dag", llm: stubLlmClient });
 
 /** Create a simple provider that returns a final answer on the first call. */
 const immediateProvider = (text: string): ToolLoopProvider => ({
