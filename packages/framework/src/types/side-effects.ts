@@ -21,7 +21,7 @@ import type { Witness, ResourceName } from "./freshness.js";
 export type SideEffectKind = "none" | "reads" | "writes" | "external-call";
 
 export type SideEffectProfile<I = unknown, O = unknown> =
-  | { readonly kind: "none"; readonly resource?: undefined }
+  | { readonly kind: "none"; readonly resource?: never }
   | {
       readonly kind: "reads";
       readonly resource: ResourceName;

@@ -47,7 +47,11 @@ export const retryAsync = async <T>(
       }
     }
   }
-  throw lastError;
+  // Guarantee an Error instance propagates — callers can always access
+  // `.message` and `.stack` without type narrowing.
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`[${opts.label}] exhausted ${opts.maxAttempts} attempts: ${String(lastError)}`);
 };
 
 /**

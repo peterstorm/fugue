@@ -120,13 +120,10 @@ const RULES: BoundaryRule[] = [
   {
     scope: ["shared"],
     scopeExcludes: [
-      // `defaults.ts` constructs the public NodeContext stubs (noopTracer,
-      // noopObserver). It imports the concrete types so the stubs match the
-      // public interfaces. No span minting; pure value construction.
-      "shared/defaults.ts",
-      // `make-node-context.ts` wires the stubs above into a NodeContext
-      // factory. Same exemption rationale.
-      "shared/make-node-context.ts",
+      // `make-node-context.ts` wires the stubs from `./defaults.js` into a
+      // NodeContext factory. `defaults.ts` imports from `../types/` only (no
+      // observer/ or tracing/ dependency). Kept here as documentation — the
+      // file does not actually trigger any rule.
     ],
     forbiddenModules: [
       "@opentelemetry/",
@@ -134,7 +131,7 @@ const RULES: BoundaryRule[] = [
       "../tracing",
     ],
     reason:
-      "shared/** must not import OTel, observer/**, or tracing/**. Telemetry-aware helpers belong in dag-runtime/ (the only consumer). NodeContext stub construction (defaults.ts, make-node-context.ts) is exempt.",
+      "shared/** must not import OTel, observer/**, or tracing/**. Telemetry-aware helpers belong in dag-runtime/ (the only consumer). NoopObserver now lives in types/observer.ts so shared/ no longer needs the exemption.",
   },
   // `types/` is a lower layer consumed by everything above it. It must not
   // depend on `dag-runtime/` or `executor/` — those are higher layers.

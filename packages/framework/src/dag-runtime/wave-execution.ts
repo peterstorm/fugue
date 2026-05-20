@@ -8,6 +8,12 @@
 // Callers (buildDagExecutor) pattern-match on DagPhase and call this
 // for `running` and `retrying` states. Everything else (human hooks,
 // sleep/jitter) stays in the executor.
+//
+// Requirement → ADR cross-reference:
+//   FR-005  → ADR-0003 (event sourcing, checkpoint after every wave)
+//   FR-021  → ADR-0021 (single-path runtime, wave-based execution)
+//   FR-025  → ADR-0025 (freshness witness emission post-wave, fail-closed)
+//   FR-029  → ADR-0029 (routing decisions pre-computed by executor, carried on wave-done)
 
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";

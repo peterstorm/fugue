@@ -5,9 +5,9 @@
 // contexts with these defaults so node bodies never have to null-check them.
 
 import type { Logger } from "../types/node.js";
-import type { Tracer } from "../tracing/tracer.js";
-import type { Observer } from "../observer/observer.js";
-import { NoopObserver } from "../observer/observer.js";
+import type { Tracer } from "../types/tracer.js";
+import type { Observer } from "../types/observer.js";
+import { NoopObserver } from "../types/observer.js";
 
 /** Console-backed logger — methods route to `console.warn`/`console.error`. */
 export const consoleLogger: Logger = {

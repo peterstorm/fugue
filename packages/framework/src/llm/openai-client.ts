@@ -17,7 +17,7 @@ import {
 } from "./tool-dispatch.js";
 import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
-import { zodToJsonSchema } from "./zod-schema.js";
+import { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
 import { classifyLlmError } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
@@ -40,42 +40,6 @@ import {
   extractFinalText,
   extractReasoning,
 } from "./openai-types.js";
-
-/**
- * Pure recursive transform: adds `additionalProperties: false` to all
- * object-type schemas. Required by Azure OpenAI structured output (strict
- * mode). Returns a new object — the input is never mutated.
- */
-function withAdditionalPropertiesFalse(schema: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...schema };
-  if (result.type === "object" && result.properties) {
-    result.additionalProperties = false;
-    result.properties = Object.fromEntries(
-      Object.entries(result.properties as Record<string, Record<string, unknown>>)
-        .map(([k, v]) => [k, v && typeof v === "object" ? withAdditionalPropertiesFalse(v) : v]),
-    );
-  }
-  if (result.items && typeof result.items === "object") {
-    result.items = withAdditionalPropertiesFalse(result.items as Record<string, unknown>);
-  }
-  // Handle composition keywords (anyOf, oneOf, allOf) — Zod v4 renders
-  // z.union, z.discriminatedUnion, z.optional as these.
-  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
-    if (Array.isArray(result[key])) {
-      result[key] = (result[key] as Record<string, unknown>[]).map(withAdditionalPropertiesFalse);
-    }
-  }
-  // Handle $defs / definitions (shared schema references)
-  for (const key of ["$defs", "definitions"] as const) {
-    if (result[key] && typeof result[key] === "object" && !Array.isArray(result[key])) {
-      result[key] = Object.fromEntries(
-        Object.entries(result[key] as Record<string, Record<string, unknown>>)
-          .map(([k, v]) => [k, v && typeof v === "object" ? withAdditionalPropertiesFalse(v) : v]),
-      );
-    }
-  }
-  return result;
-}
 
 /** Safely truncate API error body to prevent data leakage through error propagation paths. */
 const truncateErrorBody = (body: string, maxLen = 200): string =>

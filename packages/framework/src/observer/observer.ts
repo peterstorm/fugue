@@ -1,7 +1,8 @@
 import type { ObserverEvent } from "../types/events.js";
 
-// Re-export the interface from its canonical home in `types/`.
+// Re-export the interface and NoopObserver from their canonical home in `types/`.
 export type { Observer } from "../types/observer.js";
+export { NoopObserver } from "../types/observer.js";
 import type { Observer } from "../types/observer.js";
 
 // ---------------------------------------------------------------------------
@@ -24,10 +25,6 @@ import type { Observer } from "../types/observer.js";
 // ---------------------------------------------------------------------------
 // Concrete implementations
 // ---------------------------------------------------------------------------
-
-export class NoopObserver implements Observer {
-  observe(_event: ObserverEvent): void {}
-}
 
 export class RecordingObserver implements Observer {
   readonly events: ObserverEvent[] = [];

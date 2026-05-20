@@ -1,8 +1,10 @@
 // Observer contract — the typed domain-event interface.
 //
 // Lives in `types/` so the entire types layer is self-contained.
-// Runtime implementations (NoopObserver, RecordingObserver, createObserver)
-// live in `observer/observer.ts`.
+// NoopObserver also lives here (zero deps, trivial) so that `shared/`
+// can construct default contexts without importing from `observer/`.
+// Richer implementations (RecordingObserver, createObserver) live in
+// `observer/observer.ts`.
 
 import type { ObserverEvent } from "./events.js";
 
@@ -20,4 +22,9 @@ import type { ObserverEvent } from "./events.js";
  */
 export interface Observer {
   observe(event: ObserverEvent): void;
+}
+
+/** No-op observer — `observe` discards all events. Zero dependencies. */
+export class NoopObserver implements Observer {
+  observe(_event: ObserverEvent): void {}
 }

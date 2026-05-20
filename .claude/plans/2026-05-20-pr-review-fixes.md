@@ -2,378 +2,135 @@
 
 ## Summary
 
-14 issues from comprehensive PR review. Grouped by dependency order — later fixes
-may touch files edited by earlier ones.
+Comprehensive PR review found **0 critical issues** and **8 advisory items**. After re-analysis, 1 advisory was a false positive (tool-dispatch nodeId is actually safe because tool names are validated by `ensureToolNames` before dispatch, and `tool:` + valid tool name always satisfies `ID_REGEX`). That leaves **7 genuine items** to address.
+
+## Correction: False Positive
+
+**DROPPED — tool-dispatch nodeId is safe.** The `nodeId(`tool:${call.name}`)` call in the catch block of `dispatchToolCall` only executes after tool lookup succeeded (the `if (!tool) return errResult(...)` early-return is above the try/catch). Since `ensureToolNames` validates all tool names at loop start (`TOOL_NAME_REGEX = /^[A-Za-z0-9_-]{1,64}$/`), the composed string `tool:validname` always satisfies `ID_REGEX = /^[A-Za-z0-9_:-]{1,128}$/` (max length 69 < 128, all chars valid).
 
 ---
 
-## Phase 1: Critical — Failing Tests (3 items)
+## Fix Sequence
 
-### Fix 1.1: Server resume tests expect 404 but get 409
+### Wave 1: Architecture Layering (Import Violations)
 
-**Root cause:** `InMemoryCheckpointer.load()` checks `meta.frameworkVersion !== FRAMEWORK_VERSION`
-BEFORE the server gets to check `meta.subject`. Tests seed metas without `dagFingerprint` or
-`frameworkVersion`, so the checkpointer rejects them as `checkpoint-version-mismatch` (→ 409)
-before the server reaches the subject comparison (→ 404).
+#### 1.1 Move `NoopObserver` into `types/observer.ts`
 
-**Files:**
-- `apps/customer-summary/src/__tests__/server.test.ts` (lines ~125, ~275)
+**Why:** `shared/defaults.ts` imports a *value* from `observer/observer.ts`, violating the `shared/ → types/ only` layering rule. The `check-imports.ts` has an explicit exemption (`scopeExcludes: ["shared/defaults.ts"]`), but the cleaner fix is to move the trivial `NoopObserver` class (3 lines, zero deps) into `types/observer.ts` where it belongs alongside the `Observer` interface.
 
-**Fix:** The test fixtures need to supply `frameworkVersion` and `dagFingerprint` that match
-the current runtime values, so `load()` succeeds and the server reaches the subject check.
+**Changes:**
+- `packages/framework/src/types/observer.ts` — add `NoopObserver` class
+- `packages/framework/src/observer/observer.ts` — re-export `NoopObserver` from types (backwards compat)
+- `packages/framework/src/shared/defaults.ts` — change import to `../types/observer.js`
+- `packages/framework/src/scripts/check-imports.ts` — remove `"shared/defaults.ts"` from the `scopeExcludes` list for the shared → observer/tracing rule (prove the exemption is no longer needed)
 
-```typescript
-import { FRAMEWORK_VERSION, dagFingerprint } from "@ai-summary/framework/checkpoint";
-// ... in test setup:
-await cp.setMeta(victimRunId, {
-  dagId: "customer-summary",
-  startedAt: new Date(),
-  nodeCount: dag.nodes.length,  // must match current dag
-  subject: "cust-001",
-  dagFingerprint: dagFingerprint(dag),  // match current shape
-  frameworkVersion: FRAMEWORK_VERSION,  // match running framework
-});
-```
+**Test:** Run `bun test` in framework — `boundary-imports.test.ts` verifies no violations.
 
-Same pattern for the "legacy meta (no subject)" test — use `__testRawMetas()` to insert a meta
-that has the correct fingerprint/version but NO subject field, so `load()` passes but
-`meta.subject !== customer_id` triggers the 404.
+#### 1.2 Audit `shared/` logger import (no change needed — document decision)
 
-**Verify:** `bun test apps/customer-summary/src/__tests__/server.test.ts`
+**Why:** `shared/retry-async.ts` and `shared/json-patch.ts` import `fwLogger` from `../logger.js`. The logger is a global singleton seam, not a layer above `shared/`. The `check-imports.ts` rules do NOT forbid this import (only `@opentelemetry/`, `../observer`, `../tracing` are banned for shared). This is intentional — the logger is infrastructure plumbing, not a layer boundary. **No code change**, just documenting the decision here.
 
 ---
 
-### Fix 1.2: Resume test — checkpoints never written
+### Wave 2: Type Design Hardening
 
-**Root cause:** Test at `observability-resume.test.ts:266-272` creates a `cache` object with
-a `writeCheckpoint` method, but `run-node.ts` uses `ctx.checkpointWriter.write(runId, nodeId, output)`.
-The `cache` field is a `ContextCacheAdapter` (get/set), not a `CheckpointWriter`.
+#### 2.1 `SideEffectProfile` — tighten "none" variant `resource` type
 
-**File:** `apps/customer-summary/src/__tests__/observability-resume.test.ts` (lines ~266-280)
+**Why:** Currently `{ kind: "none"; resource?: undefined }` — allows `resource: undefined` to be set explicitly. Using `readonly resource?: never` prevents accidental assignment while still allowing omission.
 
-**Fix:** Wire a proper `checkpointWriter` on the NodeContext:
+**Change:**
+- `packages/framework/src/types/side-effects.ts` — change `readonly resource?: undefined` to `readonly resource?: never`
 
-```typescript
-const checkpoints: Map<string, unknown> = new Map();
-const checkpointWriter: CheckpointWriter = {
-  write: async (_runId, nodeId, output) => {
-    checkpoints.set(nodeId, output);
-  },
-};
+**Risk:** Low. The only valid value for `resource` on a `"none"` node is absence/undefined. Existing code that sets `{ kind: "none" }` (without `resource`) or `{ kind: "none", resource: undefined }` continues to compile. Code that accidentally sets `{ kind: "none", resource: "foo" }` will now correctly error.
 
-const ctx1: NodeContext = makeNodeContext({
-  runId: runId("run-1"),
-  dagId: "resume-3node",
-  checkpointWriter,   // ← this is what run-node.ts reads
-});
-```
-
-Remove the orphaned `cache.writeCheckpoint` method.
-
-**Verify:** `bun test apps/customer-summary/src/__tests__/observability-resume.test.ts`
+**Test:** `bun run typecheck` must pass. If any test creates `{ kind: "none", resource: undefined }` explicitly, it will need the explicit removal.
 
 ---
 
-## Phase 2: Safety — Silent Failure Paths (3 items)
+### Wave 3: Code Simplification
 
-### Fix 2.1: Guard `defaultEdge!` in routing.ts
+#### 3.1 Extract `withAdditionalPropertiesFalse` to `llm/zod-schema.ts`
 
-**File:** `packages/framework/src/dag-runtime/routing.ts:181`
+**Why:** This is a pure recursive schema transform (no client-specific logic). Currently lives in `openai-client.ts` but is schema manipulation that belongs alongside `zodToJsonSchema`. Extraction reduces `openai-client.ts` size and makes the transform testable/reusable.
 
-**Fix:** Replace non-null assertion with explicit guard:
+**Changes:**
+- `packages/framework/src/llm/zod-schema.ts` — add `withAdditionalPropertiesFalse` export
+- `packages/framework/src/llm/openai-client.ts` — replace inline function with import
 
-```typescript
-// Before:
-chosenTargets: new Set([...unconditionalTargets, defaultEdge!.to]),
+**Test:** `bun test` — the `openai-client` tests exercise structured output paths that call this function.
 
-// After:
-if (!defaultEdge) {
-  return {
-    kind: "predicate-malformed",
-    fromNodeId,
-    message: `No default edge found for node '${fromNodeId}' when no predicate matched`,
-  };
-}
-return {
-  kind: "decided",
-  chosenTargets: new Set([...unconditionalTargets, defaultEdge.to]),
-  prunedTargets: pruned,
-  defaultTaken: true,
-  predicateResults,
-};
-```
+#### 3.2 Simplify `InMemoryFreshnessIndex` eviction (optional — defer if risk)
 
-**Verify:** `bun test packages/framework/src/__tests__/conditional-edges-routing.test.ts`
+**Why:** The current implementation uses `resourceOrder[]`, `resourceSet`, `evictCursor`, splice-based compaction, bounded scan with fallback — clever but dense. JavaScript `Map` maintains insertion order; delete + re-set gives LRU. However, the current impl has specific bounded-scan properties that tests may rely on.
+
+**Decision:** **DEFER.** The current implementation is correct (tests pass), bounded (O(1) amortized eviction), and well-documented. Simplification risks subtle behavioral changes in eviction order that tests may assert on. File a follow-up ticket; don't risk it in this fix batch.
 
 ---
 
-### Fix 2.2: Tighten error object check in run-node.ts
+### Wave 4: Robustness
 
-**File:** `packages/framework/src/dag-runtime/run-node.ts:155-159`
+#### 4.1 Guard `retryAsync` against non-Error throws
 
-**Fix:**
+**Why:** If `fn()` throws a non-Error value (e.g., `throw "oops"` or `throw undefined`), the current `throw lastError` at exhaustion propagates an untyped value. While unlikely in well-written code, the fix is trivial and defensive.
 
-```typescript
-// Before:
-const frameworkError: FrameworkError =
-  runResult.error !== null &&
-  typeof runResult.error === "object" &&
-  "kind" in (runResult.error as object)
-    ? (runResult.error as FrameworkError)
-    : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
+**Change:**
+- `packages/framework/src/shared/retry-async.ts` — wrap the final throw:
+  ```ts
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  ```
 
-// After:
-const frameworkError: FrameworkError =
-  runResult.error !== null &&
-  typeof runResult.error === "object" &&
-  "kind" in runResult.error &&
-  typeof (runResult.error as Record<string, unknown>).kind === "string"
-    ? (runResult.error as FrameworkError)
-    : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
-```
-
-Remove the `as object` widening cast; the `typeof === "object" && !== null` check already narrows.
-
-**Verify:** `bun test packages/framework/src/__tests__/executor.test.ts`
+**Test:** Add a test case that throws a string, verify the outer catch receives an Error instance.
 
 ---
 
-### Fix 2.3: BufferedObserver — let policy errors propagate
+### Wave 5: Test Infrastructure
 
-**File:** `packages/framework/src/observer/buffered.ts` in `handleRunEnd()`
+#### 5.1 Add `describe.skipIf` pattern for Redis-dependent tests
 
-**Fix:** Move `policy.shouldFlush(summary)` outside the try block, or catch policy exceptions
-separately and propagate them (since a broken policy is a programmer error, not a transient
-failure that should be silenced):
+**Why:** 34 tests are skipped — they're Redis/BullMQ integration tests that need infrastructure. Currently they silently skip with no indication in CI of WHY. Adding a shared `skipIf` helper with environment detection improves visibility.
 
-```typescript
-private handleRunEnd(e: RunEndEvent): void {
-  const buf = this.buffers.get(e.runId);
-  if (!buf) {
-    fwLogger().warn(`[BufferedObserver] onRunEnd for unknown runId=${e.runId}`);
-  }
-  const events = buf?.events ?? [];
-  const summary = computeRunSummary(events, e);
-  this.aggregates.runCount++;
-
-  // Policy evaluation is programmer-provided — let bugs surface.
-  let shouldFlush: boolean;
-  try {
-    shouldFlush = this.policy.shouldFlush(summary);
-  } catch (policyErr) {
-    fwLogger().error(`[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss:`, policyErr);
-    shouldFlush = true; // fail-open: flush on policy error
-  }
-
-  try {
-    if (shouldFlush) {
-      // ... replay + dispatch ...
-    } else {
-      fwLogger().warn(...);
-    }
-  } finally {
-    this.buffers.delete(e.runId);
-  }
-}
-```
-
-**Verify:** `bun test packages/framework/src/__tests__/buffered-observer.test.ts`
+**Decision:** **DEFER for this commit.** The skipped tests already have proper skip annotations. A Testcontainers setup is a separate infrastructure task, not a code fix. Document as a follow-up.
 
 ---
 
-## Phase 3: Type Safety (2 items)
+### Wave 6: Documentation
 
-### Fix 3.1: In-memory queue double-cast
+#### 6.1 Add wave-execution.ts FR→ADR header comment
 
-**File:** `packages/framework/src/queue/in-memory.ts:163`
+**Why:** `executor.ts` has an excellent FR-XXX → ADR-XXXX cross-reference block. `wave-execution.ts` is the de-facto wave engine but lacks similar traceability.
 
-**Fix:** The `processFn` parameter type should accept the concrete in-memory job type.
-The generic constraint on `createWorker` already binds `S` and `C`. The cast is needed
-because `InMemoryJob` doesn't exactly match `JobLike<S, unknown, C>` (the `E` slot).
-Add a private adapter function:
-
-```typescript
-// Before:
-await processFn(job as unknown as JobLike<unknown, unknown, unknown>);
-
-// After:
-await processFn(job as JobLike<S, unknown, C>);
-```
-
-The single `as` is safe because `InMemoryJob` implements `JobLike` with `E = unknown`.
-The double cast through `unknown` is unnecessary.
-
-**Verify:** `bun test packages/framework/src/__tests__/queue-memory.test.ts`
-
----
-
-### Fix 3.2: Add `tryConfidence` public Result-returning constructor
-
-**File:** `packages/framework/src/types/confidence.ts`
-
-**Fix:** Add alongside existing `confidence()`:
-
-```typescript
-/** Result-returning variant for parse boundaries. Never throws. */
-export const tryConfidence = (
-  bucket: string,
-  source: string,
-  raw?: number | string,
-): Result<Confidence, string> => {
-  if (!(bucket in CONFIDENCE_ORDER)) {
-    return err(`unknown confidence bucket '${bucket}'`);
-  }
-  if (!(CONFIDENCE_SOURCES as readonly string[]).includes(source)) {
-    return err(`unknown confidence source '${source}'`);
-  }
-  if (source === "self-reported-numeric" && typeof raw === "number" && (raw < 0 || raw > 1)) {
-    return err(`confidence raw value for "self-reported-numeric" must be in [0, 1], got ${raw}`);
-  }
-  if (source === "logprob" && (raw === undefined || typeof raw !== "number")) {
-    return err(`confidence source "logprob" requires a numeric raw value`);
-  }
-  return ok({
-    bucket: bucket as ConfidenceBucket,
-    source: source as ConfidenceSource,
-    ...(raw !== undefined ? { raw } : {}),
-  } as Confidence);
-};
-```
-
-Export from `packages/framework/src/types/index.ts`.
-
-**Verify:** Add a unit test in `packages/framework/src/__tests__/confidence-buckets.test.ts`.
-
----
-
-## Phase 4: Architecture (2 items)
-
-### Fix 4.1: Extract `validateApproveEdit` to shared/
-
-**Files:**
-- `packages/framework/src/dag-runtime/executor.ts` (move function OUT)
-- `packages/framework/src/shared/validate.ts` (move function IN)
-
-**Fix:** Move `validateApproveEdit` from executor.ts to shared/validate.ts. It's a pure
-function (no I/O, no async, no observer interaction). The executor imports and calls it.
-
-```typescript
-// shared/validate.ts — add:
-export const validateApproveEdit = (
-  action: { kind: string; newOutput?: unknown },
-  nodeId: NodeId,
-  nodeMap: ReadonlyMap<NodeId, { outputSchema: z.ZodType<unknown> }>,
-): string | null => {
-  if (action.kind !== "approve-with-edit") return null;
-  const nodeDef = nodeMap.get(nodeId);
-  if (!nodeDef) return `approve-with-edit: node '${nodeId}' not found in DAG`;
-  const parsed = nodeDef.outputSchema.safeParse((action as { newOutput: unknown }).newOutput);
-  if (!parsed.success) return `approve-with-edit output failed schema for node '${nodeId}': ${parsed.error.message}`;
-  return null;
-};
-```
-
-**Verify:** `bun test packages/framework/src/__tests__/human-resolution.test.ts`
-
----
-
-### Fix 4.2: Extract OpenAI Responses API types
-
-**Files:**
-- Create `packages/framework/src/llm/openai-types.ts` (new)
-- `packages/framework/src/llm/openai-client.ts` (trim)
-
-**Fix:** Move `FunctionCallBlock`, `MessageBlock`, `ReasoningBlock`, `ResponsesOutputItem`,
-`FunctionCallOutputItem`, `ConversationItem`, `ResponsesUsage`, `ResponsesApiResponse`,
-and the type-guard functions (`isFunctionCallBlock`, `isMessageBlock`, `isOutputTextPart`,
-`isReasoningBlock`) into `openai-types.ts`. Import in `openai-client.ts`.
-
-**Verify:** `bun test packages/framework/src/__tests__/openai-client.test.ts`
-
----
-
-## Phase 5: Documentation (3 items)
-
-### Fix 5.1: Add FRAMEWORK_VERSION to CONTEXT.md
-
-**File:** `CONTEXT.md`
-
-**Fix:** Add to "State Machine Kernel" table:
-
-```markdown
-| **FrameworkVersion** | Content-hash of the framework's checkpoint format. Resume rejects checkpoints from a different version to prevent semantic drift. |
-```
-
----
-
-### Fix 5.2: Add FR-XXX → ADR cross-reference comment
-
-**File:** `packages/framework/src/dag-runtime/executor.ts` (top-of-file comment)
-
-**Fix:** Add a mapping comment:
-
-```typescript
-// Requirement references:
-//   FR-005 → ADR-0003 (event sourcing)
-//   FR-006 → ADR-0005 (retry layering)
-//   FR-007 → ADR-0005 (retry layering)
-//   FR-011 → ADR-0005 (retry layering)
-//   FR-012 → ADR-0006 (joblike minimal write side)
-//   FR-021 → ADR-0021 (single-path runtime)
-//   FR-026..FR-033 → ADR-0013, ADR-0015, ADR-0029
-//   FR-027 → ADR-0005 (retry backoff)
-//   FR-029a → ADR-0013 (onHumanReview hook crash retry)
-```
-
----
-
-### Fix 5.3: Document skipped tests rationale
-
-**File:** Create `packages/framework/src/__tests__/REDIS_TESTS.md`
-
-**Fix:**
-
-```markdown
-# Redis/BullMQ Integration Tests
-
-## Why they're skipped
-
-These 34 tests require a running Redis instance. They are guarded by:
-- `describe.skipIf(!process.env.REDIS_URL)` or similar
-
-## Running locally
-
-```bash
-docker compose -f infra/compose.yaml up redis -d
-export REDIS_URL=redis://localhost:6379
-bun test --filter redis
-bun test --filter bullmq
-```
-
-## CI Coverage
-
-TODO: Add Redis service to CI workflow once infra pipeline is established.
-```
-
----
-
-## Phase 6: Final Polish
-
-### Fix 6.1: Run full test suite, confirm 0 failures
-
-```bash
-bun test
-```
-
-Expected: 1348 pass, 34 skip (Redis), 0 fail.
+**Change:**
+- `packages/framework/src/dag-runtime/wave-execution.ts` — add requirement cross-references to the file header:
+  ```
+  // FR-005  → ADR-0003 (checkpoint after every transition)
+  // FR-021  → ADR-0021 (single-path runtime)
+  // FR-025  → ADR-0025 (freshness witness emission after wave)
+  // FR-029  → ADR-0029 (routing decisions pre-computed by executor)
+  ```
 
 ---
 
 ## Execution Order
 
-```
-Phase 1 (critical tests) → Phase 2 (safety) → Phase 3 (types) → Phase 4 (architecture) → Phase 5 (docs) → Phase 6 (verify)
-```
+1. **Wave 1.1** — Move NoopObserver (structural, testable via boundary-imports)
+2. **Wave 2.1** — SideEffectProfile type tightening (typecheck only)
+3. **Wave 3.1** — Extract schema transform (refactor, tests cover)
+4. **Wave 4.1** — Guard retryAsync (defensive, add test)
+5. **Wave 6.1** — Documentation header (no risk)
+6. `bun run typecheck && bun run test` — full validation
 
-Each phase is independently verifiable with targeted `bun test` runs.
-Total estimated changes: ~15 files, ~150 lines added/modified.
+## Expected Outcome
+
+- `check-imports.ts` boundary tests pass with one fewer exemption
+- Typecheck clean across both packages
+- 1253+ framework tests pass, 101 customer-summary tests pass
+- No behavioral changes to the runtime
+- Cleaner layering, tighter types, more defensive error handling
+
+## Deferred
+
+| Item | Reason |
+|------|--------|
+| InMemoryFreshnessIndex simplification | Correct + tested; risk of behavioral change |
+| Redis test infrastructure (Testcontainers) | Infrastructure task, not code fix |
+| fwLogger in shared/ | Intentional design; documented above |

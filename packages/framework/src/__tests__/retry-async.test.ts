@@ -47,4 +47,18 @@ describe("retryAsync", () => {
     ).rejects.toThrow("once");
     expect(calls).toBe(1);
   });
+
+  it("wraps non-Error thrown values into an Error instance", async () => {
+    try {
+      await retryAsync(
+        async () => { throw "string-error"; },
+        { maxAttempts: 2, baseDelayMs: 1, label: "non-error-test" },
+      );
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(Error);
+      expect((e as Error).message).toContain("string-error");
+      expect((e as Error).message).toContain("non-error-test");
+    }
+  });
 });
