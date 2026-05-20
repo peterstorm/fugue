@@ -479,8 +479,8 @@ describe("dagTransition — reroute backward (FR-031)", () => {
     });
     // We're awaiting-human after wave 2
     const phase = awaitingHuman("c", [], 2);
-    const action: HumanAction = { action: "reroute", targetNodeId: N("b") };
-    const event: DagEvent = { type: "human-responded", nodeId: "c" as NodeId, action };
+    const action = { action: "reroute" as const, targetNodeId: N("b") };
+    const event: DagEvent = { type: "human-responded", nodeId: "c" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
 
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
@@ -497,8 +497,8 @@ describe("dagTransition — reroute backward (FR-031)", () => {
       outputs: new Map([["a", "a-out"], ["b", "b-out"]]) as any,
     });
     const phase = awaitingHuman("b", [], 1); // currently in wave 1
-    const action: HumanAction = { action: "reroute", targetNodeId: N("b") }; // reroute to same wave
-    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action };
+    const action = { action: "reroute" as const, targetNodeId: N("b") }; // reroute to same wave
+    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
   });
@@ -513,8 +513,8 @@ describe("dagTransition — reroute forward invalid (FR-032)", () => {
     const ctx = makeCtx({ waves: [[N("a")], [N("b")], [N("c")]] });
     // Awaiting human at wave 0
     const phase = awaitingHuman("a", [], 0);
-    const action: HumanAction = { action: "reroute", targetNodeId: N("c") }; // c is in wave 2
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action };
+    const action = { action: "reroute" as const, targetNodeId: N("c") }; // c is in wave 2
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({
       kind: "failed",
@@ -525,8 +525,8 @@ describe("dagTransition — reroute forward invalid (FR-032)", () => {
   it("reroute to unknown node => failed with invalid-reroute", () => {
     const ctx = makeCtx();
     const phase = awaitingHuman("a", [], 0);
-    const action: HumanAction = { action: "reroute", targetNodeId: N("nonexistent") };
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action };
+    const action = { action: "reroute" as const, targetNodeId: N("nonexistent") };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({
       kind: "failed",

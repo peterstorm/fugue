@@ -1,12 +1,15 @@
 // Eval-judge runner called by runDagStateful after a successful DAG run.
-// Each judge runs in its own OTel span. Judge-internal failures (LLM call,
-// schema mismatch) fail open with `passed: true, skipped: true` so a broken
-// model can't block a run. Orchestrator-level exceptions surface as
-// `passed: false, skipped: true, crash: { ... }` so quality gates filtering
-// on `passed` see a broken judge rather than silently treating it as passing.
+// Each judge runs in its own OTel span. The judge's own `run` implementation
+// is fail-open for LLM-side errors (`outcome: "skipped-llm-failure"`), so a
+// broken model cannot block the run. Orchestrator-level exceptions caught
+// here surface as `outcome: "crash"` (fail-closed) so quality gates filtering
+// on `judgePassed(r)` see the broken judge rather than silently treating it
+// as passing.
 
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
+import { judgePassed, judgeCrashed } from "../types/eval-judge.js";
+import { crashResult } from "../nodes/eval-judge.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import { fwLogger } from "../logger.js";
@@ -45,34 +48,25 @@ export const runEvalJudges = async (
 
             const result = await judge.run(judgeInput, dagOutput, ctx);
             span.addEvent(EVENT_NODE_OUTPUT, { data: JSON.stringify(result) });
-            if (!result.passed) {
-              span.setStatus({ code: SpanStatusCode.ERROR, message: `Score ${result.score} below threshold. ${result.reason}` });
+            if (!judgePassed(result)) {
+              span.setStatus({ code: SpanStatusCode.ERROR, message: `${result.outcome}: score=${result.score ?? "null"}. ${result.reason}` });
             }
             span.end();
             return result;
           } catch (e) {
             // Orchestrator-side exception (span setup, tracer/attribute bug,
             // or a judge whose `run` threw past its own internal fail-open).
-            // Returning `passed: true` here would silently disable quality
-            // gates filtering on `passed` — operators would see a broken
-            // judge as passing every run. Return `passed: false` with a
-            // structured `crash` payload so the failure is visible to both
-            // run-end aggregation (`evalJudgeFailed`) and any downstream
-            // gating logic.
+            // Producing a "passed" result here would silently disable quality
+            // gates that rely on `judgePassed` — operators would see a broken
+            // judge as passing every run. Return `outcome: "crash"` so the
+            // failure is visible to both run-end aggregation
+            // (`evalJudgeFailed`) and any downstream gating logic.
             const msg = e instanceof Error ? e.message : String(e);
             const prefix = `[eval-judge:${judge.id}] Unexpected error: ${msg}`;
-            (ctx.logger?.warn ?? fwLogger().warn)(prefix);
+            (ctx.logger?.error ?? fwLogger().error)(prefix);
             span.setStatus({ code: SpanStatusCode.ERROR, message: prefix });
             span.end();
-            return {
-              passed: false,
-              score: null,
-              criteriaScores: {},
-              failedCriteria: [] as string[],
-              reason: `[crashed: ${msg}]`,
-              skipped: true,
-              crash: { kind: "judge-crash" as const, message: msg },
-            };
+            return crashResult(msg);
           }
         },
       ),
@@ -111,7 +105,7 @@ export const finalizeRunWithJudges = async (
       nodeOutputs,
       nodeCtx,
     );
-    const evalJudgeFailed = evalJudgeResults.some((r) => !r.passed);
+    const evalJudgeFailed = evalJudgeResults.some((r) => !judgePassed(r));
     updatedMeta = { ...meta, evalJudgeResults, evalJudgeFailed };
   }
   closeRootSpan(rootSpan, outcomeFromMeta(updatedMeta));
@@ -140,7 +134,7 @@ export const runFinalizeInBackground = (
   finalize()
     .then((meta): import("./run-dag-stateful.js").BackgroundResult => ({
       judgesPassed: !meta.evalJudgeFailed,
-      judgesCrashed: meta.evalJudgeResults?.some((r) => r.crash !== undefined) ?? false,
+      judgesCrashed: meta.evalJudgeResults?.some(judgeCrashed) ?? false,
       meta,
     }))
     .catch((e): import("./run-dag-stateful.js").BackgroundResult => {

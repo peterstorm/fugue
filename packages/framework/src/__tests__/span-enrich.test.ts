@@ -3,7 +3,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { computeCostUsd, PRICE_TABLE } from "../llm/cost.js";
-import { resolveContentFilter } from "../tracing/content-filter.js";
+import { resolveContentFilter, IDENTITY_FILTER } from "../tracing/content-filter.js";
 
 // ---------------------------------------------------------------------------
 // computeCostUsd — pure cost calculation
@@ -71,14 +71,14 @@ describe("resolveContentFilter", () => {
     expect(filter!("hello world this is long")).toBe("hello worl");
   });
 
-  it("returns identity filter when includeContent is true (deprecated path)", () => {
-    const filter = resolveContentFilter({ includeContent: true });
+  it("returns IDENTITY_FILTER when explicitly set", () => {
+    const filter = resolveContentFilter({ contentFilter: IDENTITY_FILTER });
     expect(filter).not.toBeNull();
     expect(filter!("secret")).toBe("secret");
   });
 
-  it("returns null when includeContent is false (deprecated path)", () => {
-    const filter = resolveContentFilter({ includeContent: false });
+  it("returns null when contentFilter is null", () => {
+    const filter = resolveContentFilter({ contentFilter: null });
     expect(filter).toBeNull();
   });
 });

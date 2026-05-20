@@ -7,7 +7,7 @@
 // discriminated error instead of silently falling back to the current active
 // set. The executor maps the error to a `node-failed` event.
 
-import type { DagMachineContext, DagEvent } from "./types.js";
+import type { DagMachineContext, DagEvent, HumanAction } from "./types.js";
 import type { NodeId } from "../types/ids.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isConditionalEdge } from "../types/dag.js";
@@ -66,22 +66,49 @@ export const computeRerouteActiveSet = (
 };
 
 /**
+ * A `DagEvent` before reroute enrichment. The hook caller cannot produce a
+ * fully-formed reroute `human-responded` event — `rerouteActiveSet` is computed
+ * here by `enrichHumanRespondedEvent`, not by the hook caller. So the
+ * pre-enrichment `human-responded` carries the raw `HumanAction` without the
+ * (otherwise mandatory) `rerouteActiveSet`.
+ */
+export type UnenrichedDagEvent =
+  | Exclude<DagEvent, { type: "human-responded" }>
+  | { readonly type: "human-responded"; readonly nodeId: NodeId; readonly action: HumanAction };
+
+/**
  * Enrich a human-responded event with `rerouteActiveSet` for reroute actions.
  * Returns the original event with the set attached, or a `FrameworkError` if
  * the active-set computation fails. Called by the executor after receiving a
  * successful human-responded event.
  */
 export const enrichHumanRespondedEvent = (
-  event: DagEvent,
+  event: UnenrichedDagEvent,
   machineCtx: DagMachineContext,
 ):
   | { readonly kind: "ok"; readonly event: DagEvent }
   | { readonly kind: "err"; readonly nodeId: NodeId; readonly error: FrameworkError } => {
   if (event.type !== "human-responded") return { kind: "ok", event };
-  if (event.action.action !== "reroute") return { kind: "ok", event };
-  const result = computeRerouteActiveSet(event.action.targetNodeId, machineCtx);
+  if (event.action.action !== "reroute") {
+    // Non-reroute actions need no enrichment; rebuild explicitly so the
+    // narrowed `action` type satisfies the non-reroute `DagEvent` variant.
+    return {
+      kind: "ok",
+      event: { type: "human-responded", nodeId: event.nodeId, action: event.action },
+    };
+  }
+  const rerouteAction = event.action;
+  const result = computeRerouteActiveSet(rerouteAction.targetNodeId, machineCtx);
   if (result.kind === "ok") {
-    return { kind: "ok", event: { ...event, rerouteActiveSet: result.activeSet } };
+    return {
+      kind: "ok",
+      event: {
+        type: "human-responded",
+        nodeId: event.nodeId,
+        action: rerouteAction,
+        rerouteActiveSet: result.activeSet,
+      },
+    };
   }
   if (result.kind === "invalid-target") {
     return {

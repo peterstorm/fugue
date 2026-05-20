@@ -99,7 +99,10 @@ export const runLlmCallPipeline = async <O>(
         nodeId: config.nodeId,
         attempts: 2,
         lastError: formatFrameworkError(result.error),
-        rootErrorKind: result.error.kind,
+        rootErrorKind:
+          result.error.kind === "retry-exhausted"
+            ? result.error.rootErrorKind
+            : result.error.kind,
       });
     }
   }
@@ -117,7 +120,6 @@ export const runLlmCallPipeline = async <O>(
     tokensIn: llmResponse.tokensIn,
     tokensOut: llmResponse.tokensOut,
     thinking: llmResponse.thinking,
-    includeContent: ctx.includeContent,
     contentFilter: ctx.contentFilter,
   });
 

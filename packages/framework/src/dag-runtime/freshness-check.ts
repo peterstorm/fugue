@@ -199,10 +199,10 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
    * always the last element.
    */
   async findConflict(
-    resource: string,
-    conditionedOnValue: string,
+    conditionedOn: import("../types/freshness.js").Witness,
     sinceMs: number,
   ): Promise<Result<WriteEntry | null, FrameworkError>> {
+    const { resource, value: conditionedOnValue } = conditionedOn;
     // Fast path: sinceMs === 0 means "any write ever" — check latest directly
     if (sinceMs === 0) {
       const entry = this.latest.get(resource);

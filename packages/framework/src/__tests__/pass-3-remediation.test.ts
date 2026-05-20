@@ -19,6 +19,7 @@ import type { TaskConfig, TaskRegistry } from "../scheduler/types.js";
 import type { MarkerStore } from "../queue/types.js";
 
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
+import { judgePassed, judgeCrashed } from "../nodes/eval-judge.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
@@ -393,37 +394,36 @@ describe("Wave 1.4 — eval-judge orchestrator exception flips passed to false",
 
     expect(results.length).toBe(1);
     const r = results[0]!;
-    expect(r.passed).toBe(false); // critical: was previously `true`, masking broken judges
-    expect(r.skipped).toBe(true);
+    expect(r.outcome).toBe("crash"); // critical: was previously `passed: true`, masking broken judges
+    expect(judgePassed(r)).toBe(false);
     expect(r.score).toBeNull();
-    expect(r.crash).toBeDefined();
-    expect(r.crash!.kind).toBe("judge-crash");
-    expect(r.crash!.message).toBe("judge runtime exploded");
+    if (r.outcome === "crash") {
+      expect(r.crashMessage).toBe("judge runtime exploded");
+    }
 
     void dag; // dag construction validated; not needed for the judge-runner direct call
   });
 
-  it("a healthy judge that scores below threshold still returns passed:false with NO crash field", async () => {
+  it("a healthy judge that scores below threshold returns outcome:failed (not a crash)", async () => {
     const lowScoreJudge: EvalJudgeNodeDef = {
       id: N("low-judge"),
       kind: "eval-judge",
       config: { id: N("low-judge"), criteria: [N("c1")], threshold: 0.9 },
       run: async () => ({
-        passed: false,
+        outcome: "failed" as const,
         score: 0.3,
         criteriaScores: { c1: 0.3 },
         failedCriteria: ["c1"],
         reason: "scored 0.3 below threshold 0.9",
-        skipped: false,
       }),
     };
 
     const { runEvalJudges } = await import("../dag-runtime/eval-judges.js");
     const results = await runEvalJudges([lowScoreJudge], null, "any", new Map(), makeBaseCtx());
 
-    expect(results[0]!.passed).toBe(false);
-    expect(results[0]!.skipped).toBe(false);
-    expect(results[0]!.crash).toBeUndefined(); // not an orchestrator crash — just a low score
+    expect(results[0]!.outcome).toBe("failed");
+    expect(judgePassed(results[0]!)).toBe(false);
+    expect(judgeCrashed(results[0]!)).toBe(false); // not an orchestrator crash — just a low score
   });
 });
 
@@ -486,7 +486,7 @@ describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejectio
   it("an exporter whose forceFlush rejects bumps exportFailed and resolves cleanly", async () => {
     const { TailSamplingProcessor } = await import("../observer/tail-sampling-processor.js");
     const exporter = {
-      export: (_spans: any, cb: any) => cb({ code: 0 }),
+      export: (_spans: unknown, cb: (result: { code: number }) => void) => cb({ code: 0 }),
       shutdown: async () => undefined,
       forceFlush: async () => {
         throw new Error("transport down");
@@ -770,13 +770,13 @@ describe("Wave 4.10 — DeadLetterOpts.formatMessage receives raw err", () => {
     // and trigger it manually.
     const exhaustedHandlers: Array<(id: string, err: unknown, attempts: number) => Promise<void>> = [];
     const worker = {
-      onFailed: (_handler: any) => {
+      onFailed: (_handler: unknown) => {
         // Not used by the dead-letter handler after the onExhausted split.
       },
-      onExhausted: (handler: any) => {
+      onExhausted: (handler: (id: string, err: unknown, attempts: number) => Promise<void>) => {
         exhaustedHandlers.push(handler);
       },
-      onError: (_handler: any) => {},
+      onError: (_handler: unknown) => {},
       close: async () => {},
     } as any;
 

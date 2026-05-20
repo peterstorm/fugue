@@ -2,6 +2,7 @@ import { NoopObserver } from "../observer/observer.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
+import { judgePassed } from "../types/eval-judge.js";
 import {
   createEvalJudgeNode,
   toEvalJudgeResult,
@@ -87,7 +88,7 @@ describe("toEvalJudgeResult", () => {
       reason: "Good",
     };
     const result = toEvalJudgeResult(response, 0.8, ["factuality", "relevance"]);
-    expect(result.passed).toBe(true);
+    expect(judgePassed(result)).toBe(true);
     expect(result.score).toBe(0.9);
     expect(result.failedCriteria).toHaveLength(0);
   });
@@ -100,7 +101,7 @@ describe("toEvalJudgeResult", () => {
       reason: "Poor quality",
     };
     const result = toEvalJudgeResult(response, 0.8, ["factuality", "relevance"]);
-    expect(result.passed).toBe(false);
+    expect(judgePassed(result)).toBe(false);
     expect(result.score).toBe(0.6);
   });
 
@@ -112,7 +113,7 @@ describe("toEvalJudgeResult", () => {
       reason: "Mostly good",
     };
     const result = toEvalJudgeResult(response, 0.8, ["factuality", "relevance"]);
-    expect(result.passed).toBe(false);
+    expect(judgePassed(result)).toBe(false);
     expect(result.failedCriteria).toContain("relevance");
     expect(result.failedCriteria).not.toContain("factuality");
   });
@@ -126,7 +127,7 @@ describe("toEvalJudgeResult", () => {
     };
     // Only checking "factuality" — "extra" is not in our criteria list
     const result = toEvalJudgeResult(response, 0.8, ["factuality"]);
-    expect(result.passed).toBe(true);
+    expect(judgePassed(result)).toBe(true);
     expect(result.failedCriteria).toHaveLength(0);
   });
 
@@ -138,7 +139,7 @@ describe("toEvalJudgeResult", () => {
       reason: "Borderline",
     };
     const result = toEvalJudgeResult(response, 0.8, ["clarity"]);
-    expect(result.passed).toBe(true);
+    expect(judgePassed(result)).toBe(true);
   });
 
   test("handles edge case: criterion score exactly at threshold", () => {
@@ -150,7 +151,7 @@ describe("toEvalJudgeResult", () => {
     };
     const result = toEvalJudgeResult(response, 0.8, ["clarity"]);
     // 0.8 is NOT < 0.8, so it passes
-    expect(result.passed).toBe(true);
+    expect(judgePassed(result)).toBe(true);
   });
 
   test("preserves reason from response", () => {
@@ -166,12 +167,11 @@ describe("toEvalJudgeResult", () => {
 });
 
 describe("failOpenResult", () => {
-  test("returns passed: true with reason", () => {
+  test("returns skipped-llm-failure outcome that is fail-open", () => {
     const result = failOpenResult("LLM unavailable");
-    expect(result.passed).toBe(true);
-    // Score is null when the judge couldn't run — distinct from a 1.0 verdict.
+    expect(result.outcome).toBe("skipped-llm-failure");
+    expect(judgePassed(result)).toBe(true);
     expect(result.score).toBeNull();
-    expect(result.skipped).toBe(true);
     expect(result.reason).toContain("LLM unavailable");
     expect(result.failedCriteria).toHaveLength(0);
   });
@@ -211,7 +211,7 @@ describe("createEvalJudgeNode", () => {
       });
 
       const result = await node.run("input text", "output text", makeCtx({ judgeLlm: llm }));
-      expect(result.passed).toBe(true);
+      expect(judgePassed(result)).toBe(true);
       expect(result.score).toBe(0.9);
     });
 
@@ -230,7 +230,7 @@ describe("createEvalJudgeNode", () => {
       });
 
       const result = await node.run("input", "output", makeCtx({ judgeLlm: llm }));
-      expect(result.passed).toBe(false);
+      expect(judgePassed(result)).toBe(false);
       expect(result.failedCriteria).toContain("factuality");
       expect(result.failedCriteria).toContain("relevance");
     });
@@ -275,7 +275,7 @@ describe("createEvalJudgeNode", () => {
     test("fail-open when no LLM client available", async () => {
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx());
-      expect(result.passed).toBe(true);
+      expect(judgePassed(result)).toBe(true);
       expect(result.reason).toContain("No LLM client available");
     });
 
@@ -283,7 +283,7 @@ describe("createEvalJudgeNode", () => {
       const llm = makeFailingLlm("rate limited");
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
-      expect(result.passed).toBe(true);
+      expect(judgePassed(result)).toBe(true);
       expect(result.reason).toContain("rate limited");
     });
 
@@ -291,7 +291,7 @@ describe("createEvalJudgeNode", () => {
       const llm = makeThrowingLlm();
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
-      expect(result.passed).toBe(true);
+      expect(judgePassed(result)).toBe(true);
       expect(result.reason).toContain("network timeout");
     });
 
@@ -308,7 +308,7 @@ describe("createEvalJudgeNode", () => {
       const node = createEvalJudgeNode({
         id: N("j"),
         criteria: ["tone"],
-        rubricInline: "Check that the tone is professional and neutral",
+        rubric: { source: "inline", text: "Check that the tone is professional and neutral" },
       });
       await node.run("input", "output", makeCtx({ judgeLlm: llm }));
       expect(capturedUser).toContain("professional and neutral");
@@ -328,7 +328,7 @@ describe("createEvalJudgeNode", () => {
       const node = createEvalJudgeNode({
         id: N("j"),
         criteria: ["language"],
-        rubricTemplateId: "custom-rubric",
+        rubric: { source: "template", templateId: "custom-rubric" },
       });
       await node.run("in", "out", makeCtx({ judgeLlm: llm, prompts }));
       expect(capturedUser).toContain("Danish language quality");

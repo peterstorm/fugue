@@ -33,7 +33,7 @@ export const createSummaryDag = (
     id: "summary-quality-judge",
     criteria: ["factuality", "completeness", "relevance", "coherence"],
     threshold: 0.8,
-    rubricTemplateId: "summary-eval-rubric",
+    rubric: { source: "template", templateId: "summary-eval-rubric" },
     model: opts.judgeModel,
   });
 

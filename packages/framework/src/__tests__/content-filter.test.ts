@@ -90,24 +90,15 @@ describe("resolveContentFilter", () => {
     expect(resolveContentFilter({ contentFilter: filter })).toBe(filter);
   });
 
-  it("returns IDENTITY_FILTER for includeContent=true", () => {
-    expect(resolveContentFilter({ includeContent: true })).toBe(IDENTITY_FILTER);
+  it("returns IDENTITY_FILTER when set explicitly", () => {
+    expect(resolveContentFilter({ contentFilter: IDENTITY_FILTER })).toBe(IDENTITY_FILTER);
   });
 
   it("returns null when nothing set", () => {
     expect(resolveContentFilter({})).toBeNull();
   });
 
-  it("prefers contentFilter over includeContent", () => {
-    const filter = (s: string) => s.toUpperCase();
-    expect(resolveContentFilter({ contentFilter: filter, includeContent: false })).toBe(filter);
-  });
-
-  it("contentFilter=null falls through to includeContent", () => {
-    expect(resolveContentFilter({ contentFilter: null, includeContent: true })).toBe(IDENTITY_FILTER);
-  });
-
-  it("contentFilter=null without includeContent returns null", () => {
+  it("returns null when contentFilter is null", () => {
     expect(resolveContentFilter({ contentFilter: null })).toBeNull();
   });
 });

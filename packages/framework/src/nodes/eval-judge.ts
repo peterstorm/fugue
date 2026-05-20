@@ -22,7 +22,8 @@ import { enrichLlmSpan } from "../tracing/index.js";
 import { dispatchEvent } from "../observer/dispatch.js";
 
 // Re-export types from their canonical home in `types/`.
-export type { EvalJudgeResult, EvalJudgeNodeDef, EvalJudgeNodeConfig } from "../types/eval-judge.js";
+export type { EvalJudgeResult, EvalJudgeNodeDef, EvalJudgeNodeConfig, EvalJudgeRubric } from "../types/eval-judge.js";
+export { judgePassed, judgeCrashed } from "../types/eval-judge.js";
 import type { EvalJudgeResult, EvalJudgeNodeDef, EvalJudgeNodeConfig } from "../types/eval-judge.js";
 
 
@@ -64,25 +65,36 @@ const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): vo
 };
 
 /**
- * Create a fail-open result (used when judge LLM call fails).
- *
- * `score: null` and `skipped: true` make the bypass observable; `passed: true`
- * preserves fail-open semantics so the run does not abort.
+ * Construct a fail-open `skipped-llm-failure` result. Used when the judge LLM
+ * call or schema validation fails — the bypass is observable but does not
+ * block the run.
  */
 export const failOpenResult = (reason: string): EvalJudgeResult => ({
-  passed: true,
+  outcome: "skipped-llm-failure",
   score: null,
   criteriaScores: {},
   failedCriteria: [],
   reason: `[eval-judge skipped: ${reason}]`,
-  skipped: true,
+});
+
+/**
+ * Construct a fail-closed `crash` result. Used by the eval-judge orchestrator
+ * when an unexpected exception escapes the judge's own internal fail-open
+ * handling (span setup bug, encoder failure, etc.).
+ */
+export const crashResult = (reason: string): EvalJudgeResult => ({
+  outcome: "crash",
+  score: null,
+  criteriaScores: {},
+  failedCriteria: [],
+  reason: `[eval-judge crashed: ${reason}]`,
+  crashMessage: reason,
 });
 
 /**
  * Convert raw LLM response to EvalJudgeResult, applying threshold.
  */
 export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number, criteria: readonly string[]): EvalJudgeResult => {
-  // Convert array format to record, normalizing keys to lowercase for case-insensitive matching
   const scoresMap: Record<string, number> = {};
   for (const { name, score } of response.criteria_scores) {
     scoresMap[name.toLowerCase()] = score;
@@ -93,14 +105,23 @@ export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number
     return score !== undefined && score < threshold;
   });
 
-  return {
-    passed: response.score >= threshold && failedCriteria.length === 0,
-    score: response.score,
-    criteriaScores: scoresMap,
-    failedCriteria,
-    reason: response.reason,
-    skipped: false,
-  };
+  const passed = response.score >= threshold && failedCriteria.length === 0;
+
+  return passed
+    ? {
+        outcome: "passed",
+        score: response.score,
+        criteriaScores: scoresMap,
+        failedCriteria,
+        reason: response.reason,
+      }
+    : {
+        outcome: "failed",
+        score: response.score,
+        criteriaScores: scoresMap,
+        failedCriteria,
+        reason: response.reason,
+      };
 };
 
 /**
@@ -112,7 +133,7 @@ export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number
  *   id: "quality-check",
  *   criteria: ["factuality", "relevance", "completeness"],
  *   threshold: 0.8,
- *   rubricTemplateId: "summary-rubric",
+ *   rubric: { source: "template", templateId: "summary-rubric" },
  * })
  * ```
  */
@@ -133,9 +154,8 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         return failOpenResult(msg);
       }
 
-      // Resolve rubric
       const rubric = resolveRubric(
-        { criteria: config.criteria, threshold, rubricTemplateId: config.rubricTemplateId, rubricInline: config.rubricInline },
+        { criteria: config.criteria, threshold, rubric: config.rubric },
         ctx.prompts?.get ?? null,
       );
 
@@ -170,7 +190,6 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             tokensIn: result.value.tokensIn,
             tokensOut: result.value.tokensOut,
             thinking: result.value.thinking,
-            includeContent: ctx.includeContent,
             contentFilter: ctx.contentFilter,
           });
         } catch (spanErr) {

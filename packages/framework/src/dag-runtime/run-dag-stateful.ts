@@ -61,7 +61,7 @@ export interface DagRunOpts
    * The resolved action is delivered to the machine as `human-responded`.
    */
   readonly onHumanReview?: (req: {
-    nodeId: string;
+    nodeId: NodeId;
     output: unknown;
     prompt: string;
   }) => Promise<HumanAction>;

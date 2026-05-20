@@ -123,14 +123,20 @@ export type DagEvent =
   | {
       readonly type: "human-responded";
       readonly nodeId: NodeId;
-      readonly action: HumanAction;
+      readonly action: Exclude<HumanAction, { action: "reroute" }>;
+    }
+  | {
+      readonly type: "human-responded";
+      readonly nodeId: NodeId;
+      readonly action: Extract<HumanAction, { action: "reroute" }>;
       /**
-       * Precomputed active-node set for reroute actions. When `action.action === "reroute"`,
-       * the executor computes the reseeded active set (re-evaluating predicates for prior
-       * waves) and carries it here so the pure transition layer never calls predicate closures.
-       * Absent for non-reroute actions.
+       * Precomputed active-node set for reroute actions. The executor computes
+       * the reseeded active set (re-evaluating predicates for prior waves) and
+       * carries it here so the pure transition layer never calls predicate
+       * closures. Required for the reroute variant; the type system prevents
+       * the executor from ever emitting a reroute event without it.
        */
-      readonly rerouteActiveSet?: ReadonlySet<NodeId>;
+      readonly rerouteActiveSet: ReadonlySet<NodeId>;
     }
   | { readonly type: "abort"; readonly reason: string }
   | { readonly type: "executor-error"; readonly retriable: boolean; readonly error: string };
@@ -139,9 +145,8 @@ export type DagEvent =
 // Context slice types — focused sub-records of DagMachineContextPersisted.
 //
 // Each slice groups fields by concern so transition helpers can declare narrow
-// dependencies. `DagMachineContextPersisted` extends all slices — structurally
-// identical to the monolithic definition it replaces. Existing code that reads
-// `ctx.waves`, `ctx.retries`, etc. compiles without changes.
+// dependencies. `DagMachineContextPersisted` extends all slices, so callers
+// reading `ctx.waves`, `ctx.retries`, etc. see no shape difference.
 //
 // Benefits:
 //   - Transition helpers declare which slice they need → narrower test fixtures

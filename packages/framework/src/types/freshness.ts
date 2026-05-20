@@ -74,12 +74,15 @@ export interface FreshnessIndex {
   /** Record a successful write for future conflict detection. */
   recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>>;
   /**
-   * Check if a conditioned-on witness has been superseded by a write that
-   * completed after `sinceMs`. Returns the first conflicting write, or `null`.
+   * Check if `conditionedOn` has been superseded by a write that completed
+   * after `sinceMs`. Returns the first conflicting write, or `null`.
+   *
+   * Takes a `Witness` directly (not `resource, value` strings) so the
+   * resource ↔ value pair stays bonded at the call site — no risk of
+   * swapping the two raw strings.
    */
   findConflict(
-    resource: string,
-    conditionedOnValue: string,
+    conditionedOn: Witness,
     sinceMs: number,
   ): Promise<Result<WriteEntry | null, FrameworkError>>;
 }

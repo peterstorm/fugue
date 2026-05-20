@@ -24,9 +24,11 @@ Scoring rules:
 - A criterion is "failed" if its score is below the threshold (provided in the rubric)
 - Be strict and objective. Do not give high scores for vague or partial compliance.`;
 
+import type { EvalJudgeRubric } from "../types/eval-judge.js";
+
 /**
- * Generate a default rubric from a list of criteria names.
- * Used when no rubricTemplateId or rubricInline is provided.
+ * Generate a default rubric from a list of criteria names. Used when the
+ * judge config supplies no `rubric` field.
  */
 export const generateDefaultRubric = (criteria: readonly string[], threshold: number): string => {
   const lines = criteria.map(
@@ -36,27 +38,28 @@ export const generateDefaultRubric = (criteria: readonly string[], threshold: nu
 };
 
 /**
- * Resolve the rubric from config + context.
+ * Resolve the rubric from config + context. The tagged `rubric` discriminant
+ * makes template vs inline a parse-don't-validate choice. When omitted, the
+ * default rubric is generated from `criteria`.
  *
- * Priority:
- * 1. rubricTemplateId → loaded from ctx.prompts
- * 2. rubricInline → used directly
- * 3. Auto-generate from criteria names
+ * Template lookups fall back to the default if `ctx.prompts` is absent or the
+ * id is unknown — the fallback is logged elsewhere; here we just decide which
+ * string to use.
  */
 export const resolveRubric = (
   opts: {
     readonly criteria: readonly string[];
     readonly threshold: number;
-    readonly rubricTemplateId?: string;
-    readonly rubricInline?: string;
+    readonly rubric?: EvalJudgeRubric;
   },
   promptsGet: ((name: string) => string | null) | null,
 ): string => {
-  if (opts.rubricTemplateId && promptsGet) {
-    const template = promptsGet(opts.rubricTemplateId);
+  const r = opts.rubric;
+  if (r?.source === "template" && promptsGet) {
+    const template = promptsGet(r.templateId);
     if (template) return template;
   }
-  if (opts.rubricInline) return opts.rubricInline;
+  if (r?.source === "inline") return r.text;
   return generateDefaultRubric(opts.criteria, opts.threshold);
 };
 

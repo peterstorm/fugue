@@ -39,7 +39,12 @@ export const frameworkError = {
   invalidReroute: (targetNodeId: string | NodeId, message: string): FrameworkError =>
     ({ kind: "invalid-reroute", targetNodeId: toNodeId(targetNodeId), message }),
 
-  retryExhausted: (nid: string | NodeId, attempts: number, lastError: string, rootErrorKind: FrameworkError["kind"]): FrameworkError =>
+  retryExhausted: (
+    nid: string | NodeId,
+    attempts: number,
+    lastError: string,
+    rootErrorKind: Exclude<FrameworkError["kind"], "retry-exhausted">,
+  ): FrameworkError =>
     ({ kind: "retry-exhausted", nodeId: toNodeId(nid), attempts, lastError, rootErrorKind }),
 
   missingDefaultEdge: (nid: string | NodeId): FrameworkError =>
@@ -70,8 +75,12 @@ export const frameworkError = {
   checkpointMissing: (rid: string | RunId): FrameworkError =>
     ({ kind: "checkpoint-missing", runId: toRunId(rid) }),
 
-  checkpointExpired: (rid: string | RunId, expiredAt: Date): FrameworkError =>
-    ({ kind: "checkpoint-expired", runId: toRunId(rid), expiredAt }),
+  checkpointExpired: (rid: string | RunId, expiredAt: Date | string): FrameworkError =>
+    ({
+      kind: "checkpoint-expired",
+      runId: toRunId(rid),
+      expiredAt: typeof expiredAt === "string" ? expiredAt : expiredAt.toISOString(),
+    }),
 
   checkpointCorrupt: (rid: string | RunId, message: string, nid?: string | NodeId): FrameworkError =>
     ({ kind: "checkpoint-corrupt", runId: toRunId(rid), message, ...(nid !== undefined ? { nodeId: toNodeId(nid) } : {}) }),

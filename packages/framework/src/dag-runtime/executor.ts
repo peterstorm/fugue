@@ -16,7 +16,7 @@ import { applyJitter } from "../shared/jitter.js";
 import { fwLogger } from "../logger.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
-import { enrichHumanRespondedEvent } from "./reroute.js";
+import { enrichHumanRespondedEvent, type UnenrichedDagEvent } from "./reroute.js";
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
@@ -77,7 +77,7 @@ const callHumanReviewHook = async (
   prompt: string,
   hooks: {
     onHumanReview?: (req: {
-      nodeId: string;
+      nodeId: NodeId;
       output: unknown;
       prompt: string;
     }) => Promise<import("./types.js").HumanAction>;
@@ -86,7 +86,7 @@ const callHumanReviewHook = async (
   nodeCtx: NodeContext,
   dagId: DagId,
   nowFn: () => number,
-): Promise<DagEvent> => {
+): Promise<UnenrichedDagEvent> => {
   const stamp = (): Date => new Date(nowFn());
   if (!hooks?.onHumanReview) {
     return {
@@ -152,7 +152,7 @@ const callHumanReviewHook = async (
     } satisfies DagEvent;
   }
 
-  return { type: "human-responded", nodeId, action } satisfies DagEvent;
+  return { type: "human-responded", nodeId, action } satisfies UnenrichedDagEvent;
 };
 
 
@@ -181,7 +181,7 @@ export const buildDagExecutor = (
   nodeCtx: ValidatedNodeContext,
   hooks?: {
     onHumanReview?: (req: {
-      nodeId: string;
+      nodeId: NodeId;
       output: unknown;
       prompt: string;
     }) => Promise<import("./types.js").HumanAction>;
@@ -276,12 +276,12 @@ export const buildDagExecutor = (
     }
 
     const awaitStartMs = nowFn();
-    let event = await callHumanReviewHook(phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
-    const enrichResult = enrichHumanRespondedEvent(event, machineCtx);
+    const rawEvent = await callHumanReviewHook(phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+    const enrichResult = enrichHumanRespondedEvent(rawEvent, machineCtx);
     if (enrichResult.kind === "err") {
       return { type: "node-failed", nodeId: enrichResult.nodeId, error: enrichResult.error } satisfies DagEvent;
     }
-    event = enrichResult.event;
+    const event = enrichResult.event;
     if (event.type === "human-responded") {
       const emitResult = emitHumanIntervention(
         { nodeId, output },

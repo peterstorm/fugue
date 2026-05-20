@@ -50,7 +50,7 @@ describe("InMemoryFreshnessIndex — Result interface", () => {
 
   it("findConflict returns ok(null) when no writes", async () => {
     const index = new InMemoryFreshnessIndex();
-    const result = await index.findConflict("pg:orders", "1", 0);
+    const result = await index.findConflict(mkWitness("pg:orders", "1"), 0);
     expect(isOk(result)).toBe(true);
     expect(unwrap(result)).toBeNull();
   });
@@ -58,7 +58,7 @@ describe("InMemoryFreshnessIndex — Result interface", () => {
   it("findConflict returns ok(entry) when conflict exists", async () => {
     const index = new InMemoryFreshnessIndex();
     await index.recordWrite(mkWriteEvent("r1", "w", "pg:orders", "1", "2", 1000));
-    const result = await index.findConflict("pg:orders", "1", 0);
+    const result = await index.findConflict(mkWitness("pg:orders", "1"), 0);
     expect(isOk(result)).toBe(true);
     const conflict = unwrap(result);
     expect(conflict).not.toBeNull();
@@ -74,11 +74,11 @@ describe("InMemoryFreshnessIndex — Result interface", () => {
       );
     }
     // resource-0 should have been evicted
-    const r0 = unwrap(await index.findConflict("resource-0", "0", 0));
+    const r0 = unwrap(await index.findConflict(mkWitness("resource-0", "0"), 0));
     expect(r0).toBeNull(); // evicted, so no conflict data
 
     // resource-3 should still be present
-    const r3 = unwrap(await index.findConflict("resource-3", "0", 0));
+    const r3 = unwrap(await index.findConflict(mkWitness("resource-3", "0"), 0));
     expect(r3).not.toBeNull();
   });
 
@@ -89,7 +89,7 @@ describe("InMemoryFreshnessIndex — Result interface", () => {
     index.clear();
     // After clear, can add resources again without hitting cursor issues
     await index.recordWrite(mkWriteEvent("r1", "w", "c", "0", "1", 3000));
-    const result = unwrap(await index.findConflict("c", "0", 0));
+    const result = unwrap(await index.findConflict(mkWitness("c", "0"), 0));
     expect(result).not.toBeNull();
   });
 });

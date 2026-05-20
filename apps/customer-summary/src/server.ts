@@ -177,7 +177,6 @@ export const createApp = (deps: AppDeps): Hono => {
         llm: deps.llm,
         judgeLlm: deps.llm,
         signal: abortController.signal,
-        includeContent: deps.contentFilter != null,
         contentFilter: deps.contentFilter,
       });
 

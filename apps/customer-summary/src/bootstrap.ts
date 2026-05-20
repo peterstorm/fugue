@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
@@ -14,11 +14,10 @@ import {
   anyOf,
   hadRetry,
   ratio,
-  RedisCache,
-  RedisCheckpointer,
   piiScrubber,
   IDENTITY_FILTER,
 } from "@ai-summary/framework";
+import { RedisCache, RedisCheckpointer } from "@ai-summary/framework/redis";
 import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter } from "@ai-summary/framework";
 import { NoopObserver, runId as brandRunId } from "@ai-summary/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
@@ -58,12 +57,10 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   let contextCache: ContextCache | null = null;
   let checkpointWriter: CheckpointWriter | null = null;
   let checkpointer: Checkpointer | null = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ioredis CJS/ESM interop requires dynamic handling
-  let redis: any = null;
+  let redis: Redis | null = null;
   let redisHealthy = false;
   try {
-    const RedisClient = (Redis as any).default ?? Redis;
-    redis = new RedisClient(config.REDIS_URL, {
+    redis = new Redis(config.REDIS_URL, {
       maxRetriesPerRequest: 1,
       lazyConnect: true,
       connectTimeout: 3000,

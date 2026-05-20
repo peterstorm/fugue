@@ -127,13 +127,6 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
   }),
 );
 
-const arbHumanAction = fc.oneof(
-  fc.constant({ action: "approve" as const }),
-  fc.record({ action: fc.constant("approve-with-edit" as const), newOutput: fc.string() }),
-  fc.record({ action: fc.constant("reject" as const), reason: fc.string({ maxLength: 20 }) }),
-  fc.record({ action: fc.constant("reroute" as const), targetNodeId: arbNodeId }),
-);
-
 const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
   fc.constant({ type: "start" as const }),
   fc.record({
@@ -147,11 +140,23 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
     nodeId: arbNodeId,
     error: arbFrameworkError,
   }),
-  fc.record({
-    type: fc.constant("human-responded" as const),
-    nodeId: arbNodeId,
-    action: arbHumanAction,
-  }),
+  fc.oneof(
+    fc.record({
+      type: fc.constant("human-responded" as const),
+      nodeId: arbNodeId,
+      action: fc.oneof(
+        fc.constant({ action: "approve" as const }),
+        fc.record({ action: fc.constant("approve-with-edit" as const), newOutput: fc.string() }),
+        fc.record({ action: fc.constant("reject" as const), reason: fc.string({ maxLength: 20 }) }),
+      ),
+    }),
+    fc.record({
+      type: fc.constant("human-responded" as const),
+      nodeId: arbNodeId,
+      action: fc.record({ action: fc.constant("reroute" as const), targetNodeId: arbNodeId }),
+      rerouteActiveSet: fc.constant(new Set<NodeId>()),
+    }),
+  ),
   fc.record({
     type: fc.constant("abort" as const),
     reason: fc.string({ maxLength: 20 }),

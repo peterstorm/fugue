@@ -162,11 +162,6 @@ export interface BaseNodeContext {
    * unfiltered content, or provide a custom `(s: string) => string`.
    */
   readonly contentFilter?: ContentFilter | null;
-  /**
-   * @deprecated Use `contentFilter` instead. When `true` and no `contentFilter`
-   * is set, content is included unfiltered (backwards-compatible).
-   */
-  readonly includeContent?: boolean;
 }
 
 /**
@@ -285,6 +280,5 @@ export type NodeContextInit = {
   readonly prompts?: PromptAccess | null;
   readonly judgeLlm?: LlmClient | null;
   readonly signal?: AbortSignal;
-  readonly includeContent?: boolean;
   readonly contentFilter?: ContentFilter | null;
 };

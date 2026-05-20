@@ -97,7 +97,8 @@ export const dagTransition = (
     // ─── awaiting-human ─────────────────────────────────────────────────
     .with([{ kind: "awaiting-human" }, { type: "human-responded" }], ([p, e]) => {
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
-      const r = handleHumanResponse(p, e.action, ctx, e.rerouteActiveSet);
+      const rerouteActiveSet = "rerouteActiveSet" in e ? e.rerouteActiveSet : undefined;
+      const r = handleHumanResponse(p, e.action, ctx, rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "awaiting-human" }, { type: "node-failed" }], ([p, e]) => {
@@ -129,7 +130,8 @@ export const dagTransition = (
         pendingReviews: p.pendingReviews,
         wave: p.wave,
       };
-      const r = handleHumanResponse(awaitingState, e.action, ctx, e.rerouteActiveSet);
+      const rerouteActiveSet = "rerouteActiveSet" in e ? e.rerouteActiveSet : undefined;
+      const r = handleHumanResponse(awaitingState, e.action, ctx, rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "retrying-hook" }, { type: "node-failed" }], ([p, e]) => {

@@ -167,7 +167,7 @@ export class RedisCheckpointer implements Checkpointer {
       return err({
         kind: "checkpoint-expired" as const,
         runId,
-        expiredAt: createdAt,
+        expiredAt: createdAt.toISOString(),
       });
     }
 

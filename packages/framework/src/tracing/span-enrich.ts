@@ -39,10 +39,6 @@ export interface EnrichLlmSpanOpts {
    * regex-based PII removal or `IDENTITY_FILTER` for unfiltered content.
    */
   readonly contentFilter?: ContentFilter | null;
-  /**
-   * @deprecated Use `contentFilter` instead.
-   */
-  readonly includeContent?: boolean;
 }
 
 /** Enrich the currently-active OTel span with LLM request/response details. */

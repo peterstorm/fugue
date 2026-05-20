@@ -104,7 +104,7 @@ describe("checkFreshness — pure conflict detection", () => {
 describe("InMemoryFreshnessIndex", () => {
   it("findConflict returns null when no writes recorded", async () => {
     const index = new InMemoryFreshnessIndex();
-    expect(unwrap(await index.findConflict("postgres:orders", "42", 0))).toBeNull();
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "42"), 0))).toBeNull();
   });
 
   it("findConflict returns null when conditioned value matches latest write", async () => {
@@ -121,7 +121,7 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     // Conditioned on "42" which matches the latest write
-    expect(unwrap(await index.findConflict("postgres:orders", "42", 0))).toBeNull();
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "42"), 0))).toBeNull();
   });
 
   it("findConflict returns conflicting write entry", async () => {
@@ -138,7 +138,7 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     // Conditioned on "41" but the latest write produced "42"
-    const conflict = unwrap(await index.findConflict("postgres:orders", "41", 0));
+    const conflict = unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 0));
     expect(conflict).not.toBeNull();
     expect(conflict!.newWitness.value).toBe("42");
     expect(conflict!.runId).toBe(R("r1"));
@@ -158,10 +158,10 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     // sinceMs=2000 should not see the write at 1000
-    expect(unwrap(await index.findConflict("postgres:orders", "41", 2000))).toBeNull();
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 2000))).toBeNull();
 
     // sinceMs=500 should see it
-    expect(unwrap(await index.findConflict("postgres:orders", "41", 500))).not.toBeNull();
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 500))).not.toBeNull();
   });
 
   it("clear empties the index", async () => {
@@ -178,6 +178,6 @@ describe("InMemoryFreshnessIndex", () => {
     });
 
     index.clear();
-    expect(unwrap(await index.findConflict("postgres:orders", "41", 0))).toBeNull();
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 0))).toBeNull();
   });
 });

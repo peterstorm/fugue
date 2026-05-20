@@ -87,7 +87,7 @@ describe("formatFrameworkError", () => {
     },
     {
       name: "checkpoint-expired",
-      error: { kind: "checkpoint-expired", runId: R("run-2"), expiredAt: new Date("2025-01-01T00:00:00Z") },
+      error: { kind: "checkpoint-expired", runId: R("run-2"), expiredAt: "2025-01-01T00:00:00.000Z" },
       contains: ["checkpoint", "expired", "run-2", "2025"],
     },
     {

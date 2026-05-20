@@ -169,10 +169,10 @@ export class RedisFreshnessIndex implements FreshnessIndex {
   }
 
   async findConflict(
-    resource: string,
-    conditionedOnValue: string,
+    conditionedOn: import("../types/freshness.js").Witness,
     sinceMs: number,
   ): Promise<Result<WriteEntry | null, FrameworkError>> {
+    const { resource, value: conditionedOnValue } = conditionedOn;
     const key = KEY_PREFIX + resource;
 
     try {

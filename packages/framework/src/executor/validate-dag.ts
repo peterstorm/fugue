@@ -13,6 +13,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { nodeId, tryNodeId, dagId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
+import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";
 
 /**
  * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. Private
@@ -168,12 +169,15 @@ export const validateDagShape = (
       );
     }
     if (p.minConfidence !== undefined) {
-      const validBuckets = ["high", "medium", "low", "unknown"];
-      if (!validBuckets.includes(p.minConfidence as string)) {
+      // Derive from CONFIDENCE_ORDER so adding a new ConfidenceBucket variant
+      // automatically widens the accepted set without manual updates here.
+      const validBuckets = Object.keys(CONFIDENCE_ORDER) as readonly ConfidenceBucket[];
+      const minConfidence = p.minConfidence;
+      if (typeof minConfidence !== "string" || !(validBuckets as readonly string[]).includes(minConfidence)) {
         return err({
           kind: "predicate-malformed",
           nodeId: e.from,
-          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${String(p.minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
+          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${String(minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
         });
       }
     }

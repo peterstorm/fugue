@@ -139,11 +139,7 @@ export async function emitFreshnessWitnessEvents(
         // sinceMs: 0 is intentional — within a run, all prior writes are relevant
         // because topological ordering guarantees the read witness was captured
         // before any writes in later waves.
-        const conflictResult = await freshnessIndex.findConflict(
-          conditionedOn.resource,
-          conditionedOn.value,
-          0,
-        );
+        const conflictResult = await freshnessIndex.findConflict(conditionedOn, 0);
         if (!conflictResult.ok) {
           const msg = formatFrameworkError(conflictResult.error);
           fwLogger().error(

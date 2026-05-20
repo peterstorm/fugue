@@ -131,7 +131,7 @@ function checkpointerSuite(
         if (result.error.kind === "checkpoint-expired") {
           // @ts-expect-error — branded ID test fixture
           expect(result.error.runId).toBe(N("expired-1"));
-          expect(result.error.expiredAt.getTime()).toBe(expiredAt.getTime());
+          expect(result.error.expiredAt).toBe(expiredAt.toISOString());
         }
       }
     });
@@ -370,7 +370,7 @@ describeRedis("RedisCheckpointer", () => {
       if (result.error.kind === "checkpoint-expired") {
         // @ts-expect-error — branded ID test fixture
         expect(result.error.runId).toBe(runId);
-        expect(result.error.expiredAt.getTime()).toBe(expiredCreatedAt.getTime());
+        expect(result.error.expiredAt).toBe(expiredCreatedAt.toISOString());
       }
     }
   });

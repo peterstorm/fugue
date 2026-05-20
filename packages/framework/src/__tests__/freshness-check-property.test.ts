@@ -145,11 +145,7 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
           const index = new InMemoryFreshnessIndex();
           let indexConflicts = 0;
           for (const event of events) {
-            const conflict = unwrap(await index.findConflict(
-              event.conditionedOn.resource,
-              event.conditionedOn.value,
-              0,
-            ));
+            const conflict = unwrap(await index.findConflict(event.conditionedOn, 0));
             if (conflict) indexConflicts++;
             unwrap(await index.recordWrite(event));
           }

@@ -46,7 +46,7 @@ export interface RunOptions {
    * Human-review hook — required when any node in the DAG declares
    * `humanReview`; rejected otherwise.
    */
-  readonly onHumanReview?: (req: { nodeId: string; output: unknown; prompt: string }) => Promise<HumanAction>;
+  readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: string }) => Promise<HumanAction>;
   /**
    * Per-call retry limit overrides, merged with (and taking precedence over)
    * `DagDef.retryLimits`.

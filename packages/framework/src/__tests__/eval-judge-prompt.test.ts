@@ -46,33 +46,33 @@ describe("eval-judge-prompt", () => {
   });
 
   describe("resolveRubric", () => {
-    test("uses rubricTemplateId from prompts when available", () => {
+    test("uses template source from prompts when available", () => {
       const promptsGet = (name: string) => name === "my-rubric" ? "Custom rubric content" : null;
       const result = resolveRubric(
-        { criteria: ["a"], threshold: 0.8, rubricTemplateId: "my-rubric" },
+        { criteria: ["a"], threshold: 0.8, rubric: { source: "template", templateId: "my-rubric" } },
         promptsGet,
       );
       expect(result).toBe("Custom rubric content");
     });
 
-    test("falls back to rubricInline when template not found", () => {
+    test("falls back to auto-generated rubric when template not found", () => {
       const promptsGet = (_name: string) => null;
       const result = resolveRubric(
-        { criteria: ["a"], threshold: 0.8, rubricTemplateId: "missing", rubricInline: "Inline rubric" },
+        { criteria: ["a"], threshold: 0.8, rubric: { source: "template", templateId: "missing" } },
         promptsGet,
       );
-      expect(result).toBe("Inline rubric");
+      expect(result).toContain("- a:");
     });
 
-    test("uses rubricInline when no templateId provided", () => {
+    test("uses inline source directly", () => {
       const result = resolveRubric(
-        { criteria: ["a"], threshold: 0.8, rubricInline: "My inline" },
+        { criteria: ["a"], threshold: 0.8, rubric: { source: "inline", text: "My inline" } },
         null,
       );
       expect(result).toBe("My inline");
     });
 
-    test("falls back to auto-generated rubric when nothing else provided", () => {
+    test("falls back to auto-generated rubric when rubric is omitted", () => {
       const result = resolveRubric(
         { criteria: ["factuality", "relevance"], threshold: 0.75 },
         null,
@@ -82,21 +82,12 @@ describe("eval-judge-prompt", () => {
       expect(result).toContain("0.75");
     });
 
-    test("falls back to auto-generated when prompts is null and templateId set", () => {
+    test("falls back to auto-generated when prompts is null and template requested", () => {
       const result = resolveRubric(
-        { criteria: ["x"], threshold: 0.8, rubricTemplateId: "something" },
+        { criteria: ["x"], threshold: 0.8, rubric: { source: "template", templateId: "something" } },
         null,
       );
       expect(result).toContain("- x:");
-    });
-
-    test("prefers templateId over rubricInline", () => {
-      const promptsGet = (name: string) => name === "tmpl" ? "Template wins" : null;
-      const result = resolveRubric(
-        { criteria: ["a"], threshold: 0.8, rubricTemplateId: "tmpl", rubricInline: "Inline loses" },
-        promptsGet,
-      );
-      expect(result).toBe("Template wins");
     });
   });
 

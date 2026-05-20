@@ -18,12 +18,20 @@ export type FrameworkError =
       /**
        * Discriminant of the underlying error that exhausted the budget.
        * Lets consumers tell a rate-limit storm (`"transient"`) from a logic
-       * crash (`"node-crash"`) without parsing `lastError`.
+       * crash (`"node-crash"`) without parsing `lastError`. The recursive
+       * `"retry-exhausted"` value is excluded — a retry-exhausted error
+       * never wraps itself.
        */
-      readonly rootErrorKind: FrameworkError["kind"];
+      readonly rootErrorKind: Exclude<FrameworkError["kind"], "retry-exhausted">;
     }
   | { readonly kind: "checkpoint-missing"; readonly runId: RunId }
-  | { readonly kind: "checkpoint-expired"; readonly runId: RunId; readonly expiredAt: Date }
+  | {
+      readonly kind: "checkpoint-expired";
+      readonly runId: RunId;
+      /** ISO 8601 UTC timestamp. Stored as a string so the error round-trips
+       * through `JSON.stringify` / `JSON.parse` without losing type fidelity. */
+      readonly expiredAt: string;
+    }
   | { readonly kind: "checkpoint-corrupt"; readonly runId: RunId; readonly nodeId?: NodeId; readonly message: string }
   | {
       readonly kind: "checkpoint-version-mismatch";
@@ -129,7 +137,7 @@ export const formatFrameworkError = (e: FrameworkError): string => {
     case "checkpoint-missing":
       return `checkpoint missing for run '${e.runId}'`;
     case "checkpoint-expired":
-      return `checkpoint for run '${e.runId}' expired at ${e.expiredAt.toISOString()}`;
+      return `checkpoint for run '${e.runId}' expired at ${e.expiredAt}`;
     case "checkpoint-corrupt":
       return `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`;
     case "checkpoint-version-mismatch":

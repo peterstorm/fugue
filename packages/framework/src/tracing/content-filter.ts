@@ -6,11 +6,8 @@
  * included in traces for debugging but sensitive patterns (emails, phones,
  * credit cards, etc.) are replaced with placeholder tokens.
  *
- * When `null`/`undefined`, content is fully redacted (backwards-compatible
- * with the old `includeContent: false` behaviour).
- *
- * When set to `IDENTITY_FILTER`, content passes through unmodified (equivalent
- * to the old `includeContent: true`).
+ * When `null`/`undefined`, content is fully redacted.
+ * When set to `IDENTITY_FILTER`, content passes through unmodified.
  */
 
 // ---------------------------------------------------------------------------
@@ -72,20 +69,16 @@ export const composeFilters = (...filters: ContentFilter[]): ContentFilter =>
 
 /**
  * Resolve the effective content filter from context fields.
- * Priority: `contentFilter` > `includeContent` (deprecated) > redact.
  *
  * Returns `null` when content should be fully redacted (no filter available).
+ * Callers wanting raw content set `contentFilter: IDENTITY_FILTER`; callers
+ * wanting PII scrubbing set `contentFilter: piiScrubber` (or compose).
  */
 export const resolveContentFilter = (opts: {
   contentFilter?: ContentFilter | null;
-  includeContent?: boolean;
 }): ContentFilter | null => {
   if (opts.contentFilter !== undefined && opts.contentFilter !== null) {
     return opts.contentFilter;
-  }
-  // Backwards-compat: includeContent=true → identity (no scrubbing)
-  if (opts.includeContent === true) {
-    return IDENTITY_FILTER;
   }
   return null;
 };

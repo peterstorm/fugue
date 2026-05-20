@@ -142,7 +142,7 @@ export class InMemoryCheckpointer implements Checkpointer {
       return err({
         kind: "checkpoint-expired",
         runId,
-        expiredAt: createdAt,
+        expiredAt: createdAt.toISOString(),
       });
     }
 

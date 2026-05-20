@@ -13,7 +13,7 @@ import { fwLogger } from "../logger.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
-import type { EvalJudgeResult } from "../nodes/eval-judge.js";
+import { type EvalJudgeResult, judgePassed } from "../nodes/eval-judge.js";
 import type { DagRunMeta } from "./node-span.js";
 import {
   AI_DAG_ID,
@@ -180,7 +180,7 @@ export const closeRootSpan = (rootSpan: Span, outcome: RootSpanOutcome): void =>
 export const outcomeFromMeta = (meta: DagRunMeta): RootSpanOutcome => {
   if (meta.evalJudgeFailed) {
     const failedCriteria = meta.evalJudgeResults
-      .filter((r) => !r.passed)
+      .filter((r) => !judgePassed(r))
       .flatMap((r) => r.failedCriteria);
     return {
       kind: "ok-eval-failed",
