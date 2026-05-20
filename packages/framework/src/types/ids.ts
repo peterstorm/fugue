@@ -57,20 +57,37 @@ export const dagId = (s: string): DagId => {
 };
 
 /**
- * Internal-only widening cast. Trusted entry points (`defineDag`,
- * `makeNodeContext`, factory helpers) skip the regex check when they have
- * already validated the incoming string by another invariant.
+ * @internal Brand for trusted internal entry points (`defineDag`,
+ * `makeNodeContext`, factory helpers). Still validates against `ID_REGEX` —
+ * "trusted" code has bugs too, and an unvalidated id silently corrupts every
+ * downstream map lookup. Use the `*Unchecked` variants only on profiled hot
+ * paths. NOT public API — not re-exported from the barrel (`src/index.ts`).
  */
+export const __brandRunId = (s: string): RunId => {
+  validate("runId", s);
+  return s as RunId;
+};
+/** @internal See `__brandRunId`. */
+export const __brandNodeId = (s: string): NodeId => {
+  validate("nodeId", s);
+  return s as NodeId;
+};
+/** @internal See `__brandRunId`. */
+export const __brandDagId = (s: string): DagId => {
+  validate("dagId", s);
+  return s as DagId;
+};
+
 /**
- * @internal Bypass validation for trusted internal code. NOT part of the
- * public API — do not import from outside the framework package. These are
- * intentionally not re-exported from the barrel (`src/index.ts`).
+ * @internal Unchecked widening cast — bypasses `ID_REGEX`. ONLY for profiled
+ * hot deserialization/replay paths where id provenance is already guaranteed.
+ * Prefer `__brandRunId` everywhere else.
  */
-export const __brandRunId = (s: string): RunId => s as RunId;
-/** @internal See `__brandRunId`. */
-export const __brandNodeId = (s: string): NodeId => s as NodeId;
-/** @internal See `__brandRunId`. */
-export const __brandDagId = (s: string): DagId => s as DagId;
+export const __brandRunIdUnchecked = (s: string): RunId => s as RunId;
+/** @internal See `__brandRunIdUnchecked`. */
+export const __brandNodeIdUnchecked = (s: string): NodeId => s as NodeId;
+/** @internal See `__brandRunIdUnchecked`. */
+export const __brandDagIdUnchecked = (s: string): DagId => s as DagId;
 
 // ---------------------------------------------------------------------------
 // Result-returning variants — for parse boundaries where throwing is undesirable.

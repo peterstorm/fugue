@@ -2,7 +2,6 @@ import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -233,8 +232,6 @@ const extractReasoning = (
   return block.summary.map((s) => s.text ?? "").join("\n");
 };
 
-const resolveNodeId = (req: { readonly nodeId: NodeId }): NodeId =>
-  req.nodeId;
 
 /**
  * OpenAI LLM client using the Responses API (/openai/responses).
@@ -332,7 +329,7 @@ export class OpenAILlmClient implements LlmClient {
     } catch (e) {
       return err({
         kind: "validation",
-        nodeId: resolveNodeId(req),
+        nodeId: req.nodeId,
         message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
@@ -380,7 +377,7 @@ export class OpenAILlmClient implements LlmClient {
         if (httpResult.status === 429) {
           return err({
             kind: "transient",
-            nodeId: resolveNodeId(req),
+            nodeId: req.nodeId,
             message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
@@ -390,14 +387,14 @@ export class OpenAILlmClient implements LlmClient {
           return err({
             kind: "node-crash",
             retriability: "non-retriable",
-            nodeId: resolveNodeId(req),
+            nodeId: req.nodeId,
             message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
         return err({
           kind: "node-crash",
           retriability: "retriable",
-          nodeId: resolveNodeId(req),
+          nodeId: req.nodeId,
           message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
         });
       }
@@ -412,7 +409,7 @@ export class OpenAILlmClient implements LlmClient {
         return err({
           kind: "node-crash",
           retriability: "retriable",
-          nodeId: resolveNodeId(req),
+          nodeId: req.nodeId,
           message: "Responses API returned no text output",
         });
       }
@@ -427,7 +424,7 @@ export class OpenAILlmClient implements LlmClient {
         return err({
           kind: "node-crash",
           retriability: "retriable",
-          nodeId: resolveNodeId(req),
+          nodeId: req.nodeId,
           message: `Not valid JSON (${parseMsg}): ${rawText.slice(0, 200)}`,
         });
       }
@@ -437,7 +434,7 @@ export class OpenAILlmClient implements LlmClient {
         return err({
           kind: "node-crash",
           retriability: "retriable",
-          nodeId: resolveNodeId(req),
+          nodeId: req.nodeId,
           message: `Schema validation failed: ${parsed.error.message}`,
         });
       }
@@ -453,7 +450,7 @@ export class OpenAILlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
-      return classifyLlmError(error, resolveNodeId(req), {
+      return classifyLlmError(error, req.nodeId, {
         timeoutMs: this.requestTimeoutMs,
         callerAborted: req.signal?.aborted,
       });
@@ -516,7 +513,7 @@ export class OpenAILlmClient implements LlmClient {
             },
           );
         } catch (error) {
-          return classifyLlmError(error, resolveNodeId(req), {
+          return classifyLlmError(error, req.nodeId, {
             timeoutMs: this.requestTimeoutMs,
             callerAborted: (req.signal ?? ctx.signal)?.aborted,
           });
@@ -526,7 +523,7 @@ export class OpenAILlmClient implements LlmClient {
           if (httpResult.status === 429) {
             return err({
               kind: "transient",
-              nodeId: resolveNodeId(req),
+              nodeId: req.nodeId,
               message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
             });
           }
@@ -536,14 +533,14 @@ export class OpenAILlmClient implements LlmClient {
             return err({
               kind: "node-crash",
               retriability: "non-retriable",
-              nodeId: resolveNodeId(req),
+              nodeId: req.nodeId,
               message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
             });
           }
           return err({
             kind: "node-crash",
             retriability: "retriable",
-            nodeId: resolveNodeId(req),
+            nodeId: req.nodeId,
             message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
           });
         }
@@ -574,7 +571,7 @@ export class OpenAILlmClient implements LlmClient {
     };
 
     return toolUseLoop(provider, {
-      nodeId: resolveNodeId(req),
+      nodeId: req.nodeId,
       model: req.model,
       schema: req.schema,
       tools: req.tools,

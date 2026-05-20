@@ -19,7 +19,6 @@ import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -103,15 +102,9 @@ const lastTextBlock = (response: AnthropicResponse): string | undefined => {
   return undefined;
 };
 
-const stripCodeFences = (text: string): string =>
-  text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
-
 /** Anthropic SDK abort predicate — `APIUserAbortError` name differs from standard `AbortError`. */
 const isAnthropicAbort = (e: unknown): boolean =>
   e instanceof APIUserAbortError;
-
-const resolveNodeId = (req: { readonly nodeId: NodeId }): NodeId =>
-  req.nodeId;
 
 export class AnthropicLlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
@@ -159,7 +152,7 @@ export class AnthropicLlmClient implements LlmClient {
         return err({
           kind: "node-crash",
           retriability: "retriable",
-          nodeId: resolveNodeId(req),
+          nodeId: req.nodeId,
           message: "Anthropic response did not contain a tool_use block",
         });
       }
@@ -169,7 +162,7 @@ export class AnthropicLlmClient implements LlmClient {
         return err({
           kind: "node-crash",
           retriability: "retriable",
-          nodeId: resolveNodeId(req),
+          nodeId: req.nodeId,
           message: `Schema validation failed: ${parsed.error.message}`,
         });
       }
@@ -184,7 +177,7 @@ export class AnthropicLlmClient implements LlmClient {
         rawText,
       });
     } catch (error) {
-      return classifyLlmError(error, resolveNodeId(req), {
+      return classifyLlmError(error, req.nodeId, {
         timedOut: t.timedOut(),
         callerAborted: req.signal?.aborted,
         timeoutMs: this.requestTimeoutMs,
@@ -227,7 +220,7 @@ export class AnthropicLlmClient implements LlmClient {
             },
           );
         } catch (e) {
-          return classifyLlmError(e, resolveNodeId(req), {
+          return classifyLlmError(e, req.nodeId, {
             timedOut: t.timedOut(),
             callerAborted: turnCallerSignal?.aborted,
             timeoutMs: this.requestTimeoutMs,
@@ -259,7 +252,7 @@ export class AnthropicLlmClient implements LlmClient {
     };
 
     return toolUseLoop(provider, {
-      nodeId: resolveNodeId(req),
+      nodeId: req.nodeId,
       model: req.model,
       schema: req.schema,
       tools: req.tools,
