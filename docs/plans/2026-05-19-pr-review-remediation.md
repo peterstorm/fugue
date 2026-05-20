@@ -687,3 +687,32 @@ Before declaring this remediation complete, run:
 - Advisory: 47 issues → Waves 3-6 (all addressed)
 - Total fixes enumerated: 62
 - Estimated effort (rough): 3-5 focused days of implementation + review
+
+### Status — updated 2026-05-20
+
+Waves 0-3 complete and committed; Waves 4-6 partial. `bun run typecheck`
+(framework + customer-summary), `bun test packages/framework` (1231 pass /
+0 fail), and `check-imports` all green at `1be1904`.
+
+- **Wave 0** (`448c50e`) — done.
+- **Wave 1** (`ecab85f`) — done.
+- **Wave 2** (`42f883f`) — done: all of 2.1-2.9.
+- **Wave 3** (`57b5e46`) — done: 3.1-3.5, 3.7, 3.9-3.12 implemented; 3.6 and
+  3.8 were already in place. 3.7 resolved by *eliminating* the redundant
+  always-true `writeCheckpoint` flag rather than making `checkpointWriter`
+  mandatory (the plan's premise — `writeCheckpoint` as an opt-in — did not
+  match the code; it was hardcoded `true`).
+- **Wave 4** (`06f437a`) — partial: 4.1, 4.2, 4.8, 4.9 done.
+  - **Deferred:** 4.3 (premise wrong — `SubSpanEvent.parentSpanId` holds a
+    logical parent id, e.g. `judgeId` / tool-call id / node id, *not* an OTel
+    16-hex span id; a `SpanId` brand with the documented validation would be
+    incorrect). 4.4 (`TaskId`/`CronExpression`), 4.5 (require
+    `computeDedupKey`), 4.6 (nominal `Result`), 4.7 (`PositiveInt`) deferred —
+    advisory branded-type consistency with disproportionate test-fixture
+    churn (25+ fixture edits each) for the defect-closure value.
+- **Wave 5** (`65a7e32`) — done: 5.2, 5.4, 5.5, 5.7; 5.1/5.3 were already
+  resolved in Waves 1/3. **Deferred:** 5.6 (cosmetic module-banner trimming).
+- **Wave 6** (`1be1904`) — partial: 6.8, 6.9 added (plus the test-fixture
+  updates that landed alongside Waves 2-3). **Remaining:** the net-new test
+  files 6.1-6.7, 6.10-6.13.
+- **Wave 7** — not started (explicitly optional follow-up).
