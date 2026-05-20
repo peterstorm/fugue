@@ -1,0 +1,59 @@
+{
+  "customerId": "cust-006",
+  "name": "Fiona Chen",
+  "email": "fiona@designco.com",
+  "accountType": "business",
+  "createdAt": "2022-05-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-006a",
+      "date": "2024-02-14",
+      "channel": "chat",
+      "agent": "Kim",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Just wanted to say the new dashboard redesign is amazing!",
+          "timestamp": "2024-02-14T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Thank you so much! I'll pass that along to the design team.",
+          "timestamp": "2024-02-14T09:01:00Z"
+        }
+      ],
+      "tags": [
+        "feedback",
+        "positive"
+      ]
+    },
+    {
+      "id": "conv-006b",
+      "date": "2024-06-01",
+      "channel": "email",
+      "agent": "Kim",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "We'd like to upgrade to the enterprise plan. Can you walk us through the transition?",
+          "timestamp": "2024-06-01T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Absolutely! The upgrade is seamless — all your data carries over. I'll process it now.",
+          "timestamp": "2024-06-01T10:15:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Upgraded and everything looks great. We love this product.",
+          "timestamp": "2024-06-01T11:00:00Z"
+        }
+      ],
+      "resolution": "Plan upgraded to enterprise",
+      "tags": [
+        "upgrade",
+        "positive"
+      ]
+    }
+  ]
+}

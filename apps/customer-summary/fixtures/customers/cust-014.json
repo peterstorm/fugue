@@ -1,0 +1,70 @@
+{
+  "customerId": "cust-014",
+  "name": "Nathan Brooks",
+  "email": "nbrooks@agency.com",
+  "accountType": "business",
+  "createdAt": "2023-05-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-014a",
+      "date": "2024-04-01",
+      "channel": "phone",
+      "agent": "Victor",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "The new UI update broke our workflow completely. We can't find anything.",
+          "timestamp": "2024-04-01T14:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I understand the frustration. Would you like me to walk you through the new layout?",
+          "timestamp": "2024-04-01T14:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "No. We want the old UI back. This was forced on us without notice.",
+          "timestamp": "2024-04-01T14:03:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I'll submit your feedback. In the meantime, you can enable 'Classic View' in Settings.",
+          "timestamp": "2024-04-01T14:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Classic View is a band-aid, not a solution. Very unhappy with this direction.",
+          "timestamp": "2024-04-01T14:07:00Z"
+        }
+      ],
+      "resolution": "Classic view enabled, feedback submitted",
+      "tags": [
+        "ui",
+        "complaint",
+        "feedback"
+      ]
+    },
+    {
+      "id": "conv-014b",
+      "date": "2024-06-15",
+      "channel": "email",
+      "agent": "Wendy",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "We've reluctantly adapted to the new UI. Still think it was poorly rolled out.",
+          "timestamp": "2024-06-15T16:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Thank you for giving it a chance. We've incorporated feedback from users like you into the next update.",
+          "timestamp": "2024-06-15T16:30:00Z"
+        }
+      ],
+      "tags": [
+        "ui",
+        "feedback"
+      ]
+    }
+  ]
+}

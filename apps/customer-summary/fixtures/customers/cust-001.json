@@ -1,0 +1,66 @@
+{
+  "customerId": "cust-001",
+  "name": "Alice Johnson",
+  "email": "alice@example.com",
+  "phone": "+1-555-0101",
+  "accountType": "personal",
+  "createdAt": "2023-01-15T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-001a",
+      "date": "2024-06-10",
+      "channel": "chat",
+      "agent": "Bob",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Hi, I have a question about my last invoice. The amount seems higher than usual.",
+          "timestamp": "2024-06-10T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Let me pull up your account. I see a prorated charge for the plan upgrade you made on June 1st.",
+          "timestamp": "2024-06-10T09:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Oh right, I forgot about that. Makes sense now, thanks!",
+          "timestamp": "2024-06-10T09:03:00Z"
+        }
+      ],
+      "resolution": "Explained prorated charge",
+      "tags": [
+        "billing",
+        "resolved"
+      ]
+    },
+    {
+      "id": "conv-001b",
+      "date": "2024-07-20",
+      "channel": "email",
+      "agent": "Carol",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Can you tell me about the new premium features?",
+          "timestamp": "2024-07-20T14:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Sure! The premium tier includes advanced analytics, priority support, and custom integrations.",
+          "timestamp": "2024-07-20T14:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "That sounds great. I'll think about upgrading.",
+          "timestamp": "2024-07-20T15:00:00Z"
+        }
+      ],
+      "resolution": "Product info provided",
+      "tags": [
+        "product",
+        "upsell"
+      ]
+    }
+  ]
+}

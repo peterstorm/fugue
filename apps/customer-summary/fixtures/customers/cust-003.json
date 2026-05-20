@@ -1,0 +1,87 @@
+{
+  "customerId": "cust-003",
+  "name": "Clara Nguyen",
+  "phone": "+1-555-0303",
+  "accountType": "personal",
+  "createdAt": "2023-06-20T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-003a",
+      "date": "2024-04-10",
+      "channel": "chat",
+      "agent": "Frank",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Where is my order #ORD-9921? It was supposed to arrive yesterday.",
+          "timestamp": "2024-04-10T16:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Tracking shows it's at the local distribution center. Expected delivery tomorrow.",
+          "timestamp": "2024-04-10T16:03:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "That's frustrating but okay. Thanks for checking.",
+          "timestamp": "2024-04-10T16:04:00Z"
+        }
+      ],
+      "resolution": "Tracking info provided",
+      "tags": [
+        "shipping",
+        "delay"
+      ]
+    },
+    {
+      "id": "conv-003b",
+      "date": "2024-04-15",
+      "channel": "email",
+      "agent": "Grace",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "I received the order but one item is damaged. I'd like a replacement.",
+          "timestamp": "2024-04-15T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I'm sorry about that. I've initiated a replacement shipment. You should receive it in 3-5 days.",
+          "timestamp": "2024-04-15T09:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Thank you for resolving this quickly.",
+          "timestamp": "2024-04-15T10:00:00Z"
+        }
+      ],
+      "resolution": "Replacement shipped",
+      "tags": [
+        "return",
+        "damaged",
+        "resolved"
+      ]
+    },
+    {
+      "id": "conv-003c",
+      "date": "2024-05-01",
+      "channel": "phone",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Just calling to confirm I received the replacement. Everything looks good.",
+          "timestamp": "2024-05-01T11:00:00Z"
+        },
+        {
+          "role": "system",
+          "content": "Customer confirmed replacement received.",
+          "timestamp": "2024-05-01T11:01:00Z"
+        }
+      ],
+      "resolution": "Replacement confirmed",
+      "tags": [
+        "follow-up"
+      ]
+    }
+  ]
+}

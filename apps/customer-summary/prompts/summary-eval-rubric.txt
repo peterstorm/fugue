@@ -1,0 +1,23 @@
+Evaluate the customer summary output against these criteria.
+
+IMPORTANT: The "Input" section contains the full execution context as JSON with these keys:
+- "dagInput": the original request (just a customerId)
+- "dagOutput": the final summary (same as the "Output" section)
+- "nodeOutputs": intermediate results from the pipeline, including:
+  - "fetch-crm": the raw CRM record with customer conversations — THIS IS THE SOURCE OF TRUTH for factuality verification
+  - "extract-features": extracted features from conversations
+  - Other intermediate nodes
+
+Use "nodeOutputs.fetch-crm" as the ground truth source data when evaluating factuality.
+
+CRITERIA:
+
+- Factuality (0.0-1.0): Claims in the summary must be supported by the source conversation data in nodeOutputs["fetch-crm"]. Score proportionally: if 9/10 claims are grounded, score 0.9. Score 0.0 only if the summary is entirely fabricated. Reasonable inferences from the data (e.g., inferring satisfaction from tone) are acceptable and should not be penalized.
+
+- Completeness (0.0-1.0): The summary must cover key dimensions: sentiment, topics, summary text, action items, risk level, satisfaction. Score proportionally based on coverage.
+
+- Relevance (0.0-1.0): Content should be useful to a support team. No filler or off-topic content.
+
+- Coherence (0.0-1.0): The summary should read as unified analysis with internally consistent assessments.
+
+Score each criterion 0.0-1.0. A criterion fails below 0.8.

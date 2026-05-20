@@ -1,0 +1,22 @@
+{
+  "customerId": "cust-015",
+  "name": "Olivia Hart",
+  "createdAt": "2024-07-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-015a",
+      "date": "2024-07-05",
+      "channel": "chat",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Hi, just browsing. Thanks.",
+          "timestamp": "2024-07-05T12:00:00Z"
+        }
+      ],
+      "tags": [
+        "brief"
+      ]
+    }
+  ]
+}

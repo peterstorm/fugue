@@ -1,0 +1,30 @@
+{
+  "customerId": "cust-016",
+  "name": "Patrick Quinn",
+  "email": "pq@mail.com",
+  "createdAt": "2024-06-15T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-016a",
+      "date": "2024-06-20",
+      "channel": "email",
+      "agent": "Xena",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "What are your pricing plans?",
+          "timestamp": "2024-06-20T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Here's a link to our pricing page: https://example.com/pricing",
+          "timestamp": "2024-06-20T09:15:00Z"
+        }
+      ],
+      "tags": [
+        "pricing",
+        "inquiry"
+      ]
+    }
+  ]
+}

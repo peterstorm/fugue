@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-console-log",
+  "description": "Disabled — scripts/ uses console.log legitimately; framework source already uses fwLogger()",
+  "extensions": [],
+  "pattern": "",
+  "flags": "",
+  "fixHint": "disabled",
+  "enabled": false
+}

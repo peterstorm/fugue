@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "no-non-null-assertion",
+  "description": "Disallow non-null assertions (!) — use explicit guards or Result patterns",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "\\w+!\\.\\w",
+  "flags": "",
+  "fixHint": "Replace the non-null assertion with an explicit null check, returning a FrameworkError on the Err path. Use Result patterns or early-return guards instead.",
+  "enabled": true,
+  "excludePatterns": [".test.ts", ".spec.ts"]
+}

@@ -1,0 +1,78 @@
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.11.1
+    ports:
+      - "5000:5000"
+    command: >-
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root mlflow-artifacts:/
+      --serve-artifacts
+      --artifacts-destination /mlflow/artifacts
+    volumes:
+      - mlflow_data:/mlflow
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  eval:
+    build:
+      context: ..
+      dockerfile: infra/eval.Dockerfile
+    depends_on:
+      ollama:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - APP_BASE_URL=${APP_BASE_URL:-http://host.containers.internal:3000}
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - EVAL_CASES_PATH=fixtures/eval/cases.json
+      - EVAL_MODE=full
+    volumes:
+      - ../apps/customer-summary/eval:/eval:ro
+      - ../apps/customer-summary/fixtures:/eval/fixtures:ro
+    profiles:
+      - eval
+
+  eval-ci:
+    build:
+      context: ..
+      dockerfile: infra/eval.Dockerfile
+    depends_on:
+      mlflow:
+        condition: service_started
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - APP_BASE_URL=${APP_BASE_URL:-http://host.containers.internal:3000}
+      - EVAL_CASES_PATH=fixtures/eval/cases.json
+      - EVAL_MODE=ci
+    volumes:
+      - ../apps/customer-summary/eval:/eval:ro
+      - ../apps/customer-summary/fixtures:/eval/fixtures:ro
+    profiles:
+      - eval-ci
+
+volumes:
+  mlflow_data:
+  redis_data:
+  ollama_data:

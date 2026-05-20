@@ -1,0 +1,34 @@
+{
+  "customerId": "cust-021",
+  "name": "Derek Nguyen",
+  "email": "derek.n@example.com",
+  "accountType": "personal",
+  "createdAt": "2024-06-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-021a",
+      "date": "2024-08-10",
+      "channel": "chat",
+      "agent": "Maria",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Quick question - how do I change my password?",
+          "timestamp": "2024-08-10T11:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Go to Settings > Security > Change Password.",
+          "timestamp": "2024-08-10T11:01:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Got it, thanks!",
+          "timestamp": "2024-08-10T11:02:00Z"
+        }
+      ],
+      "resolution": "Self-service guidance provided",
+      "tags": ["account", "quick"]
+    }
+  ]
+}

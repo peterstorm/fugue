@@ -1,0 +1,152 @@
+{
+  "boundaries": [
+    {
+      "module": "packages/framework/src/types/",
+      "allow": ["./", "packages/framework/src/types/", "zod"],
+      "deny": [
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/shared/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/queue-bullmq/",
+        "packages/framework/src/scheduler/",
+        "packages/framework/src/tracing/",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/nodes/",
+        "packages/framework/src/sugar/",
+        "@opentelemetry/",
+        "bullmq",
+        "ioredis"
+      ]
+    },
+    {
+      "module": "packages/framework/src/shared/",
+      "allow": ["./", "packages/framework/src/shared/", "packages/framework/src/types/", "zod", "node:crypto"],
+      "deny": [
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/queue-bullmq/",
+        "packages/framework/src/scheduler/",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/nodes/",
+        "bullmq",
+        "ioredis",
+        "@opentelemetry/"
+      ]
+    },
+    {
+      "module": "packages/framework/src/state-machine/",
+      "allow": ["./", "packages/framework/src/state-machine/", "packages/framework/src/types/"],
+      "deny": [
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/queue-bullmq/",
+        "packages/framework/src/scheduler/",
+        "packages/framework/src/tracing/",
+        "bullmq",
+        "ioredis",
+        "@opentelemetry/"
+      ]
+    },
+    {
+      "module": "packages/framework/src/dag-runtime/",
+      "allow": [
+        "./",
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/types/",
+        "packages/framework/src/shared/",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/tracing/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/logger",
+        "ts-pattern",
+        "@opentelemetry/"
+      ],
+      "deny": [
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/queue-bullmq/",
+        "packages/framework/src/scheduler/",
+        "bullmq",
+        "ioredis"
+      ]
+    },
+    {
+      "module": "packages/framework/src/scheduler/",
+      "allow": ["./", "packages/framework/src/scheduler/", "packages/framework/src/types/"],
+      "deny": [
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/queue-bullmq/",
+        "bullmq",
+        "ioredis",
+        "@opentelemetry/"
+      ]
+    },
+    {
+      "module": "packages/framework/src/queue-bullmq/",
+      "allow": [
+        "./",
+        "packages/framework/src/queue-bullmq/",
+        "packages/framework/src/types/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/logger",
+        "bullmq",
+        "ioredis"
+      ],
+      "deny": [
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/scheduler/"
+      ]
+    }
+  ],
+  "pureModules": [
+    "packages/framework/src/types/",
+    "packages/framework/src/shared/build-input.ts",
+    "packages/framework/src/shared/hash.ts",
+    "packages/framework/src/shared/incoming.ts",
+    "packages/framework/src/shared/jitter.ts",
+    "packages/framework/src/shared/json-patch.ts",
+    "packages/framework/src/shared/topo.ts",
+    "packages/framework/src/shared/validate.ts",
+    "packages/framework/src/dag-runtime/transition.ts",
+    "packages/framework/src/dag-runtime/routing.ts",
+    "packages/framework/src/dag-runtime/wave-resolution.ts",
+    "packages/framework/src/dag-runtime/retry-policy.ts",
+    "packages/framework/src/dag-runtime/human-resolution.ts",
+    "packages/framework/src/dag-runtime/conditional.ts",
+    "packages/framework/src/dag-runtime/topology.ts",
+    "packages/framework/src/state-machine/replay.ts",
+    "packages/framework/src/scheduler/catch-up.ts",
+    "packages/framework/src/scheduler/cycle.ts",
+    "packages/framework/src/scheduler/diff.ts"
+  ],
+  "maxFunctionLines": 50,
+  "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts"]
+}

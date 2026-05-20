@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-raw-string-ids",
+  "description": "Disallow passing raw string literals where branded IDs (RunId/NodeId/DagId) are expected",
+  "extensions": [".ts"],
+  "pattern": "(?:runId|nodeId|dagId):\\s*[\"']",
+  "flags": "",
+  "fixHint": "Use the smart constructor: runId('...'), nodeId('...'), or dagId('...') to produce branded IDs. Raw strings do not satisfy the brand at compile time.",
+  "enabled": false
+}

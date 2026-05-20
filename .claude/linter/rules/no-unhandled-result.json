@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-unhandled-result",
+  "description": "Disallow accessing .value on a Result without checking .ok first",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "\\b\\w+\\.value\\b(?!.*\\.ok)",
+  "flags": "",
+  "fixHint": "Check result.ok before accessing result.value, or use fold/unwrapOr/map combinators from the Result type",
+  "enabled": false
+}

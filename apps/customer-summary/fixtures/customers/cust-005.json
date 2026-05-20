@@ -1,0 +1,72 @@
+{
+  "customerId": "cust-005",
+  "name": "Elena Rossi",
+  "email": "elena.rossi@startup.io",
+  "phone": "+1-555-0505",
+  "accountType": "business",
+  "createdAt": "2024-01-10T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-005a",
+      "date": "2024-01-15",
+      "channel": "phone",
+      "agent": "Jake",
+      "messages": [
+        {
+          "role": "agent",
+          "content": "Welcome to the platform! I'm your onboarding specialist. Let's get you set up.",
+          "timestamp": "2024-01-15T10:00:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Thanks! We need to integrate with our existing CRM and set up SSO.",
+          "timestamp": "2024-01-15T10:02:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Both are supported. I'll send you the integration docs and SSO configuration guide.",
+          "timestamp": "2024-01-15T10:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Perfect. We'll work through these and reach out if we hit any issues.",
+          "timestamp": "2024-01-15T10:10:00Z"
+        }
+      ],
+      "resolution": "Onboarding started",
+      "tags": [
+        "onboarding",
+        "integration"
+      ]
+    },
+    {
+      "id": "conv-005b",
+      "date": "2024-02-01",
+      "channel": "email",
+      "agent": "Jake",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "SSO is configured and working. The CRM integration has a sync delay of about 10 minutes though.",
+          "timestamp": "2024-02-01T14:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "The sync interval is configurable. Check Settings > Integrations > Sync Frequency. You can set it to real-time.",
+          "timestamp": "2024-02-01T14:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Changed it to real-time. Working great now. Very happy with the setup!",
+          "timestamp": "2024-02-01T15:00:00Z"
+        }
+      ],
+      "resolution": "Integration optimized",
+      "tags": [
+        "onboarding",
+        "integration",
+        "resolved"
+      ]
+    }
+  ]
+}

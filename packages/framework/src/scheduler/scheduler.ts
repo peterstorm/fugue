@@ -1,0 +1,416 @@
+// CronScheduler — imperative shell
+// Uses cron-parser for next-fire-time calculation.
+// MUST NOT import bullmq, ioredis, or queue-bullmq/** —
+// enforced by scripts/check-imports.ts.
+
+import { parseExpression } from "cron-parser";
+import type { MarkerStore } from "../queue/types.js";
+import type { TaskConfig, TaskRegistry, TaskRegistryStore } from "./types.js";
+import { diffRegistry } from "./diff.js";
+import { hasCycle } from "./cycle.js";
+import { fwLogger } from "../logger.js";
+import { retryAsync } from "../shared/retry-async.js";
+
+// ---------------------------------------------------------------------------
+// Public interface
+// ---------------------------------------------------------------------------
+
+export interface CronScheduler {
+  /**
+   * Reconcile active timers with the desired registry.
+   * Arms new tasks, disarms removed tasks, re-arms updated tasks.
+   * Silently skips tasks that have a dependency cycle (logs a warning).
+   */
+  reconcile(reg: TaskRegistry): void;
+
+  /**
+   * Called after a task completes — enqueues dependent tasks whose upstream
+   * tasks have all completed within their validity windows.
+   */
+  resolveDependents(taskId: string, triggeredAt: Date): Promise<void>;
+
+  /** Cancel all active timers, await in-flight fires, and clear internal state. */
+  stop(): Promise<void>;
+}
+
+export interface CronSchedulerOpts {
+  /**
+   * Enqueue a single task.
+   *
+   * **Contract:** `enqueue` MUST be idempotent under a stable key derived from
+   * `(taskId, triggeredAt)`. The scheduler will redeliver the same
+   * `(task, triggeredAt)` pair under failure-recovery and dependent-fan-out
+   * paths; non-idempotent implementations accept duplicate-execution risk.
+   *
+   * The BullMQ-backed adapter satisfies this by using
+   * `jobId = ${task.id}-${triggeredAt.getTime()}` so the queue itself
+   * deduplicates.
+   */
+  enqueue: (task: TaskConfig, triggeredAt: Date) => Promise<void>;
+  /**
+   * Injectable wall-clock supplier. Defaults to `() => new Date()`. The
+   * scheduler keeps the `() => Date` shape (not `() => number`) because
+   * cron-parser and the `triggeredAt` arguments downstream want `Date`
+   * values directly; carrying the number through and re-wrapping at every
+   * call site costs more than the framework-wide uniformity buys. The
+   * `() => number` convention applies to observer + queue clocks.
+   */
+  now?: () => Date;
+  /**
+   * Shared task-registry store for cross-process dependent resolution.
+   * When provided, `resolveDependents` reads from this store instead of
+   * the process-local `activeRegistry`. Enables multi-process deployments
+   * where the scheduler and workers run in separate processes.
+   *
+   * When omitted, the scheduler uses the in-process `activeRegistry`
+   * reconciled via `reconcile()` — correct for single-process deployments.
+   */
+  registryStore?: TaskRegistryStore;
+}
+
+// ---------------------------------------------------------------------------
+// Marker key helpers (exported for tests)
+// ---------------------------------------------------------------------------
+
+export function markerFiredKey(taskId: string): string {
+  return `scheduler:${taskId}:fired`;
+}
+
+export function markerCompletedKey(taskId: string): string {
+  return `scheduler:${taskId}:completed`;
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates a `CronScheduler` that reconciles cron timers per `diffRegistry`,
+ * arms setTimeout-based timers for the next scheduled fire of each task, and
+ * enqueues dependents when an upstream task completes.
+ *
+ * FR-064: reconcile(registry), resolveDependents(taskId, triggeredAt), stop()
+ */
+export function createCronScheduler(
+  markers: MarkerStore,
+  opts: CronSchedulerOpts,
+): CronScheduler {
+  const { enqueue, now = () => new Date() } = opts;
+
+  // Map from taskId → active timer handle
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  // In-flight handleFire promises — awaited on stop() for graceful shutdown.
+  const inFlight = new Set<Promise<void>>();
+  // Per-task consecutive unexpected-failure count, drives the exponential
+  // backoff (capped at BACKOFF_CAP_MS). Reset on any successful handleFire.
+  const consecutiveFailures = new Map<string, number>();
+  // Current active registry (tasks currently armed)
+  let activeRegistry: TaskRegistry = new Map();
+
+  // ---------------------------------------------------------------------------
+  // Internal helpers
+  // ---------------------------------------------------------------------------
+
+  function getNextDate(cron: string, after: Date): Date | null {
+    try {
+      const interval = parseExpression(cron, { currentDate: after });
+      return interval.next().toDate();
+    } catch (err) {
+      fwLogger().error(`[CronScheduler] Failed to parse cron "${cron}" after ${after.toISOString()}:`, err);
+      return null;
+    }
+  }
+
+  // On every timer fire, re-read the current task from `activeRegistry` rather
+  // than the closure-captured value. If `reconcile` updated the task between
+  // arm and fire, the live config wins — without this, a stale closure can
+  // permanently re-arm the scheduler with retired cron / validForMs values.
+  // Returns null if the task has been removed entirely; the caller should
+  // simply stop the chain in that case.
+  function onTimerFire(taskId: string): void {
+    try {
+      const current = activeRegistry.get(taskId);
+      if (current === undefined) return; // task was removed mid-fire — drop the chain
+      const triggeredAt = now();
+      const p = handleFire(current, triggeredAt)
+        .then(() => {
+          consecutiveFailures.delete(current.id);
+          const stillActive = activeRegistry.get(current.id);
+          if (stillActive !== undefined) rescheduleTask(stillActive, triggeredAt);
+        })
+        .catch((err) => {
+          fwLogger().error(`[CronScheduler] timer callback failed for "${current.id}":`, err);
+          const n = (consecutiveFailures.get(current.id) ?? 0) + 1;
+          consecutiveFailures.set(current.id, n);
+          const stillActive = activeRegistry.get(current.id);
+          if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
+        })
+        .finally(() => { inFlight.delete(p); });
+      inFlight.add(p);
+    } catch (e) {
+      fwLogger().error(`[CronScheduler] onTimerFire threw synchronously for "${taskId}":`, e);
+      const n = (consecutiveFailures.get(taskId) ?? 0) + 1;
+      consecutiveFailures.set(taskId, n);
+      const stillActive = activeRegistry.get(taskId);
+      if (stillActive !== undefined) rescheduleTaskWithBackoff(stillActive, n);
+    }
+  }
+
+  function scheduleTask(task: TaskConfig): void {
+    disarmTask(task.id); // cancel any existing timer first
+
+    const nowDate = now();
+    const nextDate = getNextDate(task.cron, nowDate);
+    if (nextDate === null) {
+      fwLogger().warn(`[CronScheduler] Task "${task.id}" will NOT be armed — cron "${task.cron}" yielded no next date after ${nowDate.toISOString()}`);
+      return;
+    }
+
+    const delayMs = Math.max(0, nextDate.getTime() - nowDate.getTime());
+
+    const handle = setTimeout(() => onTimerFire(task.id), delayMs);
+    timers.set(task.id, handle);
+  }
+
+  function rescheduleTask(task: TaskConfig, after: Date): void {
+    disarmTask(task.id);
+
+    const nowDate = now();
+    const nextDate = getNextDate(task.cron, after);
+    if (nextDate === null) {
+      fwLogger().warn(`[CronScheduler] Task "${task.id}" will NOT be re-armed — cron "${task.cron}" yielded no next date after ${after.toISOString()}`);
+      return;
+    }
+
+    const delayMs = Math.max(0, nextDate.getTime() - nowDate.getTime());
+
+    const handle = setTimeout(() => onTimerFire(task.id), delayMs);
+    timers.set(task.id, handle);
+  }
+
+  // When handleFire fails unexpectedly, re-arm at an exponentially-growing
+  // delay (capped at 30 minutes) instead of the normal cron-tick interval.
+  // Resets to normal scheduling on first success.
+  function rescheduleTaskWithBackoff(
+    task: TaskConfig,
+    failureCount: number,
+  ): void {
+    disarmTask(task.id);
+    const backoffMs = computeBackoffMs(failureCount);
+    fwLogger().warn(
+      `[CronScheduler] backing off task "${task.id}" by ${backoffMs}ms (consecutive failures: ${failureCount})`,
+    );
+    const handle = setTimeout(() => onTimerFire(task.id), backoffMs);
+    timers.set(task.id, handle);
+  }
+
+  function disarmTask(id: string): void {
+    const handle = timers.get(id);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      timers.delete(id);
+    }
+  }
+
+  async function handleFire(task: TaskConfig, triggeredAt: Date): Promise<void> {
+    // Enqueue first — only mark as fired on success.
+    // Enqueue implementations MUST be idempotent (per CronSchedulerOpts.enqueue contract).
+    //
+    // A swallowed enqueue failure here used to drop the task back into normal
+    // cron-tick scheduling, bypassing the consecutive-failure backoff. Rethrow
+    // so the outer setTimeout `.catch` branch increments `consecutiveFailures`
+    // and calls `rescheduleTaskWithBackoff` instead — a broken enqueue backend
+    // gets exponentially-spaced retries, not a per-cron-tick hammer.
+    try {
+      await enqueue(task, triggeredAt);
+    } catch (err) {
+      fwLogger().error(`[CronScheduler] enqueue failed for task "${task.id}" — backing off:`, err);
+      throw err;
+    }
+
+    const ttlSeconds = Math.ceil(task.validForMs / 1000) + 60; // grace period
+    try {
+      await markers.set(markerFiredKey(task.id), ttlSeconds);
+    } catch (err) {
+      // Rethrow so the outer setTimeout `.catch` branch applies the
+      // consecutive-failure backoff. Swallowing here used to spam every
+      // normal cron tick at the broken marker store — `enqueue` is
+      // idempotent at the queue level, but the scheduler's own backoff
+      // belongs in this error path, not the queue contract.
+      fwLogger().error(`[CronScheduler] markers.set(fired) failed for task "${task.id}":`, err);
+      throw err;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public methods
+  // ---------------------------------------------------------------------------
+
+  function reconcile(reg: TaskRegistry): void {
+    const diff = diffRegistry(activeRegistry, reg);
+
+    // Disarm removed tasks and clear any retained failure-counter state so a
+    // re-added task starts with a fresh backoff schedule.
+    for (const id of diff.remove) {
+      disarmTask(id);
+      consecutiveFailures.delete(id);
+    }
+
+    // Arm new and updated tasks (skip cyclic ones)
+    for (const task of [...diff.add, ...diff.update]) {
+      if (hasCycle(task.id, reg)) {
+        fwLogger().warn(`[CronScheduler] Skipping task "${task.id}" — dependency cycle detected`);
+        continue;
+      }
+      scheduleTask(task);
+    }
+
+    activeRegistry = reg;
+  }
+
+  async function resolveDependents(
+    taskId: string,
+    triggeredAt: Date,
+  ): Promise<void> {
+    // Prefer the shared store (cross-process) over the process-local registry.
+    const registry = opts.registryStore
+      ? await opts.registryStore.getAll()
+      : activeRegistry;
+
+    if (registry.size === 0) {
+      fwLogger().warn(
+        `[CronScheduler] resolveDependents("${taskId}") called with empty registry — was reconcile() called first?`,
+      );
+      return;
+    }
+    // Mark the upstream task as completed
+    const upstreamTask = registry.get(taskId);
+    const completedTtl = upstreamTask
+      ? Math.ceil(upstreamTask.validForMs / 1000) + 60
+      : 3600;
+    try {
+      await retryAsync(
+        () => markers.set(markerCompletedKey(taskId), completedTtl),
+        { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(completed) task="${taskId}"` },
+      );
+    } catch (e) {
+      fwLogger().error(
+        `[CronScheduler] markers.set(completed) permanently failed for task "${taskId}" after 3 attempts — dependent chain abandoned:`,
+        e,
+      );
+      return;
+    }
+
+    // Find all tasks that directly depend on taskId
+    const dependentTasks = findDependents(taskId, registry);
+    if (dependentTasks.length === 0) return;
+
+    // For each dependent, check if ALL its dependencies have completed
+    for (const dep of dependentTasks) {
+      try {
+        if (!dep.dependsOn || dep.dependsOn.length === 0) continue;
+
+        let allDepsCompleted = true;
+        for (const depId of dep.dependsOn) {
+          const completed = await markers.exists(markerCompletedKey(depId));
+          if (!completed) {
+            allDepsCompleted = false;
+            break;
+          }
+        }
+        if (!allDepsCompleted) continue;
+
+        // Only enqueue if not already fired. A failed exists() check must NOT
+        // default to "not fired" — that races duplicate enqueues across
+        // processes. Skip this cycle; the next scheduler tick retries once the
+        // marker store recovers.
+        const firedResult = await markers.exists(markerFiredKey(dep.id))
+          .catch((e) => {
+            fwLogger().error(
+              `[CronScheduler] markers.exists(fired) failed for "${dep.id}" — skipping enqueue this cycle:`,
+              e instanceof Error ? e.message : e,
+            );
+            return "unknown" as const;
+          });
+        if (firedResult === "unknown" || firedResult === true) continue;
+
+        // Enqueue first — only mark fired on success.
+        try {
+          await retryAsync(
+            () => enqueue(dep, triggeredAt),
+            { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler enqueue dependent "${dep.id}"` },
+          );
+        } catch (e) {
+          fwLogger().error(`[CronScheduler] enqueue permanently failed for dependent "${dep.id}" — skipped:`, e);
+          continue;
+        }
+        const depFiredTtl = Math.ceil(dep.validForMs / 1000) + 60;
+        try {
+          await retryAsync(
+            () => markers.set(markerFiredKey(dep.id), depFiredTtl),
+            { maxAttempts: 3, baseDelayMs: 500, label: `CronScheduler markers.set(fired) dependent "${dep.id}"` },
+          );
+        } catch (err) {
+          // The job is already enqueued but the fired-marker did not persist.
+          // A later resolveDependents cycle may re-enqueue once the marker
+          // store recovers — the marker store is the single source of truth.
+          fwLogger().error(
+            `[CronScheduler] markers.set(fired) permanently failed for dependent "${dep.id}" (upstream "${taskId}", job already enqueued):`,
+            err,
+          );
+        }
+      } catch (err) {
+        fwLogger().error(`[CronScheduler] resolveDependents failed for taskId="${taskId}", dep="${dep.id}":`, err);
+        // Continue so remaining dependents still get processed
+      }
+    }
+  }
+
+  async function stop(): Promise<void> {
+    for (const handle of timers.values()) {
+      clearTimeout(handle);
+    }
+    timers.clear();
+    await Promise.allSettled([...inFlight]);
+    consecutiveFailures.clear();
+    activeRegistry = new Map();
+  }
+
+  return { reconcile, resolveDependents, stop };
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Base delay applied to the first consecutive failure. Subsequent failures
+ * double the delay until `BACKOFF_CAP_MS` clamps further growth.
+ */
+export const BACKOFF_BASE_MS = 1_000;
+/** Hard ceiling on backoff — keeps recovery latency bounded after long outages. */
+export const BACKOFF_CAP_MS = 30 * 60 * 1_000;
+
+/**
+ * Pure exponential-backoff formula extracted from `rescheduleTaskWithBackoff`
+ * so the curve can be unit-tested without scheduling real timers. `n` is the
+ * 1-indexed consecutive-failure count; `n=1` returns `BACKOFF_BASE_MS`. Values
+ * `n < 1` are clamped to 1 to match the caller's invariant.
+ */
+export function computeBackoffMs(failureCount: number): number {
+  const n = Math.max(1, failureCount);
+  return Math.min(BACKOFF_BASE_MS * Math.pow(2, n - 1), BACKOFF_CAP_MS);
+}
+
+function findDependents(
+  taskId: string,
+  registry: TaskRegistry,
+): TaskConfig[] {
+  const result: TaskConfig[] = [];
+  for (const task of registry.values()) {
+    if (task.dependsOn?.includes(taskId)) {
+      result.push(task);
+    }
+  }
+  return result;
+}

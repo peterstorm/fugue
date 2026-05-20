@@ -1,0 +1,37 @@
+{
+  "customerId": "cust-009",
+  "name": "Isaac Torres",
+  "phone": "+1-555-0909",
+  "accountType": "personal",
+  "createdAt": "2023-08-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-009a",
+      "date": "2024-05-10",
+      "channel": "chat",
+      "agent": "Olivia",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Your customer service is the best I've ever experienced. Renewing my subscription today.",
+          "timestamp": "2024-05-10T14:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Thank you, Isaac! We appreciate your loyalty. I see the renewal went through.",
+          "timestamp": "2024-05-10T14:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Great, see you next year!",
+          "timestamp": "2024-05-10T14:03:00Z"
+        }
+      ],
+      "resolution": "Subscription renewed",
+      "tags": [
+        "renewal",
+        "positive"
+      ]
+    }
+  ]
+}

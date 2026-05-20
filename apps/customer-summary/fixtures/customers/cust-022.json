@@ -1,0 +1,64 @@
+{
+  "customerId": "cust-022",
+  "name": "Priya Sharma",
+  "email": "priya.s@techstartup.io",
+  "accountType": "business",
+  "createdAt": "2023-09-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-022a",
+      "date": "2024-07-01",
+      "channel": "chat",
+      "agent": "Tom",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Your product is absolutely fantastic! We love the new dashboard. Our whole team is thrilled. Best tool we've ever used!",
+          "timestamp": "2024-07-01T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Thank you so much! Glad to hear your team is happy.",
+          "timestamp": "2024-07-01T10:02:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "We've already recommended you to three other companies!",
+          "timestamp": "2024-07-01T10:03:00Z"
+        }
+      ],
+      "resolution": "Positive feedback logged",
+      "tags": ["positive", "advocacy"]
+    },
+    {
+      "id": "conv-022b",
+      "date": "2024-08-15",
+      "channel": "phone",
+      "agent": "Lisa",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "I am incredibly frustrated. Your latest update completely broke our workflow. This is unacceptable. We've lost two days of productivity.",
+          "timestamp": "2024-08-15T09:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I'm so sorry about this disruption. Let me escalate this to engineering right away.",
+          "timestamp": "2024-08-15T09:03:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "This is the worst experience we've had. If this isn't fixed by Friday we're cancelling.",
+          "timestamp": "2024-08-15T09:05:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I completely understand. Our engineering lead will contact you directly within 2 hours.",
+          "timestamp": "2024-08-15T09:07:00Z"
+        }
+      ],
+      "resolution": "Escalated to engineering",
+      "tags": ["bug", "escalation", "complaint", "churn-risk"]
+    }
+  ]
+}

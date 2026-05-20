@@ -1,0 +1,71 @@
+{
+  "customerId": "cust-002",
+  "name": "Brian Smith",
+  "email": "brian.smith@corp.com",
+  "accountType": "business",
+  "createdAt": "2022-11-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-002a",
+      "date": "2024-05-15",
+      "channel": "phone",
+      "agent": "Dave",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Our API integration stopped working after the latest update.",
+          "timestamp": "2024-05-15T10:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I see the issue. The authentication endpoint changed in v3. Let me walk you through the migration.",
+          "timestamp": "2024-05-15T10:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Got it working now. The migration guide would have been helpful beforehand.",
+          "timestamp": "2024-05-15T10:30:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Fair feedback. I'll flag that to our docs team.",
+          "timestamp": "2024-05-15T10:31:00Z"
+        }
+      ],
+      "resolution": "API migration completed",
+      "tags": [
+        "technical",
+        "api",
+        "resolved"
+      ]
+    },
+    {
+      "id": "conv-002b",
+      "date": "2024-08-01",
+      "channel": "chat",
+      "agent": "Eve",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "Need to add 5 more seats to our business plan.",
+          "timestamp": "2024-08-01T11:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "Done! I've added 5 seats. The prorated charge will appear on your next invoice.",
+          "timestamp": "2024-08-01T11:05:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Perfect, thanks for the quick help.",
+          "timestamp": "2024-08-01T11:06:00Z"
+        }
+      ],
+      "resolution": "Seats added",
+      "tags": [
+        "account",
+        "billing"
+      ]
+    }
+  ]
+}

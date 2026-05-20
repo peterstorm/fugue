@@ -1,0 +1,22 @@
+// `observer/` — typed *domain event* bus for the framework runtime.
+// OTel SDK initialization, the MLflow exporter, and the span-attribute
+// side-channel registry live in `tracing/`. For OTel pipeline setup see
+// `tracing/init.ts`; for span helpers see `tracing/span-enrich.ts`. The
+// barrel below covers only the domain observer surface.
+
+export type { Observer } from "./observer.js";
+export { NoopObserver, RecordingObserver, createObserver, createExhaustiveObserver } from "./observer.js";
+export type { RunSummary, AggregateCounters } from "./buffered.js";
+export { BufferedObserver, computeRunSummary } from "./buffered.js";
+export { dispatchEvent } from "./dispatch.js";
+export type { PersistencePolicy } from "./policy.js";
+export {
+  alwaysOn,
+  errorOnly,
+  ratio,
+  hadRetry,
+  anyOf,
+  allOf,
+  custom,
+} from "./policy.js";
+export { TailSamplingProcessor } from "./tail-sampling-processor.js";

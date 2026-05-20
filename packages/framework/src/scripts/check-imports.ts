@@ -1,0 +1,279 @@
+/**
+ * Boundary-import checker
+ *
+ * Enforces:
+ *   - state-machine/** MUST NOT import bullmq, ioredis, or queue-bullmq/**
+ *   - dag-runtime/**   MUST NOT import bullmq, ioredis, or queue-bullmq/**
+ *   - Only queue-bullmq/** may import bullmq and ioredis
+ *
+ * Scans all .ts files (excluding .d.ts) under packages/framework/src/.
+ * Detects `import`, `import type`, and dynamic `import(...)` forms.
+ *
+ * Exposed as a library; the boundary check runs in `__tests__/boundary-imports.test.ts`.
+ */
+
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface Violation {
+  file: string;
+  line: number;
+  importSpecifier: string;
+}
+
+export interface CheckResult {
+  violations: Violation[];
+}
+
+// ---------------------------------------------------------------------------
+// Rules — for each restricted directory, list the forbidden import patterns
+// ---------------------------------------------------------------------------
+
+interface BoundaryRule {
+  /**
+   * Files that the rule applies to. Each entry is either a directory prefix
+   * (interpreted as `${entry}/`) or a specific relative file path under `src/`.
+   */
+  scope: string[];
+  /**
+   * Optional exact-path exclusions from `scope`. Use for files inside the
+   * scoped directory that legitimately need the otherwise-forbidden imports
+   * (e.g. `shared/defaults.ts` constructs the default observer/tracer
+   * stubs — pulling in their concrete types is necessary, not a smell).
+   */
+  scopeExcludes?: string[];
+  /** Module specifiers that are forbidden. Partial prefix match is used. */
+  forbiddenModules: string[];
+  /** Human-readable reason — surfaced in violation messages and lint output. */
+  reason?: string;
+}
+
+const RULES: BoundaryRule[] = [
+  {
+    scope: ["state-machine"],
+    forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
+    reason: "state-machine/ is the kernel; transport adapters belong outside it.",
+  },
+  {
+    scope: ["dag-runtime"],
+    forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
+    reason: "dag-runtime/ is transport-agnostic; durable backends are wired by the shell.",
+  },
+  {
+    scope: [
+      "state-machine",
+      "dag-runtime",
+    ],
+    scopeExcludes: [
+      // These are the imperative shell — they legitimately use OTel:
+      "dag-runtime/executor.ts",
+      "dag-runtime/run-dag-stateful.ts",
+      "dag-runtime/run-telemetry.ts",
+      "dag-runtime/node-span.ts",
+      "dag-runtime/eval-judges.ts",
+      "dag-runtime/freshness-emission.ts",
+      "dag-runtime/human-emission.ts",
+      "dag-runtime/route-emission.ts",
+    ],
+    forbiddenModules: ["@opentelemetry/"],
+    reason: "Pure-core modules must not depend on OTel; tracing belongs to the imperative shell. Add new shell files to scopeExcludes.",
+  },
+  {
+    scope: ["scheduler"],
+    forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
+    reason:
+      "scheduler/** must remain transport-agnostic — durable backends are wired by callers.",
+  },
+  // The executor/ ↔ dag-runtime/ cycle is broken: shared utilities live in
+  // shared/; executor/ wraps dag-runtime/ as the public API layer. The reverse
+  // direction (dag-runtime → executor) would re-introduce the cycle and is
+  // forbidden.
+  {
+    scope: ["dag-runtime"],
+    forbiddenModules: ["../executor"],
+    reason:
+      "dag-runtime/** must not import from executor/** — executor wraps dag-runtime, not the other way. Use shared/ for pure utilities consumed by both.",
+  },
+  // `types/` is the pure domain-type layer. It must not reach into runtime
+  // modules (dag-runtime, shared, executor) — only other types/ files.
+  {
+    scope: ["types"],
+    scopeExcludes: [
+      // The barrel re-exports `computeJsonPatch` from shared/ as part of the
+      // public API surface. The function is pure (no side effects) and lives
+      // in shared/ for historical reasons.
+      "types/index.ts",
+    ],
+    forbiddenModules: ["../dag-runtime", "../shared", "../executor"],
+    reason:
+      "types/** is the pure type layer — must not import runtime or utility modules. Move logic to dag-runtime/ or shared/ instead.",
+  },
+  // `shared/` must stay free of telemetry concerns: the modules that used to
+  // mint spans (`shared/run-node.ts`, `shared/node-span.ts`) moved into
+  // `dag-runtime/` during pass 3. Anything in `shared/` is consumed by both
+  // the executor and the dag-runtime — pulling OTel or observer/tracing
+  // plumbing in here would re-introduce the cycle the move was meant to break.
+  {
+    scope: ["shared"],
+    scopeExcludes: [
+      // `make-node-context.ts` wires the stubs from `./defaults.js` into a
+      // NodeContext factory. `defaults.ts` imports from `../types/` only (no
+      // observer/ or tracing/ dependency). Kept here as documentation — the
+      // file does not actually trigger any rule.
+    ],
+    forbiddenModules: [
+      "@opentelemetry/",
+      "../observer",
+      "../tracing",
+    ],
+    reason:
+      "shared/** must not import OTel, observer/**, or tracing/**. Telemetry-aware helpers belong in dag-runtime/ (the only consumer). NoopObserver now lives in types/observer.ts so shared/ no longer needs the exemption.",
+  },
+  // `types/` is a lower layer consumed by everything above it. It must not
+  // depend on `dag-runtime/` or `executor/` — those are higher layers.
+  {
+    scope: ["types"],
+    forbiddenModules: ["../dag-runtime", "../executor"],
+    reason:
+      "types/ is a lower layer; it must not import from dag-runtime/ or executor/. Pure utilities belong in shared/.",
+  },
+  // Anti-leak: the public main-barrel files and intermediate barrels in
+  // cache/ and checkpoint/ must not pull `ioredis` into their import graph.
+  // The Redis adapter files themselves are exempt; only the `/redis` and
+  // `/bullmq` subpath barrels are permitted entry points.
+  {
+    scope: ["index.ts", "advanced.ts", "testing.ts", "cache", "checkpoint"],
+    scopeExcludes: [
+      "cache/redis-cache.ts",
+      "checkpoint/redis-checkpointer.ts",
+      "checkpoint/redis-freshness-index.ts",
+    ],
+    forbiddenModules: ["ioredis"],
+    reason:
+      "ioredis is reachable only from the `/redis` and `/bullmq` subpath barrels. The main barrel and intermediate cache/, checkpoint/ barrels must stay Redis-free so default-bundle consumers do not pay for it.",
+  },
+];
+
+/** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */
+function inScope(relPath: string, scope: readonly string[]): boolean {
+  return scope.some((entry) => {
+    if (entry.endsWith(".ts")) return relPath === entry;
+    return relPath.startsWith(entry + "/");
+  });
+}
+
+/** True when `relPath` is excluded from the rule via `scopeExcludes` (exact path). */
+function isExcluded(relPath: string, excludes: readonly string[] | undefined): boolean {
+  if (!excludes) return false;
+  return excludes.some((entry) => relPath === entry);
+}
+
+// ---------------------------------------------------------------------------
+// File walking
+// ---------------------------------------------------------------------------
+
+function walkTs(dir: string): string[] {
+  const result: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    const stat = statSync(full);
+    if (stat.isDirectory()) {
+      result.push(...walkTs(full));
+    } else if (entry.endsWith(".ts") && !entry.endsWith(".d.ts")) {
+      result.push(full);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Import extraction — regex-based
+// ---------------------------------------------------------------------------
+
+// Matches:
+//   import ... from "specifier"
+//   import type ... from "specifier"
+//   import("specifier")
+//   import('specifier')
+const IMPORT_RE =
+  /(?:import\s+(?:type\s+)?[^'"]*from\s+|import\s*\()['"]([^'"]+)['"]/g;
+
+// Matches:
+//   export { Foo } from "specifier"
+//   export type { Foo } from "specifier"
+//   export * from "specifier"
+//   export * as ns from "specifier"
+const EXPORT_FROM_RE =
+  /export\s+(?:type\s+)?(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]/g;
+
+// Matches:
+//   require("specifier")
+//   require('specifier')
+const REQUIRE_RE = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+function extractImports(source: string): Array<{ specifier: string; line: number }> {
+  const results: Array<{ specifier: string; line: number }> = [];
+
+  function collectMatches(re: RegExp): void {
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(source)) !== null) {
+      const specifier = match[1];
+      const before = source.slice(0, match.index);
+      const line = before.split("\n").length;
+      results.push({ specifier, line });
+    }
+  }
+
+  collectMatches(IMPORT_RE);
+  collectMatches(EXPORT_FROM_RE);
+  collectMatches(REQUIRE_RE);
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Core check function
+// ---------------------------------------------------------------------------
+
+export function checkImports(srcDir: string): CheckResult {
+  const allFiles = walkTs(srcDir);
+  const violations: Violation[] = [];
+
+  for (const file of allFiles) {
+    const relPath = relative(srcDir, file);
+
+    // Determine which rules apply to this file (in-scope and not explicitly excluded)
+    const applicableRules = RULES.filter(
+      (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
+    );
+
+    if (applicableRules.length === 0) continue;
+
+    const source = readFileSync(file, "utf-8");
+    const imports = extractImports(source);
+
+    for (const { specifier, line } of imports) {
+      for (const rule of applicableRules) {
+        const isForbidden = rule.forbiddenModules.some(
+          (mod) =>
+            // Trailing-slash entries are interpreted as namespace prefixes
+            // (e.g., `@opentelemetry/`); bare entries match exact + child.
+            mod.endsWith("/")
+              ? specifier === mod.slice(0, -1) || specifier.startsWith(mod)
+              : specifier === mod || specifier.startsWith(mod + "/"),
+        );
+        if (isForbidden) {
+          violations.push({ file: relPath, line, importSpecifier: specifier });
+        }
+      }
+    }
+  }
+
+  return { violations };
+}
+

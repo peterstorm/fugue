@@ -1,0 +1,43 @@
+{
+  "customerId": "cust-013",
+  "name": "Maria Santos",
+  "phone": "+1-555-1313",
+  "accountType": "personal",
+  "createdAt": "2024-01-01T00:00:00Z",
+  "conversations": [
+    {
+      "id": "conv-013a",
+      "date": "2024-03-15",
+      "channel": "email",
+      "agent": "Uma",
+      "messages": [
+        {
+          "role": "customer",
+          "content": "I've been waiting 2 weeks for a response to my support ticket #TK-4401. This is unacceptable.",
+          "timestamp": "2024-03-15T11:00:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "I apologize for the delay. We had a backlog. Let me look into your ticket now.",
+          "timestamp": "2024-03-15T11:30:00Z"
+        },
+        {
+          "role": "customer",
+          "content": "Two weeks is not a 'backlog', it's negligence. I expected better.",
+          "timestamp": "2024-03-15T11:35:00Z"
+        },
+        {
+          "role": "agent",
+          "content": "You're right, and I'm sorry. The issue in your ticket has been resolved. I've also flagged your account for priority support going forward.",
+          "timestamp": "2024-03-15T11:45:00Z"
+        }
+      ],
+      "resolution": "Ticket resolved, priority support added",
+      "tags": [
+        "support",
+        "delay",
+        "complaint"
+      ]
+    }
+  ]
+}
