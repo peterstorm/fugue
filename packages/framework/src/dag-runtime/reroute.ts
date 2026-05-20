@@ -89,7 +89,7 @@ export const enrichHumanRespondedEvent = (
   | { readonly kind: "ok"; readonly event: DagEvent }
   | { readonly kind: "err"; readonly nodeId: NodeId; readonly error: FrameworkError } => {
   if (event.type !== "human-responded") return { kind: "ok", event };
-  if (event.action.action !== "reroute") {
+  if (event.action.kind !== "reroute") {
     // Non-reroute actions need no enrichment; rebuild explicitly so the
     // narrowed `action` type satisfies the non-reroute `DagEvent` variant.
     return {

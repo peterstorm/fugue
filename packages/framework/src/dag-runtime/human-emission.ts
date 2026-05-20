@@ -53,15 +53,15 @@ export const emitHumanIntervention = (
   }
 
   const detailed: HumanActionDetailed = match(action)
-    .with({ action: "approve" }, () => ({ kind: "approve" as const }))
-    .with({ action: "approve-with-edit" }, (a) => ({
+    .with({ kind: "approve" }, () => ({ kind: "approve" as const }))
+    .with({ kind: "approve-with-edit" }, (a) => ({
       kind: "approve-with-edit" as const,
       originalOutput: phase.output,
       replacedOutput: a.newOutput,
       diff: computeJsonPatch(phase.output, a.newOutput),
     }))
-    .with({ action: "reject" }, (a) => ({ kind: "reject" as const, reason: a.reason }))
-    .with({ action: "reroute" }, (a) => ({
+    .with({ kind: "reject" }, (a) => ({ kind: "reject" as const, reason: a.reason }))
+    .with({ kind: "reroute" }, (a) => ({
       kind: "reroute" as const,
       targetNodeId: a.targetNodeId,
       ...(a.reason !== undefined ? { reason: a.reason } : {}),

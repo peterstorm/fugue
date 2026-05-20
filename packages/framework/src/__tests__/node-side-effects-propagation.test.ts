@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 1 test — node side-effects propagation.
  *
@@ -61,7 +62,7 @@ describe("node side-effects propagation (Phase 1)", () => {
 
   it("sideEffects: { kind: 'reads', resource: 'postgres:orders' } propagates", async () => {
     const observer = new RecordingObserver();
-    const profile: SideEffectProfile = { kind: "reads", resource: "postgres:orders" };
+    const profile: SideEffectProfile = { kind: "reads", resource: RN("postgres:orders") };
     const node: NodeDef<unknown, unknown> = {
       id: N("reader"),
       kind: "fetch",
@@ -81,7 +82,7 @@ describe("node side-effects propagation (Phase 1)", () => {
 
   it("sideEffects: { kind: 'writes' } appears on node-error events", async () => {
     const observer = new RecordingObserver();
-    const profile: SideEffectProfile = { kind: "writes", resource: "postgres:refunds" };
+    const profile: SideEffectProfile = { kind: "writes", resource: RN("postgres:refunds") };
     const node: NodeDef<unknown, unknown> = {
       id: N("writer"),
       kind: "transform",
@@ -109,7 +110,7 @@ describe("node side-effects propagation (Phase 1)", () => {
     let callCount = 0;
     const profile: SideEffectProfile = {
       kind: "writes",
-      resource: "stripe:charges",
+      resource: RN("stripe:charges"),
       idempotencyKey: (input) => {
         callCount++;
         return `idem-${(input as { id: string }).id}`;
@@ -136,7 +137,7 @@ describe("node side-effects propagation (Phase 1)", () => {
 
   it("external-call sideEffects propagates resource and kind", async () => {
     const observer = new RecordingObserver();
-    const profile: SideEffectProfile = { kind: "external-call", resource: "openai:gpt-4" };
+    const profile: SideEffectProfile = { kind: "external-call", resource: RN("openai:gpt-4") };
     const node: NodeDef<unknown, unknown> = {
       id: N("llm-call"),
       kind: "llm",

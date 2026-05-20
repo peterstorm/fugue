@@ -80,9 +80,9 @@ describe("conditional edges — reroute", () => {
       // router's next call will return {kind: "yes"} and the "no" branch should
       // be pruned, so we should never see this hook fire again.
       if (onHumanReviewCalls === 1) {
-        return { action: "reroute", targetNodeId: N("router") };
+        return { kind: "reroute", targetNodeId: N("router") };
       }
-      return { action: "approve" };
+      return { kind: "approve" };
     };
 
     // Start with router emitting "no" so we land in awaiting-human, then

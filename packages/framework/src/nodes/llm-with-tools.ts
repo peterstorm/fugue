@@ -4,6 +4,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
+import { resourceName } from "../types/freshness.js";
 import { stableHash } from "../shared/hash.js";
 import { nodeId } from "../types/ids.js";
 import { runLlmCallPipeline } from "./llm-pipeline.js";
@@ -75,7 +76,7 @@ export const createLlmWithToolsNode = <I, O>(
   inputSchema: config.inputSchema,
   outputSchema: config.outputSchema,
   requires: ["llm"] as const,
-  sideEffects: { kind: "external-call", resource: `llm:${config.model}` },
+  sideEffects: { kind: "external-call", resource: resourceName(`llm:${config.model}`) },
   confidence: { mode: "none" },
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     if (config.skipWhen?.(input)) {

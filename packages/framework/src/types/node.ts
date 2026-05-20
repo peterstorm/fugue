@@ -238,7 +238,7 @@ export interface NodeDef<
    * `resource` is mandatory for all kinds except `"none"` and names the logical
    * resource (e.g. `"postgres:orders"`, `"stripe:charges"`).
    */
-  readonly sideEffects: SideEffectProfile;
+  readonly sideEffects: SideEffectProfile<I, O>;
   /**
    * Confidence extraction mode. Declares how this node produces a confidence
    * signal for downstream routing decisions.

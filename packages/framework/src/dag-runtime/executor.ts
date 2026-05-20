@@ -51,7 +51,7 @@ const validateApproveEdit = (
   nodeId: NodeId,
   nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
 ): string | null => {
-  if (action.action !== "approve-with-edit") return null;
+  if (action.kind !== "approve-with-edit") return null;
   const nodeDef = nodeMap.get(nodeId);
   if (!nodeDef) {
     return `approve-with-edit: node '${nodeId}' not found in DAG`;

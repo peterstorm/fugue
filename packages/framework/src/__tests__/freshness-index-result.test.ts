@@ -1,3 +1,4 @@
+import { resourceName, witness, RN } from "./_freshness-helpers.js";
 /**
  * Tests for the FreshnessIndex Result-typed interface.
  *
@@ -14,11 +15,8 @@ import type { WriteAttemptedEvent } from "../types/events.js";
 import type { Witness } from "../types/freshness.js";
 import { isOk, unwrap } from "../types/result.js";
 
-const mkWitness = (resource: string, value: string): Witness => ({
-  kind: "version",
-  resource,
-  value,
-});
+const mkWitness = (resource: string, value: string): Witness =>
+  witness("version", resource, value);
 
 const mkWriteEvent = (
   runId: string,

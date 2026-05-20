@@ -297,7 +297,7 @@ describe("dagTransition — running", () => {
   });
 
   it("other events while running => no-op", () => {
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(running(0), event, makeCtx());
     expect(result.state).toEqual(running(0));
   });
@@ -359,7 +359,7 @@ describe("dagTransition — retrying", () => {
 describe("dagTransition — awaiting-human (FR-028)", () => {
   it("human-responded for wrong node id => no-op", () => {
     const phase = awaitingHuman("a");
-    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, makeCtx());
     expect(result.state).toEqual(phase);
   });
@@ -380,7 +380,7 @@ describe("dagTransition — approve (FR-029)", () => {
   it("approve with no pending reviews => advance to next wave", () => {
     const phase = awaitingHuman("a", [], 0);
     const ctx = makeCtx({ outputs: new Map([["a", "a-out"]]) as any });
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
   });
@@ -399,7 +399,7 @@ describe("dagTransition — approve (FR-029)", () => {
       outputs: new Map([["a", "a-out"], ["b", "b-out"]]) as any,
     });
     const phase = awaitingHuman("a", ["b"], 0);
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({ kind: "awaiting-human", nodeId: "b" as NodeId, pendingReviews: [] });
   });
@@ -407,7 +407,7 @@ describe("dagTransition — approve (FR-029)", () => {
   it("approve on last wave => succeeded", () => {
     const ctx = makeCtx({ waves: [[N("a")]], outputs: new Map([["a", "output"]]) as any });
     const phase = awaitingHuman("a", [], 0);
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, ctx);
     expect(result.state.kind).toBe("succeeded");
   });
@@ -421,7 +421,7 @@ describe("dagTransition — approve-with-edit (FR-029)", () => {
   it("approve-with-edit replaces node output and advances", () => {
     const ctx = makeCtx({ outputs: new Map([["a", "original"]]) as any });
     const phase = awaitingHuman("a", [], 0);
-    const action: HumanAction = { action: "approve-with-edit", newOutput: "edited" };
+    const action: HumanAction = { kind: "approve-with-edit", newOutput: "edited" };
     const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action };
     const result = dagTransition(phase, event, ctx);
     expect(result.context.outputs.get(N("a"))).toBe(N("edited"));
@@ -442,7 +442,7 @@ describe("dagTransition — approve-with-edit (FR-029)", () => {
       outputs: new Map([["a", "a-out"], ["b", "b-out"]]) as any,
     });
     const phase = awaitingHuman("a", ["b"], 0);
-    const action: HumanAction = { action: "approve-with-edit", newOutput: "edited-a" };
+    const action: HumanAction = { kind: "approve-with-edit", newOutput: "edited-a" };
     const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action };
     const result = dagTransition(phase, event, ctx);
     expect(result.context.outputs.get(N("a"))).toBe(N("edited-a"));
@@ -457,7 +457,7 @@ describe("dagTransition — approve-with-edit (FR-029)", () => {
 describe("dagTransition — reject (FR-030)", () => {
   it("reject => failed with rejected error carrying reason and nodeId", () => {
     const phase = awaitingHuman("a", [], 0);
-    const action: HumanAction = { action: "reject", reason: "not good enough" };
+    const action: HumanAction = { kind: "reject", reason: "not good enough" };
     const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action };
     const result = dagTransition(phase, event, makeCtx());
     expect(result.state).toMatchObject({
@@ -479,7 +479,7 @@ describe("dagTransition — reroute backward (FR-031)", () => {
     });
     // We're awaiting-human after wave 2
     const phase = awaitingHuman("c", [], 2);
-    const action = { action: "reroute" as const, targetNodeId: N("b") };
+    const action = { kind: "reroute" as const, targetNodeId: N("b") };
     const event: DagEvent = { type: "human-responded", nodeId: "c" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
 
@@ -497,7 +497,7 @@ describe("dagTransition — reroute backward (FR-031)", () => {
       outputs: new Map([["a", "a-out"], ["b", "b-out"]]) as any,
     });
     const phase = awaitingHuman("b", [], 1); // currently in wave 1
-    const action = { action: "reroute" as const, targetNodeId: N("b") }; // reroute to same wave
+    const action = { kind: "reroute" as const, targetNodeId: N("b") }; // reroute to same wave
     const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
@@ -513,7 +513,7 @@ describe("dagTransition — reroute forward invalid (FR-032)", () => {
     const ctx = makeCtx({ waves: [[N("a")], [N("b")], [N("c")]] });
     // Awaiting human at wave 0
     const phase = awaitingHuman("a", [], 0);
-    const action = { action: "reroute" as const, targetNodeId: N("c") }; // c is in wave 2
+    const action = { kind: "reroute" as const, targetNodeId: N("c") }; // c is in wave 2
     const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({
@@ -525,7 +525,7 @@ describe("dagTransition — reroute forward invalid (FR-032)", () => {
   it("reroute to unknown node => failed with invalid-reroute", () => {
     const ctx = makeCtx();
     const phase = awaitingHuman("a", [], 0);
-    const action = { action: "reroute" as const, targetNodeId: N("nonexistent") };
+    const action = { kind: "reroute" as const, targetNodeId: N("nonexistent") };
     const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({
@@ -663,28 +663,28 @@ describe("handleHumanResponse", () => {
   it("approve advances wave", () => {
     const ctx = makeCtx({ outputs: new Map([["a", "out"]]) as any });
     const state = awaitingHuman("a", [], 0);
-    const result = handleHumanResponse(state, { action: "approve" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve" }, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
   });
 
   it("approve-with-edit updates output then advances", () => {
     const ctx = makeCtx({ outputs: new Map([["a", "old"]]) as any });
     const state = awaitingHuman("a", [], 0);
-    const result = handleHumanResponse(state, { action: "approve-with-edit", newOutput: "new" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve-with-edit", newOutput: "new" }, ctx);
     expect(result.context.outputs.get(N("a"))).toBe(N("new"));
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
   });
 
   it("reject => failed with rejected error", () => {
     const state = awaitingHuman("a", [], 0);
-    const result = handleHumanResponse(state, { action: "reject", reason: "bad" }, makeCtx());
+    const result = handleHumanResponse(state, { kind: "reject", reason: "bad" }, makeCtx());
     expect(result.state).toMatchObject({ kind: "failed", error: { kind: "rejected" } });
   });
 
   it("reroute backward => running at target wave", () => {
     const ctx = makeCtx({ waves: [[N("a")], [N("b")], [N("c")]], outputs: new Map([["a", "out"], ["b", "b"], ["c", "c"]]) as any });
     const state = awaitingHuman("c", [], 2);
-    const result = handleHumanResponse(state, { action: "reroute", targetNodeId: N("a") }, ctx);
+    const result = handleHumanResponse(state, { kind: "reroute", targetNodeId: N("a") }, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 0 });
     expect(result.context.outputs.has(N("a"))).toBe(false); // all cleared from wave 0+
   });
@@ -692,7 +692,7 @@ describe("handleHumanResponse", () => {
   it("reroute forward => failed with invalid-reroute", () => {
     const ctx = makeCtx({ waves: [[N("a")], [N("b")], [N("c")]] });
     const state = awaitingHuman("a", [], 0);
-    const result = handleHumanResponse(state, { action: "reroute", targetNodeId: N("c") }, ctx);
+    const result = handleHumanResponse(state, { kind: "reroute", targetNodeId: N("c") }, ctx);
     expect(result.state).toMatchObject({ kind: "failed", error: { kind: "invalid-reroute" } });
   });
 });
@@ -1049,7 +1049,7 @@ describe("dagTransition — full round-trip", () => {
     currentCtx = r.context;
 
     // human approves => succeeded (single-wave DAG)
-    r = dagTransition(phase, { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } }, currentCtx);
+    r = dagTransition(phase, { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } }, currentCtx);
     expect(r.state.kind).toBe("succeeded");
   });
 });
@@ -1190,7 +1190,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
   it("retrying-hook + human-responded approve => resolves (no pending reviews => next wave)", () => {
     const ctx = makeCtx({ outputs: new Map([["a", { result: "preserved-output" }]]) as any });
     const phase = retryingHookPhase(1, [], 0);
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, ctx);
 
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
@@ -1202,7 +1202,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
     const event: DagEvent = {
       type: "human-responded",
       nodeId: "a" as NodeId,
-      action: { action: "reject", reason: "still not good" },
+      action: { kind: "reject", reason: "still not good" },
     };
     const result = dagTransition(phase, event, ctx);
 
@@ -1226,7 +1226,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
       outputs: new Map([["a", "a-out"], ["b", "b-out"]]) as any,
     });
     const phase = retryingHookPhase(1, ["b"], 0);
-    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, ctx);
 
     expect(result.state).toMatchObject({ kind: "awaiting-human", nodeId: "b" as NodeId });
@@ -1273,7 +1273,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
   it("retrying-hook + human-responded for wrong nodeId => no-op", () => {
     const ctx = makeCtx();
     const phase = retryingHookPhase(1);
-    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action: { action: "approve" } };
+    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action: { kind: "approve" } };
     const result = dagTransition(phase, event, ctx);
 
     expect(result.state).toEqual(phase);
@@ -1285,7 +1285,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
     const event: DagEvent = {
       type: "human-responded",
       nodeId: "a" as NodeId,
-      action: { action: "approve-with-edit", newOutput: "edited" },
+      action: { kind: "approve-with-edit", newOutput: "edited" },
     };
     const result = dagTransition(phase, event, ctx);
 

@@ -21,13 +21,68 @@ export type WitnessKind =
   | "idempotency-key"  // request-scoped (Stripe, Plaid)
   | "custom";
 
-export interface Witness {
+// ---------------------------------------------------------------------------
+// ResourceName — branded type shared by Witness and SideEffectProfile
+// ---------------------------------------------------------------------------
+
+declare const __resourceNameBrand: unique symbol;
+
+/**
+ * Branded resource identifier shared between `SideEffectProfile.resource`
+ * and `Witness.resource`. Ensures compile-time cross-referencing: a Witness
+ * produced by `extractWitness` must name the same resource as the node's
+ * `sideEffects.resource`.
+ *
+ * Valid resource names are non-empty strings following the convention
+ * `system:entity[:id]` (e.g. `"postgres:orders"`, `"stripe:charges:ch_123"`).
+ */
+export type ResourceName = string & { readonly [__resourceNameBrand]: void };
+
+/** Smart constructor for ResourceName. Validates non-empty. */
+export const resourceName = (name: string): ResourceName => {
+  if (!name) {
+    throw new Error("ResourceName must be non-empty");
+  }
+  return name as ResourceName;
+};
+
+/** @internal — bypass validation for deserialization/test fixtures. */
+export const __brandResourceName = (name: string): ResourceName => name as ResourceName;
+
+declare const __witnessBrand: unique symbol;
+
+export type Witness = {
   readonly kind: WitnessKind;
   /** Must match `NodeDef.sideEffects.resource` for framework cross-referencing. */
-  readonly resource: string;
+  readonly resource: ResourceName;
   /** Opaque to the framework — never parsed or compared beyond string equality. */
   readonly value: string;
-}
+} & { readonly [__witnessBrand]: void };
+
+/** Smart constructor — validates non-empty resource and value. */
+export const witness = (
+  kind: WitnessKind,
+  resource: string,
+  value: string,
+): Witness => {
+  if (!resource) {
+    throw new Error("Witness resource must be non-empty");
+  }
+  if (!value) {
+    throw new Error("Witness value must be non-empty");
+  }
+  return { kind, resource: resource as ResourceName, value } as Witness;
+};
+
+/**
+ * @internal — Bypass validation for trusted internal code (deserialization,
+ * replay, test fixtures). NOT part of the public API.
+ */
+export const __brandWitness = (w: {
+  kind: WitnessKind;
+  resource: string;
+  value: string;
+}): Witness => w as Witness;
 
 // ---------------------------------------------------------------------------
 // FreshnessIndex port + supporting types

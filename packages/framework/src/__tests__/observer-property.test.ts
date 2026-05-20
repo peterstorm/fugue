@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 import { describe, it, expect } from "bun:test";
 import fc from "fast-check";
 import { RecordingObserver, createObserver } from "../observer/observer.js";
@@ -35,18 +36,18 @@ const arbEventType: fc.Arbitrary<ObserverEvent> = fc.oneof(
   fc.constant<ObserverEvent>({ type: "node-pruned", runId: rid, dagId: did, nodeId: nid, reason: "branch-not-taken", timestamp: ts }),
   fc.constant<ObserverEvent>({
     type: "witness-captured", runId: rid, dagId: did, nodeId: nid,
-    witness: { kind: "version", resource: "r", value: "1" }, capturedAtMs: 0, timestamp: ts,
+    witness: witness("version", "r", "1"), capturedAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({
     type: "write-attempted", runId: rid, dagId: did, nodeId: nid,
-    conditionedOn: { kind: "version", resource: "r", value: "1" },
-    newWitness: { kind: "version", resource: "r", value: "2" },
+    conditionedOn: witness("version", "r", "1"),
+    newWitness: witness("version", "r", "2"),
     succeededAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({
     type: "freshness-violation", runId: rid, dagId: did, nodeId: nid,
-    resource: "r", conditionedOnWitness: { kind: "version", resource: "r", value: "1" },
-    conflictingWrite: { runId: rid, nodeId: nid, newWitness: { kind: "version", resource: "r", value: "2" }, succeededAtMs: 0 },
+    resource: RN("r"), conditionedOnWitness: witness("version", "r", "1"),
+    conflictingWrite: { runId: rid, nodeId: nid, newWitness: witness("version", "r", "2"), succeededAtMs: 0 },
     detectedAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({

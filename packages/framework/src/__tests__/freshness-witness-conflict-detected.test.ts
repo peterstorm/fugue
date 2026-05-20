@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness witness: conflict detected.
  *
@@ -50,7 +51,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ newVersion: z.number() }),
       requires: [],
-      sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: () => ({ kind: "version", resource: "postgres:orders", value: "42" }), extractNewWitness: (output: any) => ({ kind: "version", resource: "postgres:orders", value: String(output.newVersion) }) },
+      sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: () => (witness("version", "postgres:orders", "42")), extractNewWitness: (output: any) => witness("version", "postgres:orders", String(output.newVersion)) },
       confidence: { mode: "none" },
       run: async () => ok({ newVersion: 43 }),
     };
@@ -85,7 +86,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ newVersion: z.number() }),
       requires: [],
-      sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: () => ({ kind: "version", resource: "postgres:orders", value: "42" }), extractNewWitness: (output: any) => ({ kind: "version", resource: "postgres:orders", value: String(output.newVersion) }) },
+      sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: () => (witness("version", "postgres:orders", "42")), extractNewWitness: (output: any) => witness("version", "postgres:orders", String(output.newVersion)) },
       confidence: { mode: "none" },
       run: async () => ok({ newVersion: 44 }),
     };
@@ -129,7 +130,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ newVersion: z.number() }),
       requires: [],
-      sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: () => ({ kind: "version", resource: "postgres:orders", value: "42" }), extractNewWitness: () => ({ kind: "version", resource: "postgres:orders", value: "43" }) },
+      sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: () => (witness("version", "postgres:orders", "42")), extractNewWitness: () => (witness("version", "postgres:orders", "43")) },
       confidence: { mode: "none" },
       run: async () => ok({ newVersion: 43 }),
     };
@@ -151,7 +152,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ newVersion: z.number() }),
       requires: [],
-      sideEffects: { kind: "writes", resource: "postgres:orders", extractConditionedOn: () => ({ kind: "version", resource: "postgres:orders", value: "43" }), extractNewWitness: () => ({ kind: "version", resource: "postgres:orders", value: "44" }) },
+      sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: () => (witness("version", "postgres:orders", "43")), extractNewWitness: () => (witness("version", "postgres:orders", "44")) },
       confidence: { mode: "none" },
       run: async () => ok({ newVersion: 44 }),
     };

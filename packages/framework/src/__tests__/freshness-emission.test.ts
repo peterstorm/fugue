@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 import { describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
 import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";
@@ -89,7 +90,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits witness-captured for reads node with extractWitness", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: (output: unknown) => ({ kind: "version", resource: "pg:orders", value: String((output as { version: number }).version) }) },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: (output: unknown) => witness("version", "pg:orders", String((output as { version: number }).version)) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, { version: 42 }]]);
@@ -100,14 +101,14 @@ describe("emitFreshnessWitnessEvents", () => {
 
     const captured = obs.events.filter((e) => e.type === "witness-captured") as WitnessCapturedEvent[];
     expect(captured).toHaveLength(1);
-    expect(captured[0]!.witness.resource).toBe("pg:orders");
+    expect(captured[0]!.witness.resource).toBe(RN("pg:orders"));
     expect(captured[0]!.witness.value).toBe("42");
   });
 
   it("emits write-attempted for writes node with both extractors", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: "pg:orders", extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "42" }), extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "43" }) },
+      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witness("version", "pg:orders", "43")) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -128,7 +129,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits freshness-violation when conflict detected", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: "pg:orders", extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "42" }), extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "44" }) },
+      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witness("version", "pg:orders", "44")) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -142,8 +143,8 @@ describe("emitFreshnessWitnessEvents", () => {
       runId: runId("other-run"),
       dagId: DID,
       nodeId: nodeId("other-writer"),
-      conditionedOn: { kind: "version", resource: "pg:orders", value: "41" },
-      newWitness: { kind: "version", resource: "pg:orders", value: "43" },
+      conditionedOn: witness("version", "pg:orders", "41"),
+      newWitness: witness("version", "pg:orders", "43"),
       succeededAtMs: Date.now() - 1000,
       timestamp: new Date(),
     });
@@ -160,7 +161,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("does not emit events for nodes without extractors", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders" },
+      sideEffects: { kind: "reads", resource: RN("pg:orders") },
       // No extractWitness
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
@@ -176,7 +177,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("skips freshness events for skipped nodes", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => ({ kind: "version", resource: "pg:orders", value: "1" }) },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => (witness("version", "pg:orders", "1")) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -192,7 +193,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("returns Err when extractor throws (fail-closed)", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => { throw new Error("broken"); } },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => { throw new Error("broken"); } },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -228,7 +229,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("populates witness accumulator map by resource", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: "pg:orders", extractWitness: () => ({ kind: "version", resource: "pg:orders", value: "99" }) },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => (witness("version", "pg:orders", "99")) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -247,9 +248,9 @@ describe("emitFreshnessWitnessEvents", () => {
     const writeNode = makeNodeDef("write-node", {
       sideEffects: {
         kind: "writes",
-        resource: "pg:orders",
-        extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "1" }),
-        extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "2" }),
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => (witness("version", "pg:orders", "1")),
+        extractNewWitness: () => (witness("version", "pg:orders", "2")),
       },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
@@ -279,9 +280,9 @@ describe("emitFreshnessWitnessEvents", () => {
     const writeNode = makeNodeDef("write-node", {
       sideEffects: {
         kind: "writes",
-        resource: "pg:orders",
+        resource: RN("pg:orders"),
         extractConditionedOn: () => { throw new Error("broken extractor"); },
-        extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "2" }),
+        extractNewWitness: () => (witness("version", "pg:orders", "2")),
       },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
@@ -307,9 +308,9 @@ describe("emitFreshnessWitnessEvents", () => {
     const writeNode = makeNodeDef("write-node", {
       sideEffects: {
         kind: "writes",
-        resource: "pg:orders",
-        extractConditionedOn: () => ({ kind: "version", resource: "pg:orders", value: "1" }),
-        extractNewWitness: () => ({ kind: "version", resource: "pg:orders", value: "2" }),
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => (witness("version", "pg:orders", "1")),
+        extractNewWitness: () => (witness("version", "pg:orders", "2")),
       },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);

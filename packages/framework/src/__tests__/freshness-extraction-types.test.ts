@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness extraction type-level assertions.
  *
@@ -23,10 +24,10 @@ describe("freshness extraction types (Phase 3)", () => {
   test("reads sideEffects with extractWitness compiles — extractor receives output type", () => {
     const se: SideEffectProfile = {
       kind: "reads",
-      resource: "postgres:orders",
+      resource: RN("postgres:orders"),
       extractWitness: (output: any) => {
         const v: number = output.version;
-        return { kind: "version", resource: "postgres:orders", value: String(v) };
+        return witness("version", "postgres:orders", String(v));
       },
     };
     const node: NodeDef<unknown, { version: number; data: string }> = {
@@ -51,14 +52,14 @@ describe("freshness extraction types (Phase 3)", () => {
   test("writes sideEffects with both extractors compiles", () => {
     const se: SideEffectProfile = {
       kind: "writes",
-      resource: "postgres:orders",
+      resource: RN("postgres:orders"),
       extractConditionedOn: (input: any) => {
         const v: number = input.version;
-        return { kind: "version", resource: "postgres:orders", value: String(v) };
+        return witness("version", "postgres:orders", String(v));
       },
       extractNewWitness: (output: any) => {
         const v: number = output.newVersion;
-        return { kind: "version", resource: "postgres:orders", value: String(v) };
+        return witness("version", "postgres:orders", String(v));
       },
     };
     const node: NodeDef<{ version: number }, { newVersion: number }> = {
@@ -86,17 +87,13 @@ describe("freshness extraction types (Phase 3)", () => {
   test("reads extractWitness return type must be Witness", () => {
     const se: Extract<SideEffectProfile, { kind: "reads" }> = {
       kind: "reads",
-      resource: "test",
-      extractWitness: (output: any) => ({
-        kind: "version" as const,
-        resource: "test",
-        value: String(output.v),
-      }),
+      resource: RN("test"),
+      extractWitness: (output: any) => witness("version", "test", String(output.v)),
     };
     expect(se.extractWitness).toBeDefined();
     const result = se.extractWitness!({ v: 99 });
     expect(result.kind).toBe("version");
-    expect(result.resource).toBe("test");
+    expect(result.resource).toBe(RN("test"));
     expect(result.value).toBe("99");
   });
 
@@ -117,12 +114,12 @@ describe("freshness extraction types (Phase 3)", () => {
 
   test("WitnessKind covers all expected variants", () => {
     const witnesses: Witness[] = [
-      { kind: "version", resource: "r", value: "1" },
-      { kind: "etag", resource: "r", value: "abc" },
-      { kind: "timestamp", resource: "r", value: "1234567890" },
-      { kind: "lsn", resource: "r", value: "0/1234" },
-      { kind: "idempotency-key", resource: "r", value: "idem-1" },
-      { kind: "custom", resource: "r", value: "custom-val" },
+      witness("version", "r", "1"),
+      witness("etag", "r", "abc"),
+      witness("timestamp", "r", "1234567890"),
+      witness("lsn", "r", "0/1234"),
+      witness("idempotency-key", "r", "idem-1"),
+      witness("custom", "r", "custom-val"),
     ];
     expect(witnesses).toHaveLength(6);
   });

@@ -362,7 +362,7 @@ describe("runDagStateful — HITL approve", () => {
     });
 
     const onHumanReview = mock(
-      async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> => ({ action: "approve" }),
+      async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> => ({ kind: "approve" }),
     );
 
     const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });
@@ -393,7 +393,7 @@ describe("runDagStateful — HITL approve-with-edit", () => {
     });
 
     const onHumanReview = async (_req: any): Promise<HumanAction> => ({
-      action: "approve-with-edit",
+      kind: "approve-with-edit",
       newOutput: "edited-value",
     });
 
@@ -423,7 +423,7 @@ describe("runDagStateful — HITL approve-with-edit", () => {
     });
 
     const onHumanReview = async (_req: any): Promise<HumanAction> => ({
-      action: "approve-with-edit",
+      kind: "approve-with-edit",
       newOutput: { score: "not-a-number" }, // wrong shape
     });
 
@@ -474,8 +474,8 @@ describe("runDagStateful — HITL approve-with-edit", () => {
       call++;
       // First attempt: bad output. Second attempt: valid output.
       return call === 1
-        ? { action: "approve-with-edit", newOutput: { score: "bad" } }
-        : { action: "approve-with-edit", newOutput: { score: 0.9 } };
+        ? { kind: "approve-with-edit", newOutput: { score: "bad" } }
+        : { kind: "approve-with-edit", newOutput: { score: 0.9 } };
     };
 
     const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });
@@ -504,7 +504,7 @@ describe("runDagStateful — HITL reject", () => {
     });
 
     const onHumanReview = async (_req: any): Promise<HumanAction> => ({
-      action: "reject",
+      kind: "reject",
       reason: "not acceptable",
     });
 
@@ -553,10 +553,10 @@ describe("runDagStateful — HITL reroute-back", () => {
       rerouteCount++;
       if (rerouteCount === 1) {
         // First time: reroute back to wave 0 (node "a")
-        return { action: "reroute", targetNodeId: N("a") };
+        return { kind: "reroute", targetNodeId: N("a") };
       }
       // Second time: approve
-      return { action: "approve" };
+      return { kind: "approve" };
     };
 
     const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });
@@ -931,7 +931,7 @@ describe("runDagStateful — sequential human reviews (FR-028)", () => {
 
     const onHumanReview = async (req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> => {
       reviewOrder.push(req.nodeId);
-      return { action: "approve" };
+      return { kind: "approve" };
     };
 
     const result = await runDagStateful(dag, null, makeCtx(), { onHumanReview });
@@ -1101,7 +1101,7 @@ describe("runDagStateful — onHumanReview throws", () => {
       if (hookCallCount < 3) {
         throw new Error(`hook crash #${hookCallCount}`);
       }
-      return { action: "approve" };
+      return { kind: "approve" };
     };
 
     const ctx: NodeContext = { ...makeCtx(), observer };

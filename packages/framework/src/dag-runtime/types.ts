@@ -20,10 +20,10 @@ export const EXECUTOR_NODE_ID: NodeId = nodeId("__executor__");
 // ---------------------------------------------------------------------------
 
 export type HumanAction =
-  | { readonly action: "approve"; readonly actor?: string }
-  | { readonly action: "approve-with-edit"; readonly newOutput: unknown; readonly actor?: string }
-  | { readonly action: "reject"; readonly reason: string; readonly actor?: string }
-  | { readonly action: "reroute"; readonly targetNodeId: NodeId; readonly reason?: string; readonly actor?: string };
+  | { readonly kind: "approve"; readonly actor?: string }
+  | { readonly kind: "approve-with-edit"; readonly newOutput: unknown; readonly actor?: string }
+  | { readonly kind: "reject"; readonly reason: string; readonly actor?: string }
+  | { readonly kind: "reroute"; readonly targetNodeId: NodeId; readonly reason?: string; readonly actor?: string };
 
 // ---------------------------------------------------------------------------
 // DagPhase — state of the DAG machine
@@ -123,12 +123,12 @@ export type DagEvent =
   | {
       readonly type: "human-responded";
       readonly nodeId: NodeId;
-      readonly action: Exclude<HumanAction, { action: "reroute" }>;
+      readonly action: Exclude<HumanAction, { kind: "reroute" }>;
     }
   | {
       readonly type: "human-responded";
       readonly nodeId: NodeId;
-      readonly action: Extract<HumanAction, { action: "reroute" }>;
+      readonly action: Extract<HumanAction, { kind: "reroute" }>;
       /**
        * Precomputed active-node set for reroute actions. The executor computes
        * the reseeded active set (re-evaluating predicates for prior waves) and

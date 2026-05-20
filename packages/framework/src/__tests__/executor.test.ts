@@ -594,7 +594,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     });
 
   const noopReview = async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> =>
-    ({ action: "approve" });
+    ({ kind: "approve" });
 
   it("DAG with humanReview node + onHumanReview hook routes through state-machine path", async () => {
     const dag = mkHitlDag("hitl-dag");
@@ -606,7 +606,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
       prompt: string;
     }): Promise<HumanAction> => {
       hookCalled = true;
-      return { action: "approve" };
+      return { kind: "approve" };
     };
 
     const result = await runDag(dag, {}, mkCtx(), { onHumanReview });

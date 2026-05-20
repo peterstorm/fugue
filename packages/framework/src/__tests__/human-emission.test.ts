@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 import { describe, it, expect } from "bun:test";
 import { emitHumanIntervention } from "../dag-runtime/human-emission.js";
 import { RecordingObserver } from "../observer/observer.js";
@@ -20,7 +21,7 @@ const makeNodeDef = (overrides?: Partial<NodeDef<unknown, unknown>>): NodeDef<un
   outputSchema: z.unknown(),
   requires: [] as const,
   run: async () => ok(null),
-  sideEffects: { kind: "writes", resource: "postgres:orders" },
+  sideEffects: { kind: "writes", resource: RN("postgres:orders") },
   confidence: { mode: "none" },
   ...overrides,
 });
@@ -41,7 +42,7 @@ describe("emitHumanIntervention", () => {
   it("emits approve action", () => {
     const obs = new RecordingObserver();
     const nodeMap = new Map([[NID, makeNodeDef()]]);
-    const action: HumanAction = { action: "approve", actor: "alice" };
+    const action: HumanAction = { kind: "approve", actor: "alice" };
 
     emitHumanIntervention(
       { nodeId: NID, output: { x: 1 } },
@@ -58,7 +59,7 @@ describe("emitHumanIntervention", () => {
   it("emits approve-with-edit with JSON patch diff", () => {
     const obs = new RecordingObserver();
     const nodeMap = new Map([[NID, makeNodeDef()]]);
-    const action: HumanAction = { action: "approve-with-edit", newOutput: { x: 2 } };
+    const action: HumanAction = { kind: "approve-with-edit", newOutput: { x: 2 } };
 
     emitHumanIntervention(
       { nodeId: NID, output: { x: 1 } },
@@ -77,7 +78,7 @@ describe("emitHumanIntervention", () => {
   it("emits reject action with reason", () => {
     const obs = new RecordingObserver();
     const nodeMap = new Map([[NID, makeNodeDef()]]);
-    const action: HumanAction = { action: "reject", reason: "looks wrong" };
+    const action: HumanAction = { kind: "reject", reason: "looks wrong" };
 
     emitHumanIntervention(
       { nodeId: NID, output: {} },
@@ -95,7 +96,7 @@ describe("emitHumanIntervention", () => {
     const obs = new RecordingObserver();
     const targetNid = nodeId("other-node");
     const nodeMap = new Map([[NID, makeNodeDef()]]);
-    const action: HumanAction = { action: "reroute", targetNodeId: targetNid, reason: "try again" };
+    const action: HumanAction = { kind: "reroute", targetNodeId: targetNid, reason: "try again" };
 
     emitHumanIntervention(
       { nodeId: NID, output: {} },
@@ -121,7 +122,7 @@ describe("emitHumanIntervention", () => {
 
     emitHumanIntervention(
       { nodeId: NID, output: {} },
-      { action: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
+      { kind: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
     );
 
     const evt = obs.events.find((e) => e.type === "human-intervention") as HumanInterventionEvent;
@@ -140,7 +141,7 @@ describe("emitHumanIntervention", () => {
 
     const result = emitHumanIntervention(
       { nodeId: NID, output: {} },
-      { action: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
+      { kind: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
     );
 
     expect(result.ok).toBe(false);
@@ -163,7 +164,7 @@ describe("emitHumanIntervention", () => {
 
     const result = emitHumanIntervention(
       { nodeId: NID, output: {} },
-      { action: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
+      { kind: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), [],
     );
 
     expect(result.ok).toBe(false);
@@ -182,16 +183,16 @@ describe("emitHumanIntervention", () => {
     const obs = new RecordingObserver();
     const nodeMap = new Map([[NID, makeNodeDef()]]);
     const witnesses = [
-      { kind: "version" as const, resource: "pg:orders", value: "42" },
+      witness("version", "pg:orders", "42"),
     ];
 
     emitHumanIntervention(
       { nodeId: NID, output: {} },
-      { action: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), witnesses,
+      { kind: "approve" }, nodeMap, makeCtx(obs) as any, DID, Date.now, Date.now(), witnesses,
     );
 
     const evt = obs.events.find((e) => e.type === "human-intervention") as HumanInterventionEvent;
     expect(evt.context.priorWitnesses).toHaveLength(1);
-    expect(evt.context.priorWitnesses[0]!.resource).toBe("pg:orders");
+    expect(evt.context.priorWitnesses[0]!.resource).toBe(RN("pg:orders"));
   });
 });

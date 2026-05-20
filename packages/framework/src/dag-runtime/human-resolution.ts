@@ -21,9 +21,9 @@ export const handleHumanResponse = (
   rerouteActiveSet?: ReadonlySet<NodeId>,
 ): WaveDoneResult =>
   match(action)
-    .with({ action: "approve" }, () => resolveHumanApproved(currentState, ctx))
+    .with({ kind: "approve" }, () => resolveHumanApproved(currentState, ctx))
 
-    .with({ action: "approve-with-edit" }, ({ newOutput }) => {
+    .with({ kind: "approve-with-edit" }, ({ newOutput }) => {
       // Replace the reviewed node's output in the outputs map (FR-029)
       const newOutputs = new Map(ctx.outputs);
       newOutputs.set(currentState.nodeId, newOutput);
@@ -32,7 +32,7 @@ export const handleHumanResponse = (
     })
 
     // FR-030: reject transitions to failed with `rejected` error
-    .with({ action: "reject" }, ({ reason }): WaveDoneResult => ({
+    .with({ kind: "reject" }, ({ reason }): WaveDoneResult => ({
       state: {
         kind: "failed",
         error: {
@@ -44,7 +44,7 @@ export const handleHumanResponse = (
       context: ctx,
     }))
 
-    .with({ action: "reroute" }, ({ targetNodeId }) =>
+    .with({ kind: "reroute" }, ({ targetNodeId }) =>
       handleReroute(currentState, targetNodeId, ctx, rerouteActiveSet),
     )
 

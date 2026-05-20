@@ -79,7 +79,7 @@ describe("handleHumanResponse — approve", () => {
       dag: { id: D("test"), nodes: [], edges: [], outputNodeId: N("b") } as unknown as DagDef,
     });
     const state = mkAwaitingHuman("a");
-    const action: HumanAction = { action: "approve" };
+    const action: HumanAction = { kind: "approve" };
     const result = handleHumanResponse(state, action, ctx);
     expect(result.state.kind).toBe("running");
     if (result.state.kind === "running") {
@@ -98,7 +98,7 @@ describe("handleHumanResponse — approve", () => {
       dag: { id: D("test"), nodes: [], edges: [], outputNodeId: N("a") } as unknown as DagDef,
     });
     const state = mkAwaitingHuman("a");
-    const result = handleHumanResponse(state, { action: "approve" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve" }, ctx);
     expect(result.state.kind).toBe("succeeded");
     if (result.state.kind === "succeeded") {
       expect(result.state.output).toBe("A");
@@ -124,7 +124,7 @@ describe("handleHumanResponse — approve-with-edit", () => {
     const state = mkAwaitingHuman("a", { output: "original" });
     const result = handleHumanResponse(
       state,
-      { action: "approve-with-edit", newOutput: "edited" },
+      { kind: "approve-with-edit", newOutput: "edited" },
       ctx,
     );
     expect(result.state.kind).toBe("succeeded");
@@ -148,7 +148,7 @@ describe("handleHumanResponse — reject", () => {
     const state = mkAwaitingHuman("a");
     const result = handleHumanResponse(
       state,
-      { action: "reject", reason: "bad quality" },
+      { kind: "reject", reason: "bad quality" },
       ctx,
     );
     expect(result.state.kind).toBe("failed");
@@ -187,7 +187,7 @@ describe("handleHumanResponse — reroute backward", () => {
     const state = mkAwaitingHuman("b", { wave: 1 });
     const result = handleHumanResponse(
       state,
-      { action: "reroute", targetNodeId: N("a") },
+      { kind: "reroute", targetNodeId: N("a") },
       ctx,
     );
     expect(result.state.kind).toBe("running");
@@ -223,7 +223,7 @@ describe("handleHumanResponse — reroute backward", () => {
     const state = mkAwaitingHuman("c", { wave: 2 });
     const result = handleHumanResponse(
       state,
-      { action: "reroute", targetNodeId: N("b") },
+      { kind: "reroute", targetNodeId: N("b") },
       ctx,
     );
     expect(result.state.kind).toBe("running");
@@ -251,7 +251,7 @@ describe("handleHumanResponse — reroute forward (invalid)", () => {
     const state = mkAwaitingHuman("a", { wave: 0 });
     const result = handleHumanResponse(
       state,
-      { action: "reroute", targetNodeId: N("c") },
+      { kind: "reroute", targetNodeId: N("c") },
       ctx,
     );
     expect(result.state.kind).toBe("failed");
@@ -273,7 +273,7 @@ describe("handleHumanResponse — reroute forward (invalid)", () => {
     const state = mkAwaitingHuman("a", { wave: 0 });
     const result = handleHumanResponse(
       state,
-      { action: "reroute", targetNodeId: N("nonexistent") },
+      { kind: "reroute", targetNodeId: N("nonexistent") },
       ctx,
     );
     expect(result.state.kind).toBe("failed");
@@ -305,7 +305,7 @@ describe("handleHumanResponse — pending reviews", () => {
       dag: { id: D("test"), nodes: [], edges: [], outputNodeId: N("b") } as unknown as DagDef,
     });
     const state = mkAwaitingHuman("a", { pendingReviews: ["b"] });
-    const result = handleHumanResponse(state, { action: "approve" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve" }, ctx);
     expect(result.state.kind).toBe("awaiting-human");
     if (result.state.kind === "awaiting-human") {
       expect(result.state.nodeId).toBe(N("b"));
@@ -328,7 +328,7 @@ describe("handleHumanResponse — pending reviews", () => {
     });
     // No pending reviews left — this is the last one
     const state = mkAwaitingHuman("a", { pendingReviews: [] });
-    const result = handleHumanResponse(state, { action: "approve" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve" }, ctx);
     expect(result.state.kind).toBe("running");
     if (result.state.kind === "running") {
       expect(result.state.wave).toBe(1);
@@ -349,7 +349,7 @@ describe("handleHumanResponse — pending reviews", () => {
       dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
     });
     const state = mkAwaitingHuman("a", { pendingReviews: ["b"] });
-    const result = handleHumanResponse(state, { action: "approve" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve" }, ctx);
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed") {
       expect(result.state.error.kind).toBe("node-crash");
@@ -371,7 +371,7 @@ describe("handleHumanResponse — pending reviews", () => {
       dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
     });
     const state = mkAwaitingHuman("a", { pendingReviews: ["b"] });
-    const result = handleHumanResponse(state, { action: "approve" }, ctx);
+    const result = handleHumanResponse(state, { kind: "approve" }, ctx);
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed") {
       expect(result.state.error.kind).toBe("node-crash");

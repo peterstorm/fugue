@@ -1,3 +1,4 @@
+import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 // Phase 4 — HumanInterventionEvent tests
 // Verifies that `HumanInterventionEvent` is emitted via the observer for each
 // human-action variant, with correct fields (actor, action, context, elapsedMs).
@@ -73,7 +74,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
@@ -93,7 +94,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const, actor: "alice" }),
+      onHumanReview: async () => ({ kind: "approve" as const, actor: "alice" }),
     });
 
     expect(result.ok).toBe(true);
@@ -119,7 +120,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
 
     const result = await runDagStateful(dag, null, ctx, {
       onHumanReview: async () => ({
-        action: "approve-with-edit" as const,
+        kind: "approve-with-edit" as const,
         newOutput: { data: "edited" },
       }),
     });
@@ -148,7 +149,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
 
     const result = await runDagStateful(dag, "hello", ctx, {
       onHumanReview: async () => ({
-        action: "reject" as const,
+        kind: "reject" as const,
         reason: "bad output",
       }),
     });
@@ -183,9 +184,9 @@ describe("Phase 4 — HumanInterventionEvent", () => {
       onHumanReview: async (): Promise<HumanAction> => {
         callCount++;
         if (callCount === 1) {
-          return { action: "reroute", targetNodeId: N("a") };
+          return { kind: "reroute", targetNodeId: N("a") };
         }
-        return { action: "approve" };
+        return { kind: "approve" };
       },
     });
 
@@ -204,13 +205,13 @@ describe("Phase 4 — HumanInterventionEvent", () => {
 
   test("context.nodeSideEffects reflects node declaration", async () => {
     const dag = makeDag({
-      sideEffects: { kind: "writes", resource: "postgres:orders" },
+      sideEffects: { kind: "writes", resource: RN("postgres:orders") },
     });
     const observer = new RecordingObserver();
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
@@ -230,7 +231,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
@@ -245,7 +246,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
@@ -260,7 +261,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
@@ -276,7 +277,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
@@ -290,11 +291,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
       id: "test-witnesses",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: "postgres:orders", extractWitness: (output: unknown) => ({
-            kind: "version" as const,
-            resource: "postgres:orders",
-            value: String((output as { version: number }).version),
-          }) },
+          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witness("version", "postgres:orders", String((output as { version: number }).version)) },
           run: async () => ok({ version: 42 }),
         }),
         review: makeNode("review", {
@@ -311,17 +308,13 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     });
 
     const result = await runDagStateful(dag, null, ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(true);
     const evt = findInterventionEvent(observer.events);
     expect(evt).toBeDefined();
-    expect(evt!.context.priorWitnesses).toContainEqual({
-      kind: "version",
-      resource: "postgres:orders",
-      value: "42",
-    });
+    expect(evt!.context.priorWitnesses).toContainEqual(witness("version", "postgres:orders", "42"));
   });
 
   test("I9: retrying-hook path emits HumanInterventionEvent", async () => {
@@ -346,7 +339,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const onHumanReview = async () => {
       hookCallCount++;
       if (hookCallCount === 1) throw new Error("hook crash");
-      return { action: "approve" as const, actor: "bob" };
+      return { kind: "approve" as const, actor: "bob" };
     };
 
     const result = await runDagStateful(dag, "hello", ctx, {
@@ -374,7 +367,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const ctx = makeCtx(observer);
 
     const result = await runDagStateful(dag, "hello", ctx, {
-      onHumanReview: async () => ({ action: "approve" as const }),
+      onHumanReview: async () => ({ kind: "approve" as const }),
     });
 
     expect(result.ok).toBe(false);

@@ -11,14 +11,12 @@ import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
+import { witness } from "../types/freshness.js";
 import type { Witness } from "../types/freshness.js";
 import { unwrap } from "../types/result.js";
 
-const mkWitness = (resource: string, value: string, kind: "version" = "version"): Witness => ({
-  kind,
-  resource,
-  value,
-});
+const mkWitness = (resource: string, value: string, kind: "version" = "version"): Witness =>
+  witness(kind, resource, value);
 
 describe("checkFreshness — pure conflict detection", () => {
   it("returns empty conflicts when no writes exist", () => {
