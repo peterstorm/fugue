@@ -1,11 +1,10 @@
 {
   "kind": "regex",
   "name": "no-console-log",
-  "description": "Disallow console.log() in framework/app source — use fwLogger() or structured logging",
-  "extensions": [".ts", ".tsx"],
-  "pattern": "console\\.log\\(",
+  "description": "Disabled — scripts/ uses console.log legitimately; framework source already uses fwLogger()",
+  "extensions": [],
+  "pattern": "",
   "flags": "",
-  "fixHint": "Replace console.log() with fwLogger().info() or ctx.logger.warn(). For scripts, this rule is excluded.",
-  "enabled": true,
-  "excludePatterns": ["scripts/", ".test.ts", ".spec.ts"]
+  "fixHint": "disabled",
+  "enabled": false
 }

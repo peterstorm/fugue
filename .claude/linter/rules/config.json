@@ -143,7 +143,6 @@
     "packages/framework/src/dag-runtime/conditional.ts",
     "packages/framework/src/dag-runtime/topology.ts",
     "packages/framework/src/state-machine/replay.ts",
-    "packages/framework/src/state-machine/serialize.ts",
     "packages/framework/src/scheduler/catch-up.ts",
     "packages/framework/src/scheduler/cycle.ts",
     "packages/framework/src/scheduler/diff.ts"
