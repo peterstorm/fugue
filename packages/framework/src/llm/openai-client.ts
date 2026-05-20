@@ -305,6 +305,12 @@ export class OpenAILlmClient implements LlmClient {
       // Distinguish caller-cancellation from timeout. Both surface as
       // AbortError at the fetch boundary; tag the timeout so the outer
       // handler can classify it as transient.
+      //
+      // Priority when both timeout and caller-signal fire simultaneously:
+      // - t.timedOut() && !signal?.aborted → transient (retriable)
+      // - signal?.aborted → aborted (caller cancelled)
+      // Whichever AbortSignal fires first wins at fetch level; our
+      // timedOut() flag disambiguates after the fact.
       if (e instanceof Error && e.name === "AbortError" && t.timedOut() && !signal?.aborted) {
         throw new Error(`request timed out after ${this.requestTimeoutMs}ms`, { cause: "timeout" });
       }

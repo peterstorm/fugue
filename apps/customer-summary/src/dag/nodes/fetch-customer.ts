@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createFetchNode, ok, err } from "@ai-summary/framework";
+import { createFetchNode, ok, err, witness, resourceName } from "@ai-summary/framework";
 import type { Result, FrameworkError } from "@ai-summary/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord } from "../../schemas/crm.js";
@@ -16,6 +16,24 @@ export const createFetchCustomerNode = (source: ConversationSource) =>
     id: "fetch-crm",
     inputSchema: InputSchema,
     outputSchema: OutputSchema,
+    sideEffects: {
+      kind: "reads",
+      resource: resourceName("crm:customers"),
+      // Emit a freshness witness from the CRM record's createdAt field and
+      // conversation count. Downstream writes (if any) can condition on this
+      // witness to detect stale-read → write hazards. When customer is null
+      // (not found), the witness value is "not-found".
+      extractWitness: (output) => {
+        const o = output as Output;
+        return witness(
+          "version",
+          "crm:customers",
+          o.customer
+            ? `${o.customer.createdAt}:${o.customer.conversations.length}`
+            : "not-found",
+        );
+      },
+    },
     fetch: async (input, _ctx): Promise<Result<Output, FrameworkError>> => {
       const result = await source.fetchCustomer(input.customerId);
       if (!result.ok) return result;

@@ -29,6 +29,8 @@ export interface RunOptions {
    * output validated against the current `outputSchema`) on first encounter;
    * remaining nodes run normally. `runId` is informational and is expected
    * to match `ctx.runId` for the resumed run.
+   *
+   * @see ADR-0017 — checkpoint fingerprinting and version-mismatch detection
    */
   readonly resume?: {
     readonly runId: string;
@@ -45,6 +47,8 @@ export interface RunOptions {
   /**
    * Human-review hook — required when any node in the DAG declares
    * `humanReview`; rejected otherwise.
+   *
+   * @see ADR-0025 — HumanInterventionEvent telemetry design
    */
   readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: string }) => Promise<HumanAction>;
   /**
@@ -74,6 +78,8 @@ export interface RunOptions {
   /**
    * Shared freshness index for cross-DAG detection within a process. When
    * omitted, a private instance is created per executor.
+   *
+   * @see ADR-0024 — freshness witness contract design
    */
   readonly freshnessIndex?: FreshnessIndex;
 

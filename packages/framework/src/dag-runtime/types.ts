@@ -228,6 +228,16 @@ export interface DagMachineContextPersisted extends DagTopology, DagRetryState, 
 // Used by the executor (imperative shell) which needs `nodeById` for `run()`
 // and `outgoingByNode` for predicate evaluation and reroute computation.
 //
+// SERIALIZATION BOUNDARY:
+//   - `DagMachineContextPersisted` (the base) is JSON-safe and gets written to
+//     the JobLike via `toJson`/`fromJson` (which handles Map/Set encoding).
+//   - `DagMachineContext` (this interface) adds live fields (closures, Zod
+//     schemas, predicate functions) that CANNOT survive serialization.
+//   - `wrapDagJobLike` in `persistence.ts` bridges the two: on write it
+//     strips the live fields; on read it re-injects them from the compiled DAG.
+//   - Callers MUST NOT pass `DagMachineContext` to `toJson` directly — use the
+//     wrapped job, which narrows to `DagMachineContextPersisted` automatically.
+//
 // The pure transition layer operates on `DagMachineContextPersisted` directly.
 // `DagMachineContext` adds closure-carrying fields that cannot survive
 // serialization: the live DAG (with `run` functions), the outgoing adjacency

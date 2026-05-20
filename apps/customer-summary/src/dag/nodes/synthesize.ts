@@ -10,6 +10,10 @@ const InputSchema = ExtractionResultSchema;
 
 const NullableSynthesisOutputSchema = SynthesisOutputSchema.optional();
 
+// No freshness extractor: LLM synthesis is non-deterministic — no meaningful
+// freshness signal to capture. The grounding guardrail validates factual
+// consistency instead. sideEffects defaults to { kind: "external-call" } via
+// createLlmNode.
 export const createSynthesizeNode = (
   model = "claude-sonnet-4-20250514",
   opts?: { thinking?: { type: "enabled"; budgetTokens: number }; systemPrompt?: string },

@@ -5,6 +5,9 @@
 // should use this instead of inlining attempt loops.
 
 import { fwLogger } from "../logger.js";
+import type { Result } from "../types/result.js";
+import { ok, err } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
 
 export interface RetryOpts {
   /** Maximum number of attempts (including the first). */
@@ -20,6 +23,10 @@ export interface RetryOpts {
  * success, or throws the last error after all attempts are exhausted.
  *
  * Delay between attempt `i` and `i+1` is `baseDelayMs * (i + 1)`.
+ *
+ * NOTE: This variant throws the raw last error on exhaustion. Callers that
+ * need typed error propagation should use `retryAsyncResult` instead, which
+ * returns `Result<T, FrameworkError>` and never throws.
  */
 export const retryAsync = async <T>(
   fn: () => Promise<T>,
@@ -41,4 +48,34 @@ export const retryAsync = async <T>(
     }
   }
   throw lastError;
+};
+
+/**
+ * Retry with Result return. On exhaustion, returns `Err` with the last error
+ * mapped to a `FrameworkError` via the caller-supplied `toFrameworkError`.
+ * Never throws — prefer this over `retryAsync` when the caller needs typed
+ * error propagation through the `Result` pipeline.
+ *
+ * Delay between attempt `i` and `i+1` is `baseDelayMs * (i + 1)`.
+ */
+export const retryAsyncResult = async <T>(
+  fn: () => Promise<T>,
+  opts: RetryOpts & { readonly toFrameworkError: (e: unknown) => FrameworkError },
+): Promise<Result<T, FrameworkError>> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < opts.maxAttempts; attempt++) {
+    try {
+      return ok(await fn());
+    } catch (e) {
+      lastError = e;
+      fwLogger().error(
+        `[${opts.label}] attempt ${attempt + 1}/${opts.maxAttempts} failed:`,
+        e,
+      );
+      if (attempt < opts.maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, opts.baseDelayMs * (attempt + 1)));
+      }
+    }
+  }
+  return err(opts.toFrameworkError(lastError));
 };

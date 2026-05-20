@@ -131,7 +131,16 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     this.maxResources = opts?.maxResources ?? 10_000;
   }
 
-  /** Record a successful write. Evicts oldest entries per resource and oldest resources globally. */
+  /**
+   * Record a successful write. Evicts oldest entries per resource and oldest
+   * resources globally.
+   *
+   * The in-memory implementation never fails (always returns `ok(undefined)`).
+   * The `Result` return type satisfies the `FreshnessIndex` interface contract
+   * required by the Redis adapter, which CAN fail on network issues. Callers
+   * should still check `.ok` — switching to a Redis-backed index at runtime
+   * would silently break code that assumes infallible writes.
+   */
   async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const resource = event.newWitness.resource;
     const entry: WriteEntry = {

@@ -124,7 +124,11 @@ export const decideRoute = (
     };
   }
 
-  // Validate predicate shapes defensively (catches `as` casts at runtime)
+  // Defense-in-depth: validateDagShape already guarantees predicate structure,
+  // but decideRoute runs at execution time where `as` casts, deserialized
+  // payloads, or dynamic DAG construction could bypass static validation.
+  // This runtime check surfaces the bug immediately as `predicate-malformed`
+  // rather than producing a confusing "cannot call undefined" stack trace.
   for (const e of guarded) {
     const pred = e.when;
     if (pred === null || typeof pred !== "object") {
