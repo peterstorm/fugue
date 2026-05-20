@@ -193,10 +193,19 @@ export const decideRoute = (
   }
 
   // No predicate matched — validator guarantees defaultEdge exists.
+  // Defense-in-depth: guard against dynamic DAG construction or deserialized
+  // DAGs that bypassed validateDagShape.
+  if (!defaultEdge) {
+    return {
+      kind: "predicate-malformed",
+      fromNodeId,
+      message: `No default edge found for node '${fromNodeId}' when no conditional predicate matched`,
+    };
+  }
   const pruned = new Set<NodeId>(guarded.map((g) => g.to));
   return {
     kind: "decided",
-    chosenTargets: new Set([...unconditionalTargets, defaultEdge!.to]),
+    chosenTargets: new Set([...unconditionalTargets, defaultEdge.to]),
     prunedTargets: pruned,
     defaultTaken: true,
     predicateResults,

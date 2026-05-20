@@ -63,7 +63,7 @@ export type {
   ConfidenceSource,
   Confidence,
 } from "./confidence.js";
-export { CONFIDENCE_ORDER, meetsConfidence, confidence } from "./confidence.js";
+export { CONFIDENCE_ORDER, meetsConfidence, confidence, tryConfidence } from "./confidence.js";
 
 // ── Freshness witness types ───────────────────────────────────────────────
 export type { WitnessKind, Witness, ResourceName } from "./freshness.js";

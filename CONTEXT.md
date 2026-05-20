@@ -29,6 +29,7 @@ gates, freshness-aware state management, and production observability.
 | **JobLike** | Durable job handle: `updateData`, `updateProgress`, `appendEvent`. Backed by in-memory or BullMQ+Redis. |
 | **Checkpoint** | A persisted snapshot of node outputs for crash-resume. |
 | **Fingerprint** | A content-hash of DAG topology + predicate versions. Detects shape drift between checkpoint write and resume. |
+| **FrameworkVersion** | Content-hash of the framework's runtime semantics (validation, retry, coercion). Resume rejects checkpoints from a different version to prevent silent behavioral drift. |
 
 ### Type Safety
 

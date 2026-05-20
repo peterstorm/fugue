@@ -160,7 +160,7 @@ export function createInMemoryBackend(): InMemoryBackend {
               // generics at dispatch would require threading S/C through
               // `getOrCreateQueue` / `workers`. The single-point erasure here
               // is the load-bearing trade-off.
-              await processFn(job as unknown as JobLike<unknown, unknown, unknown>);
+              await processFn(job);
               succeeded = true;
             } catch (jobErr) {
               const isExhausted = attempt >= max;

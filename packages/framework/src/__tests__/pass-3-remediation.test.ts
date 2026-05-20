@@ -514,7 +514,8 @@ describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejectio
 describe("Wave 6.6 — BufferedObserver policy-throw still clears the run buffer", () => {
   it("a policy whose shouldFlush throws does not leak the run's buffered events", async () => {
     const { BufferedObserver } = await import("../observer/buffered.js");
-    const inner = new NoopObserver();
+    const innerEvents: unknown[] = [];
+    const inner = { observe: (e: unknown) => { innerEvents.push(e); } };
     const policy = {
       shouldFlush: () => {
         throw new Error("policy exploded");
@@ -525,19 +526,21 @@ describe("Wave 6.6 — BufferedObserver policy-throw still clears the run buffer
     buf.observe({ type: "run-start", runId: "X" as RunId, dagId: "d" as DagId, timestamp: new Date() });
     expect((buf as any).buffers.has("X")).toBe(true);
 
-    // shouldFlush throws — the try/finally must still drop the buffer.
-    expect(() =>
-      buf.observe({
-        type: "run-end",
-        runId: "X" as RunId,
-        dagId: "d" as DagId,
-        timestamp: new Date(),
-        duration: 0,
-        status: "ok",
-      } as any),
-    ).toThrow("policy exploded");
+    // shouldFlush throws — fail-open: events are flushed and buffer cleared.
+    // observe() does NOT re-throw (production observers must be failure-tolerant).
+    buf.observe({
+      type: "run-end",
+      runId: "X" as RunId,
+      dagId: "d" as DagId,
+      timestamp: new Date(),
+      duration: 0,
+      status: "ok",
+    } as any);
 
+    // Buffer cleared even on policy failure
     expect((buf as any).buffers.has("X")).toBe(false);
+    // Fail-open: events flushed to inner observer (run-start + run-end)
+    expect(innerEvents.length).toBe(2);
   });
 });
 

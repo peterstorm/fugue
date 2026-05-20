@@ -154,7 +154,8 @@ export const runNodeShared = async (
       const frameworkError: FrameworkError =
         runResult.error !== null &&
         typeof runResult.error === "object" &&
-        "kind" in (runResult.error as object)
+        "kind" in runResult.error &&
+        typeof (runResult.error as Record<string, unknown>).kind === "string"
           ? (runResult.error as FrameworkError)
           : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
 

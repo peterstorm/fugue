@@ -1,233 +1,379 @@
 # PR Review Fix Plan — 2026-05-20
 
-## Overview
+## Summary
 
-11 advisory issues from comprehensive PR review. No critical blockers.
-Grouped by type for efficient execution (documentation, types, tests, app).
-
----
-
-## Phase 1: Documentation & Comments (low risk, high clarity)
-
-### 1.1 — Add cross-reference comment in `runStateMachine` throws
-**File:** `packages/framework/src/state-machine/runner.ts:128-133`
-**Action:** Add a comment before the throw explaining the control flow:
-```typescript
-// DESIGN: This throw is caught by handleKernelError() in run-dag-stateful.ts.
-// The queue layer (BullMQ) also catches it to trigger retry. See ADR-0005.
-```
-
-### 1.2 — Document timeout/abort race in OpenAI client
-**File:** `packages/framework/src/llm/openai-client.ts:226-241`
-**Action:** Add comment in `postResponses` catch block:
-```typescript
-// Priority when both timeout and caller-signal fire simultaneously:
-// - If t.timedOut() && !signal?.aborted → classify as transient (retriable)
-// - If signal?.aborted → classify as aborted (caller cancelled)
-// - Race between them: whichever AbortSignal fires first wins at fetch level;
-//   our timedOut() flag disambiguates after the fact.
-```
-
-### 1.3 — Add ADR references to `RunOptions` JSDoc
-**File:** `packages/framework/src/executor/run-dag.ts:14-97`
-**Action:** Add `@see` tags to relevant fields:
-- `resume` → `@see ADR-0017 (checkpoint fingerprinting)`
-- `freshnessIndex` → `@see ADR-0024 (freshness witness contracts)`
-- `onHumanReview` → `@see ADR-0025 (human intervention events)`
-
-### 1.4 — Document serialization boundary on `DagMachineContext`
-**File:** `packages/framework/src/dag-runtime/types.ts`
-**Action:** Add JSDoc block on `DagMachineContext` explaining:
-- Live fields (closures, Zod schemas) exist ONLY in-process
-- `DagMachineContextPersisted` is the serialization-safe subset
-- `wrapDagJobLike` in `persistence.ts` handles the conversion
-- Cross-reference `toJson`/`fromJson` for Map/Set handling
-
-### 1.5 — Create `dag-runtime/README.md` module map
-**File:** `packages/framework/src/dag-runtime/README.md` (new)
-**Action:** Create a brief module map:
-```markdown
-# dag-runtime/ — Module Decomposition
-
-## Core Loop
-- `machine.ts` — compile DagDef → Machine (pure)
-- `transition.ts` — pure state transition (DagPhase × DagEvent → DagPhase)
-- `executor.ts` — imperative executor (sleep, hooks, wave dispatch)
-- `run-dag-stateful.ts` — orchestrator (compose kernel + executor + telemetry)
-
-## Wave Execution
-- `wave-execution.ts` — dispatch all nodes in a wave concurrently
-- `run-node.ts` — single node execution (validate → run → checkpoint)
-
-## Routing & Conditional Logic
-- `routing.ts` — predicate evaluation, route decisions (pure)
-- `conditional.ts` — (legacy re-export, delegates to routing.ts)
-- `route-emission.ts` — emit routing observer events
-- `reroute.ts` — human-reroute enrichment
-- `topology.ts` — static graph analysis (adjacency, incoming sources)
-
-## Freshness
-- `freshness-check.ts` — in-memory FreshnessIndex, conflict detection (pure)
-- `freshness-emission.ts` — emit witness/write observer events per wave
-
-## Human-in-the-Loop
-- `human-emission.ts` — emit HumanInterventionEvent telemetry
-- `human-resolution.ts` — transition helper for human responses
-
-## Retry & Resolution
-- `retry-policy.ts` — retry budget, backoff computation (pure)
-- `wave-resolution.ts` — post-wave state: advance/human-gate/succeeded
-
-## Eval Judges
-- `eval-judges.ts` — post-run quality gates (background or inline)
-
-## Telemetry
-- `run-telemetry.ts` — OTel root span, run-start/run-end events
-- `node-span.ts` — per-node OTel spans, outcome accumulation
-- `emit.ts` — thin wrapper: ctx.observer → dispatchEvent
-
-## Infrastructure
-- `persistence.ts` — wrapDagJobLike (live ↔ persisted context)
-- `types.ts` — DagPhase, DagEvent, DagMachineContext unions
-```
+14 issues from comprehensive PR review. Grouped by dependency order — later fixes
+may touch files edited by earlier ones.
 
 ---
 
-## Phase 2: Type Improvements (medium risk, compile-time safety)
+## Phase 1: Critical — Failing Tests (3 items)
 
-### 2.1 — Use `ReadonlyMap` / `ReadonlySet` in `DagMachineContextPersisted`
-**File:** `packages/framework/src/dag-runtime/types.ts`
-**Action:** Change the persisted context interface fields:
-- `outputs: Map<NodeId, unknown>` → `outputs: ReadonlyMap<NodeId, unknown>`
-- `retries: Map<NodeId, number>` → `retries: ReadonlyMap<NodeId, number>`
-- `activeNodeIds: Set<NodeId>` → `activeNodeIds: ReadonlySet<NodeId>`
-- `confidenceByNode: Map<NodeId, ...>` → `confidenceByNode: ReadonlyMap<NodeId, ...>`
+### Fix 1.1: Server resume tests expect 404 but get 409
 
-The transition functions already use spread-and-replace (`new Map(ctx.outputs)`) so this change is safe. The live `DagMachineContext` (executor-side) keeps mutable types since it's the shell.
+**Root cause:** `InMemoryCheckpointer.load()` checks `meta.frameworkVersion !== FRAMEWORK_VERSION`
+BEFORE the server gets to check `meta.subject`. Tests seed metas without `dagFingerprint` or
+`frameworkVersion`, so the checkpointer rejects them as `checkpoint-version-mismatch` (→ 409)
+before the server reaches the subject comparison (→ 404).
 
-**Risk:** May require `as ReadonlyMap<>` casts in transition helpers. Compile and fix.
+**Files:**
+- `apps/customer-summary/src/__tests__/server.test.ts` (lines ~125, ~275)
+
+**Fix:** The test fixtures need to supply `frameworkVersion` and `dagFingerprint` that match
+the current runtime values, so `load()` succeeds and the server reaches the subject check.
+
+```typescript
+import { FRAMEWORK_VERSION, dagFingerprint } from "@ai-summary/framework/checkpoint";
+// ... in test setup:
+await cp.setMeta(victimRunId, {
+  dagId: "customer-summary",
+  startedAt: new Date(),
+  nodeCount: dag.nodes.length,  // must match current dag
+  subject: "cust-001",
+  dagFingerprint: dagFingerprint(dag),  // match current shape
+  frameworkVersion: FRAMEWORK_VERSION,  // match running framework
+});
+```
+
+Same pattern for the "legacy meta (no subject)" test — use `__testRawMetas()` to insert a meta
+that has the correct fingerprint/version but NO subject field, so `load()` passes but
+`meta.subject !== customer_id` triggers the 404.
+
+**Verify:** `bun test apps/customer-summary/src/__tests__/server.test.ts`
 
 ---
 
-## Phase 3: Error Handling Improvements (medium risk)
+### Fix 1.2: Resume test — checkpoints never written
 
-### 3.1 — Add `retryAsyncResult` variant or document limitation
-**File:** `packages/framework/src/shared/retry-async.ts`
-**Action:** Add a Result-returning variant alongside the throwing one:
+**Root cause:** Test at `observability-resume.test.ts:266-272` creates a `cache` object with
+a `writeCheckpoint` method, but `run-node.ts` uses `ctx.checkpointWriter.write(runId, nodeId, output)`.
+The `cache` field is a `ContextCacheAdapter` (get/set), not a `CheckpointWriter`.
+
+**File:** `apps/customer-summary/src/__tests__/observability-resume.test.ts` (lines ~266-280)
+
+**Fix:** Wire a proper `checkpointWriter` on the NodeContext:
+
 ```typescript
-/**
- * Retry with Result return. On exhaustion, returns Err with the last error
- * wrapped in a FrameworkError. Prefer this over `retryAsync` when the caller
- * needs typed error propagation.
- */
-export const retryAsyncResult = async <T>(
-  fn: () => Promise<T>,
-  opts: RetryOpts & { readonly toFrameworkError: (e: unknown) => FrameworkError },
-): Promise<Result<T, FrameworkError>> => {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < opts.maxAttempts; attempt++) {
-    try {
-      return ok(await fn());
-    } catch (e) {
-      lastError = e;
-      fwLogger().error(`[${opts.label}] attempt ${attempt + 1}/${opts.maxAttempts} failed:`, e);
-      if (attempt < opts.maxAttempts - 1) {
-        await new Promise((r) => setTimeout(r, opts.baseDelayMs * (attempt + 1)));
-      }
-    }
-  }
-  return err(opts.toFrameworkError(lastError));
+const checkpoints: Map<string, unknown> = new Map();
+const checkpointWriter: CheckpointWriter = {
+  write: async (_runId, nodeId, output) => {
+    checkpoints.set(nodeId, output);
+  },
+};
+
+const ctx1: NodeContext = makeNodeContext({
+  runId: runId("run-1"),
+  dagId: "resume-3node",
+  checkpointWriter,   // ← this is what run-node.ts reads
+});
+```
+
+Remove the orphaned `cache.writeCheckpoint` method.
+
+**Verify:** `bun test apps/customer-summary/src/__tests__/observability-resume.test.ts`
+
+---
+
+## Phase 2: Safety — Silent Failure Paths (3 items)
+
+### Fix 2.1: Guard `defaultEdge!` in routing.ts
+
+**File:** `packages/framework/src/dag-runtime/routing.ts:181`
+
+**Fix:** Replace non-null assertion with explicit guard:
+
+```typescript
+// Before:
+chosenTargets: new Set([...unconditionalTargets, defaultEdge!.to]),
+
+// After:
+if (!defaultEdge) {
+  return {
+    kind: "predicate-malformed",
+    fromNodeId,
+    message: `No default edge found for node '${fromNodeId}' when no predicate matched`,
+  };
+}
+return {
+  kind: "decided",
+  chosenTargets: new Set([...unconditionalTargets, defaultEdge.to]),
+  prunedTargets: pruned,
+  defaultTaken: true,
+  predicateResults,
 };
 ```
 
-### 3.2 — Add defensive comment on `InMemoryFreshnessIndex.recordWrite`
-**File:** `packages/framework/src/dag-runtime/freshness-check.ts:147`
-**Action:** Add a comment explaining the Result return is for interface compatibility:
+**Verify:** `bun test packages/framework/src/__tests__/conditional-edges-routing.test.ts`
+
+---
+
+### Fix 2.2: Tighten error object check in run-node.ts
+
+**File:** `packages/framework/src/dag-runtime/run-node.ts:155-159`
+
+**Fix:**
+
 ```typescript
-/**
- * Record a successful write. Evicts oldest entries per resource and oldest
- * resources globally.
- *
- * The in-memory implementation never fails (returns `ok(undefined)` always).
- * The `Result` return type satisfies the `FreshnessIndex` interface contract
- * required by the Redis adapter, which CAN fail on network issues. Callers
- * should still check `.ok` — switching to a Redis-backed index at runtime
- * would silently break code that assumes success.
- */
+// Before:
+const frameworkError: FrameworkError =
+  runResult.error !== null &&
+  typeof runResult.error === "object" &&
+  "kind" in (runResult.error as object)
+    ? (runResult.error as FrameworkError)
+    : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
+
+// After:
+const frameworkError: FrameworkError =
+  runResult.error !== null &&
+  typeof runResult.error === "object" &&
+  "kind" in runResult.error &&
+  typeof (runResult.error as Record<string, unknown>).kind === "string"
+    ? (runResult.error as FrameworkError)
+    : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
+```
+
+Remove the `as object` widening cast; the `typeof === "object" && !== null` check already narrows.
+
+**Verify:** `bun test packages/framework/src/__tests__/executor.test.ts`
+
+---
+
+### Fix 2.3: BufferedObserver — let policy errors propagate
+
+**File:** `packages/framework/src/observer/buffered.ts` in `handleRunEnd()`
+
+**Fix:** Move `policy.shouldFlush(summary)` outside the try block, or catch policy exceptions
+separately and propagate them (since a broken policy is a programmer error, not a transient
+failure that should be silenced):
+
+```typescript
+private handleRunEnd(e: RunEndEvent): void {
+  const buf = this.buffers.get(e.runId);
+  if (!buf) {
+    fwLogger().warn(`[BufferedObserver] onRunEnd for unknown runId=${e.runId}`);
+  }
+  const events = buf?.events ?? [];
+  const summary = computeRunSummary(events, e);
+  this.aggregates.runCount++;
+
+  // Policy evaluation is programmer-provided — let bugs surface.
+  let shouldFlush: boolean;
+  try {
+    shouldFlush = this.policy.shouldFlush(summary);
+  } catch (policyErr) {
+    fwLogger().error(`[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss:`, policyErr);
+    shouldFlush = true; // fail-open: flush on policy error
+  }
+
+  try {
+    if (shouldFlush) {
+      // ... replay + dispatch ...
+    } else {
+      fwLogger().warn(...);
+    }
+  } finally {
+    this.buffers.delete(e.runId);
+  }
+}
+```
+
+**Verify:** `bun test packages/framework/src/__tests__/buffered-observer.test.ts`
+
+---
+
+## Phase 3: Type Safety (2 items)
+
+### Fix 3.1: In-memory queue double-cast
+
+**File:** `packages/framework/src/queue/in-memory.ts:163`
+
+**Fix:** The `processFn` parameter type should accept the concrete in-memory job type.
+The generic constraint on `createWorker` already binds `S` and `C`. The cast is needed
+because `InMemoryJob` doesn't exactly match `JobLike<S, unknown, C>` (the `E` slot).
+Add a private adapter function:
+
+```typescript
+// Before:
+await processFn(job as unknown as JobLike<unknown, unknown, unknown>);
+
+// After:
+await processFn(job as JobLike<S, unknown, C>);
+```
+
+The single `as` is safe because `InMemoryJob` implements `JobLike` with `E = unknown`.
+The double cast through `unknown` is unnecessary.
+
+**Verify:** `bun test packages/framework/src/__tests__/queue-memory.test.ts`
+
+---
+
+### Fix 3.2: Add `tryConfidence` public Result-returning constructor
+
+**File:** `packages/framework/src/types/confidence.ts`
+
+**Fix:** Add alongside existing `confidence()`:
+
+```typescript
+/** Result-returning variant for parse boundaries. Never throws. */
+export const tryConfidence = (
+  bucket: string,
+  source: string,
+  raw?: number | string,
+): Result<Confidence, string> => {
+  if (!(bucket in CONFIDENCE_ORDER)) {
+    return err(`unknown confidence bucket '${bucket}'`);
+  }
+  if (!(CONFIDENCE_SOURCES as readonly string[]).includes(source)) {
+    return err(`unknown confidence source '${source}'`);
+  }
+  if (source === "self-reported-numeric" && typeof raw === "number" && (raw < 0 || raw > 1)) {
+    return err(`confidence raw value for "self-reported-numeric" must be in [0, 1], got ${raw}`);
+  }
+  if (source === "logprob" && (raw === undefined || typeof raw !== "number")) {
+    return err(`confidence source "logprob" requires a numeric raw value`);
+  }
+  return ok({
+    bucket: bucket as ConfidenceBucket,
+    source: source as ConfidenceSource,
+    ...(raw !== undefined ? { raw } : {}),
+  } as Confidence);
+};
+```
+
+Export from `packages/framework/src/types/index.ts`.
+
+**Verify:** Add a unit test in `packages/framework/src/__tests__/confidence-buckets.test.ts`.
+
+---
+
+## Phase 4: Architecture (2 items)
+
+### Fix 4.1: Extract `validateApproveEdit` to shared/
+
+**Files:**
+- `packages/framework/src/dag-runtime/executor.ts` (move function OUT)
+- `packages/framework/src/shared/validate.ts` (move function IN)
+
+**Fix:** Move `validateApproveEdit` from executor.ts to shared/validate.ts. It's a pure
+function (no I/O, no async, no observer interaction). The executor imports and calls it.
+
+```typescript
+// shared/validate.ts — add:
+export const validateApproveEdit = (
+  action: { kind: string; newOutput?: unknown },
+  nodeId: NodeId,
+  nodeMap: ReadonlyMap<NodeId, { outputSchema: z.ZodType<unknown> }>,
+): string | null => {
+  if (action.kind !== "approve-with-edit") return null;
+  const nodeDef = nodeMap.get(nodeId);
+  if (!nodeDef) return `approve-with-edit: node '${nodeId}' not found in DAG`;
+  const parsed = nodeDef.outputSchema.safeParse((action as { newOutput: unknown }).newOutput);
+  if (!parsed.success) return `approve-with-edit output failed schema for node '${nodeId}': ${parsed.error.message}`;
+  return null;
+};
+```
+
+**Verify:** `bun test packages/framework/src/__tests__/human-resolution.test.ts`
+
+---
+
+### Fix 4.2: Extract OpenAI Responses API types
+
+**Files:**
+- Create `packages/framework/src/llm/openai-types.ts` (new)
+- `packages/framework/src/llm/openai-client.ts` (trim)
+
+**Fix:** Move `FunctionCallBlock`, `MessageBlock`, `ReasoningBlock`, `ResponsesOutputItem`,
+`FunctionCallOutputItem`, `ConversationItem`, `ResponsesUsage`, `ResponsesApiResponse`,
+and the type-guard functions (`isFunctionCallBlock`, `isMessageBlock`, `isOutputTextPart`,
+`isReasoningBlock`) into `openai-types.ts`. Import in `openai-client.ts`.
+
+**Verify:** `bun test packages/framework/src/__tests__/openai-client.test.ts`
+
+---
+
+## Phase 5: Documentation (3 items)
+
+### Fix 5.1: Add FRAMEWORK_VERSION to CONTEXT.md
+
+**File:** `CONTEXT.md`
+
+**Fix:** Add to "State Machine Kernel" table:
+
+```markdown
+| **FrameworkVersion** | Content-hash of the framework's checkpoint format. Resume rejects checkpoints from a different version to prevent semantic drift. |
 ```
 
 ---
 
-## Phase 4: Test Coverage (low risk, correctness)
+### Fix 5.2: Add FR-XXX → ADR cross-reference comment
 
-### 4.1 — Add property test for `DagMachineContextPersisted` serialization roundtrip
-**File:** `packages/framework/src/__tests__/context-serialization-roundtrip.test.ts` (new)
-**Action:** Create a property test that:
-1. Generates random `DagMachineContextPersisted` values with Maps, Sets, branded IDs
-2. Asserts `fromJson(toJson(ctx))` produces a value deeply equal to the original
-3. Tests edge cases: empty Maps, Maps with special values (null, undefined in values), nested Maps
+**File:** `packages/framework/src/dag-runtime/executor.ts` (top-of-file comment)
+
+**Fix:** Add a mapping comment:
 
 ```typescript
-import fc from "fast-check";
-import { toJson, fromJson } from "../state-machine/serialize.js";
-// ... generate arbitrary DagMachineContextPersisted shapes
-// ... assert roundtrip equality
+// Requirement references:
+//   FR-005 → ADR-0003 (event sourcing)
+//   FR-006 → ADR-0005 (retry layering)
+//   FR-007 → ADR-0005 (retry layering)
+//   FR-011 → ADR-0005 (retry layering)
+//   FR-012 → ADR-0006 (joblike minimal write side)
+//   FR-021 → ADR-0021 (single-path runtime)
+//   FR-026..FR-033 → ADR-0013, ADR-0015, ADR-0029
+//   FR-027 → ADR-0005 (retry backoff)
+//   FR-029a → ADR-0013 (onHumanReview hook crash retry)
 ```
 
 ---
 
-## Phase 5: Reference App Enhancement (low risk, showcase)
+### Fix 5.3: Document skipped tests rationale
 
-### 5.1 — Add freshness extractors to `fetch-customer` node
-**File:** `apps/customer-summary/src/dag/nodes/fetch-customer.ts`
-**Action:** Add `extractWitness` to the reads node:
-```typescript
-sideEffects: {
-  kind: "reads",
-  resource: resourceName("crm:customers"),
-  extractWitness: (output) => witness("version-tag", "crm:customers", output.lastModified ?? "unknown"),
-},
+**File:** Create `packages/framework/src/__tests__/REDIS_TESTS.md`
+
+**Fix:**
+
+```markdown
+# Redis/BullMQ Integration Tests
+
+## Why they're skipped
+
+These 34 tests require a running Redis instance. They are guarded by:
+- `describe.skipIf(!process.env.REDIS_URL)` or similar
+
+## Running locally
+
+```bash
+docker compose -f infra/compose.yaml up redis -d
+export REDIS_URL=redis://localhost:6379
+bun test --filter redis
+bun test --filter bullmq
 ```
-This demonstrates the freshness witness feature in the reference app without affecting behavior (the downstream `synthesize` node doesn't condition-on this witness).
 
-### 5.2 — Add comment explaining why other nodes skip freshness
-**File:** `apps/customer-summary/src/dag/nodes/synthesize.ts`
-**Action:** Add brief comment:
-```typescript
-// No extractWitness: LLM synthesis is non-deterministic — no meaningful
-// freshness signal to capture. The grounding guardrail validates factual
-// consistency instead.
+## CI Coverage
+
+TODO: Add Redis service to CI workflow once infra pipeline is established.
 ```
 
 ---
 
-## Phase 6: Defensive Code Comment (low risk)
+## Phase 6: Final Polish
 
-### 6.1 — Comment on `decideRoute` defensive validation
-**File:** `packages/framework/src/dag-runtime/routing.ts:131-148`
-**Action:** Add comment:
-```typescript
-// Defense-in-depth: validateDagShape already guarantees predicate structure,
-// but decideRoute runs at execution time where `as` casts, deserialized
-// payloads, or dynamic DAG construction could bypass static validation.
-// This runtime check surfaces the bug immediately rather than producing
-// a confusing "cannot call undefined" stack trace from pred.check().
+### Fix 6.1: Run full test suite, confirm 0 failures
+
+```bash
+bun test
 ```
+
+Expected: 1348 pass, 34 skip (Redis), 0 fail.
 
 ---
 
 ## Execution Order
 
 ```
-Phase 1 (docs/comments) → Phase 2 (types) → Phase 3 (errors) → Phase 4 (tests) → Phase 5 (app) → Phase 6 (comment)
+Phase 1 (critical tests) → Phase 2 (safety) → Phase 3 (types) → Phase 4 (architecture) → Phase 5 (docs) → Phase 6 (verify)
 ```
 
-**Estimated effort:** ~45 minutes total
-- Phase 1: 15 min (5 edits + 1 new file)
-- Phase 2: 10 min (type changes + compile fix)
-- Phase 3: 10 min (new function + comment)
-- Phase 4: 5 min (new test file)
-- Phase 5: 3 min (2 small edits)
-- Phase 6: 2 min (1 comment)
-
-**Verification:** `bun test` after each phase to ensure no regressions.
+Each phase is independently verifiable with targeted `bun test` runs.
+Total estimated changes: ~15 files, ~150 lines added/modified.

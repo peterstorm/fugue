@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, makeNodeContext, runId, nodeId, dagId, frameworkError } from "@ai-summary/framework";
+import type { CheckpointWriter } from "@ai-summary/framework";
 import type { NodeContext, DagDef } from "@ai-summary/framework";
 import type { SummaryResponse } from "../schemas/response.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
@@ -264,18 +265,16 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
     });
 
     const checkpoints: Map<string, unknown> = new Map();
-    const cache = {
-      get: async (_key: string) => ({ hit: false } as const),
-      set: async (_key: string, _value: unknown) => ok(undefined),
-      writeCheckpoint: async (_runId: string, nodeId: string, output: unknown) => {
-        checkpoints.set(nodeId, output);
+    const checkpointWriter: CheckpointWriter = {
+      write: async (_runId, nid, output) => {
+        checkpoints.set(nid, output);
       },
     };
 
     const ctx1: NodeContext = makeNodeContext({
       runId: runId("run-1"),
       dagId: "resume-3node",
-      cache,
+      checkpointWriter,
     });
 
     const r1 = await runDag(failDag, { v: 1 }, ctx1);
@@ -293,7 +292,7 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
       runId: runId("run-1"),
       dagId: "resume-3node",
       observer,
-      cache,
+      checkpointWriter,
     });
 
     const r2 = await runDag(dag, undefined, ctx2, {

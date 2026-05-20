@@ -1,6 +1,17 @@
 // buildDagExecutor — DAG executor closure
 // Orchestrates wave execution, retry backoff with jitter, and human-review hook dispatch.
 // Returns an Executor<DagPhase, DagEvent, DagMachineContext> that runs one wave per call.
+//
+// Requirement → ADR cross-reference:
+//   FR-005  → ADR-0003 (event sourcing, checkpoint after every transition)
+//   FR-006  → ADR-0005 (retry layering, classify executor errors)
+//   FR-007  → ADR-0005 (throw on terminal-failed for queue retry)
+//   FR-011  → ADR-0005 (per-invocation retry counters)
+//   FR-012  → ADR-0006 (joblike minimal write side, beforeExecute hook)
+//   FR-021  → ADR-0021 (single-path runtime, pure transitions)
+//   FR-026–033 → ADR-0013, ADR-0015, ADR-0029 (HITL, conditional edges, routing)
+//   FR-027  → ADR-0005 (retry backoff with jitter)
+//   FR-029a → ADR-0013 (onHumanReview hook crash retry)
 
 import { match } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";

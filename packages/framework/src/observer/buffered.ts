@@ -195,8 +195,21 @@ export class BufferedObserver implements Observer, Disposable {
 
     this.aggregates.runCount++;
 
+    // Policy evaluation is programmer-provided — let bugs surface visibly.
+    // Fail-open: flush on policy error to avoid silent data loss.
+    let shouldFlush: boolean;
     try {
-      if (this.policy.shouldFlush(summary)) {
+      shouldFlush = this.policy.shouldFlush(summary);
+    } catch (policyErr) {
+      fwLogger().error(
+        `[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss:`,
+        policyErr instanceof Error ? policyErr.message : policyErr,
+      );
+      shouldFlush = true;
+    }
+
+    try {
+      if (shouldFlush) {
         let replayFailures = 0;
         for (const buffered of events) {
           try {

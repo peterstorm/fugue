@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { bucketFromProbability, bucketFromEnsemble } from "../sugar/confidence-buckets.js";
+import { tryConfidence } from "../types/confidence.js";
 
 describe("bucketFromProbability", () => {
   it(">=0.85 → high (default thresholds)", () => {
@@ -64,5 +65,46 @@ describe("bucketFromEnsemble", () => {
   it("custom thresholds", () => {
     expect(bucketFromEnsemble(4, 5, { high: 0.9, medium: 0.7 })).toBe("medium"); // 0.8
     expect(bucketFromEnsemble(5, 5, { high: 0.9, medium: 0.7 })).toBe("high"); // 1.0
+  });
+});
+
+describe("tryConfidence", () => {
+  it("valid bucket + source returns Ok", () => {
+    const r = tryConfidence("high", "logprob", 0.95);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.bucket).toBe("high");
+      expect(r.value.source).toBe("logprob");
+      expect(r.value.raw).toBe(0.95);
+    }
+  });
+
+  it("unknown bucket returns Err", () => {
+    const r = tryConfidence("mega-high", "logprob", 0.9);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("unknown confidence bucket");
+  });
+
+  it("unknown source returns Err", () => {
+    const r = tryConfidence("high", "telepathy", 0.9);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("unknown confidence source");
+  });
+
+  it("self-reported-numeric out of range returns Err", () => {
+    const r = tryConfidence("high", "self-reported-numeric", 1.5);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("[0, 1]");
+  });
+
+  it("logprob without numeric raw returns Err", () => {
+    const r = tryConfidence("medium", "logprob");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("numeric raw value");
+  });
+
+  it("self-reported-bucket without raw is Ok", () => {
+    const r = tryConfidence("low", "self-reported-bucket");
+    expect(r.ok).toBe(true);
   });
 });

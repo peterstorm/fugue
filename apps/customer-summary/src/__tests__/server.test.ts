@@ -118,14 +118,17 @@ describe("POST /summarize", () => {
 
     test("resume with mismatched customer_id returns 404 and does NOT replay outputs", async () => {
       const cp = new InMemoryCheckpointer();
+      const id = currentDagIdentity();
 
       // Pre-seed a checkpoint owned by victim "cust-001"
       const victimRunId = mkRunId("victim-run-id-123");
       await cp.setMeta(victimRunId, {
-        dagId: "customer-summary",
+        dagId: id.dagId,
         startedAt: new Date(),
-        nodeCount: 5,
+        nodeCount: id.nodeCount,
         subject: "cust-001",
+        dagFingerprint: id.dagFingerprint,
+        frameworkVersion: id.frameworkVersion,
       });
       await cp.saveNode(victimRunId, "fetch-crm", {
         nodeId: "fetch-crm",
@@ -271,11 +274,14 @@ describe("POST /summarize", () => {
 
     test("resume against legacy meta (no subject) returns 404", async () => {
       const cp = new InMemoryCheckpointer();
+      const id = currentDagIdentity();
       const runId = mkRunId("legacy-run-id");
       await cp.setMeta(runId, {
-        dagId: "customer-summary",
+        dagId: id.dagId,
         startedAt: new Date(),
-        nodeCount: 5,
+        nodeCount: id.nodeCount,
+        dagFingerprint: id.dagFingerprint,
+        frameworkVersion: id.frameworkVersion,
         // no subject — pre-fix data
       });
 

@@ -115,6 +115,35 @@ export const __brandConfidence = (c: {
 };
 
 /**
+ * Public Result-returning constructor for parse boundaries where throwing is
+ * undesirable. Validates bucket, source, and raw constraints. Mirrors the
+ * pattern of `tryRunId`/`tryNodeId`/`tryDagId`.
+ */
+export const tryConfidence = (
+  bucket: string,
+  source: string,
+  raw?: number | string,
+): Result<Confidence, string> => {
+  if (!(bucket in CONFIDENCE_ORDER)) {
+    return err(`unknown confidence bucket '${bucket}'`);
+  }
+  if (!(CONFIDENCE_SOURCES as readonly string[]).includes(source)) {
+    return err(`unknown confidence source '${source}'`);
+  }
+  if (source === "self-reported-numeric" && typeof raw === "number" && (raw < 0 || raw > 1)) {
+    return err(`confidence raw value for "self-reported-numeric" must be in [0, 1], got ${raw}`);
+  }
+  if (source === "logprob" && (raw === undefined || typeof raw !== "number")) {
+    return err(`confidence source "logprob" requires a numeric raw value`);
+  }
+  return ok({
+    bucket: bucket as ConfidenceBucket,
+    source: source as ConfidenceSource,
+    ...(raw !== undefined ? { raw } : {}),
+  } as Confidence);
+};
+
+/**
  * Total ordering for predicate gating. Higher is more confident.
  * Framework short-circuits predicates when the upstream bucket is below
  * `minConfidence`.
