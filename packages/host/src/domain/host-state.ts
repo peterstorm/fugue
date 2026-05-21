@@ -150,31 +150,15 @@ export const beginDrain = (
   inflightCount: number,
   now: number,
 ): Result<HostState, TransitionError> => {
-  switch (state.phase) {
-    case "ready":
-      return ok({
-        phase: "draining" as const,
-        registry: state.registry,
-        drainStartedAt: now,
-        inflightCount,
-      });
-    case "degraded":
-      return ok({
-        phase: "draining" as const,
-        registry: state.registry,
-        drainStartedAt: now,
-        inflightCount,
-      });
-    case "syncing":
-      return ok({
-        phase: "draining" as const,
-        registry: state.registry,
-        drainStartedAt: now,
-        inflightCount,
-      });
-    default:
-      return err(invalidTransition(state.phase, "draining"));
+  if (state.phase === "booting" || state.phase === "stopped" || state.phase === "draining") {
+    return err(invalidTransition(state.phase, "draining"));
   }
+  return ok({
+    phase: "draining" as const,
+    registry: state.registry,
+    drainStartedAt: now,
+    inflightCount,
+  });
 };
 
 /**

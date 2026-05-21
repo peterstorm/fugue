@@ -135,6 +135,7 @@ const createFakeSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
+  logger: { warn: () => {} },
 });
 
 const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string; data?: unknown }> } => {
@@ -183,7 +184,7 @@ describe("Full Host Lifecycle", () => {
   });
 
   test("boots successfully with valid config and loads DAGs", async () => {
-    const dags = [fakeLoadResult("billing:invoice"), fakeLoadResult("ops:alerts")];
+    const dags = [fakeLoadResult("billing-invoice"), fakeLoadResult("ops-alerts")];
     const { port, redis } = createFakeRedis();
     const logger = createTestLogger();
 
@@ -203,8 +204,8 @@ describe("Full Host Lifecycle", () => {
       expect(state.phase).toBe("ready");
       if (state.phase === "ready") {
         expect(state.registry.dags.size).toBe(2);
-        expect(state.registry.dags.has("billing:invoice" as DagId)).toBe(true);
-        expect(state.registry.dags.has("ops:alerts" as DagId)).toBe(true);
+        expect(state.registry.dags.has("billing-invoice" as DagId)).toBe(true);
+        expect(state.registry.dags.has("ops-alerts" as DagId)).toBe(true);
       }
     }
   });

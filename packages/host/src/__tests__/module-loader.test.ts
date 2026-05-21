@@ -21,7 +21,7 @@ const VALID_DAG_MODULE = `
 import { z } from "zod";
 
 const dag = {
-  id: "test-team:test-dag",
+  id: "test-team-test-dag",
   nodes: [{ id: "node-1", execute: async () => ({ result: "ok" }) }],
   edges: [],
 };
@@ -48,7 +48,7 @@ const VALID_DAG_MODULE_2 = `
 import { z } from "zod";
 
 const dag = {
-  id: "billing:invoice",
+  id: "billing-invoice",
   nodes: [{ id: "fetch", execute: async () => ({ data: [] }) }],
   edges: [],
 };
@@ -102,8 +102,8 @@ describe("Module Loader", () => {
 
       expect(result.ok).toBe(true);
       if (result.ok) {
-        expect(result.value.id).toBe(dagId("test-team:test-dag"));
-        expect(result.value.registration.dag.id).toBe(dagId("test-team:test-dag"));
+        expect(result.value.id).toBe(dagId("test-team-test-dag"));
+        expect(result.value.registration.dag.id).toBe(dagId("test-team-test-dag"));
         expect(result.value.modulePath).toBe(path);
       }
     });
@@ -258,8 +258,8 @@ describe("Module Loader", () => {
       expect(result.errors).toHaveLength(3);
 
       const dagIds = result.loaded.map((l) => l.id as unknown as string);
-      expect(dagIds).toContain("test-team:test-dag");
-      expect(dagIds).toContain("billing:invoice");
+      expect(dagIds).toContain("test-team-test-dag");
+      expect(dagIds).toContain("billing-invoice");
     });
 
     it("isolates errors — one bad DAG does not affect others (NFR-010)", async () => {

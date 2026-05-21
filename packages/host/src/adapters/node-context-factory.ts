@@ -33,6 +33,14 @@ import type { ContentFilter } from "@fugue/framework";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
+ * Minimal logger port for cache/checkpoint adapters.
+ * Avoids coupling to a specific logging library.
+ */
+export interface LogPort {
+  readonly warn: (msg: string, data?: Record<string, unknown>) => void;
+}
+
+/**
  * Redis-like interface — only the methods we actually use.
  * Avoids coupling to a specific Redis client library.
  */
@@ -50,6 +58,7 @@ export interface SharedInfra {
   readonly redis: RedisPort;
   readonly tracer: Tracer;
   readonly contentFilter: ContentFilter | null;
+  readonly logger: LogPort;
 }
 
 /**
@@ -108,6 +117,7 @@ export const createNamespacedCache = (
   redis: RedisPort,
   dagId: string,
   defaultTtlSec: number | undefined,
+  logger: LogPort,
 ): ContextCacheAdapter => ({
   get: async (key: string): Promise<CacheLookup> => {
     const fullKey = buildCacheKey(dagId, key);
@@ -123,7 +133,7 @@ export const createNamespacedCache = (
       return { hit: true, value: JSON.parse(raw) };
     } catch {
       // Corrupted entry — treat as miss
-      console.warn(JSON.stringify({ level: "warn", msg: "Cache entry corrupted — treating as miss", key: fullKey, dagId, ts: new Date().toISOString() }));
+      logger.warn("Cache entry corrupted — treating as miss", { key: fullKey, dagId });
       return { hit: false };
     }
   },
@@ -138,8 +148,7 @@ export const createNamespacedCache = (
     try {
       serialized = JSON.stringify(value);
     } catch (e) {
-      // Non-serializable value — surface as structured error
-      console.warn(JSON.stringify({ level: "warn", msg: "Cache set failed — value not serializable", key: fullKey, dagId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      logger.warn("Cache set failed — value not serializable", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
       return ok(undefined); // Don't kill the request for a cache write failure
     }
     try {
@@ -150,8 +159,7 @@ export const createNamespacedCache = (
         await redis.set(fullKey, serialized);
       }
     } catch (e) {
-      // Redis unavailable — log but don't kill the request
-      console.warn(JSON.stringify({ level: "warn", msg: "Cache set failed — Redis error", key: fullKey, dagId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
     }
     return ok(undefined);
   },
@@ -169,6 +177,7 @@ export const createNamespacedCheckpointWriter = (
   dagId: string,
   runId: string,
   checkpointTtlSec: number | undefined,
+  logger: LogPort,
 ): CheckpointWriter => ({
   write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
     const fullKey = buildCheckpointKey(dagId, runId, nodeId as string);
@@ -176,7 +185,7 @@ export const createNamespacedCheckpointWriter = (
     try {
       serialized = JSON.stringify(value);
     } catch (e) {
-      console.warn(JSON.stringify({ level: "warn", msg: "Checkpoint write failed — value not serializable", key: fullKey, dagId, runId, nodeId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      logger.warn("Checkpoint write failed — value not serializable", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
       return; // Best-effort — don't kill the DAG execution
     }
     try {
@@ -186,7 +195,7 @@ export const createNamespacedCheckpointWriter = (
         await redis.set(fullKey, serialized);
       }
     } catch (e) {
-      console.warn(JSON.stringify({ level: "warn", msg: "Checkpoint write failed — Redis error", key: fullKey, dagId, runId, nodeId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
       // Best-effort — don't kill the DAG execution
     }
   },
@@ -234,12 +243,13 @@ export const createNodeContextForDag = (
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
-  const cache = createNamespacedCache(shared.redis, dagId, ttl.cacheTtlSec);
+  const cache = createNamespacedCache(shared.redis, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
     shared.redis,
     dagId,
     runId,
     ttl.checkpointTtlSec,
+    shared.logger,
   );
 
   return makeNodeContext({

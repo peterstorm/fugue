@@ -35,6 +35,7 @@ export interface RunDagDeps {
   readonly setCircuit: (dagId: DagId, s: CircuitState) => void;
   readonly createContext: (registered: RegisteredDag, signal?: AbortSignal) => NodeContext;
   readonly executeDag: <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions) => Promise<Result<O, FrameworkError>>;
+  readonly clock: () => number;
 }
 
 /**
@@ -106,7 +107,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     }
 
     // 3. Check circuit breaker state
-    const now = Date.now();
+    const now = deps.clock();
     let circuit = deps.getCircuit(dagId);
 
     // Try reset if open
@@ -147,7 +148,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const ctx = deps.createContext(registered, controller.signal);
-    const startTime = Date.now();
+    const startTime = deps.clock();
 
     try {
       const result = await deps.executeDag(
@@ -157,18 +158,18 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       );
 
       clearTimeout(timeoutId);
-      const durationMs = Date.now() - startTime;
+      const durationMs = deps.clock() - startTime;
 
       // 7. Map Result to HTTP response
       if (result.ok) {
         // 8. Record success
-        circuit = recordSuccess(deps.getCircuit(dagId), Date.now());
+        circuit = recordSuccess(deps.getCircuit(dagId), deps.clock());
         deps.setCircuit(dagId, circuit);
 
         return successResponse(c, result.value, { runId: ctx.runId, durationMs });
       } else {
         // Framework error
-        circuit = recordFailure(deps.getCircuit(dagId), Date.now());
+        circuit = recordFailure(deps.getCircuit(dagId), deps.clock());
         deps.setCircuit(dagId, circuit);
 
         const msg = formatFrameworkError(result.error);
@@ -182,7 +183,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
       // Handle abort (timeout)
       if (e instanceof Error && e.name === "AbortError") {
-        circuit = recordFailure(deps.getCircuit(dagId), Date.now());
+        circuit = recordFailure(deps.getCircuit(dagId), deps.clock());
         deps.setCircuit(dagId, circuit);
 
         const timeoutErr: HostError = {
@@ -199,11 +200,12 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       }
 
       // Record failure for circuit breaker
-      circuit = recordFailure(deps.getCircuit(dagId), Date.now());
+      circuit = recordFailure(deps.getCircuit(dagId), deps.clock());
       deps.setCircuit(dagId, circuit);
 
-      // Re-throw for error handler middleware
-      throw e;
+      // Wrap with context for the error handler middleware
+      const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });
+      throw wrapped;
     } finally {
       // 9. Release concurrency token
       const currentConcurrency = deps.getConcurrency();

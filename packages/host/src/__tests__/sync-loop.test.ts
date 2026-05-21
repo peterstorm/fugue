@@ -456,8 +456,9 @@ describe("startSyncLoop", () => {
 
     const handle = startSyncLoop(
       git, loader, config, logger,
-      () => {},
-      () => {},
+      () => {}, // onStarted
+      () => {}, // onComplete
+      () => {}, // onError
       "initial-sha",
     );
 
@@ -474,8 +475,9 @@ describe("startSyncLoop", () => {
 
     const handle = startSyncLoop(
       git, loader, config, logger,
-      () => {},
-      () => {},
+      () => {}, // onStarted
+      () => {}, // onComplete
+      () => {}, // onError
       "same-sha",
     );
 
@@ -495,11 +497,12 @@ describe("startSyncLoop", () => {
 
     const handle = startSyncLoop(
       git, loader, config, logger,
+      () => {}, // onStarted
       (registry, sha) => {
         completedRegistry = registry;
         completedSha = sha;
       },
-      () => {},
+      () => {}, // onError
       "old-sha",
     );
 
@@ -520,7 +523,8 @@ describe("startSyncLoop", () => {
 
     const handle = startSyncLoop(
       git, loader, config, logger,
-      () => {},
+      () => {}, // onStarted
+      () => {}, // onComplete
       () => { errorCalled = true; },
       "old-sha",
     );
@@ -538,8 +542,9 @@ describe("startSyncLoop", () => {
 
     const handle = startSyncLoop(
       git, loader, config, logger,
-      () => {},
-      () => {},
+      () => {}, // onStarted
+      () => {}, // onComplete
+      () => {}, // onError
       "sha",
     );
 
@@ -560,19 +565,19 @@ describe("startSyncLoop", () => {
 
 describe("loadResultToRegisteredDag", () => {
   it("converts a LoadResult to RegisteredDag with correct fields", () => {
-    const lr = makeFakeDag("my-team:my-dag");
+    const lr = makeFakeDag("my-team-my-dag");
     const registered = loadResultToRegisteredDag(lr, "sha-xyz", 1000);
 
-    expect(registered.id as string).toBe("my-team:my-dag");
+    expect(registered.id as string).toBe("my-team-my-dag");
     expect(registered.sha).toBe("sha-xyz");
     expect(registered.loadedAt).toBe(1000);
     expect(registered.healthy).toBe(true);
-    expect(registered.route).toBe("/dags/my-team:my-dag/run");
+    expect(registered.route).toBe("/dags/my-team-my-dag/run");
   });
 
   it("extracts team from path when dags directory present", () => {
     const lr: LoadResult = {
-      id: dagId("test:dag"),
+      id: dagId("test-dag"),
       registration: {
         dag: { id: "test:dag", nodes: [], edges: [] } as unknown as DagDef,
         inputSchema: z.object({}),
@@ -585,7 +590,7 @@ describe("loadResultToRegisteredDag", () => {
 
   it("uses 'unknown' team when path structure doesn't match", () => {
     const lr: LoadResult = {
-      id: dagId("test:dag"),
+      id: dagId("test-dag"),
       registration: {
         dag: { id: "test:dag", nodes: [], edges: [] } as unknown as DagDef,
         inputSchema: z.object({}),

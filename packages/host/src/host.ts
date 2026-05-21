@@ -19,7 +19,7 @@ import type { Result, DagId, NodeContext, DagDef, RunOptions, FrameworkError, Ru
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
-import { booting, bootComplete, beginDrain, drainComplete, syncCompleted, syncFailed, canServeRequests } from "./domain/host-state.js";
+import { booting, bootComplete, beginDrain, drainComplete, syncStarted, syncCompleted, syncFailed, canServeRequests } from "./domain/host-state.js";
 import type { Registry } from "./domain/registry.js";
 import { emptyRegistry } from "./domain/registry.js";
 import type { RegisteredDag } from "./domain/registry.js";
@@ -125,6 +125,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     executeDag: async <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions): Promise<Result<O, FrameworkError>> => {
       return runDag<I, O>(dag, input, ctx, opts);
     },
+    clock: Date.now,
   };
 
   // ── HTTP Server ──────────────────────────────────────────────────────────
@@ -145,26 +146,30 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     loader,
     syncConfig,
     logger,
+    // onStarted: transition to syncing via state machine
+    () => {
+      if (hostState.phase === "draining" || hostState.phase === "stopped") return;
+      const result = syncStarted(hostState, Date.now());
+      if (result.ok) {
+        hostState = result.value;
+      }
+      // If transition fails (e.g., already syncing), log and continue
+    },
+    // onComplete: transition syncing → ready
     (newRegistry, newSha) => {
-      // Guard: ignore sync completions during shutdown
       if (hostState.phase === "draining" || hostState.phase === "stopped") {
         logger.warn("Ignoring sync completion — host is shutting down", { phase: hostState.phase });
         return;
       }
 
-      // Use state machine transition when possible
       const result = syncCompleted(hostState, newRegistry, newSha, Date.now());
       if (result.ok) {
         hostState = result.value;
       } else {
-        // Fallback for states where syncCompleted isn't valid (ready, degraded)
-        // — sync loop doesn't transition to syncing before each cycle
-        hostState = {
-          phase: "ready",
-          registry: newRegistry,
-          lastSyncAt: Date.now(),
-          lastSyncSha: newSha,
-        };
+        logger.warn("syncCompleted transition failed — state machine violation", {
+          currentPhase: hostState.phase,
+          error: result.error.message,
+        });
       }
 
       // Force-reset circuit breakers for all DAGs (FR-092)
@@ -177,24 +182,18 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         sha: newSha,
       });
     },
+    // onError: transition syncing → degraded
     (error) => {
-      // Guard: ignore sync errors during shutdown
-      if (hostState.phase === "draining" || hostState.phase === "stopped") {
-        return;
-      }
+      if (hostState.phase === "draining" || hostState.phase === "stopped") return;
 
-      // Use state machine transition when possible
       const result = syncFailed(hostState, Date.now());
       if (result.ok) {
         hostState = result.value;
-      } else if (hostState.phase === "ready") {
-        // Direct degradation from ready (sync loop doesn't transition to syncing)
-        hostState = {
-          phase: "degraded",
-          registry: hostState.registry,
-          reason: "sync-failed",
-          since: Date.now(),
-        };
+      } else {
+        logger.warn("syncFailed transition failed — state machine violation", {
+          currentPhase: hostState.phase,
+          error: result.error.message,
+        });
       }
       logger.warn("Sync error — existing DAGs remain active", { error });
     },

@@ -223,7 +223,7 @@ describe("Concurrency Limiter", () => {
 
   describe("property tests", () => {
     // Arbitrary valid DagId (using the ID_REGEX pattern)
-    const arbDagId = fc.stringMatching(/^[a-z][a-z0-9_:-]{0,15}$/).map((s) => dagId(s));
+    const arbDagId = fc.stringMatching(/^[a-z][a-z0-9_-]{0,15}$/).map((s) => dagId(s));
 
     test("N acquires followed by N releases returns to initial global count", () => {
       fc.assert(

@@ -68,6 +68,11 @@ export interface SyncLogger {
 }
 
 /**
+ * Callback invoked when a sync cycle begins (before pulling).
+ */
+export type OnSyncStarted = () => void;
+
+/**
  * Callback invoked when sync completes with a new registry.
  */
 export type OnSyncComplete = (registry: Registry, sha: string) => void;
@@ -257,6 +262,7 @@ export const startSyncLoop = (
   loader: ModuleLoaderPort,
   config: SyncConfig,
   logger: SyncLogger,
+  onStarted: OnSyncStarted,
   onComplete: OnSyncComplete,
   onError: OnSyncError,
   initialSha: string = "",
@@ -271,6 +277,7 @@ export const startSyncLoop = (
     }
 
     running = true;
+    onStarted();
     try {
       const result = await executeSyncCycle(git, loader, config, lastSha, logger);
 

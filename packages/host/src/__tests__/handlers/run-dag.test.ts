@@ -4,7 +4,6 @@ import type { HostEnv } from "../../http/router.js";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
 import { errorHandler } from "../../http/middleware/error-handler.js";
-import { concurrencyGuard } from "../../http/middleware/concurrency-guard.js";
 import type { HostState } from "../../domain/host-state.js";
 import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { initConcurrency, withDagLimit } from "../../domain/concurrency.js";
@@ -68,6 +67,7 @@ const createTestApp = (state: TestState, executeDag?: RunDagDeps["executeDag"]) 
     setCircuit: (dagId, s) => { state.circuits.set(dagId, s); },
     createContext: (registered, signal) => ({ ...fakeNodeContext(registered.id as string), signal }),
     executeDag: executeDag ?? (async () => ok({ result: "success" })) as any,
+    clock: Date.now,
   };
 
   const app = new Hono<HostEnv>();
@@ -80,7 +80,7 @@ const createTestApp = (state: TestState, executeDag?: RunDagDeps["executeDag"]) 
   });
 
   const handler = createRunDagHandler(deps);
-  app.post("/dags/:id/run", concurrencyGuard(), handler);
+  app.post("/dags/:id/run", handler);
   return app;
 };
 
@@ -500,7 +500,8 @@ describe("POST /dags/:id/run", () => {
 
       const body = await res.json();
       expect(body.error).toBe("internal-error");
-      expect(body.message).toBe("Unexpected boom");
+      expect(body.message).toContain("Unhandled error executing DAG");
+      expect(body.message).toContain("my-dag");
     });
 
     it("releases concurrency token even when handler throws", async () => {

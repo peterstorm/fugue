@@ -31,9 +31,9 @@ const createLogger = (): SyncLogger => ({
 
 // ── Redis Connectivity ─────────────────────────────────────────────────────
 
-const createRedisConnectivity = (redisUrl: string): { port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> } => {
-  // Lazy import to avoid loading ioredis at module-level for tests
-  const Redis = require("ioredis");
+const createRedisConnectivity = async (redisUrl: string): Promise<{ port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> }> => {
+  // Dynamic import avoids loading ioredis at module-level for tests
+  const { default: Redis } = await import("ioredis");
   const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
 
   const port: RedisConnectivityPort = {
@@ -53,7 +53,13 @@ const createRedisConnectivity = (redisUrl: string): { port: RedisConnectivityPor
 
   const redis: RedisPort = {
     get: (key) => client.get(key),
-    set: (key, value, ...args) => client.set(key, value, ...args),
+    set: (key, value, ...args) => {
+      if (args.length >= 2) {
+        // EX/PX with TTL value
+        return client.set(key, value, args[0] as "EX", Number(args[1]));
+      }
+      return client.set(key, value);
+    },
   };
 
   return { port, redis, disconnect: () => client.quit() };
@@ -93,7 +99,7 @@ const main = async () => {
   const config = configResult.value;
 
   // Step 2: Create Redis connectivity
-  const { port: redisPort, redis, disconnect: disconnectRedis } = createRedisConnectivity(config.REDIS_URL);
+  const { port: redisPort, redis, disconnect: disconnectRedis } = await createRedisConnectivity(config.REDIS_URL);
 
   // Step 3: Create shared infrastructure
   const sharedInfra: SharedInfra = {
@@ -101,6 +107,7 @@ const main = async () => {
     redis,
     tracer: noopTracer,
     contentFilter: null,
+    logger,
   };
 
   // Step 4: Create git adapter (local or remote)

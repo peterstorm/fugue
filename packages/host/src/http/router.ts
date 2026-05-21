@@ -11,7 +11,6 @@ import type { ConcurrencyState } from "../domain/concurrency.js";
 import type { CircuitState } from "../domain/circuit-breaker.js";
 import type { DagId } from "@fugue/framework";
 import { errorHandler } from "./middleware/error-handler.js";
-import { concurrencyGuard } from "./middleware/concurrency-guard.js";
 import { healthHandler, readinessHandler } from "./handlers/health.js";
 import { listDagsHandler } from "./handlers/list-dags.js";
 import { createRunDagHandler } from "./handlers/run-dag.js";
@@ -63,9 +62,9 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   // ── DAG routes ───────────────────────────────────────────────────────────
   app.get("/dags", listDagsHandler);
 
-  // POST /dags/:id/run — with global concurrency guard
+  // POST /dags/:id/run
   const runDagHandler = createRunDagHandler(deps);
-  app.post("/dags/:id/run", concurrencyGuard(), runDagHandler);
+  app.post("/dags/:id/run", runDagHandler);
 
   return app;
 };

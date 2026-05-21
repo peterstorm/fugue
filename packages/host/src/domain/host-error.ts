@@ -26,7 +26,7 @@ export type HostError =
   | { readonly kind: "bun-install-failed"; readonly message: string }
   | { readonly kind: "config-invalid"; readonly message: string }
   | { readonly kind: "input-validation-failed"; readonly dagId: DagId; readonly issues: readonly ZodIssue[] }
-  | { readonly kind: "dag-validation-failed"; readonly dagId: DagId; readonly reason: string; readonly message: string }
+  | { readonly kind: "dag-validation-failed"; readonly dagId: string; readonly reason: string; readonly message: string }
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId };
 

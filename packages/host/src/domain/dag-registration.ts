@@ -146,7 +146,7 @@ export const validateDagRegistration = (
 ): Result<DagRegistration, HostError> => {
   const result = DagRegistrationSchema.safeParse(value);
   if (!result.success) {
-    const id = extractDagId(value) as DagId;
+    const id = extractDagId(value);
     return err({
       kind: "dag-validation-failed",
       dagId: id,

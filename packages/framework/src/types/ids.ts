@@ -50,9 +50,19 @@ export const nodeId = (s: string): NodeId => {
   return s as NodeId;
 };
 
-/** Smart constructor for `DagId`. Validates the string against `ID_REGEX`. */
+/**
+ * Pattern for DagId — stricter than the general ID_REGEX.
+ * Disallows `:` to prevent Redis key namespace escape (keys use `:` as delimiter).
+ */
+const DAG_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Smart constructor for `DagId`. Validates against `DAG_ID_REGEX` (no colons). */
 export const dagId = (s: string): DagId => {
-  validate("dagId", s);
+  if (typeof s !== "string" || !DAG_ID_REGEX.test(s)) {
+    throw new Error(
+      `Invalid dagId "${s}": must match ${DAG_ID_REGEX.source} (colons not allowed in DAG IDs)`,
+    );
+  }
   return s as DagId;
 };
 
@@ -107,6 +117,6 @@ export const tryNodeId = (s: string): Result<NodeId, string> =>
 
 /** Parse a string into a DagId, returning a Result instead of throwing. */
 export const tryDagId = (s: string): Result<DagId, string> =>
-  typeof s === "string" && ID_REGEX.test(s)
+  typeof s === "string" && DAG_ID_REGEX.test(s)
     ? ok(s as DagId)
-    : err(`Invalid dagId "${s}": must match ${ID_REGEX.source}`);
+    : err(`Invalid dagId "${s}": must match ${DAG_ID_REGEX.source} (colons not allowed)`);

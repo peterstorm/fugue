@@ -9,6 +9,7 @@
 import type { Context } from "hono";
 import type { HostEnv } from "../router.js";
 import { healthResponse, readinessResponse } from "../response.js";
+import { canServeRequests, getRegistry } from "../../domain/host-state.js";
 
 /**
  * Liveness probe — always returns 200 if the process is alive.
@@ -25,19 +26,10 @@ export const healthHandler = (c: Context<HostEnv>): Response => {
 export const readinessHandler = (c: Context<HostEnv>): Response => {
   const hostState = c.get("hostState");
 
-  switch (hostState.phase) {
-    case "ready":
-      return readinessResponse(c, true, hostState.registry.dags.size, hostState.phase);
-
-    case "degraded":
-      return readinessResponse(c, true, hostState.registry.dags.size, hostState.phase);
-
-    case "syncing":
-      return readinessResponse(c, true, hostState.registry.dags.size, hostState.phase);
-
-    case "booting":
-    case "draining":
-    case "stopped":
-      return readinessResponse(c, false, 0, hostState.phase);
+  if (canServeRequests(hostState)) {
+    const registry = getRegistry(hostState)!;
+    return readinessResponse(c, true, registry.dags.size, hostState.phase);
   }
+
+  return readinessResponse(c, false, 0, hostState.phase);
 };

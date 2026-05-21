@@ -13,7 +13,7 @@ import { describe, test, expect } from "bun:test";
 import type { RunId, NodeId, DagId, LlmClient, Tracer } from "@fugue/framework";
 import { runId, dagId, nodeId } from "@fugue/framework";
 import type { RegisteredDag, DagConfig } from "../domain/registry.js";
-import type { RedisPort, SharedInfra } from "../adapters/node-context-factory.js";
+import type { RedisPort, SharedInfra, LogPort } from "../adapters/node-context-factory.js";
 import {
   buildCacheKey,
   buildCheckpointKey,
@@ -26,6 +26,8 @@ import {
 } from "../adapters/node-context-factory.js";
 
 // ── Test Helpers ───────────────────────────────────────────────────────────
+
+const noopLogger: LogPort = { warn: () => {} };
 
 /** In-memory Redis mock that records all calls for assertion. */
 const createMockRedis = (): RedisPort & {
@@ -81,6 +83,7 @@ const buildSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
+  logger: { warn: () => {} },
 });
 
 // ── Pure Key Prefixing Tests ───────────────────────────────────────────────
@@ -125,7 +128,7 @@ describe("createNamespacedCache", () => {
     const redis = createMockRedis();
     redis.store.set("fugue:my-dag:cache:item-1", JSON.stringify({ foo: "bar" }));
 
-    const cache = createNamespacedCache(redis, "my-dag", undefined);
+    const cache = createNamespacedCache(redis, "my-dag", undefined, noopLogger);
     const result = await cache.get("item-1");
 
     expect(result).toEqual({ hit: true, value: { foo: "bar" } });
@@ -134,7 +137,7 @@ describe("createNamespacedCache", () => {
 
   test("get: returns miss when key does not exist", async () => {
     const redis = createMockRedis();
-    const cache = createNamespacedCache(redis, "my-dag", undefined);
+    const cache = createNamespacedCache(redis, "my-dag", undefined, noopLogger);
     const result = await cache.get("nonexistent");
 
     expect(result).toEqual({ hit: false });
@@ -144,7 +147,7 @@ describe("createNamespacedCache", () => {
     const redis = createMockRedis();
     redis.store.set("fugue:my-dag:cache:broken", "not-valid-json{{{");
 
-    const cache = createNamespacedCache(redis, "my-dag", undefined);
+    const cache = createNamespacedCache(redis, "my-dag", undefined, noopLogger);
     const result = await cache.get("broken");
 
     expect(result).toEqual({ hit: false });
@@ -152,7 +155,7 @@ describe("createNamespacedCache", () => {
 
   test("set: writes with prefixed key and no TTL when none configured", async () => {
     const redis = createMockRedis();
-    const cache = createNamespacedCache(redis, "my-dag", undefined);
+    const cache = createNamespacedCache(redis, "my-dag", undefined, noopLogger);
     await cache.set("item-1", { hello: "world" });
 
     expect(redis.store.get("fugue:my-dag:cache:item-1")).toBe(JSON.stringify({ hello: "world" }));
@@ -165,7 +168,7 @@ describe("createNamespacedCache", () => {
 
   test("set: applies explicit TTL from caller", async () => {
     const redis = createMockRedis();
-    const cache = createNamespacedCache(redis, "my-dag", undefined);
+    const cache = createNamespacedCache(redis, "my-dag", undefined, noopLogger);
     await cache.set("item-1", "value", 300);
 
     expect(redis.calls[0]).toEqual({
@@ -176,7 +179,7 @@ describe("createNamespacedCache", () => {
 
   test("FR-042: applies default TTL when caller omits TTL", async () => {
     const redis = createMockRedis();
-    const cache = createNamespacedCache(redis, "my-dag", 60);
+    const cache = createNamespacedCache(redis, "my-dag", 60, noopLogger);
     await cache.set("item-1", "value");
 
     expect(redis.calls[0]).toEqual({
@@ -187,7 +190,7 @@ describe("createNamespacedCache", () => {
 
   test("explicit TTL overrides default TTL", async () => {
     const redis = createMockRedis();
-    const cache = createNamespacedCache(redis, "my-dag", 60);
+    const cache = createNamespacedCache(redis, "my-dag", 60, noopLogger);
     await cache.set("item-1", "value", 120);
 
     expect(redis.calls[0]).toEqual({
@@ -198,7 +201,7 @@ describe("createNamespacedCache", () => {
 
   test("set returns Ok result", async () => {
     const redis = createMockRedis();
-    const cache = createNamespacedCache(redis, "my-dag", undefined);
+    const cache = createNamespacedCache(redis, "my-dag", undefined, noopLogger);
     const result = await cache.set("item-1", "value");
 
     expect(result).toEqual({ ok: true, value: undefined });
@@ -210,7 +213,7 @@ describe("createNamespacedCache", () => {
 describe("createNamespacedCheckpointWriter", () => {
   test("FR-031: writes with prefixed key fugue:<dagId>:<runId>:<nodeId>", async () => {
     const redis = createMockRedis();
-    const writer = createNamespacedCheckpointWriter(redis, "my-dag", "run-abc", undefined);
+    const writer = createNamespacedCheckpointWriter(redis, "my-dag", "run-abc", undefined, noopLogger);
 
     const rid = runId("run-abc");
     const nid = nodeId("fetch-data");
@@ -221,7 +224,7 @@ describe("createNamespacedCheckpointWriter", () => {
 
   test("write without TTL: no EX args", async () => {
     const redis = createMockRedis();
-    const writer = createNamespacedCheckpointWriter(redis, "my-dag", "run-1", undefined);
+    const writer = createNamespacedCheckpointWriter(redis, "my-dag", "run-1", undefined, noopLogger);
 
     await writer.write(runId("run-1"), nodeId("node-a"), "data");
 
@@ -233,7 +236,7 @@ describe("createNamespacedCheckpointWriter", () => {
 
   test("FR-042: applies checkpoint TTL when configured", async () => {
     const redis = createMockRedis();
-    const writer = createNamespacedCheckpointWriter(redis, "my-dag", "run-1", 3600);
+    const writer = createNamespacedCheckpointWriter(redis, "my-dag", "run-1", 3600, noopLogger);
 
     await writer.write(runId("run-1"), nodeId("node-a"), "data");
 
@@ -436,6 +439,7 @@ describe("createNodeContextForDag", () => {
       redis,
       tracer: noopTracer,
       contentFilter: filter,
+      logger: { warn: () => {} },
     };
     const dag = buildRegisteredDag("my-dag");
     const rid = runId("run-1");

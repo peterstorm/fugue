@@ -23,11 +23,16 @@ import {
   createNodeContextForDag,
   type RedisPort,
   type SharedInfra,
+  type LogPort,
 } from "../../adapters/node-context-factory.js";
 
-// ---------------------------------------------------------------------------
+// ───────────────────────────────────────────────────────────────────────────
 // Test helpers
-// ---------------------------------------------------------------------------
+// ───────────────────────────────────────────────────────────────────────────
+
+const noopLogger: LogPort = { warn: () => {} };
+
+// ───────────────────────────────────────────────────────────────────────────
 
 const makeFakeDag = (id: string): DagDef =>
   ({
@@ -75,6 +80,7 @@ const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
+  logger: { warn: () => {} },
 });
 
 // ---------------------------------------------------------------------------
@@ -132,8 +138,8 @@ describe("DAG cache adapter isolation (integration)", () => {
   test("two namespaced caches for different DAGs writing same key are isolated", async () => {
     const { port: redis, store } = createMockRedis();
 
-    const cacheA = createNamespacedCache(redis, "dag-alpha", undefined);
-    const cacheB = createNamespacedCache(redis, "dag-beta", undefined);
+    const cacheA = createNamespacedCache(redis, "dag-alpha", undefined, noopLogger);
+    const cacheB = createNamespacedCache(redis, "dag-beta", undefined, noopLogger);
 
     // Both write to the same logical key
     await cacheA.set("shared-key", { source: "alpha" });
@@ -157,8 +163,8 @@ describe("DAG cache adapter isolation (integration)", () => {
   test("cache miss in one DAG does not affect another DAG's cache", async () => {
     const { port: redis } = createMockRedis();
 
-    const cacheA = createNamespacedCache(redis, "dag-alpha", undefined);
-    const cacheB = createNamespacedCache(redis, "dag-beta", undefined);
+    const cacheA = createNamespacedCache(redis, "dag-alpha", undefined, noopLogger);
+    const cacheB = createNamespacedCache(redis, "dag-beta", undefined, noopLogger);
 
     await cacheA.set("only-in-alpha", { data: 42 });
 
@@ -179,8 +185,8 @@ describe("DAG checkpoint writer isolation (integration)", () => {
     const { port: redis, store } = createMockRedis();
     const runId = "run-shared" as unknown as RunId;
 
-    const writerA = createNamespacedCheckpointWriter(redis, "dag-alpha", "run-shared", undefined);
-    const writerB = createNamespacedCheckpointWriter(redis, "dag-beta", "run-shared", undefined);
+    const writerA = createNamespacedCheckpointWriter(redis, "dag-alpha", "run-shared", undefined, noopLogger);
+    const writerB = createNamespacedCheckpointWriter(redis, "dag-beta", "run-shared", undefined, noopLogger);
 
     await writerA.write(runId, "node-1" as unknown as import("@fugue/framework").NodeId, { output: "from-alpha" });
     await writerB.write(runId, "node-1" as unknown as import("@fugue/framework").NodeId, { output: "from-beta" });
