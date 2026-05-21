@@ -1,8 +1,8 @@
 /**
  * Signal handlers — graceful shutdown on SIGTERM/SIGINT, crash on uncaught exceptions.
  *
- * @satisfies NFR-030 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
- * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events
+ * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
+ * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
 import type { SyncLogger } from "../sync/sync-loop.js";

@@ -10,7 +10,7 @@
  * signal handlers, state transitions) is orchestrated in host.ts.
  *
  * @satisfies FR-006 — Host MUST refuse to start if Redis is unreachable
- * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events
+ * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
 import { ok, err } from "@fugue/framework";
@@ -103,7 +103,7 @@ export const buildSyncConfig = (config: HostConfig): SyncConfig => {
  *
  * Returns the BootResult needed for the host to wire together.
  *
- * @satisfies FR-006, NFR-031
+ * @satisfies FR-006, NFR-020
  */
 export const executeStartup = async (
   deps: StartupDeps,

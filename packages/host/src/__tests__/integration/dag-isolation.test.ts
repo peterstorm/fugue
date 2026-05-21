@@ -55,7 +55,8 @@ const makeRegisteredDag = (id: string): RegisteredDag => ({
   route: `/dags/${id}/run`,
   dag: makeFakeDag(id),
   inputSchema: z.object({ query: z.string() }),
-  config: {},
+  config: { route: `/dags/${id}/run`, timeout: 30_000, maxConcurrency: 10 },
+  meta: { description: "", version: "0.0.0" },
   loadedAt: Date.now(),
   sha: "abc123",
   status: { kind: "healthy" },
@@ -67,7 +68,7 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
     store,
     port: {
       get: async (key: string) => store.get(key) ?? null,
-      set: async (key: string, value: string, ..._args: string[]) => {
+      set: async (key: string, value: string, _opts?: { expiresInSec?: number }) => {
         store.set(key, value);
         return "OK";
       },

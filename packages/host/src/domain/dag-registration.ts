@@ -161,13 +161,19 @@ export const validateDagRegistration = (
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-const extractDagId = (value: unknown): string => {
+const extractDagId = (value: unknown): DagId => {
   if (value != null && typeof value === "object" && "dag" in value) {
     const dag = (value as Record<string, unknown>).dag;
     if (dag != null && typeof dag === "object" && "id" in dag) {
       const id = (dag as Record<string, unknown>).id;
-      if (typeof id === "string") return id;
+      if (typeof id === "string") {
+        try {
+          return makeDagId(id);
+        } catch {
+          // id doesn't pass DagId validation — use fallback
+        }
+      }
     }
   }
-  return "<unknown>";
+  return makeDagId("unknown");
 };

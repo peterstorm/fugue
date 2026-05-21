@@ -253,14 +253,14 @@ describe("validateDagRegistration", () => {
     }
   });
 
-  test("missing dag.id produces error with dagId '<unknown>'", () => {
+  test("missing dag.id produces error with dagId 'unknown'", () => {
     const result = validateDagRegistration({
       dag: { nodes: [], edges: [] },
       inputSchema: testInputSchema,
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "dag-validation-failed") {
-      expect(result.error.dagId as string).toBe("<unknown>");
+      expect(result.error.dagId as string).toBe("unknown");
     }
   });
 

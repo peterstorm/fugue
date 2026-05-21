@@ -82,17 +82,16 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     let input: unknown;
     try {
       input = await c.req.json();
-    } catch {
-      // Synthetic Zod issue — not from parser, so we construct the shape manually
-      const syntheticIssue = { message: "Request body must be valid JSON", path: [], code: "custom" } as unknown as import("zod").core.$ZodIssue;
-      const validationErr: HostError = {
-        kind: "input-validation-failed",
+    } catch (e: unknown) {
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      const parseErr: HostError = {
+        kind: "body-parse-failed",
         dagId,
-        issues: [syntheticIssue],
+        message: errorMsg,
       };
-      return errorResponse(c, 400, validationErr.kind, "Request body must be valid JSON", {
+      return errorResponse(c, 400, parseErr.kind, formatHostError(parseErr), {
         dagId,
-        details: { issues: [{ message: "Request body must be valid JSON", path: [] }] },
+        details: { message: errorMsg },
       });
     }
 

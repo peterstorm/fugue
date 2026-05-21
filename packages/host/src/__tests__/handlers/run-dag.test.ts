@@ -32,9 +32,11 @@ const makeFakeDag = (id: string, opts?: {
   dag: { id: id as any, nodes: [], edges: [] } as any,
   inputSchema: opts?.inputSchema ?? z.object({ text: z.string() }),
   config: {
+    route: `/dags/${id}/run`,
     timeout: opts?.timeout ?? 30_000,
-    maxConcurrency: opts?.maxConcurrency,
+    maxConcurrency: opts?.maxConcurrency ?? 10,
   },
+  meta: { description: "", version: "0.0.0" },
   loadedAt: Date.now(),
   sha: "abc123",
   status: (opts?.healthy === false)
@@ -76,7 +78,6 @@ const createTestApp = (state: TestState, executeDag?: RunDagDeps["executeDag"]) 
 
   app.use("*", async (c, next) => {
     c.set("hostState", state.hostState);
-    c.set("concurrency", state.concurrency);
     await next();
   });
 
@@ -202,7 +203,7 @@ describe("POST /dags/:id/run", () => {
       expect(res.status).toBe(400);
 
       const body = await res.json();
-      expect(body.error).toBe("input-validation-failed");
+      expect(body.error).toBe("body-parse-failed");
     });
   });
 

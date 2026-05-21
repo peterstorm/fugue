@@ -16,12 +16,13 @@ import type { z } from "zod";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * Per-DAG configuration loaded from fugue.yaml alongside the DAG module.
+ * Per-DAG configuration — fully resolved with no optionals.
+ * Constructed from DagRegistration defaults + fugue.yaml overrides.
  */
-export interface DagConfig {
-  readonly route?: string;
-  readonly timeout?: number;
-  readonly maxConcurrency?: number;
+export interface ResolvedDagConfig {
+  readonly route: string;
+  readonly timeout: number;
+  readonly maxConcurrency: number;
   readonly cacheTtlMs?: number;
   readonly checkpointTtlMs?: number;
   readonly circuitBreaker?: {
@@ -47,7 +48,8 @@ export interface RegisteredDag {
   readonly route: string;
   readonly dag: DagDef;
   readonly inputSchema: z.ZodType;
-  readonly config: DagConfig;
+  readonly config: ResolvedDagConfig;
+  readonly meta: { readonly description: string; readonly version: string };
   readonly loadedAt: number;
   readonly sha: string;
   readonly status: DagStatus;

@@ -39,7 +39,7 @@ export type DegradedReason = "redis-disconnected" | "sync-failed" | "no-dags-loa
 
 export type HostState =
   | { readonly phase: "booting"; readonly startedAt: number }
-  | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number; readonly lastSyncSha: string }
+  | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number; readonly lastSyncSha: string; readonly lastSuccessfulSyncAt: number }
   | { readonly phase: "ready"; readonly registry: Registry; readonly lastSyncAt: number; readonly lastSyncSha: string }
   | { readonly phase: "degraded"; readonly registry: Registry; readonly reason: DegradedReason; readonly since: number; readonly lastSyncSha: string; readonly lastSyncAt: number }
   | { readonly phase: "draining"; readonly registry: Registry; readonly drainStartedAt: number; readonly inflightCount: number }
@@ -90,6 +90,7 @@ export const syncStarted = (
         registry: s.registry,
         syncStartedAt: now,
         lastSyncSha: s.lastSyncSha,
+        lastSuccessfulSyncAt: s.lastSyncAt,
       }),
     )
     .with({ phase: "degraded" }, (s) =>
@@ -98,6 +99,7 @@ export const syncStarted = (
         registry: s.registry,
         syncStartedAt: now,
         lastSyncSha: s.lastSyncSha,
+        lastSuccessfulSyncAt: s.lastSyncAt,
       }),
     )
     .otherwise((s) => err(invalidTransition(s.phase, "syncing")));
@@ -141,7 +143,7 @@ export const syncFailed = (
     reason: "sync-failed" as const,
     since: now,
     lastSyncSha: state.lastSyncSha,
-    lastSyncAt: state.syncStartedAt,
+    lastSyncAt: state.lastSuccessfulSyncAt,
   });
 };
 
@@ -204,7 +206,7 @@ export const redisDied = (
         reason: "redis-disconnected" as const,
         since: now,
         lastSyncSha: s.lastSyncSha,
-        lastSyncAt: s.syncStartedAt,
+        lastSyncAt: s.lastSuccessfulSyncAt,
       }),
     )
     .otherwise((s) => err(invalidTransition(s.phase, "degraded")));

@@ -9,8 +9,8 @@
  * - Wires HTTP router → read current state
  * - Handles SIGTERM → draining state → stop sync → close server → exit
  *
- * @satisfies NFR-030 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
- * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events
+ * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
+ * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
 import { ok, err, runId as makeRunId, dagId } from "@fugue/framework";
@@ -125,6 +125,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       return runDag<I, O>(dag, input, ctx, opts);
     },
     clock: Date.now,
+    logger,
   };
 
   // ── HTTP Server ──────────────────────────────────────────────────────────
@@ -147,7 +148,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     logger,
     // onStarted: transition to syncing via state machine
     () => {
-      if (hostState.phase === "draining" || hostState.phase === "stopped") return;
+      if (hostState.phase === "draining" || hostState.phase === "stopped") {
+        logger.info("Ignoring sync start — host is shutting down", { phase: hostState.phase });
+        return;
+      }
       const result = syncStarted(hostState, Date.now());
       if (result.ok) {
         hostState = result.value;
@@ -161,7 +165,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     // onComplete: transition syncing → ready
     (newRegistry, newSha) => {
       if (hostState.phase === "draining" || hostState.phase === "stopped") {
-        logger.warn("Ignoring sync completion — host is shutting down", { phase: hostState.phase });
+        logger.info("Ignoring sync completion — host is shutting down", { phase: hostState.phase });
         return;
       }
 
@@ -187,7 +191,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     },
     // onError: transition syncing → degraded
     (error) => {
-      if (hostState.phase === "draining" || hostState.phase === "stopped") return;
+      if (hostState.phase === "draining" || hostState.phase === "stopped") {
+        logger.info("Ignoring sync error — host is shutting down", { phase: hostState.phase });
+        return;
+      }
 
       const result = syncFailed(hostState, Date.now());
       if (result.ok) {

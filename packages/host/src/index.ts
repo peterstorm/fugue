@@ -28,7 +28,7 @@ export {
   invalidTransition,
 } from "./domain/host-state.js";
 
-export type { Registry, RegisteredDag, DagConfig, DagStatus } from "./domain/registry.js";
+export type { Registry, RegisteredDag, ResolvedDagConfig, DagStatus } from "./domain/registry.js";
 export {
   emptyRegistry,
   withDag,
@@ -42,6 +42,9 @@ export {
 export type { HostError, HostErrorKind } from "./domain/host-error.js";
 export { httpStatusFor, formatHostError } from "./domain/host-error.js";
 
+export type { HostConfig, FugueYaml } from "./domain/config.js";
+export { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema } from "./domain/config.js";
+
 // ── Host Factory ───────────────────────────────────────────────────────────
 
 export { createHost } from "./host.js";
@@ -53,6 +56,10 @@ export { executeStartup, validateRedis, buildSyncConfig } from "./lifecycle/star
 export type { StartupDeps, BootResult, RedisConnectivityPort } from "./lifecycle/startup.js";
 export { registerSignalHandlers } from "./lifecycle/signals.js";
 export type { SignalHandlerDeps, SignalHandlerHandle } from "./lifecycle/signals.js";
+
+// ── Sync ───────────────────────────────────────────────────────────────────
+
+export type { SyncConfig, SyncLogger, SyncLoopHandle } from "./sync/sync-loop.js";
 
 // ── Adapters ───────────────────────────────────────────────────────────────
 

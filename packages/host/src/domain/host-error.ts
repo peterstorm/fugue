@@ -28,7 +28,8 @@ export type HostError =
   | { readonly kind: "bun-install-failed"; readonly message: string }
   | { readonly kind: "config-invalid"; readonly message: string }
   | { readonly kind: "input-validation-failed"; readonly dagId: DagId; readonly issues: readonly ZodIssue[] }
-  | { readonly kind: "dag-validation-failed"; readonly dagId: string; readonly reason: string; readonly message: string }
+  | { readonly kind: "dag-validation-failed"; readonly dagId: DagId; readonly reason: string; readonly message: string }
+  | { readonly kind: "body-parse-failed"; readonly dagId: DagId; readonly message: string }
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId };
 
@@ -44,6 +45,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "input-validation-failed" }, () => 400)
     .with({ kind: "validation-failed" }, () => 400)
     .with({ kind: "dag-validation-failed" }, () => 400)
+    .with({ kind: "body-parse-failed" }, () => 400)
     .with({ kind: "concurrency-exceeded" }, () => 429)
     .with({ kind: "timeout" }, () => 408)
     .with({ kind: "dag-disabled" }, () => 503)
@@ -87,6 +89,7 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "config-invalid" }, (e) => `host configuration invalid: ${e.message}`)
     .with({ kind: "input-validation-failed" }, (e) => `input validation failed for DAG '${e.dagId}': ${e.issues.length} issue(s)`)
     .with({ kind: "dag-validation-failed" }, (e) => `DAG registration validation failed for '${e.dagId}': ${e.reason}`)
+    .with({ kind: "body-parse-failed" }, (e) => `request body parse failed for DAG '${e.dagId}': ${e.message}`)
     .with({ kind: "discovery-failed" }, (e) => `DAG discovery failed for '${e.dagsRoot}': ${e.message}`)
     .with({ kind: "async-result-expired" }, (e) => `async result for run '${e.runId}' has expired`)
     .exhaustive();

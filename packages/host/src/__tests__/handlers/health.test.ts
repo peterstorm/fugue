@@ -3,10 +3,8 @@ import { Hono } from "hono";
 import type { HostEnv } from "../../http/router.js";
 import { healthHandler, readinessHandler } from "../../http/handlers/health.js";
 import type { HostState } from "../../domain/host-state.js";
-import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { emptyRegistry, withDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
-import { initConcurrency } from "../../domain/concurrency.js";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -19,19 +17,18 @@ const makeFakeDag = (id: string): RegisteredDag => ({
   route: `/dags/${id}/run`,
   dag: { id: id as any, nodes: [], edges: [] } as any,
   inputSchema: z.object({}),
-  config: {},
+  config: { route: `/dags/${id}/run`, timeout: 30_000, maxConcurrency: 10 },
+  meta: { description: "", version: "0.0.0" },
   loadedAt: Date.now(),
   sha: "abc123",
   status: { kind: "healthy" },
 });
 
-const createApp = (hostState: HostState, concurrency?: ConcurrencyState) => {
+const createApp = (hostState: HostState) => {
   const app = new Hono<HostEnv>();
-  const conc = concurrency ?? initConcurrency();
 
   app.use("*", async (c, next) => {
     c.set("hostState", hostState);
-    c.set("concurrency", conc);
     await next();
   });
 
@@ -117,6 +114,7 @@ describe("GET /readiness", () => {
       registry,
       syncStartedAt: Date.now(),
       lastSyncSha: "abc123",
+      lastSuccessfulSyncAt: Date.now() - 30_000,
     });
 
     const res = await app.request("/readiness");

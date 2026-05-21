@@ -7,7 +7,7 @@
  * This file has side effects (Redis connect, git clone, HTTP server start,
  * process.exit). It is NOT re-exported from the library surface.
  *
- * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events
+ * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
 import { parseHostConfig } from "./domain/config.js";
@@ -53,10 +53,9 @@ const createRedisConnectivity = async (redisUrl: string): Promise<{ port: RedisC
 
   const redis: RedisPort = {
     get: (key) => client.get(key),
-    set: (key, value, ...args) => {
-      if (args.length >= 2) {
-        // EX/PX with TTL value
-        return client.set(key, value, args[0] as "EX", Number(args[1]));
+    set: (key, value, opts) => {
+      if (opts?.expiresInSec !== undefined) {
+        return client.set(key, value, "EX", opts.expiresInSec);
       }
       return client.set(key, value);
     },
@@ -68,7 +67,7 @@ const createRedisConnectivity = async (redisUrl: string): Promise<{ port: RedisC
 // ── LLM Client ─────────────────────────────────────────────────────────────
 
 /**
- * Fail-fast LLM client — crashes loudly if called without proper configuration.
+ * Fail-on-use LLM client — surfaces missing configuration on first .chat() call.
  * DAGs that use ctx.llm.chat() will immediately surface the missing-key problem.
  */
 const createLlmClient = (config: { LLM_PROVIDER: string; ANTHROPIC_API_KEY?: string; OPENAI_API_KEY?: string }): LlmClient => {

@@ -12,7 +12,7 @@
 import { describe, test, expect } from "bun:test";
 import type { RunId, NodeId, DagId, LlmClient, Tracer } from "@fugue/framework";
 import { runId, dagId, nodeId } from "@fugue/framework";
-import type { RegisteredDag, DagConfig } from "../domain/registry.js";
+import type { RegisteredDag, ResolvedDagConfig } from "../domain/registry.js";
 import type { RedisPort, SharedInfra, LogPort } from "../adapters/node-context-factory.js";
 import {
   buildCacheKey,
@@ -44,8 +44,8 @@ const createMockRedis = (): RedisPort & {
       calls.push({ method: "get", args: [key] });
       return store.get(key) ?? null;
     },
-    set: async (key: string, value: string, ...args: string[]) => {
-      calls.push({ method: "set", args: [key, value, ...args] });
+    set: async (key: string, value: string, opts?: { expiresInSec?: number }) => {
+      calls.push({ method: "set", args: [key, value, ...(opts?.expiresInSec !== undefined ? ["EX", String(opts.expiresInSec)] : [])] });
       store.set(key, value);
       return "OK";
     },
@@ -65,14 +65,15 @@ const noopTracer: Tracer = {
 /** Build a RegisteredDag with minimal required fields for testing. */
 const buildRegisteredDag = (
   id: string,
-  config: DagConfig = {},
+  config: Partial<ResolvedDagConfig> = {},
 ): RegisteredDag => ({
   id: dagId(id),
   team: "test-team",
   route: `/dags/${id}`,
   dag: {} as any,
   inputSchema: {} as any,
-  config,
+  config: { route: `/dags/${id}`, timeout: 30_000, maxConcurrency: 10, ...config },
+  meta: { description: "", version: "0.0.0" },
   loadedAt: Date.now(),
   sha: "abc123",
   status: { kind: "healthy" },

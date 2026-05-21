@@ -13,6 +13,13 @@ import { httpStatusFor, formatHostError } from "../../domain/host-error.js";
 import { errorResponse } from "../response.js";
 
 /**
+ * Logger interface for the error handler — injected to avoid coupling to a specific logger.
+ */
+export interface ErrorHandlerLogger {
+  readonly error: (msg: string, data?: Record<string, unknown>) => void;
+}
+
+/**
  * Determine if an unknown value is a HostError by checking for the `kind` discriminant.
  */
 const isHostError = (e: unknown): e is HostError =>
@@ -64,9 +71,10 @@ const headersFor = (error: HostError): Record<string, string> | undefined => {
 };
 
 /**
- * Hono error handler. Registered via `app.onError(errorHandler)`.
+ * Create a Hono error handler with injected logger.
+ * Registered via `app.onError(createErrorHandler(logger))`.
  */
-export const errorHandler = (thrown: Error | HostError, c: Context): Response => {
+export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error | HostError, c: Context): Response => {
   // If it's a HostError (thrown directly or wrapped)
   if (isHostError(thrown)) {
     const status = httpStatusFor(thrown);
@@ -95,10 +103,30 @@ export const errorHandler = (thrown: Error | HostError, c: Context): Response =>
   // Check for FrameworkError (has `kind` field from the framework)
   if (thrown instanceof Error && "frameworkErrorKind" in thrown) {
     const kind = (thrown as unknown as { frameworkErrorKind: string }).frameworkErrorKind;
+    logger.error("Framework error in request handler", {
+      kind,
+      error: thrown.message,
+      stack: thrown.stack,
+    });
     return errorResponse(c, 500, kind, thrown.message);
   }
 
-  // Generic unhandled error
+  // Generic unhandled error — MUST be logged for observability
   const message = thrown instanceof Error ? thrown.message : "Internal server error";
+  const cause = thrown instanceof Error && thrown.cause instanceof Error ? thrown.cause : undefined;
+  logger.error("Unhandled error in request handler", {
+    error: message,
+    stack: thrown instanceof Error ? thrown.stack : undefined,
+    causeMessage: cause?.message,
+    causeStack: cause?.stack,
+  });
   return errorResponse(c, 500, "internal-error", message);
 };
+
+/**
+ * Legacy error handler without logger — logs to console.error.
+ * @deprecated Use createErrorHandler(logger) instead.
+ */
+export const errorHandler = createErrorHandler({
+  error: (msg, data) => console.error(JSON.stringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
+});

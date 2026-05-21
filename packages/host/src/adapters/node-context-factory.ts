@@ -10,7 +10,7 @@
  * @satisfies FR-030 — Cache keys prefixed fugue:<dagId>:cache:<key>
  * @satisfies FR-031 — Checkpoint keys prefixed fugue:<dagId>:<runId>:<nodeId>
  * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
- * @satisfies FR-042 — Per-DAG TTL overrides apply to cache/checkpoint entries
+ * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
  * @satisfies SC-008 — Two DAGs using same cache key string are isolated
  */
 
@@ -46,7 +46,7 @@ export interface LogPort {
  */
 export interface RedisPort {
   readonly get: (key: string) => Promise<string | null>;
-  readonly set: (key: string, value: string, ...args: string[]) => Promise<string | null>;
+  readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<string | null>;
 }
 
 /**
@@ -111,7 +111,7 @@ export const buildCheckpointKey = (dagId: string, runId: string, nodeId: string)
  * Applies per-DAG TTL override when set is called without an explicit TTL.
  *
  * @satisfies FR-030 — Keys prefixed with DAG namespace
- * @satisfies FR-042 — Per-DAG TTL override applied
+ * @satisfies FR-041 — Per-DAG TTL override applied
  */
 export const createNamespacedCache = (
   redis: RedisPort,
@@ -159,7 +159,7 @@ export const createNamespacedCache = (
     try {
       const effectiveTtl = ttlSec ?? defaultTtlSec;
       if (effectiveTtl !== undefined) {
-        await redis.set(fullKey, serialized, "EX", String(effectiveTtl));
+        await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl });
       } else {
         await redis.set(fullKey, serialized);
       }
@@ -175,7 +175,7 @@ export const createNamespacedCache = (
  * Applies per-DAG checkpoint TTL.
  *
  * @satisfies FR-031 — Keys prefixed with DAG + run namespace
- * @satisfies FR-042 — Per-DAG checkpoint TTL applied
+ * @satisfies FR-041 — Per-DAG checkpoint TTL applied
  */
 export const createNamespacedCheckpointWriter = (
   redis: RedisPort,
@@ -195,7 +195,7 @@ export const createNamespacedCheckpointWriter = (
     }
     try {
       if (checkpointTtlSec !== undefined) {
-        await redis.set(fullKey, serialized, "EX", String(checkpointTtlSec));
+        await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec });
       } else {
         await redis.set(fullKey, serialized);
       }
@@ -212,7 +212,7 @@ export const createNamespacedCheckpointWriter = (
  * Resolve TTL values for a DAG — per-DAG overrides (from fugue.yaml) take
  * precedence. Values converted from ms (config) to seconds (Redis EX).
  *
- * @satisfies FR-042
+ * @satisfies FR-041
  */
 export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   const cacheTtlMs = dag.config.cacheTtlMs;
@@ -236,7 +236,7 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
  * @satisfies FR-030 — Cache key isolation
  * @satisfies FR-031 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
- * @satisfies FR-042 — Per-DAG TTL overrides
+ * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 — Cross-DAG cache isolation
  */
 export const createNodeContextForDag = (

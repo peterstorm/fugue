@@ -3,10 +3,8 @@ import { Hono } from "hono";
 import type { HostEnv } from "../../http/router.js";
 import { listDagsHandler } from "../../http/handlers/list-dags.js";
 import type { HostState } from "../../domain/host-state.js";
-import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { emptyRegistry, withDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
-import { initConcurrency } from "../../domain/concurrency.js";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -19,7 +17,8 @@ const makeFakeDag = (id: string, opts?: { healthy?: boolean; route?: string }): 
   route: opts?.route ?? `/dags/${id}/run`,
   dag: { id: id as any, nodes: [], edges: [] } as any,
   inputSchema: z.object({}),
-  config: {},
+  config: { route: `/dags/${id}/run`, timeout: 30_000, maxConcurrency: 10 },
+  meta: { description: "", version: "0.0.0" },
   loadedAt: Date.now(),
   sha: "abc123",
   status: (opts?.healthy === false)
@@ -32,7 +31,6 @@ const createApp = (hostState: HostState) => {
 
   app.use("*", async (c, next) => {
     c.set("hostState", hostState);
-    c.set("concurrency", initConcurrency());
     await next();
   });
 

@@ -8,8 +8,8 @@
  * directly and hashes file mtimes for SHA comparison.
  *
  * @satisfies FR-001 — Poll git branch and detect new commits by comparing SHAs
- * @satisfies FR-002 — Detect lockfile changes between commits
- * @satisfies FR-005 — Log warning and retry on next interval if git unreachable
+ * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
+ * @satisfies AD-5 — Raw git via Bun.spawn
  * @satisfies AD-5 — Raw git via Bun.spawn
  */
 
@@ -229,7 +229,7 @@ export const createLocalGitAdapter = (): GitPort => ({
 
 /**
  * Run `bun install --frozen-lockfile` in the given directory.
- * @satisfies FR-002 — Run bun install if lockfile changed between commits
+ * @satisfies FR-005 — Run bun install --frozen-lockfile when bun.lockb has changed
  */
 export const runBunInstall = async (
   cwd: string,

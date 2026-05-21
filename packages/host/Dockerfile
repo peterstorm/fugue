@@ -32,4 +32,4 @@ HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/health || exit 1
 
 # Run the host entry point
-CMD ["bun", "run", "packages/host/src/index.ts"]
+CMD ["bun", "run", "packages/host/src/main.ts"]

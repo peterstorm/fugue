@@ -7,10 +7,8 @@
 
 import { Hono } from "hono";
 import type { HostState } from "../domain/host-state.js";
-import type { ConcurrencyState } from "../domain/concurrency.js";
-import type { CircuitState } from "../domain/circuit-breaker.js";
-import type { DagId } from "@fugue/framework";
-import { errorHandler } from "./middleware/error-handler.js";
+import { createErrorHandler } from "./middleware/error-handler.js";
+import type { ErrorHandlerLogger } from "./middleware/error-handler.js";
 import { healthHandler, readinessHandler } from "./handlers/health.js";
 import { listDagsHandler } from "./handlers/list-dags.js";
 import { createRunDagHandler } from "./handlers/run-dag.js";
@@ -23,7 +21,6 @@ import type { RunDagDeps } from "./handlers/run-dag.js";
 export type HostEnv = {
   Variables: {
     hostState: HostState;
-    concurrency: ConcurrencyState;
   };
 };
 
@@ -33,6 +30,7 @@ export type HostEnv = {
 
 export interface RouterDeps extends RunDagDeps {
   readonly getHostState: () => HostState;
+  readonly logger: ErrorHandlerLogger;
 }
 
 /**
@@ -46,12 +44,11 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   const app = new Hono<HostEnv>();
 
   // ── Global error handler ─────────────────────────────────────────────────
-  app.onError(errorHandler);
+  app.onError(createErrorHandler(deps.logger));
 
   // ── Inject shared state into context ─────────────────────────────────────
   app.use("*", async (c, next) => {
     c.set("hostState", deps.getHostState());
-    c.set("concurrency", deps.getConcurrency());
     await next();
   });
 

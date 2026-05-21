@@ -87,6 +87,10 @@ describe("HostError", () => {
         expected: "DAG discovery failed for '/opt/dags': ENOENT: no such file or directory",
       },
       {
+        error: { kind: "body-parse-failed", dagId: did("test-dag"), message: "Unexpected token" },
+        expected: "request body parse failed for DAG 'test-dag': Unexpected token",
+      },
+      {
         error: { kind: "async-result-expired", runId: rid("run-456") },
         expected: "async result for run 'run-456' has expired",
       },
@@ -115,10 +119,11 @@ describe("HostError", () => {
         "config-invalid",
         "input-validation-failed",
         "dag-validation-failed",
+        "body-parse-failed",
         "discovery-failed",
         "async-result-expired",
       ];
-      expect(allKinds).toHaveLength(17);
+      expect(allKinds).toHaveLength(18);
     });
   });
 
@@ -141,6 +146,7 @@ describe("HostError", () => {
       { error: { kind: "bun-install-failed", message: "m" }, status: 500 },
       { error: { kind: "config-invalid", message: "m" }, status: 500 },
       { error: { kind: "discovery-failed", dagsRoot: "/x", message: "m" }, status: 500 },
+      { error: { kind: "body-parse-failed", dagId: did("x"), message: "m" }, status: 400 },
     ];
 
     for (const { error, status } of statusCases) {

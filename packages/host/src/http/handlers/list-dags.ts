@@ -35,8 +35,8 @@ export const listDagsHandler = (c: Context<HostEnv>): Response => {
     dags.push({
       id: reg.id,
       route: reg.route,
-      description: "",
-      version: reg.sha,
+      description: reg.meta.description,
+      version: reg.meta.version,
       healthy: reg.status.kind === "healthy",
     });
   }

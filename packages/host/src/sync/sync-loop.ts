@@ -14,17 +14,15 @@
  * Error isolation: A single DAG import failure does NOT block others.
  *
  * @satisfies FR-001 — Poll git branch at configurable interval and detect new commits
- * @satisfies FR-002 — Run bun install if bun.lockb changed between commits
- * @satisfies FR-003 — Remove DAGs from registry when removed from git
- * @satisfies FR-005 — Log warning and retry on next interval if git unreachable
- * @satisfies FR-007 — Identify each DAG version by git commit SHA
- * @satisfies NFR-003 — Poll overhead <50ms at P99
+ * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
+ * @satisfies FR-002 — Discover DAGs by scanning dags/{team}/{name}/dag.ts convention
+ * @satisfies FR-003 — Dynamically import discovered DAG modules with SHA cache-busting
+ * @satisfies NFR-003 — Git sync detection MUST complete within poll interval + 5s
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
-import { ok, err } from "@fugue/framework";
-import type { Result, DagId } from "@fugue/framework";
-import { dagId } from "@fugue/framework";
+import { ok } from "@fugue/framework";
+import type { Result } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry, RegisteredDag } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
@@ -134,6 +132,10 @@ export const loadResultToRegisteredDag = (
       route: resolved.route,
       timeout: resolved.config.timeoutMs,
       maxConcurrency: resolved.config.maxConcurrent,
+    },
+    meta: {
+      description: resolved.meta.description,
+      version: resolved.meta.version,
     },
     loadedAt: now,
     sha,
