@@ -33,7 +33,6 @@ export type HostError =
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId };
 
-/** Discriminant union of all host error kinds. */
 export type HostErrorKind = HostError["kind"];
 
 /**

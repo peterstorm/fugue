@@ -35,16 +35,14 @@ import type { DagSnapshot } from "./diff.js";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * The result of a single sync cycle.
+ * The result of a single sync cycle — proper discriminated union.
+ * Each variant carries exactly the fields relevant to its outcome.
  */
-export interface SyncResult {
-  readonly kind: "no-change" | "updated" | "error";
-  readonly sha: string;
-  readonly registry?: Registry;
-  readonly errors?: readonly { readonly path: string; readonly error: HostError }[];
-  readonly syncError?: HostError;
-  readonly message?: string;
-}
+export type SyncResult =
+  | { readonly kind: "no-change"; readonly sha: string }
+  | { readonly kind: "updated"; readonly sha: string; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
+  | { readonly kind: "error"; readonly sha: string; readonly syncError: HostError; readonly message: string }
+  | { readonly kind: "skipped"; readonly sha: string; readonly reason: "already-in-progress" };
 
 /**
  * Configuration for the sync loop.
@@ -59,12 +57,9 @@ export interface SyncConfig {
 
 /**
  * Logger interface for sync operations.
+ * Identical to LogPort — kept as a named alias for clarity at call sites.
  */
-export interface SyncLogger {
-  readonly info: (msg: string, data?: Record<string, unknown>) => void;
-  readonly warn: (msg: string, data?: Record<string, unknown>) => void;
-  readonly error: (msg: string, data?: Record<string, unknown>) => void;
-}
+export type SyncLogger = import("../adapters/node-context-factory.js").LogPort;
 
 /**
  * Callback invoked when a sync cycle begins (before pulling).
@@ -254,7 +249,7 @@ export const executeSyncCycle = async (
     kind: "updated",
     sha: currentSha,
     registry,
-    errors: bulkResult.errors.length > 0 ? bulkResult.errors : undefined,
+    errors: bulkResult.errors,
   };
 };
 
@@ -279,7 +274,7 @@ export const startSyncLoop = (
 
   const doSync = async (): Promise<SyncResult> => {
     if (running) {
-      return { kind: "no-change", sha: lastSha, message: "sync already in progress" };
+      return { kind: "skipped", sha: lastSha, reason: "already-in-progress" };
     }
 
     running = true;
@@ -287,19 +282,34 @@ export const startSyncLoop = (
     try {
       const result = await executeSyncCycle(git, loader, config, lastSha, logger);
 
-      if (result.kind === "updated" && result.registry) {
-        lastSha = result.sha;
+      if (result.kind === "updated") {
+        // Call onComplete BEFORE advancing SHA — if onComplete throws,
+        // SHA stays at lastSha so the next cycle will retry this commit.
         onComplete(result.registry, result.sha);
+        lastSha = result.sha;
       } else if (result.kind === "no-change") {
         lastSha = result.sha;
       } else if (result.kind === "error") {
-        onError(result.syncError ?? {
-          kind: "git-pull-failed",
-          message: result.message || "sync cycle failed",
-        });
+        onError(result.syncError);
       }
 
       return result;
+    } catch (e) {
+      // Recover state machine from "syncing" on unexpected throw.
+      // Without this, the host remains stuck in syncing phase permanently.
+      const errMsg = e instanceof Error ? e.message : String(e);
+      logger.error("Unexpected error in sync cycle", { error: errMsg });
+      const syncError: HostError = {
+        kind: "git-pull-failed",
+        message: `Unexpected error in sync cycle: ${errMsg}`,
+      };
+      onError(syncError);
+      return {
+        kind: "error",
+        sha: lastSha,
+        syncError,
+        message: `Unexpected error: ${errMsg}`,
+      };
     } finally {
       running = false;
     }

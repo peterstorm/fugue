@@ -299,8 +299,8 @@ describe("executeSyncCycle", () => {
 
     expect(result.kind).toBe("updated");
     expect(result.sha).toBe("new-sha-456");
-    expect(result.registry).toBeDefined();
-    expect(result.registry!.dags.size).toBe(2);
+    if (result.kind !== "updated") throw new Error("expected updated");
+    expect(result.registry.dags.size).toBe(2);
     expect(state.pullCalls).toBe(1);
   });
 
@@ -351,7 +351,8 @@ describe("executeSyncCycle", () => {
     const result = await executeSyncCycle(git, loader, config, "old-sha", logger);
 
     expect(result.kind).toBe("updated");
-    expect(result.registry!.dags.size).toBe(1);
+    if (result.kind !== "updated") throw new Error("expected updated");
+    expect(result.registry.dags.size).toBe(1);
     expect(result.errors).toHaveLength(1);
     expect(logger.logs.some((l) => l.includes("DAG load failed"))).toBe(true);
   });
@@ -364,7 +365,8 @@ describe("executeSyncCycle", () => {
 
     const result = await executeSyncCycle(git, loader, config, "old", logger);
 
-    expect(result.registry!.sha).toBe("commit-abc123");
+    if (result.kind !== "updated") throw new Error("expected updated");
+    expect(result.registry.sha).toBe("commit-abc123");
   });
 });
 
@@ -535,8 +537,8 @@ describe("startSyncLoop", () => {
   });
 
   it("stop prevents further timer executions", async () => {
-    const { port: git, state } = createFakeGit({ currentSha: "sha" });
-    const loader = createFakeLoader();
+    const { port: git, state } = createFakeGit({ currentSha: "new-sha" });
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
     const config = makeSyncConfig({ pollIntervalMs: 10 }); // Very short interval
     const logger = makeLogger();
 
@@ -545,19 +547,56 @@ describe("startSyncLoop", () => {
       () => {}, // onStarted
       () => {}, // onComplete
       () => {}, // onError
-      "sha",
+      "old-sha",
     );
 
+    // Let a few timer ticks fire
+    await new Promise((r) => setTimeout(r, 60));
+    const callsBeforeStop = state.shaCalls;
     handle.stop();
 
-    // Wait a bit to confirm no more calls happen
-    await new Promise((r) => setTimeout(r, 50));
-    // After stop, no new sha calls should be accumulating rapidly
-    const callsAfterStop = state.shaCalls;
-    await new Promise((r) => setTimeout(r, 50));
-    // Should not have increased significantly (maybe 0-1 if timer fired before stop)
-    // This is a best-effort check
-    expect(true).toBe(true); // Timer cleanup verified by no hanging test
+    // After stop, no new calls should accumulate
+    await new Promise((r) => setTimeout(r, 60));
+    // At most 1 additional call from an in-flight tick
+    expect(state.shaCalls - callsBeforeStop).toBeLessThanOrEqual(1);
+  });
+
+  it("triggerSync returns skipped when sync is already in progress", async () => {
+    // Create a git port that takes time to return SHA (simulates slow git)
+    let resolveSha: ((v: Result<string, HostError>) => void) | null = null;
+    const slowGit: GitPort = {
+      clone: async () => ok(undefined),
+      pull: async () => ok(undefined),
+      currentSha: async (): Promise<Result<string, HostError>> => {
+        return new Promise((resolve) => { resolveSha = resolve; });
+      },
+      hasLockfileChanged: async () => ok(false),
+      install: async () => ok(undefined),
+    };
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
+    const config = makeSyncConfig({ pollIntervalMs: 60_000 });
+    const logger = makeLogger();
+
+    const handle = startSyncLoop(
+      slowGit, loader, config, logger,
+      () => {},
+      () => {},
+      () => {},
+      "old-sha",
+    );
+
+    // Start first sync (will block on currentSha)
+    const firstSync = handle.triggerSync();
+
+    // Immediately try second sync — should be skipped
+    const secondSync = await handle.triggerSync();
+    expect(secondSync.kind).toBe("skipped");
+
+    // Unblock the first sync
+    resolveSha!(ok("new-sha"));
+    await firstSync;
+
+    handle.stop();
   });
 });
 
@@ -669,6 +708,7 @@ describe("executeSyncCycle — bun install path (FR-002)", () => {
 
     expect(result.kind).toBe("error");
     expect(result.sha).toBe("old-sha"); // SHA does not advance
+    if (result.kind !== "error") throw new Error("expected error");
     expect(result.message).toContain("bun install failed");
   });
 

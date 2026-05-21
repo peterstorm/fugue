@@ -128,6 +128,7 @@ const main = async () => {
       redis: redisPort,
       sharedInfra,
       logger,
+      onShutdown: async () => { await disconnectRedis?.(); },
     });
 
     if (!hostResult.ok) {

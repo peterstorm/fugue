@@ -20,9 +20,9 @@ import { canServeRequests, getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
-import type { ConcurrencyState, AcquireToken } from "../../domain/concurrency.js";
-import { isAllowed, recordSuccess, recordFailure, attemptReset, consumeTestRequest } from "../../domain/circuit-breaker.js";
-import type { CircuitState } from "../../domain/circuit-breaker.js";
+import type { ConcurrencyState } from "../../domain/concurrency.js";
+import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-guard.js";
+import type { CircuitPort } from "../../domain/circuit-guard.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
@@ -31,8 +31,7 @@ import type { CircuitState } from "../../domain/circuit-breaker.js";
 export interface RunDagDeps {
   readonly getConcurrency: () => ConcurrencyState;
   readonly setConcurrency: (s: ConcurrencyState) => void;
-  readonly getCircuit: (dagId: DagId) => CircuitState;
-  readonly setCircuit: (dagId: DagId, s: CircuitState) => void;
+  readonly circuit: CircuitPort;
   readonly createContext: (registered: RegisteredDag, signal?: AbortSignal) => NodeContext;
   readonly executeDag: <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
@@ -107,22 +106,12 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
     // 3. Check circuit breaker state
     const now = deps.clock();
-    let circuit = deps.getCircuit(dagId);
+    const circuitCheck = checkCircuit(deps.circuit, dagId, now);
 
-    // Try reset if open
-    circuit = attemptReset(circuit, now);
-    deps.setCircuit(dagId, circuit);
-
-    if (!isAllowed(circuit)) {
+    if (!circuitCheck.allowed) {
       return errorResponse(c, 503, "dag-disabled", `Circuit breaker open for DAG '${dagId}'`, {
         dagId,
       });
-    }
-
-    // Consume test request in half-open
-    if (circuit.state === "half-open") {
-      circuit = consumeTestRequest(circuit);
-      deps.setCircuit(dagId, circuit);
     }
 
     // 4. Acquire per-DAG concurrency token
@@ -143,70 +132,67 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const token = acquireResult.value.token;
 
     // 5. Execute DAG with timeout
-    const timeoutMs = registered.config.timeout ?? 30_000;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const ctx = deps.createContext(registered, controller.signal);
-    const startTime = deps.clock();
-
+    // INVARIANT: The outer try/finally guarantees token release even if
+    // createContext or setTimeout throws. The inner try/catch handles
+    // execution-level errors (timeout, framework errors, unhandled throws).
     try {
-      const result = await deps.executeDag(
-        registered.dag,
-        parseResult.data,
-        ctx,
-      );
+      const timeoutMs = registered.config.timeout ?? 30_000;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const ctx = deps.createContext(registered, controller.signal);
+      const startTime = deps.clock();
 
-      clearTimeout(timeoutId);
-      const durationMs = deps.clock() - startTime;
+      try {
+        const result = await deps.executeDag(
+          registered.dag,
+          parseResult.data,
+          ctx,
+        );
 
-      // 6. Map Result to HTTP response
-      if (result.ok) {
-        // 7. Record success
-        circuit = recordSuccess(deps.getCircuit(dagId), deps.clock());
-        deps.setCircuit(dagId, circuit);
+        clearTimeout(timeoutId);
+        const durationMs = deps.clock() - startTime;
 
-        return successResponse(c, result.value, { runId: ctx.runId, durationMs });
-      } else {
-        // Framework error
-        circuit = recordFailure(deps.getCircuit(dagId), deps.clock());
-        deps.setCircuit(dagId, circuit);
+        // 6. Map Result to HTTP response
+        if (result.ok) {
+          markSuccess(deps.circuit, dagId, deps.clock());
+          return successResponse(c, result.value, { runId: ctx.runId, durationMs });
+        } else {
+          markFailure(deps.circuit, dagId, deps.clock());
+          const msg = formatFrameworkError(result.error);
+          return errorResponse(c, 500, result.error.kind, msg, {
+            dagId,
+            runId: ctx.runId,
+          });
+        }
+      } catch (e: unknown) {
+        clearTimeout(timeoutId);
 
-        const msg = formatFrameworkError(result.error);
-        return errorResponse(c, 500, result.error.kind, msg, {
-          dagId,
-          runId: ctx.runId,
-        });
+        // Handle abort (timeout)
+        if (e instanceof Error && e.name === "AbortError") {
+          markFailure(deps.circuit, dagId, deps.clock());
+          const timeoutErr: HostError = {
+            kind: "timeout",
+            dagId,
+            runId: ctx.runId,
+            timeoutMs,
+          };
+          return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
+            dagId,
+            runId: ctx.runId,
+            details: { timeoutMs },
+          });
+        }
+
+        markFailure(deps.circuit, dagId, deps.clock());
+
+        // Wrap with context for the error handler middleware
+        const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });
+        throw wrapped;
       }
-    } catch (e: unknown) {
-      clearTimeout(timeoutId);
-
-      // Handle abort (timeout)
-      if (e instanceof Error && e.name === "AbortError") {
-        circuit = recordFailure(deps.getCircuit(dagId), deps.clock());
-        deps.setCircuit(dagId, circuit);
-
-        const timeoutErr: HostError = {
-          kind: "timeout",
-          dagId,
-          runId: ctx.runId,
-          timeoutMs,
-        };
-        return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
-          dagId,
-          runId: ctx.runId,
-          details: { timeoutMs },
-        });
-      }
-
-      // Record failure for circuit breaker
-      circuit = recordFailure(deps.getCircuit(dagId), deps.clock());
-      deps.setCircuit(dagId, circuit);
-
-      // Wrap with context for the error handler middleware
-      const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });
-      throw wrapped;
     } finally {
       // 8. Release concurrency token
+      // INVARIANT: This read-transform-write MUST remain synchronous (no await).
+      // Single-threaded event loop guarantees atomicity within a tick.
       const currentConcurrency = deps.getConcurrency();
       deps.setConcurrency(release(currentConcurrency, token));
     }

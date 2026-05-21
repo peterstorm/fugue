@@ -30,7 +30,7 @@ import {
 // Test helpers
 // ───────────────────────────────────────────────────────────────────────────
 
-const noopLogger: LogPort = { warn: () => {} };
+const noopLogger: LogPort = { info: () => {}, warn: () => {}, error: () => {} };
 
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
-  logger: { warn: () => {} },
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
 });
 
 // ---------------------------------------------------------------------------

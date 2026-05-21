@@ -26,10 +26,14 @@ export const healthHandler = (c: Context<HostEnv>): Response => {
 export const readinessHandler = (c: Context<HostEnv>): Response => {
   const hostState = c.get("hostState");
 
-  if (canServeRequests(hostState)) {
-    const registry = getRegistry(hostState)!;
-    return readinessResponse(c, true, registry.dags.size, hostState.phase);
+  if (!canServeRequests(hostState)) {
+    return readinessResponse(c, false, 0, hostState.phase);
   }
 
-  return readinessResponse(c, false, 0, hostState.phase);
+  const registry = getRegistry(hostState);
+  if (!registry) {
+    return readinessResponse(c, false, 0, hostState.phase);
+  }
+
+  return readinessResponse(c, true, registry.dags.size, hostState.phase);
 };

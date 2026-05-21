@@ -129,9 +129,6 @@ export const freeze = (dags: readonly RegisteredDag[], sha: string, now: number)
 
 // ── Queries ────────────────────────────────────────────────────────────────
 
-/**
- * Look up a DAG by id. Returns undefined if not found.
- */
 export const lookupDag = (r: Registry, id: DagId): RegisteredDag | undefined =>
   r.dags.get(id);
 
@@ -146,7 +143,4 @@ export const healthyCount = (r: Registry): number => {
   return count;
 };
 
-/**
- * Check if registry has any loaded DAGs.
- */
 export const isEmpty = (r: Registry): boolean => r.dags.size === 0;

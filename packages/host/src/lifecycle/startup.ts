@@ -79,12 +79,13 @@ export const validateRedis = async (
 
 /**
  * Build the SyncConfig from HostConfig.
+ * Clock parameter enables deterministic testing of repo path generation.
  */
-export const buildSyncConfig = (config: HostConfig): SyncConfig => {
+export const buildSyncConfig = (config: HostConfig, clock: () => number = Date.now): SyncConfig => {
   const isLocalMode = config.DAGS_LOCAL_PATH !== undefined && config.DAGS_LOCAL_PATH !== "";
   const repoPath = isLocalMode
     ? config.DAGS_LOCAL_PATH!
-    : `/tmp/fugue-dags-${Date.now()}`;
+    : `/tmp/fugue-dags-${clock()}`;
 
   return {
     repoPath,

@@ -115,22 +115,20 @@ export const loadDagModule = async (
  */
 export const discoverDagPaths = async (dagsRoot: string): Promise<Result<string[], HostError>> => {
   try {
-    const glob = new Bun.Glob("dags/*/*/dag.ts");
-    const paths: string[] = [];
+    const pathSet = new Set<string>();
 
-    for await (const file of glob.scan({ cwd: dagsRoot, absolute: true })) {
-      paths.push(file);
+    const primaryGlob = new Bun.Glob("dags/*/*/dag.ts");
+    for await (const file of primaryGlob.scan({ cwd: dagsRoot, absolute: true })) {
+      pathSet.add(file);
     }
 
-    // Primary + fallback globs may overlap — deduplicate to prevent double-registration
+    // Fallback glob for flat layouts — deduplication via Set is O(1) per add
     const altGlob = new Bun.Glob("*/*/dag.ts");
     for await (const file of altGlob.scan({ cwd: dagsRoot, absolute: true })) {
-      if (!paths.includes(file)) {
-        paths.push(file);
-      }
+      pathSet.add(file);
     }
 
-    return ok(paths.sort());
+    return ok([...pathSet].sort());
   } catch (e) {
     return err({
       kind: "discovery-failed",

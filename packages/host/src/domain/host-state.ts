@@ -8,7 +8,7 @@
  * @satisfies NFR-012 — Sync failures transition to degraded, not crash; existing DAGs preserved
  */
 
-import { match, P } from "ts-pattern";
+import { match } from "ts-pattern";
 import type { Result } from "@fugue/framework";
 import { ok, err } from "@fugue/framework";
 import type { Registry } from "./registry.js";
@@ -21,12 +21,12 @@ import type { Registry } from "./registry.js";
  */
 export interface TransitionError {
   readonly kind: "invalid-transition";
-  readonly from: string;
-  readonly to: string;
+  readonly from: HostState["phase"] | `degraded:${DegradedReason}`;
+  readonly to: HostState["phase"];
   readonly message: string;
 }
 
-export const invalidTransition = (from: string, to: string): TransitionError => ({
+export const invalidTransition = (from: HostState["phase"] | `degraded:${DegradedReason}`, to: HostState["phase"]): TransitionError => ({
   kind: "invalid-transition",
   from,
   to,
@@ -102,7 +102,11 @@ export const syncStarted = (
         lastSuccessfulSyncAt: s.lastSyncAt,
       }),
     )
-    .otherwise((s) => err(invalidTransition(s.phase, "syncing")));
+    .with({ phase: "booting" }, (s) => err(invalidTransition(s.phase, "syncing")))
+    .with({ phase: "syncing" }, (s) => err(invalidTransition(s.phase, "syncing")))
+    .with({ phase: "draining" }, (s) => err(invalidTransition(s.phase, "syncing")))
+    .with({ phase: "stopped" }, (s) => err(invalidTransition(s.phase, "syncing")))
+    .exhaustive();
 
 /**
  * Sync completed successfully: new registry loaded from git.
@@ -209,7 +213,11 @@ export const redisDied = (
         lastSyncAt: s.lastSuccessfulSyncAt,
       }),
     )
-    .otherwise((s) => err(invalidTransition(s.phase, "degraded")));
+    .with({ phase: "booting" }, (s) => err(invalidTransition(s.phase, "degraded")))
+    .with({ phase: "degraded" }, (s) => err(invalidTransition(s.phase, "degraded")))
+    .with({ phase: "draining" }, (s) => err(invalidTransition(s.phase, "degraded")))
+    .with({ phase: "stopped" }, (s) => err(invalidTransition(s.phase, "degraded")))
+    .exhaustive();
 
 /**
  * Redis connection recovered.

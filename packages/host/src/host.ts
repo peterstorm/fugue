@@ -51,6 +51,8 @@ export interface HostDeps {
   readonly redis: RedisConnectivityPort;
   readonly sharedInfra: SharedInfra;
   readonly logger: SyncLogger;
+  /** Called during graceful shutdown to clean up infrastructure (e.g., close Redis). */
+  readonly onShutdown?: () => Promise<void>;
 }
 
 /**
@@ -114,8 +116,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     getHostState: () => hostState,
     getConcurrency: () => concurrency,
     setConcurrency: (s) => { concurrency = s; },
-    getCircuit: (id) => circuitBreakers.get(id) ?? initCircuit(Date.now()),
-    setCircuit: (id, s) => { circuitBreakers.set(id, s); },
+    circuit: {
+      get: (id) => circuitBreakers.get(id) ?? initCircuit(Date.now()),
+      set: (id, s) => { circuitBreakers.set(id, s); },
+    },
     createContext: (registered: RegisteredDag, signal?: AbortSignal): NodeContext => {
       const rid = makeRunId(crypto.randomUUID());
       const effectiveSignal = signal ?? new AbortController().signal;
@@ -246,6 +250,17 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     if (server) {
       server.stop();
       server = null;
+    }
+
+    // Clean up infrastructure (e.g., close Redis connections)
+    if (deps.onShutdown) {
+      try {
+        await deps.onShutdown();
+      } catch (e) {
+        logger.warn("Error during infrastructure cleanup", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
 
     // Transition to stopped

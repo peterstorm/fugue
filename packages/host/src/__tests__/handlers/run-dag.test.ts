@@ -66,8 +66,10 @@ const createTestApp = (state: TestState, executeDag?: RunDagDeps["executeDag"]) 
   const deps: RunDagDeps = {
     getConcurrency: () => state.concurrency,
     setConcurrency: (s) => { state.concurrency = s; },
-    getCircuit: (dagId) => state.circuits.get(dagId) ?? initCircuit(Date.now()),
-    setCircuit: (dagId, s) => { state.circuits.set(dagId, s); },
+    circuit: {
+      get: (dagId) => state.circuits.get(dagId) ?? initCircuit(Date.now()),
+      set: (dagId, s) => { state.circuits.set(dagId, s); },
+    },
     createContext: (registered, signal) => ({ ...fakeNodeContext(registered.id as string), signal }),
     executeDag: executeDag ?? (async () => ok({ result: "success" })) as any,
     clock: Date.now,

@@ -10,7 +10,6 @@
  * @satisfies FR-001 — Poll git branch and detect new commits by comparing SHAs
  * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
  * @satisfies AD-5 — Raw git via Bun.spawn
- * @satisfies AD-5 — Raw git via Bun.spawn
  */
 
 import { ok, err } from "@fugue/framework";
@@ -251,6 +250,8 @@ export const runBunInstall = async (
 
     if (result === "timeout") {
       proc.kill();
+      // Wait for process to terminate before draining streams
+      await proc.exited.catch(() => {});
       await Promise.allSettled([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),

@@ -4,7 +4,7 @@
  * Key responsibilities:
  * - DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-030, FR-031)
  * - Fresh runId + independent AbortSignal per request (FR-032)
- * - Per-DAG TTL overrides for cache/checkpoint entries (FR-042)
+ * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
  * - Shared infrastructure (LLM, tracer) passed through without per-request init
  *
  * @satisfies FR-030 — Cache keys prefixed fugue:<dagId>:cache:<key>
@@ -33,11 +33,13 @@ import type { ContentFilter } from "@fugue/framework";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * Minimal logger port for cache/checkpoint adapters.
+ * Unified logger port for all host subsystems.
  * Avoids coupling to a specific logging library.
  */
 export interface LogPort {
+  readonly info: (msg: string, data?: Record<string, unknown>) => void;
   readonly warn: (msg: string, data?: Record<string, unknown>) => void;
+  readonly error: (msg: string, data?: Record<string, unknown>) => void;
 }
 
 /**
@@ -143,6 +145,12 @@ export const createNamespacedCache = (
     }
   },
 
+  /**
+   * DESIGN: Cache writes are best-effort. Failures are logged but never propagated
+   * to callers via the Result return. Returning err() would abort the DAG run for
+   * a non-critical cache failure — worse than stale data. The Result return satisfies
+   * the ContextCacheAdapter interface contract; we always return ok().
+   */
   set: async (
     key: string,
     value: unknown,

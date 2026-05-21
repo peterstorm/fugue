@@ -86,9 +86,6 @@ export const diffDags = (
   return { added, removed, changed, unchanged };
 };
 
-/**
- * Check if a diff has any changes (added, removed, or changed DAGs).
- */
 export const hasChanges = (diff: DagDiff): boolean =>
   diff.added.length > 0 || diff.removed.length > 0 || diff.changed.length > 0;
 

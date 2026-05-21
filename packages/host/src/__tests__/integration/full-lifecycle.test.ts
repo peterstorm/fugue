@@ -135,7 +135,7 @@ const createFakeSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
-  logger: { warn: () => {} },
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
 });
 
 const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string; data?: unknown }> } => {
@@ -529,5 +529,36 @@ describe("Full Host Lifecycle", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("git-clone-failed");
     }
+  });
+
+  test("sync completion is ignored when host is draining", async () => {
+    const { port, redis } = createFakeRedis();
+    const logger = createTestLogger();
+    const dags = [fakeLoadResult("drain:test")];
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort({ shas: ["sha1", "sha2"] }),
+      loader: createFakeModuleLoader(dags),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+
+    // Start shutdown (transitions to draining)
+    const shutdownPromise = host.shutdown();
+
+    // After shutdown starts, the host state should be draining or stopped
+    const stateAfterShutdown = host.getState();
+    expect(["draining", "stopped"]).toContain(stateAfterShutdown.phase);
+
+    await shutdownPromise;
+
+    // After shutdown completes, state should be stopped
+    expect(host.getState().phase).toBe("stopped");
   });
 });

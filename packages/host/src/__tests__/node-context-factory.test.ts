@@ -27,7 +27,7 @@ import {
 
 // ── Test Helpers ───────────────────────────────────────────────────────────
 
-const noopLogger: LogPort = { warn: () => {} };
+const noopLogger: LogPort = { info: () => {}, warn: () => {}, error: () => {} };
 
 /** In-memory Redis mock that records all calls for assertion. */
 const createMockRedis = (): RedisPort & {
@@ -84,7 +84,7 @@ const buildSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
-  logger: { warn: () => {} },
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
 });
 
 // ── Pure Key Prefixing Tests ───────────────────────────────────────────────
@@ -440,7 +440,7 @@ describe("createNodeContextForDag", () => {
       redis,
       tracer: noopTracer,
       contentFilter: filter,
-      logger: { warn: () => {} },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
     };
     const dag = buildRegisteredDag("my-dag");
     const rid = runId("run-1");

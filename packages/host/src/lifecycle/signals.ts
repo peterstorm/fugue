@@ -3,6 +3,8 @@
  *
  * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
+ * @satisfies NFR-030 — Double-SIGTERM forces immediate exit
+ * @satisfies NFR-031 — Uncaught exceptions and unhandled rejections exit with code 1
  */
 
 import type { SyncLogger } from "../sync/sync-loop.js";
@@ -33,8 +35,6 @@ export interface SignalHandlerHandle {
  * - SIGINT → same (for dev mode Ctrl+C)
  * - Uncaught exception → log, exit 1
  * - Unhandled rejection → log, exit 1
- *
- * @satisfies NFR-030, NFR-031
  */
 export const registerSignalHandlers = (deps: SignalHandlerDeps): SignalHandlerHandle => {
   const { onShutdown, logger } = deps;
