@@ -1,6 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { formatHostError, httpStatusFor } from "../domain/host-error.js";
 import type { HostError } from "../domain/host-error.js";
+import type { DagId, RunId } from "@fugue/framework";
+
+// Test helpers for branded types
+const did = (s: string) => s as unknown as DagId;
+const rid = (s: string) => s as unknown as RunId;
 
 describe("HostError", () => {
   describe("formatHostError", () => {
@@ -34,15 +39,15 @@ describe("HostError", () => {
         expected: "no default export found in '/dags/foo/dag.ts'",
       },
       {
-        error: { kind: "dag-not-found", dagId: "foo", available: ["bar", "baz"] },
+        error: { kind: "dag-not-found", dagId: did("foo"), available: [did("bar"), did("baz")] },
         expected: "DAG 'foo' not found (available: bar, baz)",
       },
       {
-        error: { kind: "dag-not-found", dagId: "foo", available: [] },
+        error: { kind: "dag-not-found", dagId: did("foo"), available: [] as DagId[] },
         expected: "DAG 'foo' not found (available: none)",
       },
       {
-        error: { kind: "dag-disabled", dagId: "foo", reason: "maintenance" },
+        error: { kind: "dag-disabled", dagId: did("foo"), reason: "maintenance" },
         expected: "DAG 'foo' is disabled: maintenance",
       },
       {
@@ -50,11 +55,11 @@ describe("HostError", () => {
         expected: "global concurrency limit exceeded",
       },
       {
-        error: { kind: "concurrency-exceeded", scope: "dag", dagId: "foo" },
+        error: { kind: "concurrency-exceeded", scope: "dag", dagId: did("foo") },
         expected: "concurrency limit exceeded for DAG 'foo'",
       },
       {
-        error: { kind: "timeout", dagId: "foo", runId: "run-123", timeoutMs: 5000 },
+        error: { kind: "timeout", dagId: did("foo"), runId: rid("run-123"), timeoutMs: 5000 },
         expected: "DAG 'foo' run 'run-123' timed out after 5000ms",
       },
       {
@@ -70,11 +75,11 @@ describe("HostError", () => {
         expected: "host configuration invalid: REDIS_URL: Required",
       },
       {
-        error: { kind: "input-validation-failed", dagId: "foo", issues: [{ message: "too short", path: ["name"], code: "too_small" } as any, { message: "required", path: ["age"], code: "invalid_type" } as any] },
+        error: { kind: "input-validation-failed", dagId: did("foo"), issues: [{ message: "too short", path: ["name"], code: "too_small" } as any, { message: "required", path: ["age"], code: "invalid_type" } as any] },
         expected: "input validation failed for DAG 'foo': 2 issue(s)",
       },
       {
-        error: { kind: "dag-validation-failed", dagId: "my-dag", reason: "missing inputSchema", message: "DagRegistration validation failed: missing inputSchema" },
+        error: { kind: "dag-validation-failed", dagId: did("my-dag"), reason: "missing inputSchema", message: "DagRegistration validation failed: missing inputSchema" },
         expected: "DAG registration validation failed for 'my-dag': missing inputSchema",
       },
       {
@@ -82,7 +87,7 @@ describe("HostError", () => {
         expected: "DAG discovery failed for '/opt/dags': ENOENT: no such file or directory",
       },
       {
-        error: { kind: "async-result-expired", runId: "run-456" },
+        error: { kind: "async-result-expired", runId: rid("run-456") },
         expected: "async result for run 'run-456' has expired",
       },
     ];
@@ -119,15 +124,15 @@ describe("HostError", () => {
 
   describe("httpStatusFor", () => {
     const statusCases: Array<{ error: HostError; status: number }> = [
-      { error: { kind: "dag-not-found", dagId: "x", available: [] }, status: 404 },
-      { error: { kind: "input-validation-failed", dagId: "x", issues: [] }, status: 400 },
+      { error: { kind: "dag-not-found", dagId: did("x"), available: [] as DagId[] }, status: 404 },
+      { error: { kind: "input-validation-failed", dagId: did("x"), issues: [] }, status: 400 },
       { error: { kind: "validation-failed", path: "/x", issues: [] }, status: 400 },
-      { error: { kind: "dag-validation-failed", dagId: "x", reason: "r", message: "m" }, status: 400 },
+      { error: { kind: "dag-validation-failed", dagId: did("x"), reason: "r", message: "m" }, status: 400 },
       { error: { kind: "concurrency-exceeded", scope: "global" }, status: 429 },
-      { error: { kind: "timeout", dagId: "x", runId: "r", timeoutMs: 1000 }, status: 408 },
-      { error: { kind: "dag-disabled", dagId: "x", reason: "r" }, status: 503 },
+      { error: { kind: "timeout", dagId: did("x"), runId: rid("r"), timeoutMs: 1000 }, status: 408 },
+      { error: { kind: "dag-disabled", dagId: did("x"), reason: "r" }, status: 503 },
       { error: { kind: "redis-unavailable", operation: "GET" }, status: 503 },
-      { error: { kind: "async-result-expired", runId: "r" }, status: 410 },
+      { error: { kind: "async-result-expired", runId: rid("r") }, status: 410 },
       { error: { kind: "git-clone-failed", url: "u", message: "m" }, status: 500 },
       { error: { kind: "git-pull-failed", message: "m" }, status: 500 },
       { error: { kind: "git-timeout", operation: "fetch" }, status: 500 },

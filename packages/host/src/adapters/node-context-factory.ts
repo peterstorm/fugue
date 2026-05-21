@@ -111,12 +111,19 @@ export const createNamespacedCache = (
 ): ContextCacheAdapter => ({
   get: async (key: string): Promise<CacheLookup> => {
     const fullKey = buildCacheKey(dagId, key);
-    const raw = await redis.get(fullKey);
+    let raw: string | null;
+    try {
+      raw = await redis.get(fullKey);
+    } catch {
+      // Redis unavailable — graceful degradation to cache miss
+      return { hit: false };
+    }
     if (raw === null) return { hit: false };
     try {
       return { hit: true, value: JSON.parse(raw) };
     } catch {
       // Corrupted entry — treat as miss
+      console.warn(JSON.stringify({ level: "warn", msg: "Cache entry corrupted — treating as miss", key: fullKey, dagId, ts: new Date().toISOString() }));
       return { hit: false };
     }
   },
@@ -127,13 +134,24 @@ export const createNamespacedCache = (
     ttlSec?: number,
   ): Promise<Result<void, FrameworkError>> => {
     const fullKey = buildCacheKey(dagId, key);
-    const serialized = JSON.stringify(value);
-    const effectiveTtl = ttlSec ?? defaultTtlSec;
-
-    if (effectiveTtl !== undefined) {
-      await redis.set(fullKey, serialized, "EX", String(effectiveTtl));
-    } else {
-      await redis.set(fullKey, serialized);
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(value);
+    } catch (e) {
+      // Non-serializable value — surface as structured error
+      console.warn(JSON.stringify({ level: "warn", msg: "Cache set failed — value not serializable", key: fullKey, dagId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      return ok(undefined); // Don't kill the request for a cache write failure
+    }
+    try {
+      const effectiveTtl = ttlSec ?? defaultTtlSec;
+      if (effectiveTtl !== undefined) {
+        await redis.set(fullKey, serialized, "EX", String(effectiveTtl));
+      } else {
+        await redis.set(fullKey, serialized);
+      }
+    } catch (e) {
+      // Redis unavailable — log but don't kill the request
+      console.warn(JSON.stringify({ level: "warn", msg: "Cache set failed — Redis error", key: fullKey, dagId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
     }
     return ok(undefined);
   },
@@ -154,12 +172,22 @@ export const createNamespacedCheckpointWriter = (
 ): CheckpointWriter => ({
   write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
     const fullKey = buildCheckpointKey(dagId, runId, nodeId as string);
-    const serialized = JSON.stringify(value);
-
-    if (checkpointTtlSec !== undefined) {
-      await redis.set(fullKey, serialized, "EX", String(checkpointTtlSec));
-    } else {
-      await redis.set(fullKey, serialized);
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(value);
+    } catch (e) {
+      console.warn(JSON.stringify({ level: "warn", msg: "Checkpoint write failed — value not serializable", key: fullKey, dagId, runId, nodeId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      return; // Best-effort — don't kill the DAG execution
+    }
+    try {
+      if (checkpointTtlSec !== undefined) {
+        await redis.set(fullKey, serialized, "EX", String(checkpointTtlSec));
+      } else {
+        await redis.set(fullKey, serialized);
+      }
+    } catch (e) {
+      console.warn(JSON.stringify({ level: "warn", msg: "Checkpoint write failed — Redis error", key: fullKey, dagId, runId, nodeId, error: e instanceof Error ? e.message : String(e), ts: new Date().toISOString() }));
+      // Best-effort — don't kill the DAG execution
     }
   },
 });

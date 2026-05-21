@@ -16,6 +16,7 @@ import type { HostEnv } from "../router.js";
 import { errorResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
 import { formatHostError } from "../../domain/host-error.js";
+import { canServeRequests, getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
@@ -44,19 +45,14 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const dagId = c.req.param("id") as DagId;
     const hostState = c.get("hostState");
 
-    // 1. Look up DAG in registry
-    const registry = (() => {
-      switch (hostState.phase) {
-        case "ready":
-        case "degraded":
-        case "syncing":
-        case "draining":
-          return hostState.registry;
-        default:
-          return undefined;
-      }
-    })();
+    // 1. Reject if host cannot serve requests (booting, draining, stopped)
+    if (!canServeRequests(hostState)) {
+      return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} — not accepting requests`, {
+        details: { phase: hostState.phase },
+      });
+    }
 
+    const registry = getRegistry(hostState);
     if (!registry) {
       const notFound: HostError = { kind: "dag-not-found", dagId, available: [] };
       return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
@@ -147,14 +143,13 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const token = acquireResult.value.token;
 
     // 5. Execute DAG with timeout
+    const timeoutMs = registered.config.timeout ?? 30_000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const ctx = deps.createContext(registered, controller.signal);
+    const startTime = Date.now();
+
     try {
-      const timeoutMs = registered.config.timeout ?? 30_000;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-      const ctx = deps.createContext(registered, controller.signal);
-      const startTime = Date.now();
-
       const result = await deps.executeDag(
         registered.dag,
         parseResult.data,
@@ -183,6 +178,8 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
         });
       }
     } catch (e: unknown) {
+      clearTimeout(timeoutId);
+
       // Handle abort (timeout)
       if (e instanceof Error && e.name === "AbortError") {
         circuit = recordFailure(deps.getCircuit(dagId), Date.now());
@@ -191,13 +188,13 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
         const timeoutErr: HostError = {
           kind: "timeout",
           dagId,
-          runId: "unknown",
-          timeoutMs: registered.config.timeout ?? 30_000,
+          runId: ctx.runId,
+          timeoutMs,
         };
         return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
           dagId,
-          runId: "unknown",
-          details: { timeoutMs: registered.config.timeout ?? 30_000 },
+          runId: ctx.runId,
+          details: { timeoutMs },
         });
       }
 

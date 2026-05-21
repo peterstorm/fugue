@@ -192,7 +192,13 @@ export const executeSyncCycle = async (
   // Step 4: Check lockfile changes (skip in local mode)
   if (!config.isLocalMode && lastSha !== "") {
     const lockResult = await git.hasLockfileChanged(config.repoPath, lastSha, currentSha);
-    if (lockResult.ok && lockResult.value) {
+    if (!lockResult.ok) {
+      logger.warn("Failed to check lockfile changes — skipping bun install", {
+        error: lockResult.error,
+        fromSha: lastSha,
+        toSha: currentSha,
+      });
+    } else if (lockResult.value) {
       logger.info("bun.lockb changed, running bun install");
       const installResult = await git.install(config.repoPath);
       if (!installResult.ok) {

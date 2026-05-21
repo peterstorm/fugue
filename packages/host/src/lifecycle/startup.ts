@@ -1,16 +1,13 @@
 /**
- * Startup sequence — validates preconditions, performs initial sync,
- * and boots the host into a ready state.
+ * Startup sequence — validates preconditions and performs initial sync.
  *
- * Steps:
- * 1. Parse config (HostConfigSchema from env)
- * 2. Validate Redis connectivity (PING) — exit with error if unreachable (FR-006)
- * 3. Clone dags repo (or use DAGS_LOCAL_PATH for dev)
- * 4. Initial sync (discover + load all DAGs into Registry)
- * 5. Construct SharedInfra (LLM client, Redis, tracer)
- * 6. Boot HTTP server (Hono)
- * 7. Start sync loop poll timer
- * 8. Mark host state as "ready"
+ * This module handles:
+ * 1. Validate Redis connectivity (PING) — exit with error if unreachable (FR-006)
+ * 2. Build sync config from HostConfig (local vs remote mode)
+ * 3. Initial clone + load all DAGs into Registry
+ *
+ * The full host boot sequence (config parse, SharedInfra, HTTP server,
+ * signal handlers, state transitions) is orchestrated in host.ts.
  *
  * @satisfies FR-006 — Host MUST refuse to start if Redis is unreachable
  * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events

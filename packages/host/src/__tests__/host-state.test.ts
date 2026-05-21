@@ -75,7 +75,7 @@ describe("HostState", () => {
     it("creates an initial booting state", () => {
       const state = booting(1000);
       expect(state.phase).toBe("booting");
-      expect(state.startedAt).toBe(1000);
+      if (state.phase === "booting") expect(state.startedAt).toBe(1000);
     });
   });
 

@@ -13,7 +13,8 @@
 
 import type { DagDef } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
-import { ok, err } from "@fugue/framework";
+import { ok, err, dagId as makeDagId } from "@fugue/framework";
+import type { DagId } from "@fugue/framework";
 import { z } from "zod";
 import type { HostError } from "./host-error.js";
 
@@ -145,10 +146,10 @@ export const validateDagRegistration = (
 ): Result<DagRegistration, HostError> => {
   const result = DagRegistrationSchema.safeParse(value);
   if (!result.success) {
-    const dagId = extractDagId(value);
+    const id = extractDagId(value) as DagId;
     return err({
       kind: "dag-validation-failed",
-      dagId,
+      dagId: id,
       reason: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
       message: `DagRegistration validation failed: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
     });

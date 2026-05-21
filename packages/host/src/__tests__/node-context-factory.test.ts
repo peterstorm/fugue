@@ -290,7 +290,7 @@ describe("createNodeContextForDag", () => {
 
     const ctx = createNodeContextForDag(shared, dag, rid, controller.signal);
 
-    expect(ctx.runId).toBe("run-123");
+    expect(ctx.runId as string).toBe("run-123");
     expect(ctx.signal).toBe(controller.signal);
   });
 
@@ -316,7 +316,7 @@ describe("createNodeContextForDag", () => {
 
     const ctx = createNodeContextForDag(shared, dag, rid, signal);
 
-    expect(ctx.dagId).toBe("alpha-dag");
+    expect(ctx.dagId as string).toBe("alpha-dag");
   });
 
   test("cache adapter is namespaced — writes go through prefixed key", async () => {

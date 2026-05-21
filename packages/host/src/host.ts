@@ -19,7 +19,7 @@ import type { Result, DagId, NodeContext, DagDef, RunOptions, FrameworkError, Ru
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
-import { booting, bootComplete, beginDrain, drainComplete, canServeRequests } from "./domain/host-state.js";
+import { booting, bootComplete, beginDrain, drainComplete, syncCompleted, syncFailed, canServeRequests } from "./domain/host-state.js";
 import type { Registry } from "./domain/registry.js";
 import { emptyRegistry } from "./domain/registry.js";
 import type { RegisteredDag } from "./domain/registry.js";
@@ -118,7 +118,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     getCircuit: (id) => circuitBreakers.get(id) ?? initCircuit(Date.now()),
     setCircuit: (id, s) => { circuitBreakers.set(id, s); },
     createContext: (registered: RegisteredDag, signal?: AbortSignal): NodeContext => {
-      const rid = makeRunId();
+      const rid = makeRunId(crypto.randomUUID());
       const effectiveSignal = signal ?? new AbortController().signal;
       return createNodeContextForDag(sharedInfra, registered, rid, effectiveSignal);
     },
@@ -134,7 +134,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     port: config.PORT,
   });
   server = {
-    port: bunServer.port,
+    port: bunServer.port!,
     stop: () => bunServer.stop(),
   };
   logger.info(`HTTP server listening on port ${bunServer.port}`);
@@ -146,13 +146,27 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     syncConfig,
     logger,
     (newRegistry, newSha) => {
-      // Atomic registry swap
-      hostState = {
-        phase: "ready",
-        registry: newRegistry,
-        lastSyncAt: Date.now(),
-        lastSyncSha: newSha,
-      };
+      // Guard: ignore sync completions during shutdown
+      if (hostState.phase === "draining" || hostState.phase === "stopped") {
+        logger.warn("Ignoring sync completion — host is shutting down", { phase: hostState.phase });
+        return;
+      }
+
+      // Use state machine transition when possible
+      const result = syncCompleted(hostState, newRegistry, newSha, Date.now());
+      if (result.ok) {
+        hostState = result.value;
+      } else {
+        // Fallback for states where syncCompleted isn't valid (ready, degraded)
+        // — sync loop doesn't transition to syncing before each cycle
+        hostState = {
+          phase: "ready",
+          registry: newRegistry,
+          lastSyncAt: Date.now(),
+          lastSyncSha: newSha,
+        };
+      }
+
       // Force-reset circuit breakers for all DAGs (FR-092)
       const now = Date.now();
       for (const dagId of newRegistry.dags.keys()) {
@@ -164,8 +178,17 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       });
     },
     (error) => {
-      // On sync error — transition to degraded if ready
-      if (hostState.phase === "ready") {
+      // Guard: ignore sync errors during shutdown
+      if (hostState.phase === "draining" || hostState.phase === "stopped") {
+        return;
+      }
+
+      // Use state machine transition when possible
+      const result = syncFailed(hostState, Date.now());
+      if (result.ok) {
+        hostState = result.value;
+      } else if (hostState.phase === "ready") {
+        // Direct degradation from ready (sync loop doesn't transition to syncing)
         hostState = {
           phase: "degraded",
           registry: hostState.registry,
@@ -193,6 +216,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     const drainResult = beginDrain(hostState, inflightCount, Date.now());
     if (drainResult.ok) {
       hostState = drainResult.value;
+    } else {
+      logger.warn("Cannot transition to draining", {
+        currentPhase: hostState.phase,
+        error: drainResult.error.message,
+      });
     }
 
     // Wait for in-flight requests to drain (up to DRAIN_TIMEOUT_MS)
@@ -215,6 +243,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     const stoppedResult = drainComplete(hostState);
     if (stoppedResult.ok) {
       hostState = stoppedResult.value;
+    } else {
+      logger.warn("Cannot transition to stopped", {
+        currentPhase: hostState.phase,
+        error: stoppedResult.error.message,
+      });
     }
 
     logger.info("Host stopped");

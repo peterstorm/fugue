@@ -75,7 +75,7 @@ export const errorResponse = (
     }
   }
 
-  return c.json(body, status as any);
+  return c.json(body, status as any); // SAFETY: Hono's StatusCode type doesn't cover all valid HTTP codes
 };
 
 export const successResponse = <T>(
@@ -103,7 +103,7 @@ export const healthResponse = (
 ): Response => {
   const body: HealthResponse = { status, timestamp: new Date().toISOString() };
   const httpStatus = status === "unavailable" ? 503 : 200;
-  return c.json(body, httpStatus as any);
+  return c.json(body, httpStatus as any); // SAFETY: Hono StatusCode type limitation
 };
 
 export const readinessResponse = (
@@ -114,5 +114,5 @@ export const readinessResponse = (
 ): Response => {
   const body: ReadinessResponse = { ready, dagCount, phase };
   const httpStatus = ready ? 200 : 503;
-  return c.json(body, httpStatus as any);
+  return c.json(body, httpStatus as any); // SAFETY: Hono StatusCode type limitation
 };

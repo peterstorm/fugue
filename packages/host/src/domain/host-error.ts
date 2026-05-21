@@ -6,6 +6,7 @@
  */
 
 import type { z } from "zod";
+import type { DagId, RunId } from "@fugue/framework";
 
 // Zod 4 re-exports $ZodIssue as the canonical issue type
 type ZodIssue = z.core.$ZodIssue;
@@ -17,17 +18,17 @@ export type HostError =
   | { readonly kind: "import-failed"; readonly path: string; readonly message: string; readonly stack?: string }
   | { readonly kind: "validation-failed"; readonly path: string; readonly issues: readonly ZodIssue[] }
   | { readonly kind: "no-default-export"; readonly path: string }
-  | { readonly kind: "dag-not-found"; readonly dagId: string; readonly available: readonly string[] }
-  | { readonly kind: "dag-disabled"; readonly dagId: string; readonly reason: string }
-  | { readonly kind: "concurrency-exceeded"; readonly scope: "global" | "dag"; readonly dagId?: string }
-  | { readonly kind: "timeout"; readonly dagId: string; readonly runId: string; readonly timeoutMs: number }
+  | { readonly kind: "dag-not-found"; readonly dagId: DagId; readonly available: readonly DagId[] }
+  | { readonly kind: "dag-disabled"; readonly dagId: DagId; readonly reason: string }
+  | { readonly kind: "concurrency-exceeded"; readonly scope: "global" | "dag"; readonly dagId?: DagId }
+  | { readonly kind: "timeout"; readonly dagId: DagId; readonly runId: RunId; readonly timeoutMs: number }
   | { readonly kind: "redis-unavailable"; readonly operation: string }
   | { readonly kind: "bun-install-failed"; readonly message: string }
   | { readonly kind: "config-invalid"; readonly message: string }
-  | { readonly kind: "input-validation-failed"; readonly dagId: string; readonly issues: readonly ZodIssue[] }
-  | { readonly kind: "dag-validation-failed"; readonly dagId: string; readonly reason: string; readonly message: string }
+  | { readonly kind: "input-validation-failed"; readonly dagId: DagId; readonly issues: readonly ZodIssue[] }
+  | { readonly kind: "dag-validation-failed"; readonly dagId: DagId; readonly reason: string; readonly message: string }
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
-  | { readonly kind: "async-result-expired"; readonly runId: string };
+  | { readonly kind: "async-result-expired"; readonly runId: RunId };
 
 /** Discriminant union of all host error kinds. */
 export type HostErrorKind = HostError["kind"];

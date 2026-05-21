@@ -28,6 +28,7 @@ interface FakeGitState {
   shouldFailSha: boolean;
   pullCalls: number;
   cloneCalls: number;
+  shaCalls: number;
 }
 
 const createFakeGit = (overrides?: Partial<FakeGitState>): { port: GitPort; state: FakeGitState } => {
@@ -38,6 +39,7 @@ const createFakeGit = (overrides?: Partial<FakeGitState>): { port: GitPort; stat
     shouldFailSha: false,
     pullCalls: 0,
     cloneCalls: 0,
+    shaCalls: 0,
     ...overrides,
   };
 
@@ -54,6 +56,7 @@ const createFakeGit = (overrides?: Partial<FakeGitState>): { port: GitPort; stat
       return ok(undefined);
     },
     currentSha: async () => {
+      state.shaCalls++;
       if (state.shouldFailSha) {
         return err({ kind: "git-pull-failed", message: "not a repo" } as HostError);
       }
@@ -119,7 +122,7 @@ describe("DAG Diff", () => {
 
     const diff = diffDags(prev, curr);
     expect(diff.added).toHaveLength(1);
-    expect(diff.added[0].id).toBe("dag-a");
+    expect(diff.added[0].id as string).toBe("dag-a");
     expect(diff.removed).toHaveLength(0);
     expect(diff.changed).toHaveLength(0);
     expect(diff.unchanged).toHaveLength(0);
@@ -137,7 +140,7 @@ describe("DAG Diff", () => {
     const diff = diffDags(prev, curr);
     expect(diff.added).toHaveLength(0);
     expect(diff.removed).toHaveLength(1);
-    expect(diff.removed[0].id).toBe("dag-b");
+    expect(diff.removed[0].id as string).toBe("dag-b");
     expect(diff.unchanged).toHaveLength(1);
   });
 
@@ -199,10 +202,10 @@ describe("DAG Diff", () => {
     expect(diff.changed).toHaveLength(1);
     expect(diff.removed).toHaveLength(1);
     expect(diff.added).toHaveLength(1);
-    expect(diff.unchanged[0].id).toBe("stays-same");
-    expect(diff.changed[0].id).toBe("gets-updated");
-    expect(diff.removed[0].id).toBe("gets-removed");
-    expect(diff.added[0].id).toBe("brand-new");
+    expect(diff.unchanged[0].id as string).toBe("stays-same");
+    expect(diff.changed[0].id as string).toBe("gets-updated");
+    expect(diff.removed[0].id as string).toBe("gets-removed");
+    expect(diff.added[0].id as string).toBe("brand-new");
   });
 
   it("empty previous → all current are 'added'", () => {
@@ -560,7 +563,7 @@ describe("loadResultToRegisteredDag", () => {
     const lr = makeFakeDag("my-team:my-dag");
     const registered = loadResultToRegisteredDag(lr, "sha-xyz", 1000);
 
-    expect(registered.id).toBe("my-team:my-dag");
+    expect(registered.id as string).toBe("my-team:my-dag");
     expect(registered.sha).toBe("sha-xyz");
     expect(registered.loadedAt).toBe(1000);
     expect(registered.healthy).toBe(true);
@@ -600,8 +603,116 @@ describe("loadResultsToSnapshots", () => {
     const snapshots = loadResultsToSnapshots(results, "sha-test");
 
     expect(snapshots).toHaveLength(2);
-    expect(snapshots[0].id).toBe("a");
+    expect(snapshots[0].id as string).toBe("a");
     expect(snapshots[0].sha).toBe("sha-test");
-    expect(snapshots[1].id).toBe("b");
+    expect(snapshots[1].id as string).toBe("b");
+  });
+});
+
+// ── Bun Install Path Tests (FR-002) ─────────────────────────────────────────
+
+describe("executeSyncCycle — bun install path (FR-002)", () => {
+  const makeBunInstallGit = (opts: {
+    lockfileChanged: boolean;
+    installFails?: boolean;
+    lockCheckFails?: boolean;
+  }): GitPort => ({
+    clone: async () => ok(undefined),
+    pull: async () => ok(undefined),
+    currentSha: async () => ok("new-sha"),
+    hasLockfileChanged: async () => {
+      if (opts.lockCheckFails) {
+        return err({ kind: "git-pull-failed", message: "diff command failed" } as HostError);
+      }
+      return ok(opts.lockfileChanged);
+    },
+    install: async () => {
+      if (opts.installFails) {
+        return err({ kind: "bun-install-failed", message: "frozen lockfile mismatch" } as HostError);
+      }
+      return ok(undefined);
+    },
+  });
+
+  it("calls bun install when lockfile changed between SHAs", async () => {
+    let installCalled = false;
+    const git: GitPort = {
+      clone: async () => ok(undefined),
+      pull: async () => ok(undefined),
+      currentSha: async () => ok("new-sha"),
+      hasLockfileChanged: async () => ok(true),
+      install: async () => { installCalled = true; return ok(undefined); },
+    };
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
+    const config = makeSyncConfig({ isLocalMode: false });
+    const logger = makeLogger();
+
+    const result = await executeSyncCycle(git, loader, config, "old-sha", logger);
+
+    expect(result.kind).toBe("updated");
+    expect(installCalled).toBe(true);
+    expect(logger.logs.some((l) => l.includes("bun.lockb changed"))).toBe(true);
+  });
+
+  it("returns error when bun install fails", async () => {
+    const git = makeBunInstallGit({ lockfileChanged: true, installFails: true });
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
+    const config = makeSyncConfig({ isLocalMode: false });
+    const logger = makeLogger();
+
+    const result = await executeSyncCycle(git, loader, config, "old-sha", logger);
+
+    expect(result.kind).toBe("error");
+    expect(result.sha).toBe("old-sha"); // SHA does not advance
+    expect(result.message).toContain("bun install failed");
+  });
+
+  it("logs warning and skips install when lockfile check fails", async () => {
+    const git = makeBunInstallGit({ lockfileChanged: false, lockCheckFails: true });
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
+    const config = makeSyncConfig({ isLocalMode: false });
+    const logger = makeLogger();
+
+    const result = await executeSyncCycle(git, loader, config, "old-sha", logger);
+
+    // Sync continues despite lockfile check failure
+    expect(result.kind).toBe("updated");
+    expect(logger.logs.some((l) => l.includes("Failed to check lockfile changes"))).toBe(true);
+  });
+
+  it("skips lockfile check when lastSha is empty (initial sync)", async () => {
+    let lockCheckCalled = false;
+    const git: GitPort = {
+      clone: async () => ok(undefined),
+      pull: async () => ok(undefined),
+      currentSha: async () => ok("new-sha"),
+      hasLockfileChanged: async () => { lockCheckCalled = true; return ok(true); },
+      install: async () => ok(undefined),
+    };
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
+    const config = makeSyncConfig({ isLocalMode: false });
+    const logger = makeLogger();
+
+    await executeSyncCycle(git, loader, config, "", logger);
+
+    expect(lockCheckCalled).toBe(false);
+  });
+
+  it("skips lockfile check in local mode", async () => {
+    let lockCheckCalled = false;
+    const git: GitPort = {
+      clone: async () => ok(undefined),
+      pull: async () => ok(undefined),
+      currentSha: async () => ok("new-sha"),
+      hasLockfileChanged: async () => { lockCheckCalled = true; return ok(true); },
+      install: async () => ok(undefined),
+    };
+    const loader = createFakeLoader([makeFakeDag("dag-a")]);
+    const config = makeSyncConfig({ isLocalMode: true });
+    const logger = makeLogger();
+
+    await executeSyncCycle(git, loader, config, "old-sha", logger);
+
+    expect(lockCheckCalled).toBe(false);
   });
 });

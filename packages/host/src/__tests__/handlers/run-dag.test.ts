@@ -139,7 +139,7 @@ describe("POST /dags/:id/run", () => {
       expect(body.details.available).toEqual([]);
     });
 
-    it("returns 404 when host is booting (no registry)", async () => {
+    it("returns 503 when host is booting (unavailable)", async () => {
       const state: TestState = {
         concurrency: initConcurrency(),
         circuits: new Map(),
@@ -148,7 +148,9 @@ describe("POST /dags/:id/run", () => {
       const app = createTestApp(state);
 
       const res = await postJson(app, "/dags/any/run", { text: "hi" });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.error).toBe("host-unavailable");
     });
   });
 
@@ -518,6 +520,199 @@ describe("POST /dags/:id/run", () => {
 
       await postJson(app, "/dags/my-dag/run", { text: "hello" });
       expect(state.concurrency.global.current).toBe(0);
+    });
+  });
+
+  describe("Timeout / AbortError (FR-024)", () => {
+    it("returns 408 with correct runId when DAG times out", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("slow-dag", { timeout: 50 })),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      // Simulate a DAG that takes too long — the abort signal fires
+      const executeDag = async (_dag: unknown, _input: unknown, ctx: { signal?: AbortSignal }) => {
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            const abortErr = new Error("Aborted");
+            abortErr.name = "AbortError";
+            reject(abortErr);
+          };
+          if (ctx.signal?.aborted) return onAbort();
+          ctx.signal?.addEventListener("abort", onAbort);
+        });
+      };
+
+      const app = createTestApp(state, executeDag as any);
+      const res = await postJson(app, "/dags/slow-dag/run", { text: "hello" });
+
+      expect(res.status).toBe(408);
+      const body = await res.json();
+      expect(body.error).toBe("timeout");
+      expect(body.runId).toBe("run-123"); // From fakeNodeContext
+      expect(body.details.timeoutMs).toBe(50);
+    });
+
+    it("records failure in circuit breaker on timeout", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("slow-dag", { timeout: 50 })),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      const executeDag = async (_dag: unknown, _input: unknown, ctx: { signal?: AbortSignal }) => {
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            const abortErr = new Error("Aborted");
+            abortErr.name = "AbortError";
+            reject(abortErr);
+          };
+          if (ctx.signal?.aborted) return onAbort();
+          ctx.signal?.addEventListener("abort", onAbort);
+        });
+      };
+
+      const app = createTestApp(state, executeDag as any);
+      await postJson(app, "/dags/slow-dag/run", { text: "hello" });
+
+      const circuit = state.circuits.get("slow-dag");
+      expect(circuit).toBeDefined();
+      if (circuit?.state === "closed") {
+        expect(circuit.failureCount).toBeGreaterThan(0);
+      }
+    });
+
+    it("releases concurrency token after timeout", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("slow-dag", { timeout: 50 })),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      const executeDag = async (_dag: unknown, _input: unknown, ctx: { signal?: AbortSignal }) => {
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            const abortErr = new Error("Aborted");
+            abortErr.name = "AbortError";
+            reject(abortErr);
+          };
+          if (ctx.signal?.aborted) return onAbort();
+          ctx.signal?.addEventListener("abort", onAbort);
+        });
+      };
+
+      const app = createTestApp(state, executeDag as any);
+      await postJson(app, "/dags/slow-dag/run", { text: "hello" });
+
+      expect(state.concurrency.global.current).toBe(0);
+    });
+  });
+
+  describe("Half-open circuit breaker integration", () => {
+    it("allows request through half-open circuit and heals on success", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map<string, CircuitState>([
+          ["healer-dag", { state: "half-open", testRequestAllowed: true }],
+        ]),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("healer-dag")),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      const app = createTestApp(state);
+      const res = await postJson(app, "/dags/healer-dag/run", { text: "hello" });
+
+      expect(res.status).toBe(200);
+      // Circuit should now be closed (healed)
+      const circuit = state.circuits.get("healer-dag");
+      expect(circuit?.state).toBe("closed");
+    });
+
+    it("re-opens circuit on failure during half-open", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map<string, CircuitState>([
+          ["fragile-dag", { state: "half-open", testRequestAllowed: true }],
+        ]),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("fragile-dag")),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      const executeDag = async () => err({ kind: "node-crash", message: "failed" });
+      const app = createTestApp(state, executeDag as any);
+      const res = await postJson(app, "/dags/fragile-dag/run", { text: "hello" });
+
+      expect(res.status).toBe(500);
+      // Circuit should re-open
+      const circuit = state.circuits.get("fragile-dag");
+      expect(circuit?.state).toBe("open");
+    });
+
+    it("blocks requests when circuit is open and cooldown not elapsed", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map<string, CircuitState>([
+          ["blocked-dag", { state: "open", openedAt: Date.now(), reason: "too many failures" }],
+        ]),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("blocked-dag")),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      const app = createTestApp(state);
+      const res = await postJson(app, "/dags/blocked-dag/run", { text: "hello" });
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.error).toBe("dag-disabled");
+    });
+  });
+
+  describe("Draining phase rejection (NFR-030)", () => {
+    it("returns 503 when host is draining", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "draining",
+          registry: withDag(emptyRegistry(), makeFakeDag("my-dag")),
+          drainStartedAt: Date.now(),
+          inflightCount: 0,
+        },
+      };
+      const app = createTestApp(state);
+
+      const res = await postJson(app, "/dags/my-dag/run", { text: "hello" });
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.error).toBe("host-unavailable");
     });
   });
 });

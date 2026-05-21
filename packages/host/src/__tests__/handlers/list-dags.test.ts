@@ -47,10 +47,9 @@ describe("GET /dags", () => {
     const app = createApp({ phase: "booting", startedAt: Date.now() });
     const res = await app.request("/dags");
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     const body = await res.json();
-    expect(body.dags).toEqual([]);
-    expect(body.count).toBe(0);
+    expect(body.error).toBe("host-unavailable");
   });
 
   it("returns empty list when registry is empty", async () => {
@@ -134,13 +133,29 @@ describe("GET /dags", () => {
     expect(body.dags[0].id).toBe("my-dag");
   });
 
-  it("returns empty list when host is stopped", async () => {
+  it("returns 503 when host is stopped", async () => {
     const app = createApp({ phase: "stopped" });
 
     const res = await app.request("/dags");
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     const body = await res.json();
-    expect(body.dags).toEqual([]);
-    expect(body.count).toBe(0);
+    expect(body.error).toBe("host-unavailable");
+  });
+
+  it("returns 503 when host is draining", async () => {
+    let registry = emptyRegistry();
+    registry = withDag(registry, makeFakeDag("my-dag"));
+
+    const app = createApp({
+      phase: "draining",
+      registry,
+      drainStartedAt: Date.now(),
+      inflightCount: 0,
+    });
+
+    const res = await app.request("/dags");
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("host-unavailable");
   });
 });

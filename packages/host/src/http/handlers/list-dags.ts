@@ -8,28 +8,24 @@ import type { Context } from "hono";
 import type { HostEnv } from "../router.js";
 import { dagListResponse } from "../response.js";
 import type { DagListItem } from "../response.js";
+import { canServeRequests, getRegistry } from "../../domain/host-state.js";
+import { errorResponse } from "../response.js";
 
 /**
  * Returns the list of all registered DAGs with their metadata.
  * Includes both healthy and unhealthy DAGs (unhealthy are flagged).
+ * Rejects requests when host cannot serve (booting, draining, stopped).
  */
 export const listDagsHandler = (c: Context<HostEnv>): Response => {
   const hostState = c.get("hostState");
 
-  // Extract registry from whichever phase we're in
-  const registry = (() => {
-    switch (hostState.phase) {
-      case "ready":
-      case "degraded":
-      case "syncing":
-      case "draining":
-        return hostState.registry;
-      case "booting":
-      case "stopped":
-        return undefined;
-    }
-  })();
+  if (!canServeRequests(hostState)) {
+    return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} \u2014 not accepting requests`, {
+      details: { phase: hostState.phase },
+    });
+  }
 
+  const registry = getRegistry(hostState);
   if (!registry) {
     return dagListResponse(c, []);
   }

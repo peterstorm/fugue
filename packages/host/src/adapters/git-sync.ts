@@ -81,7 +81,7 @@ const spawnGit = async (
       ]);
       return err({
         kind: "git-timeout",
-        operation: `git `,
+        operation: `git ${args.join(" ")}`,
       });
     }
 
@@ -263,7 +263,7 @@ export const runBunInstall = async (
       await new Response(proc.stdout).text(); // drain stdout
       return err({
         kind: "bun-install-failed",
-        message: stderr.trim() || `exit code `,
+        message: stderr.trim() || `exit code ${result}`,
       });
     }
 

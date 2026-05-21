@@ -260,7 +260,7 @@ describe("validateDagRegistration", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "dag-validation-failed") {
-      expect(result.error.dagId).toBe("<unknown>");
+      expect(result.error.dagId as string).toBe("<unknown>");
     }
   });
 
@@ -290,7 +290,7 @@ describe("validateDagRegistration", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "dag-validation-failed") {
-      expect(result.error.dagId).toBe("my-dag");
+      expect(result.error.dagId as string).toBe("my-dag");
     }
   });
 
