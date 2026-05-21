@@ -16,10 +16,10 @@ import {
   ratio,
   piiScrubber,
   IDENTITY_FILTER,
-} from "@ai-summary/framework";
-import { RedisCache, RedisCheckpointer } from "@ai-summary/framework/redis";
-import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter } from "@ai-summary/framework";
-import { NoopObserver, runId as brandRunId } from "@ai-summary/framework";
+} from "@fugue/framework";
+import { RedisCache, RedisCheckpointer } from "@fugue/framework/redis";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter } from "@fugue/framework";
+import { NoopObserver, runId as brandRunId } from "@fugue/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS } from "./config.js";

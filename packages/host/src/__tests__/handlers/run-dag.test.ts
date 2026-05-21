@@ -37,8 +37,9 @@ const makeFakeDag = (id: string, opts?: {
   },
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: opts?.healthy ?? true,
-  disabledReason: opts?.disabledReason,
+  status: (opts?.healthy === false)
+    ? { kind: "disabled", reason: opts?.disabledReason ?? "unknown" }
+    : { kind: "healthy" },
 });
 
 const fakeNodeContext = (dagId: string): NodeContext => ({

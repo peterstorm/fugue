@@ -1,4 +1,4 @@
-# @ai-summary/framework
+# @fugue/framework
 
 DAG-shaped, durable runtime for LLM-bearing workflows. See [`docs/adr/`](../../docs/adr/) for the decision record; this file is a reference for the public surface exported from `src/index.ts`.
 
@@ -154,9 +154,9 @@ Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 
 ## Public surface
 
-- `@ai-summary/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
-- `@ai-summary/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
-- `setFrameworkLogger(...)` / `setFrameworkTracer(...)` — host-injectable logger + OTel tracer seams. Defaults are `console.*` and `trace.getTracer("ai-summary-framework")` respectively, matching prior behaviour; tests typically pass recording stubs.
+- `@fugue/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
+- `@fugue/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
+- `setFrameworkLogger(...)` / `setFrameworkTracer(...)` — host-injectable logger + OTel tracer seams. Defaults are `console.*` and `trace.getTracer("fugue-framework")` respectively, matching prior behaviour; tests typically pass recording stubs.
 
 ## State-Transition Observability
 

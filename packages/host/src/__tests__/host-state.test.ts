@@ -32,7 +32,7 @@ const makeDag = (id: string): RegisteredDag => ({
   config: {},
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: true,
+  status: { kind: "healthy" },
 });
 
 const testRegistry = () => freeze([makeDag("test-dag")], "sha-abc", 1000);

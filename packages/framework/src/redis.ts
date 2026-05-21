@@ -1,4 +1,4 @@
-// @ai-summary/framework/redis — Redis adapter subpath export.
+// @fugue/framework/redis — Redis adapter subpath export.
 //
 // Consumers that need Redis-backed caching, checkpointing, or cross-process
 // freshness detection import from this subpath. Consumers running fully

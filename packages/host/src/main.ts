@@ -99,41 +99,49 @@ const main = async () => {
   const config = configResult.value;
 
   // Step 2: Create Redis connectivity
-  const { port: redisPort, redis, disconnect: disconnectRedis } = await createRedisConnectivity(config.REDIS_URL);
+  let disconnectRedis: (() => Promise<unknown>) | undefined;
+  try {
+    const redisConn = await createRedisConnectivity(config.REDIS_URL);
+    disconnectRedis = redisConn.disconnect;
+    const { port: redisPort, redis } = redisConn;
 
-  // Step 3: Create shared infrastructure
-  const sharedInfra: SharedInfra = {
-    llm: createLlmClient(config),
-    redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    logger,
-  };
+    // Step 3: Create shared infrastructure
+    const sharedInfra: SharedInfra = {
+      llm: createLlmClient(config),
+      redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      logger,
+    };
 
-  // Step 4: Create git adapter (local or remote)
-  const isLocalMode = config.DAGS_LOCAL_PATH !== undefined && config.DAGS_LOCAL_PATH !== "";
-  const git = isLocalMode ? createLocalGitAdapter() : createBunGitAdapter();
+    // Step 4: Create git adapter (local or remote)
+    const isLocalMode = config.DAGS_LOCAL_PATH !== undefined && config.DAGS_LOCAL_PATH !== "";
+    const git = isLocalMode ? createLocalGitAdapter() : createBunGitAdapter();
 
-  // Step 5: Create module loader
-  const loader = createModuleLoader();
+    // Step 5: Create module loader
+    const loader = createModuleLoader();
 
-  // Step 6: Create and boot host
-  const hostResult = await createHost({
-    config,
-    git,
-    loader,
-    redis: redisPort,
-    sharedInfra,
-    logger,
-  });
+    // Step 6: Create and boot host
+    const hostResult = await createHost({
+      config,
+      git,
+      loader,
+      redis: redisPort,
+      sharedInfra,
+      logger,
+    });
 
-  if (!hostResult.ok) {
-    logger.error(`Host failed to start: ${formatHostError(hostResult.error)}`);
-    await disconnectRedis();
-    process.exit(1);
+    if (!hostResult.ok) {
+      logger.error(`Host failed to start: ${formatHostError(hostResult.error)}`);
+      await disconnectRedis();
+      process.exit(1);
+    }
+
+    logger.info("Fugue host is running");
+  } catch (e) {
+    if (disconnectRedis) await disconnectRedis().catch(() => {});
+    throw e;
   }
-
-  logger.info("Fugue host is running");
 };
 
 // Execute main — catch any unhandled error

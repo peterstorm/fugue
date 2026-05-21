@@ -6,6 +6,7 @@
  * catches errors from all routes.
  */
 
+import { match } from "ts-pattern";
 import type { Context } from "hono";
 import type { HostError } from "../../domain/host-error.js";
 import { httpStatusFor, formatHostError } from "../../domain/host-error.js";
@@ -23,21 +24,14 @@ const isHostError = (e: unknown): e is HostError =>
 /**
  * Extract details from a HostError for the response body.
  */
-const detailsFor = (error: HostError): unknown => {
-  switch (error.kind) {
-    case "dag-not-found":
-      return { available: error.available };
-    case "input-validation-failed":
-    case "validation-failed":
-      return { issues: error.issues };
-    case "concurrency-exceeded":
-      return { scope: error.scope, dagId: error.dagId };
-    case "timeout":
-      return { timeoutMs: error.timeoutMs };
-    default:
-      return undefined;
-  }
-};
+const detailsFor = (error: HostError): unknown =>
+  match(error)
+    .with({ kind: "dag-not-found" }, (e) => ({ available: e.available }))
+    .with({ kind: "input-validation-failed" }, (e) => ({ issues: e.issues }))
+    .with({ kind: "validation-failed" }, (e) => ({ issues: e.issues }))
+    .with({ kind: "concurrency-exceeded" }, (e) => ({ scope: e.scope, dagId: e.dagId }))
+    .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
+    .otherwise(() => undefined);
 
 /**
  * Extract dagId if present on the error.

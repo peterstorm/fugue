@@ -37,7 +37,7 @@ const makeRegisteredDag = (id: string, healthy = true): RegisteredDag => ({
   config: {},
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy,
+  status: healthy ? { kind: "healthy" } : { kind: "disabled", reason: "test" },
 });
 
 // Arbitrary for valid DAG IDs (lowercase alphanumeric with hyphens)
@@ -162,7 +162,7 @@ describe("registry properties", () => {
           );
           const registry = freeze(dags, "sha-1", Date.now());
 
-          const expectedHealthy = dags.filter((d) => d.healthy).length;
+          const expectedHealthy = dags.filter((d) => d.status.kind === "healthy").length;
           expect(healthyCount(registry)).toBe(expectedHealthy);
         },
       ),

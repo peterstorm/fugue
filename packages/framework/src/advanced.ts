@@ -1,7 +1,7 @@
-// @ai-summary/framework/advanced — kernel-mode entrypoints + transition
+// @fugue/framework/advanced — kernel-mode entrypoints + transition
 // primitives for callers building custom machines on top of the framework.
 //
-// Most consumers should import from `@ai-summary/framework` (which re-exports
+// Most consumers should import from `@fugue/framework` (which re-exports
 // `runDag` as the single recommended entry point). The advanced surface here
 // is intentionally a separate path so the main barrel stays minimal and
 // signposted: reaching for these is a deliberate decision, not an accident

@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "prefer-ts-pattern",
+  "description": "Prefer ts-pattern match().with().exhaustive() over switch for discriminated unions — project convention per framework usage",
+  "extensions": [".ts"],
+  "pattern": "switch\\s*\\(",
+  "flags": "",
+  "fixHint": "Use match(value).with({kind: '...'}, handler).exhaustive() from ts-pattern instead of switch. This provides exhaustive matching without manual `never` guards and composes with nested patterns.",
+  "enabled": true,
+  "excludePatterns": [".test.ts", ".spec.ts", ".property.test.ts"]
+}

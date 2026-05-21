@@ -44,6 +44,7 @@ export interface SyncResult {
   readonly sha: string;
   readonly registry?: Registry;
   readonly errors?: readonly { readonly path: string; readonly error: HostError }[];
+  readonly syncError?: HostError;
   readonly message?: string;
 }
 
@@ -136,7 +137,7 @@ export const loadResultToRegisteredDag = (
     },
     loadedAt: now,
     sha,
-    healthy: true,
+    status: { kind: "healthy" },
   };
 };
 
@@ -168,6 +169,7 @@ export const executeSyncCycle = async (
     return {
       kind: "error",
       sha: lastSha,
+      syncError: shaResult.error,
       message: `SHA check failed: ${shaResult.error.kind}`,
     };
   }
@@ -189,6 +191,7 @@ export const executeSyncCycle = async (
       return {
         kind: "error",
         sha: lastSha,
+        syncError: pullResult.error,
         message: `pull failed: ${pullResult.error.kind}`,
       };
     }
@@ -211,6 +214,7 @@ export const executeSyncCycle = async (
         return {
           kind: "error",
           sha: lastSha,
+          syncError: installResult.error,
           message: `bun install failed: ${installResult.error.kind}`,
         };
       }
@@ -287,7 +291,7 @@ export const startSyncLoop = (
       } else if (result.kind === "no-change") {
         lastSha = result.sha;
       } else if (result.kind === "error") {
-        onError({
+        onError(result.syncError ?? {
           kind: "git-pull-failed",
           message: result.message || "sync cycle failed",
         });

@@ -12,6 +12,7 @@ import type { Context } from "hono";
 // ---------------------------------------------------------------------------
 
 export interface ErrorResponse {
+  readonly ok: false;
   readonly error: string;
   readonly message: string;
   readonly details?: unknown;
@@ -67,6 +68,7 @@ export const errorResponse = (
   opts?: { details?: unknown; dagId?: string; runId?: string; headers?: Record<string, string> },
 ): Response => {
   const body: ErrorResponse = {
+    ok: false,
     error,
     message,
     ...(opts?.details !== undefined && { details: opts.details }),

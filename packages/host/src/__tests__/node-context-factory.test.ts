@@ -75,7 +75,7 @@ const buildRegisteredDag = (
   config,
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: true,
+  status: { kind: "healthy" },
 });
 
 const buildSharedInfra = (redis: RedisPort): SharedInfra => ({

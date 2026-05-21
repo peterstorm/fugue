@@ -571,7 +571,7 @@ describe("loadResultToRegisteredDag", () => {
     expect(registered.id as string).toBe("my-team-my-dag");
     expect(registered.sha).toBe("sha-xyz");
     expect(registered.loadedAt).toBe(1000);
-    expect(registered.healthy).toBe(true);
+    expect(registered.status.kind).toBe("healthy");
     expect(registered.route).toBe("/dags/my-team-my-dag/run");
   });
 

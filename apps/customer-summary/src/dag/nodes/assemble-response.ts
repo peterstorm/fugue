@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { createTransformNode, ok, fwLogger } from "@ai-summary/framework";
-import type { Result, FrameworkError, GuardrailResult } from "@ai-summary/framework";
+import { createTransformNode, ok, fwLogger } from "@fugue/framework";
+import type { Result, FrameworkError, GuardrailResult } from "@fugue/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
 import type { SummaryResponse } from "../../schemas/response.js";
 import { SynthesisOutputSchema } from "../../schemas/summary.js";

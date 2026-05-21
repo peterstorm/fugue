@@ -25,7 +25,7 @@ const makeDag = (id: string, overrides?: Partial<RegisteredDag>): RegisteredDag 
   config: {},
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: true,
+  status: overrides?.status ?? { kind: "healthy" },
   ...overrides,
 });
 
@@ -200,9 +200,9 @@ describe("Registry", () => {
   describe("healthyCount", () => {
     it("counts only healthy DAGs", () => {
       const dags = [
-        makeDag("healthy-1", { healthy: true }),
-        makeDag("unhealthy-1", { healthy: false }),
-        makeDag("healthy-2", { healthy: true }),
+        makeDag("healthy-1", { status: { kind: "healthy" } }),
+        makeDag("unhealthy-1", { status: { kind: "disabled", reason: "test" } }),
+        makeDag("healthy-2", { status: { kind: "healthy" } }),
       ];
       const r = freeze(dags, "sha", 1000);
 
@@ -230,7 +230,10 @@ describe("Registry", () => {
         config: fc.constant({}),
         loadedAt: fc.nat(),
         sha: arbSha,
-        healthy: fc.boolean(),
+        status: fc.oneof(
+          fc.constant({ kind: "healthy" as const }),
+          fc.record({ kind: fc.constant("disabled" as const), reason: fc.string({ minLength: 1 }) }),
+        ),
       })
     );
 
@@ -317,7 +320,7 @@ describe("Registry", () => {
             const r = freeze(dags, sha, now);
             // Count unique healthy dags (last one wins for duplicate ids)
             const lastByIdMap = new Map(dags.map((d) => [d.id, d]));
-            const expectedHealthy = [...lastByIdMap.values()].filter((d) => d.healthy).length;
+            const expectedHealthy = [...lastByIdMap.values()].filter((d) => d.status.kind === "healthy").length;
             return healthyCount(r) === expectedHealthy;
           },
         ),

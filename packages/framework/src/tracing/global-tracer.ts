@@ -8,14 +8,14 @@
 
 import { trace, type Tracer } from "@opentelemetry/api";
 
-const defaultTracer = (): Tracer => trace.getTracer("ai-summary-framework");
+const defaultTracer = (): Tracer => trace.getTracer("fugue-framework");
 
 let _tracer: Tracer | null = null;
 
 /**
  * Install a host-provided OTel tracer for the framework's internal spans.
  * The default (resolved lazily on first access) is
- * `trace.getTracer("ai-summary-framework")`.
+ * `trace.getTracer("fugue-framework")`.
  */
 export const setFrameworkTracer = (tracer: Tracer): void => {
   _tracer = tracer;

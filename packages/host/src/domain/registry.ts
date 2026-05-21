@@ -31,6 +31,14 @@ export interface DagConfig {
 }
 
 /**
+ * DAG health status — discriminated union prevents impossible states
+ * (e.g., healthy with a disabledReason).
+ */
+export type DagStatus =
+  | { readonly kind: "healthy" }
+  | { readonly kind: "disabled"; readonly reason: string };
+
+/**
  * A DAG that has been validated, loaded, and registered in the host.
  */
 export interface RegisteredDag {
@@ -42,8 +50,7 @@ export interface RegisteredDag {
   readonly config: DagConfig;
   readonly loadedAt: number;
   readonly sha: string;
-  readonly healthy: boolean;
-  readonly disabledReason?: string;
+  readonly status: DagStatus;
 }
 
 /**
@@ -67,39 +74,40 @@ export const emptyRegistry = (): Registry => ({
 });
 
 /**
- * Return a new registry with the given DAG added (or replaced if same id).
+ * Return a new frozen registry with the given DAG added (or replaced if same id).
  * Non-destructive — original registry is unchanged.
  */
 export const withDag = (r: Registry, dag: RegisteredDag): Registry => {
   const newDags = new Map(r.dags);
   newDags.set(dag.id, dag);
-  return {
-    dags: newDags,
+  return Object.freeze({
+    dags: newDags as ReadonlyMap<DagId, RegisteredDag>,
     loadedAt: r.loadedAt,
     sha: r.sha,
-  };
+  });
 };
 
 /**
- * Return a new registry with the given DAG removed.
+ * Return a new frozen registry with the given DAG removed.
  * Non-destructive — original registry is unchanged.
  * If id doesn't exist, returns a structurally identical copy.
  */
 export const withoutDag = (r: Registry, id: DagId): Registry => {
   const newDags = new Map(r.dags);
   newDags.delete(id);
-  return {
-    dags: newDags,
+  return Object.freeze({
+    dags: newDags as ReadonlyMap<DagId, RegisteredDag>,
     loadedAt: r.loadedAt,
     sha: r.sha,
-  };
+  });
 };
 
 /**
  * Freeze a set of validated DAGs into an immutable registry snapshot.
- * Uses Object.freeze on the registry object to enforce runtime immutability.
- * The Map is typed as ReadonlyMap — TypeScript enforces no .set()/.delete() at compile time.
- * At runtime, Object.freeze on the outer object prevents field reassignment.
+ * Object.freeze on the outer object prevents reassigning `dags`, `loadedAt`, `sha`
+ * fields at runtime. The Map is cast to ReadonlyMap for compile-time safety but
+ * is NOT deeply frozen — runtime immutability depends on the convention that
+ * consumers never cast away ReadonlyMap.
  *
  * @param dags - Array of validated, loaded DAGs
  * @param sha - Git commit SHA this registry represents
@@ -131,7 +139,7 @@ export const lookupDag = (r: Registry, id: DagId): RegisteredDag | undefined =>
 export const healthyCount = (r: Registry): number => {
   let count = 0;
   for (const dag of r.dags.values()) {
-    if (dag.healthy) count++;
+    if (dag.status.kind === "healthy") count++;
   }
   return count;
 };

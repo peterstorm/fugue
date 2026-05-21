@@ -1,4 +1,4 @@
-# `@ai-summary/framework` — UX & architecture deep-dive
+# `@fugue/framework` — UX & architecture deep-dive
 
 How the library actually works from a caller's perspective, with and without
 the state-machine path, and a precise account of every place Redis touches
@@ -37,7 +37,7 @@ LLM nodes can additionally declare tools the model may call mid-completion
 `DagDef` is **branded**. There's exactly one way to construct one:
 
 ```ts
-import { defineDag } from "@ai-summary/framework";
+import { defineDag } from "@fugue/framework";
 
 export const summaryDag = defineDag({
   id: "summarize",
@@ -91,7 +91,7 @@ keys, use the array variant. Same module-load validation, no edit-time
 edge typing:
 
 ```ts
-import { defineDagFromArray } from "@ai-summary/framework";
+import { defineDagFromArray } from "@fugue/framework";
 
 const dag = defineDagFromArray({
   id: "summarize",
@@ -1179,7 +1179,7 @@ no per-tool span wiring on the caller's side.
 
 ```ts
 import { z } from "zod";
-import type { ToolDef } from "@ai-summary/framework";
+import type { ToolDef } from "@fugue/framework";
 
 const lookupDealsByCustomer: ToolDef<
   { customerId: string; limit?: number },
@@ -1215,7 +1215,7 @@ both become `is_error: true` results that the model sees and can react to
 
 ```ts
 import { z } from "zod";
-import { createLlmNode } from "@ai-summary/framework";
+import { createLlmNode } from "@fugue/framework";
 
 const Summary = z.object({
   summary: z.string(),
@@ -1331,7 +1331,7 @@ inferred, `from`/`to` are constrained to known node ids and `when` is
 type-checked against the actual upstream output schema.
 
 ```ts
-import { defineDag } from "@ai-summary/framework";
+import { defineDag } from "@fugue/framework";
 
 const dag = defineDag({
   id: "router-demo",

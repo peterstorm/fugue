@@ -22,7 +22,7 @@ const makeFakeDag = (id: string): RegisteredDag => ({
   config: {},
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: true,
+  status: { kind: "healthy" },
 });
 
 const createApp = (hostState: HostState, concurrency?: ConcurrencyState) => {
@@ -99,6 +99,8 @@ describe("GET /readiness", () => {
       registry,
       reason: "sync-failed",
       since: Date.now(),
+      lastSyncSha: "abc123",
+      lastSyncAt: Date.now(),
     });
 
     const res = await app.request("/readiness");
@@ -114,6 +116,7 @@ describe("GET /readiness", () => {
       phase: "syncing",
       registry,
       syncStartedAt: Date.now(),
+      lastSyncSha: "abc123",
     });
 
     const res = await app.request("/readiness");

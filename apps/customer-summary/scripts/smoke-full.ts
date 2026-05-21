@@ -35,9 +35,9 @@ import {
   createEvalJudgeNode,
   makeNodeContext,
   ok,
-} from "@ai-summary/framework";
-import type { ToolDef, ToolCall, NodeContext } from "@ai-summary/framework";
-import { OpenAILlmClient } from "@ai-summary/framework";
+} from "@fugue/framework";
+import type { ToolDef, ToolCall, NodeContext } from "@fugue/framework";
+import { OpenAILlmClient } from "@fugue/framework";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { JsonFixtureSource } from "../src/sources/json-fixture-source.js";
 import { createSummaryDag } from "../src/dag/summary-dag.js";
@@ -71,7 +71,7 @@ const tracing = await initTracing({
  */
 const otelTracer: Tracer = {
   withSpan: async <T>(name: string, spanType: string, fn: () => Promise<T>): Promise<T> => {
-    const tracer = trace.getTracer("ai-summary-framework");
+    const tracer = trace.getTracer("fugue-framework");
     return tracer.startActiveSpan(name, { attributes: { "ai.span.type": spanType, "mlflow.spanType": spanType } }, async (span) => {
       try {
         const result = await fn();

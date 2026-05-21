@@ -1,0 +1,11 @@
+# Per-DAG configuration for the Fugue host.
+# The host reads this file from the DAG's directory alongside dag.ts.
+#
+# @satisfies FR-012 — Per-DAG runtime config (timeout, concurrency)
+# @satisfies FR-013 — Sensible defaults when omitted
+
+team: cx
+owner: platform
+route: /summarize
+maxConcurrent: 5
+timeoutMs: 90000

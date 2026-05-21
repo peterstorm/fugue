@@ -124,8 +124,13 @@ export const createNamespacedCache = (
     let raw: string | null;
     try {
       raw = await redis.get(fullKey);
-    } catch {
+    } catch (e) {
       // Redis unavailable — graceful degradation to cache miss
+      logger.warn("Cache get failed — graceful degradation to miss", {
+        key: fullKey,
+        dagId,
+        error: e instanceof Error ? e.message : String(e),
+      });
       return { hit: false };
     }
     if (raw === null) return { hit: false };

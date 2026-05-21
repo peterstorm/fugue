@@ -10,7 +10,7 @@
 
 import type { Context } from "hono";
 import type { DagId, Result, NodeContext, FrameworkError } from "@fugue/framework";
-import { formatFrameworkError } from "@fugue/framework";
+import { formatFrameworkError, dagId as makeDagId } from "@fugue/framework";
 import type { DagDef, RunOptions } from "@fugue/framework";
 import type { HostEnv } from "../router.js";
 import { errorResponse, successResponse } from "../response.js";
@@ -43,7 +43,7 @@ export interface RunDagDeps {
  */
 export const createRunDagHandler = (deps: RunDagDeps) => {
   return async (c: Context<HostEnv>): Promise<Response> => {
-    const dagId = c.req.param("id") as DagId;
+    const dagId = makeDagId(c.req.param("id") ?? "");
     const hostState = c.get("hostState");
 
     // 1. Reject if host cannot serve requests (booting, draining, stopped)
@@ -73,8 +73,8 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     }
 
     // Check if DAG is disabled
-    if (!registered.healthy && registered.disabledReason) {
-      const disabled: HostError = { kind: "dag-disabled", dagId, reason: registered.disabledReason };
+    if (registered.status.kind === "disabled") {
+      const disabled: HostError = { kind: "dag-disabled", dagId, reason: registered.status.reason };
       return errorResponse(c, 503, disabled.kind, formatHostError(disabled), { dagId });
     }
 
@@ -160,9 +160,9 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       clearTimeout(timeoutId);
       const durationMs = deps.clock() - startTime;
 
-      // 7. Map Result to HTTP response
+      // 6. Map Result to HTTP response
       if (result.ok) {
-        // 8. Record success
+        // 7. Record success
         circuit = recordSuccess(deps.getCircuit(dagId), deps.clock());
         deps.setCircuit(dagId, circuit);
 
@@ -207,7 +207,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });
       throw wrapped;
     } finally {
-      // 9. Release concurrency token
+      // 8. Release concurrency token
       const currentConcurrency = deps.getConcurrency();
       deps.setConcurrency(release(currentConcurrency, token));
     }

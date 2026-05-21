@@ -37,7 +37,7 @@ export const listDagsHandler = (c: Context<HostEnv>): Response => {
       route: reg.route,
       description: "",
       version: reg.sha,
-      healthy: reg.healthy,
+      healthy: reg.status.kind === "healthy",
     });
   }
 

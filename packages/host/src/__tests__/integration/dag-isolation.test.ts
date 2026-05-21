@@ -58,7 +58,7 @@ const makeRegisteredDag = (id: string): RegisteredDag => ({
   config: {},
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: true,
+  status: { kind: "healthy" },
 });
 
 const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {

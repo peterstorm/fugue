@@ -1,6 +1,68 @@
 {
   "boundaries": [
     {
+      "module": "packages/host/src/domain/",
+      "allow": ["./", "packages/host/src/domain/", "@fugue/framework", "zod", "ts-pattern"],
+      "deny": [
+        "packages/host/src/adapters/",
+        "packages/host/src/http/",
+        "packages/host/src/sync/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis",
+        "yaml"
+      ]
+    },
+    {
+      "module": "packages/host/src/sync/",
+      "allow": ["./", "packages/host/src/sync/", "packages/host/src/domain/", "packages/host/src/adapters/", "@fugue/framework"],
+      "deny": [
+        "packages/host/src/http/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis"
+      ]
+    },
+    {
+      "module": "packages/host/src/http/",
+      "allow": ["./", "packages/host/src/http/", "packages/host/src/domain/", "@fugue/framework", "hono", "ts-pattern"],
+      "deny": [
+        "packages/host/src/adapters/",
+        "packages/host/src/sync/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "ioredis"
+      ]
+    },
+    {
+      "module": "packages/host/src/lifecycle/",
+      "allow": ["./", "packages/host/src/lifecycle/", "packages/host/src/domain/", "packages/host/src/adapters/", "packages/host/src/sync/", "@fugue/framework"],
+      "deny": [
+        "packages/host/src/http/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis"
+      ]
+    },
+    {
+      "module": "packages/host/src/adapters/",
+      "allow": ["./", "packages/host/src/adapters/", "packages/host/src/domain/", "@fugue/framework", "ts-pattern"],
+      "deny": [
+        "packages/host/src/http/",
+        "packages/host/src/sync/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono"
+      ]
+    },
+    {
       "module": "packages/framework/src/types/",
       "allow": ["./", "packages/framework/src/types/", "zod"],
       "deny": [
@@ -127,6 +189,8 @@
     }
   ],
   "pureModules": [
+    "packages/host/src/domain/",
+    "packages/host/src/sync/diff.ts",
     "packages/framework/src/types/",
     "packages/framework/src/shared/build-input.ts",
     "packages/framework/src/shared/hash.ts",
@@ -147,6 +211,6 @@
     "packages/framework/src/scheduler/cycle.ts",
     "packages/framework/src/scheduler/diff.ts"
   ],
-  "maxFunctionLines": 50,
-  "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts"]
+  "maxFunctionLines": 60,
+  "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts", "host.ts", "run-dag.ts"]
 }

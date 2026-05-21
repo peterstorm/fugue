@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createLlmNode } from "@ai-summary/framework";
+import { createLlmNode } from "@fugue/framework";
 import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 import type { Message } from "../../schemas/crm.js";

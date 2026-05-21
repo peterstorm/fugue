@@ -9,6 +9,8 @@
  * FR-092: Disabled DAGs MUST be re-enabled automatically when a new version is synced from git
  */
 
+import { match } from "ts-pattern";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -53,21 +55,12 @@ export const initCircuit = (now: number = 0): CircuitState => ({
  * - half-open → transitions to closed (circuit healed)
  * - open → stays open (successes are not expected in open state)
  */
-export const recordSuccess = (s: CircuitState, now: number): CircuitState => {
-  switch (s.state) {
-    case "closed":
-      // On success in closed state, reset failure tracking
-      return { state: "closed", failureCount: 0, windowStart: now };
-
-    case "half-open":
-      // Success in half-open means the circuit has healed → close it
-      return { state: "closed", failureCount: 0, windowStart: now };
-
-    case "open":
-      // Shouldn't receive successes while open, but stay open
-      return s;
-  }
-};
+export const recordSuccess = (s: CircuitState, now: number): CircuitState =>
+  match(s)
+    .with({ state: "closed" }, () => ({ state: "closed" as const, failureCount: 0, windowStart: now }))
+    .with({ state: "half-open" }, () => ({ state: "closed" as const, failureCount: 0, windowStart: now }))
+    .with({ state: "open" }, (current) => current)
+    .exhaustive();
 
 /**
  * Record a failed execution.
@@ -86,43 +79,36 @@ export const recordFailure = (
   now: number,
   threshold: number = DEFAULTS.threshold,
   windowMs: number = DEFAULTS.windowMs,
-): CircuitState => {
-  switch (s.state) {
-    case "closed": {
+): CircuitState =>
+  match(s)
+    .with({ state: "closed" }, (current) => {
       // If we're outside the window, reset the window
-      const windowExpired = now - s.windowStart > windowMs;
-      const effectiveCount = windowExpired ? 1 : s.failureCount + 1;
-      const effectiveWindowStart = windowExpired ? now : s.windowStart;
+      const windowExpired = now - current.windowStart > windowMs;
+      const effectiveCount = windowExpired ? 1 : current.failureCount + 1;
+      const effectiveWindowStart = windowExpired ? now : current.windowStart;
 
-      // Check threshold (>threshold means we need more than threshold failures)
+      // Open circuit after exceeding threshold (e.g., threshold=5 means 6th failure opens)
       if (effectiveCount > threshold) {
         return {
-          state: "open",
+          state: "open" as const,
           openedAt: now,
           reason: `Exceeded ${threshold} failures within ${windowMs}ms window`,
         };
       }
 
       return {
-        state: "closed",
+        state: "closed" as const,
         failureCount: effectiveCount,
         windowStart: effectiveWindowStart,
       };
-    }
-
-    case "half-open":
-      // Test request failed — back to open
-      return {
-        state: "open",
-        openedAt: now,
-        reason: "Half-open test request failed",
-      };
-
-    case "open":
-      // Already open, no change
-      return s;
-  }
-};
+    })
+    .with({ state: "half-open" }, () => ({
+      state: "open" as const,
+      openedAt: now,
+      reason: "Half-open test request failed",
+    }))
+    .with({ state: "open" }, (current) => current)
+    .exhaustive();
 
 /**
  * Attempt to transition from open to half-open after the cooldown period.
@@ -139,19 +125,16 @@ export const attemptReset = (
   s: CircuitState,
   now: number,
   cooldownMs: number = DEFAULTS.cooldownMs,
-): CircuitState => {
-  switch (s.state) {
-    case "open":
-      if (now - s.openedAt >= cooldownMs) {
-        return { state: "half-open", testRequestAllowed: true };
-      }
-      return s;
-
-    case "closed":
-    case "half-open":
-      return s;
-  }
-};
+): CircuitState =>
+  match(s)
+    .with({ state: "open" }, (current) =>
+      now - current.openedAt >= cooldownMs
+        ? { state: "half-open" as const, testRequestAllowed: true }
+        : current,
+    )
+    .with({ state: "closed" }, (current) => current)
+    .with({ state: "half-open" }, (current) => current)
+    .exhaustive();
 
 /**
  * Force-reset the circuit to closed state.
@@ -171,16 +154,12 @@ export const forceReset = (now: number = 0): CircuitState => ({
 // ---------------------------------------------------------------------------
 
 /** Check if the circuit allows requests through */
-export const isAllowed = (s: CircuitState): boolean => {
-  switch (s.state) {
-    case "closed":
-      return true;
-    case "open":
-      return false;
-    case "half-open":
-      return s.testRequestAllowed;
-  }
-};
+export const isAllowed = (s: CircuitState): boolean =>
+  match(s)
+    .with({ state: "closed" }, () => true)
+    .with({ state: "open" }, () => false)
+    .with({ state: "half-open" }, (current) => current.testRequestAllowed)
+    .exhaustive();
 
 /**
  * Consume the test request in half-open state.

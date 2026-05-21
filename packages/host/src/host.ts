@@ -11,7 +11,6 @@
  *
  * @satisfies NFR-030 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
  * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events
- * @satisfies NFR-013 — Redis reconnection MUST be automatic after transient disconnection
  */
 
 import { ok, err, runId as makeRunId, dagId } from "@fugue/framework";
@@ -152,8 +151,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       const result = syncStarted(hostState, Date.now());
       if (result.ok) {
         hostState = result.value;
+      } else {
+        logger.warn("syncStarted transition failed", {
+          currentPhase: hostState.phase,
+          error: result.error.message,
+        });
       }
-      // If transition fails (e.g., already syncing), log and continue
     },
     // onComplete: transition syncing → ready
     (newRegistry, newSha) => {

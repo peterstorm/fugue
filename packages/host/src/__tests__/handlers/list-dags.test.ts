@@ -22,7 +22,9 @@ const makeFakeDag = (id: string, opts?: { healthy?: boolean; route?: string }): 
   config: {},
   loadedAt: Date.now(),
   sha: "abc123",
-  healthy: opts?.healthy ?? true,
+  status: (opts?.healthy === false)
+    ? { kind: "disabled", reason: "test" }
+    : { kind: "healthy" },
 });
 
 const createApp = (hostState: HostState) => {
@@ -124,6 +126,8 @@ describe("GET /dags", () => {
       registry,
       reason: "sync-failed",
       since: Date.now(),
+      lastSyncSha: "abc123",
+      lastSyncAt: Date.now(),
     });
 
     const res = await app.request("/dags");

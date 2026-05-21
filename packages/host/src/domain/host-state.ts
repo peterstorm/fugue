@@ -8,6 +8,7 @@
  * @satisfies NFR-012 — Sync failures transition to degraded, not crash; existing DAGs preserved
  */
 
+import { match, P } from "ts-pattern";
 import type { Result } from "@fugue/framework";
 import { ok, err } from "@fugue/framework";
 import type { Registry } from "./registry.js";
@@ -38,9 +39,9 @@ export type DegradedReason = "redis-disconnected" | "sync-failed" | "no-dags-loa
 
 export type HostState =
   | { readonly phase: "booting"; readonly startedAt: number }
-  | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number }
+  | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number; readonly lastSyncSha: string }
   | { readonly phase: "ready"; readonly registry: Registry; readonly lastSyncAt: number; readonly lastSyncSha: string }
-  | { readonly phase: "degraded"; readonly registry: Registry; readonly reason: DegradedReason; readonly since: number }
+  | { readonly phase: "degraded"; readonly registry: Registry; readonly reason: DegradedReason; readonly since: number; readonly lastSyncSha: string; readonly lastSyncAt: number }
   | { readonly phase: "draining"; readonly registry: Registry; readonly drainStartedAt: number; readonly inflightCount: number }
   | { readonly phase: "stopped" };
 
@@ -81,24 +82,25 @@ export const bootComplete = (
 export const syncStarted = (
   state: HostState,
   now: number,
-): Result<HostState, TransitionError> => {
-  switch (state.phase) {
-    case "ready":
-      return ok({
+): Result<HostState, TransitionError> =>
+  match(state)
+    .with({ phase: "ready" }, (s) =>
+      ok({
         phase: "syncing" as const,
-        registry: state.registry,
+        registry: s.registry,
         syncStartedAt: now,
-      });
-    case "degraded":
-      return ok({
+        lastSyncSha: s.lastSyncSha,
+      }),
+    )
+    .with({ phase: "degraded" }, (s) =>
+      ok({
         phase: "syncing" as const,
-        registry: state.registry,
+        registry: s.registry,
         syncStartedAt: now,
-      });
-    default:
-      return err(invalidTransition(state.phase, "syncing"));
-  }
-};
+        lastSyncSha: s.lastSyncSha,
+      }),
+    )
+    .otherwise((s) => err(invalidTransition(s.phase, "syncing")));
 
 /**
  * Sync completed successfully: new registry loaded from git.
@@ -138,6 +140,8 @@ export const syncFailed = (
     registry: state.registry,
     reason: "sync-failed" as const,
     since: now,
+    lastSyncSha: state.lastSyncSha,
+    lastSyncAt: state.syncStartedAt,
   });
 };
 
@@ -181,30 +185,34 @@ export const drainComplete = (
 export const redisDied = (
   state: HostState,
   now: number,
-): Result<HostState, TransitionError> => {
-  switch (state.phase) {
-    case "ready":
-      return ok({
+): Result<HostState, TransitionError> =>
+  match(state)
+    .with({ phase: "ready" }, (s) =>
+      ok({
         phase: "degraded" as const,
-        registry: state.registry,
+        registry: s.registry,
         reason: "redis-disconnected" as const,
         since: now,
-      });
-    case "syncing":
-      return ok({
+        lastSyncSha: s.lastSyncSha,
+        lastSyncAt: s.lastSyncAt,
+      }),
+    )
+    .with({ phase: "syncing" }, (s) =>
+      ok({
         phase: "degraded" as const,
-        registry: state.registry,
+        registry: s.registry,
         reason: "redis-disconnected" as const,
         since: now,
-      });
-    default:
-      return err(invalidTransition(state.phase, "degraded"));
-  }
-};
+        lastSyncSha: s.lastSyncSha,
+        lastSyncAt: s.syncStartedAt,
+      }),
+    )
+    .otherwise((s) => err(invalidTransition(s.phase, "degraded")));
 
 /**
  * Redis connection recovered.
  * Valid from: degraded (with reason redis-disconnected)
+ * Restores lastSyncSha/lastSyncAt from the degraded state — avoids forcing unnecessary resync.
  */
 export const redisRecovered = (
   state: HostState,
@@ -219,8 +227,8 @@ export const redisRecovered = (
   return ok({
     phase: "ready" as const,
     registry: state.registry,
-    lastSyncAt: now,
-    lastSyncSha: "",
+    lastSyncAt: state.lastSyncAt,
+    lastSyncSha: state.lastSyncSha,
   });
 };
 
@@ -230,18 +238,25 @@ export const redisRecovered = (
  * Extract the registry from any state that has one.
  * Booting and stopped states have no registry.
  */
-export const getRegistry = (state: HostState): Registry | undefined => {
-  switch (state.phase) {
-    case "booting":
-    case "stopped":
-      return undefined;
-    default:
-      return state.registry;
-  }
-};
+export const getRegistry = (state: HostState): Registry | undefined =>
+  match(state)
+    .with({ phase: "booting" }, () => undefined)
+    .with({ phase: "stopped" }, () => undefined)
+    .with({ phase: "ready" }, (s) => s.registry)
+    .with({ phase: "syncing" }, (s) => s.registry)
+    .with({ phase: "degraded" }, (s) => s.registry)
+    .with({ phase: "draining" }, (s) => s.registry)
+    .exhaustive();
 
 /**
  * Check if the host is in a state that can serve requests.
  */
 export const canServeRequests = (state: HostState): boolean =>
-  state.phase === "ready" || state.phase === "degraded" || state.phase === "syncing";
+  match(state)
+    .with({ phase: "ready" }, () => true)
+    .with({ phase: "degraded" }, () => true)
+    .with({ phase: "syncing" }, () => true)
+    .with({ phase: "booting" }, () => false)
+    .with({ phase: "draining" }, () => false)
+    .with({ phase: "stopped" }, () => false)
+    .exhaustive();

@@ -105,12 +105,12 @@ gates, freshness-aware state management, and production observability.
 | `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
 | `tracing/` | `types/` | OpenTelemetry integration |
 
-**Subpath exports.** The main barrel (`@ai-summary/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
+**Subpath exports.** The main barrel (`@fugue/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
 
 | Subpath | Exports | Optional peer dep |
 |---------|---------|-------------------|
-| `@ai-summary/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
-| `@ai-summary/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
+| `@fugue/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
+| `@fugue/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
 
 `check-imports.ts` enforces that `ioredis` is reachable only from `cache/redis-cache.ts`, `checkpoint/redis-*.ts`, and `queue-bullmq/`.
 

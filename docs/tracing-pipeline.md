@@ -122,7 +122,7 @@ Currently configured with `ratio(1.0)` — all traces are exported.
 ## Configuration
 
 ```typescript
-import { initTracing, anyOf, errorOnly, ratio } from "@ai-summary/framework";
+import { initTracing, anyOf, errorOnly, ratio } from "@fugue/framework";
 
 const handle = await initTracing({
   trackingUri: "http://mlflow:5000",

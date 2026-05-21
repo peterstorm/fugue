@@ -74,6 +74,8 @@ const spawnGit = async (
 
     if (result === "timeout") {
       proc.kill();
+      // Wait for process to actually terminate before draining
+      await proc.exited.catch(() => {});
       // Drain streams to release file descriptors
       await Promise.allSettled([
         new Response(proc.stdout).text(),
@@ -92,8 +94,9 @@ const spawnGit = async (
     return ok({ exitCode: result, stdout: stdout.trim(), stderr: stderr.trim() });
   } catch (e) {
     return err({
-      kind: "git-timeout",
-      operation: `git ${args[0]} (spawn failed: ${e instanceof Error ? e.message : String(e)})`,
+      kind: "git-spawn-failed",
+      operation: `git ${args[0]}`,
+      message: e instanceof Error ? e.message : String(e),
     });
   }
 };
@@ -143,15 +146,17 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
 
     if (result.value.exitCode !== 0) {
       return err({
-        kind: "git-pull-failed",
-        message: `rev-parse failed: ${result.value.stderr || `exit code ${result.value.exitCode}`}`,
+        kind: "git-spawn-failed",
+        operation: "rev-parse HEAD",
+        message: result.value.stderr || `exit code ${result.value.exitCode}`,
       });
     }
 
     const sha = result.value.stdout;
     if (!sha || sha.length < 7) {
       return err({
-        kind: "git-pull-failed",
+        kind: "git-spawn-failed",
+        operation: "rev-parse HEAD",
         message: `rev-parse returned invalid SHA: "${sha}"`,
       });
     }

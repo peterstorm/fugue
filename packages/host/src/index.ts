@@ -28,7 +28,7 @@ export {
   invalidTransition,
 } from "./domain/host-state.js";
 
-export type { Registry, RegisteredDag, DagConfig } from "./domain/registry.js";
+export type { Registry, RegisteredDag, DagConfig, DagStatus } from "./domain/registry.js";
 export {
   emptyRegistry,
   withDag,
