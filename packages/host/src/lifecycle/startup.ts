@@ -14,31 +14,24 @@
  */
 
 import { ok, err } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import type { Result, GitSha } from "@fugue/framework";
+import { gitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { HostConfig } from "../domain/config.js";
 import type { Registry } from "../domain/registry.js";
-import type { RedisPort, SharedInfra } from "../adapters/node-context-factory.js";
-import type { GitPort } from "../adapters/git-sync.js";
-import type { ModuleLoaderPort } from "../adapters/module-loader.js";
+import type { GitPort, ModuleLoaderPort, RedisConnectivityPort } from "../ports.js";
 import { initialSync } from "../sync/sync-loop.js";
 import type { SyncConfig, SyncLogger } from "../sync/sync-loop.js";
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
-/**
- * Port for Redis connectivity validation (PING command).
- */
-export interface RedisConnectivityPort {
-  readonly ping: () => Promise<Result<void, HostError>>;
-}
+// Re-export for backwards compatibility
+export type { RedisConnectivityPort } from "../ports.js";
 
 /**
  * The boot result — everything needed to wire the host together.
  */
 export interface BootResult {
   readonly registry: Registry;
-  readonly sha: string;
+  readonly sha: GitSha;
   readonly syncConfig: SyncConfig;
 }
 

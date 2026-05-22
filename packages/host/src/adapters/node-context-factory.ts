@@ -29,38 +29,12 @@ import type {
 } from "@fugue/framework";
 import { makeNodeContext, ok } from "@fugue/framework";
 import type { RegisteredDag } from "../domain/registry.js";
-import type { ContentFilter } from "@fugue/framework";
+import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
+
+// Re-export port types from canonical location for backwards compatibility
+export type { LogPort, RedisPort, SharedInfra } from "../ports.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
-
-// Re-export LogPort from canonical location for backwards compatibility
-export type { LogPort } from "../ports.js";
-import type { LogPort } from "../ports.js";
-
-/**
- * Redis-like interface — only the methods we actually use.
- * Avoids coupling to a specific Redis client library.
- *
- * IMPORTANT: Methods may reject (throw) if the Redis connection drops.
- * All call sites MUST wrap in try/catch. The namespaced cache/checkpoint
- * adapters already do this — any new consumers must handle rejections.
- */
-export interface RedisPort {
-  readonly get: (key: string) => Promise<string | null>;
-  readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<string | null>;
-}
-
-/**
- * Shared infrastructure singletons — initialized once at host startup.
- * Passed by reference into every NodeContext (no per-request allocation).
- */
-export interface SharedInfra {
-  readonly llm: LlmClient;
-  readonly redis: RedisPort;
-  readonly tracer: Tracer;
-  readonly contentFilter: ContentFilter | null;
-  readonly logger: LogPort;
-}
 
 /**
  * TTL configuration resolved for a specific DAG — combines host defaults
@@ -93,18 +67,17 @@ export const createNamespacedCache = (
 ): ContextCacheAdapter => ({
   get: async (key: string): Promise<CacheLookup> => {
     const fullKey = buildCacheKey(dagId, key);
-    let raw: string | null;
-    try {
-      raw = await redis.get(fullKey);
-    } catch (e) {
+    const result = await redis.get(fullKey);
+    if (!result.ok) {
       // Redis unavailable — graceful degradation to cache miss
       logger.warn("Cache get failed — graceful degradation to miss", {
         key: fullKey,
         dagId,
-        error: e instanceof Error ? e.message : String(e),
+        error: result.error.kind,
       });
       return { hit: false };
     }
+    const raw = result.value;
     if (raw === null) return { hit: false };
     try {
       return { hit: true, value: JSON.parse(raw) };
@@ -137,15 +110,12 @@ export const createNamespacedCache = (
       logger.warn("Cache set failed — value not serializable", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
       return ok(undefined); // Don't kill the request for a cache write failure
     }
-    try {
-      const effectiveTtl = ttlSec ?? defaultTtlSec;
-      if (effectiveTtl !== undefined) {
-        await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl });
-      } else {
-        await redis.set(fullKey, serialized);
-      }
-    } catch (e) {
-      logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
+    const effectiveTtl = ttlSec ?? defaultTtlSec;
+    const setResult = effectiveTtl !== undefined
+      ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
+      : await redis.set(fullKey, serialized);
+    if (!setResult.ok) {
+      logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: setResult.error.kind });
     }
     return ok(undefined);
   },
@@ -174,14 +144,11 @@ export const createNamespacedCheckpointWriter = (
       logger.warn("Checkpoint write failed — value not serializable", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
       return; // Best-effort — don't kill the DAG execution
     }
-    try {
-      if (checkpointTtlSec !== undefined) {
-        await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec });
-      } else {
-        await redis.set(fullKey, serialized);
-      }
-    } catch (e) {
-      logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
+    const setResult = checkpointTtlSec !== undefined
+      ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
+      : await redis.set(fullKey, serialized);
+    if (!setResult.ok) {
+      logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: setResult.error.kind });
       // Best-effort — don't kill the DAG execution
     }
   },

@@ -15,28 +15,10 @@
 import { ok, err } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
+import type { GitPort } from "../ports.js";
 
-// ── Port Interface ─────────────────────────────────────────────────────────
-
-export interface GitPort {
-  readonly clone: (
-    url: string,
-    target: string,
-    opts?: { branch?: string; depth?: number },
-  ) => Promise<Result<void, HostError>>;
-
-  readonly pull: (repoPath: string) => Promise<Result<void, HostError>>;
-
-  readonly currentSha: (repoPath: string) => Promise<Result<string, HostError>>;
-
-  readonly hasLockfileChanged: (
-    repoPath: string,
-    fromSha: string,
-    toSha: string,
-  ) => Promise<Result<boolean, HostError>>;
-
-  readonly install: (repoPath: string) => Promise<Result<void, HostError>>;
-}
+// Re-export for backwards compatibility
+export type { GitPort } from "../ports.js";
 
 // ── Bun.spawn Adapter ──────────────────────────────────────────────────────
 

@@ -16,8 +16,7 @@ import type { HostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 import { createModuleLoader } from "./adapters/module-loader.js";
-import type { RedisConnectivityPort } from "./lifecycle/startup.js";
-import type { SharedInfra, RedisPort } from "./adapters/node-context-factory.js";
+import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { ok, err, noopTracer } from "@fugue/framework";
 import type { Result, LlmClient, Tracer } from "@fugue/framework";
@@ -59,12 +58,23 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
     };
 
     const redis: RedisPort = {
-      get: (key) => client.get(key),
-      set: (key, value, opts) => {
-        if (opts?.expiresInSec !== undefined) {
-          return client.set(key, value, "EX", opts.expiresInSec);
+      get: async (key) => {
+        try {
+          const val = await client.get(key);
+          return ok(val);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `GET ${key}: ${e instanceof Error ? e.message : String(e)}` });
         }
-        return client.set(key, value);
+      },
+      set: async (key, value, opts) => {
+        try {
+          const result = opts?.expiresInSec !== undefined
+            ? await client.set(key, value, "EX", opts.expiresInSec)
+            : await client.set(key, value);
+          return ok(result);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `SET ${key}: ${e instanceof Error ? e.message : String(e)}` });
+        }
       },
     };
 

@@ -17,6 +17,7 @@ import { ok, err } from "./result.js";
 declare const __runIdBrand: unique symbol;
 declare const __nodeIdBrand: unique symbol;
 declare const __dagIdBrand: unique symbol;
+declare const __gitShaBrand: unique symbol;
 
 export type RunId = string & { readonly [__runIdBrand]: void };
 export type NodeId = string & { readonly [__nodeIdBrand]: void };
@@ -120,3 +121,20 @@ export const tryDagId = (s: string): Result<DagId, string> =>
   typeof s === "string" && DAG_ID_REGEX.test(s)
     ? ok(s as DagId)
     : err(`Invalid dagId "${s}": must match ${DAG_ID_REGEX.source} (colons not allowed)`);
+
+
+// ---------------------------------------------------------------------------
+// GitSha — branded type for git commit hashes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Branded git SHA string. Convention: empty string `""` means "never synced".
+ * No format validation — SHAs flow from git output and are trusted.
+ */
+export type GitSha = string & { readonly [__gitShaBrand]: void };
+
+/** Brand a string as a GitSha. No validation — trusts git output. */
+export const gitSha = (s: string): GitSha => s as unknown as GitSha;
+
+/** The sentinel value meaning "never synced" — typed as GitSha. */
+export const EMPTY_SHA: GitSha = "" as unknown as GitSha;

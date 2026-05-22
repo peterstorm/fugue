@@ -10,7 +10,8 @@
  * @satisfies NFR-010 — Failing DAG import cannot corrupt existing registry
  */
 
-import type { DagId, DagDef } from "@fugue/framework";
+import type { DagId, DagDef, GitSha } from "@fugue/framework";
+import { EMPTY_SHA } from "@fugue/framework";
 import type { z } from "zod";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ export interface RegisteredDag {
   readonly config: ResolvedDagConfig;
   readonly meta: { readonly description: string; readonly version: string };
   readonly loadedAt: number;
-  readonly sha: string;
+  readonly sha: GitSha;
   readonly status: DagStatus;
 }
 
@@ -61,7 +62,7 @@ export interface RegisteredDag {
 export interface Registry {
   readonly dags: ReadonlyMap<DagId, RegisteredDag>;
   readonly loadedAt: number;
-  readonly sha: string;
+  readonly sha: GitSha;
 }
 
 // ── Builders (pure) ────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ export interface Registry {
 export const emptyRegistry = (): Registry => Object.freeze({
   dags: new Map() as ReadonlyMap<DagId, RegisteredDag>,
   loadedAt: 0,
-  sha: "",
+  sha: EMPTY_SHA,
 });
 
 /**
@@ -115,7 +116,7 @@ export const withoutDag = (r: Registry, id: DagId): Registry => {
  * @param sha - Git commit SHA this registry represents
  * @param now - Timestamp when loading completed
  */
-export const freeze = (dags: readonly RegisteredDag[], sha: string, now: number): Registry => {
+export const freeze = (dags: readonly RegisteredDag[], sha: GitSha, now: number): Registry => {
   const dagMap = new Map<DagId, RegisteredDag>();
   for (const dag of dags) {
     dagMap.set(dag.id, dag);

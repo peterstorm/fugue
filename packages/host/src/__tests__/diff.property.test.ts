@@ -13,14 +13,14 @@
 
 import { describe, it } from "bun:test";
 import * as fc from "fast-check";
-import { dagId } from "@fugue/framework";
+import { dagId, gitSha } from "@fugue/framework";
 import { diffDags, hasChanges, diffSummary } from "../domain/dag-diff.js";
 import type { DagSnapshot } from "../domain/dag-diff.js";
 
 // ── Arbitraries ────────────────────────────────────────────────────────────
 
 const arbDagId = fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/).map((s) => dagId(s));
-const arbSha = fc.stringMatching(/^[0-9a-f]{7}$/);
+const arbSha = fc.stringMatching(/^[0-9a-f]{7}$/).map((s) => gitSha(s));
 
 const arbSnapshot = fc.record({
   id: arbDagId,

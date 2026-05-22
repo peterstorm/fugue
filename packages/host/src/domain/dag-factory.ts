@@ -8,12 +8,13 @@
 import type { RegisteredDag } from "./registry.js";
 import type { LoadResult } from "../ports.js";
 import type { DagSnapshot } from "./dag-diff.js";
+import type { GitSha } from "@fugue/framework";
 import { resolveDefaults } from "./dag-registration.js";
 
 /**
  * Convert LoadResults to DagSnapshots for diff comparison.
  */
-export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: string): DagSnapshot[] =>
+export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: GitSha): DagSnapshot[] =>
   results.map((r) => ({
     id: r.id,
     path: r.modulePath,
@@ -27,7 +28,7 @@ export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: stri
  */
 export const loadResultToRegisteredDag = (
   result: LoadResult,
-  sha: string,
+  sha: GitSha,
   now: number,
 ): RegisteredDag => {
   const resolved = resolveDefaults(result.registration);

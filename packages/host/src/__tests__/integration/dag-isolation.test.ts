@@ -10,7 +10,7 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fugue/framework";
-import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId } from "@fugue/framework";
+import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, gitSha } from "@fugue/framework";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
 import {
@@ -58,7 +58,7 @@ const makeRegisteredDag = (id: string): RegisteredDag => ({
   config: { route: `/dags/${id}/run`, timeout: 30_000, maxConcurrency: 10 },
   meta: { description: "", version: "0.0.0" },
   loadedAt: Date.now(),
-  sha: "abc123",
+  sha: gitSha("abc123"),
   status: { kind: "healthy" },
 });
 
@@ -67,10 +67,10 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
   return {
     store,
     port: {
-      get: async (key: string) => store.get(key) ?? null,
+      get: async (key: string) => ok(store.get(key) ?? null),
       set: async (key: string, value: string, _opts?: { expiresInSec?: number }) => {
         store.set(key, value);
-        return "OK";
+        return ok("OK" as string | null);
       },
     },
   };

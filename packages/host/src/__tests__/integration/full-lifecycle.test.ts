@@ -12,7 +12,7 @@
  */
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { ok, err, noopTracer } from "@fugue/framework";
+import { ok, err, noopTracer, gitSha } from "@fugue/framework";
 import type { Result, DagId, DagDef, NodeContext, FrameworkError, RunOptions } from "@fugue/framework";
 import { z } from "zod";
 import type { GitPort } from "../../adapters/git-sync.js";
@@ -124,8 +124,8 @@ const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivi
       },
     },
     redis: {
-      get: async (key) => store.get(key) ?? null,
-      set: async (key, value) => { store.set(key, value); return "OK"; },
+      get: async (key) => ok(store.get(key) ?? null),
+      set: async (key, value) => { store.set(key, value); return ok("OK" as string | null); },
     },
   };
 };

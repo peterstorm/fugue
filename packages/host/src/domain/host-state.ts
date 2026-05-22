@@ -9,7 +9,7 @@
  */
 
 import { match } from "ts-pattern";
-import type { Result } from "@fugue/framework";
+import type { Result, GitSha } from "@fugue/framework";
 import { ok, err } from "@fugue/framework";
 import type { Registry } from "./registry.js";
 
@@ -45,9 +45,9 @@ export type DegradedReason = "redis-disconnected" | "sync-failed" | "no-dags-loa
  */
 export type HostState =
   | { readonly phase: "booting"; readonly startedAt: number }
-  | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number; readonly lastSyncSha: string; readonly lastSuccessfulSyncAt: number }
-  | { readonly phase: "ready"; readonly registry: Registry; readonly lastSyncAt: number; readonly lastSyncSha: string }
-  | { readonly phase: "degraded"; readonly registry: Registry; readonly reason: DegradedReason; readonly since: number; readonly lastSyncSha: string; readonly lastSyncAt: number }
+  | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number; readonly lastSyncSha: GitSha; readonly lastSuccessfulSyncAt: number }
+  | { readonly phase: "ready"; readonly registry: Registry; readonly lastSyncAt: number; readonly lastSyncSha: GitSha }
+  | { readonly phase: "degraded"; readonly registry: Registry; readonly reason: DegradedReason; readonly since: number; readonly lastSyncSha: GitSha; readonly lastSyncAt: number }
   | { readonly phase: "draining"; readonly registry: Registry; readonly drainStartedAt: number; readonly inflightCount: number }
   | { readonly phase: "stopped" };
 
@@ -67,7 +67,7 @@ export const booting = (now: number): HostState => ({
 export const bootComplete = (
   state: HostState,
   registry: Registry,
-  sha: string,
+  sha: GitSha,
   now: number,
 ): Result<HostState, TransitionError> => {
   if (state.phase !== "booting") {
@@ -121,7 +121,7 @@ export const syncStarted = (
 export const syncCompleted = (
   state: HostState,
   registry: Registry,
-  sha: string,
+  sha: GitSha,
   now: number,
 ): Result<HostState, TransitionError> => {
   if (state.phase !== "syncing") {

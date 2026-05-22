@@ -11,7 +11,11 @@ import type { DagId } from "@fugue/framework";
 import type { CircuitState } from "../domain/circuit-breaker.js";
 import { initCircuit, DEFAULTS } from "../domain/circuit-breaker.js";
 import { checkCircuit, markSuccess, markFailure, DEFAULT_CIRCUIT_CONFIG } from "../domain/circuit-guard.js";
-import type { CircuitPort, CircuitConfig } from "../domain/circuit-guard.js";
+import type { CircuitPort, CircuitConfig, CircuitPermit } from "../domain/circuit-guard.js";
+
+// Helper: create a permit for testing mark* functions directly
+const testPermit = (port: CircuitPort, dId: DagId): CircuitPermit =>
+  ({ dagId: dId, port } as unknown as CircuitPermit);
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -117,7 +121,7 @@ describe("markSuccess", () => {
   test("from closed: resets failure count", () => {
     const closed: CircuitState = { state: "closed", failureCount: 3, windowStart: NOW };
     const { port, states } = createPort(closed);
-    markSuccess(port, DAG, NOW + 100);
+    markSuccess(testPermit(port, DAG), NOW + 100);
 
     const state = states.get(DAG)!;
     expect(state.state).toBe("closed");
@@ -129,7 +133,7 @@ describe("markSuccess", () => {
   test("from half-open: heals to closed", () => {
     const halfOpen: CircuitState = { state: "half-open", testRequestAllowed: false };
     const { port, states } = createPort(halfOpen);
-    markSuccess(port, DAG, NOW);
+    markSuccess(testPermit(port, DAG), NOW);
 
     const state = states.get(DAG)!;
     expect(state.state).toBe("closed");
@@ -138,7 +142,7 @@ describe("markSuccess", () => {
   test("from open: stays open (unexpected success path)", () => {
     const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
     const { port, states } = createPort(open);
-    markSuccess(port, DAG, NOW + 100);
+    markSuccess(testPermit(port, DAG), NOW + 100);
 
     const state = states.get(DAG)!;
     expect(state.state).toBe("open");
@@ -151,7 +155,7 @@ describe("markFailure", () => {
   test("from closed: increments failure count", () => {
     const closed = initCircuit(NOW);
     const { port, states } = createPort(closed);
-    markFailure(port, DAG, NOW + 100);
+    markFailure(testPermit(port, DAG), NOW + 100);
 
     const state = states.get(DAG)!;
     expect(state.state).toBe("closed");
@@ -165,7 +169,7 @@ describe("markFailure", () => {
     // Get to threshold failures
     const { port, states } = createPort(state);
     for (let i = 0; i <= THRESHOLD; i++) {
-      markFailure(port, DAG, NOW + i);
+      markFailure(testPermit(port, DAG), NOW + i);
       // Re-read from port for next iteration (port mutates state)
       // Actually markFailure reads from port.get each time
     }
@@ -179,12 +183,12 @@ describe("markFailure", () => {
     const { port, states } = createPort(initCircuit(NOW));
 
     // 2 failures should NOT open (threshold=2 means 3rd failure opens)
-    markFailure(port, DAG, NOW + 1, customConfig);
-    markFailure(port, DAG, NOW + 2, customConfig);
+    markFailure(testPermit(port, DAG), NOW + 1, customConfig);
+    markFailure(testPermit(port, DAG), NOW + 2, customConfig);
     expect(states.get(DAG)!.state).toBe("closed");
 
     // 3rd failure opens the circuit
-    markFailure(port, DAG, NOW + 3, customConfig);
+    markFailure(testPermit(port, DAG), NOW + 3, customConfig);
     expect(states.get(DAG)!.state).toBe("open");
   });
 
@@ -193,12 +197,12 @@ describe("markFailure", () => {
     const { port, states } = createPort(initCircuit(NOW));
 
     // 2 failures inside window
-    markFailure(port, DAG, NOW + 10, customConfig);
-    markFailure(port, DAG, NOW + 20, customConfig);
+    markFailure(testPermit(port, DAG), NOW + 10, customConfig);
+    markFailure(testPermit(port, DAG), NOW + 20, customConfig);
     expect(states.get(DAG)!.state).toBe("closed");
 
     // 3rd failure OUTSIDE window — window resets, count restarts at 1
-    markFailure(port, DAG, NOW + 200, customConfig);
+    markFailure(testPermit(port, DAG), NOW + 200, customConfig);
     expect(states.get(DAG)!.state).toBe("closed");
     if (states.get(DAG)!.state === "closed") {
       expect((states.get(DAG)! as { failureCount: number }).failureCount).toBe(1);
@@ -213,7 +217,7 @@ describe("markFailure", () => {
   test("from half-open: re-opens circuit", () => {
     const halfOpen: CircuitState = { state: "half-open", testRequestAllowed: false };
     const { port, states } = createPort(halfOpen);
-    markFailure(port, DAG, NOW);
+    markFailure(testPermit(port, DAG), NOW);
 
     const state = states.get(DAG)!;
     expect(state.state).toBe("open");
@@ -226,7 +230,7 @@ describe("markFailure", () => {
       get: () => closed,
       set: () => { setCalls++; },
     };
-    markFailure(port, DAG, NOW + 100);
+    markFailure(testPermit(port, DAG), NOW + 100);
     expect(setCalls).toBe(1);
   });
 });
@@ -239,7 +243,7 @@ describe("full protocol", () => {
 
     // Accumulate failures past threshold
     for (let i = 0; i <= THRESHOLD; i++) {
-      markFailure(port, DAG, NOW + i);
+      markFailure(testPermit(port, DAG), NOW + i);
     }
     expect(states.get(DAG)!.state).toBe("open");
 
@@ -253,7 +257,7 @@ describe("full protocol", () => {
     expect(states.get(DAG)!.state).toBe("half-open");
 
     // Success heals
-    markSuccess(port, DAG, NOW + THRESHOLD + COOLDOWN + 2);
+    markSuccess(testPermit(port, DAG), NOW + THRESHOLD + COOLDOWN + 2);
     expect(states.get(DAG)!.state).toBe("closed");
   });
 
@@ -261,7 +265,7 @@ describe("full protocol", () => {
     const { port, states } = createPort(initCircuit(NOW));
 
     for (let i = 0; i <= THRESHOLD; i++) {
-      markFailure(port, DAG, NOW + i);
+      markFailure(testPermit(port, DAG), NOW + i);
     }
     expect(states.get(DAG)!.state).toBe("open");
 
@@ -270,7 +274,7 @@ describe("full protocol", () => {
     expect(states.get(DAG)!.state).toBe("half-open");
 
     // Failure re-opens
-    markFailure(port, DAG, NOW + THRESHOLD + COOLDOWN + 2);
+    markFailure(testPermit(port, DAG), NOW + THRESHOLD + COOLDOWN + 2);
     expect(states.get(DAG)!.state).toBe("open");
   });
 });

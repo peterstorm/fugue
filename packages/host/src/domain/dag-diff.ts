@@ -11,7 +11,7 @@
  * @satisfies FR-007 — Track DAG versions by git commit SHA
  */
 
-import type { DagId } from "@fugue/framework";
+import type { DagId, GitSha } from "@fugue/framework";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -21,7 +21,7 @@ import type { DagId } from "@fugue/framework";
 export interface DagSnapshot {
   readonly id: DagId;
   readonly path: string;
-  readonly sha: string;
+  readonly sha: GitSha;
 }
 
 /**

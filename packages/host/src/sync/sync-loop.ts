@@ -21,8 +21,8 @@
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
-import { ok } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, gitSha } from "@fugue/framework";
+import type { Result, GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
@@ -46,10 +46,10 @@ export { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag
  * - skipped: `previousSha` — the last known SHA (sync was not attempted)
  */
 export type SyncResult =
-  | { readonly kind: "no-change"; readonly currentSha: string }
-  | { readonly kind: "updated"; readonly newSha: string; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
-  | { readonly kind: "error"; readonly previousSha: string; readonly syncError: HostError }
-  | { readonly kind: "skipped"; readonly previousSha: string; readonly reason: "already-in-progress" };
+  | { readonly kind: "no-change"; readonly currentSha: GitSha }
+  | { readonly kind: "updated"; readonly newSha: GitSha; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
+  | { readonly kind: "error"; readonly previousSha: GitSha; readonly syncError: HostError }
+  | { readonly kind: "skipped"; readonly previousSha: GitSha; readonly reason: "already-in-progress" };
 
 /**
  * Configuration for the sync loop.
@@ -76,7 +76,7 @@ export type OnSyncStarted = () => void;
 /**
  * Callback invoked when sync completes with a new registry.
  */
-export type OnSyncComplete = (registry: Registry, sha: string) => void;
+export type OnSyncComplete = (registry: Registry, sha: GitSha) => void;
 
 /**
  * Callback invoked when sync fails.
@@ -113,7 +113,7 @@ export const executeSyncCycle = async (
   git: GitPort,
   loader: ModuleLoaderPort,
   config: SyncConfig,
-  lastSha: string,
+  lastSha: GitSha,
   logger: SyncLogger,
   clock: Clock = Date.now,
 ): Promise<SyncResult> => {
@@ -130,7 +130,7 @@ export const executeSyncCycle = async (
     };
   }
 
-  const currentSha = shaResult.value;
+  const currentSha = gitSha(shaResult.value);
 
   // Step 2: Skip if unchanged
   if (currentSha === lastSha) {
@@ -231,9 +231,9 @@ export const startSyncLoop = (
   onStarted: OnSyncStarted,
   onComplete: OnSyncComplete,
   onError: OnSyncError,
-  initialSha: string = "",
+  initialSha: GitSha = gitSha(""),
 ): SyncLoopHandle => {
-  let lastSha = initialSha;
+  let lastSha: GitSha = initialSha;
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
 
@@ -315,7 +315,7 @@ export const initialSync = async (
   config: SyncConfig,
   logger: SyncLogger,
   clock: Clock = Date.now,
-): Promise<Result<{ registry: Registry; sha: string }, HostError>> => {
+): Promise<Result<{ registry: Registry; sha: GitSha }, HostError>> => {
   // Clone if not local mode
   if (!config.isLocalMode) {
     const cloneResult = await git.clone(config.repoUrl, config.repoPath, {
@@ -333,7 +333,7 @@ export const initialSync = async (
     return shaResult;
   }
 
-  const sha = shaResult.value;
+  const sha = gitSha(shaResult.value);
 
   // Load all DAGs
   const bulkResult = await loader.loadAll(config.repoPath, sha);

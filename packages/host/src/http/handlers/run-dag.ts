@@ -121,6 +121,8 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       });
     }
 
+    const { permit } = circuitCheck;
+
     // 4. Acquire per-DAG concurrency token
     const concurrency = deps.getConcurrency();
     const acquireResult = acquire(concurrency, dagId, now);
@@ -162,10 +164,10 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
         // 6. Map Result to HTTP response
         if (result.ok) {
-          markSuccess(deps.circuit, dagId, deps.clock());
+          markSuccess(permit, deps.clock());
           return successResponse(c, result.value, { runId: ctx.runId, durationMs });
         } else {
-          markFailure(deps.circuit, dagId, deps.clock(), deps.circuitConfig);
+          markFailure(permit, deps.clock(), deps.circuitConfig);
           const msg = formatFrameworkError(result.error);
           return errorResponse(c, 500, result.error.kind, msg, {
             dagId,
@@ -177,7 +179,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
         // Handle abort (timeout)
         if (e instanceof Error && e.name === "AbortError") {
-          markFailure(deps.circuit, dagId, deps.clock(), deps.circuitConfig);
+          markFailure(permit, deps.clock(), deps.circuitConfig);
           const timeoutErr: HostError = {
             kind: "timeout",
             dagId,
@@ -191,7 +193,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
           });
         }
 
-        markFailure(deps.circuit, dagId, deps.clock(), deps.circuitConfig);
+        markFailure(permit, deps.clock(), deps.circuitConfig);
 
         // Wrap with context for the error handler middleware
         const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });

@@ -1,11 +1,18 @@
 /**
- * Shared port interfaces used across host subsystems.
- * Lives outside domain/ because ports are boundary contracts, not domain logic.
+ * Port Interfaces — boundary contracts for all infrastructure adapters.
+ *
+ * Lives outside domain/ because ports define the shape of external systems,
+ * not domain logic. Both domain and adapter layers import from here.
+ *
+ * Convention: Ports are grouped by subsystem. Each port returns Result<T, HostError>
+ * for operations that can fail, making failure explicit at the type level.
  */
 
-import type { Result, DagId } from "@fugue/framework";
+import type { Result, DagId, GitSha, LlmClient, Tracer } from "@fugue/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
+import type { CircuitState } from "./domain/circuit-breaker.js";
+import type { ContentFilter } from "@fugue/framework";
 
 // ── Logger ──────────────────────────────────────────────────────────────────
 
@@ -52,4 +59,82 @@ export interface ModuleLoaderPort {
     dagsRoot: string,
     sha: string,
   ) => Promise<BulkLoadResult>;
+}
+
+// ── Git ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Port interface for git operations — enables testing with fakes.
+ * All methods return Result — never throw.
+ */
+export interface GitPort {
+  readonly clone: (
+    url: string,
+    target: string,
+    opts?: { branch?: string; depth?: number },
+  ) => Promise<Result<void, HostError>>;
+
+  readonly pull: (repoPath: string) => Promise<Result<void, HostError>>;
+
+  readonly currentSha: (repoPath: string) => Promise<Result<string, HostError>>;
+
+  readonly hasLockfileChanged: (
+    repoPath: string,
+    fromSha: string,
+    toSha: string,
+  ) => Promise<Result<boolean, HostError>>;
+
+  readonly install: (repoPath: string) => Promise<Result<void, HostError>>;
+}
+
+// ── Redis ────────────────────────────────────────────────────────────────────
+
+/**
+ * Redis-like interface for cache/checkpoint operations.
+ * Returns Result to make failures explicit — no try/catch required at call sites.
+ */
+export interface RedisPort {
+  readonly get: (key: string) => Promise<Result<string | null, HostError>>;
+  readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
+}
+
+/**
+ * Port for Redis connectivity validation (PING command).
+ */
+export interface RedisConnectivityPort {
+  readonly ping: () => Promise<Result<void, HostError>>;
+}
+
+// ── Shared Infrastructure ────────────────────────────────────────────────────
+
+/**
+ * Shared infrastructure singletons — initialized once at host startup.
+ * Passed by reference into every NodeContext (no per-request allocation).
+ */
+export interface SharedInfra {
+  readonly llm: LlmClient;
+  readonly redis: RedisPort;
+  readonly tracer: Tracer;
+  readonly contentFilter: ContentFilter | null;
+  readonly logger: LogPort;
+}
+
+// ── Circuit Breaker ──────────────────────────────────────────────────────────
+
+/**
+ * Minimal read/write handle for circuit breaker state.
+ * Injected from the imperative shell's mutable Map.
+ */
+export interface CircuitPort {
+  readonly get: (dagId: DagId) => CircuitState;
+  readonly set: (dagId: DagId, s: CircuitState) => void;
+}
+
+/**
+ * Configuration for circuit breaker thresholds.
+ * Threaded from HostConfig.CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_WINDOW_MS.
+ */
+export interface CircuitConfig {
+  readonly threshold: number;
+  readonly windowMs: number;
 }

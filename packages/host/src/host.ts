@@ -13,8 +13,8 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err, runId as makeRunId } from "@fugue/framework";
-import type { Result, DagId, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fugue/framework";
+import { ok, err, runId as makeRunId, gitSha } from "@fugue/framework";
+import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fugue/framework";
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
@@ -23,9 +23,10 @@ import type { RegisteredDag } from "./domain/registry.js";
 import { initConcurrency } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit, forceReset } from "./domain/circuit-breaker.js";
-import type { GitPort } from "./adapters/git-sync.js";
-import type { ModuleLoaderPort } from "./adapters/module-loader.js";
-import type { SharedInfra, RedisPort } from "./adapters/node-context-factory.js";
+import type { GitPort } from "./ports.js";
+import type { ModuleLoaderPort } from "./ports.js";
+import type { SharedInfra } from "./ports.js";
+import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
 import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
@@ -33,7 +34,7 @@ import { startSyncLoop } from "./sync/sync-loop.js";
 import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
 import { diffDags, diffSummary } from "./domain/dag-diff.js";
 import { executeStartup, buildSyncConfig } from "./lifecycle/startup.js";
-import type { RedisConnectivityPort, StartupDeps } from "./lifecycle/startup.js";
+import type { StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
 import type { SignalHandlerHandle } from "./lifecycle/signals.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
