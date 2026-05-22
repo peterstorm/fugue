@@ -41,6 +41,7 @@ const testConfig = (overrides?: Partial<HostConfig>): HostConfig => ({
   DRAIN_TIMEOUT_MS: 5_000,
   LLM_PROVIDER: "anthropic" as const,
   ANTHROPIC_API_KEY: "test-key",
+  ADMIN_TOKEN: "test-admin-token-long-enough",
   OTEL_EXPORTER_OTLP_ENDPOINT: undefined,
   MLFLOW_TRACKING_URI: undefined,
   MLFLOW_EXPERIMENT_ID: undefined,
@@ -267,8 +268,10 @@ describe("Full Host Lifecycle", () => {
     expect(readyBody.ready).toBe(true);
     expect(readyBody.dagCount).toBe(1);
 
-    // DAG list endpoint
-    const dagsRes = await fetch(`http://localhost:${host.server!.port}/dags`);
+    // DAG list endpoint (requires auth)
+    const dagsRes = await fetch(`http://localhost:${host.server!.port}/dags`, {
+      headers: { Authorization: "Bearer test-admin-token-long-enough" },
+    });
     expect(dagsRes.status).toBe(200);
     const dagsBody = await dagsRes.json();
     expect(dagsBody.count).toBe(1);

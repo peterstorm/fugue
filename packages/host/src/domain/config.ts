@@ -56,8 +56,8 @@ export const HostConfigSchema = z.object({
   AZURE_OPENAI_API_KEY: z.string().optional(),
   /** Azure OpenAI deployment name */
   AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
-  /** Bearer token for API authentication (if unset, auth is disabled) */
-  API_TOKEN: z.string().min(16).optional(),
+  /** Admin bearer token for provisioning teams and full access (required) */
+  ADMIN_TOKEN: z.string().min(16),
   /** OpenTelemetry OTLP exporter endpoint */
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   /** MLflow tracking server URI */

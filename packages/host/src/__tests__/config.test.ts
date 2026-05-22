@@ -6,6 +6,7 @@ describe("HostConfigSchema", () => {
   const validEnv = {
     DAGS_REPO_URL: "https://github.com/org/dags.git",
     REDIS_URL: "redis://localhost:6379",
+    ADMIN_TOKEN: "test-admin-token-long-enough",
   };
 
   it("parses valid environment with only required fields", () => {
@@ -38,7 +39,7 @@ describe("HostConfigSchema", () => {
   });
 
   it("rejects missing DAGS_REPO_URL", () => {
-    const result = parseHostConfig({ REDIS_URL: "redis://localhost:6379" });
+    const result = parseHostConfig({ REDIS_URL: "redis://localhost:6379", ADMIN_TOKEN: "test-admin-token-long-enough" });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe("config-invalid");
@@ -47,7 +48,7 @@ describe("HostConfigSchema", () => {
   });
 
   it("rejects missing REDIS_URL (FR-006)", () => {
-    const result = parseHostConfig({ DAGS_REPO_URL: "https://github.com/org/dags.git" });
+    const result = parseHostConfig({ DAGS_REPO_URL: "https://github.com/org/dags.git", ADMIN_TOKEN: "test-admin-token-long-enough" });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe("config-invalid");

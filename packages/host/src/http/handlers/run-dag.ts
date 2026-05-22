@@ -12,6 +12,8 @@ import type { DagId, Result, NodeContext, FrameworkError } from "@fugue/framewor
 import { formatFrameworkError, tryDagId } from "@fugue/framework";
 import type { DagDef, RunOptions } from "@fugue/framework";
 import type { HostEnv } from "../router.js";
+import type { AuthIdentity } from "../../domain/auth.js";
+import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
 import { formatHostError } from "../../domain/host-error.js";
@@ -82,6 +84,16 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     if (registered.status.kind === "disabled") {
       const disabled: HostError = { kind: "dag-disabled", dagId, reason: registered.status.reason };
       return errorResponse(c, 503, disabled.kind, formatHostError(disabled), { dagId });
+    }
+
+    // 1.5. Authorization — check team scope
+    const identity = c.get("authIdentity") as AuthIdentity | undefined;
+    if (identity && !canAccessDag(identity, registered.team)) {
+      const callerTeam = identity.kind === "team" ? identity.team : "admin";
+      return errorResponse(c, 403, "forbidden",
+        `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
+        { dagId, details: { callerTeam, dagTeam: registered.team } },
+      );
     }
 
     // 2. Parse and validate input

@@ -13,6 +13,7 @@ import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import type { ContentFilter } from "@fugue/framework";
+import type { TokenGrant, TokenHash } from "./domain/auth.js";
 
 // ── Logger ──────────────────────────────────────────────────────────────────
 
@@ -137,4 +138,22 @@ export interface CircuitPort {
 export interface CircuitConfig {
   readonly threshold: number;
   readonly windowMs: number;
+}
+
+// ── Token Store ─────────────────────────────────────────────────────────────
+
+/**
+ * Port for team token persistence.
+ * Stores token hashes mapped to team grants.
+ * Used by auth middleware (resolve) and admin handlers (store/list/revoke).
+ */
+export interface TokenStorePort {
+  /** Look up a token grant by its hash. Returns null if not found or revoked. */
+  readonly resolve: (hash: TokenHash) => Promise<TokenGrant | null>;
+  /** Store a new team token. Returns err if team already has a token. */
+  readonly store: (team: string, hash: TokenHash, grant: TokenGrant) => Promise<Result<void, HostError>>;
+  /** List all provisioned teams with their grants (excludes hashes). */
+  readonly listTeams: () => Promise<readonly TokenGrant[]>;
+  /** Revoke a team's token. Idempotent — revoking non-existent team is ok. */
+  readonly revoke: (team: string) => Promise<Result<void, HostError>>;
 }

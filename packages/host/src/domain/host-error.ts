@@ -34,6 +34,9 @@ export type HostError =
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId }
   | { readonly kind: "unauthorized"; readonly reason: string }
+  | { readonly kind: "forbidden"; readonly dagId: DagId; readonly callerTeam: string; readonly dagTeam: string }
+  | { readonly kind: "team-already-exists"; readonly team: string }
+  | { readonly kind: "team-not-found"; readonly team: string }
   | { readonly kind: "internal-invariant-violated"; readonly message: string; readonly context: Record<string, unknown> };
 
 export type HostErrorKind = HostError["kind"];
@@ -63,6 +66,9 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "config-invalid" }, () => 500)
     .with({ kind: "discovery-failed" }, () => 500)
     .with({ kind: "unauthorized" }, () => 401)
+    .with({ kind: "forbidden" }, () => 403)
+    .with({ kind: "team-already-exists" }, () => 409)
+    .with({ kind: "team-not-found" }, () => 404)
     .with({ kind: "internal-invariant-violated" }, () => 500)
     .exhaustive();
 
@@ -97,5 +103,8 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "discovery-failed" }, (e) => `DAG discovery failed for '${e.dagsRoot}': ${e.message}`)
     .with({ kind: "async-result-expired" }, (e) => `async result for run '${e.runId}' has expired`)
     .with({ kind: "unauthorized" }, (e) => `unauthorized: ${e.reason}`)
+    .with({ kind: "forbidden" }, (e) => `token for team '${e.callerTeam}' cannot access DAG '${e.dagId}' (owned by '${e.dagTeam}')`)
+    .with({ kind: "team-already-exists" }, (e) => `team '${e.team}' already has a token`)
+    .with({ kind: "team-not-found" }, (e) => `team '${e.team}' not found`)
     .with({ kind: "internal-invariant-violated" }, (e) => `internal invariant violated: ${e.message}`)
     .exhaustive();
