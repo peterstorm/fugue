@@ -40,8 +40,9 @@ export type DegradedReason = "redis-disconnected" | "sync-failed" | "no-dags-loa
 /**
  * Host lifecycle state ADT.
  *
- * `lastSyncSha` convention: empty string `""` means "never synced" (initial state).
- * After the first successful sync, it always contains a valid git SHA.
+ * `lastSyncSha` convention: branded empty string (via `EMPTY_SHA` from framework)
+ * means "never synced" (initial state). After the first successful sync, always
+ * contains a valid 40-char git SHA.
  */
 export type HostState =
   | { readonly phase: "booting"; readonly startedAt: number }
@@ -245,7 +246,6 @@ export const redisDied = (
  */
 export const redisRecovered = (
   state: HostState,
-  now: number,
 ): Result<HostState, TransitionError> => {
   if (state.phase !== "degraded") {
     return err(invalidTransition(state.phase, "ready"));

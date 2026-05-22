@@ -53,7 +53,8 @@ const spawnGit = async (
 
     if (result === "timeout") {
       proc.kill();
-      // Wait for process to actually terminate before draining
+      // Process may already have exited between timeout race resolution and kill.
+      // The exit reason is not meaningful after kill — the timeout error is already captured below.
       await proc.exited.catch(() => {});
       // Drain streams to release file descriptors
       await Promise.allSettled([
@@ -230,7 +231,8 @@ export const runBunInstall = async (
 
     if (result === "timeout") {
       proc.kill();
-      // Wait for process to terminate before draining streams
+      // Process may already have exited between timeout race resolution and kill.
+      // The exit reason is not meaningful after kill — the timeout error is already captured below.
       await proc.exited.catch(() => {});
       await Promise.allSettled([
         new Response(proc.stdout).text(),

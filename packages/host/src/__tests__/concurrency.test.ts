@@ -93,7 +93,7 @@ describe("Concurrency Limiter", () => {
       const result = acquire(afterAcquires, DAG_A, NOW + 10);
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.error).toBe("global-at-capacity");
+      expect(result.error.kind).toBe("global-at-capacity");
     });
 
     test("returns dag-at-capacity when per-DAG limit reached", () => {
@@ -102,7 +102,7 @@ describe("Concurrency Limiter", () => {
       const result = acquire(afterAcquires, DAG_A, NOW + 10);
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.error).toBe("dag-at-capacity");
+      expect(result.error.kind).toBe("dag-at-capacity");
     });
 
     test("per-DAG isolation: DAG B not affected by DAG A capacity", () => {
@@ -184,7 +184,7 @@ describe("Concurrency Limiter", () => {
       const result = acquire(afterAcquires, DAG_A, NOW + 10);
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.error).toBe("dag-at-capacity");
+      expect(result.error.kind).toBe("dag-at-capacity");
     });
   });
 

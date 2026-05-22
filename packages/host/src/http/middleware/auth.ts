@@ -10,7 +10,8 @@
  * Sets `authIdentity` on Hono context for downstream authorization checks.
  *
  * Added post-spec for multi-tenant team isolation.
- * Design decision documented in ADR-0033 trust model.
+ * Trust model: admin token (env) is root of trust; team tokens are hashed
+ * and resolved via Redis. See packages/host/docs/auth.md for full design.
  */
 
 import type { Context, Next } from "hono";

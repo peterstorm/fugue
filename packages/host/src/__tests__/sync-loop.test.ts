@@ -1,9 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { ok, err, gitSha } from "@fugue/framework";
+import { ok, err, gitSha, EMPTY_SHA } from "@fugue/framework";
 import type { GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort, ModuleLoaderPort, BulkLoadResult } from "../ports.js";
-import { executeSyncCycle } from "../sync/sync-loop.js";
+import { executeSyncCycle, startSyncLoop } from "../sync/sync-loop.js";
 import type { SyncConfig, SyncLogger } from "../sync/sync-loop.js";
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
@@ -163,5 +163,96 @@ describe("executeSyncCycle", () => {
     });
     await executeSyncCycle(git, fakeLoader(), config, emptySha, noopLogger);
     expect(lockfileChecked).toBe(false);
+  });
+
+  it("pulls before reading SHA in remote mode — detects remote changes", async () => {
+    const calls: string[] = [];
+    // Simulate remote: pull advances HEAD from sha1 → sha2
+    const git = fakeGit({
+      pull: async () => { calls.push("pull"); return ok(undefined); },
+      currentSha: async () => {
+        calls.push("currentSha");
+        // After pull, local HEAD reflects remote
+        return ok(sha2);
+      },
+    });
+    const result = await executeSyncCycle(git, fakeLoader(), config, sha1, noopLogger);
+    expect(result.kind).toBe("updated");
+    // Verify pull happens BEFORE currentSha
+    expect(calls[0]).toBe("pull");
+    expect(calls[1]).toBe("currentSha");
+  });
+
+  it("skips pull on initial sync (lastSha is EMPTY_SHA) even in remote mode", async () => {
+    let pullCalled = false;
+    const git = fakeGit({
+      currentSha: async () => ok(sha2),
+      pull: async () => { pullCalled = true; return ok(undefined); },
+    });
+    await executeSyncCycle(git, fakeLoader(), config, EMPTY_SHA, noopLogger);
+    expect(pullCalled).toBe(false);
+  });
+});
+
+// ── startSyncLoop tests ───────────────────────────────────────────────────────
+
+describe("startSyncLoop", () => {
+  it("recovers if onStarted throws — next sync not deadlocked", async () => {
+    let onStartedCallCount = 0;
+    const git = fakeGit({ currentSha: async () => ok(sha2) });
+    const handle = startSyncLoop(
+      git,
+      fakeLoader(),
+      config,
+      noopLogger,
+      () => {
+        onStartedCallCount++;
+        if (onStartedCallCount === 1) throw new Error("onStarted boom");
+      },
+      () => {},
+      () => {},
+      () => {},
+      sha1,
+    );
+
+    // First sync: onStarted throws, should recover
+    const result1 = await handle.triggerSync();
+    expect(result1.kind).toBe("error");
+
+    // Second sync: should NOT be deadlocked
+    const result2 = await handle.triggerSync();
+    expect(result2.kind).not.toBe("skipped");
+
+    handle.stop();
+  });
+
+  it("returns skipped when sync is already in progress", async () => {
+    let resolve: (() => void) | undefined;
+    const blockingGit = fakeGit({
+      pull: () => new Promise((r) => { resolve = () => r(ok(undefined)); }),
+    });
+    const handle = startSyncLoop(
+      blockingGit,
+      fakeLoader(),
+      config,
+      noopLogger,
+      () => {},
+      () => {},
+      () => {},
+      () => {},
+      sha1,
+    );
+
+    // Start a sync that blocks on pull
+    const p1 = handle.triggerSync();
+
+    // Try another sync immediately — should be skipped
+    const result2 = await handle.triggerSync();
+    expect(result2.kind).toBe("skipped");
+
+    // Unblock and cleanup
+    resolve?.();
+    await p1;
+    handle.stop();
   });
 });

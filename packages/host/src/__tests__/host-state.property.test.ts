@@ -73,7 +73,7 @@ const applyAction = (state: HostState, action: Action, now: number): HostState =
       result = redisDied(state, now);
       break;
     case "redisRecovered":
-      result = redisRecovered(state, now);
+      result = redisRecovered(state);
       break;
   }
   // Only apply valid transitions — invalid ones leave state unchanged

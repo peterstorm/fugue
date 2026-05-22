@@ -27,6 +27,11 @@ export interface LogPort {
   readonly error: (msg: string, data?: Record<string, unknown>) => void;
 }
 
+// ── Clock ──────────────────────────────────────────────────────────────────────
+
+/** Injectable time source — enables deterministic testing. */
+export type Clock = () => number;
+
 // ── Module Loader ────────────────────────────────────────────────────────────
 
 export interface LoadResult {
@@ -154,7 +159,7 @@ export interface TokenStorePort {
   /** Store a new team token. Returns err if team already has a token. */
   readonly store: (team: string, hash: TokenHash, grant: TokenGrant) => Promise<Result<void, HostError>>;
   /** List all provisioned teams with their grants (excludes hashes). */
-  readonly listTeams: () => Promise<readonly TokenGrant[]>;
+  readonly listTeams: () => Promise<Result<readonly TokenGrant[], HostError>>;
   /** Revoke a team's token. Idempotent — revoking non-existent team is ok. */
   readonly revoke: (team: string) => Promise<Result<void, HostError>>;
 }

@@ -144,12 +144,12 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const acquireResult = acquire(concurrency, dagId, now);
 
     if (!acquireResult.ok) {
-      const concErr: HostError = acquireResult.error === "global-at-capacity"
+      const concErr: HostError = acquireResult.error.kind === "global-at-capacity"
         ? { kind: "global-concurrency-exceeded" }
         : { kind: "dag-concurrency-exceeded", dagId };
       return errorResponse(c, 429, concErr.kind, formatHostError(concErr), {
         dagId,
-        details: { scope: acquireResult.error === "global-at-capacity" ? "global" : "dag" },
+        details: { scope: acquireResult.error.kind === "global-at-capacity" ? "global" : "dag" },
         headers: { "Retry-After": "5" },
       });
     }

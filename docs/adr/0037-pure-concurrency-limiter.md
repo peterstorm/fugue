@@ -39,7 +39,7 @@ The concurrency limiter is modeled as an immutable `ConcurrencyState` record wit
 - **`withDagLimit(state, dagId, max)`** registers custom per-DAG limits at DAG registration time.
 - **Query helpers** (`hasCapacity`, `globalUtilization`, `dagUtilization`) read state without mutation.
 
-Implementation lives at `packages/host/src/domain/concurrency.ts`. The imperative shell (HTTP middleware at `packages/host/src/http/middleware/concurrency-guard.ts`) holds the mutable state reference, calls acquire before dispatch, and release in finally.
+Implementation lives at `packages/host/src/domain/concurrency.ts`. The imperative shell (`packages/host/src/http/handlers/run-dag.ts`) holds the mutable state reference, calls acquire before dispatch, and release in finally.
 
 Key invariants:
 - `acquire` is the only function that increments counts.
@@ -57,5 +57,5 @@ Key invariants:
 
 **Negative:**
 - No built-in backpressure. Rejected requests fail immediately with 429 rather than queuing. This is acceptable for the current use case (AI agent callers can retry) but would need rethinking if human-interactive UIs consume the API.
-- The imperative shell must correctly maintain the mutable state reference. A bug in the shell (e.g. missing `release` in an error path) could leak slots. Mitigated by the finally-block pattern in the concurrency-guard middleware.
+- The imperative shell must correctly maintain the mutable state reference. A bug in the shell (e.g. missing `release` in an error path) could leak slots. Mitigated by the finally-block pattern in the run-dag handler.
 - Adding distributed concurrency later requires replacing this with a Redis-backed limiter — the pure interface doesn't extend to multi-instance.

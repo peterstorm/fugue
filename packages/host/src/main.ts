@@ -174,7 +174,14 @@ const main = async () => {
 
     logger.info("Fugue host is running");
   } catch (e) {
-    await disconnectRedis().catch(() => {});
+    await disconnectRedis().catch((disconnectErr) => {
+      console.error(JSON.stringify({
+        level: "error",
+        msg: "Failed to disconnect Redis during error cleanup",
+        error: disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr),
+        ts: new Date().toISOString(),
+      }));
+    });
     throw e;
   }
 };

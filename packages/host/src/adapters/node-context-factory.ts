@@ -89,9 +89,14 @@ export const createNamespacedCache = (
     if (raw === null) return { hit: false };
     try {
       return { hit: true, value: JSON.parse(raw) };
-    } catch {
+    } catch (e) {
       // Corrupted entry — treat as miss
-      logger.warn("Cache entry corrupted — treating as miss", { key: fullKey, dagId, rawPreview: raw?.slice(0, 100) });
+      logger.warn("Cache entry corrupted — treating as miss", {
+        key: fullKey,
+        dagId,
+        rawPreview: raw?.slice(0, 100),
+        parseError: e instanceof Error ? e.message : String(e),
+      });
       return { hit: false };
     }
   },

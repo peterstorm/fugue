@@ -129,7 +129,12 @@ export const createListTeamsHandler = (deps: AdminHandlerDeps) => {
     const denied = requireAdmin(c);
     if (denied) return denied;
 
-    const teams = await deps.tokenStore.listTeams();
+    const teamsResult = await deps.tokenStore.listTeams();
+    if (!teamsResult.ok) {
+      return errorResponse(c, 500, "internal-error", "Failed to list teams");
+    }
+
+    const teams = teamsResult.value;
 
     return c.json({
       ok: true,

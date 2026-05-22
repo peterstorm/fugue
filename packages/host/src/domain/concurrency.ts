@@ -37,7 +37,9 @@ export interface AcquireToken {
   readonly [__acquireTokenBrand]: void;
 }
 
-export type ConcurrencyError = "global-at-capacity" | "dag-at-capacity";
+export type ConcurrencyError =
+  | { readonly kind: "global-at-capacity"; readonly current: number; readonly max: number }
+  | { readonly kind: "dag-at-capacity"; readonly dagId: DagId; readonly current: number; readonly max: number };
 
 // ---------------------------------------------------------------------------
 // Builders
@@ -87,7 +89,7 @@ export const acquire = (
 ): Result<{ state: ConcurrencyState; token: AcquireToken }, ConcurrencyError> => {
   // Check global capacity
   if (state.global.current >= state.global.max) {
-    return err("global-at-capacity");
+    return err({ kind: "global-at-capacity", current: state.global.current, max: state.global.max });
   }
 
   // Get or initialize per-DAG state
@@ -95,7 +97,7 @@ export const acquire = (
 
   // Check per-DAG capacity
   if (dagState.current >= dagState.max) {
-    return err("dag-at-capacity");
+    return err({ kind: "dag-at-capacity", dagId, current: dagState.current, max: dagState.max });
   }
 
   // Produce new state

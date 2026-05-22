@@ -10,7 +10,7 @@
 
 import { ok, err } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
-import type { HostError } from "../domain/host-error.js";
+import { redisUnavailable, teamAlreadyExists } from "../domain/host-error.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
 import type { TokenStorePort, RedisPort, LogPort } from "../ports.js";
 
@@ -48,14 +48,14 @@ export const createInMemoryTokenStore = (
 
     store: async (team, hash, grant) => {
       if (byTeam.has(team)) {
-        return err({ kind: "team-already-exists", team } as HostError);
+        return err(teamAlreadyExists(team));
       }
       byHash.set(hash, grant);
       byTeam.set(team, { hash, grant });
       return ok(undefined);
     },
 
-    listTeams: async () => Array.from(byTeam.values()).map((v) => v.grant),
+    listTeams: async () => ok(Array.from(byTeam.values()).map((v) => v.grant)),
 
     revoke: async (team) => {
       const entry = byTeam.get(team);
@@ -86,7 +86,7 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
     resolve: async (hash) => {
       const result = await redis.get(tokenKey(hash));
       if (!result.ok) {
-        return err({ kind: "redis-unavailable", operation: "token-resolve" } as HostError);
+        return err(redisUnavailable("token-resolve"));
       }
       if (result.value === null || result.value === "") return ok(null);
       try {
@@ -96,10 +96,7 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
           hashPrefix: String(hash).slice(0, 8),
           error: e instanceof Error ? e.message : String(e),
         });
-        return err({
-          kind: "redis-unavailable",
-          operation: `token-resolve: corrupt grant data for hash ${String(hash).slice(0, 8)}…`,
-        } as HostError);
+        return err(redisUnavailable(`token-resolve: corrupt grant data for hash ${String(hash).slice(0, 8)}…`));
       }
     },
 
@@ -107,17 +104,17 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
       // Check if team already exists (via reverse index)
       const existingResult = await redis.get(teamKey(team));
       if (!existingResult.ok) {
-        return err({ kind: "redis-unavailable", operation: "token-store-check" } as HostError);
+        return err(redisUnavailable("token-store-check"));
       }
       if (existingResult.value !== null && existingResult.value !== "") {
-        return err({ kind: "team-already-exists", team } as HostError);
+        return err(teamAlreadyExists(team));
       }
 
       // Store token → grant mapping
       const grantJson = JSON.stringify(grant);
       const tokenSetResult = await redis.set(tokenKey(hash), grantJson);
       if (!tokenSetResult.ok) {
-        return err({ kind: "redis-unavailable", operation: "token-store-set" } as HostError);
+        return err(redisUnavailable("token-store-set"));
       }
 
       // Store team → { hash, grant } reverse index
@@ -132,20 +129,20 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
             hashPrefix: String(hash).slice(0, 8),
           });
         }
-        return err({ kind: "redis-unavailable", operation: "token-store-team-index" } as HostError);
+        return err(redisUnavailable("token-store-team-index"));
       }
 
       knownTeams.set(team, grant);
       return ok(undefined);
     },
 
-    listTeams: async () => Array.from(knownTeams.values()),
+    listTeams: async () => ok(Array.from(knownTeams.values())),
 
     revoke: async (team) => {
       // Look up the team's hash from the reverse index
       const teamResult = await redis.get(teamKey(team));
       if (!teamResult.ok) {
-        return err({ kind: "redis-unavailable", operation: "token-revoke-lookup" } as HostError);
+        return err(redisUnavailable("token-revoke-lookup"));
       }
       if (teamResult.value === null || teamResult.value === "") {
         // Idempotent — revoking non-existent team is fine
@@ -161,22 +158,19 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
           team,
           error: e instanceof Error ? e.message : String(e),
         });
-        return err({
-          kind: "redis-unavailable",
-          operation: `token-revoke: corrupt team index for '${team}' — manual cleanup required`,
-        } as HostError);
+        return err(redisUnavailable(`token-revoke: corrupt team index for '${team}' — manual cleanup required`));
       }
 
       // Delete token hash key
       const tokenDelResult = await redis.del(tokenKey(hash as TokenHash));
       if (!tokenDelResult.ok) {
-        return err({ kind: "redis-unavailable", operation: "token-revoke-hash-delete" } as HostError);
+        return err(redisUnavailable("token-revoke-hash-delete"));
       }
 
       // Delete team reverse index key
       const teamDelResult = await redis.del(teamKey(team));
       if (!teamDelResult.ok) {
-        return err({ kind: "redis-unavailable", operation: "token-revoke-team-delete" } as HostError);
+        return err(redisUnavailable("token-revoke-team-delete"));
       }
 
       knownTeams.delete(team);

@@ -106,3 +106,13 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "team-not-found" }, (e) => `team '${e.team}' not found`)
     .with({ kind: "internal-invariant-violated" }, (e) => `internal invariant violated: ${e.message}`)
     .exhaustive();
+
+// ── Smart Constructors ─────────────────────────────────────────────────────
+
+export const redisUnavailable = (operation: string): HostError => ({ kind: "redis-unavailable", operation });
+export const teamAlreadyExists = (team: string): HostError => ({ kind: "team-already-exists", team });
+export const teamNotFound = (team: string): HostError => ({ kind: "team-not-found", team });
+export const importFailed = (path: string, message: string, stack?: string): HostError => ({ kind: "import-failed", path, message, stack });
+export const noDefaultExport = (path: string): HostError => ({ kind: "no-default-export", path });
+export const discoveryFailed = (dagsRoot: string, message: string): HostError => ({ kind: "discovery-failed", dagsRoot, message });
+export const internalInvariantViolated = (message: string, context: Record<string, unknown>): HostError => ({ kind: "internal-invariant-violated", message, context });

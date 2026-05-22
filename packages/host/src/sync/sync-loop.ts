@@ -3,9 +3,9 @@
  *
  * The sync loop:
  * 1. Waits for poll interval
- * 2. Checks current SHA (rev-parse)
- * 3. Compares with last known SHA — short-circuits if unchanged
- * 4. Pulls new changes
+ * 2. Pulls remote changes (remote mode only, after initial sync)
+ * 3. Reads current SHA (rev-parse HEAD — now reflects remote state)
+ * 4. Compares with last known SHA — short-circuits if unchanged
  * 5. Checks if lockfile changed → runs bun install
  * 6. Discovers and loads all DAGs
  * 7. Builds new immutable registry snapshot
@@ -21,12 +21,12 @@
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
-import { ok, gitSha } from "@fugue/framework";
+import { ok, gitSha, EMPTY_SHA } from "@fugue/framework";
 import type { Result, GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
-import type { GitPort, ModuleLoaderPort, LoadResult } from "../ports.js";
+import type { GitPort, ModuleLoaderPort, LoadResult, Clock } from "../ports.js";
 import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
 
 // Re-export for test convenience (tests import from sync-loop)
@@ -88,9 +88,9 @@ export type OnSyncNoChange = (sha: GitSha) => void;
 export type OnSyncError = (error: HostError) => void;
 
 /**
- * Clock function — injectable time source for deterministic testing.
+ * Clock function — re-exported from ports for backward compatibility.
  */
-export type Clock = () => number;
+export type { Clock } from "../ports.js";
 
 /**
  * Handle returned from startSyncLoop to control the loop.
@@ -121,7 +121,22 @@ export const executeSyncCycle = async (
   logger: SyncLogger,
   clock: Clock = Date.now,
 ): Promise<SyncResult> => {
-  // Step 1: Get current SHA
+  // Step 1: Pull changes first in remote mode (so rev-parse reflects remote state)
+  if (!config.isLocalMode && lastSha !== EMPTY_SHA) {
+    const pullResult = await git.pull(config.repoPath);
+    if (!pullResult.ok) {
+      logger.warn("Git pull failed, existing DAGs remain active", {
+        error: pullResult.error,
+      });
+      return {
+        kind: "error",
+        previousSha: lastSha,
+        syncError: pullResult.error,
+      };
+    }
+  }
+
+  // Step 2: Get current SHA (now reflects remote state after pull)
   const shaResult = await git.currentSha(config.repoPath);
   if (!shaResult.ok) {
     logger.warn("Failed to get current SHA, will retry next interval", {
@@ -136,28 +151,13 @@ export const executeSyncCycle = async (
 
   const currentSha = shaResult.value;
 
-  // Step 2: Skip if unchanged
+  // Step 3: Skip if unchanged
   if (currentSha === lastSha) {
     return { kind: "no-change", currentSha };
   }
 
-  // Step 3: Pull changes (skip in local mode)
-  if (!config.isLocalMode) {
-    const pullResult = await git.pull(config.repoPath);
-    if (!pullResult.ok) {
-      logger.warn("Git pull failed, existing DAGs remain active", {
-        error: pullResult.error,
-      });
-      return {
-        kind: "error",
-        previousSha: lastSha,
-        syncError: pullResult.error,
-      };
-    }
-  }
-
-  // Step 4: Check lockfile changes (skip in local mode)
-  if (!config.isLocalMode && lastSha !== "") {
+  // Step 4: Check lockfile changes (skip in local mode and on first sync)
+  if (!config.isLocalMode && lastSha !== EMPTY_SHA) {
     const lockResult = await git.hasLockfileChanged(config.repoPath, lastSha, currentSha);
     if (!lockResult.ok) {
       // Fail-safe: when we can't determine if lockfile changed, run install defensively.
@@ -248,8 +248,8 @@ export const startSyncLoop = (
     }
 
     running = true;
-    onStarted();
     try {
+      onStarted();
       const result = await executeSyncCycle(git, loader, config, lastSha, logger);
 
       if (result.kind === "updated") {

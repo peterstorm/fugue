@@ -258,7 +258,7 @@ describe("HostState", () => {
 
   describe("redisRecovered", () => {
     it("transitions degraded:redis-disconnected → ready", () => {
-      const result = redisRecovered(degradedRedis(), 500);
+      const result = redisRecovered(degradedRedis());
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.value.phase).toBe("ready");
@@ -267,20 +267,20 @@ describe("HostState", () => {
     it("preserves registry and SHA on recovery", () => {
       const degraded = degradedRedis();
       const prevReg = getRegistry(degraded);
-      const result = redisRecovered(degraded, 500);
+      const result = redisRecovered(degraded);
       if (!result.ok) return;
       expect(getRegistry(result.value)).toBe(prevReg);
     });
 
     it("rejects from degraded:sync-failed", () => {
-      const result = redisRecovered(degradedSyncFailed(), 500);
+      const result = redisRecovered(degradedSyncFailed());
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.from).toContain("sync-failed");
     });
 
     it("rejects from ready", () => {
-      expect(redisRecovered(readyState(), 500).ok).toBe(false);
+      expect(redisRecovered(readyState()).ok).toBe(false);
     });
   });
 
