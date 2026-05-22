@@ -14,8 +14,8 @@
 import { describe, it } from "bun:test";
 import * as fc from "fast-check";
 import { dagId } from "@fugue/framework";
-import { diffDags, hasChanges, diffSummary } from "../sync/diff.js";
-import type { DagSnapshot } from "../sync/diff.js";
+import { diffDags, hasChanges, diffSummary } from "../domain/dag-diff.js";
+import type { DagSnapshot } from "../domain/dag-diff.js";
 
 // ── Arbitraries ────────────────────────────────────────────────────────────
 

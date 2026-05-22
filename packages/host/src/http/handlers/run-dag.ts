@@ -10,7 +10,7 @@
 
 import type { Context } from "hono";
 import type { DagId, Result, NodeContext, FrameworkError } from "@fugue/framework";
-import { formatFrameworkError, dagId as makeDagId } from "@fugue/framework";
+import { formatFrameworkError, tryDagId } from "@fugue/framework";
 import type { DagDef, RunOptions } from "@fugue/framework";
 import type { HostEnv } from "../router.js";
 import { errorResponse, successResponse } from "../response.js";
@@ -22,7 +22,7 @@ import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
 import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-guard.js";
-import type { CircuitPort } from "../../domain/circuit-guard.js";
+import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
@@ -32,6 +32,7 @@ export interface RunDagDeps {
   readonly getConcurrency: () => ConcurrencyState;
   readonly setConcurrency: (s: ConcurrencyState) => void;
   readonly circuit: CircuitPort;
+  readonly circuitConfig: CircuitConfig;
   readonly createContext: (registered: RegisteredDag, signal?: AbortSignal) => NodeContext;
   readonly executeDag: <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
@@ -42,7 +43,14 @@ export interface RunDagDeps {
  */
 export const createRunDagHandler = (deps: RunDagDeps) => {
   return async (c: Context<HostEnv>): Promise<Response> => {
-    const dagId = makeDagId(c.req.param("id") ?? "");
+    const rawId = c.req.param("id") ?? "";
+    const dagIdResult = tryDagId(rawId);
+    if (!dagIdResult.ok) {
+      return errorResponse(c, 400, "invalid-dag-id", `Invalid DAG ID '${rawId}': ${dagIdResult.error}`, {
+        details: { raw: rawId },
+      });
+    }
+    const dagId = dagIdResult.value;
     const hostState = c.get("hostState");
 
     // 1. Reject if host cannot serve requests (booting, draining, stopped)
@@ -158,7 +166,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
           markSuccess(deps.circuit, dagId, deps.clock());
           return successResponse(c, result.value, { runId: ctx.runId, durationMs });
         } else {
-          markFailure(deps.circuit, dagId, deps.clock());
+          markFailure(deps.circuit, dagId, deps.clock(), deps.circuitConfig);
           const msg = formatFrameworkError(result.error);
           return errorResponse(c, 500, result.error.kind, msg, {
             dagId,
@@ -170,7 +178,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
         // Handle abort (timeout)
         if (e instanceof Error && e.name === "AbortError") {
-          markFailure(deps.circuit, dagId, deps.clock());
+          markFailure(deps.circuit, dagId, deps.clock(), deps.circuitConfig);
           const timeoutErr: HostError = {
             kind: "timeout",
             dagId,
@@ -184,7 +192,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
           });
         }
 
-        markFailure(deps.circuit, dagId, deps.clock());
+        markFailure(deps.circuit, dagId, deps.clock(), deps.circuitConfig);
 
         // Wrap with context for the error handler middleware
         const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });

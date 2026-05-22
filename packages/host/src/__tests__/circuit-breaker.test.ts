@@ -74,7 +74,7 @@ describe("Circuit Breaker", () => {
     });
 
     test("open → stays open (unexpected success)", () => {
-      const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+      const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
       const after = recordSuccess(open, NOW + 1000);
       expect(after.state).toBe("open");
     });
@@ -95,7 +95,7 @@ describe("Circuit Breaker", () => {
       const after = failN(initial, THRESHOLD + 1);
       expect(after.state).toBe("open");
       if (after.state !== "open") return;
-      expect(after.reason).toContain("5");
+      expect(after.reason).toEqual({ kind: "threshold-exceeded", threshold: THRESHOLD, windowMs: WINDOW_MS });
     });
 
     test("closed → does NOT transition to open at exactly threshold", () => {
@@ -124,11 +124,11 @@ describe("Circuit Breaker", () => {
       const after = recordFailure(halfOpen, NOW, THRESHOLD, WINDOW_MS);
       expect(after.state).toBe("open");
       if (after.state !== "open") return;
-      expect(after.reason).toContain("Half-open test request failed");
+      expect(after.reason).toEqual({ kind: "half-open-test-failed" });
     });
 
     test("open → stays open", () => {
-      const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+      const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
       const after = recordFailure(open, NOW + 1000, THRESHOLD, WINDOW_MS);
       expect(after).toBe(open); // Reference equality — no change
     });
@@ -136,7 +136,7 @@ describe("Circuit Breaker", () => {
 
   describe("attemptReset", () => {
     test("open + cooldown elapsed → half-open", () => {
-      const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+      const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
       const after = attemptReset(open, NOW + COOLDOWN_MS, COOLDOWN_MS);
       expect(after.state).toBe("half-open");
       if (after.state !== "half-open") return;
@@ -144,7 +144,7 @@ describe("Circuit Breaker", () => {
     });
 
     test("open + cooldown NOT elapsed → stays open", () => {
-      const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+      const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
       const after = attemptReset(open, NOW + COOLDOWN_MS - 1, COOLDOWN_MS);
       expect(after.state).toBe("open");
     });
@@ -164,7 +164,7 @@ describe("Circuit Breaker", () => {
 
   describe("forceReset", () => {
     test("always returns closed state regardless of current state", () => {
-      const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+      const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
       const result = forceReset(NOW + 5000);
       expect(result.state).toBe("closed");
       if (result.state !== "closed") return;
@@ -191,7 +191,7 @@ describe("Circuit Breaker", () => {
     });
 
     test("open → false", () => {
-      const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+      const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
       expect(isAllowed(open)).toBe(false);
     });
 
@@ -335,7 +335,10 @@ describe("Circuit Breaker", () => {
         fc.record({
           state: fc.constant("open" as const),
           openedAt: fc.integer({ min: 0, max: 1_000_000 }),
-          reason: fc.string({ minLength: 1, maxLength: 50 }),
+          reason: fc.oneof(
+            fc.record({ kind: fc.constant("threshold-exceeded" as const), threshold: fc.integer({ min: 1, max: 20 }), windowMs: fc.integer({ min: 1000, max: 120_000 }) }),
+            fc.constant({ kind: "half-open-test-failed" as const }),
+          ),
         }),
         fc.record({
           state: fc.constant("half-open" as const),

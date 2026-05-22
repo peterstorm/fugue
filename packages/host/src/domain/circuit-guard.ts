@@ -2,19 +2,18 @@
  * Circuit Guard — encapsulates the multi-step circuit breaker orchestration protocol.
  *
  * The run-dag handler must: get → attemptReset → set → isAllowed → consumeTestRequest → set → execute → recordSuccess/Failure → set.
- * This module captures that protocol as composable pure functions,
+ * This module captures that protocol as composable functions,
  * preventing ordering bugs and missed state writes.
  *
- * DESIGN: This module lives in domain/ despite performing side effects (port.set())
- * because it encapsulates a PURE PROTOCOL — the sequence of state transitions is
- * deterministic given the port's current state. The side effects are limited to
- * the injected port handle; the functions are testable with a trivial Map-backed fake.
- * This is the "pure protocol over injected port" pattern.
+ * DESIGN: This module lives in domain/ because it encapsulates a deterministic
+ * protocol over an injected port handle. The transition sequence is fully
+ * determined by the port's current state — side effects (port.set()) are confined
+ * to the injected handle. Testable with a trivial Map-backed fake.
  */
 
 import type { DagId } from "@fugue/framework";
 import type { CircuitState } from "./circuit-breaker.js";
-import { attemptReset, isAllowed, consumeTestRequest, recordSuccess, recordFailure } from "./circuit-breaker.js";
+import { attemptReset, isAllowed, consumeTestRequest, recordSuccess, recordFailure, DEFAULTS } from "./circuit-breaker.js";
 
 // ── Port Interface ─────────────────────────────────────────────────────────
 
@@ -26,6 +25,24 @@ export interface CircuitPort {
   readonly get: (dagId: DagId) => CircuitState;
   readonly set: (dagId: DagId, s: CircuitState) => void;
 }
+
+/**
+ * Configuration for circuit breaker thresholds.
+ * Threaded from HostConfig.CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_WINDOW_MS.
+ */
+export interface CircuitConfig {
+  readonly threshold: number;
+  readonly windowMs: number;
+}
+
+/**
+ * Default circuit config — used when no explicit config is provided.
+ * Matches the default values in HostConfigSchema.
+ */
+export const DEFAULT_CIRCUIT_CONFIG: CircuitConfig = {
+  threshold: DEFAULTS.threshold,
+  windowMs: DEFAULTS.windowMs,
+};
 
 // ── Guard Results ──────────────────────────────────────────────────────────
 
@@ -73,8 +90,15 @@ export const markSuccess = (port: CircuitPort, dagId: DagId, now: number): void 
 /**
  * Record a failed execution in the circuit breaker.
  * May transition closed → open if threshold exceeded.
+ *
+ * @param config - Circuit breaker thresholds (from HostConfig). Defaults to DEFAULTS if omitted.
  */
-export const markFailure = (port: CircuitPort, dagId: DagId, now: number): void => {
-  const circuit = recordFailure(port.get(dagId), now);
+export const markFailure = (
+  port: CircuitPort,
+  dagId: DagId,
+  now: number,
+  config: CircuitConfig = DEFAULT_CIRCUIT_CONFIG,
+): void => {
+  const circuit = recordFailure(port.get(dagId), now, config.threshold, config.windowMs);
   port.set(dagId, circuit);
 };

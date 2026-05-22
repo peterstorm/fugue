@@ -162,7 +162,7 @@ describe("circuit-breaker properties", () => {
   test("open circuit blocks all requests", () => {
     fc.assert(
       fc.property(fc.nat({ max: 1_000_000 }), (now) => {
-        const open: CircuitState = { state: "open", openedAt: now, reason: "test" };
+        const open: CircuitState = { state: "open", openedAt: now, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
         expect(isAllowed(open)).toBe(false);
       }),
     );
@@ -175,7 +175,7 @@ describe("circuit-breaker properties", () => {
         fc.integer({ min: 1000, max: 60_000 }),
         fc.nat({ max: 500_000 }),
         (openedAt, cooldown, elapsed) => {
-          const open: CircuitState = { state: "open", openedAt, reason: "test" };
+          const open: CircuitState = { state: "open", openedAt, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
           const checkTime = openedAt + elapsed;
           const next = attemptReset(open, checkTime, cooldown);
 

@@ -37,6 +37,12 @@ export const invalidTransition = (from: HostState["phase"] | `degraded:${Degrade
 
 export type DegradedReason = "redis-disconnected" | "sync-failed" | "no-dags-loaded";
 
+/**
+ * Host lifecycle state ADT.
+ *
+ * `lastSyncSha` convention: empty string `""` means "never synced" (initial state).
+ * After the first successful sync, it always contains a valid git SHA.
+ */
 export type HostState =
   | { readonly phase: "booting"; readonly startedAt: number }
   | { readonly phase: "syncing"; readonly registry: Registry; readonly syncStartedAt: number; readonly lastSyncSha: string; readonly lastSuccessfulSyncAt: number }

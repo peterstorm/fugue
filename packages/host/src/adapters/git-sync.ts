@@ -152,11 +152,11 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
     }
 
     const sha = result.value.stdout;
-    if (!sha || sha.length < 7) {
+    if (!sha || sha.length < 7 || /^0+$/.test(sha)) {
       return err({
         kind: "git-spawn-failed",
         operation: "rev-parse HEAD",
-        message: `rev-parse returned invalid SHA: "${sha}"`,
+        message: `rev-parse returned invalid or empty SHA: "${sha}"`,
       });
     }
 
@@ -206,7 +206,7 @@ export const createLocalGitAdapter = (): GitPort => ({
         const stat = Bun.file(`${repoPath}/${file}`);
         const size = stat.size;
         const lastModified = stat.lastModified;
-        // Simple FNV-like hash of mtimes
+        // Simple djb2-like hash combining file modification times and sizes
         mtimeHash = ((mtimeHash << 5) - mtimeHash + lastModified + size) | 0;
       }
 

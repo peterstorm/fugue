@@ -7,7 +7,7 @@
  * INVARIANT: Uncaught exceptions and unhandled rejections exit with code 1 (fail-fast)
  */
 
-import type { SyncLogger } from "../sync/sync-loop.js";
+import type { LogPort } from "../ports.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -16,7 +16,7 @@ import type { SyncLogger } from "../sync/sync-loop.js";
  */
 export interface SignalHandlerDeps {
   readonly onShutdown: () => Promise<void>;
-  readonly logger: SyncLogger;
+  readonly logger: LogPort;
 }
 
 /**

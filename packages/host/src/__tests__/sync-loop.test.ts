@@ -16,8 +16,8 @@ import {
   loadResultsToSnapshots,
 } from "../sync/sync-loop.js";
 import type { SyncConfig, SyncLogger, SyncResult } from "../sync/sync-loop.js";
-import { diffDags, hasChanges, diffSummary } from "../sync/diff.js";
-import type { DagSnapshot, DagDiff } from "../sync/diff.js";
+import { diffDags, hasChanges, diffSummary } from "../domain/dag-diff.js";
+import type { DagSnapshot, DagDiff } from "../domain/dag-diff.js";
 
 // ── Fake Ports ─────────────────────────────────────────────────────────────
 
@@ -285,7 +285,7 @@ describe("executeSyncCycle", () => {
 
     const result = await executeSyncCycle(git, loader, config, "same-sha", logger);
     expect(result.kind).toBe("no-change");
-    expect(result.sha).toBe("same-sha");
+    if (result.kind === "no-change") expect(result.currentSha).toBe("same-sha");
   });
 
   it("pulls and loads DAGs when SHA changes", async () => {
@@ -298,7 +298,7 @@ describe("executeSyncCycle", () => {
     const result = await executeSyncCycle(git, loader, config, "old-sha-123", logger);
 
     expect(result.kind).toBe("updated");
-    expect(result.sha).toBe("new-sha-456");
+    if (result.kind === "updated") expect(result.newSha).toBe("new-sha-456");
     if (result.kind !== "updated") throw new Error("expected updated");
     expect(result.registry.dags.size).toBe(2);
     expect(state.pullCalls).toBe(1);
@@ -337,7 +337,7 @@ describe("executeSyncCycle", () => {
     const result = await executeSyncCycle(git, loader, config, "old-sha", logger);
 
     expect(result.kind).toBe("error");
-    expect(result.sha).toBe("old-sha"); // SHA doesn't advance on error
+    if (result.kind === "error") expect(result.previousSha).toBe("old-sha"); // SHA doesn't advance on error
   });
 
   it("reports errors from individual DAG imports without failing (NFR-010)", async () => {
@@ -707,7 +707,7 @@ describe("executeSyncCycle — bun install path (FR-002)", () => {
     const result = await executeSyncCycle(git, loader, config, "old-sha", logger);
 
     expect(result.kind).toBe("error");
-    expect(result.sha).toBe("old-sha"); // SHA does not advance
+    if (result.kind === "error") expect(result.previousSha).toBe("old-sha"); // SHA does not advance
     if (result.kind !== "error") throw new Error("expected error");
     expect(result.syncError.kind).toBe("bun-install-failed");
   });

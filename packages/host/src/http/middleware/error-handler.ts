@@ -109,19 +109,23 @@ export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error
       error: thrown.message,
       stack: thrown.stack,
     });
-    return errorResponse(c, 500, kind, thrown.message);
+    // FrameworkErrors have controlled messages (e.g., "LLM unavailable") — safe to expose kind.
+    // But message may contain internal details, so use a generic message.
+    return errorResponse(c, 500, kind, `Framework error: ${kind}`);
   }
 
   // Generic unhandled error — MUST be logged for observability
-  const message = thrown instanceof Error ? thrown.message : "Internal server error";
+  // SECURITY: Never expose internal error messages to clients.
+  // Full details are logged server-side only.
+  const internalMessage = thrown instanceof Error ? thrown.message : String(thrown);
   const cause = thrown instanceof Error && thrown.cause instanceof Error ? thrown.cause : undefined;
   logger.error("Unhandled error in request handler", {
-    error: message,
+    error: internalMessage,
     stack: thrown instanceof Error ? thrown.stack : undefined,
     causeMessage: cause?.message,
     causeStack: cause?.stack,
   });
-  return errorResponse(c, 500, "internal-error", message);
+  return errorResponse(c, 500, "internal-error", "An unexpected error occurred");
 };
 
 /**

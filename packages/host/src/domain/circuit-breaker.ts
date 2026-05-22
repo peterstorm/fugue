@@ -15,9 +15,24 @@ import { match } from "ts-pattern";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Reason the circuit entered the open state — discriminated union for machine-parseability.
+ */
+export type OpenReason =
+  | { readonly kind: "threshold-exceeded"; readonly threshold: number; readonly windowMs: number }
+  | { readonly kind: "half-open-test-failed" };
+
+/**
+ * Format an OpenReason for human-readable logging.
+ */
+export const formatOpenReason = (reason: OpenReason): string =>
+  reason.kind === "threshold-exceeded"
+    ? `Exceeded ${reason.threshold} failures within ${reason.windowMs}ms window`
+    : "Half-open test request failed";
+
 export type CircuitState =
   | { readonly state: "closed"; readonly failureCount: number; readonly windowStart: number }
-  | { readonly state: "open"; readonly openedAt: number; readonly reason: string }
+  | { readonly state: "open"; readonly openedAt: number; readonly reason: OpenReason }
   | { readonly state: "half-open"; readonly testRequestAllowed: boolean };
 
 /** Default configuration constants */
@@ -84,7 +99,9 @@ export const recordFailure = (
     .with({ state: "closed" }, (current) => {
       // If we're outside the window, reset the window
       const windowExpired = now - current.windowStart > windowMs;
-      const effectiveCount = windowExpired ? 1 : current.failureCount + 1;
+      // Defensive: clamp failureCount to non-negative (prevents NaN propagation from bad external state)
+      const baseCount = Math.max(0, current.failureCount);
+      const effectiveCount = windowExpired ? 1 : baseCount + 1;
       const effectiveWindowStart = windowExpired ? now : current.windowStart;
 
       // Open circuit after exceeding threshold (e.g., threshold=5 means 6th failure opens)
@@ -92,7 +109,7 @@ export const recordFailure = (
         return {
           state: "open" as const,
           openedAt: now,
-          reason: `Exceeded ${threshold} failures within ${windowMs}ms window`,
+          reason: { kind: "threshold-exceeded", threshold, windowMs },
         };
       }
 
@@ -105,7 +122,7 @@ export const recordFailure = (
     .with({ state: "half-open" }, () => ({
       state: "open" as const,
       openedAt: now,
-      reason: "Half-open test request failed",
+      reason: { kind: "half-open-test-failed" },
     }))
     .with({ state: "open" }, (current) => current)
     .exhaustive();

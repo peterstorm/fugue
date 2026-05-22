@@ -115,7 +115,8 @@ describe("error-handler middleware", () => {
 
       const body = await res.json();
       expect(body.error).toBe("node-execution-error");
-      expect(body.message).toBe("node execution failed");
+      // Message is sanitized to kind-based template (not raw thrown.message)
+      expect(body.message).toBe("Framework error: node-execution-error");
 
       // Must be logged
       expect(logs.length).toBeGreaterThan(0);
@@ -125,7 +126,7 @@ describe("error-handler middleware", () => {
   });
 
   describe("Path 4: Generic unhandled Error", () => {
-    it("returns 500 with internal-error", async () => {
+    it("returns 500 with sanitized message (never leaks internals)", async () => {
       const { logger, logs } = createTestLogger();
       const app = createApp(logger, () => { throw new Error("unexpected null"); });
 
@@ -135,10 +136,12 @@ describe("error-handler middleware", () => {
       const body = await res.json();
       expect(body.ok).toBe(false);
       expect(body.error).toBe("internal-error");
-      expect(body.message).toBe("unexpected null");
+      // SECURITY: message must NOT contain the thrown error's internal details
+      expect(body.message).toBe("An unexpected error occurred");
+      expect(body.message).not.toContain("unexpected null");
     });
 
-    it("logs error with stack trace", async () => {
+    it("logs full error details server-side (not in response)", async () => {
       const { logger, logs } = createTestLogger();
       const app = createApp(logger, () => { throw new Error("oops"); });
 

@@ -24,25 +24,34 @@
 import { ok } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { Registry, RegisteredDag } from "../domain/registry.js";
+import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
-import { resolveDefaults } from "../domain/dag-registration.js";
 import type { GitPort } from "../adapters/git-sync.js";
 import type { ModuleLoaderPort, LoadResult } from "../adapters/module-loader.js";
-import { diffDags, diffSummary } from "./diff.js";
-import type { DagSnapshot } from "./diff.js";
+import { diffDags, diffSummary } from "../domain/dag-diff.js";
+import type { DagSnapshot } from "../domain/dag-diff.js";
+import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
+
+// Re-export for backwards compatibility (tests import from sync-loop)
+export { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
  * The result of a single sync cycle — proper discriminated union.
  * Each variant carries exactly the fields relevant to its outcome.
+ *
+ * SHA semantics per variant:
+ * - no-change: `currentSha` — the confirmed-unchanged SHA
+ * - updated: `newSha` — the newly synced SHA
+ * - error: `previousSha` — the last known-good SHA (before the failed attempt)
+ * - skipped: `previousSha` — the last known SHA (sync was not attempted)
  */
 export type SyncResult =
-  | { readonly kind: "no-change"; readonly sha: string }
-  | { readonly kind: "updated"; readonly sha: string; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
-  | { readonly kind: "error"; readonly sha: string; readonly syncError: HostError }
-  | { readonly kind: "skipped"; readonly sha: string; readonly reason: "already-in-progress" };
+  | { readonly kind: "no-change"; readonly currentSha: string }
+  | { readonly kind: "updated"; readonly newSha: string; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
+  | { readonly kind: "error"; readonly previousSha: string; readonly syncError: HostError }
+  | { readonly kind: "skipped"; readonly previousSha: string; readonly reason: "already-in-progress" };
 
 /**
  * Configuration for the sync loop.
@@ -89,54 +98,7 @@ export interface SyncLoopHandle {
   readonly triggerSync: () => Promise<SyncResult>;
 }
 
-// ── Core Sync Logic (Pure-ish — depends on ports) ──────────────────────────
-
-/**
- * Convert LoadResults to DagSnapshots for diff comparison.
- */
-export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: string): DagSnapshot[] =>
-  results.map((r) => ({
-    id: r.id,
-    path: r.modulePath,
-    sha,
-  }));
-
-/**
- * Convert a LoadResult to a RegisteredDag for the registry.
- */
-export const loadResultToRegisteredDag = (
-  result: LoadResult,
-  sha: string,
-  now: number,
-): RegisteredDag => {
-  const resolved = resolveDefaults(result.registration);
-  // Extract team from path: dags/{team}/{dag-name}/dag.ts
-  const pathParts = result.modulePath.split("/");
-  const dagsDirIndex = pathParts.lastIndexOf("dags");
-  const team = dagsDirIndex >= 0 && dagsDirIndex + 1 < pathParts.length
-    ? pathParts[dagsDirIndex + 1]
-    : "unknown";
-
-  return {
-    id: result.id,
-    team,
-    route: resolved.route,
-    dag: resolved.dag,
-    inputSchema: resolved.inputSchema,
-    config: {
-      route: resolved.route,
-      timeout: resolved.config.timeoutMs,
-      maxConcurrency: resolved.config.maxConcurrent,
-    },
-    meta: {
-      description: resolved.meta.description,
-      version: resolved.meta.version,
-    },
-    loadedAt: now,
-    sha,
-    status: { kind: "healthy" },
-  };
-};
+// ── Core Sync Logic (depends on ports) ─────────────────────────────────────
 
 /**
  * Execute a single sync cycle. This is the core logic without timer management.
@@ -165,7 +127,7 @@ export const executeSyncCycle = async (
     });
     return {
       kind: "error",
-      sha: lastSha,
+      previousSha: lastSha,
       syncError: shaResult.error,
     };
   }
@@ -174,7 +136,7 @@ export const executeSyncCycle = async (
 
   // Step 2: Skip if unchanged
   if (currentSha === lastSha) {
-    return { kind: "no-change", sha: currentSha };
+    return { kind: "no-change", currentSha };
   }
 
   // Step 3: Pull changes (skip in local mode)
@@ -186,7 +148,7 @@ export const executeSyncCycle = async (
       });
       return {
         kind: "error",
-        sha: lastSha,
+        previousSha: lastSha,
         syncError: pullResult.error,
       };
     }
@@ -196,11 +158,22 @@ export const executeSyncCycle = async (
   if (!config.isLocalMode && lastSha !== "") {
     const lockResult = await git.hasLockfileChanged(config.repoPath, lastSha, currentSha);
     if (!lockResult.ok) {
-      logger.warn("Failed to check lockfile changes — skipping bun install", {
+      // Fail-safe: when we can't determine if lockfile changed, run install defensively.
+      // Skipping could cause "Cannot find module" errors for new dependencies.
+      logger.warn("Failed to check lockfile changes — running bun install defensively", {
         error: lockResult.error,
         fromSha: lastSha,
         toSha: currentSha,
       });
+      const installResult = await git.install(config.repoPath);
+      if (!installResult.ok) {
+        logger.error("bun install failed (defensive)", { error: installResult.error });
+        return {
+          kind: "error",
+          previousSha: lastSha,
+          syncError: installResult.error,
+        };
+      }
     } else if (lockResult.value) {
       logger.info("bun.lockb changed, running bun install");
       const installResult = await git.install(config.repoPath);
@@ -208,7 +181,7 @@ export const executeSyncCycle = async (
         logger.error("bun install failed", { error: installResult.error });
         return {
           kind: "error",
-          sha: lastSha,
+          previousSha: lastSha,
           syncError: installResult.error,
         };
       }
@@ -237,14 +210,11 @@ export const executeSyncCycle = async (
     sha: currentSha,
     loaded: bulkResult.loaded.length,
     errors: bulkResult.errors.length,
-    diff: diffSummary(
-      diffDags([], loadResultsToSnapshots(bulkResult.loaded, currentSha)),
-    ),
   });
 
   return {
     kind: "updated",
-    sha: currentSha,
+    newSha: currentSha,
     registry,
     errors: bulkResult.errors,
   };
@@ -271,7 +241,7 @@ export const startSyncLoop = (
 
   const doSync = async (): Promise<SyncResult> => {
     if (running) {
-      return { kind: "skipped", sha: lastSha, reason: "already-in-progress" };
+      return { kind: "skipped", previousSha: lastSha, reason: "already-in-progress" };
     }
 
     running = true;
@@ -282,10 +252,10 @@ export const startSyncLoop = (
       if (result.kind === "updated") {
         // Call onComplete BEFORE advancing SHA — if onComplete throws,
         // SHA stays at lastSha so the next cycle will retry this commit.
-        onComplete(result.registry, result.sha);
-        lastSha = result.sha;
+        onComplete(result.registry, result.newSha);
+        lastSha = result.newSha;
       } else if (result.kind === "no-change") {
-        lastSha = result.sha;
+        lastSha = result.currentSha;
       } else if (result.kind === "error") {
         onError(result.syncError);
       }
@@ -300,10 +270,16 @@ export const startSyncLoop = (
         kind: "git-pull-failed",
         message: `Unexpected error in sync cycle: ${errMsg}`,
       };
-      onError(syncError);
+      try {
+        onError(syncError);
+      } catch (callbackErr) {
+        logger.error("onError callback threw", {
+          error: callbackErr instanceof Error ? callbackErr.message : String(callbackErr),
+        });
+      }
       return {
         kind: "error",
-        sha: lastSha,
+        previousSha: lastSha,
         syncError,
       };
     } finally {

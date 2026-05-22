@@ -70,39 +70,10 @@ export interface ResolvedTtl {
   readonly checkpointTtlSec: number | undefined;
 }
 
-// ── Key Prefixing (pure) ───────────────────────────────────────────────────
+// ── Key Prefixing (delegated to domain/cache-keys.ts) ─────────────────────
 
-/**
- * Build the Redis key prefix for cache entries of a specific DAG.
- * Format: fugue:<dagId>:cache:<key>
- *
- * @satisfies FR-030
- * @satisfies SC-008 — Each DAG gets its own namespace; same logical key in two DAGs -> different Redis keys
- */
-export const cacheKeyPrefix = (dagId: string): string =>
-  `fugue:${dagId}:cache:`;
-
-/**
- * Build the full cache key for a specific DAG and logical key.
- */
-export const buildCacheKey = (dagId: string, key: string): string =>
-  `${cacheKeyPrefix(dagId)}${key}`;
-
-/**
- * Build the Redis key prefix for checkpoint entries.
- * Format: fugue:<dagId>:<runId>:
- *
- * @satisfies FR-031
- */
-export const checkpointKeyPrefix = (dagId: string, runId: string): string =>
-  `fugue:${dagId}:${runId}:`;
-
-/**
- * Build the full checkpoint key for a specific DAG, run, and node.
- * Format: fugue:<dagId>:<runId>:<nodeId>
- */
-export const buildCheckpointKey = (dagId: string, runId: string, nodeId: string): string =>
-  `${checkpointKeyPrefix(dagId, runId)}${nodeId}`;
+export { cacheKeyPrefix, buildCacheKey, checkpointKeyPrefix, buildCheckpointKey } from "../domain/cache-keys.js";
+import { buildCacheKey, buildCheckpointKey } from "../domain/cache-keys.js";
 
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
 

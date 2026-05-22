@@ -27,10 +27,14 @@ export interface ConcurrencyState {
   readonly defaultDagMax: number;
 }
 
+/** @internal Unique symbol for type-level branding — prevents external forgery. */
+declare const __acquireTokenBrand: unique symbol;
+
 export interface AcquireToken {
   readonly dagId: DagId;
   readonly acquiredAt: number;
-  readonly __brand: "AcquireToken";
+  /** Type-level brand — only `acquire()` can produce a valid token. */
+  readonly [__acquireTokenBrand]: void;
 }
 
 export type ConcurrencyError = "global-at-capacity" | "dag-at-capacity";
@@ -104,7 +108,7 @@ export const acquire = (
     perDag: newPerDag,
   };
 
-  const token: AcquireToken = { dagId, acquiredAt: now, __brand: "AcquireToken" };
+  const token = { dagId, acquiredAt: now } as unknown as AcquireToken;
 
   return ok({ state: newState, token });
 };
@@ -158,3 +162,16 @@ export const hasCapacity = (state: ConcurrencyState, dagId: DagId): boolean => {
   const dagState = state.perDag.get(dagId) ?? { current: 0, max: state.defaultDagMax };
   return dagState.current < dagState.max;
 };
+
+// ---------------------------------------------------------------------------
+// Test Helpers (exported for test use only)
+// ---------------------------------------------------------------------------
+
+/**
+ * @internal Create a fake AcquireToken for testing.
+ * Production code MUST use `acquire()` to obtain tokens.
+ * This bypasses the branded type for test scenarios like
+ * verifying `release()` behavior with manufactured tokens.
+ */
+export const __unsafeTestToken = (dagId: DagId, acquiredAt: number): AcquireToken =>
+  ({ dagId, acquiredAt } as unknown as AcquireToken);

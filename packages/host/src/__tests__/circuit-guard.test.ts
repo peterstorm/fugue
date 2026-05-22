@@ -10,8 +10,8 @@ import { dagId } from "@fugue/framework";
 import type { DagId } from "@fugue/framework";
 import type { CircuitState } from "../domain/circuit-breaker.js";
 import { initCircuit, DEFAULTS } from "../domain/circuit-breaker.js";
-import { checkCircuit, markSuccess, markFailure } from "../domain/circuit-guard.js";
-import type { CircuitPort } from "../domain/circuit-guard.js";
+import { checkCircuit, markSuccess, markFailure, DEFAULT_CIRCUIT_CONFIG } from "../domain/circuit-guard.js";
+import type { CircuitPort, CircuitConfig } from "../domain/circuit-guard.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ describe("checkCircuit", () => {
   });
 
   test("open circuit (cooldown not elapsed) returns allowed: false", () => {
-    const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+    const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
     const { port } = createPort(open);
     const result = checkCircuit(port, DAG, NOW + 1000); // cooldown is 30s
     expect(result.allowed).toBe(false);
@@ -50,7 +50,7 @@ describe("checkCircuit", () => {
   });
 
   test("open circuit (cooldown elapsed) transitions to half-open and allows one request", () => {
-    const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+    const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
     const { port, states } = createPort(open);
     const result = checkCircuit(port, DAG, NOW + COOLDOWN + 1);
 
@@ -92,7 +92,7 @@ describe("checkCircuit", () => {
   });
 
   test("port.set is called twice for half-open (reset + consume)", () => {
-    const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+    const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
     let setCalls = 0;
     const port: CircuitPort = {
       get: () => open,
@@ -136,7 +136,7 @@ describe("markSuccess", () => {
   });
 
   test("from open: stays open (unexpected success path)", () => {
-    const open: CircuitState = { state: "open", openedAt: NOW, reason: "test" };
+    const open: CircuitState = { state: "open", openedAt: NOW, reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } };
     const { port, states } = createPort(open);
     markSuccess(port, DAG, NOW + 100);
 
@@ -172,6 +172,42 @@ describe("markFailure", () => {
 
     const finalState = states.get(DAG)!;
     expect(finalState.state).toBe("open");
+  });
+
+  test("respects custom threshold from CircuitConfig (critical: config not dead code)", () => {
+    const customConfig: CircuitConfig = { threshold: 2, windowMs: 10_000 };
+    const { port, states } = createPort(initCircuit(NOW));
+
+    // 2 failures should NOT open (threshold=2 means 3rd failure opens)
+    markFailure(port, DAG, NOW + 1, customConfig);
+    markFailure(port, DAG, NOW + 2, customConfig);
+    expect(states.get(DAG)!.state).toBe("closed");
+
+    // 3rd failure opens the circuit
+    markFailure(port, DAG, NOW + 3, customConfig);
+    expect(states.get(DAG)!.state).toBe("open");
+  });
+
+  test("respects custom windowMs from CircuitConfig", () => {
+    const customConfig: CircuitConfig = { threshold: 2, windowMs: 100 };
+    const { port, states } = createPort(initCircuit(NOW));
+
+    // 2 failures inside window
+    markFailure(port, DAG, NOW + 10, customConfig);
+    markFailure(port, DAG, NOW + 20, customConfig);
+    expect(states.get(DAG)!.state).toBe("closed");
+
+    // 3rd failure OUTSIDE window — window resets, count restarts at 1
+    markFailure(port, DAG, NOW + 200, customConfig);
+    expect(states.get(DAG)!.state).toBe("closed");
+    if (states.get(DAG)!.state === "closed") {
+      expect((states.get(DAG)! as { failureCount: number }).failureCount).toBe(1);
+    }
+  });
+
+  test("default config matches DEFAULTS from circuit-breaker module", () => {
+    expect(DEFAULT_CIRCUIT_CONFIG.threshold).toBe(DEFAULTS.threshold);
+    expect(DEFAULT_CIRCUIT_CONFIG.windowMs).toBe(DEFAULTS.windowMs);
   });
 
   test("from half-open: re-opens circuit", () => {

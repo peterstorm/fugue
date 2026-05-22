@@ -11,7 +11,7 @@
 
 import { ok, err } from "@fugue/framework";
 import type { Result, DagId } from "@fugue/framework";
-import { dagId } from "@fugue/framework";
+import { tryDagId } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { DagRegistration } from "../domain/dag-registration.js";
 import { validateDagRegistration } from "../domain/dag-registration.js";
@@ -97,10 +97,18 @@ export const loadDagModule = async (
   }
 
   const registration = validation.value;
-  const id = dagId(registration.dag.id);
+  const idResult = tryDagId(registration.dag.id);
+  if (!idResult.ok) {
+    return err({
+      kind: "dag-validation-failed",
+      dagId: "unknown" as DagId,
+      reason: `Invalid DAG ID: ${idResult.error}`,
+      message: `DagRegistration has invalid ID '${registration.dag.id}': ${idResult.error}`,
+    });
+  }
 
   return ok({
-    id,
+    id: idResult.value,
     registration,
     modulePath,
   });

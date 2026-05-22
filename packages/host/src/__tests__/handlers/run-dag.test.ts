@@ -73,6 +73,7 @@ const createTestApp = (state: TestState, executeDag?: RunDagDeps["executeDag"]) 
     createContext: (registered, signal) => ({ ...fakeNodeContext(registered.id as string), signal }),
     executeDag: executeDag ?? (async () => ok({ result: "success" })) as any,
     clock: Date.now,
+    circuitConfig: { threshold: 5, windowMs: 60_000 },
   };
 
   const app = new Hono<HostEnv>();
@@ -100,6 +101,49 @@ const postJson = (app: Hono<HostEnv>, path: string, body: unknown) =>
 // ---------------------------------------------------------------------------
 
 describe("POST /dags/:id/run", () => {
+  describe("Invalid DAG ID", () => {
+    it("returns 400 for malformed DAG ID (special characters)", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "ready",
+          registry: emptyRegistry(),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+      const app = createTestApp(state);
+
+      const res = await postJson(app, "/dags/invalid:colons:here/run", { text: "hello" });
+      expect(res.status).toBe(400);
+
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toBe("invalid-dag-id");
+      expect(body.details.raw).toBe("invalid:colons:here");
+    });
+
+    it("returns 400 for empty DAG ID", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "ready",
+          registry: emptyRegistry(),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+      const app = createTestApp(state);
+
+      const res = await postJson(app, "/dags//run", { text: "hello" });
+      // Hono may not match /dags//run — in which case it's 404 from router.
+      // If it does match with empty id, we get 400.
+      expect([400, 404]).toContain(res.status);
+    });
+  });
+
   describe("DAG lookup (FR-025)", () => {
     it("returns 404 when DAG does not exist", async () => {
       const state: TestState = {
@@ -215,7 +259,7 @@ describe("POST /dags/:id/run", () => {
       circuits.set("broken-dag", {
         state: "open",
         openedAt: Date.now(),
-        reason: "Too many failures",
+        reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 },
       });
 
       const state: TestState = {
@@ -504,8 +548,9 @@ describe("POST /dags/:id/run", () => {
 
       const body = await res.json();
       expect(body.error).toBe("internal-error");
-      expect(body.message).toContain("Unhandled error executing DAG");
-      expect(body.message).toContain("my-dag");
+      // SECURITY: internal error details are NOT leaked to the client
+      expect(body.message).toBe("An unexpected error occurred");
+      expect(body.message).not.toContain("my-dag");
     });
 
     it("releases concurrency token even when handler throws", async () => {
@@ -524,6 +569,47 @@ describe("POST /dags/:id/run", () => {
       const app = createTestApp(state, executeDag as any);
 
       await postJson(app, "/dags/my-dag/run", { text: "hello" });
+      expect(state.concurrency.global.current).toBe(0);
+    });
+
+    it("INVARIANT: releases concurrency token when createContext throws", async () => {
+      const state: TestState = {
+        concurrency: initConcurrency(),
+        circuits: new Map(),
+        hostState: {
+          phase: "ready",
+          registry: withDag(emptyRegistry(), makeFakeDag("my-dag")),
+          lastSyncAt: Date.now(),
+          lastSyncSha: "sha",
+        },
+      };
+
+      // Build a custom app where createContext throws
+      const deps: RunDagDeps = {
+        getConcurrency: () => state.concurrency,
+        setConcurrency: (s) => { state.concurrency = s; },
+        circuit: {
+          get: (dagId) => state.circuits.get(dagId) ?? initCircuit(Date.now()),
+          set: (dagId, s) => { state.circuits.set(dagId, s); },
+        },
+        createContext: () => { throw new Error("context creation failed"); },
+        executeDag: (async () => ok({ result: "success" })) as any,
+        clock: Date.now,
+        circuitConfig: { threshold: 5, windowMs: 60_000 },
+      };
+
+      const app = new Hono<HostEnv>();
+      app.onError(errorHandler);
+      app.use("*", async (c, next) => {
+        c.set("hostState", state.hostState);
+        await next();
+      });
+      app.post("/dags/:id/run", createRunDagHandler(deps));
+
+      const res = await postJson(app, "/dags/my-dag/run", { text: "hello" });
+      // Should get 500 (unhandled error from createContext)
+      expect(res.status).toBe(500);
+      // CRITICAL: Token must still be released
       expect(state.concurrency.global.current).toBe(0);
     });
   });
@@ -681,7 +767,7 @@ describe("POST /dags/:id/run", () => {
       const state: TestState = {
         concurrency: initConcurrency(),
         circuits: new Map<string, CircuitState>([
-          ["blocked-dag", { state: "open", openedAt: Date.now(), reason: "too many failures" }],
+          ["blocked-dag", { state: "open", openedAt: Date.now(), reason: { kind: "threshold-exceeded", threshold: 5, windowMs: 60_000 } }],
         ]),
         hostState: {
           phase: "ready",

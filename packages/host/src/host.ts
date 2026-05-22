@@ -31,6 +31,7 @@ import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
 import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
+import { diffDags, diffSummary } from "./domain/dag-diff.js";
 import { executeStartup, buildSyncConfig } from "./lifecycle/startup.js";
 import type { RedisConnectivityPort, StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
@@ -127,6 +128,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       return runDag<I, O>(dag, input, ctx, opts);
     },
     clock: Date.now,
+    circuitConfig: {
+      threshold: config.CIRCUIT_BREAKER_THRESHOLD,
+      windowMs: config.CIRCUIT_BREAKER_WINDOW_MS,
+    },
     logger,
   };
 
@@ -189,9 +194,18 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       for (const dagId of newRegistry.dags.keys()) {
         circuitBreakers.set(dagId, forceReset(now));
       }
+
+      // Compute and log diff between previous and new registry
+      const prevDags = hostState.phase !== "booting" && hostState.phase !== "stopped" && "registry" in hostState
+        ? Array.from((hostState as { registry: Registry }).registry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }))
+        : [];
+      const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }));
+      const diff = diffDags(prevDags, newDags);
+
       logger.info("Registry updated via sync", {
         dagCount: newRegistry.dags.size,
         sha: newSha,
+        diff: diffSummary(diff),
       });
     },
     // onError: transition syncing → degraded
