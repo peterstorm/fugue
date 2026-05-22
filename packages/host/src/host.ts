@@ -18,11 +18,11 @@ import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkE
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
-import { booting, bootComplete, beginDrain, drainComplete, syncStarted, syncCompleted, syncFailed, canServeRequests, getRegistry } from "./domain/host-state.js";
+import { booting, bootComplete, beginDrain, drainComplete, canServeRequests, getRegistry } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
 import { initConcurrency } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
-import { initCircuit, forceReset } from "./domain/circuit-breaker.js";
+import { initCircuit } from "./domain/circuit-breaker.js";
 import type { GitPort } from "./ports.js";
 import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
@@ -33,7 +33,7 @@ import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
 import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
-import { diffDags, diffSummary } from "./domain/dag-diff.js";
+import { createSyncCallbacks } from "./sync/sync-callbacks.js";
 import { executeStartup, buildSyncConfig } from "./lifecycle/startup.js";
 import type { StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
@@ -177,119 +177,23 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   logger.info(`HTTP server listening on port ${bunServer.port}`);
 
   // ── Sync Loop ────────────────────────────────────────────────────────────
+  const syncCallbacks = createSyncCallbacks({
+    getState: () => hostState,
+    setState: (s) => { hostState = s; },
+    getCircuitBreakers: () => circuitBreakers,
+    logger,
+    clock: Date.now,
+  });
+
   syncLoop = startSyncLoop(
     git,
     loader,
     syncConfig,
     logger,
-    // onStarted: transition to syncing via state machine
-    // NOTE: State machine sync is best-effort. If the transition fails (e.g., host is draining),
-    // the sync cycle still executes but onComplete/onError callbacks will also be rejected,
-    // keeping the state consistent at the cost of one wasted poll cycle.
-    () => {
-      if (hostState.phase === "draining" || hostState.phase === "stopped") {
-        logger.info("Ignoring sync start — host is shutting down", { phase: hostState.phase });
-        return;
-      }
-      const result = syncStarted(hostState, Date.now());
-      if (result.ok) {
-        hostState = result.value;
-      } else {
-        logger.warn("syncStarted transition failed", {
-          currentPhase: hostState.phase,
-          error: result.error.message,
-        });
-      }
-    },
-    // onComplete: transition syncing → ready
-    (newRegistry, newSha) => {
-      if (hostState.phase === "draining" || hostState.phase === "stopped") {
-        logger.info("Ignoring sync completion — host is shutting down", { phase: hostState.phase });
-        return;
-      }
-
-      // Capture previous registry BEFORE state transition for accurate diff
-      const prevRegistry = getRegistry(hostState);
-      const prevDags = prevRegistry
-        ? Array.from(prevRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }))
-        : [];
-
-      const result = syncCompleted(hostState, newRegistry, newSha, Date.now());
-      if (result.ok) {
-        hostState = result.value;
-
-        // Only update circuit breakers for the registry that was actually installed
-        const currentDagIds = new Set(newRegistry.dags.keys());
-        for (const dagId of circuitBreakers.keys()) {
-          if (!currentDagIds.has(dagId)) {
-            circuitBreakers.delete(dagId);
-          }
-        }
-        // Force-reset circuit breakers for current DAGs (FR-092)
-        const now = Date.now();
-        for (const dagId of currentDagIds) {
-          circuitBreakers.set(dagId, forceReset(now));
-        }
-
-        // Compute and log diff between previous and new registry
-        const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }));
-        const diff = diffDags(prevDags, newDags);
-
-        logger.info("Registry updated via sync", {
-          dagCount: newRegistry.dags.size,
-          sha: newSha,
-          diff: diffSummary(diff),
-        });
-
-        // Warn about DAGs with unresolvable team (path doesn't follow convention)
-        for (const dag of newRegistry.dags.values()) {
-          if (dag.team === "unknown") {
-            logger.warn(`DAG '${dag.id}' has team 'unknown' — path does not follow dags/{team}/{name}/dag.ts convention`, {
-              dagId: dag.id,
-              route: dag.route,
-            });
-          }
-        }
-      } else {
-        logger.warn("syncCompleted transition failed — registry NOT updated, circuit breakers unchanged", {
-          currentPhase: hostState.phase,
-          error: result.error.message,
-        });
-      }
-    },
-    // onNoChange: transition syncing → ready (no registry swap needed)
-    (unchangedSha) => {
-      if (hostState.phase === "draining" || hostState.phase === "stopped") return;
-      const currentRegistry = getRegistry(hostState);
-      if (!currentRegistry) return; // shouldn't happen from syncing state
-      const result = syncCompleted(hostState, currentRegistry, unchangedSha, Date.now());
-      if (result.ok) {
-        hostState = result.value;
-      } else {
-        logger.warn("syncCompleted (no-change) transition failed", {
-          currentPhase: hostState.phase,
-          error: result.error.message,
-        });
-      }
-    },
-    // onError: transition syncing → degraded
-    (error) => {
-      if (hostState.phase === "draining" || hostState.phase === "stopped") {
-        logger.info("Ignoring sync error — host is shutting down", { phase: hostState.phase });
-        return;
-      }
-
-      const result = syncFailed(hostState, Date.now());
-      if (result.ok) {
-        hostState = result.value;
-      } else {
-        logger.warn("syncFailed transition failed — state machine violation", {
-          currentPhase: hostState.phase,
-          error: result.error.message,
-        });
-      }
-      logger.warn("Sync error — existing DAGs remain active", { error });
-    },
+    syncCallbacks.onStarted,
+    syncCallbacks.onComplete,
+    syncCallbacks.onNoChange,
+    syncCallbacks.onError,
     sha,
   );
 

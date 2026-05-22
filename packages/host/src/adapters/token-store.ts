@@ -72,16 +72,11 @@ export const createInMemoryTokenStore = (
 
 /**
  * Redis-backed token store for production.
- * Uses RedisPort for get/set/del operations.
+ * Uses RedisPort for get/set/del/keys operations.
  *
- * Limitation: listTeams only returns teams provisioned since last boot.
- * Production deployments with many teams should extend RedisPort with SCAN
- * and populate on boot.
+ * listTeams scans Redis directly — survives host restarts without data loss.
  */
 export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): TokenStorePort => {
-  // In-process mirror for listTeams (populated on store, cleared on revoke)
-  const knownTeams = new Map<string, TokenGrant>();
-
   return {
     resolve: async (hash) => {
       const result = await redis.get(tokenKey(hash));
@@ -132,11 +127,32 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
         return err(redisUnavailable("token-store-team-index"));
       }
 
-      knownTeams.set(team, grant);
       return ok(undefined);
     },
 
-    listTeams: async () => ok(Array.from(knownTeams.values())),
+    listTeams: async () => {
+      // Scan Redis for all team index keys — survives restarts
+      const keysResult = await redis.keys(`${TEAM_KEY_PREFIX}*`);
+      if (!keysResult.ok) {
+        return err(redisUnavailable("token-list-teams"));
+      }
+
+      const grants: TokenGrant[] = [];
+      for (const key of keysResult.value) {
+        const valueResult = await redis.get(key);
+        if (!valueResult.ok || valueResult.value === null || valueResult.value === "") {
+          continue; // Skip unreadable entries — best effort
+        }
+        try {
+          const parsed = JSON.parse(valueResult.value) as { hash: string; grant: TokenGrant };
+          grants.push(parsed.grant);
+        } catch {
+          logger?.warn("[token-store] Skipping corrupt team index entry", { key });
+        }
+      }
+
+      return ok(grants);
+    },
 
     revoke: async (team) => {
       // Look up the team's hash from the reverse index
@@ -173,7 +189,6 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
         return err(redisUnavailable("token-revoke-team-delete"));
       }
 
-      knownTeams.delete(team);
       return ok(undefined);
     },
   };

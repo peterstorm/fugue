@@ -86,6 +86,11 @@ export const buildSyncConfig = (config: HostConfig, clock: () => number = Date.n
     branch: config.DAGS_REPO_BRANCH,
     pollIntervalMs: config.DAGS_POLL_INTERVAL_MS,
     isLocalMode,
+    hostTimeoutDefaults: {
+      defaultTimeoutMs: config.DEFAULT_DAG_TIMEOUT_MS,
+      maxTimeoutMs: config.MAX_DAG_TIMEOUT_MS,
+      defaultMaxConcurrent: config.DEFAULT_DAG_CONCURRENCY,
+    },
   };
 };
 

@@ -84,6 +84,14 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
           return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}: ${e instanceof Error ? e.message : String(e)}` });
         }
       },
+      keys: async (pattern) => {
+        try {
+          const keys = await client.keys(pattern);
+          return ok(keys);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `KEYS ${pattern}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
     };
 
     return ok({ port, redis, disconnect: () => client.quit() });

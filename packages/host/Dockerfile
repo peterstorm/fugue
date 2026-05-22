@@ -9,7 +9,7 @@ RUN apk add --no-cache git
 WORKDIR /app
 
 # Copy workspace root files for bun install resolution
-COPY package.json bun.lockb ./
+COPY package.json bun.lock ./
 COPY packages/host/package.json packages/host/package.json
 COPY packages/framework/package.json packages/framework/package.json
 

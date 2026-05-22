@@ -128,6 +128,11 @@ const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivi
       get: async (key) => ok(store.get(key) ?? null),
       set: async (key, value) => { store.set(key, value); return ok("OK" as string | null); },
       del: async (key) => { const had = store.has(key) ? 1 : 0; store.delete(key); return ok(had); },
+      keys: async (pattern) => {
+        const prefix = pattern.replace(/\*$/, "");
+        const matched = [...store.keys()].filter(k => k.startsWith(prefix));
+        return ok(matched);
+      },
     },
   };
 };

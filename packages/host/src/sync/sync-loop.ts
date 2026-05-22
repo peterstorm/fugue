@@ -28,9 +28,11 @@ import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
 import type { GitPort, ModuleLoaderPort, LoadResult, Clock } from "../ports.js";
 import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
+import type { HostTimeoutDefaults } from "../domain/dag-factory.js";
 
 // Re-export for test convenience (tests import from sync-loop)
 export { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
+export type { HostTimeoutDefaults } from "../domain/dag-factory.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -59,6 +61,8 @@ export interface SyncConfig {
   readonly branch: string;
   readonly pollIntervalMs: number;
   readonly isLocalMode: boolean;
+  /** Host-level timeout defaults for DAG factory. */
+  readonly hostTimeoutDefaults?: HostTimeoutDefaults;
 }
 
 /**
@@ -204,7 +208,7 @@ export const executeSyncCycle = async (
   // Step 6: Build new registry
   const now = clock();
   const registeredDags = bulkResult.loaded.map((lr) =>
-    loadResultToRegisteredDag(lr, currentSha, now),
+    loadResultToRegisteredDag(lr, currentSha, now, config.hostTimeoutDefaults),
   );
   const registry = freeze(registeredDags, currentSha, now);
 
@@ -355,7 +359,7 @@ export const initialSync = async (
 
   const now = clock();
   const registeredDags = bulkResult.loaded.map((lr) =>
-    loadResultToRegisteredDag(lr, sha, now),
+    loadResultToRegisteredDag(lr, sha, now, config.hostTimeoutDefaults),
   );
   const registry = freeze(registeredDags, sha, now);
 

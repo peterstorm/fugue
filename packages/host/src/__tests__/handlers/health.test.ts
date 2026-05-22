@@ -113,7 +113,7 @@ describe("readinessHandler", () => {
       route: "/dags/my-dag/run",
       dag: { id: "my-dag", nodes: [], edges: [] } as unknown as DagDef,
       inputSchema: z.any(),
-      config: { route: "/dags/my-dag/run", timeout: 30000, maxConcurrency: 10 },
+      config: { timeout: 30000, maxConcurrency: 10 },
       meta: { description: "test", version: "1.0.0" },
       loadedAt: 1000,
       sha: gitSha("abc123"),

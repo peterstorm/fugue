@@ -103,6 +103,8 @@ export interface RedisPort {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
   readonly del: (key: string) => Promise<Result<number, HostError>>;
+  /** Retrieve all keys matching a glob pattern. Used for listing (e.g., team index scan). */
+  readonly keys: (pattern: string) => Promise<Result<string[], HostError>>;
 }
 
 /**

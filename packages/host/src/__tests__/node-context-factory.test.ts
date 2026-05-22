@@ -65,6 +65,10 @@ const createMockRedis = (store: Map<string, string> = new Map()): {
       store.delete(key);
       return ok(1);
     },
+    keys: async (pattern) => {
+      const prefix = pattern.replace(/\*$/, "");
+      return ok([...store.keys()].filter(k => k.startsWith(prefix)));
+    },
   };
   return { redis, calls };
 };
@@ -73,6 +77,7 @@ const failingRedis = (): RedisPort => ({
   get: async () => err({ kind: "redis-unavailable", operation: "get" } as HostError),
   set: async () => err({ kind: "redis-unavailable", operation: "set" } as HostError),
   del: async () => err({ kind: "redis-unavailable", operation: "del" } as HostError),
+  keys: async () => err({ kind: "redis-unavailable", operation: "keys" } as HostError),
 });
 
 const collectLogs = () => {

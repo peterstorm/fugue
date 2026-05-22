@@ -16,7 +16,7 @@ const makeDag = (id: string, opts?: { healthy?: boolean }): RegisteredDag => ({
   route: `/dags/${id}/run`,
   dag: { id: dagId(id), nodes: [], edges: [] } as any,
   inputSchema: z.object({}),
-  config: { route: `/dags/${id}/run`, timeout: 30000, maxConcurrency: 10 },
+  config: { timeout: 30000, maxConcurrency: 10 },
   meta: { description: "test", version: "1.0" },
   loadedAt: Date.now(),
   sha,

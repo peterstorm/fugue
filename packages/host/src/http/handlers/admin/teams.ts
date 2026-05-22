@@ -77,13 +77,9 @@ export const createCreateTeamHandler = (deps: AdminHandlerDeps) => {
       : `${teamName} token`;
 
     // Validate team name format (alphanumeric + hyphens, like DNS labels)
-    if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(teamName) && teamName.length > 1) {
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(teamName)) {
       return errorResponse(c, 400, "input-validation-failed",
-        "Team name must be lowercase alphanumeric with hyphens (e.g., 'team-a')");
-    }
-    if (teamName.length === 1 && !/^[a-z0-9]$/.test(teamName)) {
-      return errorResponse(c, 400, "input-validation-failed",
-        "Team name must be lowercase alphanumeric with hyphens (e.g., 'team-a')");
+        "Team name must be lowercase alphanumeric with hyphens, starting and ending with alphanumeric (e.g., 'team-a')");
     }
 
     // Generate token

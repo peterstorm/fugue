@@ -11,10 +11,16 @@ import { healthResponse, readinessResponse } from "../response.js";
 import { canServeRequests, getRegistry } from "../../domain/host-state.js";
 
 /**
- * Liveness probe — always returns 200 if the process is alive.
+ * Liveness probe — returns 200 if the process is alive.
+ * Reports "degraded" when the host is in degraded state (e.g., Redis disconnected)
+ * so monitoring systems can alert without triggering restarts.
  * Kubernetes uses this to determine if the container should be restarted.
  */
 export const healthHandler = (c: Context<HostEnv>): Response => {
+  const hostState = c.get("hostState");
+  if (hostState.phase === "degraded") {
+    return healthResponse(c, "degraded");
+  }
   return healthResponse(c, "ok");
 };
 

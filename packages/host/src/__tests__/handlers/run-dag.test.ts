@@ -25,7 +25,7 @@ const makeDag = (id: string, team = "test-team"): RegisteredDag => ({
   route: `/dags/${id}/run`,
   dag: { id: dagId(id), nodes: [], edges: [] } as unknown as RegisteredDag["dag"],
   inputSchema: z.object({ query: z.string() }),
-  config: { route: `/dags/${id}/run`, timeout: 5000, maxConcurrency: 10 },
+  config: { timeout: 5000, maxConcurrency: 10 },
   meta: { description: "test", version: "1.0" },
   loadedAt: Date.now(),
   sha,

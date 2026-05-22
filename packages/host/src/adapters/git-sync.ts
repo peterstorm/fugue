@@ -172,6 +172,10 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
  * Create a local filesystem adapter for dev mode.
  * Skips clone/pull — reads directory directly.
  * currentSha returns a hash of file modification times.
+ *
+ * NOTE: The mtime hash uses a simplified djb2-like algorithm. Hash collisions
+ * are possible (two different file states → same hash → sync skipped).
+ * Acceptable for dev mode. Workaround: touch any .ts file to force different mtime.
  */
 export const createLocalGitAdapter = (): GitPort => ({
   clone: async () => ok(undefined),

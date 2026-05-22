@@ -17,11 +17,10 @@ import type { z } from "zod";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * Per-DAG configuration — core fields (route, timeout, maxConcurrency) fully resolved.
+ * Per-DAG configuration — core fields (timeout, maxConcurrency) fully resolved.
  * Optional TTL and circuit-breaker overrides use host defaults when undefined.
  */
 export interface ResolvedDagConfig {
-  readonly route: string;
   readonly timeout: number;
   readonly maxConcurrency: number;
   readonly cacheTtlMs?: number;

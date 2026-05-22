@@ -22,6 +22,7 @@ import type { RunDagDeps } from "./handlers/run-dag.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
 import type { LogPort } from "../ports.js";
+import { errorResponse } from "./response.js";
 
 // ---------------------------------------------------------------------------
 // Shared environment type for Hono context variables
@@ -70,7 +71,16 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   // ── Auth middleware (applied to all routes below) ────────────────────────
   app.use("*", createAuthMiddleware(deps));
 
-  // ── Admin routes (admin identity enforced inside handlers) ───────────────
+  // ── Admin route guard (defense-in-depth at router level) ─────────────────
+  app.use("/admin/*", async (c, next) => {
+    const identity = c.get("authIdentity");
+    if (!identity || identity.kind !== "admin") {
+      return errorResponse(c, 403, "forbidden", "Admin access required");
+    }
+    await next();
+  });
+
+  // ── Admin routes ─────────────────────────────────────────────────────────
   const createTeam = createCreateTeamHandler(deps.adminHandlerDeps);
   const listTeams = createListTeamsHandler(deps.adminHandlerDeps);
   const revokeTeam = createRevokeTeamHandler(deps.adminHandlerDeps);

@@ -35,7 +35,7 @@ const makeDag = (id: string, healthy = true): RegisteredDag => ({
   route: `/dags/${id}/run`,
   dag: { id, nodes: [], edges: [] } as unknown as DagDef,
   inputSchema: z.any(),
-  config: { route: `/dags/${id}/run`, timeout: 30000, maxConcurrency: 10 },
+  config: { timeout: 30000, maxConcurrency: 10 },
   meta: { description: `DAG ${id}`, version: "1.0.0" },
   loadedAt: 1000,
   sha: gitSha("abc123"),
