@@ -36,8 +36,8 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "dag-not-found" }, (e) => ({ available: e.available }))
     .with({ kind: "input-validation-failed" }, (e) => ({ issues: e.issues }))
     .with({ kind: "validation-failed" }, (e) => ({ issues: e.issues }))
-    .with({ kind: "concurrency-exceeded", scope: "global" }, (e) => ({ scope: e.scope }))
-    .with({ kind: "concurrency-exceeded", scope: "dag" }, (e) => ({ scope: e.scope, dagId: e.dagId }))
+    .with({ kind: "global-concurrency-exceeded" }, () => ({ scope: "global" }))
+    .with({ kind: "dag-concurrency-exceeded" }, (e) => ({ scope: "dag", dagId: e.dagId }))
     .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
     .otherwise(() => undefined);
 
@@ -65,7 +65,7 @@ const runIdFor = (error: HostError): string | undefined => {
  * Headers to include based on error kind.
  */
 const headersFor = (error: HostError): Record<string, string> | undefined => {
-  if (error.kind === "concurrency-exceeded") {
+  if (error.kind === "global-concurrency-exceeded" || error.kind === "dag-concurrency-exceeded") {
     return { "Retry-After": "5" };
   }
   return undefined;

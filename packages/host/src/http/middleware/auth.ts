@@ -9,13 +9,14 @@
  *
  * Sets `authIdentity` on Hono context for downstream authorization checks.
  *
- * @satisfies FR-200 — Protected routes require valid bearer token
- * @satisfies FR-201 — Team tokens scoped to team's DAGs
+ * Added post-spec for multi-tenant team isolation.
+ * Design decision documented in ADR-0033 trust model.
  */
 
 import type { Context, Next } from "hono";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { hashToken } from "../../domain/auth.js";
+import type { TokenGrant } from "../../domain/auth.js";
 import type { TokenStorePort } from "../../ports.js";
 import { errorResponse } from "../response.js";
 
@@ -24,14 +25,14 @@ import { errorResponse } from "../response.js";
 // ---------------------------------------------------------------------------
 
 /**
- * Compare two strings in constant time. Returns true if they are equal.
- * Uses XOR accumulation so execution time doesn't leak prefix length.
+ * Constant-time string comparison. Iterates full max-length regardless
+ * of content, preventing both prefix and length timing side-channels.
  */
 export const constantTimeEqual = (a: string, b: string): boolean => {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  const maxLen = Math.max(a.length, b.length);
+  let mismatch = a.length ^ b.length; // length difference contributes to result
+  for (let i = 0; i < maxLen; i++) {
+    mismatch |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
   }
   return mismatch === 0;
 };
@@ -102,8 +103,21 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
     }
 
     // Path 2: Team token — hash and look up in store
-    const hash = await hashToken(token);
-    const grant = await deps.tokenStore.resolve(hash);
+    let grant: TokenGrant | null;
+    try {
+      const hash = await hashToken(token);
+      const resolveResult = await deps.tokenStore.resolve(hash);
+      if (!resolveResult.ok) {
+        // Redis/infrastructure failure — surface as 503 not 401
+        return errorResponse(c, 503, "auth-service-unavailable",
+          "Authentication service temporarily unavailable");
+      }
+      grant = resolveResult.value;
+    } catch {
+      // crypto.subtle or unexpected failure — surface as 503
+      return errorResponse(c, 503, "auth-service-unavailable",
+        "Authentication service temporarily unavailable");
+    }
 
     if (!grant) {
       return errorResponse(c, 401, "unauthorized", "Invalid bearer token", {

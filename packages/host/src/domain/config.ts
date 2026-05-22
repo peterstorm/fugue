@@ -77,7 +77,17 @@ export const HostConfigSchema = z.object({
 }).refine(
   (c) => c.DEFAULT_DAG_TIMEOUT_MS <= c.MAX_DAG_TIMEOUT_MS,
   { message: "DEFAULT_DAG_TIMEOUT_MS must not exceed MAX_DAG_TIMEOUT_MS" },
-);
+).superRefine((c, ctx) => {
+  if (c.LLM_PROVIDER === "anthropic" && !c.ANTHROPIC_API_KEY) {
+    ctx.addIssue({ code: "custom", path: ["ANTHROPIC_API_KEY"], message: "Required when LLM_PROVIDER is 'anthropic'" });
+  }
+  if (c.LLM_PROVIDER === "openai" && !c.OPENAI_API_KEY) {
+    ctx.addIssue({ code: "custom", path: ["OPENAI_API_KEY"], message: "Required when LLM_PROVIDER is 'openai'" });
+  }
+  if (c.LLM_PROVIDER === "azure" && (!c.AZURE_OPENAI_ENDPOINT || !c.AZURE_OPENAI_API_KEY || !c.AZURE_OPENAI_DEPLOYMENT)) {
+    ctx.addIssue({ code: "custom", path: ["AZURE_OPENAI_ENDPOINT"], message: "AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_OPENAI_DEPLOYMENT required when LLM_PROVIDER is 'azure'" });
+  }
+});
 
 export type HostConfig = z.infer<typeof HostConfigSchema>;
 

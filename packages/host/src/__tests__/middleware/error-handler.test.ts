@@ -74,8 +74,7 @@ describe("error-handler middleware", () => {
     it("unwraps cause and maps to correct status", async () => {
       const { logger } = createTestLogger();
       const hostErr: HostError = {
-        kind: "concurrency-exceeded",
-        scope: "dag",
+        kind: "dag-concurrency-exceeded",
         dagId: "slow-dag" as any,
       };
       const wrapped = new Error("DAG execution failed", { cause: hostErr });
@@ -85,14 +84,13 @@ describe("error-handler middleware", () => {
       expect(res.status).toBe(429);
 
       const body = await res.json();
-      expect(body.error).toBe("concurrency-exceeded");
+      expect(body.error).toBe("dag-concurrency-exceeded");
     });
 
     it("includes Retry-After header for concurrency errors", async () => {
       const { logger } = createTestLogger();
       const hostErr: HostError = {
-        kind: "concurrency-exceeded",
-        scope: "global",
+        kind: "global-concurrency-exceeded",
       };
       const wrapped = new Error("limit hit", { cause: hostErr });
       const app = createApp(logger, () => { throw wrapped; });

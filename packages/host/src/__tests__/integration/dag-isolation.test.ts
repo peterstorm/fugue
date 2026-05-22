@@ -21,10 +21,8 @@ import {
   createNamespacedCache,
   createNamespacedCheckpointWriter,
   createNodeContextForDag,
-  type RedisPort,
-  type SharedInfra,
-  type LogPort,
 } from "../../adapters/node-context-factory.js";
+import type { RedisPort, SharedInfra, LogPort } from "../../ports.js";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Test helpers
@@ -72,6 +70,7 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
         store.set(key, value);
         return ok("OK" as string | null);
       },
+      del: async (key: string) => { const had = store.has(key) ? 1 : 0; store.delete(key); return ok(had); },
     },
   };
 };

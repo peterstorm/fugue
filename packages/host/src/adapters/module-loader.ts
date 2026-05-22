@@ -16,8 +16,6 @@ import type { HostError } from "../domain/host-error.js";
 import { validateDagRegistration } from "../domain/dag-registration.js";
 import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
 
-// Re-export port types for backwards compatibility
-export type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
 
 // ── Implementation ─────────────────────────────────────────────────────────
 

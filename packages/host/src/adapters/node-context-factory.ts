@@ -31,8 +31,6 @@ import { makeNodeContext, ok } from "@fugue/framework";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 
-// Re-export port types from canonical location for backwards compatibility
-export type { LogPort, RedisPort, SharedInfra } from "../ports.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

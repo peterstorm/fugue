@@ -77,7 +77,7 @@ export interface GitPort {
 
   readonly pull: (repoPath: string) => Promise<Result<void, HostError>>;
 
-  readonly currentSha: (repoPath: string) => Promise<Result<string, HostError>>;
+  readonly currentSha: (repoPath: string) => Promise<Result<GitSha, HostError>>;
 
   readonly hasLockfileChanged: (
     repoPath: string,
@@ -97,6 +97,7 @@ export interface GitPort {
 export interface RedisPort {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
+  readonly del: (key: string) => Promise<Result<number, HostError>>;
 }
 
 /**
@@ -148,8 +149,8 @@ export interface CircuitConfig {
  * Used by auth middleware (resolve) and admin handlers (store/list/revoke).
  */
 export interface TokenStorePort {
-  /** Look up a token grant by its hash. Returns null if not found or revoked. */
-  readonly resolve: (hash: TokenHash) => Promise<TokenGrant | null>;
+  /** Look up a token grant by its hash. Returns Ok(null) if not found, Err on infrastructure failure. */
+  readonly resolve: (hash: TokenHash) => Promise<Result<TokenGrant | null, HostError>>;
   /** Store a new team token. Returns err if team already has a token. */
   readonly store: (team: string, hash: TokenHash, grant: TokenGrant) => Promise<Result<void, HostError>>;
   /** List all provisioned teams with their grants (excludes hashes). */

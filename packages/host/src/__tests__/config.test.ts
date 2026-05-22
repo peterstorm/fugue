@@ -7,6 +7,7 @@ describe("HostConfigSchema", () => {
     DAGS_REPO_URL: "https://github.com/org/dags.git",
     REDIS_URL: "redis://localhost:6379",
     ADMIN_TOKEN: "test-admin-token-long-enough",
+    ANTHROPIC_API_KEY: "sk-ant-test-key",
   };
 
   it("parses valid environment with only required fields", () => {
@@ -78,7 +79,7 @@ describe("HostConfigSchema", () => {
   });
 
   it("accepts optional LLM provider override", () => {
-    const result = parseHostConfig({ ...validEnv, LLM_PROVIDER: "openai" });
+    const result = parseHostConfig({ ...validEnv, LLM_PROVIDER: "openai", OPENAI_API_KEY: "sk-test" });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.LLM_PROVIDER).toBe("openai");

@@ -51,11 +51,11 @@ describe("HostError", () => {
         expected: "DAG 'foo' is disabled: maintenance",
       },
       {
-        error: { kind: "concurrency-exceeded", scope: "global" },
+        error: { kind: "global-concurrency-exceeded" },
         expected: "global concurrency limit exceeded",
       },
       {
-        error: { kind: "concurrency-exceeded", scope: "dag", dagId: did("foo") },
+        error: { kind: "dag-concurrency-exceeded", dagId: did("foo") },
         expected: "concurrency limit exceeded for DAG 'foo'",
       },
       {
@@ -102,17 +102,19 @@ describe("HostError", () => {
       });
     }
 
-    it("handles all 17 error kinds (exhaustiveness check)", () => {
+    it("handles all error kinds (exhaustiveness check)", () => {
       const allKinds: HostError["kind"][] = [
         "git-clone-failed",
         "git-pull-failed",
         "git-timeout",
+        "git-spawn-failed",
         "import-failed",
         "validation-failed",
         "no-default-export",
         "dag-not-found",
         "dag-disabled",
-        "concurrency-exceeded",
+        "global-concurrency-exceeded",
+        "dag-concurrency-exceeded",
         "timeout",
         "redis-unavailable",
         "bun-install-failed",
@@ -122,8 +124,13 @@ describe("HostError", () => {
         "body-parse-failed",
         "discovery-failed",
         "async-result-expired",
+        "unauthorized",
+        "forbidden",
+        "team-already-exists",
+        "team-not-found",
+        "internal-invariant-violated",
       ];
-      expect(allKinds).toHaveLength(18);
+      expect(allKinds).toHaveLength(25);
     });
   });
 
@@ -133,7 +140,7 @@ describe("HostError", () => {
       { error: { kind: "input-validation-failed", dagId: did("x"), issues: [] }, status: 400 },
       { error: { kind: "validation-failed", path: "/x", issues: [] }, status: 400 },
       { error: { kind: "dag-validation-failed", dagId: did("x"), reason: "r", message: "m" }, status: 400 },
-      { error: { kind: "concurrency-exceeded", scope: "global" }, status: 429 },
+      { error: { kind: "global-concurrency-exceeded" }, status: 429 },
       { error: { kind: "timeout", dagId: did("x"), runId: rid("r"), timeoutMs: 1000 }, status: 408 },
       { error: { kind: "dag-disabled", dagId: did("x"), reason: "r" }, status: 503 },
       { error: { kind: "redis-unavailable", operation: "GET" }, status: 503 },

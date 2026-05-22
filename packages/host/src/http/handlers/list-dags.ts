@@ -1,7 +1,7 @@
 /**
  * List DAGs handler — returns metadata for all registered DAGs.
  *
- * FR-028: GET /dags returns list of registered DAGs with metadata
+ * FR-023: GET /dags returns list of registered DAGs with metadata
  */
 
 import type { Context } from "hono";

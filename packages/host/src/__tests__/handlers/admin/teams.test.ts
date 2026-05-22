@@ -199,10 +199,9 @@ describe("DELETE /admin/teams/:team", () => {
 
     // Verify token works
     const hash = await hashToken(token);
-    const grant = await tokenStore.resolve(hash);
-    expect(grant).not.toBeNull();
-
-    // Revoke
+    const grantResult = await tokenStore.resolve(hash);
+    expect(grantResult.ok).toBe(true);
+    expect(grantResult.ok && grantResult.value).not.toBeNull();
     const revokeRes = await app.request("/admin/teams/team-revoke", {
       method: "DELETE",
       headers: adminHeaders,
@@ -214,7 +213,7 @@ describe("DELETE /admin/teams/:team", () => {
 
     // Verify token no longer resolves
     const afterRevoke = await tokenStore.resolve(hash);
-    expect(afterRevoke).toBeNull();
+    expect(afterRevoke.ok && afterRevoke.value).toBeNull();
   });
 
   it("is idempotent — revoking non-existent team returns 200", async () => {
@@ -248,8 +247,10 @@ describe("team token used for DAG access after provisioning", () => {
 
     // Hash the raw token and resolve — simulates what auth middleware does
     const hash = await hashToken(token);
-    const grant = await tokenStore.resolve(hash);
+    const grantResult = await tokenStore.resolve(hash);
 
+    expect(grantResult.ok).toBe(true);
+    const grant = grantResult.ok ? grantResult.value : null;
     expect(grant).not.toBeNull();
     expect(grant!.team).toBe("team-verify");
   });

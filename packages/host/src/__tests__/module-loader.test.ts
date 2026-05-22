@@ -9,7 +9,7 @@ import {
   loadAll,
   createModuleLoader,
 } from "../adapters/module-loader.js";
-import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../adapters/module-loader.js";
+import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../ports.js";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 

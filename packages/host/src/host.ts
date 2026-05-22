@@ -28,7 +28,7 @@ import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
-import { createInMemoryTokenStore } from "./adapters/token-store.js";
+import { createInMemoryTokenStore, createRedisTokenStore } from "./adapters/token-store.js";
 import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
@@ -113,7 +113,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   hostState = readyResult.value;
 
   // ── Router Dependencies ──────────────────────────────────────────────────
-  const tokenStore = createInMemoryTokenStore();
+  const tokenStore = createRedisTokenStore(sharedInfra.redis, sharedInfra.logger);
 
   const routerDeps: RouterDeps = {
     getHostState: () => hostState,

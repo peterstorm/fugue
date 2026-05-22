@@ -15,9 +15,9 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { ok, err, noopTracer, gitSha } from "@fugue/framework";
 import type { Result, DagId, DagDef, NodeContext, FrameworkError, RunOptions } from "@fugue/framework";
 import { z } from "zod";
-import type { GitPort } from "../../adapters/git-sync.js";
-import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../../adapters/module-loader.js";
-import type { SharedInfra, RedisPort } from "../../adapters/node-context-factory.js";
+import type { GitPort } from "../../ports.js";
+import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../../ports.js";
+import type { SharedInfra, RedisPort } from "../../ports.js";
 import type { RedisConnectivityPort } from "../../lifecycle/startup.js";
 import type { SyncLogger } from "../../sync/sync-loop.js";
 import type { HostConfig } from "../../domain/config.js";
@@ -92,7 +92,7 @@ const createFakeGitPort = (opts?: { failPull?: boolean; shas?: string[] }): GitP
     currentSha: async () => {
       const sha = shas[Math.min(shaIndex, shas.length - 1)];
       shaIndex++;
-      return ok(sha);
+      return ok(gitSha(sha));
     },
     hasLockfileChanged: async () => ok(false),
     install: async () => ok(undefined),
@@ -127,6 +127,7 @@ const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivi
     redis: {
       get: async (key) => ok(store.get(key) ?? null),
       set: async (key, value) => { store.set(key, value); return ok("OK" as string | null); },
+      del: async (key) => { const had = store.has(key) ? 1 : 0; store.delete(key); return ok(had); },
     },
   };
 };
@@ -347,7 +348,7 @@ describe("Full Host Lifecycle", () => {
       currentSha: async () => {
         // Return different SHA each time to trigger sync
         shaCounter++;
-        return ok(`sha-${shaCounter}`);
+        return ok(gitSha(`sha-${shaCounter}`));
       },
       hasLockfileChanged: async () => ok(false),
       install: async () => ok(undefined),
@@ -511,7 +512,7 @@ describe("Full Host Lifecycle", () => {
     const failGit: GitPort = {
       clone: async (url) => err({ kind: "git-clone-failed", url, message: "permission denied" }),
       pull: async () => ok(undefined),
-      currentSha: async () => ok("abc"),
+      currentSha: async () => ok(gitSha("abc")),
       hasLockfileChanged: async () => ok(false),
       install: async () => ok(undefined),
     };

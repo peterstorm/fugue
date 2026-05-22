@@ -88,7 +88,10 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
     // 1.5. Authorization — check team scope
     const identity = c.get("authIdentity") as AuthIdentity | undefined;
-    if (identity && !canAccessDag(identity, registered.team)) {
+    if (!identity) {
+      return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
+    }
+    if (!canAccessDag(identity, registered.team)) {
       const callerTeam = identity.kind === "team" ? identity.team : "admin";
       return errorResponse(c, 403, "forbidden",
         `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
@@ -141,8 +144,8 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
     if (!acquireResult.ok) {
       const concErr: HostError = acquireResult.error === "global-at-capacity"
-        ? { kind: "concurrency-exceeded", scope: "global" }
-        : { kind: "concurrency-exceeded", scope: "dag", dagId };
+        ? { kind: "global-concurrency-exceeded" }
+        : { kind: "dag-concurrency-exceeded", dagId };
       return errorResponse(c, 429, concErr.kind, formatHostError(concErr), {
         dagId,
         details: { scope: acquireResult.error === "global-at-capacity" ? "global" : "dag" },

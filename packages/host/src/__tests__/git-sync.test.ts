@@ -1,8 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { ok, err } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, err, gitSha } from "@fugue/framework";
+import type { Result, GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { GitPort } from "../adapters/git-sync.js";
+import type { GitPort } from "../ports.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "../adapters/git-sync.js";
 
 // ── Fake GitPort for Unit Tests ────────────────────────────────────────────
@@ -47,7 +47,7 @@ const createFakeGitPort = (overrides?: Partial<FakeGitState>): { port: GitPort; 
     currentSha: async (repoPath) => {
       state.shaCalls.push(repoPath);
       if (state.shouldFailSha) return err(state.shouldFailSha);
-      return ok(state.currentSha);
+      return ok(gitSha(state.currentSha));
     },
     hasLockfileChanged: async (repoPath, fromSha, toSha) => {
       state.diffCalls.push({ repoPath, fromSha, toSha });
@@ -122,7 +122,7 @@ describe("GitPort interface", () => {
       const result = await port.currentSha("/tmp/repo");
       expect(result.ok).toBe(true);
       if (result.ok) {
-        expect(result.value).toBe("deadbeef12345678");
+        expect(result.value).toBe(gitSha("deadbeef12345678"));
       }
     });
 

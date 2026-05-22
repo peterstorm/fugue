@@ -64,8 +64,5 @@ export type { SyncConfig, SyncLogger, SyncLoopHandle } from "./sync/sync-loop.js
 // ── Adapters ───────────────────────────────────────────────────────────────
 
 export { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
-export type { GitPort } from "./adapters/git-sync.js";
 export { createModuleLoader } from "./adapters/module-loader.js";
-export type { ModuleLoaderPort, LoadResult, BulkLoadResult, LoadError } from "./adapters/module-loader.js";
-export type { SharedInfra, RedisPort } from "./adapters/node-context-factory.js";
-export type { LogPort } from "./ports.js";
+export type { GitPort, ModuleLoaderPort, LoadResult, BulkLoadResult, LoadError, SharedInfra, RedisPort, LogPort } from "./ports.js";

@@ -12,7 +12,7 @@ import { ok, err } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
-import type { TokenStorePort, RedisPort } from "../ports.js";
+import type { TokenStorePort, RedisPort, LogPort } from "../ports.js";
 
 // ── Redis Key Prefixes ─────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ export const createInMemoryTokenStore = (
       return byTeam as ReadonlyMap<string, { hash: TokenHash; grant: TokenGrant }>;
     },
 
-    resolve: async (hash) => byHash.get(hash) ?? null,
+    resolve: async (hash) => ok(byHash.get(hash) ?? null),
 
     store: async (team, hash, grant) => {
       if (byTeam.has(team)) {
@@ -72,27 +72,31 @@ export const createInMemoryTokenStore = (
 
 /**
  * Redis-backed token store for production.
- * Uses the existing RedisPort interface for get/set operations.
+ * Uses RedisPort for get/set/del operations.
  *
- * Limitation: listTeams requires SCAN which RedisPort doesn't expose.
- * For the initial implementation, the in-memory adapter tracks a mirror
- * of team grants populated at boot from Redis keys. The Redis adapter's
- * listTeams returns only teams provisioned since last boot.
- * Production deployments with many teams should extend RedisPort with SCAN.
+ * Limitation: listTeams only returns teams provisioned since last boot.
+ * Production deployments with many teams should extend RedisPort with SCAN
+ * and populate on boot.
  */
-export const createRedisTokenStore = (redis: RedisPort): TokenStorePort => {
+export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): TokenStorePort => {
   // In-process mirror for listTeams (populated on store, cleared on revoke)
   const knownTeams = new Map<string, TokenGrant>();
 
   return {
     resolve: async (hash) => {
       const result = await redis.get(tokenKey(hash));
-      if (!result.ok) return null;
-      if (result.value === null) return null;
+      if (!result.ok) {
+        return err({ kind: "redis-unavailable", operation: "token-resolve" } as HostError);
+      }
+      if (result.value === null || result.value === "") return ok(null);
       try {
-        return JSON.parse(result.value) as TokenGrant;
-      } catch {
-        return null;
+        return ok(JSON.parse(result.value) as TokenGrant);
+      } catch (e) {
+        logger?.error("[token-store] Corrupt grant data in Redis", {
+          hashPrefix: String(hash).slice(0, 8),
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return ok(null);
       }
     },
 
@@ -117,6 +121,8 @@ export const createRedisTokenStore = (redis: RedisPort): TokenStorePort => {
       const teamJson = JSON.stringify({ hash, grant });
       const teamSetResult = await redis.set(teamKey(team), teamJson);
       if (!teamSetResult.ok) {
+        // Rollback: expire the orphaned token hash to prevent unrevokable ghost token
+        await redis.del(tokenKey(hash));
         return err({ kind: "redis-unavailable", operation: "token-store-team-index" } as HostError);
       }
 
@@ -141,13 +147,25 @@ export const createRedisTokenStore = (redis: RedisPort): TokenStorePort => {
       try {
         const parsed = JSON.parse(teamResult.value) as { hash: string };
         hash = parsed.hash;
-      } catch {
+      } catch (e) {
+        logger?.error("[token-store] Corrupt team index data in Redis", {
+          team,
+          error: e instanceof Error ? e.message : String(e),
+        });
         return ok(undefined);
       }
 
-      // Delete both keys (set to empty with 1-second expiry via RedisPort)
-      await redis.set(tokenKey(hash as TokenHash), "", { expiresInSec: 1 });
-      await redis.set(teamKey(team), "", { expiresInSec: 1 });
+      // Delete token hash key
+      const tokenDelResult = await redis.del(tokenKey(hash as TokenHash));
+      if (!tokenDelResult.ok) {
+        return err({ kind: "redis-unavailable", operation: "token-revoke-hash-delete" } as HostError);
+      }
+
+      // Delete team reverse index key
+      const teamDelResult = await redis.del(teamKey(team));
+      if (!teamDelResult.ok) {
+        return err({ kind: "redis-unavailable", operation: "token-revoke-team-delete" } as HostError);
+      }
 
       knownTeams.delete(team);
       return ok(undefined);

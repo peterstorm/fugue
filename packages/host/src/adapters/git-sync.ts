@@ -12,13 +12,11 @@
  * @satisfies ADR-0034 — Raw git via Bun.spawn
  */
 
-import { ok, err } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, err, gitSha as brandGitSha } from "@fugue/framework";
+import type { Result, GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
 
-// Re-export for backwards compatibility
-export type { GitPort } from "../ports.js";
 
 // ── Bun.spawn Adapter ──────────────────────────────────────────────────────
 
@@ -142,7 +140,7 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
       });
     }
 
-    return ok(sha);
+    return ok(brandGitSha(sha));
   },
 
   hasLockfileChanged: async (repoPath, fromSha, toSha) => {
@@ -192,7 +190,7 @@ export const createLocalGitAdapter = (): GitPort => ({
         mtimeHash = ((mtimeHash << 5) - mtimeHash + lastModified + size) | 0;
       }
 
-      return ok(Math.abs(mtimeHash).toString(16).padStart(8, "0"));
+      return ok(brandGitSha(Math.abs(mtimeHash).toString(16).padStart(8, "0")));
     } catch (e) {
       return err({
         kind: "git-pull-failed",

@@ -71,10 +71,11 @@ export const formatToken = (randomBytes: Uint8Array): TeamToken => {
 };
 
 /**
- * Validate that a string looks like a team token (has prefix, sufficient length).
+ * Type guard: validates that a string has the team token shape (prefix + minimum length).
  * Does NOT check if the token exists — that's the store's job.
+ * Narrows the type to `TeamToken` for downstream use.
  */
-export const isTeamTokenShape = (s: string): boolean =>
+export const isTeamTokenShape = (s: string): s is TeamToken =>
   s.startsWith(TOKEN_PREFIX) && s.length >= TOKEN_MIN_LENGTH;
 
 // ── Hashing (pure — crypto.subtle is deterministic for same input) ─────────

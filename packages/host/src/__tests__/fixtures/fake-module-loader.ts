@@ -9,7 +9,7 @@
 import { ok, err } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
 import type { HostError } from "../../domain/host-error.js";
-import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../../adapters/module-loader.js";
+import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../../ports.js";
 
 export const createFakeModuleLoader = (
   dags: LoadResult[] = [],

@@ -22,8 +22,8 @@ export type HostError =
   | { readonly kind: "no-default-export"; readonly path: string }
   | { readonly kind: "dag-not-found"; readonly dagId: DagId; readonly available: readonly DagId[] }
   | { readonly kind: "dag-disabled"; readonly dagId: DagId; readonly reason: string }
-  | { readonly kind: "concurrency-exceeded"; readonly scope: "global" }
-  | { readonly kind: "concurrency-exceeded"; readonly scope: "dag"; readonly dagId: DagId }
+  | { readonly kind: "global-concurrency-exceeded" }
+  | { readonly kind: "dag-concurrency-exceeded"; readonly dagId: DagId }
   | { readonly kind: "timeout"; readonly dagId: DagId; readonly runId: RunId; readonly timeoutMs: number }
   | { readonly kind: "redis-unavailable"; readonly operation: string }
   | { readonly kind: "bun-install-failed"; readonly message: string }
@@ -51,7 +51,8 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "validation-failed" }, () => 400)
     .with({ kind: "dag-validation-failed" }, () => 400)
     .with({ kind: "body-parse-failed" }, () => 400)
-    .with({ kind: "concurrency-exceeded" }, () => 429)
+    .with({ kind: "global-concurrency-exceeded" }, () => 429)
+    .with({ kind: "dag-concurrency-exceeded" }, () => 429)
     .with({ kind: "timeout" }, () => 408)
     .with({ kind: "dag-disabled" }, () => 503)
     .with({ kind: "redis-unavailable" }, () => 503)
@@ -88,11 +89,8 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "no-default-export" }, (e) => `no default export found in '${e.path}'`)
     .with({ kind: "dag-not-found" }, (e) => `DAG '${e.dagId}' not found (available: ${e.available.join(", ") || "none"})`)
     .with({ kind: "dag-disabled" }, (e) => `DAG '${e.dagId}' is disabled: ${e.reason}`)
-    .with({ kind: "concurrency-exceeded" }, (e) =>
-      e.scope === "global"
-        ? `global concurrency limit exceeded`
-        : `concurrency limit exceeded for DAG '${e.dagId}'`,
-    )
+    .with({ kind: "global-concurrency-exceeded" }, () => `global concurrency limit exceeded`)
+    .with({ kind: "dag-concurrency-exceeded" }, (e) => `concurrency limit exceeded for DAG '${e.dagId}'`)
     .with({ kind: "timeout" }, (e) => `DAG '${e.dagId}' run '${e.runId}' timed out after ${e.timeoutMs}ms`)
     .with({ kind: "redis-unavailable" }, (e) => `Redis unavailable during '${e.operation}'`)
     .with({ kind: "bun-install-failed" }, (e) => `bun install failed: ${e.message}`)

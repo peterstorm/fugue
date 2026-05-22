@@ -76,6 +76,14 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
           return err({ kind: "redis-unavailable" as const, operation: `SET ${key}: ${e instanceof Error ? e.message : String(e)}` });
         }
       },
+      del: async (key) => {
+        try {
+          const count = await client.del(key);
+          return ok(count);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
     };
 
     return ok({ port, redis, disconnect: () => client.quit() });
@@ -92,17 +100,16 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
 /**
  * Fail-on-use LLM client — surfaces missing configuration on first .chat() call.
  *
- * SAFETY: This is intentional — DAGs that don't use LLM never hit this path.
- * DAGs that do use LLM get an immediate actionable error rather than a silent null.
- * The thrown error carries `frameworkErrorKind` which is caught by error-handler middleware.
+ * SAFETY: With LLM_PROVIDER/key cross-validation in config, this only activates
+ * if the API key is explicitly empty string (edge case). DAGs that don't use LLM
+ * never hit this path. The returned Result error is caught by the framework's
+ * normal error flow — no thrown exceptions.
  */
 const createLlmClient = (config: { LLM_PROVIDER: string; ANTHROPIC_API_KEY?: string; OPENAI_API_KEY?: string }): LlmClient => {
   const keyVar = config.LLM_PROVIDER === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
   const message = `LLM client not configured. Set ${keyVar} environment variable to enable LLM calls (provider: ${config.LLM_PROVIDER}).`;
   const stub = {
-    chat: async () => {
-      throw Object.assign(new Error(message), { frameworkErrorKind: "llm-unavailable" as const });
-    },
+    chat: async () => err({ kind: "llm-unavailable" as const, message }),
   };
   return stub as unknown as LlmClient;
 };

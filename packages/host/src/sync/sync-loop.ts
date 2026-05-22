@@ -26,11 +26,10 @@ import type { Result, GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
-import type { GitPort } from "../adapters/git-sync.js";
-import type { ModuleLoaderPort, LoadResult } from "../adapters/module-loader.js";
+import type { GitPort, ModuleLoaderPort, LoadResult } from "../ports.js";
 import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
 
-// Re-export for backwards compatibility (tests import from sync-loop)
+// Re-export for test convenience (tests import from sync-loop)
 export { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -130,7 +129,7 @@ export const executeSyncCycle = async (
     };
   }
 
-  const currentSha = gitSha(shaResult.value);
+  const currentSha = shaResult.value;
 
   // Step 2: Skip if unchanged
   if (currentSha === lastSha) {
@@ -333,7 +332,7 @@ export const initialSync = async (
     return shaResult;
   }
 
-  const sha = gitSha(shaResult.value);
+  const sha = shaResult.value;
 
   // Load all DAGs
   const bulkResult = await loader.loadAll(config.repoPath, sha);
