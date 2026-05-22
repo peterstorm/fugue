@@ -133,6 +133,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       threshold: config.CIRCUIT_BREAKER_THRESHOLD,
       windowMs: config.CIRCUIT_BREAKER_WINDOW_MS,
     },
+    auth: { token: config.API_TOKEN },
     logger,
   };
 

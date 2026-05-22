@@ -109,7 +109,7 @@ export const recordFailure = (
         return {
           state: "open" as const,
           openedAt: now,
-          reason: { kind: "threshold-exceeded", threshold, windowMs },
+          reason: { kind: "threshold-exceeded" as const, threshold, windowMs },
         };
       }
 
@@ -122,7 +122,7 @@ export const recordFailure = (
     .with({ state: "half-open" }, () => ({
       state: "open" as const,
       openedAt: now,
-      reason: { kind: "half-open-test-failed" },
+      reason: { kind: "half-open-test-failed" as const },
     }))
     .with({ state: "open" }, (current) => current)
     .exhaustive();

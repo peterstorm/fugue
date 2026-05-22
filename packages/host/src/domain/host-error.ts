@@ -33,6 +33,7 @@ export type HostError =
   | { readonly kind: "body-parse-failed"; readonly dagId: DagId; readonly message: string }
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId }
+  | { readonly kind: "unauthorized"; readonly reason: string }
   | { readonly kind: "internal-invariant-violated"; readonly message: string; readonly context: Record<string, unknown> };
 
 export type HostErrorKind = HostError["kind"];
@@ -61,6 +62,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "bun-install-failed" }, () => 500)
     .with({ kind: "config-invalid" }, () => 500)
     .with({ kind: "discovery-failed" }, () => 500)
+    .with({ kind: "unauthorized" }, () => 401)
     .with({ kind: "internal-invariant-violated" }, () => 500)
     .exhaustive();
 
@@ -94,5 +96,6 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "body-parse-failed" }, (e) => `request body parse failed for DAG '${e.dagId}': ${e.message}`)
     .with({ kind: "discovery-failed" }, (e) => `DAG discovery failed for '${e.dagsRoot}': ${e.message}`)
     .with({ kind: "async-result-expired" }, (e) => `async result for run '${e.runId}' has expired`)
+    .with({ kind: "unauthorized" }, (e) => `unauthorized: ${e.reason}`)
     .with({ kind: "internal-invariant-violated" }, (e) => `internal invariant violated: ${e.message}`)
     .exhaustive();

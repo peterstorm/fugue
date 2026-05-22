@@ -9,6 +9,8 @@ import { Hono } from "hono";
 import type { HostState } from "../domain/host-state.js";
 import { createErrorHandler } from "./middleware/error-handler.js";
 import type { ErrorHandlerLogger } from "./middleware/error-handler.js";
+import { createAuthMiddleware } from "./middleware/auth.js";
+import type { AuthConfig } from "./middleware/auth.js";
 import { healthHandler, readinessHandler } from "./handlers/health.js";
 import { listDagsHandler } from "./handlers/list-dags.js";
 import { createRunDagHandler } from "./handlers/run-dag.js";
@@ -31,6 +33,7 @@ export type HostEnv = {
 export interface RouterDeps extends RunDagDeps {
   readonly getHostState: () => HostState;
   readonly logger: ErrorHandlerLogger;
+  readonly auth: AuthConfig;
 }
 
 /**
@@ -52,11 +55,14 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
     await next();
   });
 
-  // ── Health routes (no concurrency guard) ─────────────────────────────────
+  // ── Health routes (no auth, no concurrency guard) ───────────────────────
   app.get("/health", healthHandler);
   app.get("/readiness", readinessHandler);
 
-  // ── DAG routes ───────────────────────────────────────────────────────────
+  // ── Auth middleware (applied to all routes below) ────────────────────────
+  app.use("*", createAuthMiddleware(deps.auth));
+
+  // ── DAG routes (authenticated) ───────────────────────────────────────────
   app.get("/dags", listDagsHandler);
 
   // POST /dags/:id/run
