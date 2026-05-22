@@ -74,9 +74,8 @@ const createLlmClient = (config: { LLM_PROVIDER: string; ANTHROPIC_API_KEY?: str
   return {
     chat: async () => {
       const keyVar = config.LLM_PROVIDER === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
-      throw new Error(
-        `LLM client not configured. Set ${keyVar} environment variable to enable LLM calls (provider: ${config.LLM_PROVIDER}).`,
-      );
+      const message = `LLM client not configured. Set ${keyVar} environment variable to enable LLM calls (provider: ${config.LLM_PROVIDER}).`;
+      throw Object.assign(new Error(message), { frameworkErrorKind: "llm-unavailable" });
     },
   } as unknown as LlmClient;
 };

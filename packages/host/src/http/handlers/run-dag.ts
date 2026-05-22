@@ -3,7 +3,7 @@
  *
  * FR-020: Executes DAG and returns result as JSON with 200
  * FR-023: Invalid input returns 400 with machine-readable JSON describing failed fields
- * FR-024: DAG timeout returns 408 with run ID for resumption
+ * FR-024: DAG timeout returns 408 with run ID (enables future resumption)
  * FR-025: Non-existent DAG returns 404 with available DAG IDs listed
  * FR-027: Per-DAG concurrency limit exceeded returns 429
  */
@@ -119,11 +119,12 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const acquireResult = acquire(concurrency, dagId, now);
 
     if (!acquireResult.ok) {
-      const scope = acquireResult.error === "global-at-capacity" ? "global" : "dag";
-      const concErr: HostError = { kind: "concurrency-exceeded", scope, dagId };
+      const concErr: HostError = acquireResult.error === "global-at-capacity"
+        ? { kind: "concurrency-exceeded", scope: "global" }
+        : { kind: "concurrency-exceeded", scope: "dag", dagId };
       return errorResponse(c, 429, concErr.kind, formatHostError(concErr), {
         dagId,
-        details: { scope },
+        details: { scope: acquireResult.error === "global-at-capacity" ? "global" : "dag" },
         headers: { "Retry-After": "5" },
       });
     }

@@ -30,6 +30,7 @@ export interface ConcurrencyState {
 export interface AcquireToken {
   readonly dagId: DagId;
   readonly acquiredAt: number;
+  readonly __brand: "AcquireToken";
 }
 
 export type ConcurrencyError = "global-at-capacity" | "dag-at-capacity";
@@ -103,7 +104,7 @@ export const acquire = (
     perDag: newPerDag,
   };
 
-  const token: AcquireToken = { dagId, acquiredAt: now };
+  const token: AcquireToken = { dagId, acquiredAt: now, __brand: "AcquireToken" };
 
   return ok({ state: newState, token });
 };

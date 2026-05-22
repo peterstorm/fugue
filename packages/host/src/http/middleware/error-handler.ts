@@ -36,7 +36,8 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "dag-not-found" }, (e) => ({ available: e.available }))
     .with({ kind: "input-validation-failed" }, (e) => ({ issues: e.issues }))
     .with({ kind: "validation-failed" }, (e) => ({ issues: e.issues }))
-    .with({ kind: "concurrency-exceeded" }, (e) => ({ scope: e.scope, dagId: e.dagId }))
+    .with({ kind: "concurrency-exceeded", scope: "global" }, (e) => ({ scope: e.scope }))
+    .with({ kind: "concurrency-exceeded", scope: "dag" }, (e) => ({ scope: e.scope, dagId: e.dagId }))
     .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
     .otherwise(() => undefined);
 
@@ -124,8 +125,8 @@ export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error
 };
 
 /**
- * Legacy error handler without logger — logs to console.error.
- * @deprecated Use createErrorHandler(logger) instead.
+ * Convenience error handler using console.error — intended for dev/test only.
+ * Production code should use createErrorHandler(logger) with a structured logger.
  */
 export const errorHandler = createErrorHandler({
   error: (msg, data) => console.error(JSON.stringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),

@@ -72,7 +72,10 @@ export const HostConfigSchema = z.object({
   DEFAULT_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(300_000),
   /** Default checkpoint TTL for DAG checkpoint entries (FR-040) */
   DEFAULT_CHECKPOINT_TTL_MS: z.coerce.number().int().min(1000).default(86_400_000),
-});
+}).refine(
+  (c) => c.DEFAULT_DAG_TIMEOUT_MS <= c.MAX_DAG_TIMEOUT_MS,
+  { message: "DEFAULT_DAG_TIMEOUT_MS must not exceed MAX_DAG_TIMEOUT_MS" },
+);
 
 export type HostConfig = z.infer<typeof HostConfigSchema>;
 

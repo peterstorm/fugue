@@ -13,15 +13,13 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err, runId as makeRunId, dagId } from "@fugue/framework";
+import { ok, err, runId as makeRunId } from "@fugue/framework";
 import type { Result, DagId, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fugue/framework";
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, syncStarted, syncCompleted, syncFailed, canServeRequests } from "./domain/host-state.js";
-import type { Registry } from "./domain/registry.js";
-import { emptyRegistry } from "./domain/registry.js";
-import type { RegisteredDag } from "./domain/registry.js";
+import type { Registry, RegisteredDag } from "./domain/registry.js";
 import { initConcurrency } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit, forceReset } from "./domain/circuit-breaker.js";
@@ -107,7 +105,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // Transition to ready
   const readyResult = bootComplete(hostState, registry, sha, Date.now());
   if (!readyResult.ok) {
-    return err({ kind: "config-invalid", message: `Failed to transition to ready: ${readyResult.error.message}` });
+    return err({ kind: "internal-invariant-violated", message: "Boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
   }
   hostState = readyResult.value;
 
@@ -151,6 +149,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     syncConfig,
     logger,
     // onStarted: transition to syncing via state machine
+    // NOTE: State machine sync is best-effort. If the transition fails (e.g., host is draining),
+    // the sync cycle still executes but onComplete/onError callbacks will also be rejected,
+    // keeping the state consistent at the cost of one wasted poll cycle.
     () => {
       if (hostState.phase === "draining" || hostState.phase === "stopped") {
         logger.info("Ignoring sync start — host is shutting down", { phase: hostState.phase });
@@ -305,6 +306,6 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         await syncLoop.triggerSync();
       }
     },
-    server,
+    get server() { return server; },
   });
 };

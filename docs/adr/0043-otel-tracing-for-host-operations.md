@@ -1,7 +1,7 @@
 # ADR-0043: OTel Tracing for Host Operations
 
 ## Status
-Accepted
+Accepted — Not Yet Implemented (design decision for future sprint)
 
 ## Date
 2026-05-20

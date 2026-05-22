@@ -22,7 +22,8 @@ export type HostError =
   | { readonly kind: "no-default-export"; readonly path: string }
   | { readonly kind: "dag-not-found"; readonly dagId: DagId; readonly available: readonly DagId[] }
   | { readonly kind: "dag-disabled"; readonly dagId: DagId; readonly reason: string }
-  | { readonly kind: "concurrency-exceeded"; readonly scope: "global" | "dag"; readonly dagId?: DagId }
+  | { readonly kind: "concurrency-exceeded"; readonly scope: "global" }
+  | { readonly kind: "concurrency-exceeded"; readonly scope: "dag"; readonly dagId: DagId }
   | { readonly kind: "timeout"; readonly dagId: DagId; readonly runId: RunId; readonly timeoutMs: number }
   | { readonly kind: "redis-unavailable"; readonly operation: string }
   | { readonly kind: "bun-install-failed"; readonly message: string }
@@ -31,7 +32,8 @@ export type HostError =
   | { readonly kind: "dag-validation-failed"; readonly dagId: DagId; readonly reason: string; readonly message: string }
   | { readonly kind: "body-parse-failed"; readonly dagId: DagId; readonly message: string }
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
-  | { readonly kind: "async-result-expired"; readonly runId: RunId };
+  | { readonly kind: "async-result-expired"; readonly runId: RunId }
+  | { readonly kind: "internal-invariant-violated"; readonly message: string; readonly context: Record<string, unknown> };
 
 export type HostErrorKind = HostError["kind"];
 
@@ -59,6 +61,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "bun-install-failed" }, () => 500)
     .with({ kind: "config-invalid" }, () => 500)
     .with({ kind: "discovery-failed" }, () => 500)
+    .with({ kind: "internal-invariant-violated" }, () => 500)
     .exhaustive();
 
 /**
@@ -91,4 +94,5 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "body-parse-failed" }, (e) => `request body parse failed for DAG '${e.dagId}': ${e.message}`)
     .with({ kind: "discovery-failed" }, (e) => `DAG discovery failed for '${e.dagsRoot}': ${e.message}`)
     .with({ kind: "async-result-expired" }, (e) => `async result for run '${e.runId}' has expired`)
+    .with({ kind: "internal-invariant-violated" }, (e) => `internal invariant violated: ${e.message}`)
     .exhaustive();

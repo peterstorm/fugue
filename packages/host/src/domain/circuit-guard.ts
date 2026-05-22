@@ -4,6 +4,12 @@
  * The run-dag handler must: get → attemptReset → set → isAllowed → consumeTestRequest → set → execute → recordSuccess/Failure → set.
  * This module captures that protocol as composable pure functions,
  * preventing ordering bugs and missed state writes.
+ *
+ * DESIGN: This module lives in domain/ despite performing side effects (port.set())
+ * because it encapsulates a PURE PROTOCOL — the sequence of state transitions is
+ * deterministic given the port's current state. The side effects are limited to
+ * the injected port handle; the functions are testable with a trivial Map-backed fake.
+ * This is the "pure protocol over injected port" pattern.
  */
 
 import type { DagId } from "@fugue/framework";

@@ -133,7 +133,7 @@ describe("Concurrency Limiter", () => {
 
     test("clamps to zero on underflow (defensive)", () => {
       const state = initConcurrency();
-      const fakeToken: AcquireToken = { dagId: DAG_A, acquiredAt: NOW };
+      const fakeToken: AcquireToken = { dagId: DAG_A, acquiredAt: NOW, __brand: "AcquireToken" };
       const released = release(state, fakeToken);
       expect(released.global.current).toBe(0);
     });
@@ -331,7 +331,7 @@ describe("Concurrency Limiter", () => {
           arbDagId,
           (extraReleases, id) => {
             const initial = initConcurrency();
-            const fakeToken: AcquireToken = { dagId: id, acquiredAt: NOW };
+            const fakeToken: AcquireToken = { dagId: id, acquiredAt: NOW, __brand: "AcquireToken" };
 
             let state = initial;
             for (let i = 0; i < extraReleases; i++) {

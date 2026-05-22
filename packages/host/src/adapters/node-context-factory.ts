@@ -32,19 +32,17 @@ import type { ContentFilter } from "@fugue/framework";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/**
- * Unified logger port for all host subsystems.
- * Avoids coupling to a specific logging library.
- */
-export interface LogPort {
-  readonly info: (msg: string, data?: Record<string, unknown>) => void;
-  readonly warn: (msg: string, data?: Record<string, unknown>) => void;
-  readonly error: (msg: string, data?: Record<string, unknown>) => void;
-}
+// Re-export LogPort from canonical location for backwards compatibility
+export type { LogPort } from "../ports.js";
+import type { LogPort } from "../ports.js";
 
 /**
  * Redis-like interface — only the methods we actually use.
  * Avoids coupling to a specific Redis client library.
+ *
+ * IMPORTANT: Methods may reject (throw) if the Redis connection drops.
+ * All call sites MUST wrap in try/catch. The namespaced cache/checkpoint
+ * adapters already do this — any new consumers must handle rejections.
  */
 export interface RedisPort {
   readonly get: (key: string) => Promise<string | null>;
@@ -148,8 +146,11 @@ export const createNamespacedCache = (
   /**
    * DESIGN: Cache writes are best-effort. Failures are logged but never propagated
    * to callers via the Result return. Returning err() would abort the DAG run for
-   * a non-critical cache failure — worse than stale data. The Result return satisfies
-   * the ContextCacheAdapter interface contract; we always return ok().
+   * a non-critical cache failure — worse than stale data.
+   *
+   * The return type `Promise<Result<void, FrameworkError>>` is dictated by the
+   * framework's ContextCacheAdapter interface — we cannot narrow it to `Promise<void>`.
+   * Callers should NOT pattern-match on the error branch; it is never populated.
    */
   set: async (
     key: string,

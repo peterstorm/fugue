@@ -67,4 +67,5 @@ export { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 export type { GitPort } from "./adapters/git-sync.js";
 export { createModuleLoader } from "./adapters/module-loader.js";
 export type { ModuleLoaderPort, LoadResult, BulkLoadResult, LoadError } from "./adapters/module-loader.js";
-export type { SharedInfra, RedisPort, LogPort } from "./adapters/node-context-factory.js";
+export type { SharedInfra, RedisPort } from "./adapters/node-context-factory.js";
+export type { LogPort } from "./ports.js";

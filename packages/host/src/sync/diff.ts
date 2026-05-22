@@ -7,7 +7,7 @@
  * - Changed DAGs (present in both, different SHA or path)
  * - Unchanged DAGs
  *
- * @satisfies FR-003 — Detect removed DAGs for graceful deregistration
+ * Enables graceful deregistration of removed DAGs during sync cycle.
  * @satisfies FR-007 — Track DAG versions by git commit SHA
  */
 

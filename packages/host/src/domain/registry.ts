@@ -69,8 +69,8 @@ export interface Registry {
 /**
  * Create an empty registry with no loaded DAGs.
  */
-export const emptyRegistry = (): Registry => ({
-  dags: new Map(),
+export const emptyRegistry = (): Registry => Object.freeze({
+  dags: new Map() as ReadonlyMap<DagId, RegisteredDag>,
   loadedAt: 0,
   sha: "",
 });

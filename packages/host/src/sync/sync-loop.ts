@@ -17,7 +17,7 @@
  * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
  * @satisfies FR-002 — Discover DAGs by scanning dags/{team}/{name}/dag.ts convention
  * @satisfies FR-003 — Dynamically import discovered DAG modules with SHA cache-busting
- * @satisfies NFR-003 — Git sync detection MUST complete within poll interval + 5s
+ * @satisfies NFR-003 — Git sync detection SHOULD complete within poll interval + 5s (individual ops timeout at 30s; overall cycle timeout not yet enforced)
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
@@ -41,7 +41,7 @@ import type { DagSnapshot } from "./diff.js";
 export type SyncResult =
   | { readonly kind: "no-change"; readonly sha: string }
   | { readonly kind: "updated"; readonly sha: string; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
-  | { readonly kind: "error"; readonly sha: string; readonly syncError: HostError; readonly message: string }
+  | { readonly kind: "error"; readonly sha: string; readonly syncError: HostError }
   | { readonly kind: "skipped"; readonly sha: string; readonly reason: "already-in-progress" };
 
 /**
@@ -59,7 +59,7 @@ export interface SyncConfig {
  * Logger interface for sync operations.
  * Identical to LogPort — kept as a named alias for clarity at call sites.
  */
-export type SyncLogger = import("../adapters/node-context-factory.js").LogPort;
+export type SyncLogger = import("../ports.js").LogPort;
 
 /**
  * Callback invoked when a sync cycle begins (before pulling).
@@ -167,7 +167,6 @@ export const executeSyncCycle = async (
       kind: "error",
       sha: lastSha,
       syncError: shaResult.error,
-      message: `SHA check failed: ${shaResult.error.kind}`,
     };
   }
 
@@ -189,7 +188,6 @@ export const executeSyncCycle = async (
         kind: "error",
         sha: lastSha,
         syncError: pullResult.error,
-        message: `pull failed: ${pullResult.error.kind}`,
       };
     }
   }
@@ -212,7 +210,6 @@ export const executeSyncCycle = async (
           kind: "error",
           sha: lastSha,
           syncError: installResult.error,
-          message: `bun install failed: ${installResult.error.kind}`,
         };
       }
     }
@@ -308,7 +305,6 @@ export const startSyncLoop = (
         kind: "error",
         sha: lastSha,
         syncError,
-        message: `Unexpected error: ${errMsg}`,
       };
     } finally {
       running = false;

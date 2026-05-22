@@ -1,7 +1,6 @@
 /**
- * Health and readiness handlers.
+ * Health and readiness probe handlers for Kubernetes integration.
  *
- * SC-002: Health/readiness endpoints
  * - GET /health — liveness probe (always 200 if process is up)
  * - GET /readiness — readiness probe (200 only when host can serve requests)
  */

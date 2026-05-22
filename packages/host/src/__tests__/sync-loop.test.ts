@@ -709,7 +709,7 @@ describe("executeSyncCycle — bun install path (FR-002)", () => {
     expect(result.kind).toBe("error");
     expect(result.sha).toBe("old-sha"); // SHA does not advance
     if (result.kind !== "error") throw new Error("expected error");
-    expect(result.message).toContain("bun install failed");
+    expect(result.syncError.kind).toBe("bun-install-failed");
   });
 
   it("logs warning and skips install when lockfile check fails", async () => {

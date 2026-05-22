@@ -192,6 +192,29 @@ describe("HostConfigSchema", () => {
     if (result.ok) return;
     expect(result.error.kind).toBe("config-invalid");
   });
+
+  it("rejects DEFAULT_DAG_TIMEOUT_MS exceeding MAX_DAG_TIMEOUT_MS", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DEFAULT_DAG_TIMEOUT_MS: "200000",
+      MAX_DAG_TIMEOUT_MS: "100000",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind === "config-invalid") {
+      expect(result.error.message).toContain("DEFAULT_DAG_TIMEOUT_MS");
+    }
+  });
+
+  it("accepts DEFAULT_DAG_TIMEOUT_MS equal to MAX_DAG_TIMEOUT_MS", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DEFAULT_DAG_TIMEOUT_MS: "60000",
+      MAX_DAG_TIMEOUT_MS: "60000",
+    });
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("FugueYamlSchema", () => {

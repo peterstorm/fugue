@@ -3,8 +3,8 @@
  *
  * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
- * @satisfies NFR-030 — Double-SIGTERM forces immediate exit
- * @satisfies NFR-031 — Uncaught exceptions and unhandled rejections exit with code 1
+ * INVARIANT: Double-SIGTERM forces immediate exit (prevents zombie processes during deployment)
+ * INVARIANT: Uncaught exceptions and unhandled rejections exit with code 1 (fail-fast)
  */
 
 import type { SyncLogger } from "../sync/sync-loop.js";
