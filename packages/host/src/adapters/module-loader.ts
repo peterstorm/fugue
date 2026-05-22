@@ -13,45 +13,11 @@ import { ok, err } from "@fugue/framework";
 import type { Result, DagId } from "@fugue/framework";
 import { tryDagId } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { DagRegistration } from "../domain/dag-registration.js";
 import { validateDagRegistration } from "../domain/dag-registration.js";
+import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
-export interface LoadResult {
-  readonly id: DagId;
-  readonly registration: DagRegistration;
-  readonly modulePath: string;
-}
-
-export interface LoadError {
-  readonly path: string;
-  readonly error: HostError;
-}
-
-export interface BulkLoadResult {
-  readonly loaded: readonly LoadResult[];
-  readonly errors: readonly LoadError[];
-}
-
-// ── Module Loader Port ─────────────────────────────────────────────────────
-
-/**
- * Port interface for module loading — enables testing with fake loaders.
- */
-export interface ModuleLoaderPort {
-  readonly loadDagModule: (
-    modulePath: string,
-    sha: string,
-  ) => Promise<Result<LoadResult, HostError>>;
-
-  readonly discoverDagPaths: (dagsRoot: string) => Promise<Result<string[], HostError>>;
-
-  readonly loadAll: (
-    dagsRoot: string,
-    sha: string,
-  ) => Promise<BulkLoadResult>;
-}
+// Re-export port types for backwards compatibility
+export type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
 
 // ── Implementation ─────────────────────────────────────────────────────────
 

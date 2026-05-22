@@ -18,8 +18,8 @@ import type { Result, DagId, NodeContext, DagDef, RunOptions, FrameworkError, Ru
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
-import { booting, bootComplete, beginDrain, drainComplete, syncStarted, syncCompleted, syncFailed, canServeRequests } from "./domain/host-state.js";
-import type { Registry, RegisteredDag } from "./domain/registry.js";
+import { booting, bootComplete, beginDrain, drainComplete, syncStarted, syncCompleted, syncFailed, canServeRequests, getRegistry } from "./domain/host-state.js";
+import type { RegisteredDag } from "./domain/registry.js";
 import { initConcurrency } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit, forceReset } from "./domain/circuit-breaker.js";
@@ -137,12 +137,22 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
 
   // ── HTTP Server ──────────────────────────────────────────────────────────
   const app = createRouter(routerDeps);
-  const bunServer = Bun.serve({
-    fetch: app.fetch,
-    port: config.PORT,
-  });
+  let bunServer;
+  try {
+    bunServer = Bun.serve({
+      fetch: app.fetch,
+      port: config.PORT,
+      maxRequestBodySize: 10 * 1024 * 1024, // 10MB — prevents request body DoS
+    });
+  } catch (e) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `Failed to bind HTTP server on port ${config.PORT}: ${e instanceof Error ? e.message : String(e)}`,
+      context: { port: config.PORT },
+    });
+  }
   server = {
-    port: bunServer.port!,
+    port: bunServer.port ?? config.PORT,
     stop: () => bunServer.stop(),
   };
   logger.info(`HTTP server listening on port ${bunServer.port}`);
@@ -179,6 +189,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         return;
       }
 
+      // Capture previous registry BEFORE state transition for accurate diff
+      const prevRegistry = getRegistry(hostState);
+      const prevDags = prevRegistry
+        ? Array.from(prevRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }))
+        : [];
+
       const result = syncCompleted(hostState, newRegistry, newSha, Date.now());
       if (result.ok) {
         hostState = result.value;
@@ -189,16 +205,20 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         });
       }
 
-      // Force-reset circuit breakers for all DAGs (FR-092)
+      // Clean up circuit breakers for removed DAGs (prevents memory leak)
+      const currentDagIds = new Set(newRegistry.dags.keys());
+      for (const dagId of circuitBreakers.keys()) {
+        if (!currentDagIds.has(dagId)) {
+          circuitBreakers.delete(dagId);
+        }
+      }
+      // Force-reset circuit breakers for current DAGs (FR-092)
       const now = Date.now();
-      for (const dagId of newRegistry.dags.keys()) {
+      for (const dagId of currentDagIds) {
         circuitBreakers.set(dagId, forceReset(now));
       }
 
       // Compute and log diff between previous and new registry
-      const prevDags = hostState.phase !== "booting" && hostState.phase !== "stopped" && "registry" in hostState
-        ? Array.from((hostState as { registry: Registry }).registry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }))
-        : [];
       const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }));
       const diff = diffDags(prevDags, newDags);
 
@@ -272,7 +292,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       try {
         await deps.onShutdown();
       } catch (e) {
-        logger.warn("Error during infrastructure cleanup", {
+        logger.error("Error during infrastructure cleanup — resources may be leaked", {
           error: e instanceof Error ? e.message : String(e),
         });
       }

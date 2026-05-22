@@ -7,7 +7,7 @@
  * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
  * - Shared infrastructure (LLM, tracer) passed through without per-request init
  *
- * @satisfies FR-030 — Cache keys prefixed fugue:<dagId>:cache:<key>
+ * @satisfies FR-031 — Cache keys prefixed fugue:<dagId>:cache:<key>
  * @satisfies FR-031 — Checkpoint keys prefixed fugue:<dagId>:<runId>:<nodeId>
  * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
@@ -21,6 +21,7 @@ import type {
   CacheLookup,
   LlmClient,
   Tracer,
+  DagId,
   RunId,
   NodeId,
   Result,
@@ -81,12 +82,12 @@ import { buildCacheKey, buildCheckpointKey } from "../domain/cache-keys.js";
  * Create a ContextCacheAdapter that prefixes all keys with DAG namespace.
  * Applies per-DAG TTL override when set is called without an explicit TTL.
  *
- * @satisfies FR-030 — Keys prefixed with DAG namespace
+ * @satisfies FR-031 — Keys prefixed with DAG namespace
  * @satisfies FR-041 — Per-DAG TTL override applied
  */
 export const createNamespacedCache = (
   redis: RedisPort,
-  dagId: string,
+  dagId: DagId,
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => ({
@@ -109,7 +110,7 @@ export const createNamespacedCache = (
       return { hit: true, value: JSON.parse(raw) };
     } catch {
       // Corrupted entry — treat as miss
-      logger.warn("Cache entry corrupted — treating as miss", { key: fullKey, dagId });
+      logger.warn("Cache entry corrupted — treating as miss", { key: fullKey, dagId, rawPreview: raw?.slice(0, 100) });
       return { hit: false };
     }
   },
@@ -159,13 +160,13 @@ export const createNamespacedCache = (
  */
 export const createNamespacedCheckpointWriter = (
   redis: RedisPort,
-  dagId: string,
-  runId: string,
+  dagId: DagId,
+  runId: RunId,
   checkpointTtlSec: number | undefined,
   logger: LogPort,
 ): CheckpointWriter => ({
   write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
-    const fullKey = buildCheckpointKey(dagId, runId, nodeId as string);
+    const fullKey = buildCheckpointKey(dagId, runId, nodeId);
     let serialized: string;
     try {
       serialized = JSON.stringify(value);

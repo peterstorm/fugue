@@ -9,7 +9,7 @@
  *
  * @satisfies FR-001 — Poll git branch and detect new commits by comparing SHAs
  * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
- * @satisfies AD-5 — Raw git via Bun.spawn
+ * @satisfies ADR-0034 — Raw git via Bun.spawn
  */
 
 import { ok, err } from "@fugue/framework";

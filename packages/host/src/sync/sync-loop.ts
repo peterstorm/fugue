@@ -9,7 +9,7 @@
  * 5. Checks if lockfile changed → runs bun install
  * 6. Discovers and loads all DAGs
  * 7. Builds new immutable registry snapshot
- * 8. Performs atomic swap of registry reference
+ * 8. Returns SyncResult to caller (registry swap performed externally by host.ts)
  *
  * Error isolation: A single DAG import failure does NOT block others.
  *
@@ -28,8 +28,6 @@ import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
 import type { GitPort } from "../adapters/git-sync.js";
 import type { ModuleLoaderPort, LoadResult } from "../adapters/module-loader.js";
-import { diffDags, diffSummary } from "../domain/dag-diff.js";
-import type { DagSnapshot } from "../domain/dag-diff.js";
 import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
 
 // Re-export for backwards compatibility (tests import from sync-loop)

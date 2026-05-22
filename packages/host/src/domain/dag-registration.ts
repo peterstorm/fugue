@@ -22,6 +22,12 @@ import type { HostError } from "./host-error.js";
 // Config defaults — FR-013: sensible defaults when omitted
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-DAG registration default when DAG module omits config.timeoutMs.
+ * Distinct from HostConfig.DEFAULT_DAG_TIMEOUT_MS (config.ts) which is the
+ * host-level max allowed timeout. This value applies when a DAG author
+ * provides no explicit timeout in their DagRegistration export.
+ */
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_CONCURRENT = 10;
 

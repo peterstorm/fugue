@@ -10,7 +10,7 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fugue/framework";
-import { noopTracer } from "@fugue/framework";
+import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId } from "@fugue/framework";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
 import {
@@ -90,8 +90,8 @@ const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
 
 describe("DAG cache key isolation (pure)", () => {
   test("two DAGs with same logical key produce different full cache keys", () => {
-    const dagA = "order-processor";
-    const dagB = "invoice-generator";
+    const dagA = dagId("order-processor");
+    const dagB = dagId("invoice-generator");
     const logicalKey = "customer:123:data";
 
     const keyA = buildCacheKey(dagA, logicalKey);
@@ -103,8 +103,8 @@ describe("DAG cache key isolation (pure)", () => {
   });
 
   test("two DAGs with same logical key produce different cache prefixes", () => {
-    const prefixA = cacheKeyPrefix("dag-alpha");
-    const prefixB = cacheKeyPrefix("dag-beta");
+    const prefixA = cacheKeyPrefix(dagId("dag-alpha"));
+    const prefixB = cacheKeyPrefix(dagId("dag-beta"));
 
     expect(prefixA).not.toBe(prefixB);
     expect(prefixA).toBe("fugue:dag-alpha:cache:");
@@ -112,11 +112,11 @@ describe("DAG cache key isolation (pure)", () => {
   });
 
   test("two DAGs with same runId and nodeId produce different checkpoint keys", () => {
-    const runId = "run-001";
-    const nodeId = "fetch-data";
+    const runIdVal = makeRunId("run-001");
+    const nodeIdVal = makeNodeId("fetch-data");
 
-    const keyA = buildCheckpointKey("dag-alpha", runId, nodeId);
-    const keyB = buildCheckpointKey("dag-beta", runId, nodeId);
+    const keyA = buildCheckpointKey(dagId("dag-alpha"), runIdVal, nodeIdVal);
+    const keyB = buildCheckpointKey(dagId("dag-beta"), runIdVal, nodeIdVal);
 
     expect(keyA).not.toBe(keyB);
     expect(keyA).toBe("fugue:dag-alpha:run-001:fetch-data");
@@ -124,8 +124,8 @@ describe("DAG cache key isolation (pure)", () => {
   });
 
   test("checkpoint prefixes are distinct per DAG even with same runId", () => {
-    const prefixA = checkpointKeyPrefix("dag-alpha", "run-xyz");
-    const prefixB = checkpointKeyPrefix("dag-beta", "run-xyz");
+    const prefixA = checkpointKeyPrefix(dagId("dag-alpha"), makeRunId("run-xyz"));
+    const prefixB = checkpointKeyPrefix(dagId("dag-beta"), makeRunId("run-xyz"));
 
     expect(prefixA).not.toBe(prefixB);
   });
@@ -139,8 +139,8 @@ describe("DAG cache adapter isolation (integration)", () => {
   test("two namespaced caches for different DAGs writing same key are isolated", async () => {
     const { port: redis, store } = createMockRedis();
 
-    const cacheA = createNamespacedCache(redis, "dag-alpha", undefined, noopLogger);
-    const cacheB = createNamespacedCache(redis, "dag-beta", undefined, noopLogger);
+    const cacheA = createNamespacedCache(redis, dagId("dag-alpha"), undefined, noopLogger);
+    const cacheB = createNamespacedCache(redis, dagId("dag-beta"), undefined, noopLogger);
 
     // Both write to the same logical key
     await cacheA.set("shared-key", { source: "alpha" });
@@ -164,8 +164,8 @@ describe("DAG cache adapter isolation (integration)", () => {
   test("cache miss in one DAG does not affect another DAG's cache", async () => {
     const { port: redis } = createMockRedis();
 
-    const cacheA = createNamespacedCache(redis, "dag-alpha", undefined, noopLogger);
-    const cacheB = createNamespacedCache(redis, "dag-beta", undefined, noopLogger);
+    const cacheA = createNamespacedCache(redis, dagId("dag-alpha"), undefined, noopLogger);
+    const cacheB = createNamespacedCache(redis, dagId("dag-beta"), undefined, noopLogger);
 
     await cacheA.set("only-in-alpha", { data: 42 });
 
@@ -184,13 +184,13 @@ describe("DAG cache adapter isolation (integration)", () => {
 describe("DAG checkpoint writer isolation (integration)", () => {
   test("two checkpoint writers for different DAGs writing same node are isolated", async () => {
     const { port: redis, store } = createMockRedis();
-    const runId = "run-shared" as unknown as RunId;
+    const runIdVal = makeRunId("run-shared");
 
-    const writerA = createNamespacedCheckpointWriter(redis, "dag-alpha", "run-shared", undefined, noopLogger);
-    const writerB = createNamespacedCheckpointWriter(redis, "dag-beta", "run-shared", undefined, noopLogger);
+    const writerA = createNamespacedCheckpointWriter(redis, dagId("dag-alpha"), runIdVal, undefined, noopLogger);
+    const writerB = createNamespacedCheckpointWriter(redis, dagId("dag-beta"), runIdVal, undefined, noopLogger);
 
-    await writerA.write(runId, "node-1" as unknown as import("@fugue/framework").NodeId, { output: "from-alpha" });
-    await writerB.write(runId, "node-1" as unknown as import("@fugue/framework").NodeId, { output: "from-beta" });
+    await writerA.write(runIdVal, makeNodeId("node-1"), { output: "from-alpha" });
+    await writerB.write(runIdVal, makeNodeId("node-1"), { output: "from-beta" });
 
     // Both wrote to distinct keys
     expect(store.size).toBe(2);

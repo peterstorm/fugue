@@ -93,7 +93,7 @@ export const FugueYamlSchema = z.object({
   /** Per-DAG concurrency limit override */
   maxConcurrent: z.number().optional(),
   /** Per-DAG timeout override (ms) */
-  timeoutMs: z.number().optional(),
+  timeoutMs: z.number().positive().optional(),
   /** Custom route path override (defaults to DAG ID) */
   route: z.string().optional(),
   /** Per-DAG cache TTL override (FR-041) */

@@ -6,7 +6,7 @@
  */
 
 import type { RegisteredDag } from "./registry.js";
-import type { LoadResult } from "../adapters/module-loader.js";
+import type { LoadResult } from "../ports.js";
 import type { DagSnapshot } from "./dag-diff.js";
 import { resolveDefaults } from "./dag-registration.js";
 

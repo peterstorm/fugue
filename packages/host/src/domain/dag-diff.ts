@@ -49,12 +49,12 @@ export const diffDags = (
   previous: readonly DagSnapshot[],
   current: readonly DagSnapshot[],
 ): DagDiff => {
-  const prevMap = new Map<string, DagSnapshot>();
+  const prevMap = new Map<DagId, DagSnapshot>();
   for (const dag of previous) {
     prevMap.set(dag.id, dag);
   }
 
-  const currMap = new Map<string, DagSnapshot>();
+  const currMap = new Map<DagId, DagSnapshot>();
   for (const dag of current) {
     currMap.set(dag.id, dag);
   }

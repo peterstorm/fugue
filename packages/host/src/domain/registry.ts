@@ -16,8 +16,8 @@ import type { z } from "zod";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * Per-DAG configuration — fully resolved with no optionals.
- * Constructed from DagRegistration defaults + fugue.yaml overrides.
+ * Per-DAG configuration — core fields (route, timeout, maxConcurrency) fully resolved.
+ * Optional TTL and circuit-breaker overrides use host defaults when undefined.
  */
 export interface ResolvedDagConfig {
   readonly route: string;

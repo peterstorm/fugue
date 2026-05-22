@@ -2,10 +2,9 @@
  * Run DAG handler — POST /dags/:id/run
  *
  * FR-020: Executes DAG and returns result as JSON with 200
- * FR-023: Invalid input returns 400 with machine-readable JSON describing failed fields
- * FR-024: DAG timeout returns 408 with run ID (enables future resumption)
- * FR-025: Non-existent DAG returns 404 with available DAG IDs listed
- * FR-027: Per-DAG concurrency limit exceeded returns 429
+ * FR-026: Error responses are machine-readable JSON with error/message/details/dagId/runId
+ * FR-027: Per-DAG concurrency limit exceeded returns 429 with Retry-After
+ * FR-028: Per-DAG timeout returns 408 with run ID (enables future resumption)
  */
 
 import type { Context } from "hono";
@@ -199,7 +198,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
         throw wrapped;
       }
     } finally {
-      // 8. Release concurrency token
+      // 7. Release concurrency token
       // INVARIANT: This read-transform-write MUST remain synchronous (no await).
       // Single-threaded event loop guarantees atomicity within a tick.
       const currentConcurrency = deps.getConcurrency();
