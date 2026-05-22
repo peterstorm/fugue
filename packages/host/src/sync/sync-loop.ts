@@ -17,7 +17,7 @@
  * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
  * @satisfies FR-002 — Discover DAGs by scanning dags/{team}/{name}/dag.ts convention
  * @satisfies FR-003 — Dynamically import discovered DAG modules with SHA cache-busting
- * @satisfies NFR-003 — Git sync detection SHOULD complete within poll interval + 5s (individual ops timeout at 30s; overall cycle timeout not yet enforced)
+ * @satisfies NFR-003 — Git sync detection MUST complete within poll interval + 5s (individual ops timeout at 30s; overall cycle timeout TBD — tracked for future enforcement)
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
@@ -76,6 +76,11 @@ export type OnSyncStarted = () => void;
  * Callback invoked when sync completes with a new registry.
  */
 export type OnSyncComplete = (registry: Registry, sha: GitSha) => void;
+
+/**
+ * Callback invoked when sync completes with no changes (SHA unchanged).
+ */
+export type OnSyncNoChange = (sha: GitSha) => void;
 
 /**
  * Callback invoked when sync fails.
@@ -229,6 +234,7 @@ export const startSyncLoop = (
   logger: SyncLogger,
   onStarted: OnSyncStarted,
   onComplete: OnSyncComplete,
+  onNoChange: OnSyncNoChange,
   onError: OnSyncError,
   initialSha: GitSha = gitSha(""),
 ): SyncLoopHandle => {
@@ -253,6 +259,8 @@ export const startSyncLoop = (
         lastSha = result.newSha;
       } else if (result.kind === "no-change") {
         lastSha = result.currentSha;
+        // Transition syncing → ready (sync succeeded, nothing changed)
+        onNoChange(result.currentSha);
       } else if (result.kind === "error") {
         onError(result.syncError);
       }

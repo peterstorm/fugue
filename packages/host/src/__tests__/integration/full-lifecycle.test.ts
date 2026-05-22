@@ -6,9 +6,9 @@
  *
  * @satisfies FR-006 — Host MUST refuse to start if Redis is unreachable
  * @satisfies SC-001 — Given valid DAG merged to main, host discovers and registers within poll interval + 5s
- * @satisfies SC-003 — Given git remote unreachable, host logs warning and retries; existing DAGs remain active
- * @satisfies NFR-030 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
- * @satisfies NFR-031 — Host MUST log startup/shutdown lifecycle events
+ * @satisfies NFR-012 — Git sync failures MUST NOT affect serving of already-loaded DAGs
+ * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
+ * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
 import { describe, test, expect, afterEach } from "bun:test";
@@ -212,7 +212,7 @@ describe("Full Host Lifecycle", () => {
     }
   });
 
-  test("NFR-031: logs startup lifecycle events", async () => {
+  test("NFR-020: logs startup lifecycle events", async () => {
     const { port, redis } = createFakeRedis();
     const logger = createTestLogger();
 
@@ -332,7 +332,7 @@ describe("Full Host Lifecycle", () => {
     }
   });
 
-  test("SC-003: sync failure preserves existing DAGs", async () => {
+  test("NFR-012: sync failure preserves existing DAGs", async () => {
     const dags = [fakeLoadResult("stable:dag")];
     let shaCounter = 0;
     let pullShouldFail = false;
@@ -396,7 +396,7 @@ describe("Full Host Lifecycle", () => {
     expect(warnLogs.some((l) => l.msg.includes("Git pull failed"))).toBe(true);
   });
 
-  test("NFR-030: graceful shutdown stops sync and server", async () => {
+  test("FR-060: graceful shutdown stops sync and server", async () => {
     const dags = [fakeLoadResult("shutdown:test")];
     const { port, redis } = createFakeRedis();
     const logger = createTestLogger();

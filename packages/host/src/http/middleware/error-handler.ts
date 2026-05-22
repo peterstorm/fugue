@@ -30,6 +30,7 @@ const isHostError = (e: unknown): e is HostError =>
 
 /**
  * Extract details from a HostError for the response body.
+ * Exhaustive — adding a new HostError kind without a case here is a compile error.
  */
 const detailsFor = (error: HostError): unknown =>
   match(error)
@@ -39,7 +40,26 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "global-concurrency-exceeded" }, () => ({ scope: "global" }))
     .with({ kind: "dag-concurrency-exceeded" }, (e) => ({ scope: "dag", dagId: e.dagId }))
     .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
-    .otherwise(() => undefined);
+    .with({ kind: "forbidden" }, (e) => ({ callerTeam: e.callerTeam, dagTeam: e.dagTeam }))
+    .with({ kind: "dag-disabled" }, (e) => ({ reason: e.reason }))
+    .with({ kind: "body-parse-failed" }, () => undefined)
+    .with({ kind: "git-clone-failed" }, () => undefined)
+    .with({ kind: "git-pull-failed" }, () => undefined)
+    .with({ kind: "git-timeout" }, () => undefined)
+    .with({ kind: "git-spawn-failed" }, () => undefined)
+    .with({ kind: "import-failed" }, () => undefined)
+    .with({ kind: "no-default-export" }, () => undefined)
+    .with({ kind: "redis-unavailable" }, () => undefined)
+    .with({ kind: "bun-install-failed" }, () => undefined)
+    .with({ kind: "config-invalid" }, () => undefined)
+    .with({ kind: "dag-validation-failed" }, () => undefined)
+    .with({ kind: "discovery-failed" }, () => undefined)
+    .with({ kind: "async-result-expired" }, () => undefined)
+    .with({ kind: "unauthorized" }, () => undefined)
+    .with({ kind: "team-already-exists" }, () => undefined)
+    .with({ kind: "team-not-found" }, () => undefined)
+    .with({ kind: "internal-invariant-violated" }, () => undefined)
+    .exhaustive();
 
 /**
  * Extract dagId if present on the error.

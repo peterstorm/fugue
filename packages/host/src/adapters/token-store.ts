@@ -96,7 +96,10 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
           hashPrefix: String(hash).slice(0, 8),
           error: e instanceof Error ? e.message : String(e),
         });
-        return ok(null);
+        return err({
+          kind: "redis-unavailable",
+          operation: `token-resolve: corrupt grant data for hash ${String(hash).slice(0, 8)}…`,
+        } as HostError);
       }
     },
 
@@ -121,8 +124,14 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
       const teamJson = JSON.stringify({ hash, grant });
       const teamSetResult = await redis.set(teamKey(team), teamJson);
       if (!teamSetResult.ok) {
-        // Rollback: expire the orphaned token hash to prevent unrevokable ghost token
-        await redis.del(tokenKey(hash));
+        // Rollback: delete the orphaned token hash to prevent unrevokable ghost token
+        const rollbackResult = await redis.del(tokenKey(hash));
+        if (!rollbackResult.ok) {
+          logger?.error("[token-store] CRITICAL: Failed to rollback orphaned token hash — token is valid but unrevokable via admin API", {
+            team,
+            hashPrefix: String(hash).slice(0, 8),
+          });
+        }
         return err({ kind: "redis-unavailable", operation: "token-store-team-index" } as HostError);
       }
 
@@ -148,11 +157,14 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
         const parsed = JSON.parse(teamResult.value) as { hash: string };
         hash = parsed.hash;
       } catch (e) {
-        logger?.error("[token-store] Corrupt team index data in Redis", {
+        logger?.error("[token-store] Corrupt team index data in Redis — revocation failed", {
           team,
           error: e instanceof Error ? e.message : String(e),
         });
-        return ok(undefined);
+        return err({
+          kind: "redis-unavailable",
+          operation: `token-revoke: corrupt team index for '${team}' — manual cleanup required`,
+        } as HostError);
       }
 
       // Delete token hash key

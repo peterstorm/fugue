@@ -22,6 +22,19 @@ export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: GitS
   }));
 
 /**
+ * Extract team name from module path following dags/{team}/{dag-name}/dag.ts convention.
+ * Returns "unknown" when path doesn't follow convention (caller should log a warning).
+ */
+export const extractTeam = (modulePath: string): { team: string; inferred: boolean } => {
+  const pathParts = modulePath.split("/");
+  const dagsDirIndex = pathParts.lastIndexOf("dags");
+  if (dagsDirIndex >= 0 && dagsDirIndex + 1 < pathParts.length) {
+    return { team: pathParts[dagsDirIndex + 1], inferred: true };
+  }
+  return { team: "unknown", inferred: false };
+};
+
+/**
  * Convert a LoadResult to a RegisteredDag for the registry.
  *
  * Resolves defaults, extracts team from path convention, and marks as healthy.
@@ -32,12 +45,7 @@ export const loadResultToRegisteredDag = (
   now: number,
 ): RegisteredDag => {
   const resolved = resolveDefaults(result.registration);
-  // Extract team from path: dags/{team}/{dag-name}/dag.ts
-  const pathParts = result.modulePath.split("/");
-  const dagsDirIndex = pathParts.lastIndexOf("dags");
-  const team = dagsDirIndex >= 0 && dagsDirIndex + 1 < pathParts.length
-    ? pathParts[dagsDirIndex + 1]
-    : "unknown";
+  const { team } = extractTeam(result.modulePath);
 
   return {
     id: result.id,

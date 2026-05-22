@@ -51,14 +51,14 @@ export interface BulkLoadResult {
 export interface ModuleLoaderPort {
   readonly loadDagModule: (
     modulePath: string,
-    sha: string,
+    sha: GitSha,
   ) => Promise<Result<LoadResult, HostError>>;
 
   readonly discoverDagPaths: (dagsRoot: string) => Promise<Result<string[], HostError>>;
 
   readonly loadAll: (
     dagsRoot: string,
-    sha: string,
+    sha: GitSha,
   ) => Promise<BulkLoadResult>;
 }
 

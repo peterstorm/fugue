@@ -13,7 +13,6 @@
 import { Hono } from "hono";
 import type { HostState } from "../domain/host-state.js";
 import { createErrorHandler } from "./middleware/error-handler.js";
-import type { ErrorHandlerLogger } from "./middleware/error-handler.js";
 import { createAuthMiddleware } from "./middleware/auth.js";
 import type { AuthMiddlewareDeps } from "./middleware/auth.js";
 import { healthHandler, readinessHandler } from "./handlers/health.js";
@@ -22,6 +21,7 @@ import { createRunDagHandler } from "./handlers/run-dag.js";
 import type { RunDagDeps } from "./handlers/run-dag.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
+import type { LogPort } from "../ports.js";
 
 // ---------------------------------------------------------------------------
 // Shared environment type for Hono context variables
@@ -40,7 +40,7 @@ export type HostEnv = {
 
 export interface RouterDeps extends RunDagDeps, AuthMiddlewareDeps {
   readonly getHostState: () => HostState;
-  readonly logger: ErrorHandlerLogger;
+  readonly logger: LogPort;
   readonly adminHandlerDeps: AdminHandlerDeps;
 }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { ok, err, dagId } from "@fugue/framework";
-import type { Result, DagId, DagDef } from "@fugue/framework";
+import { ok, err, dagId, gitSha } from "@fugue/framework";
+import type { Result, DagId, DagDef, GitSha } from "@fugue/framework";
 import { z } from "zod";
 import type { HostError } from "../domain/host-error.js";
 import {
@@ -98,7 +98,7 @@ describe("Module Loader", () => {
   describe("loadDagModule", () => {
     it("loads a valid DAG module and returns LoadResult", async () => {
       const path = join(TEST_DIR, "dags", "team-a", "test-dag", "dag.ts");
-      const result = await loadDagModule(path, "sha123");
+      const result = await loadDagModule(path, gitSha("sha123"));
 
       expect(result.ok).toBe(true);
       if (result.ok) {
@@ -110,7 +110,7 @@ describe("Module Loader", () => {
 
     it("returns import-failed for syntax errors with message and path", async () => {
       const path = join(TEST_DIR, "dags", "broken", "syntax-error", "dag.ts");
-      const result = await loadDagModule(path, "sha123");
+      const result = await loadDagModule(path, gitSha("sha123"));
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -124,7 +124,7 @@ describe("Module Loader", () => {
 
     it("returns no-default-export when module has no default export", async () => {
       const path = join(TEST_DIR, "dags", "broken", "bad-export", "dag.ts");
-      const result = await loadDagModule(path, "sha123");
+      const result = await loadDagModule(path, gitSha("sha123"));
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -137,7 +137,7 @@ describe("Module Loader", () => {
 
     it("returns dag-validation-failed with dagId and reason for invalid schema shape", async () => {
       const path = join(TEST_DIR, "dags", "broken", "bad-schema", "dag.ts");
-      const result = await loadDagModule(path, "sha123");
+      const result = await loadDagModule(path, gitSha("sha123"));
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -153,7 +153,7 @@ describe("Module Loader", () => {
 
     it("returns import-failed for non-existent path", async () => {
       const path = join(TEST_DIR, "dags", "nonexistent", "dag.ts");
-      const result = await loadDagModule(path, "sha123");
+      const result = await loadDagModule(path, gitSha("sha123"));
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -167,8 +167,8 @@ describe("Module Loader", () => {
 
     it("uses SHA for cache-busting (different SHA does not break loading)", async () => {
       const path = join(TEST_DIR, "dags", "team-a", "test-dag", "dag.ts");
-      const result1 = await loadDagModule(path, "sha-v1");
-      const result2 = await loadDagModule(path, "sha-v2");
+      const result1 = await loadDagModule(path, gitSha("sha-v1"));
+      const result2 = await loadDagModule(path, gitSha("sha-v2"));
 
       expect(result1.ok).toBe(true);
       expect(result2.ok).toBe(true);
@@ -179,8 +179,8 @@ describe("Module Loader", () => {
       // MUST produce different module references. If they're identical, hot-reload is
       // broken and the host ships first-seen DAG code frozen until process restart.
       const path = join(TEST_DIR, "dags", "team-a", "test-dag", "dag.ts");
-      const result1 = await loadDagModule(path, "sha-aaa");
-      const result2 = await loadDagModule(path, "sha-bbb");
+      const result1 = await loadDagModule(path, gitSha("sha-aaa"));
+      const result2 = await loadDagModule(path, gitSha("sha-bbb"));
 
       expect(result1.ok).toBe(true);
       expect(result2.ok).toBe(true);
@@ -252,7 +252,7 @@ describe("Module Loader", () => {
 
   describe("loadAll", () => {
     it("loads valid DAGs and reports errors for invalid ones", async () => {
-      const result = await loadAll(TEST_DIR, "sha-bulk");
+      const result = await loadAll(TEST_DIR, gitSha("sha-bulk"));
 
       expect(result.loaded).toHaveLength(2);
       expect(result.errors).toHaveLength(3);
@@ -263,7 +263,7 @@ describe("Module Loader", () => {
     });
 
     it("isolates errors — one bad DAG does not affect others (NFR-010)", async () => {
-      const result = await loadAll(TEST_DIR, "sha-isolation");
+      const result = await loadAll(TEST_DIR, gitSha("sha-isolation"));
 
       // Valid DAGs load despite broken ones existing
       expect(result.loaded).toHaveLength(2);
@@ -281,7 +281,7 @@ describe("Module Loader", () => {
       mkdirSync(join(tempDir, "dags", "broken", "bad-export"), { recursive: true });
       writeFileSync(join(tempDir, "dags", "broken", "bad-export", "dag.ts"), INVALID_DAG_MODULE_NO_EXPORT);
 
-      const result = await loadAll(tempDir, "sha-no-valid");
+      const result = await loadAll(tempDir, gitSha("sha-no-valid"));
       expect(result.loaded).toHaveLength(0);
       expect(result.errors).toHaveLength(1);
     });
@@ -290,13 +290,13 @@ describe("Module Loader", () => {
       const emptyDir = join(TEST_DIR, "truly-empty");
       mkdirSync(emptyDir, { recursive: true });
 
-      const result = await loadAll(emptyDir, "sha-empty");
+      const result = await loadAll(emptyDir, gitSha("sha-empty"));
       expect(result.loaded).toHaveLength(0);
       expect(result.errors).toHaveLength(0);
     });
 
     it("surfaces discovery-failed as an error when directory is inaccessible", async () => {
-      const result = await loadAll("/nonexistent/dags/root", "sha-bad-root");
+      const result = await loadAll("/nonexistent/dags/root", gitSha("sha-bad-root"));
 
       expect(result.loaded).toHaveLength(0);
       expect(result.errors).toHaveLength(1);

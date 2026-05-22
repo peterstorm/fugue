@@ -62,19 +62,29 @@ export const createNamespacedCache = (
   dagId: DagId,
   defaultTtlSec: number | undefined,
   logger: LogPort,
-): ContextCacheAdapter => ({
+): ContextCacheAdapter => {
+  let consecutiveGetFailures = 0;
+  let consecutiveSetFailures = 0;
+  const FAILURE_ESCALATION_THRESHOLD = 10;
+
+  return {
   get: async (key: string): Promise<CacheLookup> => {
     const fullKey = buildCacheKey(dagId, key);
     const result = await redis.get(fullKey);
     if (!result.ok) {
-      // Redis unavailable — graceful degradation to cache miss
-      logger.warn("Cache get failed — graceful degradation to miss", {
-        key: fullKey,
-        dagId,
-        error: result.error.kind,
-      });
+      consecutiveGetFailures++;
+      if (consecutiveGetFailures >= FAILURE_ESCALATION_THRESHOLD) {
+        logger.error("Cache get failures exceeded threshold — Redis may be degraded", {
+          key: fullKey, dagId, consecutiveFailures: consecutiveGetFailures,
+        });
+      } else {
+        logger.warn("Cache get failed — graceful degradation to miss", {
+          key: fullKey, dagId, error: result.error.kind,
+        });
+      }
       return { hit: false };
     }
+    consecutiveGetFailures = 0;
     const raw = result.value;
     if (raw === null) return { hit: false };
     try {
@@ -113,11 +123,21 @@ export const createNamespacedCache = (
       ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
       : await redis.set(fullKey, serialized);
     if (!setResult.ok) {
-      logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: setResult.error.kind });
+      consecutiveSetFailures++;
+      if (consecutiveSetFailures >= FAILURE_ESCALATION_THRESHOLD) {
+        logger.error("Cache set failures exceeded threshold — Redis may be degraded", {
+          key: fullKey, dagId, consecutiveFailures: consecutiveSetFailures,
+        });
+      } else {
+        logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: setResult.error.kind });
+      }
+    } else {
+      consecutiveSetFailures = 0;
     }
     return ok(undefined);
   },
-});
+};
+};
 
 /**
  * Create a CheckpointWriter that prefixes all keys with DAG + run namespace.

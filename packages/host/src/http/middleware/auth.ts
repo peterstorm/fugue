@@ -46,6 +46,8 @@ export interface AuthMiddlewareDeps {
   readonly adminToken: string;
   /** Token store for resolving team tokens */
   readonly tokenStore: TokenStorePort;
+  /** Optional logger for diagnosing auth failures */
+  readonly logger?: import("../../ports.js").LogPort;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +115,12 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
           "Authentication service temporarily unavailable");
       }
       grant = resolveResult.value;
-    } catch {
+    } catch (e) {
+      // Log the actual error server-side for diagnostics
+      deps.logger?.error("[auth-middleware] Token resolution failed unexpectedly", {
+        error: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined,
+      });
       // crypto.subtle or unexpected failure — surface as 503
       return errorResponse(c, 503, "auth-service-unavailable",
         "Authentication service temporarily unavailable");

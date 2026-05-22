@@ -3,7 +3,7 @@
  * get isolated Redis namespaces via the NodeContext factory.
  *
  * @satisfies SC-008 — Two DAGs with same cache key get different Redis prefixes
- * @satisfies FR-030 — Cache keys prefixed fugue:<dagId>:cache:<key>
+ * @satisfies FR-031 — Cache keys prefixed fugue:<dagId>:cache:<key>
  * @satisfies FR-031 — Checkpoint keys prefixed fugue:<dagId>:<runId>:<nodeId>
  */
 

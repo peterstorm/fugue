@@ -10,7 +10,7 @@
  */
 
 import { ok, err } from "@fugue/framework";
-import type { Result, DagId } from "@fugue/framework";
+import type { Result, DagId, GitSha } from "@fugue/framework";
 import { tryDagId } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import { validateDagRegistration } from "../domain/dag-registration.js";
@@ -31,7 +31,7 @@ import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "..
  */
 export const loadDagModule = async (
   modulePath: string,
-  sha: string,
+  sha: GitSha,
 ): Promise<Result<LoadResult, HostError>> => {
   let mod: unknown;
 
@@ -117,7 +117,7 @@ export const discoverDagPaths = async (dagsRoot: string): Promise<Result<string[
  */
 export const loadAll = async (
   dagsRoot: string,
-  sha: string,
+  sha: GitSha,
 ): Promise<BulkLoadResult> => {
   const pathsResult = await discoverDagPaths(dagsRoot);
   if (!pathsResult.ok) {

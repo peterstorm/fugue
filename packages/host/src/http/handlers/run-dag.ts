@@ -133,6 +133,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     if (!circuitCheck.allowed) {
       return errorResponse(c, 503, "dag-disabled", `Circuit breaker open for DAG '${dagId}'`, {
         dagId,
+        headers: { "Retry-After": "30" },
       });
     }
 
@@ -161,9 +162,10 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     // createContext or setTimeout throws. The inner try/catch handles
     // execution-level errors (timeout, framework errors, unhandled throws).
     try {
-      const timeoutMs = registered.config.timeout ?? 30_000;
+      const timeoutMs = registered.config.timeout;
+      const HOST_TIMEOUT = Symbol("host-timeout");
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const timeoutId = setTimeout(() => controller.abort(HOST_TIMEOUT), timeoutMs);
       const ctx = deps.createContext(registered, controller.signal);
       const startTime = deps.clock();
 
@@ -192,8 +194,8 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       } catch (e: unknown) {
         clearTimeout(timeoutId);
 
-        // Handle abort (timeout)
-        if (e instanceof Error && e.name === "AbortError") {
+        // Handle abort (timeout) — only if caused by HOST_TIMEOUT sentinel
+        if (e instanceof Error && e.name === "AbortError" && controller.signal.reason === HOST_TIMEOUT) {
           markFailure(permit, deps.clock(), deps.circuitConfig);
           const timeoutErr: HostError = {
             kind: "timeout",
