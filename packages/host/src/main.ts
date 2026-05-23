@@ -25,7 +25,7 @@ import type { Result, LlmClient, Tracer } from "@fugue/framework";
 
 const safeStringify = (obj: unknown): string => {
   try { return JSON.stringify(obj); }
-  catch { return `[unserializable: ${typeof obj}]`; }
+  catch (_e) { return `[unserializable: ${typeof obj}]`; }
 };
 
 const createLogger = (): SyncLogger => ({
@@ -39,7 +39,7 @@ const createLogger = (): SyncLogger => ({
 const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> }, HostError>> => {
   try {
     // Dynamic import avoids loading ioredis at module-level for tests
-    const { default: Redis } = await import("ioredis");
+    const { Redis } = await import("ioredis");
     const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
 
     const port: RedisConnectivityPort = {
@@ -203,7 +203,7 @@ const main = async () => {
 
     logger.info("Fugue host is running");
   } catch (e) {
-    await disconnectRedis().catch((disconnectErr) => {
+    await disconnectRedis().catch((disconnectErr: unknown) => {
       console.error(JSON.stringify({
         level: "error",
         msg: "Failed to disconnect Redis during error cleanup",

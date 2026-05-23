@@ -10,8 +10,7 @@
 
 import type { Context } from "hono";
 import { formatToken, hashToken } from "../../../domain/auth.js";
-import type { TokenGrant } from "../../../domain/auth.js";
-import type { AuthIdentity } from "../../../domain/auth.js";
+import type { TokenGrant, AuthIdentity } from "../../../domain/auth.js";
 import type { TokenStorePort } from "../../../ports.js";
 import { errorResponse } from "../../response.js";
 
@@ -134,7 +133,7 @@ export const createListTeamsHandler = (deps: AdminHandlerDeps) => {
 
     return c.json({
       ok: true,
-      teams: teams.map((t) => ({
+      teams: teams.map((t: TokenGrant) => ({
         team: t.team,
         label: t.label,
         createdAt: t.createdAt,

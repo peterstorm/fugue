@@ -28,7 +28,7 @@ import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
-import { createInMemoryTokenStore, createRedisTokenStore } from "./adapters/token-store.js";
+import { createRedisTokenStore } from "./adapters/token-store.js";
 import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
