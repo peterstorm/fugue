@@ -34,7 +34,7 @@ export interface RunDagDeps {
   readonly setConcurrency: (s: ConcurrencyState) => void;
   readonly circuit: CircuitPort;
   readonly circuitConfig: CircuitConfig;
-  readonly createContext: (registered: RegisteredDag, signal?: AbortSignal) => NodeContext;
+  readonly createContext: (registered: RegisteredDag, signal: AbortSignal) => NodeContext;
   readonly executeDag: <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
 }

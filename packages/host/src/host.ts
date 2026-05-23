@@ -123,10 +123,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       get: (id) => circuitBreakers.get(id) ?? initCircuit(Date.now()),
       set: (id, s) => { circuitBreakers.set(id, s); },
     },
-    createContext: (registered: RegisteredDag, signal?: AbortSignal): NodeContext => {
+    createContext: (registered: RegisteredDag, signal: AbortSignal): NodeContext => {
       const rid = makeRunId(crypto.randomUUID());
-      const effectiveSignal = signal ?? new AbortController().signal;
-      return createNodeContextForDag(sharedInfra, registered, rid, effectiveSignal);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal);
     },
     executeDag: async <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions): Promise<Result<O, FrameworkError>> => {
       return runDag<I, O>(dag, input, ctx, opts);

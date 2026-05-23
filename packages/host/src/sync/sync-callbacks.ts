@@ -80,7 +80,7 @@ export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
       // Capture previous registry BEFORE state transition for accurate diff
       const prevRegistry = getRegistry(getState());
       const prevDags = prevRegistry
-        ? Array.from(prevRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }))
+        ? Array.from(prevRegistry.dags.values()).map(d => ({ id: d.id, path: d.modulePath, sha: d.sha }))
         : [];
 
       const result = syncCompleted(getState(), newRegistry, newSha, clock());
@@ -102,7 +102,7 @@ export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
         }
 
         // Compute and log diff between previous and new registry
-        const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.route, sha: d.sha }));
+        const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.modulePath, sha: d.sha }));
         const diff = diffDags(prevDags, newDags);
 
         logger.info("Registry updated via sync", {

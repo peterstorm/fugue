@@ -103,8 +103,22 @@ export interface RedisPort {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
   readonly del: (key: string) => Promise<Result<number, HostError>>;
-  /** Retrieve all keys matching a glob pattern. Used for listing (e.g., team index scan). */
+  /**
+   * @deprecated Use `scan()` for production — `keys()` blocks Redis with O(N) scan.
+   * Retained for backward compatibility in tests.
+   */
   readonly keys: (pattern: string) => Promise<Result<string[], HostError>>;
+  /**
+   * Cursor-based key scanning — production-safe alternative to `keys()`.
+   * Returns a batch of matching keys plus the next cursor. Cursor "0" signals completion.
+   * Call iteratively until cursor returns "0" to retrieve all matching keys.
+   */
+  readonly scan: (pattern: string, cursor?: string) => Promise<Result<{ cursor: string; keys: string[] }, HostError>>;
+  /**
+   * Set key only if it does not already exist (atomic check-and-set).
+   * Returns `true` if the key was set, `false` if it already existed.
+   */
+  readonly setNx: (key: string, value: string) => Promise<Result<boolean, HostError>>;
 }
 
 /**

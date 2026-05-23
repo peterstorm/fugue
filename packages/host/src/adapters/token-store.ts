@@ -72,9 +72,10 @@ export const createInMemoryTokenStore = (
 
 /**
  * Redis-backed token store for production.
- * Uses RedisPort for get/set/del/keys operations.
+ * Uses RedisPort for get/set/del/scan/setNx operations.
  *
- * listTeams scans Redis directly — survives host restarts without data loss.
+ * listTeams uses cursor-based SCAN — production-safe, non-blocking.
+ * store uses SETNX for atomic team claim — race-free under concurrency.
  */
 export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): TokenStorePort => {
   return {
@@ -96,49 +97,53 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
     },
 
     store: async (team, hash, grant) => {
-      // Check if team already exists (via reverse index)
-      const existingResult = await redis.get(teamKey(team));
-      if (!existingResult.ok) {
-        return err(redisUnavailable("token-store-check"));
+      // Atomic check-and-set: claim the team slot via SETNX to prevent races.
+      // Two concurrent store() calls for the same team: exactly one wins.
+      const teamJson = JSON.stringify({ hash, grant });
+      const claimResult = await redis.setNx(teamKey(team), teamJson);
+      if (!claimResult.ok) {
+        return err(redisUnavailable("token-store-claim"));
       }
-      if (existingResult.value !== null && existingResult.value !== "") {
+      if (!claimResult.value) {
+        // Another request already claimed this team
         return err(teamAlreadyExists(team));
       }
 
-      // Store token → grant mapping
+      // Team slot claimed — now store token → grant mapping
       const grantJson = JSON.stringify(grant);
       const tokenSetResult = await redis.set(tokenKey(hash), grantJson);
       if (!tokenSetResult.ok) {
-        return err(redisUnavailable("token-store-set"));
-      }
-
-      // Store team → { hash, grant } reverse index
-      const teamJson = JSON.stringify({ hash, grant });
-      const teamSetResult = await redis.set(teamKey(team), teamJson);
-      if (!teamSetResult.ok) {
-        // Rollback: delete the orphaned token hash to prevent unrevokable ghost token
-        const rollbackResult = await redis.del(tokenKey(hash));
+        // Rollback: delete the team index we just claimed
+        const rollbackResult = await redis.del(teamKey(team));
         if (!rollbackResult.ok) {
-          logger?.error("[token-store] CRITICAL: Failed to rollback orphaned token hash — token is valid but unrevokable via admin API", {
+          logger?.error("[token-store] CRITICAL: Failed to rollback team claim — team slot is occupied but token is not stored", {
             team,
             hashPrefix: String(hash).slice(0, 8),
           });
         }
-        return err(redisUnavailable("token-store-team-index"));
+        return err(redisUnavailable("token-store-set"));
       }
 
       return ok(undefined);
     },
 
     listTeams: async () => {
-      // Scan Redis for all team index keys — survives restarts
-      const keysResult = await redis.keys(`${TEAM_KEY_PREFIX}*`);
-      if (!keysResult.ok) {
-        return err(redisUnavailable("token-list-teams"));
-      }
+      // Cursor-based SCAN — production-safe, non-blocking alternative to KEYS.
+      const pattern = `${TEAM_KEY_PREFIX}*`;
+      const allKeys: string[] = [];
+      let cursor = "0";
+
+      do {
+        const scanResult = await redis.scan(pattern, cursor);
+        if (!scanResult.ok) {
+          return err(redisUnavailable("token-list-teams"));
+        }
+        allKeys.push(...scanResult.value.keys);
+        cursor = scanResult.value.cursor;
+      } while (cursor !== "0");
 
       const grants: TokenGrant[] = [];
-      for (const key of keysResult.value) {
+      for (const key of allKeys) {
         const valueResult = await redis.get(key);
         if (!valueResult.ok || valueResult.value === null || valueResult.value === "") {
           continue; // Skip unreadable entries — best effort

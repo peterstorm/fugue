@@ -53,6 +53,8 @@ export interface RegisteredDag {
   readonly loadedAt: number;
   readonly sha: GitSha;
   readonly status: DagStatus;
+  /** Absolute filesystem path of the dag.ts module that was imported. */
+  readonly modulePath: string;
 }
 
 /**

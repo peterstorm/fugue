@@ -92,6 +92,22 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
           return err({ kind: "redis-unavailable" as const, operation: `KEYS ${pattern}: ${e instanceof Error ? e.message : String(e)}` });
         }
       },
+      scan: async (pattern, cursor = "0") => {
+        try {
+          const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
+          return ok({ cursor: nextCursor, keys });
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `SCAN ${pattern}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
+      setNx: async (key, value) => {
+        try {
+          const result = await client.setnx(key, value);
+          return ok(result === 1);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `SETNX ${key}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
     };
 
     return ok({ port, redis, disconnect: () => client.quit() });
@@ -107,6 +123,11 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
 
 /**
  * Fail-on-use LLM client — surfaces missing configuration on first .chat() call.
+ *
+ * TODO: Wire real LLM client creation (Anthropic/OpenAI/Azure) here.
+ * Currently, all DAGs requiring LLM capabilities will receive this stub which
+ * returns a FrameworkError on .chat(). This is acceptable during the host MVP
+ * phase where DAGs are validated structurally but not yet executed via the host.
  *
  * SAFETY: With LLM_PROVIDER/key cross-validation in config, this only activates
  * if the API key is explicitly empty string (edge case). DAGs that don't use LLM

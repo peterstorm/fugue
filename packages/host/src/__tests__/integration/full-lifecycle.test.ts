@@ -133,6 +133,16 @@ const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivi
         const matched = [...store.keys()].filter(k => k.startsWith(prefix));
         return ok(matched);
       },
+      scan: async (pattern, _cursor = "0") => {
+        const prefix = pattern.replace(/\*$/, "");
+        const matched = [...store.keys()].filter(k => k.startsWith(prefix));
+        return ok({ cursor: "0", keys: matched });
+      },
+      setNx: async (key, value) => {
+        if (store.has(key)) return ok(false);
+        store.set(key, value);
+        return ok(true);
+      },
     },
   };
 };

@@ -42,6 +42,7 @@ const makeDag = (overrides?: Partial<RegisteredDag["config"]>): RegisteredDag =>
   loadedAt: 1000,
   sha: gitSha("abc123"),
   status: { kind: "healthy" },
+  modulePath: "/tmp/dags/eng/test-dag/dag.ts",
 });
 
 const createMockRedis = (store: Map<string, string> = new Map()): {
@@ -69,6 +70,15 @@ const createMockRedis = (store: Map<string, string> = new Map()): {
       const prefix = pattern.replace(/\*$/, "");
       return ok([...store.keys()].filter(k => k.startsWith(prefix)));
     },
+    scan: async (pattern, _cursor = "0") => {
+      const prefix = pattern.replace(/\*$/, "");
+      return ok({ cursor: "0", keys: [...store.keys()].filter(k => k.startsWith(prefix)) });
+    },
+    setNx: async (key, value) => {
+      if (store.has(key)) return ok(false);
+      store.set(key, value);
+      return ok(true);
+    },
   };
   return { redis, calls };
 };
@@ -78,6 +88,8 @@ const failingRedis = (): RedisPort => ({
   set: async () => err({ kind: "redis-unavailable", operation: "set" } as HostError),
   del: async () => err({ kind: "redis-unavailable", operation: "del" } as HostError),
   keys: async () => err({ kind: "redis-unavailable", operation: "keys" } as HostError),
+  scan: async () => err({ kind: "redis-unavailable", operation: "scan" } as HostError),
+  setNx: async () => err({ kind: "redis-unavailable", operation: "setnx" } as HostError),
 });
 
 const collectLogs = () => {

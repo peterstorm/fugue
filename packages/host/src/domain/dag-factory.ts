@@ -98,5 +98,6 @@ export const loadResultToRegisteredDag = (
     loadedAt: now,
     sha,
     status: { kind: "healthy" },
+    modulePath: result.modulePath,
   };
 };

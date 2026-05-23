@@ -52,18 +52,15 @@ export interface AuthMiddlewareDeps {
 }
 
 // ---------------------------------------------------------------------------
-// Hono env extension for auth identity
+// Middleware factory
 // ---------------------------------------------------------------------------
 
+/** @deprecated Use HostEnv from router.ts — kept for test backward compatibility */
 export type AuthEnv = {
   Variables: {
     authIdentity: AuthIdentity;
   };
 };
-
-// ---------------------------------------------------------------------------
-// Middleware factory
-// ---------------------------------------------------------------------------
 
 /**
  * Creates a Hono middleware that resolves bearer tokens to AuthIdentity.

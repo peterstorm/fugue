@@ -58,6 +58,7 @@ const makeRegisteredDag = (id: string): RegisteredDag => ({
   loadedAt: Date.now(),
   sha: gitSha("abc123"),
   status: { kind: "healthy" },
+  modulePath: `/tmp/dags/test/${id}/dag.ts`,
 });
 
 const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
@@ -74,6 +75,15 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
       keys: async (pattern: string) => {
         const prefix = pattern.replace(/\*$/, "");
         return ok([...store.keys()].filter(k => k.startsWith(prefix)));
+      },
+      scan: async (pattern: string, _cursor = "0") => {
+        const prefix = pattern.replace(/\*$/, "");
+        return ok({ cursor: "0", keys: [...store.keys()].filter(k => k.startsWith(prefix)) });
+      },
+      setNx: async (key: string, value: string) => {
+        if (store.has(key)) return ok(false);
+        store.set(key, value);
+        return ok(true);
       },
     },
   };
