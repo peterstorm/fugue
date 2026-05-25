@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createTransformNode, ok, fwLogger } from "@fugue/framework";
+import { match } from "ts-pattern";
 import type { Result, FrameworkError, GuardrailResult } from "@fugue/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
 import type { SummaryResponse } from "../../schemas/response.js";
@@ -31,14 +32,17 @@ export const createAssembleResponseNode = (customerId: string) =>
     transform: (input): Result<SummaryResponse, FrameworkError> => {
       const extraction = input["extract-features"];
 
-      switch (extraction.branch) {
-        case "not_found":
-          return ok({ status: "not_found" as const, customerId, message: "Customer not found" });
-        case "no_history":
-          return ok({ status: "no_history" as const, customerId, message: "No conversation history" });
-        case "insufficient_data":
-          return ok({ status: "insufficient_data" as const, customerId, message: "Insufficient data for analysis" });
-        case "ok": {
+      return match(extraction)
+        .with({ branch: "not_found" }, () =>
+          ok({ status: "not_found" as const, customerId, message: "Customer not found" }),
+        )
+        .with({ branch: "no_history" }, () =>
+          ok({ status: "no_history" as const, customerId, message: "No conversation history" }),
+        )
+        .with({ branch: "insufficient_data" }, () =>
+          ok({ status: "insufficient_data" as const, customerId, message: "Insufficient data for analysis" }),
+        )
+        .with({ branch: "ok" }, () => {
           const guardrail = input["grounding-guardrail"];
           if (guardrail === undefined || guardrail.kind === "skipped" || guardrail.kind === "failed") {
             // Guardrail output missing, skipped, or failed — degrade gracefully
@@ -59,11 +63,7 @@ export const createAssembleResponseNode = (customerId: string) =>
             summary: synthesis,
             groundingWarnings,
           });
-        }
-        default: {
-          const _exhaustive: never = extraction;
-          return ok({ status: "degraded" as const, customerId, message: `Unknown extraction branch: ${(extraction as any).branch}` });
-        }
-      }
+        })
+        .exhaustive();
     },
   });
