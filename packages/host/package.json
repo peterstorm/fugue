@@ -9,7 +9,7 @@
     "./contract": "./src/contract.ts"
   },
   "scripts": {
-    "typecheck": "tsc --build --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {
