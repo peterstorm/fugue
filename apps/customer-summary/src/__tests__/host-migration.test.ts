@@ -80,24 +80,24 @@ describe("resolveDefaults with customer-summary registration", () => {
 // ---------------------------------------------------------------------------
 
 describe("SummarizeInputSchema", () => {
-  test("accepts valid customer_id", () => {
-    const result = SummarizeInputSchema.safeParse({ customer_id: "cust-123" });
+  test("accepts valid customerId", () => {
+    const result = SummarizeInputSchema.safeParse({ customerId: "cust-123" });
     expect(result.success).toBe(true);
   });
 
-  test("rejects empty customer_id", () => {
-    const result = SummarizeInputSchema.safeParse({ customer_id: "" });
+  test("rejects empty customerId", () => {
+    const result = SummarizeInputSchema.safeParse({ customerId: "" });
     expect(result.success).toBe(false);
   });
 
-  test("rejects missing customer_id", () => {
+  test("rejects missing customerId", () => {
     const result = SummarizeInputSchema.safeParse({});
     expect(result.success).toBe(false);
   });
 
   test("accepts optional resume_run_id", () => {
     const result = SummarizeInputSchema.safeParse({
-      customer_id: "cust-123",
+      customerId: "cust-123",
       resume_run_id: "run-abc",
     });
     expect(result.success).toBe(true);
@@ -107,7 +107,7 @@ describe("SummarizeInputSchema", () => {
   });
 
   test("accepts payload without resume_run_id", () => {
-    const result = SummarizeInputSchema.safeParse({ customer_id: "cust-123" });
+    const result = SummarizeInputSchema.safeParse({ customerId: "cust-123" });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.resume_run_id).toBeUndefined();
@@ -119,7 +119,7 @@ describe("SummarizeInputSchema", () => {
   });
 
   test("inputSchema validates same shape as SummarizeInputSchema", () => {
-    const valid = { customer_id: "test-id" };
+    const valid = { customerId: "test-id" };
     const parsed = registration.inputSchema.parse(valid);
     expect(parsed).toEqual(valid);
   });

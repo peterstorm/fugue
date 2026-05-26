@@ -237,5 +237,6 @@ export const createNodeContextForDag = (
     checkpointWriter,
     signal,
     contentFilter: shared.contentFilter,
+    prompts: shared.prompts ?? { get: () => null },
   });
 };

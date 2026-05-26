@@ -8,7 +8,7 @@
  * for operations that can fail, making failure explicit at the type level.
  */
 
-import type { Result, DagId, GitSha, LlmClient, Tracer } from "@fugue/framework";
+import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess } from "@fugue/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
@@ -139,6 +139,7 @@ export interface SharedInfra {
   readonly redis: RedisPort;
   readonly tracer: Tracer;
   readonly contentFilter: ContentFilter | null;
+  readonly prompts: PromptAccess | null;
   readonly logger: LogPort;
 }
 

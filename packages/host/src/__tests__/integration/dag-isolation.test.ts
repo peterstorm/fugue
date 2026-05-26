@@ -94,6 +94,7 @@ const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
   redis,
   tracer: noopTracer,
   contentFilter: null,
+  prompts: null,
   logger: { info: () => {}, warn: () => {}, error: () => {} },
 });
 

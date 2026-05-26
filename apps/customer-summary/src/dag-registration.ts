@@ -19,7 +19,7 @@ import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 // ---------------------------------------------------------------------------
 
 export const SummarizeInputSchema = z.object({
-  customer_id: z.string().min(1),
+  customerId: z.string().min(1),
   resume_run_id: z.string().optional(),
 });
 

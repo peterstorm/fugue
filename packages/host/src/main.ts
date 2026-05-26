@@ -190,6 +190,7 @@ const main = async () => {
       redis,
       tracer: noopTracer,
       contentFilter: null,
+      prompts: null,
       logger,
     };
 
