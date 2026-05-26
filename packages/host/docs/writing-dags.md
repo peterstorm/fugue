@@ -2,6 +2,9 @@
 
 This guide explains how to create a DAG that the Fugue Host will discover, validate, and serve via HTTP.
 
+> **Quick reference:** For a copy-paste-ready skeleton and all node factory signatures,
+> see [`docs/llm-dag-authoring.md`](../../../docs/llm-dag-authoring.md).
+
 ## Directory Convention
 
 The host discovers DAGs using the glob pattern `dags/{team}/{dag-name}/dag.ts`:
