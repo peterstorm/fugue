@@ -38,6 +38,8 @@ export interface LoadResult {
   readonly id: DagId;
   readonly registration: DagRegistration;
   readonly modulePath: string;
+  /** Pre-loaded prompt templates from sibling prompts/ directory (empty map if none found). */
+  readonly prompts: ReadonlyMap<string, string>;
 }
 
 export interface LoadError {

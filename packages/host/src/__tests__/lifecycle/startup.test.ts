@@ -54,7 +54,7 @@ const fakeGit = (): GitPort => ({
 });
 
 const fakeLoader = (): ModuleLoaderPort => ({
-  loadDagModule: async () => ok({ id: "test" as any, registration: {} as any, modulePath: "" }),
+  loadDagModule: async () => ok({ id: "test" as any, registration: {} as any, modulePath: "", prompts: new Map() }),
   discoverDagPaths: async () => ok([]),
   loadAll: async () => ({ loaded: [], errors: [] }),
 });

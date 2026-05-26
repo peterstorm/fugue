@@ -12,6 +12,7 @@
 import { z } from "zod";
 import type { DagRegistration } from "@fugue/host/contract";
 import { createSummaryDag } from "./dag/summary-dag.js";
+import { join } from "node:path";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 
 // ---------------------------------------------------------------------------
@@ -40,7 +41,10 @@ export const SummarizeInputSchema = z.object({
 const createRegisteredDag = () => {
   // The fixture source is used as the default for standalone mode.
   // When hosted, the source is injected per-request via NodeContext.
-  const defaultSource = new JsonFixtureSource("./fixtures/customers");
+  // Resolve fixtures relative to this module, not process CWD.
+  // Ensures the DAG works whether loaded by the standalone server or the Fugue host.
+  const fixturesDir = join(import.meta.dir, "..", "fixtures", "customers");
+  const defaultSource = new JsonFixtureSource(fixturesDir);
   return createSummaryDag(defaultSource, "placeholder");
 };
 

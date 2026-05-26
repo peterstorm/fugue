@@ -104,5 +104,6 @@ export const loadResultToRegisteredDag = (
     sha,
     status: { kind: "healthy" },
     modulePath: result.modulePath,
+    prompts: result.prompts,
   };
 };

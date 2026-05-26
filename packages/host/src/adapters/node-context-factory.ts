@@ -228,6 +228,12 @@ export const createNodeContextForDag = (
     shared.logger,
   );
 
+  // Per-DAG prompts take precedence; fall back to shared (host-level) prompts.
+  const dagPrompts = dag.prompts;
+  const promptAccess = dagPrompts.size > 0
+    ? { get: (name: string) => dagPrompts.get(name) ?? null }
+    : shared.prompts ?? { get: () => null };
+
   return makeNodeContext({
     runId,
     dagId,
@@ -237,6 +243,6 @@ export const createNodeContextForDag = (
     checkpointWriter,
     signal,
     contentFilter: shared.contentFilter,
-    prompts: shared.prompts ?? { get: () => null },
+    prompts: promptAccess,
   });
 };

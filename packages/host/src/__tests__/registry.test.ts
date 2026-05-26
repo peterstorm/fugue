@@ -21,6 +21,7 @@ const makeDag = (id: string, opts?: { healthy?: boolean }): RegisteredDag => ({
   loadedAt: Date.now(),
   sha,
   status: (opts?.healthy ?? true) ? { kind: "healthy" } : { kind: "disabled", reason: "test" },
+  prompts: new Map(),
   modulePath: `/tmp/dags/test-team/${id}/dag.ts`,
 });
 

@@ -149,7 +149,7 @@ const createLlmClient = async (config: HostConfig): Promise<LlmClient> => {
     // Construct the full deployment URL Azure OpenAI expects:
     // https://<resource>.openai.azure.com/openai/deployments/<deployment>
     const baseUrl = `${endpoint}/openai/deployments/${deployment}`;
-    return new OpenAILlmClient({ apiKey, baseUrl, apiVersion: "2024-12-01-preview" });
+    return new OpenAILlmClient({ apiKey, baseUrl, apiVersion: config.AZURE_OPENAI_API_VERSION, modelOverride: deployment });
   }
 
   // LLM_PROVIDER === "openai"

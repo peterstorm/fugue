@@ -75,6 +75,7 @@ const fakeLoadResult = (id: string): LoadResult => ({
   id: id as DagId,
   registration: fakeRegistration(id),
   modulePath: `/tmp/test-dags/dags/team/${id}/dag.ts`,
+  prompts: new Map(),
 });
 
 const createFakeGitPort = (opts?: { failPull?: boolean; shas?: string[] }): GitPort => {

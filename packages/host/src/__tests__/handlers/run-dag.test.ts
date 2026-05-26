@@ -30,6 +30,7 @@ const makeDag = (id: string, team = "test-team"): RegisteredDag => ({
   loadedAt: Date.now(),
   sha,
   status: { kind: "healthy" },
+  prompts: new Map(),
   modulePath: `/tmp/dags/test-team/${id}/dag.ts`,
 });
 

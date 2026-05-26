@@ -59,6 +59,7 @@ const makeRegisteredDag = (id: string): RegisteredDag => ({
   sha: gitSha("abc123"),
   status: { kind: "healthy" },
   modulePath: `/tmp/dags/test/${id}/dag.ts`,
+  prompts: new Map(),
 });
 
 const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {

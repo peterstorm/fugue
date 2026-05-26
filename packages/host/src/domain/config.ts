@@ -56,6 +56,8 @@ export const HostConfigSchema = z.object({
   AZURE_OPENAI_API_KEY: z.string().optional(),
   /** Azure OpenAI deployment name */
   AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
+  /** Azure OpenAI API version (defaults to 2025-03-01-preview) */
+  AZURE_OPENAI_API_VERSION: z.string().default("2025-03-01-preview"),
   /** Admin bearer token for provisioning teams and full access (required) */
   ADMIN_TOKEN: z.string().min(16),
   /** OpenTelemetry OTLP exporter endpoint */

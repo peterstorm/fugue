@@ -42,6 +42,7 @@ const makeDag = (overrides?: Partial<RegisteredDag["config"]>): RegisteredDag =>
   loadedAt: 1000,
   sha: gitSha("abc123"),
   status: { kind: "healthy" },
+  prompts: new Map(),
   modulePath: "/tmp/dags/eng/test-dag/dag.ts",
 });
 

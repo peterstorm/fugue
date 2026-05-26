@@ -55,6 +55,8 @@ export interface RegisteredDag {
   readonly status: DagStatus;
   /** Absolute filesystem path of the dag.ts module that was imported. */
   readonly modulePath: string;
+  /** Pre-loaded prompt templates keyed by name (loaded from sibling prompts/ dir). */
+  readonly prompts: ReadonlyMap<string, string>;
 }
 
 /**

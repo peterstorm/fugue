@@ -47,6 +47,7 @@ const registeredDagArb = (idOverride?: DagId): fc.Arbitrary<RegisteredDag> =>
       fc.constant({ kind: "healthy" as const }),
       fc.record({ kind: fc.constant("disabled" as const), reason: fc.string() }),
     ),
+    prompts: fc.constant(new Map()),
     modulePath: fc.constant("/tmp/dags/test/dag.ts"),
   }) as unknown as fc.Arbitrary<RegisteredDag>;
 

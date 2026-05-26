@@ -9,6 +9,8 @@
  * @satisfies NFR-010 — A failing DAG import MUST NOT affect other already-registered DAGs
  */
 
+import { readdir, readFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
 import { ok, err } from "@fugue/framework";
 import type { Result, DagId, GitSha } from "@fugue/framework";
 import { tryDagId, dagId } from "@fugue/framework";
@@ -71,11 +73,44 @@ export const loadDagModule = async (
     });
   }
 
+  // Load prompts from sibling prompts/ directory (best-effort)
+  const prompts = await loadPromptsForModule(modulePath);
+
   return ok({
     id: idResult.value,
     registration,
     modulePath,
+    prompts,
   });
+};
+
+/**
+ * Load all .txt files from a prompts/ directory colocated with the DAG module.
+ * Returns an empty Map if no prompts directory exists.
+ * Best-effort: failures in individual files are silently skipped.
+ */
+const loadPromptsForModule = async (modulePath: string): Promise<ReadonlyMap<string, string>> => {
+  const dagDir = dirname(modulePath);
+  const promptsDir = join(dagDir, "prompts");
+  const map = new Map<string, string>();
+
+  try {
+    const entries = await readdir(promptsDir);
+    for (const entry of entries) {
+      if (!entry.endsWith(".txt")) continue;
+      try {
+        const text = await readFile(join(promptsDir, entry), "utf-8");
+        const name = entry.slice(0, -4); // strip .txt
+        map.set(name, text);
+      } catch {
+        // Skip unreadable prompt files
+      }
+    }
+  } catch {
+    // No prompts/ directory — totally fine
+  }
+
+  return map;
 };
 
 /**

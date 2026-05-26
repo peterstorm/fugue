@@ -40,6 +40,7 @@ const makeDag = (id: string, healthy = true): RegisteredDag => ({
   loadedAt: 1000,
   sha: gitSha("abc123"),
   status: healthy ? { kind: "healthy" } : { kind: "disabled", reason: "test" },
+  prompts: new Map(),
   modulePath: `/tmp/dags/eng/${id}/dag.ts`,
 });
 

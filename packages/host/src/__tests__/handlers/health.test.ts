@@ -118,6 +118,7 @@ describe("readinessHandler", () => {
       loadedAt: 1000,
       sha: gitSha("abc123"),
       status: { kind: "healthy" },
+      prompts: new Map(),
       modulePath: "/tmp/dags/eng/my-dag/dag.ts",
     };
     const registry = freeze([dag], gitSha("abc123"), 1000);
