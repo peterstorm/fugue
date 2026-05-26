@@ -74,7 +74,10 @@ export const loadDagModule = async (
   }
 
   // Load prompts from sibling prompts/ directory (best-effort)
-  const prompts = await loadPromptsForModule(modulePath);
+  const prompts = await loadPromptsForModule(modulePath, (path, e) => {
+    // Log at warn level — DAG will fail at runtime with "prompt-not-found" if a required prompt is missing
+    console.warn(`[module-loader] Failed to read prompt file '${path}': ${e instanceof Error ? e.message : String(e)}`);
+  });
 
   return ok({
     id: idResult.value,
@@ -87,9 +90,12 @@ export const loadDagModule = async (
 /**
  * Load all .txt files from a prompts/ directory colocated with the DAG module.
  * Returns an empty Map if no prompts directory exists.
- * Best-effort: failures in individual files are silently skipped.
+ * Best-effort: individual file failures are logged but don't block loading.
  */
-const loadPromptsForModule = async (modulePath: string): Promise<ReadonlyMap<string, string>> => {
+export const loadPromptsForModule = async (
+  modulePath: string,
+  onFileError?: (path: string, error: unknown) => void,
+): Promise<ReadonlyMap<string, string>> => {
   const dagDir = dirname(modulePath);
   const promptsDir = join(dagDir, "prompts");
   const map = new Map<string, string>();
@@ -98,16 +104,19 @@ const loadPromptsForModule = async (modulePath: string): Promise<ReadonlyMap<str
     const entries = await readdir(promptsDir);
     for (const entry of entries) {
       if (!entry.endsWith(".txt")) continue;
+      const filePath = join(promptsDir, entry);
       try {
-        const text = await readFile(join(promptsDir, entry), "utf-8");
+        const text = await readFile(filePath, "utf-8");
         const name = entry.slice(0, -4); // strip .txt
         map.set(name, text);
-      } catch {
-        // Skip unreadable prompt files
+      } catch (e) {
+        // Prompt file exists but can't be read — DAG will fail at runtime
+        // with "prompt-not-found". Log so operators can diagnose.
+        onFileError?.(filePath, e);
       }
     }
   } catch {
-    // No prompts/ directory — totally fine
+    // No prompts/ directory — expected for DAGs that don't use prompts
   }
 
   return map;

@@ -312,4 +312,83 @@ describe("Module Loader", () => {
       expect(typeof loader.loadAll).toBe("function");
     });
   });
+
+  describe("prompt loading (loadPromptsForModule)", () => {
+    it("loads .txt files from sibling prompts/ directory", async () => {
+      // Setup: create dag with prompts dir
+      const dagDir = join(TEST_DIR, "dags", "team-a", "test-dag");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      writeFileSync(join(promptsDir, "synthesis.txt"), "Hello {{name}}");
+      writeFileSync(join(promptsDir, "greeting.txt"), "Welcome!");
+      writeFileSync(join(promptsDir, "registry.json"), '{"synthesis":{}}'); // non-.txt ignored
+
+      const path = join(dagDir, "dag.ts");
+      const result = await loadDagModule(path, gitSha("prompt-test-sha"));
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.prompts.size).toBe(2);
+        expect(result.value.prompts.get("synthesis")).toBe("Hello {{name}}");
+        expect(result.value.prompts.get("greeting")).toBe("Welcome!");
+        expect(result.value.prompts.has("registry")).toBe(false); // .json ignored
+      }
+
+      // Cleanup
+      rmSync(promptsDir, { recursive: true });
+    });
+
+    it("returns empty map when no prompts/ directory exists", async () => {
+      const path = join(TEST_DIR, "dags", "billing", "invoice", "dag.ts");
+      const result = await loadDagModule(path, gitSha("no-prompts-sha"));
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.prompts.size).toBe(0);
+      }
+    });
+
+    it("calls onFileError callback for unreadable prompt files", async () => {
+      // We test loadPromptsForModule directly for this case
+      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
+
+      const dagDir = join(TEST_DIR, "dags", "team-a", "unreadable-prompt");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      // Create a directory with the name "broken.txt" — readFile will fail on it
+      mkdirSync(join(promptsDir, "broken.txt"), { recursive: true });
+      writeFileSync(join(promptsDir, "good.txt"), "works fine");
+
+      const errors: string[] = [];
+      const result = await loadPromptsForModule(
+        join(dagDir, "dag.ts"),
+        (path) => errors.push(path),
+      );
+
+      expect(result.get("good")).toBe("works fine");
+      expect(result.has("broken")).toBe(false);
+      expect(errors.length).toBe(1);
+      expect(errors[0]).toContain("broken.txt");
+
+      // Cleanup
+      rmSync(dagDir, { recursive: true });
+    });
+
+    it("prompts flow through loadAll into BulkLoadResult", async () => {
+      // Setup prompts for billing/invoice
+      const dagDir = join(TEST_DIR, "dags", "billing", "invoice");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      writeFileSync(join(promptsDir, "invoice-summary.txt"), "Summarize {{invoiceId}}");
+
+      const result = await loadAll(TEST_DIR, gitSha("bulk-prompts-sha"));
+
+      const invoiceDag = result.loaded.find(l => l.id === dagId("billing-invoice"));
+      expect(invoiceDag).toBeDefined();
+      expect(invoiceDag!.prompts.get("invoice-summary")).toBe("Summarize {{invoiceId}}");
+
+      // Cleanup
+      rmSync(promptsDir, { recursive: true });
+    });
+  });
 });
