@@ -124,3 +124,27 @@ gates, freshness-aware state management, and production observability.
 6. **Capability validation happens once at run start** — before any `node.run` is called.
 7. **Freshness is fail-closed** — extractor failures abort the wave; proceeding without witness data would allow stale writes.
 8. **Pre-release: no backward-compat shims** — internal renames are first-class refactors, not aliased. No `@deprecated` re-exports for code that has not shipped.
+
+### Host Layer (`@fugue/host`)
+
+The host is the **imperative shell** that wires the framework into a production HTTP service.
+
+| Component | Responsibility |
+|-----------|---------------|
+| `domain/host-state.ts` | Pure state machine: booting → ready → syncing → degraded → draining → stopped |
+| `domain/registry.ts` | Immutable snapshot of loaded DAGs (frozen Map) |
+| `domain/concurrency.ts` | Pure acquire/release with branded tokens |
+| `domain/circuit-breaker.ts` | Pure closed/open/half-open state machine |
+| `domain/circuit-guard.ts` | Protocol-enforcing permit token (check→execute→mark) |
+| `domain/config.ts` | Zod-validated environment config with sensible defaults |
+| `domain/host-error.ts` | 24-variant discriminated union, exhaustive HTTP mapping |
+| `adapters/git-sync.ts` | Bun.spawn → git clone/pull/rev-parse with timeout |
+| `adapters/module-loader.ts` | Dynamic import + validation + prompt loading |
+| `adapters/node-context-factory.ts` | Constructs per-request NodeContext with DAG-namespaced keys |
+| `adapters/token-store.ts` | Redis-backed team token persistence |
+| `http/router.ts` | Hono app with route-level auth guards |
+| `sync/sync-loop.ts` | Timer-driven git poll + registry rebuild |
+| `lifecycle/startup.ts` | Boot sequence: Redis ping → clone → load |
+| `lifecycle/signals.ts` | SIGTERM/SIGINT → drain → stop |
+| `host.ts` | Top-level imperative shell wiring all subsystems |
+| `main.ts` | Binary entry point (process.exit, real Redis, real git) |
