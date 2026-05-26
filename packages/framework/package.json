@@ -10,6 +10,9 @@
     "./redis": "./src/redis.ts",
     "./testing": "./src/testing.ts"
   },
+  "bin": {
+    "fugue": "./bin/fugue.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test"
