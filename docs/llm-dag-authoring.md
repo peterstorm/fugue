@@ -151,7 +151,22 @@ createGuardrailNode<I, T>({
 
 ---
 
-## `defineDag` — the only DAG constructor
+## DAG constructors
+
+Four constructors, in order of preference. Each delegates to the same
+module-load validator and produces the same branded `DagDef`.
+
+| Constructor | Use when |
+|---|---|
+| `defineLinearDag` | Sequential pipeline A→B→C. Edges inferred from array order. |
+| `defineFanOut` | One source, N parallel branches, optional join. |
+| `defineDiamond` | One source, N parallel branches, **required** join. |
+| `defineRouter` | Classifier with predicate-driven cases plus a **required** default. |
+| `defineDag` | Anything else — fallback when no shape helper fits. |
+
+Examples for each are in "Common Patterns" below.
+
+### `defineDag` — the manual fallback
 
 ```ts
 defineDag({
@@ -177,6 +192,10 @@ defineDag({
 - Simple DAGs only need `{ from, to }` (unconditional)
 - Conditional edges need a `when: Predicate<T>` object
 - If any conditional edges leave a node, a `kind: "default"` edge is required (else-totality)
+- `outputNodeId` must be reachable via *unconditional or default* edges only —
+  a conditional-only branch is never a valid explicit output (use a join node
+  downstream of all branches instead, or omit `outputNodeId` for
+  last-active-node fallback)
 
 ### Predicate shape (for conditional edges)
 
@@ -217,76 +236,97 @@ export default registration;
 
 ## Common Patterns
 
-### Linear pipeline (A → B → C)
+> **Prefer shape helpers over manual `defineDag` whenever a pattern matches.**
+> The helpers enforce the shape at the type level (e.g. `defineRouter` makes
+> the `default` branch *required*, eliminating else-totality errors), and
+> they delegate to `defineDag`'s validator so all checks still run.
+>
+> Use raw `defineDag` only when no helper matches your topology.
+
+### Linear pipeline (A → B → C) — `defineLinearDag`
 
 ```ts
-// Option 1: explicit edges
-const dag = defineDag({
-  id: "pipeline",
-  nodes: { "step-a": nodeA, "step-b": nodeB, "step-c": nodeC },
-  edges: [
-    { from: "step-a", to: "step-b" },
-    { from: "step-b", to: "step-c" },
-  ],
-  outputNodeId: "step-c",
-});
-
-// Option 2: defineLinearDag (edges inferred from array order)
 import { defineLinearDag } from "@fugue/framework";
 
 const dag = defineLinearDag({
   id: "pipeline",
   nodes: [nodeA, nodeB, nodeC],
-  // edges: automatically [A→B, B→C], outputNodeId: nodeC
+  // Edges inferred: A→B→C. outputNodeId: nodeC.
 });
 ```
 
-### Fan-out (parallel fetch)
+### Fan-out (parallel siblings) — `defineFanOut`
 
 ```ts
-const dag = defineDag({
-  id: "fan-out",
-  nodes: {
-    "fetch-crm": fetchCrm,
-    "fetch-billing": fetchBilling,
-    "merge": mergeNode,
-  },
-  edges: [
-    { from: "fetch-crm", to: "merge" },
-    { from: "fetch-billing", to: "merge" },
-  ],
-  outputNodeId: "merge",
+import { defineFanOut } from "@fugue/framework";
+
+// One source → N parallel branches → optional join
+const dag = defineFanOut({
+  id: "enrich-customer",
+  source: triggerNode,
+  branches: [fetchCrm, fetchBilling, fetchSupport],
+  join: mergeNode,   // optional — omit to leave branches unjoined
 });
-// fetch-crm and fetch-billing run in parallel (same wave)
-// merge receives { "fetch-crm": ..., "fetch-billing": ... } as input
+// With join: edges source→{crm,billing,support}, then {crm,billing,support}→merge.
+//            outputNodeId: merge. merge receives a fan-in object keyed by
+//            each branch's id (see "Input Wiring Rules" below).
+// Without join: outputNodeId is the last branch in the array.
 ```
 
-### Diamond (fan-out + fan-in)
+### Diamond (fan-out + fan-in) — `defineDiamond`
 
 ```ts
-const dag = defineDag({
+import { defineDiamond } from "@fugue/framework";
+
+const dag = defineDiamond({
   id: "diamond",
-  nodes: {
-    "source": sourceNode,
-    "branch-a": branchA,
-    "branch-b": branchB,
-    "join": joinNode,
+  source: sourceNode,
+  branches: [branchA, branchB],
+  join: joinNode,           // required (vs optional in defineFanOut)
+});
+// outputNodeId: joinNode. join receives { "branch-a": ..., "branch-b": ... }.
+```
+
+### Conditional routing — `defineRouter`
+
+```ts
+import { defineRouter } from "@fugue/framework";
+
+const dag = defineRouter({
+  id: "intent-router",
+  classifier: classifyIntent,
+  cases: {
+    "simple-category": {
+      when: (out) => (out as { category: string }).category === "simple",
+      to: simpleHandler,
+    },
+    "complex-category": {
+      // Advanced form: provide a full Predicate when you need explicit
+      // version, label, or `minConfidence` control.
+      whenPredicate: {
+        label: "complex-route",
+        version: 2,
+        check: (out) => (out as { category: string }).category === "complex",
+        minConfidence: "medium",
+      },
+      to: complexHandler,
+    },
   },
-  edges: [
-    { from: "source", to: "branch-a" },
-    { from: "source", to: "branch-b" },
-    { from: "branch-a", to: "join" },
-    { from: "branch-b", to: "join" },
-  ],
-  outputNodeId: "join",
+  default: fallbackHandler,   // REQUIRED — eliminates else-totality errors
+  // outputNodeId is optional. If set, it must be the default branch or a
+  // descendant — conditional-only branches are unreachable via the
+  // unconditional/default edge graph used for output reachability.
 });
 ```
 
-### Conditional routing
+### Conditional routing — manual `defineDag` form
+
+When `defineRouter` is too restrictive (e.g. routes that fan out to multiple
+targets, or non-classifier-shaped topologies), drop down to `defineDag`:
 
 ```ts
 const dag = defineDag({
-  id: "router",
+  id: "router-manual",
   nodes: {
     "classify": classifier,
     "handle-simple": simpleHandler,
@@ -429,3 +469,150 @@ return err({ kind: "permanent", message: "Customer not found" });
 
 All structural rules are validated at module load by `defineDag()` — invalid
 DAGs throw `DagDefinitionError` immediately, with a message pointing at the problem.
+
+---
+
+## Verifying with the `fugue` CLI
+
+The `fugue` binary (`packages/framework/bin/fugue.ts`) validates and
+introspects a DAG file without needing to start the host. **All output is JSON
+on stdout**, designed for machine consumption.
+
+### `fugue lint <path>`
+
+Imports a `dag.ts`, runs `defineDag()`'s validator, and prints a structured
+diagnostic. Exits `0` on success, `1` on failure, `2` on bad CLI usage.
+
+```bash
+$ bunx fugue lint dags/cx/customer-summary/dag.ts
+{
+  "ok": true,
+  "path": "/abs/path/to/dag.ts"
+}
+```
+
+Failure example (edge endpoint typo):
+
+```bash
+$ bunx fugue lint dags/cx/broken/dag.ts
+{
+  "ok": false,
+  "path": "/abs/path/to/dag.ts",
+  "errors": [
+    {
+      "kind": "dag-definition-error",
+      "dagId": "broken",
+      "message": "[defineDag] DAG 'broken' is unsound: edge endpoint 'c' is not a node...",
+      "detail": { "kind": "edge-endpoint-missing", "...": "..." }
+    }
+  ]
+}
+```
+
+Possible `errors[].kind` values:
+
+| Kind | Meaning |
+|---|---|
+| `import-failed` | The module failed to import (syntax error, missing dep, etc.). |
+| `no-default-export` | The module compiled but has no default export. |
+| `missing-dag-field` | Default export exists but doesn't have a `.dag` field. |
+| `dag-definition-error` | `defineDag()` rejected the DAG. The typed `FrameworkError` is on `errors[].detail`. |
+
+### `fugue describe <path>`
+
+Prints a structured summary of a valid DAG: input/output JSON Schemas, wave
+plan, prompts referenced, capabilities required. Exits 0/1/2 like `lint`.
+
+```bash
+$ bunx fugue describe dags/cx/customer-summary/dag.ts
+{
+  "ok": true,
+  "path": "/abs/path/to/dag.ts",
+  "dag": {
+    "id": "customer-summary",
+    "route": "/dags/customer-summary/run",
+    "description": "...",
+    "version": "1.0.0",
+    "inputSchema": { "type": "object", "properties": { ... } },
+    "outputSchema": { "type": "object", "properties": { ... } },
+    "outputNodeId": "synthesize",
+    "nodes": [
+      { "id": "fetch-data", "kind": "fetch", "sideEffects": "reads",
+        "requires": ["cache"], "humanReview": false },
+      { "id": "synthesize", "kind": "llm", "sideEffects": "external-call",
+        "requires": ["llm","prompts","cache"], "humanReview": false }
+    ],
+    "edges": [{ "from": "fetch-data", "to": "synthesize", "kind": "unconditional" }],
+    "waves": [["fetch-data"], ["synthesize"]],
+    "prompts": ["synthesis"],
+    "capabilities": ["cache","llm","prompts"]
+  }
+}
+```
+
+On lint failure, `describe` returns the same `errors[]` array as `lint`.
+
+### Typical LLM authoring loop
+
+1. Generate `dag.ts` from a template.
+2. Run `bunx fugue lint dag.ts`. If `ok: false`, switch on `errors[0].kind`
+   and `errors[0].detail.kind` to decide what to fix.
+3. Once lint is green, run `bunx fugue describe dag.ts` to confirm the input
+   schema, wave plan, and prompts match the intent.
+
+---
+
+## Discovering existing DAGs
+
+When composing a *new* DAG against DAGs that are already deployed, you don't
+need to read their source — the host exposes machine-readable endpoints.
+
+### `GET /dags` — list
+
+```bash
+curl http://host:3000/dags \
+  -H "Authorization: Bearer fug_team-token"
+```
+
+Returns `{ dags: [{ id, route, description, version, healthy }], count }`.
+A team token sees only DAGs belonging to its team; admin sees all.
+
+### `GET /dags/:id/manifest` — full schema
+
+```bash
+curl http://host:3000/dags/customer-summary/manifest \
+  -H "Authorization: Bearer fug_team-token"
+```
+
+Returns the same JSON shape `fugue describe` emits (without the `path`
+wrapper) plus team metadata:
+
+```jsonc
+{
+  "id": "customer-summary",
+  "route": "/dags/customer-summary/run",
+  "team": "cx",
+  "healthy": true,
+  "sha": "a1b2c3d...",
+  "loadedAt": 1716700000000,
+  "inputSchema": { /* JSON Schema for the request body */ },
+  "outputSchema": { /* JSON Schema for the response data */ },
+  "nodes": [ ... ],
+  "edges": [ ... ],
+  "waves": [ ... ],
+  "prompts": [ ... ],
+  "capabilities": [ ... ]
+}
+```
+
+Auth: same team-isolation rules as `POST /dags/:id/run`. Schemas can leak
+PII field names and internal model identifiers, so a team token cannot
+manifest another team's DAG.
+
+### When to use which
+
+| Goal | Use |
+|---|---|
+| Local file (pre-deploy) | `fugue describe path/to/dag.ts` |
+| Deployed DAG (live host) | `GET /dags/:id/manifest` |
+| Just enumerate what's live | `GET /dags` |
