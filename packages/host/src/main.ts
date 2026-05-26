@@ -11,6 +11,7 @@
  */
 
 import { parseHostConfig } from "./domain/config.js";
+import type { HostConfig } from "./domain/config.js";
 import { formatHostError } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
@@ -18,8 +19,8 @@ import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 import { createModuleLoader } from "./adapters/module-loader.js";
 import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer } from "@fugue/framework";
-import type { Result, LlmClient, Tracer } from "@fugue/framework";
+import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient } from "@fugue/framework";
+import type { Result, LlmClient } from "@fugue/framework";
 
 // ── Logger ─────────────────────────────────────────────────────────────────
 
@@ -122,25 +123,40 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
 // ── LLM Client ─────────────────────────────────────────────────────────────
 
 /**
- * Fail-on-use LLM client — surfaces missing configuration on first .chat() call.
+ * Create the LLM client from config.
  *
- * TODO: Wire real LLM client creation (Anthropic/OpenAI/Azure) here.
- * Currently, all DAGs requiring LLM capabilities will receive this stub which
- * returns a FrameworkError on .chat(). This is acceptable during the host MVP
- * phase where DAGs are validated structurally but not yet executed via the host.
+ * - Anthropic: wraps `@anthropic-ai/sdk` via AnthropicLlmClient (framework export).
+ *   Dynamic import mirrors the ioredis pattern — avoids loading the SDK at module
+ *   evaluation time (useful for tests that never call LLM).
+ * - OpenAI: OpenAILlmClient uses fetch directly — no vendor SDK import needed.
+ * - Azure: OpenAILlmClient with Azure endpoint + api-version auth.
  *
- * SAFETY: With LLM_PROVIDER/key cross-validation in config, this only activates
- * if the API key is explicitly empty string (edge case). DAGs that don't use LLM
- * never hit this path. The returned Result error is caught by the framework's
- * normal error flow — no thrown exceptions.
+ * Config validation (superRefine in config.ts) guarantees the required keys are
+ * present for the selected provider before this function is called.
  */
-const createLlmClient = (config: { LLM_PROVIDER: string; ANTHROPIC_API_KEY?: string; OPENAI_API_KEY?: string }): LlmClient => {
-  const keyVar = config.LLM_PROVIDER === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
-  const message = `LLM client not configured. Set ${keyVar} environment variable to enable LLM calls (provider: ${config.LLM_PROVIDER}).`;
-  const stub = {
-    chat: async () => err({ kind: "llm-unavailable" as const, message }),
-  };
-  return stub as unknown as LlmClient;
+const createLlmClient = async (config: HostConfig): Promise<LlmClient> => {
+  if (config.LLM_PROVIDER === "anthropic") {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    return new AnthropicLlmClient(new Anthropic({ apiKey: config.ANTHROPIC_API_KEY }));
+  }
+
+  if (config.LLM_PROVIDER === "azure") {
+    // Config validation (superRefine) guarantees these fields are set when provider is 'azure'.
+    // We read them with fallback to empty string to satisfy the linter — Zod already validated.
+    const endpoint = (config.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/$/, "");
+    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? "";
+    const apiKey = config.AZURE_OPENAI_API_KEY ?? "";
+    // Construct the full deployment URL Azure OpenAI expects:
+    // https://<resource>.openai.azure.com/openai/deployments/<deployment>
+    const baseUrl = `${endpoint}/openai/deployments/${deployment}`;
+    return new OpenAILlmClient({ apiKey, baseUrl, apiVersion: "2024-12-01-preview" });
+  }
+
+  // LLM_PROVIDER === "openai"
+  return new OpenAILlmClient({
+    apiKey: config.OPENAI_API_KEY!,
+    baseUrl: "https://api.openai.com/v1",
+  });
 };
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -170,7 +186,7 @@ const main = async () => {
   try {
     // Step 3: Create shared infrastructure
     const sharedInfra: SharedInfra = {
-      llm: createLlmClient(config),
+      llm: await createLlmClient(config),
       redis,
       tracer: noopTracer,
       contentFilter: null,

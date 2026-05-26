@@ -63,6 +63,7 @@
       "version": "0.0.1",
       "bin": "src/main.ts",
       "dependencies": {
+        "@anthropic-ai/sdk": "^0.91.1",
         "@fugue/framework": "workspace:*",
         "hono": "^4.7.11",
         "ioredis": "^5.10.1",

@@ -13,7 +13,7 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err, runId as makeRunId, gitSha } from "@fugue/framework";
+import { ok, err, runId as makeRunId } from "@fugue/framework";
 import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fugue/framework";
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";

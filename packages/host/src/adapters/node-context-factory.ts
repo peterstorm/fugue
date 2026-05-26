@@ -68,80 +68,80 @@ export const createNamespacedCache = (
   const FAILURE_ESCALATION_THRESHOLD = 10;
 
   return {
-  get: async (key: string): Promise<CacheLookup> => {
-    const fullKey = buildCacheKey(dagId, key);
-    const result = await redis.get(fullKey);
-    if (!result.ok) {
-      consecutiveGetFailures++;
-      if (consecutiveGetFailures >= FAILURE_ESCALATION_THRESHOLD) {
-        logger.error("Cache get failures exceeded threshold — Redis may be degraded", {
-          key: fullKey, dagId, consecutiveFailures: consecutiveGetFailures,
-        });
-      } else {
-        logger.warn("Cache get failed — graceful degradation to miss", {
-          key: fullKey, dagId, error: result.error.kind,
-        });
+    get: async (key: string): Promise<CacheLookup> => {
+      const fullKey = buildCacheKey(dagId, key);
+      const result = await redis.get(fullKey);
+      if (!result.ok) {
+        consecutiveGetFailures++;
+        if (consecutiveGetFailures >= FAILURE_ESCALATION_THRESHOLD) {
+          logger.error("Cache get failures exceeded threshold — Redis may be degraded", {
+            key: fullKey, dagId, consecutiveFailures: consecutiveGetFailures,
+          });
+        } else {
+          logger.warn("Cache get failed — graceful degradation to miss", {
+            key: fullKey, dagId, error: result.error.kind,
+          });
+        }
+        return { hit: false };
       }
-      return { hit: false };
-    }
-    consecutiveGetFailures = 0;
-    const raw = result.value;
-    if (raw === null) return { hit: false };
-    try {
-      return { hit: true, value: JSON.parse(raw) };
-    } catch (e) {
-      // Corrupted entry — treat as miss
-      logger.warn("Cache entry corrupted — treating as miss", {
-        key: fullKey,
-        dagId,
-        rawPreview: raw?.slice(0, 100),
-        parseError: e instanceof Error ? e.message : String(e),
-      });
-      return { hit: false };
-    }
-  },
+      consecutiveGetFailures = 0;
+      const raw = result.value;
+      if (raw === null) return { hit: false };
+      try {
+        return { hit: true, value: JSON.parse(raw) };
+      } catch (e) {
+        // Corrupted entry — treat as miss
+        logger.warn("Cache entry corrupted — treating as miss", {
+          key: fullKey,
+          dagId,
+          rawPreview: raw?.slice(0, 100),
+          parseError: e instanceof Error ? e.message : String(e),
+        });
+        return { hit: false };
+      }
+    },
 
-  /**
-   * DESIGN: Cache writes are best-effort. Failures are logged but never propagated
-   * to callers via the Result return. Returning err() would abort the DAG run for
-   * a non-critical cache failure — worse than stale data.
-   *
-   * The return type `Promise<Result<void, FrameworkError>>` is dictated by the
-   * framework's ContextCacheAdapter interface — we cannot narrow it to `Promise<void>`.
-   * Callers should NOT pattern-match on the error branch; it is never populated.
-   */
-  set: async (
-    key: string,
-    value: unknown,
-    ttlSec?: number,
-  ): Promise<Result<void, FrameworkError>> => {
-    const fullKey = buildCacheKey(dagId, key);
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(value);
-    } catch (e) {
-      logger.warn("Cache set failed — value not serializable", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
-      return ok(undefined); // Don't kill the request for a cache write failure
-    }
-    const effectiveTtl = ttlSec ?? defaultTtlSec;
-    const setResult = effectiveTtl !== undefined
-      ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
-      : await redis.set(fullKey, serialized);
-    if (!setResult.ok) {
-      consecutiveSetFailures++;
-      if (consecutiveSetFailures >= FAILURE_ESCALATION_THRESHOLD) {
-        logger.error("Cache set failures exceeded threshold — Redis may be degraded", {
-          key: fullKey, dagId, consecutiveFailures: consecutiveSetFailures,
-        });
-      } else {
-        logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: setResult.error.kind });
+    /**
+     * DESIGN: Cache writes are best-effort. Failures are logged but never propagated
+     * to callers via the Result return. Returning err() would abort the DAG run for
+     * a non-critical cache failure — worse than stale data.
+     *
+     * The return type `Promise<Result<void, FrameworkError>>` is dictated by the
+     * framework's ContextCacheAdapter interface — we cannot narrow it to `Promise<void>`.
+     * Callers should NOT pattern-match on the error branch; it is never populated.
+     */
+    set: async (
+      key: string,
+      value: unknown,
+      ttlSec?: number,
+    ): Promise<Result<void, FrameworkError>> => {
+      const fullKey = buildCacheKey(dagId, key);
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(value);
+      } catch (e) {
+        logger.warn("Cache set failed — value not serializable", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
+        return ok(undefined); // Don't kill the request for a cache write failure
       }
-    } else {
-      consecutiveSetFailures = 0;
-    }
-    return ok(undefined);
-  },
-};
+      const effectiveTtl = ttlSec ?? defaultTtlSec;
+      const setResult = effectiveTtl !== undefined
+        ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
+        : await redis.set(fullKey, serialized);
+      if (!setResult.ok) {
+        consecutiveSetFailures++;
+        if (consecutiveSetFailures >= FAILURE_ESCALATION_THRESHOLD) {
+          logger.error("Cache set failures exceeded threshold — Redis may be degraded", {
+            key: fullKey, dagId, consecutiveFailures: consecutiveSetFailures,
+          });
+        } else {
+          logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: setResult.error.kind });
+        }
+      } else {
+        consecutiveSetFailures = 0;
+      }
+      return ok(undefined);
+    },
+  };
 };
 
 /**

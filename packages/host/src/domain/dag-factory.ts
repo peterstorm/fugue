@@ -90,6 +90,11 @@ export const loadResultToRegisteredDag = (
     config: {
       timeout: effectiveTimeout,
       maxConcurrency: effectiveConcurrency,
+      // NOTE: cacheTtlMs and checkpointTtlMs are declared on ResolvedDagConfig
+      // but never populated here. Per-DAG TTL overrides (from fugue.yaml) require loading
+      // and merging the fugue.yaml alongside dag.ts during module discovery — not yet wired.
+      // Until then, createNamespacedCache/createNamespacedCheckpointWriter fall back to
+      // the host-level default TTL from HostConfig.
     },
     meta: {
       description: resolved.meta.description,

@@ -241,6 +241,7 @@ export const startSyncLoop = (
   onNoChange: OnSyncNoChange,
   onError: OnSyncError,
   initialSha: GitSha = gitSha(""),
+  clock: Clock = Date.now,
 ): SyncLoopHandle => {
   let lastSha: GitSha = initialSha;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -254,7 +255,7 @@ export const startSyncLoop = (
     running = true;
     try {
       onStarted();
-      const result = await executeSyncCycle(git, loader, config, lastSha, logger);
+      const result = await executeSyncCycle(git, loader, config, lastSha, logger, clock);
 
       if (result.kind === "updated") {
         // Call onComplete BEFORE advancing SHA — if onComplete throws,
