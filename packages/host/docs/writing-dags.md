@@ -171,6 +171,65 @@ Response:
 }
 ```
 
+## Discovering DAGs
+
+Two read-only endpoints surface what's loaded — useful for clients (and AI
+authoring tools) that want to compose against existing DAGs:
+
+### `GET /dags`
+
+Returns the list of registered DAGs visible to the caller's team token
+(admin tokens see all). One line per DAG with `id`, `route`, `description`,
+`version`, `healthy`.
+
+```bash
+curl http://host:3000/dags \
+  -H "Authorization: Bearer fug_your-team-token"
+```
+
+### `GET /dags/:id/manifest`
+
+Returns a structured summary of a single DAG: input/output JSON Schemas,
+wave plan, prompts referenced, capabilities required, nodes, edges. Same
+team-isolation rules as `POST /dags/:id/run` — a team token can only
+manifest its own DAGs.
+
+```bash
+curl http://host:3000/dags/customer-summary/manifest \
+  -H "Authorization: Bearer fug_your-team-token"
+```
+
+Response shape:
+
+```json
+{
+  "id": "customer-summary",
+  "route": "/dags/customer-summary/run",
+  "description": "Summarizes customer data using LLM",
+  "version": "1.0.0",
+  "team": "cx",
+  "healthy": true,
+  "sha": "a1b2c3d...",
+  "loadedAt": 1716700000000,
+  "inputSchema": { "type": "object", "properties": { "customerId": {...} } },
+  "outputSchema": { "type": "object", "properties": { "summary": {...} } },
+  "outputNodeId": "synthesize",
+  "nodes": [
+    { "id": "fetch-data", "kind": "fetch", "sideEffects": "reads",
+      "requires": ["cache"], "humanReview": false },
+    { "id": "synthesize", "kind": "llm", "sideEffects": "external-call",
+      "requires": ["llm","prompts","cache"], "humanReview": false }
+  ],
+  "edges": [{ "from": "fetch-data", "to": "synthesize", "kind": "unconditional" }],
+  "waves": [["fetch-data"], ["synthesize"]],
+  "prompts": ["synthesis"],
+  "capabilities": ["cache", "llm", "prompts"]
+}
+```
+
+This is the contract for cross-DAG composition tooling: read a manifest,
+generate a typed client, compose it into a new DAG.
+
 ## Error Responses
 
 All errors are structured JSON:

@@ -40,6 +40,50 @@ export interface DagListResponse {
   readonly count: number;
 }
 
+// ---------------------------------------------------------------------------
+// Manifest response — GET /dags/:id/manifest
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-node metadata in the manifest. Shape mirrors `DescribedNode` from the
+ * framework CLI's `describe` output so LLM tooling sees a stable contract
+ * across both surfaces.
+ */
+export interface DagManifestNode {
+  readonly id: string;
+  readonly kind: string;
+  readonly sideEffects: string;
+  readonly requires: readonly string[];
+  readonly humanReview: boolean;
+}
+
+export interface DagManifestEdge {
+  readonly from: string;
+  readonly to: string;
+  readonly kind: "unconditional" | "conditional" | "default";
+  readonly predicateLabel?: string;
+  readonly predicateVersion?: number;
+}
+
+export interface DagManifestResponse {
+  readonly id: string;
+  readonly route: string;
+  readonly description: string;
+  readonly version: string;
+  readonly team: string;
+  readonly healthy: boolean;
+  readonly sha: string;
+  readonly loadedAt: number;
+  readonly inputSchema: Record<string, unknown> | null;
+  readonly outputSchema: Record<string, unknown> | null;
+  readonly outputNodeId: string | null;
+  readonly nodes: readonly DagManifestNode[];
+  readonly edges: readonly DagManifestEdge[];
+  readonly waves: readonly (readonly string[])[];
+  readonly prompts: readonly string[];
+  readonly capabilities: readonly string[];
+}
+
 export interface HealthResponse {
   readonly status: "ok" | "degraded" | "unavailable";
   readonly timestamp: string;

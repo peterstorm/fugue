@@ -17,6 +17,7 @@ import { createAuthMiddleware } from "./middleware/auth.js";
 import type { AuthMiddlewareDeps } from "./middleware/auth.js";
 import { healthHandler, readinessHandler } from "./handlers/health.js";
 import { listDagsHandler } from "./handlers/list-dags.js";
+import { manifestHandler } from "./handlers/manifest.js";
 import { createRunDagHandler } from "./handlers/run-dag.js";
 import type { RunDagDeps } from "./handlers/run-dag.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
@@ -91,6 +92,10 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
 
   // ── DAG routes (authenticated — authorization checked per-DAG) ───────────
   app.get("/dags", listDagsHandler);
+
+  // GET /dags/:id/manifest — registered before the param-less /run route so
+  // both bind cleanly; auth + team-isolation is enforced inside the handler.
+  app.get("/dags/:id/manifest", manifestHandler);
 
   // POST /dags/:id/run
   const runDagHandler = createRunDagHandler(deps);
