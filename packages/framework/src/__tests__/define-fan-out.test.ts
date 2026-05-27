@@ -1,6 +1,14 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { defineFanOut, createFetchNode, createTransformNode, ok, nodeId, dagId } from "../index.js";
+import {
+  defineFanOut,
+  createFetchNode,
+  createTransformNode,
+  createEvalJudgeNode,
+  ok,
+  nodeId,
+  dagId,
+} from "../index.js";
 
 describe("defineFanOut", () => {
   const source = createFetchNode({
@@ -87,12 +95,6 @@ describe("defineFanOut", () => {
     expect(dag.outputNodeId).toBe(nodeId("merge"));
   });
 
-  it("throws on empty branches array", () => {
-    expect(() => defineFanOut({ id: "empty", source, branches: [] })).toThrow(
-      "branches array must not be empty",
-    );
-  });
-
   it("passes through retryLimits and defaultRetryLimit", () => {
     const dag = defineFanOut({
       id: "retry-fan-out",
@@ -104,6 +106,22 @@ describe("defineFanOut", () => {
 
     expect(dag.defaultRetryLimit).toBe(2);
     expect(dag.retryLimits).toEqual({ "branch-a": 5 });
+  });
+
+  it("passes through evalJudges", () => {
+    const judge = createEvalJudgeNode({
+      id: "judge-fan-out",
+      criteria: ["accuracy"],
+      rubric: { source: "inline", text: "Score 0-1 based on accuracy." },
+    });
+    const dag = defineFanOut({
+      id: "judges-fan-out",
+      source,
+      branches: [branchA, branchB],
+      evalJudges: [judge],
+    });
+    expect(dag.evalJudges).toHaveLength(1);
+    expect(dag.evalJudges?.[0]?.id).toBe(nodeId("judge-fan-out"));
   });
 
   it("delegates structural validation to defineDag (rejects duplicate branch ids)", () => {

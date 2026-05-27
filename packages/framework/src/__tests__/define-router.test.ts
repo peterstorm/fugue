@@ -4,9 +4,11 @@ import {
   defineRouter,
   createFetchNode,
   createTransformNode,
+  createEvalJudgeNode,
   ok,
   nodeId,
   dagId,
+  DagDefinitionError,
 } from "../index.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 
@@ -118,15 +120,64 @@ describe("defineRouter", () => {
     expect(cond?.when.minConfidence).toBe("high");
   });
 
-  it("throws on empty cases", () => {
-    expect(() =>
+  it("throws a structured DagDefinitionError on empty cases", () => {
+    let captured: unknown;
+    try {
       defineRouter({
         id: "empty",
         classifier,
         cases: {},
         default: fallback,
-      }),
-    ).toThrow("cases must not be empty");
+      });
+    } catch (e) {
+      captured = e;
+    }
+    expect(captured).toBeInstanceOf(DagDefinitionError);
+    const err = captured as DagDefinitionError;
+    expect(err.dagId).toBe("empty");
+    expect(err.detail.kind).toBe("validation");
+  });
+
+  it("rejects duplicate-target cases via the validator's edge-uniqueness rule", () => {
+    // Two cases pointing at the same target produce two edges with
+    // (from: classifier, to: simpleHandler). The validator's "at most one
+    // edge per (from, to) pair" rule should surface this as a DagDefinitionError.
+    let captured: unknown;
+    try {
+      defineRouter({
+        id: "dup-targets",
+        classifier,
+        cases: {
+          "branch-one": { when: () => true, to: simpleHandler },
+          "branch-two": { when: () => false, to: simpleHandler },
+        },
+        default: fallback,
+      });
+    } catch (e) {
+      captured = e;
+    }
+    expect(captured).toBeInstanceOf(DagDefinitionError);
+    const err = captured as DagDefinitionError;
+    expect(err.detail.kind).toBe("duplicate-edge");
+  });
+
+  it("passes through evalJudges", () => {
+    const judge = createEvalJudgeNode({
+      id: "judge-router",
+      criteria: ["accuracy"],
+      rubric: { source: "inline", text: "Score 0-1 based on accuracy." },
+    });
+    const dag = defineRouter({
+      id: "judges-router",
+      classifier,
+      cases: {
+        "case-a": { when: () => true, to: simpleHandler },
+      },
+      default: fallback,
+      evalJudges: [judge],
+    });
+    expect(dag.evalJudges).toHaveLength(1);
+    expect(dag.evalJudges?.[0]?.id).toBe(nodeId("judge-router"));
   });
 
   it("evaluates synthesized predicate against the upstream output", () => {
@@ -169,8 +220,10 @@ describe("defineRouter", () => {
 
   it("rejects setting outputNodeId to a conditional-only case target", () => {
     // simpleHandler is only reachable via a conditional edge. The output
-    // reachability rule (unconditional + default only) must reject this.
-    expect(() =>
+    // reachability rule (unconditional + default only) must reject this with
+    // a structured `output-unreachable-under-routing` FrameworkError.
+    let captured: unknown;
+    try {
       defineRouter({
         id: "bad-output",
         classifier,
@@ -182,8 +235,14 @@ describe("defineRouter", () => {
         },
         default: fallback,
         outputNodeId: "handle-simple",
-      }),
-    ).toThrow(/not reachable/);
+      });
+    } catch (e) {
+      captured = e;
+    }
+    expect(captured).toBeInstanceOf(DagDefinitionError);
+    expect((captured as DagDefinitionError).detail.kind).toBe(
+      "output-unreachable-under-routing",
+    );
   });
 
   it("delegates validation: rejects an unknown outputNodeId", () => {

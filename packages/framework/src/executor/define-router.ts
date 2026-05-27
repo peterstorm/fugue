@@ -19,7 +19,8 @@
 import type { DagDef, Predicate } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
-import { defineDagFromArray } from "./define-dag.js";
+import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
+import { nodeId } from "../types/ids.js";
 
 /**
  * One case in a router. Provides either the ergonomic `when` callback (which
@@ -62,7 +63,14 @@ export interface RouterDagConfig {
 const isErgonomicCase = (
   c: RouterCase,
 ): c is Extract<RouterCase, { readonly when: (output: unknown) => boolean }> =>
-  "when" in c && typeof c.when === "function";
+  typeof (c as { readonly when?: unknown }).when === "function";
+
+const isFullPredicateCase = (
+  c: RouterCase,
+): c is Extract<RouterCase, { readonly whenPredicate: Predicate<unknown> }> => {
+  const wp = (c as { readonly whenPredicate?: unknown }).whenPredicate;
+  return wp !== undefined && wp !== null && typeof wp === "object";
+};
 
 /**
  * Define a router DAG: a classifier node whose output is routed to one of
@@ -99,7 +107,14 @@ const isErgonomicCase = (
 export const defineRouter = (config: RouterDagConfig): DagDef => {
   const caseEntries = Object.entries(config.cases);
   if (caseEntries.length === 0) {
-    throw new Error("[defineRouter] cases must not be empty");
+    // Surface as a structured DagDefinitionError so the CLI / lint surface
+    // categorizes this as `kind: "dag-definition-error"` rather than a
+    // generic `import-failed` prose throw.
+    throw new DagDefinitionError(config.id, {
+      kind: "validation",
+      nodeId: nodeId(config.classifier.id as string),
+      message: "defineRouter requires at least one case",
+    });
   }
 
   const classifierId = config.classifier.id as string;
@@ -107,9 +122,22 @@ export const defineRouter = (config: RouterDagConfig): DagDef => {
 
   // Conditional edges: classifier → each case's target with its predicate.
   const conditionalEdges = caseEntries.map(([caseKey, c]) => {
-    const predicate: Predicate<unknown> = isErgonomicCase(c)
-      ? { label: caseKey, version: 1, check: (value) => c.when(value) }
-      : c.whenPredicate;
+    let predicate: Predicate<unknown>;
+    if (isErgonomicCase(c)) {
+      const check = c.when;
+      predicate = { label: caseKey, version: 1, check: (value) => check(value) };
+    } else if (isFullPredicateCase(c)) {
+      predicate = c.whenPredicate;
+    } else {
+      // The `?: never` mutual-exclusion guard makes this unreachable at the
+      // type level, but cast-based escape hatches could still land a case
+      // with neither field set. Refuse to silently emit a malformed edge.
+      throw new DagDefinitionError(config.id, {
+        kind: "validation",
+        nodeId: nodeId(classifierId),
+        message: `defineRouter case '${caseKey}' has neither 'when' nor 'whenPredicate'`,
+      });
+    }
     return {
       from: classifierId,
       to: c.to.id as string,

@@ -4,6 +4,16 @@
 // proceed or surface the structured `errors` payload.
 
 import type { FrameworkError } from "../types/errors.js";
+import type {
+  DescribedDag,
+  DescribedNode,
+  DescribedEdge,
+} from "../describe/index.js";
+
+// Re-export the shared describe shapes so existing CLI consumers keep their
+// import path. The canonical home is `@fugue/framework`'s `describe` module —
+// the host's `GET /dags/:id/manifest` handler imports from there directly.
+export type { DescribedDag, DescribedNode, DescribedEdge };
 
 /**
  * Lint outcome: either the DAG file imports cleanly and validates, or one or
@@ -42,6 +52,17 @@ export type LintError =
       readonly dagId: string;
       readonly message: string;
       readonly detail: FrameworkError;
+    }
+  | {
+      /**
+       * Surfaced when describe assembles a topologically-invalid registered
+       * DAG. The validator should have caught this earlier; reaching this
+       * branch indicates a framework invariant violation, not authoring
+       * error.
+       */
+      readonly kind: "describe-failed";
+      readonly message: string;
+      readonly detail: FrameworkError;
     };
 
 /**
@@ -60,34 +81,3 @@ export type DescribeResult =
       readonly path: string;
       readonly errors: readonly LintError[];
     };
-
-export interface DescribedDag {
-  readonly id: string;
-  readonly route: string;
-  readonly description: string;
-  readonly version: string;
-  readonly inputSchema: Record<string, unknown> | null;
-  readonly outputSchema: Record<string, unknown> | null;
-  readonly outputNodeId: string | null;
-  readonly nodes: readonly DescribedNode[];
-  readonly edges: readonly DescribedEdge[];
-  readonly waves: readonly (readonly string[])[];
-  readonly prompts: readonly string[];
-  readonly capabilities: readonly string[];
-}
-
-export interface DescribedNode {
-  readonly id: string;
-  readonly kind: string;
-  readonly sideEffects: string;
-  readonly requires: readonly string[];
-  readonly humanReview: boolean;
-}
-
-export interface DescribedEdge {
-  readonly from: string;
-  readonly to: string;
-  readonly kind: "unconditional" | "conditional" | "default";
-  readonly predicateLabel?: string;
-  readonly predicateVersion?: number;
-}

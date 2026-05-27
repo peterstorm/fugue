@@ -75,7 +75,7 @@ export default registration;
 
 ---
 
-## Node Factories (4 types)
+## Node Factories
 
 ### `createFetchNode` — external data retrieval
 
@@ -153,7 +153,7 @@ createGuardrailNode<I, T>({
 
 ## DAG constructors
 
-Four constructors, in order of preference. Each delegates to the same
+Five constructors, in order of preference. Each delegates to the same
 module-load validator and produces the same branded `DagDef`.
 
 | Constructor | Use when |
@@ -372,7 +372,18 @@ const dag = defineDag({
 
 ### With retries and human review
 
+`humanReview` is a field on `NodeDef`, not on the factory configs. Apply it by
+spreading the factory result and adding the field — the node record entry is
+the right place for any per-node `NodeDef` field (retries, human review, etc.).
+
 ```ts
+const reviewNode = createTransformNode({
+  id: "review",
+  inputSchema: ProcessedSchema,
+  outputSchema: ProcessedSchema,
+  transform: (input) => ok(input),
+});
+
 const dag = defineDag({
   id: "durable",
   nodes: {
@@ -383,13 +394,10 @@ const dag = defineDag({
       outputSchema: ProcessedSchema,
       transform: (input) => ok(processData(input)),
     }),
-    "review": createTransformNode({
-      id: "review",
-      inputSchema: ProcessedSchema,
-      outputSchema: ProcessedSchema,
-      transform: (input) => ok(input),
-      humanReview: { prompt: "Please review the processed data" },  // pauses here
-    }),
+    "review": {
+      ...reviewNode,
+      humanReview: { prompt: "Please review the processed data" }, // pauses here
+    },
   },
   edges: [
     { from: "fetch", to: "process" },
@@ -517,6 +525,7 @@ Possible `errors[].kind` values:
 | `no-default-export` | The module compiled but has no default export. |
 | `missing-dag-field` | Default export exists but doesn't have a `.dag` field. |
 | `dag-definition-error` | `defineDag()` rejected the DAG. The typed `FrameworkError` is on `errors[].detail`. |
+| `describe-failed` | `defineDag` accepted the DAG but the describe step failed to assemble — usually a framework invariant bug. The `FrameworkError` is on `errors[].detail`. |
 
 ### `fugue describe <path>`
 
@@ -575,7 +584,8 @@ curl http://host:3000/dags \
 ```
 
 Returns `{ dags: [{ id, route, description, version, healthy }], count }`.
-A team token sees only DAGs belonging to its team; admin sees all.
+A team token sees only DAGs belonging to its team; admin tokens see all.
+Without an auth identity the endpoint returns 401.
 
 ### `GET /dags/:id/manifest` — full schema
 
@@ -584,8 +594,9 @@ curl http://host:3000/dags/customer-summary/manifest \
   -H "Authorization: Bearer fug_team-token"
 ```
 
-Returns the same JSON shape `fugue describe` emits (without the `path`
-wrapper) plus team metadata:
+Returns the per-DAG fields `fugue describe` emits under its `dag` key,
+hoisted to the top level, with host deployment metadata (`team`, `healthy`,
+`sha`, `loadedAt`) appended:
 
 ```jsonc
 {

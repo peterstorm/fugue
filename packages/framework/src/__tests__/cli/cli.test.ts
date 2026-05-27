@@ -125,6 +125,16 @@ describe("runDescribe", () => {
     expect(Object.keys(props ?? {})).toContain("summary");
   });
 
+  it("returns null outputNodeId and null outputSchema when omitted from the DAG", async () => {
+    const result = await runDescribe(fixturePath("no-explicit-output.ts"));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Both fields are explicitly `null` (not undefined / not missing) so LLM
+    // tooling never has to branch on present-vs-missing.
+    expect(result.dag.outputNodeId).toBeNull();
+    expect(result.dag.outputSchema).toBeNull();
+  });
+
   it("propagates lint errors as describe errors", async () => {
     // Uses a *separate* invalid-DAG fixture (`-2`) so this test doesn't share
     // a poisoned module-cache entry with the runLint test above. Bun caches
@@ -175,5 +185,33 @@ describe("fugue bin (subprocess)", () => {
     const { exitCode, stderr } = await runBin(["bogus", fixturePath("valid-dag.ts")]);
     expect(exitCode).toBe(2);
     expect(stderr).toContain("Unknown command");
+  });
+
+  it("--help exits 0 with usage on stdout", async () => {
+    const { exitCode, stdout } = await runBin(["--help"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Usage: fugue");
+  });
+
+  it("-h exits 0 with usage on stdout", async () => {
+    const { exitCode, stdout } = await runBin(["-h"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Usage: fugue");
+  });
+
+  it("exits 2 with usage on missing <path>", async () => {
+    const { exitCode, stderr } = await runBin(["lint"]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("Missing required <path>");
+  });
+
+  it("exits 2 when extra arguments are passed", async () => {
+    const { exitCode, stderr } = await runBin([
+      "lint",
+      fixturePath("valid-dag.ts"),
+      "leftover-arg",
+    ]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("Unexpected extra arguments");
   });
 });

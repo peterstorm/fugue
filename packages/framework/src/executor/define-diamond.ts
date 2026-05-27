@@ -11,14 +11,13 @@
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
-import { defineFanOut } from "./define-fan-out.js";
+import { defineFanOut, type NonEmptyNodeList } from "./define-fan-out.js";
 
 export interface DiamondDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
   readonly source: NodeDef<any, any, any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly branches: readonly NodeDef<any, any, any>[];
+  readonly branches: NonEmptyNodeList;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
   readonly join: NodeDef<any, any, any>;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
@@ -39,15 +38,11 @@ export interface DiamondDagConfig {
  * });
  * ```
  *
- * The join node receives a fan-in input keyed by each branch's id. See
- * `mergeInputs` for a helper that builds the matching schema.
+ * The join node receives a fan-in input keyed by each branch's id; design
+ * `join.inputSchema` to accept `{ [branchId]: branchOutput }`.
  */
-export const defineDiamond = (config: DiamondDagConfig): DagDef => {
-  if (config.branches.length === 0) {
-    throw new Error("[defineDiamond] branches array must not be empty");
-  }
-
-  return defineFanOut({
+export const defineDiamond = (config: DiamondDagConfig): DagDef =>
+  defineFanOut({
     id: config.id,
     source: config.source,
     branches: config.branches,
@@ -56,4 +51,3 @@ export const defineDiamond = (config: DiamondDagConfig): DagDef => {
     defaultRetryLimit: config.defaultRetryLimit,
     retryLimits: config.retryLimits,
   });
-};

@@ -11,18 +11,22 @@ import { listDagsHandler } from "../../http/handlers/list-dags.js";
 import type { HostState } from "../../domain/host-state.js";
 import { freeze } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
+import type { AuthIdentity } from "../../domain/auth.js";
 
 type HostEnv = {
   Variables: {
     hostState: HostState;
-    authIdentity: { kind: "admin" };
+    authIdentity: AuthIdentity;
   };
 };
 
-const makeApp = (state: HostState) => {
+const adminIdentity: AuthIdentity = { kind: "admin" };
+
+const makeApp = (state: HostState, identity: AuthIdentity = adminIdentity) => {
   const app = new Hono<HostEnv>();
   app.use("*", async (c, next) => {
     c.set("hostState", state);
+    c.set("authIdentity", identity);
     await next();
   });
   app.get("/dags", listDagsHandler);
@@ -122,5 +126,59 @@ describe("listDagsHandler", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.dags).toHaveLength(1);
+  });
+
+  it("filters by team for a team identity", async () => {
+    const engDag: RegisteredDag = { ...makeDag("alpha"), team: "eng" };
+    const billingDag: RegisteredDag = { ...makeDag("beta"), team: "billing" };
+    const state: HostState = {
+      phase: "ready",
+      registry: freeze([engDag, billingDag], gitSha("abc"), 1000),
+      lastSyncAt: 1000,
+      lastSyncSha: gitSha("abc"),
+    };
+    const teamIdentity: AuthIdentity = { kind: "team", team: "eng", tokenId: "tok-eng" };
+    const app = makeApp(state, teamIdentity);
+    const res = await app.request("/dags");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.dags).toHaveLength(1);
+    expect(body.dags[0].id).toBe("alpha");
+  });
+
+  it("admin sees DAGs across all teams", async () => {
+    const engDag: RegisteredDag = { ...makeDag("alpha"), team: "eng" };
+    const billingDag: RegisteredDag = { ...makeDag("beta"), team: "billing" };
+    const state: HostState = {
+      phase: "ready",
+      registry: freeze([engDag, billingDag], gitSha("abc"), 1000),
+      lastSyncAt: 1000,
+      lastSyncSha: gitSha("abc"),
+    };
+    const app = makeApp(state); // admin by default
+    const res = await app.request("/dags");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.dags).toHaveLength(2);
+  });
+
+  it("returns 401 when auth middleware did not run", async () => {
+    const state: HostState = {
+      phase: "ready",
+      registry: freeze([makeDag("alpha")], gitSha("abc"), 1000),
+      lastSyncAt: 1000,
+      lastSyncSha: gitSha("abc"),
+    };
+    // App that does NOT install the auth middleware.
+    const app = new Hono<HostEnv>();
+    app.use("*", async (c, next) => {
+      c.set("hostState", state);
+      await next();
+    });
+    app.get("/dags", listDagsHandler);
+    const res = await app.request("/dags");
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("unauthorized");
   });
 });

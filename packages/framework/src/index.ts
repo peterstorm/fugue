@@ -15,6 +15,7 @@ export * from "./checkpoint/index.js";
 export * from "./cache/index.js";
 export * from "./prompts/index.js";
 export * from "./llm/index.js";
+export * from "./describe/index.js";
 export * from "./tracing/index.js";
 export { setFrameworkLogger, fwLogger } from "./logger.js";
 export type { FrameworkLogger } from "./logger.js";

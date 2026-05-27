@@ -25,28 +25,38 @@ Commands:
 The path must point to a dag.ts (or other module) that default-exports a
 DagRegistration: { dag: defineDag(...), inputSchema, ... }`;
 
-const dieUsage = (message?: string): never => {
-  if (message) process.stderr.write(`${message}\n\n`);
-  process.stderr.write(`${USAGE}\n`);
+const printUsage = (stream: NodeJS.WriteStream): void => {
+  stream.write(`${USAGE}\n`);
+};
+
+const dieUsage = (message: string): never => {
+  process.stderr.write(`${message}\n\n`);
+  printUsage(process.stderr);
   process.exit(2);
 };
 
-const main = async (): Promise<void> => {
+const main = async (): Promise<number> => {
   const [, , command, pathArg, ...rest] = process.argv;
 
-  if (!command || command === "--help" || command === "-h") {
-    dieUsage();
+  if (!command) {
+    printUsage(process.stderr);
+    return 2;
   }
 
-  if (rest.length > 0) {
-    dieUsage(`Unexpected extra arguments: ${rest.join(" ")}`);
+  if (command === "--help" || command === "-h") {
+    printUsage(process.stdout);
+    return 0;
   }
 
   if (!pathArg) {
     dieUsage("Missing required <path> argument.");
   }
 
-  const exitCode = await match(command)
+  if (rest.length > 0) {
+    dieUsage(`Unexpected extra arguments: ${rest.join(" ")}`);
+  }
+
+  return match(command)
     .with("lint", async () => {
       const result = await runLint(pathArg);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -60,8 +70,6 @@ const main = async (): Promise<void> => {
     .otherwise(() => {
       dieUsage(`Unknown command: ${command}`);
     });
-
-  process.exit(exitCode);
 };
 
-await main();
+process.exit(await main());

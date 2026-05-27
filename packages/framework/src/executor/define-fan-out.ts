@@ -17,12 +17,18 @@ import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { defineDagFromArray } from "./define-dag.js";
 
+/**
+ * Fan-out branches must be non-empty. The tuple type makes the empty-array
+ * case a compile error rather than a runtime throw.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
+export type NonEmptyNodeList = readonly [NodeDef<any, any, any>, ...NodeDef<any, any, any>[]];
+
 export interface FanOutDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
   readonly source: NodeDef<any, any, any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly branches: readonly NodeDef<any, any, any>[];
+  readonly branches: NonEmptyNodeList;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
   readonly join?: NodeDef<any, any, any>;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
@@ -53,13 +59,9 @@ export interface FanOutDagConfig {
  *
  * When `join` is present, it receives a fan-in input keyed by each branch's
  * id: `{ "fetch-crm": ..., "fetch-billing": ..., "fetch-support": ... }`.
- * Design `join.inputSchema` accordingly (see `mergeInputs` helper).
+ * Design `join.inputSchema` accordingly.
  */
 export const defineFanOut = (config: FanOutDagConfig): DagDef => {
-  if (config.branches.length === 0) {
-    throw new Error("[defineFanOut] branches array must not be empty");
-  }
-
   const sourceId = config.source.id as string;
   const joinNode = config.join;
 

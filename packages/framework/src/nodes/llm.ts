@@ -48,9 +48,20 @@ export const interpolatePrompt = (template: string, vars: Record<string, unknown
     template,
   );
 
+/**
+ * LLM node with its prompt name exposed as a typed field on the returned
+ * `NodeDef`. The extra `promptName` field lets describe/manifest tooling
+ * introspect prompt references without a `as unknown` cast.
+ */
+export type LlmNodeDef<I, O> =
+  NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & {
+    readonly id: NodeId;
+    readonly promptName: string;
+  };
+
 export const createLlmNode = <I, O>(
   config: LlmNodeConfig<I, O>,
-): NodeDef<I, O, FrameworkError, readonly ["llm", "prompts"]> & { readonly id: NodeId } => {
+): LlmNodeDef<I, O> => {
   const id = nodeId(config.id);
   return {
   id,
@@ -60,6 +71,7 @@ export const createLlmNode = <I, O>(
   requires: ["llm", "prompts"] as const,
   sideEffects: { kind: "external-call", resource: resourceName(`llm:${config.model}`) },
   confidence: { mode: "none" },
+  promptName: config.promptName,
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     if (config.skipWhen?.(input)) {
       return ok(config.skipDefault as O);

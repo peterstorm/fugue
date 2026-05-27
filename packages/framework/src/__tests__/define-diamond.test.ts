@@ -1,6 +1,14 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { defineDiamond, createFetchNode, createTransformNode, ok, nodeId, dagId } from "../index.js";
+import {
+  defineDiamond,
+  createFetchNode,
+  createTransformNode,
+  createEvalJudgeNode,
+  ok,
+  nodeId,
+  dagId,
+} from "../index.js";
 
 describe("defineDiamond", () => {
   const source = createFetchNode({
@@ -57,10 +65,21 @@ describe("defineDiamond", () => {
     expect(dag.outputNodeId).toBe(nodeId("join"));
   });
 
-  it("throws on empty branches array", () => {
-    expect(() =>
-      defineDiamond({ id: "empty", source, branches: [], join }),
-    ).toThrow("branches array must not be empty");
+  it("passes through evalJudges", () => {
+    const judge = createEvalJudgeNode({
+      id: "judge-diamond",
+      criteria: ["accuracy"],
+      rubric: { source: "inline", text: "Score 0-1 based on accuracy." },
+    });
+    const dag = defineDiamond({
+      id: "judges-diamond",
+      source,
+      branches: [branchA, branchB],
+      join,
+      evalJudges: [judge],
+    });
+    expect(dag.evalJudges).toHaveLength(1);
+    expect(dag.evalJudges?.[0]?.id).toBe(nodeId("judge-diamond"));
   });
 
   it("supports a single branch (degenerate diamond, A→B→C)", () => {

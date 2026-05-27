@@ -34,4 +34,4 @@ export type {
   FakeWithToolsScript,
 } from "./fake-client.js";
 export { computeCostUsd, PRICE_TABLE } from "./cost.js";
-export { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
+export { zodToJsonSchema } from "./zod-schema.js";

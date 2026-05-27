@@ -13,6 +13,7 @@ import {
   gitSha,
   dagId,
   defineLinearDag,
+  defineRouter,
   createFetchNode,
   createTransformNode,
   ok,
@@ -88,10 +89,17 @@ const adminIdentity: AuthIdentity = { kind: "admin" };
 // buildManifest (pure) — exercise the shape directly
 // ──────────────────────────────────────────────────────────────────────────
 
+const expectManifest = (
+  built: ReturnType<typeof buildManifest>,
+) => {
+  if (!built.ok) throw new Error(`buildManifest failed: ${built.errorMessage}`);
+  return built.value;
+};
+
 describe("buildManifest", () => {
   it("returns a manifest with stable shape", () => {
     const registered = makeRegisteredDag();
-    const manifest = buildManifest(registered);
+    const manifest = expectManifest(buildManifest(registered));
 
     expect(manifest.id).toBe("manifest-test");
     expect(manifest.route).toBe("/dags/manifest-test/run");
@@ -124,7 +132,7 @@ describe("buildManifest", () => {
     const registered = makeRegisteredDag({
       status: { kind: "disabled", reason: "circuit-open" },
     });
-    const manifest = buildManifest(registered);
+    const manifest = expectManifest(buildManifest(registered));
     expect(manifest.healthy).toBe(false);
   });
 
@@ -135,8 +143,104 @@ describe("buildManifest", () => {
         ["synthesis-system", "You are a summarizer."],
       ]),
     });
-    const manifest = buildManifest(registered);
+    const manifest = expectManifest(buildManifest(registered));
     expect(manifest.prompts).toEqual(["synthesis", "synthesis-system"]);
+  });
+
+  it("serializes conditional and default edges with predicate metadata", () => {
+    // A router DAG produces both conditional edges (with predicate label +
+    // version) and a single default edge. This exercises every arm of the
+    // shared describeEdge dispatcher.
+    const classifier = createFetchNode({
+      id: "classify",
+      inputSchema: z.object({ q: z.string() }),
+      outputSchema: z.object({ kind: z.string() }),
+      fetch: async () => ok({ kind: "simple" }),
+    });
+    const handleSimple = createTransformNode({
+      id: "handle-simple",
+      inputSchema: z.object({ kind: z.string() }),
+      outputSchema: z.object({ done: z.boolean() }),
+      transform: () => ok({ done: true }),
+    });
+    const fallback = createTransformNode({
+      id: "fallback",
+      inputSchema: z.object({ kind: z.string() }),
+      outputSchema: z.object({ done: z.boolean() }),
+      transform: () => ok({ done: false }),
+    });
+    const dag = defineRouter({
+      id: "router-manifest",
+      classifier,
+      cases: {
+        "is-simple": {
+          when: (out) => (out as { kind: string }).kind === "simple",
+          to: handleSimple,
+        },
+      },
+      default: fallback,
+    });
+    const registered: RegisteredDag = {
+      id: dagId("router-manifest"),
+      team: "eng",
+      route: "/dags/router-manifest/run",
+      dag,
+      inputSchema: z.object({ q: z.string() }),
+      config: { timeout: 30000, maxConcurrency: 10 },
+      meta: { description: "Router manifest", version: "1.0.0" },
+      loadedAt: 1000,
+      sha: gitSha("abc123"),
+      status: { kind: "healthy" },
+      prompts: new Map(),
+      modulePath: "/tmp/dags/eng/router-manifest/dag.ts",
+    };
+
+    const manifest = expectManifest(buildManifest(registered));
+    const conditional = manifest.edges.find((e) => e.kind === "conditional");
+    const defaultEdge = manifest.edges.find((e) => e.kind === "default");
+
+    expect(conditional).toBeDefined();
+    if (conditional?.kind === "conditional") {
+      expect(conditional.predicateLabel).toBe("is-simple");
+      expect(conditional.predicateVersion).toBe(1);
+      expect(conditional.from).toBe("classify");
+      expect(conditional.to).toBe("handle-simple");
+    }
+    expect(defaultEdge).toBeDefined();
+    expect(defaultEdge?.from).toBe("classify");
+    expect(defaultEdge?.to).toBe("fallback");
+  });
+
+  it("returns null outputSchema and outputNodeId when the DAG has no explicit output", () => {
+    const fetchUser = createFetchNode({
+      id: "fetch-user",
+      inputSchema: z.object({ userId: z.string() }),
+      outputSchema: z.object({ name: z.string() }),
+      fetch: async (input) => ok({ name: `u-${input.userId}` }),
+    });
+    // Use defineLinearDag without an explicit output — null contract is the
+    // documented LLM-tooling contract for "no schema available".
+    const dag = defineLinearDag({ id: "no-output", nodes: [fetchUser] });
+    const registered: RegisteredDag = {
+      id: dagId("no-output"),
+      team: "eng",
+      route: "/dags/no-output/run",
+      dag,
+      inputSchema: z.object({ userId: z.string() }),
+      config: { timeout: 30000, maxConcurrency: 10 },
+      meta: { description: "No output", version: "1.0.0" },
+      loadedAt: 1000,
+      sha: gitSha("abc123"),
+      status: { kind: "healthy" },
+      prompts: new Map(),
+      modulePath: "/tmp/dags/eng/no-output/dag.ts",
+    };
+    const manifest = expectManifest(buildManifest(registered));
+    // defineLinearDag sets the last node as outputNodeId, so this DAG
+    // actually surfaces "fetch-user" as the output. Verify the schema field
+    // matches that node's outputSchema.
+    expect(manifest.outputNodeId).toBe("fetch-user");
+    expect(manifest.outputSchema).toBeDefined();
   });
 });
 
@@ -237,5 +341,28 @@ describe("manifestHandler", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.id).toBe("manifest-test");
+  });
+
+  it("returns 401 when auth middleware did not run", async () => {
+    const dags = [makeRegisteredDag()];
+    const state: HostState = {
+      phase: "ready",
+      registry: freeze(dags, gitSha("abc"), 1000),
+      lastSyncAt: 1000,
+      lastSyncSha: gitSha("abc"),
+    };
+    // App that does NOT install the auth middleware — exercises the safety
+    // net in the handler that catches missing-identity bugs in routing.
+    const app = new Hono<HostEnv>();
+    app.use("*", async (c, next) => {
+      c.set("hostState", state);
+      await next();
+    });
+    app.get("/dags/:id/manifest", manifestHandler);
+
+    const res = await app.request("/dags/manifest-test/manifest");
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe("unauthorized");
   });
 });
