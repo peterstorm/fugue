@@ -45,6 +45,27 @@ describe("startRedisProbe", () => {
     expect(ticks).toBe(snapshot);
   });
 
+  it("suppresses overlapping ticks while a ping is in flight (one PING at a time)", async () => {
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    const redis: RedisConnectivityPort = {
+      ping: async () => {
+        calls++;
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await wait(30); // outlives the 5ms interval
+        active--;
+        return ok(undefined);
+      },
+    };
+    const handle = startRedisProbe(redis, 5, { onAlive: () => {}, onDead: () => {} }, noopLogger);
+    await wait(60);
+    handle.stop();
+    expect(calls).toBeGreaterThan(0);
+    expect(maxActive).toBe(1); // the inFlight guard prevents concurrent pings
+  });
+
   it("treats a thrown ping as a dead connection", async () => {
     const redis: RedisConnectivityPort = {
       ping: async () => { throw new Error("connection reset"); },

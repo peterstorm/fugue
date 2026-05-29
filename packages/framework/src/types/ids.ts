@@ -147,3 +147,13 @@ export const gitSha = (s: string): GitSha => {
   }
   return s as unknown as GitSha;
 };
+
+/**
+ * Parse a string into a GitSha, returning a Result instead of throwing — for parse
+ * boundaries (e.g. reading a SHA back from Redis/a checkpoint) where throwing is undesirable.
+ * Mirrors `tryRunId`/`tryNodeId`/`tryDagId`. Rejects the empty string.
+ */
+export const tryGitSha = (s: string): Result<GitSha, string> =>
+  typeof s === "string" && s.length > 0
+    ? ok(s as unknown as GitSha)
+    : err('Invalid gitSha "": must be a non-empty string (use null for "never synced")');

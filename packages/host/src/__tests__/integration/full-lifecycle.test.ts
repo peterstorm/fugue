@@ -282,6 +282,23 @@ describe("Full Host Lifecycle", () => {
     expect(host.getState().phase).toBe("ready");
   });
 
+  test("FR-051: per-DAG maxConcurrent is folded into the live limiter at boot", async () => {
+    const { port, redis } = createFakeRedis();
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([fakeLoadResult("limited-dag")]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger: createTestLogger(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+    // fakeRegistration sets config.maxConcurrent: 5 — it must reach the limiter, not collapse to the default.
+    expect(host.getConcurrency().perDag.get("limited-dag" as DagId)?.max).toBe(5);
+  });
+
   test("NFR-020: logs startup lifecycle events", async () => {
     const { port, redis } = createFakeRedis();
     const logger = createTestLogger();

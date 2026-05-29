@@ -222,6 +222,13 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         if (result.ok) {
           hostState = result.value;
           logger.warn("Redis liveness probe failed — host degraded (redis-disconnected)");
+        } else if (hostState.phase !== "degraded") {
+          // Already-degraded is the expected no-op; any other rejection is a real
+          // state-machine surprise worth surfacing (mirrors the sync-callbacks pattern).
+          logger.warn("redisDied transition unexpectedly rejected", {
+            currentPhase: hostState.phase,
+            error: result.error.message,
+          });
         }
       },
       onAlive: () => {
@@ -230,6 +237,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
           if (result.ok) {
             hostState = result.value;
             logger.info("Redis recovered — host returned to ready");
+          } else {
+            logger.warn("redisRecovered transition unexpectedly rejected", {
+              currentPhase: hostState.phase,
+              error: result.error.message,
+            });
           }
         }
       },

@@ -17,16 +17,19 @@ import { ok, err, dagId as makeDagId, tryDagId } from "@fugue/framework";
 import type { DagId } from "@fugue/framework";
 import { z } from "zod";
 import type { HostError } from "./host-error.js";
+import type { FugueYaml } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Config defaults — FR-013: sensible defaults when omitted
 // ---------------------------------------------------------------------------
 
 /**
- * Per-DAG registration default when DAG module omits config.timeoutMs.
- * Note: HostConfig.DEFAULT_DAG_TIMEOUT_MS (60s) is the host-level default;
- * HostConfig.MAX_DAG_TIMEOUT_MS (120s) is the maximum allowed.
- * Neither is currently wired to constrain this value — future work.
+ * Per-DAG registration default when a DAG module omits config.timeoutMs (and no
+ * fugue.yaml override is present).
+ *
+ * The host-level defaults DO constrain the effective timeout: loadResultToRegisteredDag
+ * (dag-factory.ts) falls an omitted per-DAG timeout back to HostConfig.DEFAULT_DAG_TIMEOUT_MS
+ * (60s) and clamps the final value to HostConfig.MAX_DAG_TIMEOUT_MS (120s).
  */
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_CONCURRENT = 10;
@@ -42,7 +45,12 @@ export interface DagRegistrationConfig {
   readonly cacheTtlMs?: number;
   /** Per-DAG checkpoint TTL override (ms). Falls back to host DEFAULT_CHECKPOINT_TTL_MS. (FR-041) */
   readonly checkpointTtlMs?: number;
-  /** Per-DAG circuit-breaker override. Falls back to host CIRCUIT_BREAKER_* config. */
+  /**
+   * Per-DAG circuit-breaker override. Each subfield falls back INDEPENDENTLY to the host
+   * config when omitted: `failureThreshold` → CIRCUIT_BREAKER_THRESHOLD, `resetTimeoutMs`
+   * → the 30s half-open cooldown default. `windowMs` is host-only (not overridable per-DAG).
+   * Merged in run-dag.ts. fugue.yaml cannot set this — it lives only in the dag.ts config.
+   */
   readonly circuitBreaker?: {
     readonly failureThreshold?: number;
     readonly resetTimeoutMs?: number;
@@ -79,6 +87,38 @@ export interface ResolvedDagRegistration {
     readonly version: string;
   };
 }
+
+/**
+ * Merge a sibling fugue.yaml over a dag.ts DagRegistration. PURE — no I/O.
+ *
+ * Precedence: fugue.yaml (the deployment/ops layer) WINS over the dag.ts `config` for every
+ * field it specifies; omitted fields are left untouched. `team`/`owner`/`env` are not part of
+ * DagRegistration (the loader threads them separately). `circuitBreaker`/`asyncResultTtlMs`
+ * are intentionally not mergeable from fugue.yaml.
+ */
+export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): DagRegistration => {
+  const config: DagRegistrationConfig = {
+    ...registration.config,
+    ...(yaml.timeoutMs !== undefined ? { timeoutMs: yaml.timeoutMs } : {}),
+    ...(yaml.maxConcurrent !== undefined ? { maxConcurrent: yaml.maxConcurrent } : {}),
+    ...(yaml.cacheTtlMs !== undefined ? { cacheTtlMs: yaml.cacheTtlMs } : {}),
+    ...(yaml.checkpointTtlMs !== undefined ? { checkpointTtlMs: yaml.checkpointTtlMs } : {}),
+  };
+  return {
+    ...registration,
+    route: yaml.route ?? registration.route,
+    config,
+  };
+};
+
+/**
+ * Pure fail-closed env policy: which of the `required` env var names are absent or empty in
+ * `env`. Empty result means all present. The loader builds the HostError from the returned names.
+ */
+export const missingEnvVars = (
+  required: readonly string[],
+  env: Record<string, string | undefined>,
+): string[] => required.filter((name) => env[name] === undefined || env[name] === "");
 
 /**
  * Apply sensible defaults to all optional fields (FR-013).

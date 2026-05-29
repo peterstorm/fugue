@@ -15,14 +15,13 @@ import { ok, err } from "@fugue/framework";
 import type { Result, DagId, GitSha } from "@fugue/framework";
 import { tryDagId, dagId } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
-import { validateDagRegistration } from "../domain/dag-registration.js";
-import type { DagRegistration, DagRegistrationConfig } from "../domain/dag-registration.js";
+import { validateDagRegistration, applyFugueYaml, missingEnvVars } from "../domain/dag-registration.js";
 import { parseFugueYaml } from "../domain/config.js";
 import type { FugueYaml } from "../domain/config.js";
 import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
 
 /** Bun's native YAML parser (not yet in @types/bun) — typed minimally here. */
-const BunYAML = (Bun as unknown as { YAML: { parse: (s: string) => unknown } }).YAML;
+const BunYAML = (Bun as unknown as { YAML?: { parse: (s: string) => unknown } }).YAML;
 
 // ── fugue.yaml (per-DAG deployment config) ─────────────────────────────────
 
@@ -43,6 +42,11 @@ export const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYam
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return ok(null);
     return err({ kind: "config-invalid", message: `Cannot read ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
   }
+  // Guard the native API at first use: if Bun.YAML is unavailable on this runtime, report
+  // THAT — not a misleading "malformed fugue.yaml" that blames the operator's file.
+  if (typeof BunYAML?.parse !== "function") {
+    return err({ kind: "config-invalid", message: `Cannot parse ${yamlPath}: Bun.YAML API unavailable in this runtime` });
+  }
   let parsed: unknown;
   try {
     parsed = BunYAML.parse(text);
@@ -52,29 +56,7 @@ export const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYam
   return parseFugueYaml(parsed, yamlPath);
 };
 
-/**
- * Merge a sibling fugue.yaml over the dag.ts DagRegistration.
- *
- * Precedence: fugue.yaml (deployment/ops config) WINS over the dag.ts `config`
- * defaults for every field it specifies; omitted fields are left untouched.
- * `team`/`owner`/`env` are NOT part of DagRegistration and are handled by the caller.
- * Note: `circuitBreaker` and `asyncResultTtlMs` are intentionally not mergeable from
- * fugue.yaml (the former lives only in dag.ts config; the latter awaits async-results).
- */
-export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): DagRegistration => {
-  const config: DagRegistrationConfig = {
-    ...registration.config,
-    ...(yaml.timeoutMs !== undefined ? { timeoutMs: yaml.timeoutMs } : {}),
-    ...(yaml.maxConcurrent !== undefined ? { maxConcurrent: yaml.maxConcurrent } : {}),
-    ...(yaml.cacheTtlMs !== undefined ? { cacheTtlMs: yaml.cacheTtlMs } : {}),
-    ...(yaml.checkpointTtlMs !== undefined ? { checkpointTtlMs: yaml.checkpointTtlMs } : {}),
-  };
-  return {
-    ...registration,
-    route: yaml.route ?? registration.route,
-    config,
-  };
-};
+// (applyFugueYaml + missingEnvVars are pure domain logic — see domain/dag-registration.ts.)
 
 
 // ── Implementation ─────────────────────────────────────────────────────────
@@ -143,7 +125,7 @@ export const loadDagModule = async (
 
   // Fail-closed env requirement check (fugue.yaml `env` declares required host env vars).
   if (yaml && yaml.env.length > 0) {
-    const missing = yaml.env.filter((name) => env[name] === undefined || env[name] === "");
+    const missing = missingEnvVars(yaml.env, env);
     if (missing.length > 0) {
       return err({
         kind: "dag-validation-failed",

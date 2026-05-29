@@ -1,5 +1,19 @@
 import { describe, it, expect } from "bun:test";
-import { runId, nodeId, dagId } from "../types/ids.js";
+import { runId, nodeId, dagId, gitSha, tryGitSha } from "../types/ids.js";
+
+describe("gitSha", () => {
+  it("accepts a non-empty sha and throws on empty", () => {
+    expect(gitSha("a".repeat(40))).toBeDefined();
+    expect(() => gitSha("")).toThrow(/non-empty/);
+  });
+
+  it("tryGitSha returns ok for non-empty, err for empty", () => {
+    const ok = tryGitSha("deadbeef");
+    expect(ok.ok).toBe(true);
+    const bad = tryGitSha("");
+    expect(bad.ok).toBe(false);
+  });
+});
 
 describe("branded ID validation", () => {
   describe("nodeId", () => {

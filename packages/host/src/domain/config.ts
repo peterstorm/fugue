@@ -100,24 +100,28 @@ export type HostConfig = z.infer<typeof HostConfigSchema>;
 // ---------------------------------------------------------------------------
 
 export const FugueYamlSchema = z.object({
-  /** Team owning this DAG (required) */
-  team: z.string(),
+  /** Team owning this DAG (required, non-empty — drives authorization isolation) */
+  team: z.string().min(1),
   /** Individual owner within the team */
   owner: z.string().optional(),
   /** Environment variable names this DAG requires at runtime */
   env: z.array(z.string()).default([]),
+  // NOTE: these numeric overrides MUST mirror the constraints on DagRegistrationSchema.config
+  // (int + positive). applyFugueYaml merges them straight into the resolved DagRegistration,
+  // bypassing the dag.ts schema — so a zero/negative here would otherwise reach runtime
+  // (maxConcurrent: 0 wedges the DAG at 429 forever; negative TTL → bad Redis expiry).
   /** Per-DAG concurrency limit override */
-  maxConcurrent: z.number().optional(),
+  maxConcurrent: z.number().int().positive().optional(),
   /** Per-DAG timeout override (ms) */
-  timeoutMs: z.number().positive().optional(),
+  timeoutMs: z.number().int().positive().optional(),
   /** Custom route path override (defaults to DAG ID) */
   route: z.string().optional(),
   /** Per-DAG cache TTL override (FR-041) */
-  cacheTtlMs: z.number().optional(),
+  cacheTtlMs: z.number().int().positive().optional(),
   /** Per-DAG checkpoint TTL override (FR-041) */
-  checkpointTtlMs: z.number().optional(),
+  checkpointTtlMs: z.number().int().positive().optional(),
   /** Per-DAG async result TTL override (FR-041) */
-  asyncResultTtlMs: z.number().optional(),
+  asyncResultTtlMs: z.number().int().positive().optional(),
 });
 
 export type FugueYaml = z.infer<typeof FugueYamlSchema>;

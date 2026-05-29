@@ -5,10 +5,13 @@ import {
   DagRegistrationSchema,
   validateDagRegistration,
   resolveDefaults,
+  applyFugueYaml,
+  missingEnvVars,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT,
   type DagRegistration,
 } from "../domain/dag-registration.js";
+import type { FugueYaml } from "../domain/config.js";
 
 // ---------------------------------------------------------------------------
 // Test helpers — structurally valid DagDef-like object
@@ -425,5 +428,40 @@ describe("resolveDefaults", () => {
     const reg2 = { ...validRegistration(), dag: makeFakeDag("beta") };
     expect(resolveDefaults(reg1).route).toBe("/dags/alpha/run");
     expect(resolveDefaults(reg2).route).toBe("/dags/beta/run");
+  });
+});
+
+describe("applyFugueYaml (pure merge)", () => {
+  const yaml = (over: Partial<FugueYaml> = {}): FugueYaml => ({ team: "cx", env: [], ...over });
+
+  test("fugue.yaml fields override dag.ts config; omitted fields are preserved", () => {
+    const reg: DagRegistration = {
+      ...validRegistration(),
+      route: "/from-dag",
+      config: { timeoutMs: 30_000, maxConcurrent: 2, circuitBreaker: { failureThreshold: 9 } },
+    };
+    const merged = applyFugueYaml(reg, yaml({ route: "/from-yaml", timeoutMs: 90_000, cacheTtlMs: 600_000 }));
+    expect(merged.route).toBe("/from-yaml");          // yaml wins
+    expect(merged.config?.timeoutMs).toBe(90_000);    // yaml wins
+    expect(merged.config?.maxConcurrent).toBe(2);     // preserved from dag.ts
+    expect(merged.config?.cacheTtlMs).toBe(600_000);  // yaml-only field added
+    expect(merged.config?.circuitBreaker).toEqual({ failureThreshold: 9 }); // not mergeable from yaml → preserved
+  });
+
+  test("omitted route falls back to the dag.ts route", () => {
+    const reg = { ...validRegistration(), route: "/keep" };
+    expect(applyFugueYaml(reg, yaml()).route).toBe("/keep");
+  });
+});
+
+describe("missingEnvVars (pure fail-closed policy)", () => {
+  test("returns names absent or empty in env", () => {
+    expect(missingEnvVars(["A", "B", "C"], { A: "x", B: "" })).toEqual(["B", "C"]);
+  });
+  test("returns empty when all present", () => {
+    expect(missingEnvVars(["A"], { A: "x" })).toEqual([]);
+  });
+  test("empty requirement list is always satisfied", () => {
+    expect(missingEnvVars([], {})).toEqual([]);
   });
 });

@@ -266,6 +266,31 @@ describe("run-dag handler", () => {
     expect((await res.json()).error).toBe("timeout");
   });
 
+  it("honors a per-DAG circuitBreaker.failureThreshold (opens sooner than the host default)", async () => {
+    // threshold 1 → recordFailure opens once count > 1, i.e. after the 2nd failure.
+    const base = makeDag("cb-dag");
+    const cbDag: RegisteredDag = { ...base, config: { ...base.config, circuitBreaker: { failureThreshold: 1 } } };
+    const reg = freeze([cbDag], sha, Date.now());
+    const deps = defaultDeps({ executeDag: failExecuteDag }); // host circuitConfig threshold = 5
+    const app = createTestApp(deps, makeReadyState(reg));
+
+    expect((await post(app, "cb-dag", { query: "x" })).status).toBe(500); // failure 1
+    expect((await post(app, "cb-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
+    const r3 = await post(app, "cb-dag", { query: "x" });
+    expect(r3.status).toBe(503);                                          // circuit now open
+    expect((await r3.json()).error).toBe("dag-disabled");
+  });
+
+  it("uses the host default threshold when the DAG declares no circuitBreaker (no early open)", async () => {
+    const reg = freeze([makeDag("plain-dag")], sha, Date.now());
+    const deps = defaultDeps({ executeDag: failExecuteDag }); // threshold 5
+    const app = createTestApp(deps, makeReadyState(reg));
+    // 3 failures < threshold 5 → still 500 each, breaker stays closed.
+    for (let i = 0; i < 3; i++) {
+      expect((await post(app, "plain-dag", { query: "x" })).status).toBe(500);
+    }
+  });
+
   it("returns 200 on successful execution", async () => {
     const okDag = (async () => ok({ answer: "42" })) as RunDagDeps["executeDag"];
     const deps = defaultDeps({ executeDag: okDag });

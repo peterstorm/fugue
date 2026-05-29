@@ -424,8 +424,8 @@ owner: platform-team
 route: /summarize
 maxConcurrent: 5
 timeoutMs: 90000
-env:                  # host refuses to load the DAG unless these are set
-  - OPENAI_API_KEY
+env:                  # illustrative — host refuses to load the DAG unless these are set
+  - OPENAI_API_KEY    # (omit the `env:` block if the DAG declares no hard requirements)
 ```
 
 ### 5. Commit and push

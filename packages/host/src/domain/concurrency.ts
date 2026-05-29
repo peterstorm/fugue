@@ -91,6 +91,12 @@ export const withDagLimit = (
  * Called at boot and on every successful git sync to fold the registry's per-DAG
  * `maxConcurrency` into the live limiter.
  *
+ * NOTE: if a sync LOWERS a DAG's max below its current in-flight count, the entry is
+ * left as `{ current: N, max: newMax }` with `current > max` transiently. This is
+ * intentional and safe: `acquire` gates all new work until `current` drains back under
+ * `max`, and `release` clamps at 0 — no counter corruption, just a momentary over-capacity
+ * window that resolves as in-flight requests complete.
+ *
  * @satisfies FR-051 — per-DAG max concurrent limit enforced at runtime, overridable.
  */
 export const reconcileDagLimits = (

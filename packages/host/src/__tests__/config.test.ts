@@ -300,4 +300,27 @@ describe("FugueYamlSchema", () => {
     expect(result.value.checkpointTtlMs).toBeUndefined();
     expect(result.value.asyncResultTtlMs).toBeUndefined();
   });
+
+  // These mirror the constraints on DagRegistrationSchema.config — applyFugueYaml merges
+  // fugue.yaml straight into the resolved config, so a zero/negative would otherwise reach
+  // runtime (maxConcurrent: 0 wedges the DAG at 429; negative TTL → bad Redis expiry).
+  it("rejects an empty team (drives authorization isolation)", () => {
+    expect(parseFugueYaml({ team: "" }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
+
+  it("rejects zero or negative maxConcurrent", () => {
+    expect(parseFugueYaml({ team: "t", maxConcurrent: 0 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", maxConcurrent: -1 }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
+
+  it("rejects non-positive TTL overrides", () => {
+    expect(parseFugueYaml({ team: "t", cacheTtlMs: 0 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", checkpointTtlMs: -5 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", asyncResultTtlMs: -1 }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
+
+  it("rejects fractional maxConcurrent / TTLs (must be integers)", () => {
+    expect(parseFugueYaml({ team: "t", maxConcurrent: 2.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", cacheTtlMs: 1.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
 });
