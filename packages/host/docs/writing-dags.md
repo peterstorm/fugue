@@ -18,7 +18,7 @@ your-dags-repo/
 │   │   │   ├── prompts/             # optional prompt templates
 │   │   │   │   ├── synthesis.txt
 │   │   │   │   └── registry.json
-│   │   │   └── fugue.yaml           # optional per-DAG config
+│   │   │   └── fugue.yaml           # reserved — not read by the host yet (see Per-DAG Config)
 │   │   └── intent-classifier/
 │   │       └── dag.ts
 │   └── billing/
@@ -66,8 +66,14 @@ const registration: DagRegistration = {
   inputSchema: InputSchema,
   route: "/summarize",          // optional: custom route (default: DAG ID)
   config: {
-    timeoutMs: 90_000,          // optional: override host default
+    timeoutMs: 90_000,          // optional: override host default (clamped to MAX_DAG_TIMEOUT_MS)
     maxConcurrent: 5,           // optional: override host default
+    cacheTtlMs: 600_000,        // optional: per-DAG cache TTL (else DEFAULT_CACHE_TTL_MS)
+    checkpointTtlMs: 86_400_000,// optional: per-DAG checkpoint TTL (else DEFAULT_CHECKPOINT_TTL_MS)
+    circuitBreaker: {           // optional: per-DAG circuit-breaker override
+      failureThreshold: 3,      //   else CIRCUIT_BREAKER_THRESHOLD
+      resetTimeoutMs: 15_000,   //   cooldown before a half-open probe (else 30s)
+    },
   },
   meta: {
     description: "Summarizes customer data using LLM",
@@ -90,8 +96,12 @@ export default registration;
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `route` | `string` | DAG ID | Custom route path |
-| `config.timeoutMs` | `number` | `DEFAULT_DAG_TIMEOUT_MS` | Per-DAG timeout |
-| `config.maxConcurrent` | `number` | `DEFAULT_DAG_CONCURRENCY` | Per-DAG concurrency limit |
+| `config.timeoutMs` | `number` | `DEFAULT_DAG_TIMEOUT_MS` | Per-DAG timeout (clamped to `MAX_DAG_TIMEOUT_MS`) |
+| `config.maxConcurrent` | `number` | `DEFAULT_DAG_CONCURRENCY` | Per-DAG concurrency limit (enforced per FR-051) |
+| `config.cacheTtlMs` | `number` | `DEFAULT_CACHE_TTL_MS` | Per-DAG cache entry TTL |
+| `config.checkpointTtlMs` | `number` | `DEFAULT_CHECKPOINT_TTL_MS` | Per-DAG checkpoint entry TTL |
+| `config.circuitBreaker.failureThreshold` | `number` | `CIRCUIT_BREAKER_THRESHOLD` | Failures before the DAG's circuit opens |
+| `config.circuitBreaker.resetTimeoutMs` | `number` | `30_000` | Cooldown before a half-open probe |
 | `meta.description` | `string` | `""` | Human-readable description |
 | `meta.version` | `string` | `"0.0.0"` | Semver version |
 
@@ -121,19 +131,16 @@ Recent Conversations ({{conversationCount}} total):
 Produce a structured summary.
 ```
 
-## Per-DAG Config (fugue.yaml)
+## Per-DAG Config
 
-Optional — place alongside `dag.ts`:
+Per-DAG runtime config (timeout, concurrency, cache/checkpoint TTLs, circuit-breaker)
+is set in the **`config` field of the exported `DagRegistration`** (see [Optional Fields](#optional-fields)
+above). That is the path the host reads and enforces at registration time.
 
-```yaml
-team: cx
-owner: platform-team
-route: /summarize
-maxConcurrent: 5
-timeoutMs: 90000
-cacheTtlMs: 600000
-checkpointTtlMs: 86400000
-```
+> **Note:** a sibling `fugue.yaml` schema exists (`FugueYamlSchema`) and is exported from the
+> library, but the host does **not** currently load or merge `fugue.yaml` during DAG discovery —
+> values placed there have no runtime effect yet. Put per-DAG overrides in the `config` object
+> until file-based `fugue.yaml` merging is wired.
 
 ## Input Validation
 

@@ -220,8 +220,14 @@ const registration: DagRegistration = {
   // Everything below is optional:
   route?: string,                          // default: `/dags/${dag.id}/run`
   config?: {
-    timeoutMs?: number,                    // default: 30_000
-    maxConcurrent?: number,                // default: 10
+    timeoutMs?: number,                    // default: 30_000 (clamped to host MAX_DAG_TIMEOUT_MS)
+    maxConcurrent?: number,                // default: 10 (enforced per-DAG)
+    cacheTtlMs?: number,                   // default: host DEFAULT_CACHE_TTL_MS
+    checkpointTtlMs?: number,              // default: host DEFAULT_CHECKPOINT_TTL_MS
+    circuitBreaker?: {                     // optional per-DAG override
+      failureThreshold?: number,           //   default: host CIRCUIT_BREAKER_THRESHOLD
+      resetTimeoutMs?: number,             //   default: 30_000 (half-open cooldown)
+    },
   },
   meta?: {
     description?: string,

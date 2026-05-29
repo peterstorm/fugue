@@ -146,5 +146,6 @@ The host is the **imperative shell** that wires the framework into a production 
 | `sync/sync-loop.ts` | Timer-driven git poll + registry rebuild |
 | `lifecycle/startup.ts` | Boot sequence: Redis ping → clone → load |
 | `lifecycle/signals.ts` | SIGTERM/SIGINT → drain → stop |
+| `lifecycle/redis-probe.ts` | Post-boot Redis liveness probe → degraded/recovered transitions |
 | `host.ts` | Top-level imperative shell wiring all subsystems |
 | `main.ts` | Binary entry point (process.exit, real Redis, real git) |

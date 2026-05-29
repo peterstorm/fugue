@@ -179,6 +179,9 @@ spec:
               value: "60000"
             - name: DRAIN_TIMEOUT_MS
               value: "30000"
+            # Resilience tuning
+            - name: REDIS_PROBE_INTERVAL_MS
+              value: "10000"   # liveness probe interval; drives degraded/recovered transitions
           envFrom:
             - secretRef:
                 name: fugue-host-secrets
@@ -408,15 +411,14 @@ Customer: {{customerName}}
 Summarize this customer's account status in 2-3 sentences.
 ```
 
-### 4. (Optional) Add `fugue.yaml`
+### 4. (Optional) Per-DAG config
 
-```yaml
-# dags/cx/customer-summary/fugue.yaml
-team: cx
-owner: platform-team
-maxConcurrent: 5
-timeoutMs: 90000
-```
+Set per-DAG runtime config (`timeoutMs`, `maxConcurrent`, `cacheTtlMs`,
+`checkpointTtlMs`, `circuitBreaker`) in the `config` field of the exported
+`DagRegistration` in `dag.ts` — see [writing-dags.md](./writing-dags.md#per-dag-config).
+
+> A sibling `fugue.yaml` is **not** read by the host yet, so values placed there have
+> no runtime effect. Use the `config` object until file-based merging is wired.
 
 ### 5. Commit and push
 
@@ -513,6 +515,8 @@ All logs are JSON lines:
 | `info` | `Sync complete: N DAGs loaded` | Successful sync cycle |
 | `warn` | `DAG load failed (isolated)` | One DAG has errors but others are fine |
 | `warn` | `Git pull failed, existing DAGs remain active` | Git unreachable; continues with stale |
+| `warn` | `Redis liveness probe failed — host degraded (redis-disconnected)` | Redis lost after boot; host degrades, keeps serving from memory |
+| `info` | `Redis recovered — host returned to ready` | A later probe succeeded; host auto-recovers |
 | `error` | `Redis is unreachable — host cannot start` | Fatal — won't boot without Redis |
 
 ### Health endpoints for monitoring

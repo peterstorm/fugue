@@ -68,6 +68,7 @@ All configuration is via environment variables, validated at startup with Zod.
 | `DAGS_POLL_INTERVAL_MS` | No | `30000` | Git polling interval (ms) |
 | `DAGS_LOCAL_PATH` | No | — | If set, skips git clone and reads from this path (dev mode) |
 | `REDIS_URL` | Yes | — | Redis connection URL |
+| `REDIS_PROBE_INTERVAL_MS` | No | `10000` | Redis liveness probe interval; drives degraded/recovered transitions after boot |
 | `PORT` | No | `3000` | HTTP listen port |
 | `ADMIN_TOKEN` | Yes | — | Admin bearer token (min 16 chars) |
 | `LLM_PROVIDER` | No | `anthropic` | `anthropic`, `openai`, or `azure` |

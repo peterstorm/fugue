@@ -268,7 +268,11 @@ Yes. The admin identity has full access to all DAGs regardless of team.
 Revoke the old one and create a new one. There's no way to recover a token — only the hash is stored.
 
 **Q: How is the team associated with a DAG?**
-Via the `team` field in `fugue.yaml` at the DAG's root directory. The DAG ID convention is `team-name--dag-name`.
+The host infers it from the DAG's module path, which must follow the
+`dags/{team}/{name}/dag.ts` convention — the segment after `dags/` is the team. A path
+that doesn't follow the convention resolves to team `unknown` (and the host logs a warning).
+Team isolation in auth keys off this value. (Note: `fugue.yaml` is not read by the host yet,
+so its `team` field has no effect.)
 
 **Q: Can one team have multiple tokens?**
 Not currently. One token per team. If you need multiple (e.g., staging vs production), model them as separate teams: `team-a-staging`, `team-a-prod`.
