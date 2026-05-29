@@ -198,8 +198,8 @@ const main = async () => {
     const isLocalMode = config.DAGS_LOCAL_PATH !== undefined && config.DAGS_LOCAL_PATH !== "";
     const git = isLocalMode ? createLocalGitAdapter() : createBunGitAdapter();
 
-    // Step 5: Create module loader
-    const loader = createModuleLoader();
+    // Step 5: Create module loader (pass logger so prompt errors route through structured logging)
+    const loader = createModuleLoader(logger);
 
     // Step 6: Create and boot host
     const hostResult = await createHost({

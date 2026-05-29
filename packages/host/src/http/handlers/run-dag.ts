@@ -158,15 +158,25 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
     const token = acquireResult.value.token;
 
     // 5. Execute DAG with timeout
-    // INVARIANT: The outer try/finally guarantees token release even if
-    // createContext or setTimeout throws. The inner try/catch handles
-    // execution-level errors (timeout, framework errors, unhandled throws).
+    // INVARIANT: The outer try/finally guarantees token release.
+    // The setup guard (above) clears the timer if createContext throws.
+    // The inner try/catch handles execution-level errors.
     try {
       const timeoutMs = registered.config.timeout;
       const HOST_TIMEOUT = Symbol("host-timeout");
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(HOST_TIMEOUT), timeoutMs);
-      const ctx = deps.createContext(registered, controller.signal);
+
+      // Declare ctx before the execution try so it's accessible in the catch block.
+      // Guard the createContext call so the timer is cleared if it throws (leak prevention).
+      let ctx: import("@fugue/framework").NodeContext;
+      try {
+        ctx = deps.createContext(registered, controller.signal);
+      } catch (setupErr) {
+        clearTimeout(timeoutId);
+        markFailure(permit, deps.clock(), deps.circuitConfig);
+        throw setupErr;
+      }
       const startTime = deps.clock();
 
       try {

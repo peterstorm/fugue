@@ -9,7 +9,8 @@
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
-import { defineDagFromArray } from "./define-dag.js";
+import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
+import { nodeId } from "../types/ids.js";
 
 export interface LinearDagConfig {
   readonly id: string;
@@ -36,7 +37,11 @@ export interface LinearDagConfig {
  */
 export const defineLinearDag = (config: LinearDagConfig): DagDef => {
   if (config.nodes.length === 0) {
-    throw new Error("[defineLinearDag] nodes array must not be empty");
+    throw new DagDefinitionError(config.id, {
+      kind: "validation",
+      nodeId: nodeId(config.id),
+      message: "defineLinearDag requires at least one node",
+    });
   }
 
   const edges = config.nodes.slice(0, -1).map((node, i) => ({

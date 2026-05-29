@@ -34,6 +34,7 @@ import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "..
 export const loadDagModule = async (
   modulePath: string,
   sha: GitSha,
+  onPromptError?: (path: string, e: unknown) => void,
 ): Promise<Result<LoadResult, HostError>> => {
   let mod: unknown;
 
@@ -74,10 +75,11 @@ export const loadDagModule = async (
   }
 
   // Load prompts from sibling prompts/ directory (best-effort)
-  const prompts = await loadPromptsForModule(modulePath, (path, e) => {
-    // Log at warn level — DAG will fail at runtime with "prompt-not-found" if a required prompt is missing
+  const promptErrorHandler = onPromptError ?? ((path: string, e: unknown) => {
+    // Fallback when no logger injected — prompt errors still surfaced, just via console
     console.warn(`[module-loader] Failed to read prompt file '${path}': ${e instanceof Error ? e.message : String(e)}`);
   });
+  const prompts = await loadPromptsForModule(modulePath, promptErrorHandler);
 
   return ok({
     id: idResult.value,
@@ -162,6 +164,7 @@ export const discoverDagPaths = async (dagsRoot: string): Promise<Result<string[
 export const loadAll = async (
   dagsRoot: string,
   sha: GitSha,
+  onPromptError?: (path: string, e: unknown) => void,
 ): Promise<BulkLoadResult> => {
   const pathsResult = await discoverDagPaths(dagsRoot);
   if (!pathsResult.ok) {
@@ -173,7 +176,7 @@ export const loadAll = async (
   const errors: LoadError[] = [];
 
   for (const path of paths) {
-    const result = await loadDagModule(path, sha);
+    const result = await loadDagModule(path, sha, onPromptError);
     if (result.ok) {
       loaded.push(result.value);
     } else {
@@ -186,9 +189,19 @@ export const loadAll = async (
 
 /**
  * Create a ModuleLoaderPort using the real filesystem implementations.
+ * Accepts an optional logger — when provided, prompt-file read errors route
+ * through the structured LogPort instead of console.warn.
  */
-export const createModuleLoader = (): ModuleLoaderPort => ({
-  loadDagModule,
-  discoverDagPaths,
-  loadAll,
-});
+export const createModuleLoader = (logger?: import("../ports.js").LogPort): ModuleLoaderPort => {
+  const onPromptError: ((path: string, e: unknown) => void) | undefined = logger
+    ? (path, e) => logger.warn("[module-loader] Failed to read prompt file", {
+        promptPath: path,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    : undefined;
+  return {
+    loadDagModule: (modulePath, sha) => loadDagModule(modulePath, sha, onPromptError),
+    discoverDagPaths,
+    loadAll: (dagsRoot, sha) => loadAll(dagsRoot, sha, onPromptError),
+  };
+};

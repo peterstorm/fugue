@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { defineLinearDag, createFetchNode, createTransformNode, ok, nodeId, dagId } from "../index.js";
+import { defineLinearDag, createFetchNode, createTransformNode, ok, nodeId, dagId, DagDefinitionError } from "../index.js";
 import type { Result, FrameworkError } from "../index.js";
 
 describe("defineLinearDag", () => {
@@ -50,10 +50,18 @@ describe("defineLinearDag", () => {
     expect(dag.outputNodeId).toBe(nodeId("fetch"));
   });
 
-  it("throws on empty nodes array", () => {
-    expect(() => defineLinearDag({ id: "empty", nodes: [] })).toThrow(
-      "nodes array must not be empty",
-    );
+  it("throws a DagDefinitionError on empty nodes array", () => {
+    expect(() => defineLinearDag({ id: "empty", nodes: [] })).toThrow(DagDefinitionError);
+  });
+
+  it("DagDefinitionError has correct kind and message", () => {
+    let caught: unknown;
+    try { defineLinearDag({ id: "empty", nodes: [] }); } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(DagDefinitionError);
+    const dagErr = caught as DagDefinitionError;
+    expect(dagErr.detail.kind).toBe("validation");
+    // The Error.message string is formatted by DagDefinitionError's constructor
+    expect(dagErr.message).toContain("at least one node");
   });
 
   it("passes through retryLimits and evalJudges", () => {
