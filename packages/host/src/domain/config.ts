@@ -72,6 +72,8 @@ export const HostConfigSchema = z.object({
   CIRCUIT_BREAKER_THRESHOLD: z.coerce.number().int().min(1).default(5),
   /** Time window for circuit breaker failure counting (ms) */
   CIRCUIT_BREAKER_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
+  /** Cooldown before circuit breaker transitions from open to half-open (ms) */
+  CIRCUIT_BREAKER_COOLDOWN_MS: z.coerce.number().int().min(1000).default(30_000),
   /** Default cache TTL for DAG cache entries (FR-040) */
   DEFAULT_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(300_000),
   /** Default checkpoint TTL for DAG checkpoint entries (FR-040) */

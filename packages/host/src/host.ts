@@ -18,7 +18,7 @@ import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkE
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
-import { booting, bootComplete, beginDrain, drainComplete, canServeRequests, getRegistry, redisDied, redisRecovered } from "./domain/host-state.js";
+import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
 import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
@@ -34,7 +34,7 @@ import type { RouterDeps } from "./http/router.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
 import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
 import { createSyncCallbacks } from "./sync/sync-callbacks.js";
-import { executeStartup, buildSyncConfig } from "./lifecycle/startup.js";
+import { executeStartup } from "./lifecycle/startup.js";
 import type { StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
 import type { SignalHandlerHandle } from "./lifecycle/signals.js";
@@ -144,6 +144,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     circuitConfig: {
       threshold: config.CIRCUIT_BREAKER_THRESHOLD,
       windowMs: config.CIRCUIT_BREAKER_WINDOW_MS,
+      cooldownMs: config.CIRCUIT_BREAKER_COOLDOWN_MS,
     },
     adminToken: config.ADMIN_TOKEN,
     tokenStore,
