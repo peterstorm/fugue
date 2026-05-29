@@ -87,7 +87,8 @@ export const loadResultToRegisteredDag = (
   hostDefaults: HostTimeoutDefaults = DEFAULT_HOST_TIMEOUT_DEFAULTS,
 ): RegisteredDag => {
   const resolved = resolveDefaults(result.registration);
-  const team = extractTeam(result.modulePath);
+  // A fugue.yaml `team` (threaded onto the LoadResult) overrides the path-derived team.
+  const team = result.team && result.team.length > 0 ? result.team : extractTeam(result.modulePath);
   const regConfig = result.registration.config;
 
   // Apply host-level defaults and clamp
@@ -124,6 +125,7 @@ export const loadResultToRegisteredDag = (
     meta: {
       description: resolved.meta.description,
       version: resolved.meta.version,
+      ...(result.owner !== undefined ? { owner: result.owner } : {}),
     },
     loadedAt: now,
     sha,

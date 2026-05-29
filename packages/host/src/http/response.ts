@@ -34,6 +34,9 @@ export interface DagListItem {
   readonly description: string;
   readonly version: string;
   readonly healthy: boolean;
+  readonly team: string;
+  /** Owner from the DAG's fugue.yaml, when declared. */
+  readonly owner?: string;
 }
 
 export interface DagListResponse {

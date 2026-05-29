@@ -53,7 +53,7 @@ export interface RegisteredDag {
   readonly dag: DagDef;
   readonly inputSchema: z.ZodType;
   readonly config: ResolvedDagConfig;
-  readonly meta: { readonly description: string; readonly version: string };
+  readonly meta: { readonly description: string; readonly version: string; readonly owner?: string };
   readonly loadedAt: number;
   readonly sha: GitSha;
   readonly status: DagStatus;

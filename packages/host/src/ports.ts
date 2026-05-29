@@ -40,6 +40,10 @@ export type LoadResult = {
   readonly modulePath: string;
   /** Pre-loaded prompt templates from sibling prompts/ directory (empty map if none found). */
   readonly prompts: ReadonlyMap<string, string>;
+  /** Team from a sibling fugue.yaml `team` field, if present — overrides path-derived team. */
+  readonly team?: string;
+  /** Owner from a sibling fugue.yaml `owner` field, if present — surfaced as DAG metadata. */
+  readonly owner?: string;
 }
 
 export type LoadError = {

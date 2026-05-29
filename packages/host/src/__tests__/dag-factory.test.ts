@@ -134,6 +134,19 @@ describe("loadResultToRegisteredDag", () => {
     expect(reg.config.cacheTtlMs).toBe(DEFAULT_HOST_TIMEOUT_DEFAULTS.defaultCacheTtlMs);
   });
 
+  test("uses fugue.yaml team/owner from the LoadResult over the path-derived team", () => {
+    const lr = { ...makeLoadResult("d", "/repo/dags/path-team/d/dag.ts"), team: "yaml-team", owner: "platform" };
+    const reg = loadResultToRegisteredDag(lr, SHA, NOW, defaults);
+    expect(reg.team).toBe("yaml-team"); // overrides path-derived "path-team"
+    expect(reg.meta.owner).toBe("platform");
+  });
+
+  test("falls back to path-derived team and no owner when the LoadResult omits them", () => {
+    const reg = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/path-team/d/dag.ts"), SHA, NOW, defaults);
+    expect(reg.team).toBe("path-team");
+    expect(reg.meta.owner).toBeUndefined();
+  });
+
   test("marks the DAG healthy and carries team + sha", () => {
     const reg = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/payments/d/dag.ts"), SHA, NOW, defaults);
     expect(reg.status).toEqual({ kind: "healthy" });

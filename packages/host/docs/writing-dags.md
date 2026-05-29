@@ -18,7 +18,7 @@ your-dags-repo/
 │   │   │   ├── prompts/             # optional prompt templates
 │   │   │   │   ├── synthesis.txt
 │   │   │   │   └── registry.json
-│   │   │   └── fugue.yaml           # reserved — not read by the host yet (see Per-DAG Config)
+│   │   │   └── fugue.yaml           # optional deployment config (see Per-DAG Config)
 │   │   └── intent-classifier/
 │   │       └── dag.ts
 │   └── billing/
@@ -30,7 +30,7 @@ your-dags-repo/
 
 **Key rules:**
 - `dag.ts` must have a **default export** conforming to `DagRegistration`
-- The **team** is extracted from the path: `dags/{team}/...`
+- The **team** is the `team` field of a sibling `fugue.yaml` if present, else extracted from the path: `dags/{team}/...`
 - DAG ID comes from the `dag.id` field in the registration
 - DAG ID must match `[A-Za-z0-9_-]{1,128}` (no colons)
 
@@ -133,14 +133,30 @@ Produce a structured summary.
 
 ## Per-DAG Config
 
-Per-DAG runtime config (timeout, concurrency, cache/checkpoint TTLs, circuit-breaker)
-is set in the **`config` field of the exported `DagRegistration`** (see [Optional Fields](#optional-fields)
-above). That is the path the host reads and enforces at registration time.
+There are two places to set per-DAG config:
 
-> **Note:** a sibling `fugue.yaml` schema exists (`FugueYamlSchema`) and is exported from the
-> library, but the host does **not** currently load or merge `fugue.yaml` during DAG discovery —
-> values placed there have no runtime effect yet. Put per-DAG overrides in the `config` object
-> until file-based `fugue.yaml` merging is wired.
+1. **`config` in the exported `DagRegistration`** (in `dag.ts`) — the DAG author's defaults,
+   versioned with the code. See [Optional Fields](#optional-fields) above.
+2. **A sibling `fugue.yaml`** — deployment/ops config, managed alongside the DAG.
+
+```yaml
+# dags/cx/customer-summary/fugue.yaml
+team: cx                  # overrides the path-derived team
+owner: platform           # surfaced in GET /dags
+route: /summarize         # overrides dag.ts route
+maxConcurrent: 5
+timeoutMs: 90000
+cacheTtlMs: 600000
+checkpointTtlMs: 86400000
+env:                      # fail-closed: the host refuses to load this DAG
+  - OPENAI_API_KEY        #   unless every listed env var is set
+```
+
+**Precedence:** `fugue.yaml` **wins** over the `dag.ts` `config` for any field it sets
+(it's the operational layer); fields it omits fall back to `dag.ts` config, then host defaults.
+`team` from `fugue.yaml` overrides the path-derived team; `circuitBreaker` can only be set in
+`dag.ts` `config` (not `fugue.yaml`). A malformed or schema-invalid `fugue.yaml` fails that DAG's
+load in isolation (other DAGs are unaffected).
 
 ## Input Validation
 

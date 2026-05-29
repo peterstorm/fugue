@@ -411,14 +411,22 @@ Customer: {{customerName}}
 Summarize this customer's account status in 2-3 sentences.
 ```
 
-### 4. (Optional) Per-DAG config
+### 4. (Optional) Add `fugue.yaml`
 
-Set per-DAG runtime config (`timeoutMs`, `maxConcurrent`, `cacheTtlMs`,
-`checkpointTtlMs`, `circuitBreaker`) in the `config` field of the exported
-`DagRegistration` in `dag.ts` — see [writing-dags.md](./writing-dags.md#per-dag-config).
+A sibling `fugue.yaml` provides deployment/ops config that **overrides** the `dag.ts`
+`config` defaults. See [writing-dags.md](./writing-dags.md#per-dag-config) for the full list
+and precedence rules.
 
-> A sibling `fugue.yaml` is **not** read by the host yet, so values placed there have
-> no runtime effect. Use the `config` object until file-based merging is wired.
+```yaml
+# dags/cx/customer-summary/fugue.yaml
+team: cx
+owner: platform-team
+route: /summarize
+maxConcurrent: 5
+timeoutMs: 90000
+env:                  # host refuses to load the DAG unless these are set
+  - OPENAI_API_KEY
+```
 
 ### 5. Commit and push
 

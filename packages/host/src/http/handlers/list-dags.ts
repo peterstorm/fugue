@@ -52,6 +52,8 @@ export const listDagsHandler = (c: Context<HostEnv>): Response => {
       description: reg.meta.description,
       version: reg.meta.version,
       healthy: reg.status.kind === "healthy",
+      team: reg.team,
+      ...(reg.meta.owner !== undefined ? { owner: reg.meta.owner } : {}),
     });
   }
 

@@ -16,6 +16,8 @@ import { join } from "path";
 // ── Test Fixtures ──────────────────────────────────────────────────────────
 
 const TEST_DIR = join(import.meta.dir, "__fixtures_module_loader__");
+// Separate root for fugue.yaml fixtures so they don't pollute loadAll(TEST_DIR) counts.
+const YAML_DIR = join(import.meta.dir, "__fixtures_module_loader_yaml__");
 
 const VALID_DAG_MODULE = `
 import { z } from "zod";
@@ -67,6 +69,48 @@ export default {
 };
 `;
 
+// DAG + sibling fugue.yaml for merge/override tests
+const YAML_DAG_MODULE = `
+import { z } from "zod";
+const dag = {
+  id: "cx-with-yaml",
+  nodes: [{ id: "n", execute: async () => ({}) }],
+  edges: [],
+};
+export default {
+  dag,
+  inputSchema: z.object({ q: z.string() }),
+  route: "/from-dag-ts",
+  config: { timeoutMs: 30000, maxConcurrent: 2 },
+  meta: { description: "x", version: "1.0.0" },
+};
+`;
+
+const FUGUE_YAML = `team: cx
+owner: platform
+route: /from-yaml
+maxConcurrent: 7
+timeoutMs: 90000
+cacheTtlMs: 600000
+`;
+
+const ENV_DAG_MODULE = `
+import { z } from "zod";
+const dag = { id: "cx-needs-env", nodes: [{ id: "n", execute: async () => ({}) }], edges: [] };
+export default { dag, inputSchema: z.object({ q: z.string() }), meta: { description: "x", version: "1.0.0" } };
+`;
+
+const FUGUE_YAML_ENV = `team: cx
+env:
+  - REQUIRED_TEST_VAR
+`;
+
+const FUGUE_YAML_MALFORMED = `route: [unclosed`;
+
+const FUGUE_YAML_NO_TEAM = `owner: platform
+maxConcurrent: 3
+`;
+
 // ── Setup / Teardown ───────────────────────────────────────────────────────
 
 beforeAll(() => {
@@ -86,10 +130,34 @@ beforeAll(() => {
 
   mkdirSync(join(TEST_DIR, "dags", "broken", "syntax-error"), { recursive: true });
   writeFileSync(join(TEST_DIR, "dags", "broken", "syntax-error", "dag.ts"), SYNTAX_ERROR_MODULE);
+
+  // fugue.yaml fixtures live under a SEPARATE root so loadAll(TEST_DIR) counts are unaffected.
+  if (existsSync(YAML_DIR)) rmSync(YAML_DIR, { recursive: true });
+
+  // DAG with a sibling fugue.yaml (merge/override)
+  mkdirSync(join(YAML_DIR, "dags", "cx", "with-yaml"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "dags", "cx", "with-yaml", "dag.ts"), YAML_DAG_MODULE);
+  writeFileSync(join(YAML_DIR, "dags", "cx", "with-yaml", "fugue.yaml"), FUGUE_YAML);
+
+  // DAG whose fugue.yaml declares a required env var
+  mkdirSync(join(YAML_DIR, "dags", "cx", "needs-env"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "dags", "cx", "needs-env", "dag.ts"), ENV_DAG_MODULE);
+  writeFileSync(join(YAML_DIR, "dags", "cx", "needs-env", "fugue.yaml"), FUGUE_YAML_ENV);
+
+  // DAG with a malformed fugue.yaml
+  mkdirSync(join(YAML_DIR, "dags", "cx", "bad-yaml"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "dags", "cx", "bad-yaml", "dag.ts"), YAML_DAG_MODULE);
+  writeFileSync(join(YAML_DIR, "dags", "cx", "bad-yaml", "fugue.yaml"), FUGUE_YAML_MALFORMED);
+
+  // DAG with a fugue.yaml missing the required `team` field
+  mkdirSync(join(YAML_DIR, "dags", "cx", "no-team"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "dags", "cx", "no-team", "dag.ts"), YAML_DAG_MODULE);
+  writeFileSync(join(YAML_DIR, "dags", "cx", "no-team", "fugue.yaml"), FUGUE_YAML_NO_TEAM);
 });
 
 afterAll(() => {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  if (existsSync(YAML_DIR)) rmSync(YAML_DIR, { recursive: true });
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -389,6 +457,66 @@ describe("Module Loader", () => {
 
       // Cleanup
       rmSync(promptsDir, { recursive: true });
+    });
+  });
+
+  describe("fugue.yaml merge", () => {
+    it("merges fugue.yaml over dag.ts config (fugue.yaml wins) and threads team/owner", async () => {
+      const path = join(YAML_DIR, "dags", "cx", "with-yaml", "dag.ts");
+      const result = await loadDagModule(path, gitSha("yaml-sha"));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { registration, team, owner } = result.value;
+      expect(registration.route).toBe("/from-yaml");        // overrides dag.ts "/from-dag-ts"
+      expect(registration.config?.timeoutMs).toBe(90000);   // overrides dag.ts 30000
+      expect(registration.config?.maxConcurrent).toBe(7);   // overrides dag.ts 2
+      expect(registration.config?.cacheTtlMs).toBe(600000); // yaml-only field applied
+      expect(team).toBe("cx");
+      expect(owner).toBe("platform");
+    });
+
+    it("returns no team/owner when there is no fugue.yaml", async () => {
+      const path = join(TEST_DIR, "dags", "team-a", "test-dag", "dag.ts");
+      const result = await loadDagModule(path, gitSha("no-yaml-sha"));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.team).toBeUndefined();
+      expect(result.value.owner).toBeUndefined();
+    });
+
+    it("fails the load (isolated) on malformed fugue.yaml", async () => {
+      const path = join(YAML_DIR, "dags", "cx", "bad-yaml", "dag.ts");
+      const result = await loadDagModule(path, gitSha("bad-yaml-sha"));
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("config-invalid");
+    });
+
+    it("fails the load when fugue.yaml is missing the required team field", async () => {
+      const path = join(YAML_DIR, "dags", "cx", "no-team", "dag.ts");
+      const result = await loadDagModule(path, gitSha("no-team-sha"));
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("validation-failed");
+    });
+
+    it("fail-closed: a missing required env var fails the load", async () => {
+      const path = join(YAML_DIR, "dags", "cx", "needs-env", "dag.ts");
+      const result = await loadDagModule(path, gitSha("env-sha"), undefined, {});
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("dag-validation-failed");
+      if (result.error.kind === "dag-validation-failed") {
+        expect(result.error.reason).toContain("REQUIRED_TEST_VAR");
+      }
+    });
+
+    it("passes env validation when the required var is present", async () => {
+      const path = join(YAML_DIR, "dags", "cx", "needs-env", "dag.ts");
+      const result = await loadDagModule(path, gitSha("env-sha-2"), undefined, { REQUIRED_TEST_VAR: "set" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.team).toBe("cx");
     });
   });
 });

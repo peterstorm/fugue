@@ -16,7 +16,65 @@ import type { Result, DagId, GitSha } from "@fugue/framework";
 import { tryDagId, dagId } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import { validateDagRegistration } from "../domain/dag-registration.js";
+import type { DagRegistration, DagRegistrationConfig } from "../domain/dag-registration.js";
+import { parseFugueYaml } from "../domain/config.js";
+import type { FugueYaml } from "../domain/config.js";
 import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
+
+/** Bun's native YAML parser (not yet in @types/bun) — typed minimally here. */
+const BunYAML = (Bun as unknown as { YAML: { parse: (s: string) => unknown } }).YAML;
+
+// ── fugue.yaml (per-DAG deployment config) ─────────────────────────────────
+
+/**
+ * Read and validate a sibling `fugue.yaml` from the DAG's directory.
+ *
+ * - Missing file → `ok(null)` — fugue.yaml is optional.
+ * - Present but malformed/schema-invalid → `err` — the caller treats it as an
+ *   isolated load failure (the DAG is skipped, others are unaffected; NFR-010),
+ *   because silently ignoring deployment config would mask operator mistakes.
+ */
+export const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | null, HostError>> => {
+  const yamlPath = join(dirname(modulePath), "fugue.yaml");
+  let text: string;
+  try {
+    text = await readFile(yamlPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return ok(null);
+    return err({ kind: "config-invalid", message: `Cannot read ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+  let parsed: unknown;
+  try {
+    parsed = BunYAML.parse(text);
+  } catch (e) {
+    return err({ kind: "config-invalid", message: `Malformed fugue.yaml at ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+  return parseFugueYaml(parsed, yamlPath);
+};
+
+/**
+ * Merge a sibling fugue.yaml over the dag.ts DagRegistration.
+ *
+ * Precedence: fugue.yaml (deployment/ops config) WINS over the dag.ts `config`
+ * defaults for every field it specifies; omitted fields are left untouched.
+ * `team`/`owner`/`env` are NOT part of DagRegistration and are handled by the caller.
+ * Note: `circuitBreaker` and `asyncResultTtlMs` are intentionally not mergeable from
+ * fugue.yaml (the former lives only in dag.ts config; the latter awaits async-results).
+ */
+export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): DagRegistration => {
+  const config: DagRegistrationConfig = {
+    ...registration.config,
+    ...(yaml.timeoutMs !== undefined ? { timeoutMs: yaml.timeoutMs } : {}),
+    ...(yaml.maxConcurrent !== undefined ? { maxConcurrent: yaml.maxConcurrent } : {}),
+    ...(yaml.cacheTtlMs !== undefined ? { cacheTtlMs: yaml.cacheTtlMs } : {}),
+    ...(yaml.checkpointTtlMs !== undefined ? { checkpointTtlMs: yaml.checkpointTtlMs } : {}),
+  };
+  return {
+    ...registration,
+    route: yaml.route ?? registration.route,
+    config,
+  };
+};
 
 
 // ── Implementation ─────────────────────────────────────────────────────────
@@ -35,6 +93,7 @@ export const loadDagModule = async (
   modulePath: string,
   sha: GitSha,
   onPromptError?: (path: string, e: unknown) => void,
+  env: Record<string, string | undefined> = process.env,
 ): Promise<Result<LoadResult, HostError>> => {
   let mod: unknown;
 
@@ -63,15 +122,36 @@ export const loadDagModule = async (
     return validation;
   }
 
-  const registration = validation.value;
-  const idResult = tryDagId(registration.dag.id);
+  const baseRegistration = validation.value;
+  const idResult = tryDagId(baseRegistration.dag.id);
   if (!idResult.ok) {
     return err({
       kind: "dag-validation-failed",
       dagId: dagId("unknown"),
       reason: `Invalid DAG ID: ${idResult.error}`,
-      message: `DagRegistration has invalid ID '${registration.dag.id}': ${idResult.error}`,
+      message: `DagRegistration has invalid ID '${baseRegistration.dag.id}': ${idResult.error}`,
     });
+  }
+
+  // Load + merge sibling fugue.yaml (deployment config). Overrides dag.ts config.
+  const yamlResult = await loadFugueYaml(modulePath);
+  if (!yamlResult.ok) {
+    return yamlResult;
+  }
+  const yaml = yamlResult.value;
+  const registration = yaml ? applyFugueYaml(baseRegistration, yaml) : baseRegistration;
+
+  // Fail-closed env requirement check (fugue.yaml `env` declares required host env vars).
+  if (yaml && yaml.env.length > 0) {
+    const missing = yaml.env.filter((name) => env[name] === undefined || env[name] === "");
+    if (missing.length > 0) {
+      return err({
+        kind: "dag-validation-failed",
+        dagId: idResult.value,
+        reason: `Missing required env vars: ${missing.join(", ")}`,
+        message: `DAG '${idResult.value}' declares required env vars not set in the host: ${missing.join(", ")}`,
+      });
+    }
   }
 
   // Load prompts from sibling prompts/ directory (best-effort)
@@ -86,6 +166,8 @@ export const loadDagModule = async (
     registration,
     modulePath,
     prompts,
+    team: yaml?.team,
+    owner: yaml?.owner,
   });
 };
 
@@ -165,6 +247,7 @@ export const loadAll = async (
   dagsRoot: string,
   sha: GitSha,
   onPromptError?: (path: string, e: unknown) => void,
+  env: Record<string, string | undefined> = process.env,
 ): Promise<BulkLoadResult> => {
   const pathsResult = await discoverDagPaths(dagsRoot);
   if (!pathsResult.ok) {
@@ -176,7 +259,7 @@ export const loadAll = async (
   const errors: LoadError[] = [];
 
   for (const path of paths) {
-    const result = await loadDagModule(path, sha, onPromptError);
+    const result = await loadDagModule(path, sha, onPromptError, env);
     if (result.ok) {
       loaded.push(result.value);
     } else {
