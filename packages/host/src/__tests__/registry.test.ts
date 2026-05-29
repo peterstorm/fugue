@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { dagId, gitSha, EMPTY_SHA } from "@fugue/framework";
+import { dagId, gitSha } from "@fugue/framework";
 import type { DagId, GitSha } from "@fugue/framework";
 import { z } from "zod";
 import {
@@ -31,7 +31,7 @@ describe("Registry", () => {
       const r = emptyRegistry();
       expect(isEmpty(r)).toBe(true);
       expect(healthyCount(r)).toBe(0);
-      expect(r.sha).toBe(EMPTY_SHA);
+      expect(r.sha).toBeNull();
     });
 
     it("lookupDag returns undefined on empty", () => {

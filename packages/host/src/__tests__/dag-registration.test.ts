@@ -87,6 +87,34 @@ describe("DagRegistrationSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  test("dag with a colon-bearing id fails validation (brand is earned, not manufactured)", () => {
+    const result = DagRegistrationSchema.safeParse({
+      dag: makeFakeDag("tenant:dag"),
+      inputSchema: testInputSchema,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const issue = result.error.issues.find((i) => i.path.join(".") === "dag.id");
+      expect(issue).toBeDefined();
+    }
+  });
+
+  test("validateDagRegistration rejects a colon-bearing id at the contract boundary", () => {
+    const res = validateDagRegistration({
+      dag: makeFakeDag("a:b"),
+      inputSchema: testInputSchema,
+    });
+    expect(res.ok).toBe(false);
+  });
+
+  test("dag with an over-long id fails validation", () => {
+    const result = DagRegistrationSchema.safeParse({
+      dag: makeFakeDag("x".repeat(129)),
+      inputSchema: testInputSchema,
+    });
+    expect(result.success).toBe(false);
+  });
+
   test("dag without nodes fails validation", () => {
     const result = DagRegistrationSchema.safeParse({
       dag: { id: "x", edges: [] },

@@ -27,6 +27,7 @@ const testConfig = (overrides?: Partial<HostConfig>): HostConfig => ({
   DAGS_REPO_URL: "https://github.com/test/dags.git",
   DAGS_REPO_BRANCH: "main",
   DAGS_POLL_INTERVAL_MS: 30_000,
+  REDIS_PROBE_INTERVAL_MS: 10_000,
   DAGS_LOCAL_PATH: undefined,
   MAX_GLOBAL_CONCURRENCY: 100,
   DEFAULT_DAG_CONCURRENCY: 10,

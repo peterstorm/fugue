@@ -7,6 +7,12 @@
  * Strategy: We mock process.exit to capture exit calls without
  * actually terminating the test runner. Signals are emitted directly
  * via process.emit().
+ *
+ * ISOLATION: this file emits real process-level events (SIGTERM/SIGINT/
+ * uncaughtException/unhandledRejection) that bun's test runner also listens to.
+ * Run in the same process as other test files, those emits abort the whole run
+ * (it reports "0 tests"). The package `test` script therefore runs this file in
+ * its own `bun test` invocation, separate from the rest of the suite.
  */
 
 import { describe, it, expect, afterEach, beforeEach, mock } from "bun:test";

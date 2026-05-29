@@ -10,7 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test $(find src/__tests__ -name '*.test.ts' -not -name 'signals.test.ts' | sort) && bun test src/__tests__/lifecycle/signals.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

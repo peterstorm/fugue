@@ -21,7 +21,7 @@ import type { TokenGrant, TokenHash } from "./domain/auth.js";
  * Unified logger port for all host subsystems.
  * Avoids coupling to a specific logging library.
  */
-export interface LogPort {
+export type LogPort = {
   readonly info: (msg: string, data?: Record<string, unknown>) => void;
   readonly warn: (msg: string, data?: Record<string, unknown>) => void;
   readonly error: (msg: string, data?: Record<string, unknown>) => void;
@@ -34,7 +34,7 @@ export type Clock = () => number;
 
 // ── Module Loader ────────────────────────────────────────────────────────────
 
-export interface LoadResult {
+export type LoadResult = {
   readonly id: DagId;
   readonly registration: DagRegistration;
   readonly modulePath: string;
@@ -42,12 +42,12 @@ export interface LoadResult {
   readonly prompts: ReadonlyMap<string, string>;
 }
 
-export interface LoadError {
+export type LoadError = {
   readonly path: string;
   readonly error: HostError;
 }
 
-export interface BulkLoadResult {
+export type BulkLoadResult = {
   readonly loaded: readonly LoadResult[];
   readonly errors: readonly LoadError[];
 }
@@ -55,7 +55,7 @@ export interface BulkLoadResult {
 /**
  * Port interface for module loading — enables testing with fake loaders.
  */
-export interface ModuleLoaderPort {
+export type ModuleLoaderPort = {
   readonly loadDagModule: (
     modulePath: string,
     sha: GitSha,
@@ -75,7 +75,7 @@ export interface ModuleLoaderPort {
  * Port interface for git operations — enables testing with fakes.
  * All methods return Result — never throw.
  */
-export interface GitPort {
+export type GitPort = {
   readonly clone: (
     url: string,
     target: string,
@@ -101,17 +101,13 @@ export interface GitPort {
  * Redis-like interface for cache/checkpoint operations.
  * Returns Result to make failures explicit — no try/catch required at call sites.
  */
-export interface RedisPort {
+export type RedisPort = {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
   readonly del: (key: string) => Promise<Result<number, HostError>>;
   /**
-   * @deprecated Use `scan()` for production — `keys()` blocks Redis with O(N) scan.
-   * Retained for backward compatibility in tests.
-   */
-  readonly keys: (pattern: string) => Promise<Result<string[], HostError>>;
-  /**
-   * Cursor-based key scanning — production-safe alternative to `keys()`.
+   * Cursor-based key scanning — the only key-enumeration primitive on the port.
+   * (The blocking O(N) `KEYS` command is intentionally NOT exposed.)
    * Returns a batch of matching keys plus the next cursor. Cursor "0" signals completion.
    * Call iteratively until cursor returns "0" to retrieve all matching keys.
    */
@@ -126,7 +122,7 @@ export interface RedisPort {
 /**
  * Port for Redis connectivity validation (PING command).
  */
-export interface RedisConnectivityPort {
+export type RedisConnectivityPort = {
   readonly ping: () => Promise<Result<void, HostError>>;
 }
 
@@ -136,7 +132,7 @@ export interface RedisConnectivityPort {
  * Shared infrastructure singletons — initialized once at host startup.
  * Passed by reference into every NodeContext (no per-request allocation).
  */
-export interface SharedInfra {
+export type SharedInfra = {
   readonly llm: LlmClient;
   readonly redis: RedisPort;
   readonly tracer: Tracer;
@@ -151,18 +147,23 @@ export interface SharedInfra {
  * Minimal read/write handle for circuit breaker state.
  * Injected from the imperative shell's mutable Map.
  */
-export interface CircuitPort {
+export type CircuitPort = {
   readonly get: (dagId: DagId) => CircuitState;
   readonly set: (dagId: DagId, s: CircuitState) => void;
 }
 
 /**
  * Configuration for circuit breaker thresholds.
- * Threaded from HostConfig.CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_WINDOW_MS.
+ * Threaded from HostConfig.CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_WINDOW_MS,
+ * or from a per-DAG override (see ResolvedDagConfig.circuitBreaker).
+ *
+ * `cooldownMs` is optional — when omitted the circuit-breaker default (30s) applies.
+ * It controls how long an open circuit waits before allowing a half-open probe.
  */
-export interface CircuitConfig {
+export type CircuitConfig = {
   readonly threshold: number;
   readonly windowMs: number;
+  readonly cooldownMs?: number;
 }
 
 // ── Token Store ─────────────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ export interface CircuitConfig {
  * Stores token hashes mapped to team grants.
  * Used by auth middleware (resolve) and admin handlers (store/list/revoke).
  */
-export interface TokenStorePort {
+export type TokenStorePort = {
   /** Look up a token grant by its hash. Returns Ok(null) if not found, Err on infrastructure failure. */
   readonly resolve: (hash: TokenHash) => Promise<Result<TokenGrant | null, HostError>>;
   /** Store a new team token. Returns err if team already has a token. */

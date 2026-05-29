@@ -126,20 +126,26 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
       });
     }
 
-    // 3. Check circuit breaker state
+    // 3. Acquire per-DAG concurrency token BEFORE consuming the circuit probe.
+    //
+    // INVARIANT: the circuit's half-open probe is a single-use resource. It must
+    // only be spent on a request we are actually going to execute. If we consumed
+    // it before concurrency admission and then rejected with 429, the breaker would
+    // be stranded at half-open{testRequestAllowed:false} with no mark* call to move
+    // it forward — wedged until the next git sync force-reset. So admission first.
     const now = deps.clock();
-    const circuitCheck = checkCircuit(deps.circuit, dagId, now);
 
-    if (!circuitCheck.allowed) {
-      return errorResponse(c, 503, "dag-disabled", `Circuit breaker open for DAG '${dagId}'`, {
-        dagId,
-        headers: { "Retry-After": "30" },
-      });
-    }
+    // Effective circuit config: per-DAG override (if declared) merged over the host
+    // default. Each field the DAG omits falls back to the host-level config.
+    const cbOverride = registered.config.circuitBreaker;
+    const circuitConfig: CircuitConfig = cbOverride
+      ? {
+          threshold: cbOverride.failureThreshold ?? deps.circuitConfig.threshold,
+          windowMs: deps.circuitConfig.windowMs,
+          cooldownMs: cbOverride.resetTimeoutMs ?? deps.circuitConfig.cooldownMs,
+        }
+      : deps.circuitConfig;
 
-    const { permit } = circuitCheck;
-
-    // 4. Acquire per-DAG concurrency token
     const concurrency = deps.getConcurrency();
     const acquireResult = acquire(concurrency, dagId, now);
 
@@ -156,6 +162,20 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
     deps.setConcurrency(acquireResult.value.state);
     const token = acquireResult.value.token;
+
+    // 4. Check circuit breaker state. If it denies, release the slot we just took
+    // so a rejected request leaves no trace on the concurrency counters.
+    const circuitCheck = checkCircuit(deps.circuit, dagId, now, circuitConfig);
+
+    if (!circuitCheck.allowed) {
+      deps.setConcurrency(release(deps.getConcurrency(), token));
+      return errorResponse(c, 503, "dag-disabled", `Circuit breaker open for DAG '${dagId}'`, {
+        dagId,
+        headers: { "Retry-After": "30" },
+      });
+    }
+
+    const { permit } = circuitCheck;
 
     // 5. Execute DAG with timeout
     // INVARIANT: The outer try/finally guarantees token release.
@@ -174,7 +194,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
         ctx = deps.createContext(registered, controller.signal);
       } catch (setupErr) {
         clearTimeout(timeoutId);
-        markFailure(permit, deps.clock(), deps.circuitConfig);
+        markFailure(permit, deps.clock(), circuitConfig);
         throw setupErr;
       }
       const startTime = deps.clock();
@@ -194,7 +214,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
           markSuccess(permit, deps.clock());
           return successResponse(c, result.value, { runId: ctx.runId, durationMs });
         } else {
-          markFailure(permit, deps.clock(), deps.circuitConfig);
+          markFailure(permit, deps.clock(), circuitConfig);
           const msg = formatFrameworkError(result.error);
           return errorResponse(c, 500, result.error.kind, msg, {
             dagId,
@@ -206,7 +226,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
         // Handle abort (timeout) — only if caused by HOST_TIMEOUT sentinel
         if (e instanceof Error && e.name === "AbortError" && controller.signal.reason === HOST_TIMEOUT) {
-          markFailure(permit, deps.clock(), deps.circuitConfig);
+          markFailure(permit, deps.clock(), circuitConfig);
           const timeoutErr: HostError = {
             kind: "timeout",
             dagId,
@@ -220,7 +240,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
           });
         }
 
-        markFailure(permit, deps.clock(), deps.circuitConfig);
+        markFailure(permit, deps.clock(), circuitConfig);
 
         // Wrap with context for the error handler middleware
         const wrapped = new Error(`Unhandled error executing DAG '${dagId}'`, { cause: e });

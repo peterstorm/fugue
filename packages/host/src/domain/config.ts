@@ -28,6 +28,8 @@ export const HostConfigSchema = z.object({
   DAGS_REPO_BRANCH: z.string().default("main"),
   /** Polling interval for git sync (ms) */
   DAGS_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(30_000),
+  /** Interval for the Redis liveness probe (ms) — drives degraded/recovered transitions */
+  REDIS_PROBE_INTERVAL_MS: z.coerce.number().int().min(1000).default(10_000),
   /** Optional local path override (skips git clone, useful for dev) */
   DAGS_LOCAL_PATH: z.string().optional(),
   /** Redis connection URL — required for host to start (FR-006) */

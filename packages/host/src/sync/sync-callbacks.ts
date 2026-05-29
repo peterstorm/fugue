@@ -18,6 +18,8 @@ import type { CircuitState } from "../domain/circuit-breaker.js";
 import { forceReset } from "../domain/circuit-breaker.js";
 import { diffDags, diffSummary } from "../domain/dag-diff.js";
 import type { HostError } from "../domain/host-error.js";
+import type { ConcurrencyState } from "../domain/concurrency.js";
+import { reconcileDagLimits } from "../domain/concurrency.js";
 import type { LogPort } from "../ports.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -26,6 +28,8 @@ export interface SyncCallbackDeps {
   readonly getState: () => HostState;
   readonly setState: (s: HostState) => void;
   readonly getCircuitBreakers: () => Map<DagId, CircuitState>;
+  readonly getConcurrency: () => ConcurrencyState;
+  readonly setConcurrency: (s: ConcurrencyState) => void;
   readonly logger: LogPort;
   readonly clock: () => number;
 }
@@ -47,7 +51,7 @@ export interface SyncCallbacks {
  * - State transition failures are logged but don't crash
  */
 export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
-  const { getState, setState, getCircuitBreakers, logger, clock } = deps;
+  const { getState, setState, getCircuitBreakers, getConcurrency, setConcurrency, logger, clock } = deps;
 
   const isShuttingDown = (): boolean => {
     const phase = getState().phase;
@@ -100,6 +104,15 @@ export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
         for (const dagId of currentDagIds) {
           circuitBreakers.set(dagId, forceReset(now));
         }
+
+        // Fold the new registry's per-DAG concurrency limits into the limiter (FR-051).
+        // Preserves in-flight counts for surviving DAGs; drops removed ones unless still busy.
+        setConcurrency(
+          reconcileDagLimits(
+            getConcurrency(),
+            Array.from(newRegistry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
+          ),
+        );
 
         // Compute and log diff between previous and new registry
         const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.modulePath, sha: d.sha }));

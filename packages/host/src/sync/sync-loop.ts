@@ -21,7 +21,7 @@
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
-import { ok, gitSha, EMPTY_SHA } from "@fugue/framework";
+import { ok } from "@fugue/framework";
 import type { Result, GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
@@ -43,14 +43,15 @@ export type { HostTimeoutDefaults } from "../domain/dag-factory.js";
  * SHA semantics per variant:
  * - no-change: `currentSha` — the confirmed-unchanged SHA
  * - updated: `newSha` — the newly synced SHA
- * - error: `previousSha` — the last known-good SHA (before the failed attempt)
- * - skipped: `previousSha` — the last known SHA (sync was not attempted)
+ * - error: `previousSha` — the last known-good SHA, or `null` if the failure happened
+ *   before any successful sync
+ * - skipped: `previousSha` — the last known SHA (or `null` if never synced)
  */
 export type SyncResult =
   | { readonly kind: "no-change"; readonly currentSha: GitSha }
   | { readonly kind: "updated"; readonly newSha: GitSha; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
-  | { readonly kind: "error"; readonly previousSha: GitSha; readonly syncError: HostError }
-  | { readonly kind: "skipped"; readonly previousSha: GitSha; readonly reason: "already-in-progress" };
+  | { readonly kind: "error"; readonly previousSha: GitSha | null; readonly syncError: HostError }
+  | { readonly kind: "skipped"; readonly previousSha: GitSha | null; readonly reason: "already-in-progress" };
 
 /**
  * Configuration for the sync loop.
@@ -121,12 +122,12 @@ export const executeSyncCycle = async (
   git: GitPort,
   loader: ModuleLoaderPort,
   config: SyncConfig,
-  lastSha: GitSha,
+  lastSha: GitSha | null,
   logger: SyncLogger,
   clock: Clock = Date.now,
 ): Promise<SyncResult> => {
   // Step 1: Pull changes first in remote mode (so rev-parse reflects remote state)
-  if (!config.isLocalMode && lastSha !== EMPTY_SHA) {
+  if (!config.isLocalMode && lastSha !== null) {
     const pullResult = await git.pull(config.repoPath);
     if (!pullResult.ok) {
       logger.warn("Git pull failed, existing DAGs remain active", {
@@ -161,7 +162,7 @@ export const executeSyncCycle = async (
   }
 
   // Step 4: Check lockfile changes (skip in local mode and on first sync)
-  if (!config.isLocalMode && lastSha !== EMPTY_SHA) {
+  if (!config.isLocalMode && lastSha !== null) {
     const lockResult = await git.hasLockfileChanged(config.repoPath, lastSha, currentSha);
     if (!lockResult.ok) {
       // Fail-safe: when we can't determine if lockfile changed, run install defensively.
@@ -240,10 +241,10 @@ export const startSyncLoop = (
   onComplete: OnSyncComplete,
   onNoChange: OnSyncNoChange,
   onError: OnSyncError,
-  initialSha: GitSha = gitSha(""),
+  initialSha: GitSha | null = null,
   clock: Clock = Date.now,
 ): SyncLoopHandle => {
-  let lastSha: GitSha = initialSha;
+  let lastSha: GitSha | null = initialSha;
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
 

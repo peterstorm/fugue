@@ -128,13 +128,22 @@ export const tryDagId = (s: string): Result<DagId, string> =>
 // ---------------------------------------------------------------------------
 
 /**
- * Branded git SHA string. Convention: empty string `""` means "never synced".
- * No format validation — SHAs flow from git output and are trusted.
+ * Branded git SHA string. A GitSha is ALWAYS a non-empty string — "never synced"
+ * is modeled as `GitSha | null` at use sites, not as an empty-string sentinel, so
+ * a real SHA and "absent" are never structurally confused.
+ *
+ * No hash-format validation beyond non-emptiness — short and full SHAs both flow
+ * from git output and are trusted; the brand guards against the empty sentinel.
  */
 export type GitSha = string & { readonly [__gitShaBrand]: void };
 
-/** Brand a string as a GitSha. No validation — trusts git output. */
-export const gitSha = (s: string): GitSha => s as unknown as GitSha;
-
-/** The sentinel value meaning "never synced" — typed as GitSha. */
-export const EMPTY_SHA: GitSha = "" as unknown as GitSha;
+/**
+ * Brand a string as a GitSha. Throws on the empty string so the old `""`
+ * "never synced" sentinel can never be reconstructed — use `null` for absence.
+ */
+export const gitSha = (s: string): GitSha => {
+  if (typeof s !== "string" || s.length === 0) {
+    throw new Error('Invalid gitSha: must be a non-empty string (use null for "never synced")');
+  }
+  return s as unknown as GitSha;
+};

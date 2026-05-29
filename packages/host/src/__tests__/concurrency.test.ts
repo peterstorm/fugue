@@ -8,13 +8,14 @@ import {
   acquire,
   release,
   withDagLimit,
+  reconcileDagLimits,
   hasCapacity,
   globalUtilization,
   dagUtilization,
-  __unsafeTestToken,
   type ConcurrencyState,
   type AcquireToken,
 } from "../domain/concurrency.js";
+import { unsafeTestToken } from "./fixtures/concurrency-token.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,7 +135,7 @@ describe("Concurrency Limiter", () => {
 
     test("clamps to zero on underflow (defensive)", () => {
       const state = initConcurrency();
-      const fakeToken = __unsafeTestToken(DAG_A, NOW);
+      const fakeToken = unsafeTestToken(DAG_A, NOW);
       const released = release(state, fakeToken);
       expect(released.global.current).toBe(0);
     });
@@ -332,7 +333,7 @@ describe("Concurrency Limiter", () => {
           arbDagId,
           (extraReleases, id) => {
             const initial = initConcurrency();
-            const fakeToken = __unsafeTestToken(id, NOW);
+            const fakeToken = unsafeTestToken(id, NOW);
 
             let state = initial;
             for (let i = 0; i < extraReleases; i++) {
@@ -393,5 +394,58 @@ describe("Concurrency Limiter", () => {
         { numRuns: 200 },
       );
     });
+  });
+});
+
+describe("reconcileDagLimits — FR-051", () => {
+  test("applies per-DAG max from the registry into perDag", () => {
+    const state = initConcurrency(50, 10);
+    const next = reconcileDagLimits(state, [
+      { dagId: DAG_A, max: 2 },
+      { dagId: DAG_B, max: 25 },
+    ]);
+    expect(next.perDag.get(DAG_A)).toEqual({ current: 0, max: 2 });
+    expect(next.perDag.get(DAG_B)).toEqual({ current: 0, max: 25 });
+    expect(next.defaultDagMax).toBe(10);
+  });
+
+  test("preserves in-flight current for surviving DAGs", () => {
+    let state = initConcurrency(50, 10);
+    const { value } = acquire(state, DAG_A, NOW) as { value: { state: ConcurrencyState } };
+    state = value.state;
+    expect(state.perDag.get(DAG_A)!.current).toBe(1);
+
+    const next = reconcileDagLimits(state, [{ dagId: DAG_A, max: 3 }]);
+    expect(next.perDag.get(DAG_A)).toEqual({ current: 1, max: 3 });
+  });
+
+  test("drops idle DAGs absent from the new registry", () => {
+    const seeded = withDagLimit(initConcurrency(50, 10), DAG_A, 5);
+    const next = reconcileDagLimits(seeded, [{ dagId: DAG_B, max: 7 }]);
+    expect(next.perDag.has(DAG_A)).toBe(false);
+    expect(next.perDag.get(DAG_B)).toEqual({ current: 0, max: 7 });
+  });
+
+  test("retains a removed DAG that still has in-flight work, so release stays consistent", () => {
+    let state = initConcurrency(50, 10);
+    const acquired = acquire(state, DAG_A, NOW) as { value: { state: ConcurrencyState; token: AcquireToken } };
+    state = acquired.value.state;
+    const token = acquired.value.token;
+
+    // DAG_A removed from the registry while a request is still in flight.
+    const reconciled = reconcileDagLimits(state, [{ dagId: DAG_B, max: 4 }]);
+    expect(reconciled.perDag.get(DAG_A)).toEqual({ current: 1, max: 10 });
+
+    // Release must still decrement BOTH global and the retained per-DAG entry — no drift.
+    const released = release(reconciled, token);
+    expect(released.global.current).toBe(0);
+    expect(released.perDag.get(DAG_A)!.current).toBe(0);
+  });
+
+  test("is a no-op shape for an empty registry with no in-flight work", () => {
+    const state = initConcurrency(50, 10);
+    const next = reconcileDagLimits(state, []);
+    expect(next.perDag.size).toBe(0);
+    expect(next.global).toEqual(state.global);
   });
 });

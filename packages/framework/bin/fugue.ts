@@ -72,4 +72,12 @@ const main = async (): Promise<number> => {
     });
 };
 
-process.exit(await main());
+// Top-level guard: main() is designed not to reject, but JSON.stringify of a
+// pathological result payload could throw. Surface it as a clean non-zero exit
+// rather than an unhandled rejection with a non-deterministic exit code.
+main()
+  .then((code) => process.exit(code))
+  .catch((e: unknown) => {
+    process.stderr.write(`${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
+    process.exit(1);
+  });

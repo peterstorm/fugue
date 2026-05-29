@@ -79,6 +79,41 @@ export const withDagLimit = (
   return { ...state, perDag: newPerDag };
 };
 
+/**
+ * Reconcile per-DAG limits against a registry snapshot.
+ *
+ * Rebuilds `perDag` from `limits`, preserving in-flight `current` counts for DAGs that
+ * survive the reconcile. DAGs absent from `limits` are dropped UNLESS they still have
+ * in-flight requests (`current > 0`) — those entries are retained at their existing max
+ * so a later `release()` still finds a per-DAG slot to decrement, keeping the global
+ * counter and the sum of per-DAG counters consistent (no drift).
+ *
+ * Called at boot and on every successful git sync to fold the registry's per-DAG
+ * `maxConcurrency` into the live limiter.
+ *
+ * @satisfies FR-051 — per-DAG max concurrent limit enforced at runtime, overridable.
+ */
+export const reconcileDagLimits = (
+  state: ConcurrencyState,
+  limits: ReadonlyArray<{ readonly dagId: DagId; readonly max: number }>,
+): ConcurrencyState => {
+  const newPerDag = new Map<DagId, DagConcurrency>();
+  const provided = new Set<DagId>();
+  for (const { dagId, max } of limits) {
+    const existing = state.perDag.get(dagId);
+    newPerDag.set(dagId, { current: existing?.current ?? 0, max });
+    provided.add(dagId);
+  }
+  // Retain entries for de-registered DAGs that still have in-flight work, so their
+  // eventual release() decrements the per-DAG counter rather than silently no-op'ing.
+  for (const [id, dagState] of state.perDag) {
+    if (!provided.has(id) && dagState.current > 0) {
+      newPerDag.set(id, dagState);
+    }
+  }
+  return { ...state, perDag: newPerDag };
+};
+
 // ---------------------------------------------------------------------------
 // State transitions
 // ---------------------------------------------------------------------------
@@ -170,15 +205,6 @@ export const hasCapacity = (state: ConcurrencyState, dagId: DagId): boolean => {
   return dagState.current < dagState.max;
 };
 
-// ---------------------------------------------------------------------------
-// Test Helpers (exported for test use only)
-// ---------------------------------------------------------------------------
-
-/**
- * @internal Create a fake AcquireToken for testing.
- * Production code MUST use `acquire()` to obtain tokens.
- * This bypasses the branded type for test scenarios like
- * verifying `release()` behavior with manufactured tokens.
- */
-export const __unsafeTestToken = (dagId: DagId, acquiredAt: number): AcquireToken =>
-  ({ dagId, acquiredAt } as unknown as AcquireToken);
+// NOTE: token forging for tests lives in src/__tests__/fixtures/concurrency-token.ts,
+// NOT here. Keeping it out of the production module means no production call site can
+// import a way to mint a branded AcquireToken without going through acquire().

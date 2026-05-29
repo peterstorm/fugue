@@ -31,6 +31,7 @@ const testConfig = (overrides?: Partial<HostConfig>): HostConfig => ({
   DAGS_REPO_URL: "https://github.com/test/dags.git",
   DAGS_REPO_BRANCH: "main",
   DAGS_POLL_INTERVAL_MS: 60_000, // Long interval — we trigger manually
+  REDIS_PROBE_INTERVAL_MS: 60_000, // Long interval — probe shouldn't fire mid-test
   DAGS_LOCAL_PATH: "/tmp/test-dags",
   REDIS_URL: "redis://localhost:6379",
   PORT: 0, // Let Bun pick a random port
@@ -167,6 +168,13 @@ const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: st
   };
 };
 
+const waitFor = async (pred: () => boolean, timeoutMs = 2000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("Full Host Lifecycle", () => {
@@ -227,6 +235,51 @@ describe("Full Host Lifecycle", () => {
         expect(state.registry.dags.has("ops-alerts" as DagId)).toBe(true);
       }
     }
+  });
+
+  test("NFR-012: Redis liveness probe degrades the host on PING failure and recovers it", async () => {
+    let alive = true;
+    const store = new Map<string, string>();
+    const redisPort: RedisConnectivityPort = {
+      ping: async () => (alive ? ok(undefined) : err({ kind: "redis-unavailable" as const, operation: "PING" })),
+    };
+    const redis: RedisPort = {
+      get: async (k) => ok(store.get(k) ?? null),
+      set: async (k, v) => { store.set(k, v); return ok("OK" as string | null); },
+      del: async (k) => { const had = store.has(k) ? 1 : 0; store.delete(k); return ok(had); },
+      keys: async () => ok([]),
+      scan: async () => ok({ cursor: "0", keys: [] }),
+      setNx: async (k, v) => { if (store.has(k)) return ok(false); store.set(k, v); return ok(true); },
+    };
+    const logger = createTestLogger();
+
+    // Literal config bypasses schema min — use a fast probe interval for the test.
+    const result = await createHost({
+      config: testConfig({ REDIS_PROBE_INTERVAL_MS: 20 }),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([fakeLoadResult("probe-dag")]),
+      redis: redisPort,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+    expect(host.getState().phase).toBe("ready");
+
+    // Redis dies → a probe tick degrades the host (redis-disconnected).
+    alive = false;
+    await waitFor(() => host!.getState().phase === "degraded");
+    const degraded = host.getState();
+    expect(degraded.phase).toBe("degraded");
+    if (degraded.phase === "degraded") {
+      expect(degraded.reason).toBe("redis-disconnected");
+    }
+
+    // Redis recovers → a probe tick returns the host to ready.
+    alive = true;
+    await waitFor(() => host!.getState().phase === "ready");
+    expect(host.getState().phase).toBe("ready");
   });
 
   test("NFR-020: logs startup lifecycle events", async () => {

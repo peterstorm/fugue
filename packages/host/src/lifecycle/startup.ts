@@ -90,6 +90,8 @@ export const buildSyncConfig = (config: HostConfig, clock: () => number = Date.n
       defaultTimeoutMs: config.DEFAULT_DAG_TIMEOUT_MS,
       maxTimeoutMs: config.MAX_DAG_TIMEOUT_MS,
       defaultMaxConcurrent: config.DEFAULT_DAG_CONCURRENCY,
+      defaultCacheTtlMs: config.DEFAULT_CACHE_TTL_MS,
+      defaultCheckpointTtlMs: config.DEFAULT_CHECKPOINT_TTL_MS,
     },
   };
 };

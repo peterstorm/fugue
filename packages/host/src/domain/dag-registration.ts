@@ -13,7 +13,7 @@
 
 import type { DagDef } from "@fugue/framework";
 import type { Result } from "@fugue/framework";
-import { ok, err, dagId as makeDagId } from "@fugue/framework";
+import { ok, err, dagId as makeDagId, tryDagId } from "@fugue/framework";
 import type { DagId } from "@fugue/framework";
 import { z } from "zod";
 import type { HostError } from "./host-error.js";
@@ -38,6 +38,15 @@ export const DEFAULT_MAX_CONCURRENT = 10;
 export interface DagRegistrationConfig {
   readonly timeoutMs?: number;
   readonly maxConcurrent?: number;
+  /** Per-DAG cache TTL override (ms). Falls back to host DEFAULT_CACHE_TTL_MS. (FR-041) */
+  readonly cacheTtlMs?: number;
+  /** Per-DAG checkpoint TTL override (ms). Falls back to host DEFAULT_CHECKPOINT_TTL_MS. (FR-041) */
+  readonly checkpointTtlMs?: number;
+  /** Per-DAG circuit-breaker override. Falls back to host CIRCUIT_BREAKER_* config. */
+  readonly circuitBreaker?: {
+    readonly failureThreshold?: number;
+    readonly resetTimeoutMs?: number;
+  };
 }
 
 export interface DagRegistrationMeta {
@@ -100,43 +109,66 @@ export const resolveDefaults = (reg: DagRegistration): ResolvedDagRegistration =
  * - inputSchema is any Zod schema instance (has .parse method)
  *
  * We check structural shape (id, nodes, edges present) without requiring
- * the brand — the brand is a TS compile-time artifact.
+ * the brand — the brand is a TS compile-time artifact. The `dag.id` value is
+ * additionally refined against DAG_ID_REGEX (via tryDagId) so that the
+ * `as DagRegistration` cast in validateDagRegistration is an EARNED brand, not a
+ * manufactured one — a colon-bearing id (Redis namespace escape) is rejected here
+ * rather than slipping through the public /contract export.
  */
-export const DagRegistrationSchema = z.object({
-  dag: z.custom<DagDef>(
-    (v): v is DagDef =>
-      v != null &&
-      typeof v === "object" &&
-      "id" in v &&
-      typeof (v as Record<string, unknown>).id === "string" &&
-      "nodes" in v &&
-      Array.isArray((v as Record<string, unknown>).nodes) &&
-      "edges" in v &&
-      Array.isArray((v as Record<string, unknown>).edges),
-    { message: "dag must be a valid DagDef with id (string), nodes (array), and edges (array)" },
-  ),
-  inputSchema: z.custom<z.ZodType<unknown>>(
-    (v): v is z.ZodType<unknown> =>
-      v != null &&
-      typeof v === "object" &&
-      "parse" in v &&
-      typeof (v as Record<string, unknown>).parse === "function",
-    { message: "inputSchema must be a Zod schema (object with .parse method)" },
-  ),
-  route: z.string().optional(),
-  config: z
-    .object({
-      timeoutMs: z.number().positive().optional(),
-      maxConcurrent: z.number().int().positive().optional(),
-    })
-    .optional(),
-  meta: z
-    .object({
-      description: z.string().optional(),
-      version: z.string().optional(),
-    })
-    .optional(),
-});
+export const DagRegistrationSchema = z
+  .object({
+    dag: z.custom<DagDef>(
+      (v): v is DagDef =>
+        v != null &&
+        typeof v === "object" &&
+        "id" in v &&
+        typeof (v as Record<string, unknown>).id === "string" &&
+        "nodes" in v &&
+        Array.isArray((v as Record<string, unknown>).nodes) &&
+        "edges" in v &&
+        Array.isArray((v as Record<string, unknown>).edges),
+      { message: "dag must be a valid DagDef with id (string), nodes (array), and edges (array)" },
+    ),
+    inputSchema: z.custom<z.ZodType<unknown>>(
+      (v): v is z.ZodType<unknown> =>
+        v != null &&
+        typeof v === "object" &&
+        "parse" in v &&
+        typeof (v as Record<string, unknown>).parse === "function",
+      { message: "inputSchema must be a Zod schema (object with .parse method)" },
+    ),
+    route: z.string().optional(),
+    config: z
+      .object({
+        timeoutMs: z.number().positive().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        cacheTtlMs: z.number().positive().optional(),
+        checkpointTtlMs: z.number().positive().optional(),
+        circuitBreaker: z
+          .object({
+            failureThreshold: z.number().int().positive().optional(),
+            resetTimeoutMs: z.number().int().positive().optional(),
+          })
+          .optional(),
+      })
+      .optional(),
+    meta: z
+      .object({
+        description: z.string().optional(),
+        version: z.string().optional(),
+      })
+      .optional(),
+  })
+  .superRefine((reg, ctx) => {
+    // Enforce the DagId invariant so the brand asserted downstream is honest.
+    const id = (reg.dag as { id?: unknown }).id;
+    if (typeof id === "string") {
+      const parsed = tryDagId(id);
+      if (!parsed.ok) {
+        ctx.addIssue({ code: "custom", path: ["dag", "id"], message: parsed.error });
+      }
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Validate helper — returns Result<DagRegistration, HostError>

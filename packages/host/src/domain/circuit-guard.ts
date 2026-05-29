@@ -64,12 +64,20 @@ export type CircuitCheckResult =
  * markSuccess or markFailure after execution completes.
  *
  * Side effect: writes back the potentially-updated circuit state.
+ *
+ * @param config - Optional circuit config; its `cooldownMs` governs how long an open
+ *   circuit waits before allowing a half-open probe (per-DAG override capable).
  */
-export const checkCircuit = (port: CircuitPort, dagId: DagId, now: number): CircuitCheckResult => {
+export const checkCircuit = (
+  port: CircuitPort,
+  dagId: DagId,
+  now: number,
+  config?: CircuitConfig,
+): CircuitCheckResult => {
   let circuit = port.get(dagId);
 
   // Try reset if open and cooldown elapsed
-  circuit = attemptReset(circuit, now);
+  circuit = attemptReset(circuit, now, config?.cooldownMs);
   port.set(dagId, circuit);
 
   if (!isAllowed(circuit)) {

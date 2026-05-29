@@ -18,9 +18,9 @@ import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkE
 import { runDag } from "@fugue/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
-import { booting, bootComplete, beginDrain, drainComplete, canServeRequests, getRegistry } from "./domain/host-state.js";
+import { booting, bootComplete, beginDrain, drainComplete, canServeRequests, getRegistry, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
-import { initConcurrency } from "./domain/concurrency.js";
+import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit } from "./domain/circuit-breaker.js";
 import type { GitPort } from "./ports.js";
@@ -38,6 +38,8 @@ import { executeStartup, buildSyncConfig } from "./lifecycle/startup.js";
 import type { StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
 import type { SignalHandlerHandle } from "./lifecycle/signals.js";
+import { startRedisProbe } from "./lifecycle/redis-probe.js";
+import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -87,6 +89,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   );
   let circuitBreakers = new Map<DagId, CircuitState>();
   let syncLoop: SyncLoopHandle | null = null;
+  let redisProbe: RedisProbeHandle | null = null;
   let signalHandle: SignalHandlerHandle | null = null;
   let server: { port: number; stop: () => void } | null = null;
 
@@ -111,6 +114,13 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     return err({ kind: "internal-invariant-violated", message: "Boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
   }
   hostState = readyResult.value;
+
+  // Fold per-DAG concurrency limits from the loaded registry into the limiter (FR-051).
+  // Without this, every DAG would silently collapse to DEFAULT_DAG_CONCURRENCY.
+  concurrency = reconcileDagLimits(
+    concurrency,
+    Array.from(registry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
+  );
 
   // ── Router Dependencies ──────────────────────────────────────────────────
   const tokenStore = createRedisTokenStore(sharedInfra.redis, sharedInfra.logger);
@@ -180,6 +190,8 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     getState: () => hostState,
     setState: (s) => { hostState = s; },
     getCircuitBreakers: () => circuitBreakers,
+    getConcurrency: () => concurrency,
+    setConcurrency: (s) => { concurrency = s; },
     logger,
     clock: Date.now,
   });
@@ -196,6 +208,35 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     sha,
   );
 
+  // ── Redis Liveness Probe ───────────────────────────────────────────────────
+  // Drives the redis-disconnected degraded state after boot. Transitions are
+  // attempted on every tick and applied only when valid (redisDied is valid from
+  // ready/syncing; redisRecovered only from degraded:redis-disconnected), so the
+  // edge-vs-level distinction is handled by the pure state machine, not here.
+  redisProbe = startRedisProbe(
+    redis,
+    config.REDIS_PROBE_INTERVAL_MS,
+    {
+      onDead: () => {
+        const result = redisDied(hostState, Date.now());
+        if (result.ok) {
+          hostState = result.value;
+          logger.warn("Redis liveness probe failed — host degraded (redis-disconnected)");
+        }
+      },
+      onAlive: () => {
+        if (hostState.phase === "degraded" && hostState.reason === "redis-disconnected") {
+          const result = redisRecovered(hostState);
+          if (result.ok) {
+            hostState = result.value;
+            logger.info("Redis recovered — host returned to ready");
+          }
+        }
+      },
+    },
+    logger,
+  );
+
   // ── Shutdown Logic ───────────────────────────────────────────────────────
   const shutdown = async () => {
     logger.info("Shutdown initiated — draining in-flight requests...");
@@ -204,6 +245,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     if (syncLoop) {
       syncLoop.stop();
       syncLoop = null;
+    }
+
+    // Stop Redis liveness probe — no more degraded/recovered transitions during drain
+    if (redisProbe) {
+      redisProbe.stop();
+      redisProbe = null;
     }
 
     // Transition to draining

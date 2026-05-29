@@ -30,7 +30,7 @@ const safeStringify = (obj: unknown): string => {
 };
 
 const createLogger = (): SyncLogger => ({
-  info: (msg, data) => console.log(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
+  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
   warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
   error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
 });
@@ -83,14 +83,6 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
           return ok(count);
         } catch (e) {
           return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}: ${e instanceof Error ? e.message : String(e)}` });
-        }
-      },
-      keys: async (pattern) => {
-        try {
-          const keys = await client.keys(pattern);
-          return ok(keys);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `KEYS ${pattern}: ${e instanceof Error ? e.message : String(e)}` });
         }
       },
       scan: async (pattern, cursor = "0") => {

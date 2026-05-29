@@ -189,11 +189,81 @@ describe("run-dag handler", () => {
     expect(res.headers.get("Retry-After")).toBe("5");
   });
 
+  it("does not consume the half-open circuit probe when concurrency rejects (no wedge)", async () => {
+    // Circuit is half-open with a single probe available; global capacity is exhausted.
+    const circuits = new Map<DagId, CircuitState>();
+    circuits.set(dagId("test-dag"), { state: "half-open", testRequestAllowed: true });
+    let concurrency = initConcurrency(0, 10); // global max 0 → always at capacity
+    const deps: RunDagDeps = {
+      ...defaultDeps(),
+      getConcurrency: () => concurrency,
+      setConcurrency: (s) => { concurrency = s; },
+      circuit: {
+        get: (id) => circuits.get(id) ?? initCircuit(Date.now()),
+        set: (id, s) => { circuits.set(id, s); },
+      },
+    };
+    const app = createTestApp(deps, readyState);
+    const res = await post(app, "test-dag", { query: "hi" });
+
+    // Rejected for capacity, not the circuit.
+    expect(res.status).toBe(429);
+    expect((await res.json()).error).toBe("global-concurrency-exceeded");
+
+    // The probe must be intact — breaker still half-open and willing to test.
+    // Before the fix, the probe was consumed here, wedging the breaker forever.
+    expect(circuits.get(dagId("test-dag"))).toEqual({ state: "half-open", testRequestAllowed: true });
+
+    // And the concurrency counters are untouched on the 429 path.
+    expect(concurrency.global.current).toBe(0);
+  });
+
+  it("releases the concurrency token when the circuit denies the request", async () => {
+    const circuits = new Map<DagId, CircuitState>();
+    circuits.set(dagId("test-dag"), { state: "open", openedAt: Date.now(), reason: { kind: "half-open-test-failed" } });
+    let concurrency = initConcurrency(50, 10);
+    const deps: RunDagDeps = {
+      ...defaultDeps(),
+      getConcurrency: () => concurrency,
+      setConcurrency: (s) => { concurrency = s; },
+      circuit: {
+        get: (id) => circuits.get(id) ?? initCircuit(Date.now()),
+        set: (id, s) => { circuits.set(id, s); },
+      },
+    };
+    const app = createTestApp(deps, readyState);
+    const res = await post(app, "test-dag", { query: "hi" });
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("dag-disabled");
+    // The slot acquired before the circuit check must be released — no leak.
+    expect(concurrency.global.current).toBe(0);
+  });
+
   it("returns 500 when DAG execution returns error", async () => {
     const deps = defaultDeps({ executeDag: failExecuteDag });
     const app = createTestApp(deps, readyState);
     const res = await post(app, "test-dag", { query: "hi" });
     expect(res.status).toBe(500);
+  });
+
+  it("returns 408 when execution exceeds the host timeout (cooperative abort surfaces)", async () => {
+    // Tiny per-DAG timeout; execution outlives it and then surfaces the abort the way
+    // the framework would (a thrown AbortError once ctx.signal fires). Confirms the
+    // 408 branch is actually reachable end-to-end, not just defensively written.
+    const base = makeDag("slow-dag");
+    const slowDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 1 } };
+    const reg = freeze([slowDag], sha, Date.now());
+    const timeoutExecute = (async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      const e = new Error("aborted");
+      e.name = "AbortError";
+      throw e;
+    }) as RunDagDeps["executeDag"];
+    const app = createTestApp(defaultDeps({ executeDag: timeoutExecute }), makeReadyState(reg));
+    const res = await post(app, "slow-dag", { query: "hi" });
+    expect(res.status).toBe(408);
+    expect((await res.json()).error).toBe("timeout");
   });
 
   it("returns 200 on successful execution", async () => {

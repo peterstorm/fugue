@@ -14,23 +14,30 @@ import { resolveDefaults } from "./dag-registration.js";
 // ── Host-level timeout defaults (threaded from HostConfig) ─────────────────
 
 /**
- * Host-level defaults for DAG timeout and concurrency.
+ * Host-level defaults for DAG timeout, concurrency, and TTLs.
  * Threaded from HostConfig so that per-DAG overrides are clamped
- * against the host maximum.
+ * against the host maximum and unset TTLs fall back to host defaults.
  */
 export interface HostTimeoutDefaults {
   readonly defaultTimeoutMs: number;
   readonly maxTimeoutMs: number;
   readonly defaultMaxConcurrent: number;
+  /** Host default cache TTL (ms), applied when a DAG omits its own override. (FR-040) */
+  readonly defaultCacheTtlMs: number;
+  /** Host default checkpoint TTL (ms), applied when a DAG omits its own override. (FR-040) */
+  readonly defaultCheckpointTtlMs: number;
 }
 
 /**
  * Fallback defaults used when no HostConfig is available (e.g., tests).
+ * Mirror the defaults in HostConfigSchema.
  */
 export const DEFAULT_HOST_TIMEOUT_DEFAULTS: HostTimeoutDefaults = {
   defaultTimeoutMs: 60_000,
   maxTimeoutMs: 120_000,
   defaultMaxConcurrent: 10,
+  defaultCacheTtlMs: 300_000,
+  defaultCheckpointTtlMs: 86_400_000,
 };
 
 /**
@@ -44,16 +51,24 @@ export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: GitS
   }));
 
 /**
- * Extract team name from module path following dags/{team}/{dag-name}/dag.ts convention.
- * Returns "unknown" when path doesn't follow convention (caller should log a warning).
+ * Extract team name from a module path following the dags/{team}/{name}/dag.ts
+ * convention. Returns "unknown" when the path does not follow it — the caller
+ * (sync-callbacks) warns on "unknown", and team drives authorization isolation,
+ * so a wrong-but-plausible team must NOT slip through.
+ *
+ * Uses the FIRST exact "dags" segment (the repo's dags root) rather than the last,
+ * and requires the full {team}/{name}/{file} tail to be present, so a stray leaf
+ * segment literally named "dags" cannot misattribute a team.
  */
-export const extractTeam = (modulePath: string): { team: string; inferred: boolean } => {
-  const pathParts = modulePath.split("/");
-  const dagsDirIndex = pathParts.lastIndexOf("dags");
-  if (dagsDirIndex >= 0 && dagsDirIndex + 1 < pathParts.length) {
-    return { team: pathParts[dagsDirIndex + 1], inferred: true };
+export const extractTeam = (modulePath: string): string => {
+  const parts = modulePath.split("/");
+  const dagsIdx = parts.indexOf("dags");
+  // Need dags/{team}/{name}/{file} — at least three segments after "dags".
+  if (dagsIdx >= 0 && dagsIdx + 3 < parts.length) {
+    const team = parts[dagsIdx + 1];
+    if (team.length > 0) return team;
   }
-  return { team: "unknown", inferred: false };
+  return "unknown";
 };
 
 /**
@@ -72,14 +87,21 @@ export const loadResultToRegisteredDag = (
   hostDefaults: HostTimeoutDefaults = DEFAULT_HOST_TIMEOUT_DEFAULTS,
 ): RegisteredDag => {
   const resolved = resolveDefaults(result.registration);
-  const { team } = extractTeam(result.modulePath);
+  const team = extractTeam(result.modulePath);
+  const regConfig = result.registration.config;
 
   // Apply host-level defaults and clamp
   const effectiveTimeout = Math.min(
-    result.registration.config?.timeoutMs ?? hostDefaults.defaultTimeoutMs,
+    regConfig?.timeoutMs ?? hostDefaults.defaultTimeoutMs,
     hostDefaults.maxTimeoutMs,
   );
-  const effectiveConcurrency = result.registration.config?.maxConcurrent ?? hostDefaults.defaultMaxConcurrent;
+  const effectiveConcurrency = regConfig?.maxConcurrent ?? hostDefaults.defaultMaxConcurrent;
+
+  // Per-DAG TTL overrides fall back to host defaults so cache/checkpoint entries
+  // always carry an expiry (FR-040/FR-041). Previously these were left undefined,
+  // meaning entries were written with NO expiry — a latent FR-040 violation.
+  const cacheTtlMs = regConfig?.cacheTtlMs ?? hostDefaults.defaultCacheTtlMs;
+  const checkpointTtlMs = regConfig?.checkpointTtlMs ?? hostDefaults.defaultCheckpointTtlMs;
 
   return {
     id: result.id,
@@ -90,11 +112,14 @@ export const loadResultToRegisteredDag = (
     config: {
       timeout: effectiveTimeout,
       maxConcurrency: effectiveConcurrency,
-      // NOTE: cacheTtlMs and checkpointTtlMs are declared on ResolvedDagConfig
-      // but never populated here. Per-DAG TTL overrides (from fugue.yaml) require loading
-      // and merging the fugue.yaml alongside dag.ts during module discovery — not yet wired.
-      // Until then, createNamespacedCache/createNamespacedCheckpointWriter fall back to
-      // the host-level default TTL from HostConfig.
+      cacheTtlMs,
+      checkpointTtlMs,
+      // Per-DAG circuit-breaker override is only set when the DAG declares one;
+      // run-dag merges it over the host-level CIRCUIT_BREAKER_* config (a partial
+      // override — any field the DAG omits falls back to the host default).
+      ...(regConfig?.circuitBreaker !== undefined
+        ? { circuitBreaker: regConfig.circuitBreaker }
+        : {}),
     },
     meta: {
       description: resolved.meta.description,

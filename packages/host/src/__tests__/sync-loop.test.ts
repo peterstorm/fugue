@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { ok, err, gitSha, EMPTY_SHA } from "@fugue/framework";
+import { ok, err, gitSha } from "@fugue/framework";
 import type { GitSha } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort, ModuleLoaderPort, BulkLoadResult } from "../ports.js";
@@ -154,14 +154,13 @@ describe("executeSyncCycle", () => {
     expect(result.registry.dags.size).toBe(0);
   });
 
-  it("skips lockfile check on initial sync (lastSha is empty)", async () => {
+  it("skips lockfile check on initial sync (lastSha is null)", async () => {
     let lockfileChecked = false;
-    const emptySha = gitSha("");
     const git = fakeGit({
       currentSha: async () => ok(sha2),
       hasLockfileChanged: async () => { lockfileChecked = true; return ok(false); },
     });
-    await executeSyncCycle(git, fakeLoader(), config, emptySha, noopLogger);
+    await executeSyncCycle(git, fakeLoader(), config, null, noopLogger);
     expect(lockfileChecked).toBe(false);
   });
 
@@ -183,13 +182,13 @@ describe("executeSyncCycle", () => {
     expect(calls[1]).toBe("currentSha");
   });
 
-  it("skips pull on initial sync (lastSha is EMPTY_SHA) even in remote mode", async () => {
+  it("skips pull on initial sync (lastSha is null) even in remote mode", async () => {
     let pullCalled = false;
     const git = fakeGit({
       currentSha: async () => ok(sha2),
       pull: async () => { pullCalled = true; return ok(undefined); },
     });
-    await executeSyncCycle(git, fakeLoader(), config, EMPTY_SHA, noopLogger);
+    await executeSyncCycle(git, fakeLoader(), config, null, noopLogger);
     expect(pullCalled).toBe(false);
   });
 });

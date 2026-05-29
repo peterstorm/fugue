@@ -40,9 +40,10 @@ export type DegradedReason = "redis-disconnected" | "sync-failed" | "no-dags-loa
 /**
  * Host lifecycle state ADT.
  *
- * `lastSyncSha` convention: branded empty string (via `EMPTY_SHA` from framework)
- * means "never synced" (initial state). After the first successful sync, always
- * contains a valid 40-char git SHA.
+ * `lastSyncSha` is always a real GitSha in every state that carries one: those
+ * states are only reachable after the initial sync (bootComplete) has produced a
+ * SHA. "Never synced" is represented by the `booting` state having no sha field —
+ * not by an empty-string sentinel.
  */
 export type HostState =
   | { readonly phase: "booting"; readonly startedAt: number }

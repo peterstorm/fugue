@@ -11,23 +11,27 @@
  */
 
 import type { DagId, DagDef, GitSha } from "@fugue/framework";
-import { EMPTY_SHA } from "@fugue/framework";
 import type { z } from "zod";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * Per-DAG configuration — core fields (timeout, maxConcurrency) fully resolved.
- * Optional TTL and circuit-breaker overrides use host defaults when undefined.
+ * Per-DAG configuration — fully resolved at registration time.
+ *
+ * `timeout`, `maxConcurrency`, `cacheTtlMs`, and `checkpointTtlMs` are always
+ * populated (per-DAG override merged with the host default in dag-factory).
+ *
+ * `circuitBreaker` is a PARTIAL override, present only when the DAG declares one;
+ * run-dag merges each declared field over the host-level CIRCUIT_BREAKER_* config.
  */
 export interface ResolvedDagConfig {
   readonly timeout: number;
   readonly maxConcurrency: number;
-  readonly cacheTtlMs?: number;
-  readonly checkpointTtlMs?: number;
+  readonly cacheTtlMs: number;
+  readonly checkpointTtlMs: number;
   readonly circuitBreaker?: {
-    readonly failureThreshold: number;
-    readonly resetTimeoutMs: number;
+    readonly failureThreshold?: number;
+    readonly resetTimeoutMs?: number;
   };
 }
 
@@ -61,11 +65,14 @@ export interface RegisteredDag {
 
 /**
  * Immutable snapshot of all loaded DAGs at a point in time.
+ *
+ * `sha` is `null` only for the pre-boot empty registry ("never synced"); every
+ * registry produced by `freeze`/sync carries a real GitSha.
  */
 export interface Registry {
   readonly dags: ReadonlyMap<DagId, RegisteredDag>;
   readonly loadedAt: number;
-  readonly sha: GitSha;
+  readonly sha: GitSha | null;
 }
 
 // ── Builders (pure) ────────────────────────────────────────────────────────
@@ -76,7 +83,7 @@ export interface Registry {
 export const emptyRegistry = (): Registry => Object.freeze({
   dags: new Map() as ReadonlyMap<DagId, RegisteredDag>,
   loadedAt: 0,
-  sha: EMPTY_SHA,
+  sha: null,
 });
 
 /**
