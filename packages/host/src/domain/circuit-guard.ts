@@ -19,10 +19,35 @@
 import type { DagId } from "@fugue/framework";
 import type { CircuitState } from "./circuit-breaker.js";
 import { attemptReset, isAllowed, consumeTestRequest, recordSuccess, recordFailure, DEFAULTS } from "./circuit-breaker.js";
-import type { CircuitPort, CircuitConfig } from "../ports.js";
 
-// Re-export for backwards compatibility
-export type { CircuitPort, CircuitConfig } from "../ports.js";
+// ── Circuit Breaker Port + Config ────────────────────────────────────────────
+// These are domain concepts — a read/write handle over the circuit ADT and the
+// thresholds that govern it — so they live in domain/, not ports.ts. Keeping them
+// here means the dependency direction stays ports → domain (and run-dag → domain),
+// never domain → ports. run-dag.ts imports both from this module.
+
+/**
+ * Minimal read/write handle for circuit breaker state.
+ * Injected from the imperative shell's mutable Map.
+ */
+export type CircuitPort = {
+  readonly get: (dagId: DagId) => CircuitState;
+  readonly set: (dagId: DagId, s: CircuitState) => void;
+};
+
+/**
+ * Configuration for circuit breaker thresholds.
+ * Threaded from HostConfig.CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_WINDOW_MS,
+ * or from a per-DAG override (see ResolvedDagConfig.circuitBreaker).
+ *
+ * `cooldownMs` is optional — when omitted the circuit-breaker default (30s) applies.
+ * It controls how long an open circuit waits before allowing a half-open probe.
+ */
+export type CircuitConfig = {
+  readonly threshold: number;
+  readonly windowMs: number;
+  readonly cooldownMs?: number;
+};
 
 /**
  * Default circuit config — used when no explicit config is provided.

@@ -68,8 +68,6 @@ export const HostConfigSchema = z.object({
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */
   MLFLOW_EXPERIMENT_ID: z.string().optional(),
-  /** TTL for async run results before expiry (FR-040) */
-  ASYNC_RESULT_TTL_MS: z.coerce.number().int().min(1000).default(3_600_000),
   /** Number of failures before circuit breaker opens */
   CIRCUIT_BREAKER_THRESHOLD: z.coerce.number().int().min(1).default(5),
   /** Time window for circuit breaker failure counting (ms) */
@@ -120,8 +118,6 @@ export const FugueYamlSchema = z.object({
   cacheTtlMs: z.number().int().positive().optional(),
   /** Per-DAG checkpoint TTL override (FR-041) */
   checkpointTtlMs: z.number().int().positive().optional(),
-  /** Per-DAG async result TTL override (FR-041) */
-  asyncResultTtlMs: z.number().int().positive().optional(),
 });
 
 export type FugueYaml = z.infer<typeof FugueYamlSchema>;

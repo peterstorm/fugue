@@ -81,6 +81,19 @@ export interface ResolvedDagRegistration {
   readonly config: {
     readonly timeoutMs: number;
     readonly maxConcurrent: number;
+    /**
+     * Per-DAG TTL/circuit overrides are PRESERVED here exactly as the DAG (or a merged
+     * fugue.yaml) declared them — they are deliberately NOT host-defaulted at this layer.
+     * The host-level cache/checkpoint TTL fallback is applied later in dag-factory, which
+     * has access to HostConfig. Carrying them through keeps `resolveDefaults` from silently
+     * dropping fields a downstream caller would expect on a "resolved" registration.
+     */
+    readonly cacheTtlMs?: number;
+    readonly checkpointTtlMs?: number;
+    readonly circuitBreaker?: {
+      readonly failureThreshold?: number;
+      readonly resetTimeoutMs?: number;
+    };
   };
   readonly meta: {
     readonly description: string;
@@ -93,8 +106,8 @@ export interface ResolvedDagRegistration {
  *
  * Precedence: fugue.yaml (the deployment/ops layer) WINS over the dag.ts `config` for every
  * field it specifies; omitted fields are left untouched. `team`/`owner`/`env` are not part of
- * DagRegistration (the loader threads them separately). `circuitBreaker`/`asyncResultTtlMs`
- * are intentionally not mergeable from fugue.yaml.
+ * DagRegistration (the loader threads them separately). `circuitBreaker` is intentionally
+ * not mergeable from fugue.yaml — it lives only in the dag.ts config.
  */
 export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): DagRegistration => {
   const config: DagRegistrationConfig = {
@@ -130,6 +143,10 @@ export const resolveDefaults = (reg: DagRegistration): ResolvedDagRegistration =
   config: {
     timeoutMs: reg.config?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxConcurrent: reg.config?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
+    // Preserved untouched — host-level TTL defaulting happens in dag-factory.
+    ...(reg.config?.cacheTtlMs !== undefined ? { cacheTtlMs: reg.config.cacheTtlMs } : {}),
+    ...(reg.config?.checkpointTtlMs !== undefined ? { checkpointTtlMs: reg.config.checkpointTtlMs } : {}),
+    ...(reg.config?.circuitBreaker !== undefined ? { circuitBreaker: reg.config.circuitBreaker } : {}),
   },
   meta: {
     description: reg.meta?.description ?? "",

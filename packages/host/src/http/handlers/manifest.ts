@@ -14,6 +14,7 @@
 import type { Context } from "hono";
 import { tryDagId, buildDescribedDag, formatFrameworkError } from "@fugue/framework";
 import type { HostEnv } from "../router.js";
+import type { LogPort } from "../../ports.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse } from "../response.js";
@@ -32,9 +33,16 @@ import type { RegisteredDag } from "../../domain/registry.js";
  * only when the framework's describe assembly fails (a registry/validator
  * invariant violation — see `buildDescribedDag`). Exposed so tests can
  * exercise the shape without spinning up a Hono context.
+ *
+ * `onSchemaWarning`, when provided, is invoked for each NON-FATAL schema
+ * serialization failure. The payload still ships with `null` in place of the
+ * unrenderable schema (the documented LLM-tooling contract), but the caller can
+ * log/observe the degradation instead of it vanishing silently — matching the
+ * `fugue describe` CLI surface, which writes the same warnings to stderr.
  */
 export const buildManifest = (
   registered: RegisteredDag,
+  onSchemaWarning?: (message: string) => void,
 ): { readonly ok: true; readonly value: DagManifestResponse }
    | { readonly ok: false; readonly errorMessage: string } => {
   const built = buildDescribedDag({
@@ -44,6 +52,20 @@ export const buildManifest = (
     description: registered.meta.description,
     version: registered.meta.version,
     loadedPrompts: registered.prompts,
+    ...(onSchemaWarning
+      ? {
+          warningSink: {
+            onSchemaSerializationError: (where, e) => {
+              const target =
+                where.field === "outputSchema"
+                  ? `outputSchema (node '${where.nodeId}')`
+                  : "inputSchema";
+              const msg = e instanceof Error ? e.message : String(e);
+              onSchemaWarning(`${target}: ${msg}`);
+            },
+          },
+        }
+      : {}),
   });
 
   if (!built.ok) {
@@ -70,7 +92,15 @@ export const buildManifest = (
 // Handler
 // ---------------------------------------------------------------------------
 
-export const manifestHandler = (c: Context<HostEnv>): Response => {
+export interface ManifestHandlerDeps {
+  /** Optional logger — records non-fatal schema-serialization degradations server-side. */
+  readonly logger?: LogPort;
+}
+
+const assembleManifest = (
+  c: Context<HostEnv>,
+  onSchemaWarning?: (message: string) => void,
+): Response => {
   const rawId = c.req.param("id") ?? "";
   const dagIdResult = tryDagId(rawId);
   if (!dagIdResult.ok) {
@@ -121,7 +151,7 @@ export const manifestHandler = (c: Context<HostEnv>): Response => {
     );
   }
 
-  const built = buildManifest(registered);
+  const built = buildManifest(registered, onSchemaWarning);
   if (!built.ok) {
     return errorResponse(c, 500, "manifest-build-failed",
       `Failed to assemble manifest for DAG '${dagId}': ${built.errorMessage}`,
@@ -130,3 +160,15 @@ export const manifestHandler = (c: Context<HostEnv>): Response => {
   }
   return c.json(built.value, 200);
 };
+
+/**
+ * Creates the manifest handler. Injecting the logger (rather than exporting a
+ * bare function) lets the handler surface non-fatal schema-serialization
+ * warnings server-side — the same degradations `fugue describe` writes to
+ * stderr — instead of emitting a `null` schema with no host-side trace.
+ */
+export const createManifestHandler = (deps: ManifestHandlerDeps = {}) =>
+  (c: Context<HostEnv>): Response =>
+    assembleManifest(c, (message) =>
+      deps.logger?.warn(`[manifest] schema serialization degraded to null`, { detail: message }),
+    );

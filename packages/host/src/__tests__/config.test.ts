@@ -32,7 +32,6 @@ describe("HostConfigSchema", () => {
     expect(c.MAX_DAG_TIMEOUT_MS).toBe(120_000);
     expect(c.DRAIN_TIMEOUT_MS).toBe(30_000);
     expect(c.LLM_PROVIDER).toBe("anthropic");
-    expect(c.ASYNC_RESULT_TTL_MS).toBe(3_600_000);
     expect(c.CIRCUIT_BREAKER_THRESHOLD).toBe(5);
     expect(c.CIRCUIT_BREAKER_WINDOW_MS).toBe(60_000);
     expect(c.DEFAULT_CACHE_TTL_MS).toBe(300_000);
@@ -116,13 +115,11 @@ describe("HostConfigSchema", () => {
       ...validEnv,
       DEFAULT_CACHE_TTL_MS: "600000",
       DEFAULT_CHECKPOINT_TTL_MS: "172800000",
-      ASYNC_RESULT_TTL_MS: "7200000",
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.DEFAULT_CACHE_TTL_MS).toBe(600_000);
     expect(result.value.DEFAULT_CHECKPOINT_TTL_MS).toBe(172_800_000);
-    expect(result.value.ASYNC_RESULT_TTL_MS).toBe(7_200_000);
   });
 
   it("rejects PORT of 0 (below min 1)", () => {
@@ -238,7 +235,6 @@ describe("FugueYamlSchema", () => {
       route: "/custom/path",
       cacheTtlMs: 60_000,
       checkpointTtlMs: 3_600_000,
-      asyncResultTtlMs: 7_200_000,
     };
     const result = parseFugueYaml(data, "/dags/foo/fugue.yaml");
     expect(result.ok).toBe(true);
@@ -251,7 +247,6 @@ describe("FugueYamlSchema", () => {
     expect(result.value.route).toBe("/custom/path");
     expect(result.value.cacheTtlMs).toBe(60_000);
     expect(result.value.checkpointTtlMs).toBe(3_600_000);
-    expect(result.value.asyncResultTtlMs).toBe(7_200_000);
   });
 
   it("rejects missing team field (FR-100)", () => {
@@ -298,7 +293,6 @@ describe("FugueYamlSchema", () => {
     if (!result.ok) return;
     expect(result.value.cacheTtlMs).toBeUndefined();
     expect(result.value.checkpointTtlMs).toBeUndefined();
-    expect(result.value.asyncResultTtlMs).toBeUndefined();
   });
 
   // These mirror the constraints on DagRegistrationSchema.config — applyFugueYaml merges
@@ -316,7 +310,6 @@ describe("FugueYamlSchema", () => {
   it("rejects non-positive TTL overrides", () => {
     expect(parseFugueYaml({ team: "t", cacheTtlMs: 0 }, "/dags/x/fugue.yaml").ok).toBe(false);
     expect(parseFugueYaml({ team: "t", checkpointTtlMs: -5 }, "/dags/x/fugue.yaml").ok).toBe(false);
-    expect(parseFugueYaml({ team: "t", asyncResultTtlMs: -1 }, "/dags/x/fugue.yaml").ok).toBe(false);
   });
 
   it("rejects fractional maxConcurrent / TTLs (must be integers)", () => {

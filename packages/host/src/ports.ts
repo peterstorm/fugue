@@ -11,7 +11,6 @@
 import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess } from "@fugue/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
-import type { CircuitState } from "./domain/circuit-breaker.js";
 import type { ContentFilter } from "@fugue/framework";
 import type { TokenGrant, TokenHash } from "./domain/auth.js";
 
@@ -145,30 +144,10 @@ export type SharedInfra = {
   readonly logger: LogPort;
 }
 
-// ── Circuit Breaker ──────────────────────────────────────────────────────────
-
-/**
- * Minimal read/write handle for circuit breaker state.
- * Injected from the imperative shell's mutable Map.
- */
-export type CircuitPort = {
-  readonly get: (dagId: DagId) => CircuitState;
-  readonly set: (dagId: DagId, s: CircuitState) => void;
-}
-
-/**
- * Configuration for circuit breaker thresholds.
- * Threaded from HostConfig.CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_WINDOW_MS,
- * or from a per-DAG override (see ResolvedDagConfig.circuitBreaker).
- *
- * `cooldownMs` is optional — when omitted the circuit-breaker default (30s) applies.
- * It controls how long an open circuit waits before allowing a half-open probe.
- */
-export type CircuitConfig = {
-  readonly threshold: number;
-  readonly windowMs: number;
-  readonly cooldownMs?: number;
-}
+// NOTE: CircuitPort / CircuitConfig intentionally live in domain/circuit-guard.ts,
+// NOT here. They are domain concepts (a handle over the circuit ADT + its thresholds),
+// so keeping them in domain preserves the ports → domain dependency direction rather
+// than inverting it. See circuit-guard.ts.
 
 // ── Token Store ─────────────────────────────────────────────────────────────
 

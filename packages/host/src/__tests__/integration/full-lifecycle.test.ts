@@ -50,7 +50,6 @@ const testConfig = (overrides?: Partial<HostConfig>): HostConfig => ({
   AZURE_OPENAI_ENDPOINT: undefined,
   AZURE_OPENAI_API_KEY: undefined,
   AZURE_OPENAI_DEPLOYMENT: undefined,
-  ASYNC_RESULT_TTL_MS: 3_600_000,
   CIRCUIT_BREAKER_THRESHOLD: 5,
   CIRCUIT_BREAKER_WINDOW_MS: 60_000,
   DEFAULT_CACHE_TTL_MS: 300_000,

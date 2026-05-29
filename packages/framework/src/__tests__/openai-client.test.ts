@@ -107,6 +107,51 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
+  it("rewrites body.model to modelOverride when set (Azure single-deployment routing)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    const client = new OpenAILlmClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.com/v1",
+      modelOverride: "azure-deployment-x",
+    });
+
+    await client.sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    });
+
+    // The Azure override must win over the per-request model in the wire body —
+    // silently sending the wrong model is a billing/routing regression.
+    const sentBody = JSON.parse(fetchCalls[0]!.init.body as string);
+    expect(sentBody.model).toBe("azure-deployment-x");
+  });
+
+  it("sends req.model verbatim when no modelOverride is configured", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+
+    await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    });
+
+    const sentBody = JSON.parse(fetchCalls[0]!.init.body as string);
+    expect(sentBody.model).toBe("gpt-test");
+  });
+
   // Wave 6 §6.10: 429 maps to `transient`, not `node-crash`. Lets the runner
   // distinguish "retry me" from "permanent failure" without parsing the message.
   it("HTTP 429 → transient with status + body and nodeId", async () => {

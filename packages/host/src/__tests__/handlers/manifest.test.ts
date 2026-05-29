@@ -18,7 +18,7 @@ import {
   createTransformNode,
   ok,
 } from "@fugue/framework";
-import { manifestHandler, buildManifest } from "../../http/handlers/manifest.js";
+import { createManifestHandler, buildManifest } from "../../http/handlers/manifest.js";
 import type { HostState } from "../../domain/host-state.js";
 import { freeze } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
@@ -38,7 +38,7 @@ const makeApp = (state: HostState, identity: AuthIdentity) => {
     c.set("authIdentity", identity);
     await next();
   });
-  app.get("/dags/:id/manifest", manifestHandler);
+  app.get("/dags/:id/manifest", createManifestHandler());
   return app;
 };
 
@@ -358,7 +358,7 @@ describe("manifestHandler", () => {
       c.set("hostState", state);
       await next();
     });
-    app.get("/dags/:id/manifest", manifestHandler);
+    app.get("/dags/:id/manifest", createManifestHandler());
 
     const res = await app.request("/dags/manifest-test/manifest");
     expect(res.status).toBe(401);

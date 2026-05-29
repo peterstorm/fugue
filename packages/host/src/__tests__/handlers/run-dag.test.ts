@@ -9,7 +9,7 @@ import type { RegisteredDag } from "../../domain/registry.js";
 import type { HostState } from "../../domain/host-state.js";
 import type { Registry } from "../../domain/registry.js";
 import { freeze } from "../../domain/registry.js";
-import { initConcurrency } from "../../domain/concurrency.js";
+import { initConcurrency, acquire, withDagLimit } from "../../domain/concurrency.js";
 import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { initCircuit } from "../../domain/circuit-breaker.js";
 import type { CircuitState } from "../../domain/circuit-breaker.js";
@@ -187,6 +187,63 @@ describe("run-dag handler", () => {
     const body = await res.json();
     expect(body.error).toBe("global-concurrency-exceeded");
     expect(res.headers.get("Retry-After")).toBe("5");
+  });
+
+  it("returns 429 with scope=dag when the per-DAG limit is exhausted (global has headroom)", async () => {
+    // Per-DAG limit of 1, already occupied — global (50) still has plenty of room, so the
+    // rejection MUST be the per-DAG branch (scope=dag), not the global one tested above.
+    let concurrency = withDagLimit(initConcurrency(50, 10), dagId("test-dag"), 1);
+    const acq = acquire(concurrency, dagId("test-dag"), Date.now());
+    expect(acq.ok).toBe(true);
+    if (acq.ok) concurrency = acq.value.state;
+
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (s) => { concurrency = s; },
+    });
+    const app = createTestApp(deps, readyState);
+    const res = await post(app, "test-dag", { query: "hi" });
+
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.error).toBe("dag-concurrency-exceeded");
+    expect(body.details.scope).toBe("dag");
+    expect(res.headers.get("Retry-After")).toBe("5");
+    // Global headroom was never touched on the per-DAG rejection.
+    expect(concurrency.global.current).toBe(1);
+  });
+
+  it("returns 500 and releases the concurrency token when createContext throws", async () => {
+    // Exercises the setup-guard branch: createContext throwing must clear the timeout timer,
+    // mark the circuit, rethrow → 500, and the outer finally must still release the slot.
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (s) => { concurrency = s; },
+      createContext: () => { throw new Error("context init blew up"); },
+    });
+    const app = createTestApp(deps, readyState);
+    const res = await post(app, "test-dag", { query: "hi" });
+
+    expect(res.status).toBe(500);
+    // The slot acquired before execution must be released — no leak on the setup-throw path.
+    expect(concurrency.global.current).toBe(0);
+  });
+
+  it("records a circuit failure on the createContext-throws path (opens per-DAG breaker at threshold)", async () => {
+    // failureThreshold 1 → breaker opens after the 2nd failure. If the setup-throw branch did
+    // NOT call markFailure, the breaker would never open and request 3 would 500 like the rest.
+    const base = makeDag("ctx-throw-dag");
+    const cbDag: RegisteredDag = { ...base, config: { ...base.config, circuitBreaker: { failureThreshold: 1 } } };
+    const reg = freeze([cbDag], sha, Date.now());
+    const deps = defaultDeps({ createContext: () => { throw new Error("ctx init failed"); } });
+    const app = createTestApp(deps, makeReadyState(reg));
+
+    expect((await post(app, "ctx-throw-dag", { query: "x" })).status).toBe(500); // failure 1
+    expect((await post(app, "ctx-throw-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
+    const r3 = await post(app, "ctx-throw-dag", { query: "x" });
+    expect(r3.status).toBe(503);                                                  // circuit now open
+    expect((await r3.json()).error).toBe("dag-disabled");
   });
 
   it("does not consume the half-open circuit probe when concurrency rejects (no wedge)", async () => {
