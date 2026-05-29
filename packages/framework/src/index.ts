@@ -1,4 +1,4 @@
-// @ai-summary/framework — barrel export
+// @fugue/framework — barrel export
 //
 // Public surface: authoring-facing types, runtime entry points, and the
 // pluggable seams (Observer, Cache, LLM, JobLike, Scheduler) consumers
@@ -15,6 +15,7 @@ export * from "./checkpoint/index.js";
 export * from "./cache/index.js";
 export * from "./prompts/index.js";
 export * from "./llm/index.js";
+export * from "./describe/index.js";
 export * from "./tracing/index.js";
 export { setFrameworkLogger, fwLogger } from "./logger.js";
 export type { FrameworkLogger } from "./logger.js";
@@ -38,7 +39,7 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 //
 // `runDag` and `runDagAsWorkerJob` are the sanctioned public entries.
 // `runDagStateful` (deprecated), `compileDagToMachine`, `buildDagExecutor`,
-// and `dagTransition` live on the `@ai-summary/framework/advanced` subpath
+// and `dagTransition` live on the `@fugue/framework/advanced` subpath
 // for callers building custom machines on the kernel — see `./advanced.ts`.
 // Keeping them off the main barrel signals that reaching for them is a
 // deliberate choice, not an accident from a wildcard import.
@@ -71,7 +72,7 @@ export {
 } from "./queue/in-memory.js";
 
 // ---------------------------------------------------------------------------
-// Queue-BullMQ adapter — moved to `@ai-summary/framework/bullmq` subpath.
+// Queue-BullMQ adapter — moved to `@fugue/framework/bullmq` subpath.
 // Consumers that need durable BullMQ queues import from the subpath to avoid
 // pulling bullmq/ioredis into their dependency graph.
 // ---------------------------------------------------------------------------

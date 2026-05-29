@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { join } from "node:path";
-import { runDag, FakeLlmClient, makeNodeContext } from "@ai-summary/framework";
-import type { NodeContext } from "@ai-summary/framework";
+import { runDag, FakeLlmClient, makeNodeContext } from "@fugue/framework";
+import type { NodeContext } from "@fugue/framework";
 import type { SummaryResponse } from "../schemas/response.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";

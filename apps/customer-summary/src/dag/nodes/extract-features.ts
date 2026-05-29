@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { createTransformNode, ok } from "@ai-summary/framework";
-import type { Result } from "@ai-summary/framework";
-import type { FrameworkError } from "@ai-summary/framework";
+import { createTransformNode, ok } from "@fugue/framework";
+import type { Result } from "@fugue/framework";
+import type { FrameworkError } from "@fugue/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord, Message } from "../../schemas/crm.js";
 import { scoreByRecency } from "../../extraction/recency.js";

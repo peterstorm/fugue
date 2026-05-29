@@ -1,5 +1,5 @@
-import type { DagDef } from "@ai-summary/framework";
-import { createEvalJudgeNode, defineDag } from "@ai-summary/framework";
+import type { DagDef } from "@fugue/framework";
+import { createEvalJudgeNode, defineDag } from "@fugue/framework";
 import type { ConversationSource } from "../sources/conversation-source.js";
 import { createFetchCustomerNode } from "./nodes/fetch-customer.js";
 import { createExtractFeaturesNode } from "./nodes/extract-features.js";

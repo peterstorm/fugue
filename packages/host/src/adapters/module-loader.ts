@@ -1,0 +1,272 @@
+/**
+ * Module Loader — Dynamic import of DAG modules with validation.
+ *
+ * Discovers DAG modules by glob pattern, imports them with cache-busting,
+ * and validates each default export against DagRegistrationSchema.
+ * All failures are captured as Result.err — loader never throws.
+ *
+ * @satisfies FR-004 — Validate each module against DagRegistration schema; invalid DAGs MUST NOT be registered
+ * @satisfies NFR-010 — A failing DAG import MUST NOT affect other already-registered DAGs
+ */
+
+import { readdir, readFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { ok, err } from "@fugue/framework";
+import type { Result, DagId, GitSha } from "@fugue/framework";
+import { tryDagId, dagId } from "@fugue/framework";
+import type { HostError } from "../domain/host-error.js";
+import { validateDagRegistration, applyFugueYaml, missingEnvVars } from "../domain/dag-registration.js";
+import { parseFugueYaml } from "../domain/config.js";
+import type { FugueYaml } from "../domain/config.js";
+import type { LoadResult, LoadError, BulkLoadResult, ModuleLoaderPort } from "../ports.js";
+
+/** Bun's native YAML parser (not yet in @types/bun) — typed minimally here. */
+const BunYAML = (Bun as unknown as { YAML?: { parse: (s: string) => unknown } }).YAML;
+
+// ── fugue.yaml (per-DAG deployment config) ─────────────────────────────────
+
+/**
+ * Read and validate a sibling `fugue.yaml` from the DAG's directory.
+ *
+ * - Missing file → `ok(null)` — fugue.yaml is optional.
+ * - Present but malformed/schema-invalid → `err` — the caller treats it as an
+ *   isolated load failure (the DAG is skipped, others are unaffected; NFR-010),
+ *   because silently ignoring deployment config would mask operator mistakes.
+ */
+export const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | null, HostError>> => {
+  const yamlPath = join(dirname(modulePath), "fugue.yaml");
+  let text: string;
+  try {
+    text = await readFile(yamlPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return ok(null);
+    return err({ kind: "config-invalid", message: `Cannot read ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+  // Guard the native API at first use: if Bun.YAML is unavailable on this runtime, report
+  // THAT — not a misleading "malformed fugue.yaml" that blames the operator's file.
+  if (typeof BunYAML?.parse !== "function") {
+    return err({ kind: "config-invalid", message: `Cannot parse ${yamlPath}: Bun.YAML API unavailable in this runtime` });
+  }
+  let parsed: unknown;
+  try {
+    parsed = BunYAML.parse(text);
+  } catch (e) {
+    return err({ kind: "config-invalid", message: `Malformed fugue.yaml at ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+  return parseFugueYaml(parsed, yamlPath);
+};
+
+// (applyFugueYaml + missingEnvVars are pure domain logic — see domain/dag-registration.ts.)
+
+
+// ── Implementation ─────────────────────────────────────────────────────────
+
+/**
+ * Load a single DAG module from the filesystem.
+ *
+ * - Uses `import(path + "?v=" + sha)` for cache-busting between versions
+ * - Validates default export against DagRegistrationSchema
+ * - Catches thrown errors during import (syntax, missing deps)
+ * - Never throws — all failures returned as Result.err
+ *
+ * @satisfies FR-004, NFR-010
+ */
+export const loadDagModule = async (
+  modulePath: string,
+  sha: GitSha,
+  onPromptError?: (path: string, e: unknown) => void,
+  env: Record<string, string | undefined> = process.env,
+): Promise<Result<LoadResult, HostError>> => {
+  let mod: unknown;
+
+  try {
+    // Bun treats ?v=X as distinct module specifier → fresh evaluation per SHA
+    mod = await import(`${modulePath}?v=${sha}`);
+  } catch (e) {
+    return err({
+      kind: "import-failed",
+      path: modulePath,
+      message: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
+    });
+  }
+
+  const defaultExport = (mod as Record<string, unknown>)?.default;
+  if (defaultExport === undefined || defaultExport === null) {
+    return err({
+      kind: "no-default-export",
+      path: modulePath,
+    });
+  }
+
+  const validation = validateDagRegistration(defaultExport);
+  if (!validation.ok) {
+    return validation;
+  }
+
+  const baseRegistration = validation.value;
+  const idResult = tryDagId(baseRegistration.dag.id);
+  if (!idResult.ok) {
+    return err({
+      kind: "dag-validation-failed",
+      dagId: dagId("unknown"),
+      reason: `Invalid DAG ID: ${idResult.error}`,
+      message: `DagRegistration has invalid ID '${baseRegistration.dag.id}': ${idResult.error}`,
+    });
+  }
+
+  // Load + merge sibling fugue.yaml (deployment config). Overrides dag.ts config.
+  const yamlResult = await loadFugueYaml(modulePath);
+  if (!yamlResult.ok) {
+    return yamlResult;
+  }
+  const yaml = yamlResult.value;
+  const registration = yaml ? applyFugueYaml(baseRegistration, yaml) : baseRegistration;
+
+  // Fail-closed env requirement check (fugue.yaml `env` declares required host env vars).
+  if (yaml && yaml.env.length > 0) {
+    const missing = missingEnvVars(yaml.env, env);
+    if (missing.length > 0) {
+      return err({
+        kind: "dag-validation-failed",
+        dagId: idResult.value,
+        reason: `Missing required env vars: ${missing.join(", ")}`,
+        message: `DAG '${idResult.value}' declares required env vars not set in the host: ${missing.join(", ")}`,
+      });
+    }
+  }
+
+  // Load prompts from sibling prompts/ directory (best-effort)
+  const promptErrorHandler = onPromptError ?? ((path: string, e: unknown) => {
+    // Fallback when no logger injected — prompt errors still surfaced, just via console
+    console.warn(`[module-loader] Failed to read prompt file '${path}': ${e instanceof Error ? e.message : String(e)}`);
+  });
+  const prompts = await loadPromptsForModule(modulePath, promptErrorHandler);
+
+  return ok({
+    id: idResult.value,
+    registration,
+    modulePath,
+    prompts,
+    team: yaml?.team,
+    owner: yaml?.owner,
+  });
+};
+
+/**
+ * Load all .txt files from a prompts/ directory colocated with the DAG module.
+ * Returns an empty Map if no prompts directory exists.
+ * Best-effort: individual file failures are logged but don't block loading.
+ */
+export const loadPromptsForModule = async (
+  modulePath: string,
+  onFileError?: (path: string, error: unknown) => void,
+): Promise<ReadonlyMap<string, string>> => {
+  const dagDir = dirname(modulePath);
+  const promptsDir = join(dagDir, "prompts");
+  const map = new Map<string, string>();
+
+  try {
+    const entries = await readdir(promptsDir);
+    for (const entry of entries) {
+      if (!entry.endsWith(".txt")) continue;
+      const filePath = join(promptsDir, entry);
+      try {
+        const text = await readFile(filePath, "utf-8");
+        const name = entry.slice(0, -4); // strip .txt
+        map.set(name, text);
+      } catch (e) {
+        // Prompt file exists but can't be read — DAG will fail at runtime
+        // with "prompt-not-found". Log so operators can diagnose.
+        onFileError?.(filePath, e);
+      }
+    }
+  } catch {
+    // No prompts/ directory — expected for DAGs that don't use prompts
+  }
+
+  return map;
+};
+
+/**
+ * Discover all DAG module paths in the given root directory.
+ * Convention: dags/{team}/{dag-name}/dag.ts
+ *
+ * Returns absolute paths to each discovered dag.ts file.
+ * Wraps all I/O in Result — never throws.
+ */
+export const discoverDagPaths = async (dagsRoot: string): Promise<Result<string[], HostError>> => {
+  try {
+    const pathSet = new Set<string>();
+
+    const primaryGlob = new Bun.Glob("dags/*/*/dag.ts");
+    for await (const file of primaryGlob.scan({ cwd: dagsRoot, absolute: true })) {
+      pathSet.add(file);
+    }
+
+    // Fallback glob for flat layouts — deduplication via Set is O(1) per add
+    const altGlob = new Bun.Glob("*/*/dag.ts");
+    for await (const file of altGlob.scan({ cwd: dagsRoot, absolute: true })) {
+      pathSet.add(file);
+    }
+
+    return ok([...pathSet].sort());
+  } catch (e) {
+    return err({
+      kind: "discovery-failed",
+      dagsRoot,
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+};
+
+/**
+ * Load all discovered DAG modules from a root directory.
+ * Errors in individual DAGs do NOT affect others (NFR-010).
+ * Discovery failures are surfaced as errors, never thrown.
+ */
+export const loadAll = async (
+  dagsRoot: string,
+  sha: GitSha,
+  onPromptError?: (path: string, e: unknown) => void,
+  env: Record<string, string | undefined> = process.env,
+): Promise<BulkLoadResult> => {
+  const pathsResult = await discoverDagPaths(dagsRoot);
+  if (!pathsResult.ok) {
+    return { loaded: [], errors: [{ path: dagsRoot, error: pathsResult.error }] };
+  }
+
+  const paths = pathsResult.value;
+  const loaded: LoadResult[] = [];
+  const errors: LoadError[] = [];
+
+  for (const path of paths) {
+    const result = await loadDagModule(path, sha, onPromptError, env);
+    if (result.ok) {
+      loaded.push(result.value);
+    } else {
+      errors.push({ path, error: result.error });
+    }
+  }
+
+  return { loaded, errors };
+};
+
+/**
+ * Create a ModuleLoaderPort using the real filesystem implementations.
+ * Accepts an optional logger — when provided, prompt-file read errors route
+ * through the structured LogPort instead of console.warn.
+ */
+export const createModuleLoader = (logger?: import("../ports.js").LogPort): ModuleLoaderPort => {
+  const onPromptError: ((path: string, e: unknown) => void) | undefined = logger
+    ? (path, e) => logger.warn("[module-loader] Failed to read prompt file", {
+        promptPath: path,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    : undefined;
+  return {
+    loadDagModule: (modulePath, sha) => loadDagModule(modulePath, sha, onPromptError),
+    discoverDagPaths,
+    loadAll: (dagsRoot, sha) => loadAll(dagsRoot, sha, onPromptError),
+  };
+};

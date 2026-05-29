@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/framework" },
+    { "path": "packages/host" },
     { "path": "apps/customer-summary" }
   ]
 }

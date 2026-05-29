@@ -1,5 +1,5 @@
 {
-  "name": "ai-summary",
+  "name": "fugue",
   "private": true,
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {

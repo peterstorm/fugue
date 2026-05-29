@@ -46,6 +46,20 @@ Start with these to understand the runtime as it stands today:
 | [0027](0027-confidence-calibration-workflow.md) | Bucketed confidence calibration workflow | Accepted |
 | [0028](0028-function-based-predicates.md) | Function-based predicates with confidence gating | Accepted |
 | [0029](0029-mandatory-routing-decisions.md) | Mandatory routing decisions on wave-done | Accepted |
+| [0030](0030-state-machine-pure-transitions.md) | Pure state machine transitions | Accepted |
+| [0031](0031-immutable-registry-snapshot.md) | Immutable registry snapshot | Accepted |
+| [0032](0032-framework-independence.md) | Framework independence | Accepted |
+| [0033](0033-dag-registration-host-contract.md) | DAG registration host contract | Accepted |
+| [0034](0034-raw-git-via-bun-spawn.md) | Raw git via Bun.spawn | Accepted |
+| [0035](0035-hono-http-server.md) | Hono HTTP server | Accepted |
+| [0036](0036-layered-error-handling.md) | Layered error handling | Accepted |
+| [0037](0037-pure-concurrency-limiter.md) | Pure concurrency limiter | Accepted |
+| [0038](0038-pure-circuit-breaker.md) | Pure circuit breaker | Accepted |
+| [0039](0039-big-bang-rename.md) | Big-bang rename @ai-summary → @fugue | Accepted |
+| [0040](0040-single-instance-in-memory-state.md) | Single instance in-memory state | Accepted |
+| [0041](0041-separate-dags-repository.md) | Separate DAGs repository | Accepted |
+| [0042](0042-config-via-zod-env-yaml.md) | Config via Zod env/YAML | Accepted |
+| [0043](0043-otel-tracing-for-host-operations.md) | OTel tracing for host operations | Accepted |
 
 ## Conventions
 
@@ -57,6 +71,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-05-20: all 29 ADRs present, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. The duplicate-0008 collision flagged in `docs/plans/2026-05-10-pr-review-remediation.md` was resolved before this index was written; only `0008-event-envelope-and-time.md` occupies slot 0008 and `0013-onhumanreview-hook-crash-retry.md` occupies slot 0013.
+Verified 2026-05-22: all 43 ADRs present, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fugue/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing).
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

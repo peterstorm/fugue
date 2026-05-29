@@ -112,5 +112,5 @@ export { withRetryLimits } from "./dag.js";
 // from `./types/dag.js` where needed.
 
 // ── Branded identifiers ───────────────────────────────────────────────────
-export type { RunId, NodeId, DagId } from "./ids.js";
-export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, ID_PATTERN } from "./ids.js";
+export type { RunId, NodeId, DagId, GitSha } from "./ids.js";
+export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, gitSha, tryGitSha, ID_PATTERN } from "./ids.js";

@@ -17,6 +17,7 @@ import { ok, err } from "./result.js";
 declare const __runIdBrand: unique symbol;
 declare const __nodeIdBrand: unique symbol;
 declare const __dagIdBrand: unique symbol;
+declare const __gitShaBrand: unique symbol;
 
 export type RunId = string & { readonly [__runIdBrand]: void };
 export type NodeId = string & { readonly [__nodeIdBrand]: void };
@@ -50,9 +51,19 @@ export const nodeId = (s: string): NodeId => {
   return s as NodeId;
 };
 
-/** Smart constructor for `DagId`. Validates the string against `ID_REGEX`. */
+/**
+ * Pattern for DagId — stricter than the general ID_REGEX.
+ * Disallows `:` to prevent Redis key namespace escape (keys use `:` as delimiter).
+ */
+const DAG_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Smart constructor for `DagId`. Validates against `DAG_ID_REGEX` (no colons). */
 export const dagId = (s: string): DagId => {
-  validate("dagId", s);
+  if (typeof s !== "string" || !DAG_ID_REGEX.test(s)) {
+    throw new Error(
+      `Invalid dagId "${s}": must match ${DAG_ID_REGEX.source} (colons not allowed in DAG IDs)`,
+    );
+  }
   return s as DagId;
 };
 
@@ -107,6 +118,42 @@ export const tryNodeId = (s: string): Result<NodeId, string> =>
 
 /** Parse a string into a DagId, returning a Result instead of throwing. */
 export const tryDagId = (s: string): Result<DagId, string> =>
-  typeof s === "string" && ID_REGEX.test(s)
+  typeof s === "string" && DAG_ID_REGEX.test(s)
     ? ok(s as DagId)
-    : err(`Invalid dagId "${s}": must match ${ID_REGEX.source}`);
+    : err(`Invalid dagId "${s}": must match ${DAG_ID_REGEX.source} (colons not allowed)`);
+
+
+// ---------------------------------------------------------------------------
+// GitSha — branded type for git commit hashes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Branded git SHA string. A GitSha is ALWAYS a non-empty string — "never synced"
+ * is modeled as `GitSha | null` at use sites, not as an empty-string sentinel, so
+ * a real SHA and "absent" are never structurally confused.
+ *
+ * No hash-format validation beyond non-emptiness — short and full SHAs both flow
+ * from git output and are trusted; the brand guards against the empty sentinel.
+ */
+export type GitSha = string & { readonly [__gitShaBrand]: void };
+
+/**
+ * Brand a string as a GitSha. Throws on the empty string so the old `""`
+ * "never synced" sentinel can never be reconstructed — use `null` for absence.
+ */
+export const gitSha = (s: string): GitSha => {
+  if (typeof s !== "string" || s.length === 0) {
+    throw new Error('Invalid gitSha: must be a non-empty string (use null for "never synced")');
+  }
+  return s as unknown as GitSha;
+};
+
+/**
+ * Parse a string into a GitSha, returning a Result instead of throwing — for parse
+ * boundaries (e.g. reading a SHA back from Redis/a checkpoint) where throwing is undesirable.
+ * Mirrors `tryRunId`/`tryNodeId`/`tryDagId`. Rejects the empty string.
+ */
+export const tryGitSha = (s: string): Result<GitSha, string> =>
+  typeof s === "string" && s.length > 0
+    ? ok(s as unknown as GitSha)
+    : err('Invalid gitSha "": must be a non-empty string (use null for "never synced")');

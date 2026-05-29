@@ -66,9 +66,20 @@ export type LlmWithToolsNodeConfig<I, O> =
  * through `LlmClient.sendWithTools`, so the model can call registered tools
  * mid-completion before producing the final structured answer.
  */
+/**
+ * Tool-using LLM node. The optional `promptName` is exposed on the returned
+ * `NodeDef` so describe/manifest tooling can introspect prompt references
+ * without a `as unknown` cast.
+ */
+export type LlmWithToolsNodeDef<I, O> =
+  NodeDef<I, O, FrameworkError, readonly ["llm"]> & {
+    readonly id: NodeId;
+    readonly promptName?: string;
+  };
+
 export const createLlmWithToolsNode = <I, O>(
   config: LlmWithToolsNodeConfig<I, O>,
-): NodeDef<I, O, FrameworkError, readonly ["llm"]> & { readonly id: NodeId } => {
+): LlmWithToolsNodeDef<I, O> => {
   const id = nodeId(config.id);
   return {
   id,
@@ -78,6 +89,7 @@ export const createLlmWithToolsNode = <I, O>(
   requires: ["llm"] as const,
   sideEffects: { kind: "external-call", resource: resourceName(`llm:${config.model}`) },
   confidence: { mode: "none" },
+  ...(config.promptName !== undefined && { promptName: config.promptName }),
   run: async (input, ctx): Promise<Result<O, FrameworkError>> => {
     if (config.skipWhen?.(input)) {
       return ok(config.skipDefault as O);

@@ -1,8 +1,8 @@
 import { describe, test, expect } from "bun:test";
 import { createAssembleResponseNode } from "../dag/nodes/assemble-response.js";
-import { makeNodeContext } from "@ai-summary/framework";
+import { makeNodeContext } from "@fugue/framework";
 import type { SynthesisOutput } from "../schemas/summary.js";
-import type { GuardrailResult } from "@ai-summary/framework";
+import type { GuardrailResult } from "@fugue/framework";
 
 const makeCtx = () => makeNodeContext({ runId: "test", dagId: "test" });
 

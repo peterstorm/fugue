@@ -1,0 +1,83 @@
+// CLI result types — stable JSON shapes consumed by both human readers and
+// machine harnesses (LLM authoring tools). These are intentionally simple
+// discriminated unions so callers can pattern-match on `ok` and either
+// proceed or surface the structured `errors` payload.
+
+import type { FrameworkError } from "../types/errors.js";
+import type {
+  DescribedDag,
+  DescribedNode,
+  DescribedEdge,
+} from "../describe/index.js";
+
+// Re-export the shared describe shapes so existing CLI consumers keep their
+// import path. The canonical home is `@fugue/framework`'s `describe` module —
+// the host's `GET /dags/:id/manifest` handler imports from there directly.
+export type { DescribedDag, DescribedNode, DescribedEdge };
+
+/**
+ * Lint outcome: either the DAG file imports cleanly and validates, or one or
+ * more errors were captured. The error payload is always an array even when
+ * exactly one error fires, so consumers don't branch on cardinality.
+ */
+export type LintResult =
+  | { readonly ok: true; readonly path: string }
+  | {
+      readonly ok: false;
+      readonly path: string;
+      readonly errors: readonly LintError[];
+    };
+
+/**
+ * Discriminated lint error. `kind` is a stable string that machine consumers
+ * can switch on; the `dagId` is present when the failure was inside a
+ * `defineDag` call (the validator surfaces it on `DagDefinitionError`).
+ */
+export type LintError =
+  | {
+      readonly kind: "import-failed";
+      readonly message: string;
+      readonly stack?: string;
+    }
+  | {
+      readonly kind: "no-default-export";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "missing-dag-field";
+      readonly message: string;
+    }
+  | {
+      readonly kind: "dag-definition-error";
+      readonly dagId: string;
+      readonly message: string;
+      readonly detail: FrameworkError;
+    }
+  | {
+      /**
+       * Surfaced when describe assembles a topologically-invalid registered
+       * DAG. The validator should have caught this earlier; reaching this
+       * branch indicates a framework invariant violation, not authoring
+       * error.
+       */
+      readonly kind: "describe-failed";
+      readonly message: string;
+      readonly detail: FrameworkError;
+    };
+
+/**
+ * Describe outcome: a structured summary of a valid DAG file. Always wraps
+ * a lint pass — a file that fails to lint also fails to describe, surfacing
+ * the same `LintError` array.
+ */
+export type DescribeResult =
+  | {
+      readonly ok: true;
+      readonly path: string;
+      readonly dag: DescribedDag;
+    }
+  | {
+      readonly ok: false;
+      readonly path: string;
+      readonly errors: readonly LintError[];
+    };

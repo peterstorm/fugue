@@ -105,12 +105,12 @@ gates, freshness-aware state management, and production observability.
 | `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
 | `tracing/` | `types/` | OpenTelemetry integration |
 
-**Subpath exports.** The main barrel (`@ai-summary/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
+**Subpath exports.** The main barrel (`@fugue/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
 
 | Subpath | Exports | Optional peer dep |
 |---------|---------|-------------------|
-| `@ai-summary/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
-| `@ai-summary/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
+| `@fugue/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
+| `@fugue/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
 
 `check-imports.ts` enforces that `ioredis` is reachable only from `cache/redis-cache.ts`, `checkpoint/redis-*.ts`, and `queue-bullmq/`.
 
@@ -124,3 +124,28 @@ gates, freshness-aware state management, and production observability.
 6. **Capability validation happens once at run start** — before any `node.run` is called.
 7. **Freshness is fail-closed** — extractor failures abort the wave; proceeding without witness data would allow stale writes.
 8. **Pre-release: no backward-compat shims** — internal renames are first-class refactors, not aliased. No `@deprecated` re-exports for code that has not shipped.
+
+### Host Layer (`@fugue/host`)
+
+The host is the **imperative shell** that wires the framework into a production HTTP service.
+
+| Component | Responsibility |
+|-----------|---------------|
+| `domain/host-state.ts` | Pure state machine: booting → ready → syncing → degraded → draining → stopped |
+| `domain/registry.ts` | Immutable snapshot of loaded DAGs (frozen Map) |
+| `domain/concurrency.ts` | Pure acquire/release with branded tokens |
+| `domain/circuit-breaker.ts` | Pure closed/open/half-open state machine |
+| `domain/circuit-guard.ts` | Protocol-enforcing permit token (check→execute→mark) |
+| `domain/config.ts` | Zod-validated environment config with sensible defaults |
+| `domain/host-error.ts` | 24-variant discriminated union, exhaustive HTTP mapping |
+| `adapters/git-sync.ts` | Bun.spawn → git clone/pull/rev-parse with timeout |
+| `adapters/module-loader.ts` | Dynamic import + validation + prompt loading |
+| `adapters/node-context-factory.ts` | Constructs per-request NodeContext with DAG-namespaced keys |
+| `adapters/token-store.ts` | Redis-backed team token persistence |
+| `http/router.ts` | Hono app with route-level auth guards |
+| `sync/sync-loop.ts` | Timer-driven git poll + registry rebuild |
+| `lifecycle/startup.ts` | Boot sequence: Redis ping → clone → load |
+| `lifecycle/signals.ts` | SIGTERM/SIGINT → drain → stop |
+| `lifecycle/redis-probe.ts` | Post-boot Redis liveness probe → degraded/recovered transitions |
+| `host.ts` | Top-level imperative shell wiring all subsystems |
+| `main.ts` | Binary entry point (process.exit, real Redis, real git) |

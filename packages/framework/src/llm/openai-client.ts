@@ -92,6 +92,11 @@ export interface OpenAILlmClientOpts {
   readonly apiVersion?: string;
   /** Per-request timeout in ms. Default 120s. */
   readonly requestTimeoutMs?: number;
+  /**
+   * When set, overrides the model field in every request body.
+   * Used for Azure deployments where all requests route to a single model.
+   */
+  readonly modelOverride?: string;
 }
 
 export class OpenAILlmClient implements LlmClient {
@@ -99,12 +104,14 @@ export class OpenAILlmClient implements LlmClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly apiVersion: string | undefined;
+  private readonly modelOverride: string | undefined;
 
   constructor(opts: OpenAILlmClientOpts) {
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 120_000;
     this.baseUrl = opts.baseUrl;
     this.apiKey = opts.apiKey;
     this.apiVersion = opts.apiVersion;
+    this.modelOverride = opts.modelOverride;
   }
 
   private buildRequestConfig(): { url: string; headers: Record<string, string> } {
@@ -180,7 +187,7 @@ export class OpenAILlmClient implements LlmClient {
 
     try {
       const body: Record<string, unknown> = {
-        model: req.model,
+        model: this.modelOverride ?? req.model,
         input: [
           { role: "developer", content: req.system },
           { role: "user", content: req.user },
@@ -201,7 +208,7 @@ export class OpenAILlmClient implements LlmClient {
 
       const httpResult = await withLlmSpan(
         req.tracer ?? null,
-        { provider: "openai", model: req.model, operation: "chat" },
+        { provider: "openai", model: this.modelOverride ?? req.model, operation: "chat" },
         async () => {
           const r = await this.postResponses(body, req.signal);
           if (r.ok) {
@@ -318,7 +325,7 @@ export class OpenAILlmClient implements LlmClient {
     const provider: import("./tool-use-loop.js").ToolLoopProvider = {
       call: async (_turn: number) => {
         const body: Record<string, unknown> = {
-          model: req.model,
+          model: this.modelOverride ?? req.model,
           input: conversation,
           tools: toolSpecs,
           tool_choice: toolChoice,
@@ -340,7 +347,7 @@ export class OpenAILlmClient implements LlmClient {
         try {
           httpResult = await withLlmSpan(
             ctx.tracer ?? null,
-            { provider: "openai", model: req.model, operation: "chat" },
+            { provider: "openai", model: this.modelOverride ?? req.model, operation: "chat" },
             async () => {
               const r = await this.postResponses(body, req.signal ?? ctx.signal);
               if (r.ok) {
@@ -416,7 +423,7 @@ export class OpenAILlmClient implements LlmClient {
 
     return toolUseLoop(provider, {
       nodeId: req.nodeId,
-      model: req.model,
+      model: this.modelOverride ?? req.model,
       schema: req.schema,
       tools: req.tools,
       maxIterations,

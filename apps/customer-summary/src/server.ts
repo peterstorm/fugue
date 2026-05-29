@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId } from "@ai-summary/framework";
-import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@ai-summary/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId } from "@fugue/framework";
+import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fugue/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
 import { createSummaryDag } from "./dag/summary-dag.js";

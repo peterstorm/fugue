@@ -10,3 +10,4 @@ coverage/
 .direnv
 .pi/cortex-memory.local.md
 bun.lockb
+dump.rdb

@@ -1,0 +1,27 @@
+{
+  "name": "@fugue/host",
+  "version": "0.0.1",
+  "private": true,
+  "main": "src/index.ts",
+  "bin": "src/main.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./contract": "./src/contract.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test $(find src/__tests__ -name '*.test.ts' -not -name 'signals.test.ts' | sort) && bun test src/__tests__/lifecycle/signals.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@fugue/framework": "workspace:*",
+    "hono": "^4.7.11",
+    "ioredis": "^5.10.1",
+    "ts-pattern": "^5.9.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "fast-check": "^4.8.0"
+  }
+}
