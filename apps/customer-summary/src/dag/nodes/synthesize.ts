@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createLlmNode } from "@fugue/framework";
+import type { LlmNodeDef } from "@fugue/framework";
 import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 import type { Message } from "../../schemas/crm.js";
@@ -17,7 +18,7 @@ const NullableSynthesisOutputSchema = SynthesisOutputSchema.optional();
 export const createSynthesizeNode = (
   model = "claude-sonnet-4-20250514",
   opts?: { thinking?: { type: "enabled"; budgetTokens: number }; systemPrompt?: string },
-) =>
+): LlmNodeDef<ExtractionResult, z.infer<typeof NullableSynthesisOutputSchema>> =>
   createLlmNode<ExtractionResult, z.infer<typeof NullableSynthesisOutputSchema>>({
     id: "synthesize",
     inputSchema: InputSchema,
