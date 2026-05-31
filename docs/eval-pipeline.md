@@ -227,9 +227,14 @@ apps/customer-summary/
 ├── eval/
 │   ├── run.py              # Main entry point (orchestration)
 │   ├── scorers.py          # Scorer definitions (built-in + grounding)
+│   ├── foundry_eval.py     # Foundry-native eval path (azure-ai-evaluation); same AggregateResult shape as the MLflow path
+│   ├── parity.py           # Per-scorer parity check between MLflow and Foundry backends (SC-005, ±0.5 tolerance)
 │   ├── requirements.txt    # Python dependencies
 │   ├── test_run.py         # Tests for run.py pure functions
-│   └── test_scorers.py     # Tests for scorers
+│   ├── test_scorers.py     # Tests for scorers
+│   ├── test_backend_selector.py  # Tests for the --backend/EVAL_BACKEND selector + parity wiring
+│   ├── test_foundry_eval.py      # Tests for the Foundry eval adapter (fake evaluate_fn, contract-error branches)
+│   └── test_parity.py            # Tests for the parity delta math and tolerance boundary
 ├── fixtures/
 │   ├── eval/
 │   │   └── cases.json      # 25 eval cases with reference summaries

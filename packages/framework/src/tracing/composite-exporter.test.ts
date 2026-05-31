@@ -101,6 +101,27 @@ class HangingExporter implements SpanExporter {
   async forceFlush(): Promise<void> {}
 }
 
+/**
+ * A child whose `forceFlush`/`shutdown` return never-resolving promises
+ * (`new Promise(() => {})`) — a hung backend drain. The composite's per-child
+ * settle deadline must bound these so the lifecycle methods still resolve.
+ */
+class HangingLifecycleExporter implements SpanExporter {
+  forceFlushCalls = 0;
+  shutdownCalls = 0;
+  export(_spans: ReadableSpan[], cb: (r: ExportResult) => void): void {
+    cb({ code: ExportResultCode.SUCCESS });
+  }
+  forceFlush(): Promise<void> {
+    this.forceFlushCalls++;
+    return new Promise<void>(() => {}); // never resolves
+  }
+  shutdown(): Promise<void> {
+    this.shutdownCalls++;
+    return new Promise<void>(() => {}); // never resolves
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constructor invariants
 // ---------------------------------------------------------------------------
@@ -446,6 +467,81 @@ describe("CompositeSpanExporter — lifecycle", () => {
     const composite = new CompositeSpanExporter([bare]);
     await expect(composite.forceFlush()).resolves.toBeUndefined();
     await expect(composite.shutdown()).resolves.toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Lifecycle settle deadline — a child whose forceFlush()/shutdown() promise
+  // never resolves must not wedge the composite (FR-025/FR-026/SC-009).
+  // Pre-fix these awaited Promise.allSettled over raw child promises with NO
+  // timeout, so a never-resolving child hung the composite forever.
+  // -------------------------------------------------------------------------
+
+  it("forceFlush settles within the deadline even when a child's forceFlush never resolves", async () => {
+    const hung = new HangingLifecycleExporter();
+    const healthy = new FakeExporter();
+    // 20ms injected deadline so the test is fast; if it ever wedges, the test
+    // times out — which IS the regression signal.
+    const composite = new CompositeSpanExporter([hung, healthy], 20);
+
+    // Explicit settle assertion: races the call against a longer test-timeout
+    // so a wedge surfaces as a rejection here rather than a silent hang.
+    const settled = Symbol("settled");
+    const outcome = await Promise.race([
+      composite.forceFlush().then(() => settled),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+    ]);
+    expect(outcome).toBe(settled);
+
+    // The hung child was invoked; the healthy sibling's forceFlush completed.
+    expect(hung.forceFlushCalls).toBe(1);
+    expect(healthy.forceFlushCalls).toBe(1);
+    // The hung child is surfaced as a per-child rejection (settle-deadline).
+    expect(warnings.some((w) => w.includes("forceFlush") && /did not settle/i.test(w))).toBe(true);
+    // Only one child hung ⇒ partial failure ⇒ no error-level aggregate.
+    expect(errors.length).toBe(0);
+  });
+
+  it("shutdown settles within the deadline even when a child's shutdown never resolves", async () => {
+    const hung = new HangingLifecycleExporter();
+    const healthy = new FakeExporter();
+    const composite = new CompositeSpanExporter([hung, healthy], 20);
+
+    const settled = Symbol("settled");
+    const outcome = await Promise.race([
+      composite.shutdown().then(() => settled),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+    ]);
+    expect(outcome).toBe(settled);
+
+    expect(hung.shutdownCalls).toBe(1);
+    expect(healthy.shutdownCalls).toBe(1);
+    expect(warnings.some((w) => w.includes("shutdown") && /did not settle/i.test(w))).toBe(true);
+    expect(errors.length).toBe(0);
+  });
+
+  it("total hang on forceFlush (every child's promise never resolves) resolves AND logs error-level", async () => {
+    const a = new HangingLifecycleExporter();
+    const b = new HangingLifecycleExporter();
+    const composite = new CompositeSpanExporter([a, b], 20);
+
+    await expect(composite.forceFlush()).resolves.toBeUndefined();
+    // All children timed out ⇒ all rejected ⇒ the aggregated error fires once.
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toContain("ALL 2");
+    expect(errors[0]).toContain("forceFlush");
+    expect(errors[0]).toMatch(/did not settle/i);
+  });
+
+  it("total hang on shutdown (every child's promise never resolves) resolves AND logs error-level", async () => {
+    const a = new HangingLifecycleExporter();
+    const b = new HangingLifecycleExporter();
+    const composite = new CompositeSpanExporter([a, b], 20);
+
+    await expect(composite.shutdown()).resolves.toBeUndefined();
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toContain("ALL 2");
+    expect(errors[0]).toContain("shutdown");
+    expect(errors[0]).toMatch(/did not settle/i);
   });
 });
 

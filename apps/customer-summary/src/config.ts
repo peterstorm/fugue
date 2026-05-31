@@ -74,7 +74,7 @@ const ConfigSchema = z.object({
         });
         return z.NEVER;
       }
-      return backends as readonly TraceBackend[];
+      return Object.freeze(backends) as readonly TraceBackend[];
     }),
 
   // Application Insights connection string (FR-022). Optional at the schema

@@ -95,10 +95,11 @@ export interface ComposedObservability {
  *     emitted exactly ONCE (the full one), never the bare one too.
  *
  * `totalCostUsd` is not knowable from observer events (it lives on OTel spans),
- * so it is omitted from the BufferedObserver path — `mapRunSummaryToFoundry`
- * already drops it when `summary.totalCostUsd` is undefined, and the cost METRIC
- * is emitted on the span/trace side. Token totals are likewise span-resident and
- * are intentionally NOT supplied via `RunSummaryExtras` (same rationale as cost).
+ * so it is omitted from the BufferedObserver path. Cost and token totals are
+ * span-resident — they are carried on OTel spans (`ai.llm.cost_usd`,
+ * `gen_ai.usage.*`), NOT on observer events — and are simply NOT re-emitted on
+ * this domain-event channel here: `mapRunSummaryToFoundry` drops them when
+ * undefined (which they always are on this observer-derived path).
  * `cacheHitCount` IS knowable here and is always supplied so the SC-008 guarantee
  * holds.
  *
@@ -244,7 +245,7 @@ export interface FoundryLegLogger {
  *
  * `effective` is the selection {@link composeObservability} should consume:
  * unchanged when the Foundry leg succeeded (or was never enabled), and degraded
- * to an MLflow-only selection (no `auth` → {@link isFoundryEnabled} derives
+ * to an MLflow-only selection (auth: null → {@link isFoundryEnabled} derives
  * `false`) when Foundry construction FAILED — so a runtime Foundry construction
  * fault degrades ONLY the Foundry leg
  * (FR-026 / SC-009) and never disables MLflow tracing (SC-006). The prebuilt
@@ -304,6 +305,7 @@ export const resolveFoundryLeg = (
     return {
       effective: {
         traceBackends: mlflowOnly.length > 0 ? mlflowOnly : ["mlflow"],
+        auth: null,
       },
       foundryExporter: null,
       foundrySink: null,

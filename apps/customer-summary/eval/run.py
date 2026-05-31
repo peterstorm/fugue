@@ -137,6 +137,28 @@ def compute_aggregate(eval_table: Any, scorer_names: list[str]) -> AggregateResu
                     scorer_means[name] = v
                     break
 
+    missing = [name for name in scorer_names if name not in scorer_means]
+    if missing:
+        # Parallels foundry_eval.compute_aggregate_foundry: a missing scorer means
+        # the eval output shape did not contain the expected key — NOT a genuine
+        # low score. Surface it loudly so a shape mismatch is never silently
+        # averaged away (and never escapes the SC-005 parity overlap).
+        if not scorer_means and metrics:
+            print(
+                "ERROR: MLflow metrics shape mismatch — NONE of the expected "
+                f"scorers {scorer_names} matched the eval output. Actual metric "
+                f"keys present: {sorted(metrics.keys())}. Returning a FAILED "
+                "aggregate (fail-closed); this is a contract error, not a low score.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"WARNING: MLflow metrics missing scorer(s) {missing}; actual "
+                f"metric keys present: {sorted(metrics.keys())}. Treating the "
+                "missing scorer(s) as a shape mismatch (fail-closed), not a low score.",
+                file=sys.stderr,
+            )
+
     if not scorer_means:
         return AggregateResult(scorer_means={}, overall_mean=0.0, passed=False)
 

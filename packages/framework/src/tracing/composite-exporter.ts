@@ -212,15 +212,53 @@ export class CompositeSpanExporter implements SpanExporter {
   }
 
   /**
+   * Race a child lifecycle promise against the per-child settle deadline. A
+   * child whose forceFlush()/shutdown() promise never resolves (hung socket,
+   * never-resolving SDK drain) would otherwise wedge Promise.allSettled forever.
+   * On deadline the race rejects with a timeout error, which allSettled records
+   * as a rejection (surfaced by logRejections) — extending export()'s
+   * fault-isolation guarantee (FR-025/FR-026/SC-009) to the lifecycle methods.
+   */
+  private withSettleDeadline(op: () => Promise<void>, label: string): Promise<void> {
+    return new Promise<void>((resolveOp, rejectOp) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        rejectOp(new Error(`${label} did not settle within ${this.settleTimeoutMs}ms`));
+      }, this.settleTimeoutMs);
+      (timer as { unref?: () => void }).unref?.();
+      op().then(
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolveOp();
+        },
+        (e) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          rejectOp(e instanceof Error ? e : new Error(String(e)));
+        },
+      );
+    });
+  }
+
+  /**
    * Force-flush every child. Never rejects: a single slow/broken backend must
    * not wedge the run's flush boundary (FR-025). Per-child rejections are
    * caught and logged.
    */
   async forceFlush(): Promise<void> {
     const results = await Promise.allSettled(
-      this.children.map((child) => {
+      this.children.map((child, index) => {
         const flush = (child as { forceFlush?: () => Promise<void> }).forceFlush;
-        return flush ? Promise.resolve(flush.call(child)) : Promise.resolve();
+        if (!flush) return Promise.resolve();
+        return this.withSettleDeadline(
+          () => Promise.resolve(flush.call(child)),
+          `child #${index} forceFlush`,
+        );
       }),
     );
     this.logRejections(results, "forceFlush");
@@ -231,9 +269,13 @@ export class CompositeSpanExporter implements SpanExporter {
    */
   async shutdown(): Promise<void> {
     const results = await Promise.allSettled(
-      this.children.map((child) => {
+      this.children.map((child, index) => {
         const sd = (child as { shutdown?: () => Promise<void> }).shutdown;
-        return sd ? Promise.resolve(sd.call(child)) : Promise.resolve();
+        if (!sd) return Promise.resolve();
+        return this.withSettleDeadline(
+          () => Promise.resolve(sd.call(child)),
+          `child #${index} shutdown`,
+        );
       }),
     );
     this.logRejections(results, "shutdown");

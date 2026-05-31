@@ -34,6 +34,32 @@ import { match } from "ts-pattern";
 import type { ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { RunSummary } from "./buffered.js";
 
+// Stable event/metric names. Centralised so the sink contract and tests share
+// one source of truth.
+export const FOUNDRY_EVENT_RUN_SUMMARY = "fugue.run.summary" as const;
+export const FOUNDRY_EVENT_ROUTE_DECISION = "fugue.route.decision" as const;
+export const FOUNDRY_EVENT_NODE_PRUNED = "fugue.node.pruned" as const;
+
+export const FOUNDRY_METRIC_RUN_LATENCY = "fugue.run.latency_ms" as const;
+export const FOUNDRY_METRIC_RUN_COST = "fugue.run.cost_usd" as const;
+export const FOUNDRY_METRIC_RUN_TOKENS = "fugue.run.tokens" as const;
+export const FOUNDRY_METRIC_NODE_LATENCY = "fugue.node.latency_ms" as const;
+export const FOUNDRY_METRIC_NODE_CACHE_HIT = "fugue.node.cache_hit" as const;
+
+/** The three stable Foundry event names. */
+export type FoundryEventName =
+  | typeof FOUNDRY_EVENT_RUN_SUMMARY
+  | typeof FOUNDRY_EVENT_ROUTE_DECISION
+  | typeof FOUNDRY_EVENT_NODE_PRUNED;
+
+/** The five stable Foundry metric names. */
+export type FoundryMetricName =
+  | typeof FOUNDRY_METRIC_RUN_LATENCY
+  | typeof FOUNDRY_METRIC_RUN_COST
+  | typeof FOUNDRY_METRIC_RUN_TOKENS
+  | typeof FOUNDRY_METRIC_NODE_LATENCY
+  | typeof FOUNDRY_METRIC_NODE_CACHE_HIT;
+
 /**
  * Vendor-neutral telemetry emission. The observer translates each variant into
  * a `FoundryTelemetrySink` call (`trackEvent` / `trackMetric`).
@@ -46,28 +72,16 @@ import type { RunSummary } from "./buffered.js";
 export type FoundryEmission =
   | {
       readonly kind: "event";
-      readonly name: string;
+      readonly name: FoundryEventName;
       readonly properties: Record<string, string>;
       readonly measurements?: Record<string, number>;
     }
   | {
       readonly kind: "metric";
-      readonly name: string;
+      readonly name: FoundryMetricName;
       readonly value: number;
       readonly properties?: Record<string, string>;
     };
-
-// Stable event/metric names. Centralised so the sink contract and tests share
-// one source of truth.
-export const FOUNDRY_EVENT_RUN_SUMMARY = "fugue.run.summary" as const;
-export const FOUNDRY_EVENT_ROUTE_DECISION = "fugue.route.decision" as const;
-export const FOUNDRY_EVENT_NODE_PRUNED = "fugue.node.pruned" as const;
-
-export const FOUNDRY_METRIC_RUN_LATENCY = "fugue.run.latency_ms" as const;
-export const FOUNDRY_METRIC_RUN_COST = "fugue.run.cost_usd" as const;
-export const FOUNDRY_METRIC_RUN_TOKENS = "fugue.run.tokens" as const;
-export const FOUNDRY_METRIC_NODE_LATENCY = "fugue.node.latency_ms" as const;
-export const FOUNDRY_METRIC_NODE_CACHE_HIT = "fugue.node.cache_hit" as const;
 
 /** Keep only finite numbers — Application Insights rejects NaN/Infinity. */
 const isFinite_ = (n: number): boolean => Number.isFinite(n);

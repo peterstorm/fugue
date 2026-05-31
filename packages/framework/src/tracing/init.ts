@@ -35,6 +35,11 @@ export interface TracingConfig {
   readonly policy: PersistencePolicy;
 }
 
+/** Narrowing guard for the array arm of the exporter union. */
+const isExporterList = (
+  exporter: SpanExporter | readonly SpanExporter[],
+): exporter is readonly SpanExporter[] => Array.isArray(exporter);
+
 /**
  * Collapse the (possibly multi-backend) exporter config into the single
  * `SpanExporter` the tail-sampling processor consumes.
@@ -44,11 +49,6 @@ export interface TracingConfig {
  * SC-006: with exactly one backend, no Composite wrapper is introduced, so the
  * export pipeline is identical to the pre-multi-backend behaviour.
  */
-/** Narrowing guard for the array arm of the exporter union. */
-const isExporterList = (
-  exporter: SpanExporter | readonly SpanExporter[],
-): exporter is readonly SpanExporter[] => Array.isArray(exporter);
-
 export const normalizeExporter = (
   exporter: SpanExporter | readonly SpanExporter[],
 ): SpanExporter => {

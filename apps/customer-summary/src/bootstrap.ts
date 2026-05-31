@@ -63,6 +63,9 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   // the no-Foundry path (SC-006 / FR-027). composeObservability overrides it
   // only when Foundry is enabled.
   let observer: Observer = new NoopObserver();
+  // Held for the graceful-shutdown drain (FR — flush buffered Foundry domain
+  // events before exit). Null on the default/no-Foundry path.
+  let foundrySinkForFlush: FoundryTelemetrySink | null = null;
   try {
     const policy = anyOf(errorOnly(), hadRetry(), ratio(config.TRACE_SAMPLE_RATIO));
 
@@ -104,6 +107,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       },
       log,
     );
+    foundrySinkForFlush = foundrySink;
 
     // Compose exporters + observer from the EFFECTIVE selection. Factories are
     // bound here (the imperative shell); the composition itself is pure-ish. The
@@ -245,8 +249,9 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   } else {
     log.error("Failed to load synthesis-system prompt:", synthesisSystemPrompt.error);
   }
-  // Note: eval rubric kept in prompts registry for reference but no longer used in-pipeline.
-  // Quality evaluation is handled by MLflow's built-in scorer (post-hoc, async).
+  // Note: the summary-eval-rubric prompt is loaded for external eval tooling only;
+  // it is intentionally not consumed in the in-pipeline run (post-hoc evaluation
+  // is handled by the eval sidecar).
 
   // LLM client
   let llm: LlmClient;
@@ -349,6 +354,17 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       disposable.close();
     } else if (typeof disposable[Symbol.dispose] === "function") {
       disposable[Symbol.dispose]!();
+    }
+    // Drain buffered Foundry domain events before exit. The isolated
+    // (connection-string-mode) Application Insights client batches track calls,
+    // so without this final flush the last batch is lost on process.exit.
+    if (foundrySinkForFlush) {
+      log.info("Flushing Foundry domain events...");
+      try {
+        await foundrySinkForFlush.flush();
+      } catch (e) {
+        log.warn("Foundry sink flush failed during shutdown:", e);
+      }
     }
     if (redis) {
       await redis.disconnect();

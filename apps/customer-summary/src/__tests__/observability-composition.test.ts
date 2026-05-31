@@ -111,7 +111,7 @@ const runEnd = (runId: string, dagId: string, status: "ok" | "error", duration: 
 // Default path (no Foundry) — byte-for-byte unchanged (SC-006 / FR-003 / FR-027)
 // ---------------------------------------------------------------------------
 describe("composeObservability — default (MLflow-only) path", () => {
-  const resolved: ResolvedObservability = { traceBackends: ["mlflow"] };
+  const resolved: ResolvedObservability = { traceBackends: ["mlflow"], auth: null };
 
   test("single MLflow exporter, no Foundry exporter built", () => {
     let foundryBuilds = 0;
@@ -520,7 +520,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
   });
 
   test("not enabled: passthrough with no Foundry construction", () => {
-    const mlflowOnly: ResolvedObservability = { traceBackends: ["mlflow"] };
+    const mlflowOnly: ResolvedObservability = { traceBackends: ["mlflow"], auth: null };
     const leg = resolveFoundryLeg(
       mlflowOnly,
       () => { throw new Error("must not build"); },

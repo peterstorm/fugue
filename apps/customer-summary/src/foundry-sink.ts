@@ -21,9 +21,12 @@
  *     ingestion endpoint), then construct a `TelemetryClient` that relies on
  *     those global providers.
  *
- * The sink NEVER throws on a track call: the `AiFoundryObserver` already wraps
- * each call, but defense-in-depth here keeps a misbehaving client off the run's
- * critical path (FR-028).
+ * Fail-tolerance (FR-028): track-call fault isolation is provided by the
+ * framework observer wrappers (AiFoundryObserver / FoundryRunSummaryObserver),
+ * which wrap every emission in try/catch + log. This adapter is intentionally a
+ * thin pass-through. `flush()` may reject; its sole caller (graceful shutdown in
+ * bootstrap.ts) guards and logs it, so a flush failure is surfaced rather than
+ * silently swallowed.
  */
 import { TelemetryClient, useAzureMonitor } from "applicationinsights";
 import { DefaultAzureCredential } from "@azure/identity";
@@ -46,7 +49,9 @@ export interface AppInsightsClient {
 /**
  * Wrap an Application Insights client in the framework's `FoundryTelemetrySink`
  * port. PURE over its argument — no construction, no I/O at call time — so it is
- * trivially testable with a fake client. Each method is fail-tolerant.
+ * trivially testable with a fake client. Thin pass-through — track-call fault
+ * isolation lives in the observer wrappers; `flush()` may reject and is guarded
+ * by its caller.
  */
 export const foundrySinkOver = (client: AppInsightsClient): FoundryTelemetrySink => ({
   trackEvent: (e) => {

@@ -16,11 +16,11 @@
  * - FR-023: opt-in Entra ID via the default Azure credential mechanism.
  *
  * Note on shapes vs. the plan: the plan sketched a FLAT `ResolvedObservability`
- * with an always-present `auth`. That forces a meaningless `auth` in the
- * common no-foundry case. Per CLAUDE.md ("make illegal states unrepresentable")
- * this models `ResolvedObservability` as a DISCRIMINATED UNION on the PRESENCE
- * of `auth`: `auth` exists ONLY when foundry is on, and the foundry-enabled fact
- * is DERIVED from it via {@link isFoundryEnabled} rather than stored as a
+ * with an always-present `auth`. Per CLAUDE.md ("make illegal states
+ * unrepresentable") this instead models `auth` as REQUIRED but NULLABLE: it is
+ * non-null ONLY when foundry is on and `null` otherwise, so a foundry-enabled
+ * value without auth is unrepresentable. The foundry-enabled fact is DERIVED
+ * from `auth !== null` via {@link isFoundryEnabled} rather than stored as a
  * redundant boolean that could drift from `traceBackends`.
  */
 import type { Config, TraceBackend } from "./config.js";
@@ -42,26 +42,26 @@ export type ResolvedAuth =
   | { readonly mode: "entra-id"; readonly connectionString: string };
 
 /**
- * Resolved observability backend selection. Discriminated on the PRESENCE of
- * `auth` so it is carried ONLY when foundry is on — the no-foundry case cannot
- * carry a meaningless/empty auth (illegal state unrepresentable). The
- * foundry-enabled fact is DERIVED from `auth` presence via {@link isFoundryEnabled},
- * NOT stored as a separate boolean (which could drift from `traceBackends`).
+ * Resolved observability backend selection. `auth` is REQUIRED but nullable:
+ * it is non-null ONLY when a foundry backend is selected, and `null` otherwise.
+ * Foundry-enabled is therefore DERIVED from `auth !== null` ({@link isFoundryEnabled}),
+ * so a foundry-enabled value without auth is unrepresentable and there is no
+ * separate boolean to drift from `traceBackends`.
  */
-export type ResolvedObservability =
-  | { readonly traceBackends: readonly TraceBackend[] }
-  | { readonly traceBackends: readonly TraceBackend[]; readonly auth: ResolvedAuth };
+export interface ResolvedObservability {
+  readonly traceBackends: readonly TraceBackend[];
+  readonly auth: ResolvedAuth | null;
+}
 
 /**
- * Derived: foundry is enabled iff resolved auth is present. `auth` exists ONLY
- * when a foundry backend was selected (constructed by {@link resolveObservabilityBackends}),
+ * Derived: foundry is enabled iff resolved auth is non-null. `auth` is non-null
+ * ONLY when a foundry backend was selected (constructed by {@link resolveObservabilityBackends}),
  * so this is the single source of truth — there is no stored boolean to drift
  * from `traceBackends`.
  */
 export const isFoundryEnabled = (
   r: ResolvedObservability,
-): r is { readonly traceBackends: readonly TraceBackend[]; readonly auth: ResolvedAuth } =>
-  "auth" in r;
+): r is ResolvedObservability & { readonly auth: ResolvedAuth } => r.auth !== null;
 
 /**
  * Typed, discriminated configuration error so callers/tests branch on the
@@ -87,8 +87,8 @@ export class ObservabilityConfigError extends Error {
 /**
  * Pure resolver. `Config -> Result<ResolvedObservability, ObservabilityConfigError>`.
  *
- * - No foundry selected → `{ traceBackends: ['mlflow', …] }` (FR-003). `auth`
- *   is absent by construction, so {@link isFoundryEnabled} derives `false`.
+ * - No foundry selected → `{ traceBackends: ['mlflow', …], auth: null }` (FR-003).
+ *   `auth` is `null` by construction, so {@link isFoundryEnabled} derives `false`.
  * - Foundry selected → requires a connection string for BOTH auth modes
  *   (FR-022/FR-023; the connection string carries the ingestion endpoint).
  *   Missing → fail-closed `ObservabilityConfigError` (FR-006).
@@ -100,7 +100,7 @@ export const resolveObservabilityBackends = (
   const foundryEnabled = traceBackends.includes("foundry");
 
   if (!foundryEnabled) {
-    return ok({ traceBackends });
+    return ok({ traceBackends, auth: null });
   }
 
   const connectionString = config.APPLICATIONINSIGHTS_CONNECTION_STRING;
