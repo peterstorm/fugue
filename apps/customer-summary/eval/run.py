@@ -11,18 +11,26 @@ Modes:
   --mode=full  All scorers including LLM-judged via Azure OpenAI (default)
   --mode=ci    Deterministic grounding scorer only (no LLM calls, fast, CI-safe)
 
+Backends (run-time selectable, no code changes):
+  --backend=mlflow   Score via mlflow.evaluate() (DEFAULT)
+  --backend=foundry  Score via azure-ai-evaluation (Foundry Evaluations view)
+  --backend=both     Run BOTH paths over the same results and check per-scorer
+                     parity (SC-005, +/-0.5); non-zero exit if out of tolerance.
+  Default comes from EVAL_BACKEND env (default "mlflow"); --backend wins.
+
 Exits with code 1 if aggregate mean score < threshold.
 
 Env vars:
   APP_BASE_URL            - Base URL of the summary service (default: http://host.containers.internal:3000)
   MLFLOW_TRACKING_URI     - MLflow tracking server URI
-  MLFLOW_EXPERIMENT_NAME  - Experiment name for eval results (default: customer-summary-eval)
+  MLFLOW_EXPERIMENT_NAME  - Experiment name for eval results (default: Default)
   EVAL_CASES_PATH         - Path to eval cases JSON (default: fixtures/eval/cases.json)
   AZURE_OPENAI_ENDPOINT   - Azure OpenAI endpoint
   AZURE_OPENAI_API_KEY    - Azure OpenAI API key
   AZURE_OPENAI_DEPLOYMENT - Azure OpenAI deployment name (default: gpt-4o-mini)
   AZURE_OPENAI_API_VERSION - Azure OpenAI API version
   EVAL_WORKERS            - Number of parallel workers for summarize calls (default: 4)
+  EVAL_BACKEND            - Default eval backend: mlflow|foundry|both (default: mlflow; --backend overrides)
 """
 
 import argparse
@@ -39,6 +47,10 @@ if TYPE_CHECKING:
 
 
 PASS_THRESHOLD = 4.0
+
+ALLOWED_BACKENDS = ("mlflow", "foundry", "both")
+
+ALLOWED_MODES = ("full", "ci")
 
 
 # --- Pure domain types ---
@@ -83,10 +95,14 @@ def build_eval_data(results: list[EvalResult]) -> "pd.DataFrame":
     """Build a pandas DataFrame for mlflow.evaluate().
 
     Columns:
-      - inputs: str (the customer_id, used as model input context)
+      - inputs: str (a prompt string referencing the customer_id, used as the
+        model input context — NOT the bare customer_id)
       - predictions: str (the generated summary)
-      - targets: str (reference summary — used by grading_context_columns)
-      - reference_summary: str (alias for grading context)
+      - targets: str (reference summary — passed to mlflow.evaluate() as the
+        `targets` column; the genai metrics consume it via col_mapping)
+      - context: str (a copy of the reference summary; exists for the Foundry
+        path's query/response/context/ground_truth schema mapping, not for any
+        MLflow grading context)
       - customer_id: str (for grounding scorer fixture lookup)
     """
     import pandas as pd
@@ -98,7 +114,7 @@ def build_eval_data(results: list[EvalResult]) -> "pd.DataFrame":
                 "inputs": f"Summarize conversation history for customer {r.customer_id}.",
                 "predictions": r.summary,
                 "targets": r.reference_summary,
-                "reference_summary": r.reference_summary,
+                "context": r.reference_summary,
                 # Keep customer_id for grounding scorer fixture lookup
                 "customer_id": r.customer_id,
             })
@@ -276,13 +292,118 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("EVAL_MODE", "full"),
         help="full: all scorers (requires Azure OpenAI). ci: deterministic only (default: full)",
     )
+    # NOTE: choices validates CLI-passed values only — NOT the env defaults. Both
+    # --backend/EVAL_BACKEND and --mode/EVAL_MODE can pick up env-default values
+    # that bypass argparse choices, so each is re-validated against its allowed
+    # set (ALLOWED_BACKENDS / ALLOWED_MODES) in main() — a bogus EVAL_BACKEND or
+    # EVAL_MODE fails loud instead of falling through to a catch-all dispatch
+    # (e.g. EVAL_MODE=cii silently running LLM judges instead of CI-only).
+    parser.add_argument(
+        "--backend",
+        choices=list(ALLOWED_BACKENDS),
+        default=os.environ.get("EVAL_BACKEND", "mlflow"),
+        help=(
+            "mlflow: score via mlflow.evaluate() (default). "
+            "foundry: score via azure-ai-evaluation. "
+            "both: run both paths and check parity (SC-005). "
+            "CLI flag wins over EVAL_BACKEND env."
+        ),
+    )
     return parser.parse_args()
+
+
+def run_mlflow_backend(results: list[EvalResult], mode: str) -> AggregateResult:
+    """Imperative-shell wrapper for the MLflow path.
+
+    Sets the MLflow experiment then runs run_evaluation. Kept as a thin seam so
+    backend=both can invoke the EXACT same MLflow behavior as backend=mlflow
+    (FR-016: single-backend MLflow behavior is byte-for-byte unchanged).
+    """
+    import mlflow
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "Default")
+    mlflow.set_experiment(experiment_name)
+    print(f"MLflow experiment: {experiment_name}")
+
+    print(f"Running MLflow evaluation (mode={mode})...")
+    return run_evaluation(results, mode=mode)
+
+
+def run_foundry_backend(results: list[EvalResult], mode: str) -> AggregateResult:
+    """Imperative-shell wrapper for the Foundry path."""
+    from foundry_eval import run_evaluation_foundry
+
+    print(f"Running Foundry evaluation (mode={mode})...")
+    return run_evaluation_foundry(results, mode=mode)
+
+
+def run_both_backends(results: list[EvalResult], mode: str) -> int:
+    """Run BOTH backends over the SAME results and enforce per-scorer parity.
+
+    Wires parity.py against real data (SC-005). Returns an exit code:
+      0  -> both backends pass their own thresholds AND every shared per-scorer
+            mean is within +/-0.5.
+      1  -> a backend failed its threshold, parity was out of tolerance, OR the
+            two backends share no comparable scorer (empty overlap is treated as
+            an error — never a vacuous pass).
+    """
+    from parity import compute_parity, parity_within_tolerance, format_parity_table
+
+    mlflow_agg = run_mlflow_backend(results, mode)
+    foundry_agg = run_foundry_backend(results, mode)
+
+    print(format_results_table(results, mlflow_agg, mode=f"{mode} (mlflow)"))
+    print(format_results_table(results, foundry_agg, mode=f"{mode} (foundry)"))
+
+    deltas = compute_parity(mlflow_agg.scorer_means, foundry_agg.scorer_means)
+
+    if not deltas:
+        print(
+            "ERROR: parity check has no comparable scorers — the MLflow and "
+            "Foundry paths produced no shared scorer means "
+            f"(mlflow={sorted(mlflow_agg.scorer_means)}, "
+            f"foundry={sorted(foundry_agg.scorer_means)}). "
+            "Refusing to vacuous-pass an empty parity set.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(format_parity_table(deltas))
+    within = parity_within_tolerance(deltas, tol=0.5)
+    if not within:
+        print(
+            "ERROR: eval-backend parity OUT OF TOLERANCE (SC-005, +/-0.5).",
+            file=sys.stderr,
+        )
+
+    backends_pass = mlflow_agg.passed and foundry_agg.passed
+    return 0 if (backends_pass and within) else 1
 
 
 def main() -> int:
     """Main entry point. Returns exit code."""
     args = parse_args()
     mode = args.mode
+    backend = args.backend
+
+    # C2: re-validate the resolved backend (which may have come from the
+    # EVAL_BACKEND env default, NOT validated by argparse choices) BEFORE
+    # dispatch so a typo like EVAL_BACKEND=foundryy fails loud instead of
+    # silently routing to a catch-all.
+    if backend not in ALLOWED_BACKENDS:
+        allowed = "|".join(ALLOWED_BACKENDS)
+        print(
+            f"ERROR: EVAL_BACKEND/--backend must be {allowed}, got {backend!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if mode not in ALLOWED_MODES:
+        allowed = "|".join(ALLOWED_MODES)
+        print(
+            f"ERROR: EVAL_MODE/--mode must be {allowed}, got {mode!r}",
+            file=sys.stderr,
+        )
+        return 1
 
     base_url = os.environ.get("APP_BASE_URL", "http://host.containers.internal:3000")
     cases_path = os.environ.get("EVAL_CASES_PATH", "fixtures/eval/cases.json")
@@ -293,6 +414,7 @@ def main() -> int:
         return 1
 
     print(f"Eval mode: {mode}")
+    print(f"Eval backend: {backend}")
     print(f"Loading eval cases from: {cases_path}")
     try:
         cases = load_cases(cases_path)
@@ -318,14 +440,21 @@ def main() -> int:
         for r in errors:
             print(f"  {r.customer_id}: {r.error}", file=sys.stderr)
 
-    # Set MLflow experiment to match the app's trace experiment
-    import mlflow
-    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "Default")
-    mlflow.set_experiment(experiment_name)
-    print(f"MLflow experiment: {experiment_name}")
-
-    print(f"Running MLflow evaluation (mode={mode})...")
-    aggregate = run_evaluation(results, mode=mode)
+    # Exhaustive dispatch — no else-catches-everything. The resolved backend is
+    # already validated above, so the final else is a defensive guard only.
+    if backend == "both":
+        return run_both_backends(results, mode)
+    elif backend == "foundry":
+        aggregate = run_foundry_backend(results, mode)
+    elif backend == "mlflow":
+        aggregate = run_mlflow_backend(results, mode)
+    else:
+        allowed = "|".join(ALLOWED_BACKENDS)
+        print(
+            f"ERROR: EVAL_BACKEND/--backend must be {allowed}, got {backend!r}",
+            file=sys.stderr,
+        )
+        return 1
 
     print(format_results_table(results, aggregate, mode=mode))
 

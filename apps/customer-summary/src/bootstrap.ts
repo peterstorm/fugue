@@ -9,6 +9,7 @@ import {
   FilePromptRegistry,
   initTracing,
   createMlflowExporter,
+  createAzureMonitorExporter,
   alwaysOn,
   errorOnly,
   anyOf,
@@ -16,13 +17,18 @@ import {
   ratio,
   piiScrubber,
   IDENTITY_FILTER,
+  isOk,
 } from "@fugue/framework";
 import { RedisCache, RedisCheckpointer } from "@fugue/framework/redis";
-import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter } from "@fugue/framework";
+import { DefaultAzureCredential } from "@azure/identity";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink } from "@fugue/framework";
 import { NoopObserver, runId as brandRunId } from "@fugue/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS } from "./config.js";
+import { resolveObservabilityBackends, isFoundryEnabled } from "./observability.js";
+import { composeObservability, resolveFoundryLeg, type SpanExporter } from "./observability-composition.js";
+import { createFoundrySink } from "./foundry-sink.js";
 import { consoleAppLogger } from "./logger.js";
 import type { AppLogger } from "./logger.js";
 
@@ -35,16 +41,97 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   const fixturesDir = resolve(config.FIXTURES_DIR);
   const promptsDir = resolve(config.PROMPTS_DIR);
 
-  // --- Tracing (OTel + MLflow with tail-based sampling) ---
+  // --- Observability backend selection (FR-002/003/006/022/023) ---
+  // Resolve the trace backend(s) + auth from config. A config error MUST fail
+  // bootstrap loudly — never silently fall back (FR-006). In well-formed config
+  // this is already caught by the zod superRefine in loadConfig(); the resolver
+  // re-checks defense-in-depth, so a thrown error here means contradictory
+  // config slipped past the schema and must stop startup.
+  const resolvedObservability = resolveObservabilityBackends(config);
+  if (!isOk(resolvedObservability)) {
+    throw resolvedObservability.error;
+  }
+  const resolved = resolvedObservability.value;
+
+  // --- Tracing (OTel + MLflow [+ Foundry] with tail-based sampling) ---
+  // The persistence policy is the SINGLE source of truth: the SAME instance
+  // gates trace tail-sampling AND (in the Foundry path) the BufferedObserver's
+  // domain-event emission, so a discarded trace produces no orphaned domain
+  // events (FR-021 / SC-010).
   let tracing: TracingHandle | null = null;
+  // Default to NoopObserver: this is the byte-for-byte unchanged behaviour for
+  // the no-Foundry path (SC-006 / FR-027). composeObservability overrides it
+  // only when Foundry is enabled.
+  let observer: Observer = new NoopObserver();
   try {
     const policy = anyOf(errorOnly(), hadRetry(), ratio(config.TRACE_SAMPLE_RATIO));
-    const exporter = createMlflowExporter({
-      url: config.MLFLOW_TRACKING_URI,
-      experimentId: config.MLFLOW_EXPERIMENT_ID,
+
+    // MLflow is the always-available trace backend (FR-003). Its exporter is
+    // built unconditionally and the factory is reused below; a Foundry
+    // CONSTRUCTION fault must never disable MLflow tracing (FR-026 / SC-006 /
+    // SC-009), so the Foundry leg is attempted in its OWN guard and, on failure,
+    // we degrade to the MLflow-only selection while leaving MLflow tracing live.
+    const createMlflowExporter_ = (): SpanExporter =>
+      createMlflowExporter({
+        url: config.MLFLOW_TRACKING_URI,
+        experimentId: config.MLFLOW_EXPERIMENT_ID,
+      });
+
+    // Attempt to construct the Foundry exporter + sink in ISOLATION via the
+    // fault-isolation boundary. A Foundry construction fault degrades ONLY the
+    // Foundry leg (returning an MLflow-only effective selection), leaving MLflow
+    // tracing live (FR-026 / SC-006 / SC-009). On success the prebuilt instances
+    // are handed to composeObservability via thin factories below.
+    const { effective: effectiveResolved, foundryExporter, foundrySink } = resolveFoundryLeg(
+      resolved,
+      (): SpanExporter => {
+        // Reachable only when Foundry is enabled, where `resolved.auth` exists.
+        if (!isFoundryEnabled(resolved)) {
+          throw new Error("Foundry exporter requested without Foundry enabled");
+        }
+        const auth = resolved.auth;
+        return createAzureMonitorExporter(
+          auth.mode === "entra-id"
+            ? { auth: { connectionString: auth.connectionString, credential: new DefaultAzureCredential() } }
+            : { auth: { connectionString: auth.connectionString } },
+        );
+      },
+      (): FoundryTelemetrySink => {
+        if (!isFoundryEnabled(resolved)) {
+          throw new Error("Foundry sink requested without Foundry enabled");
+        }
+        return createFoundrySink(resolved.auth);
+      },
+      log,
+    );
+
+    // Compose exporters + observer from the EFFECTIVE selection. Factories are
+    // bound here (the imperative shell); the composition itself is pure-ish. The
+    // Foundry factories return the prebuilt instances (never re-construct), so
+    // the isolation guard above is authoritative.
+    const composed = composeObservability(effectiveResolved, policy, {
+      createMlflowExporter: createMlflowExporter_,
+      createFoundryExporter: (): SpanExporter => {
+        if (foundryExporter === null) {
+          throw new Error("createFoundryExporter called without a prebuilt Foundry exporter");
+        }
+        return foundryExporter;
+      },
+      createFoundrySink: (): FoundryTelemetrySink => {
+        if (foundrySink === null) {
+          throw new Error("createFoundrySink called without a prebuilt Foundry sink");
+        }
+        return foundrySink;
+      },
     });
-    tracing = await initTracing({ exporter, policy });
-    log.info(`Tracing initialized — MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})`);
+    observer = composed.observer;
+
+    tracing = await initTracing({ exporter: composed.exporters, policy });
+    log.info(
+      `Tracing initialized — backends [${effectiveResolved.traceBackends.join(", ")}]; ` +
+        `MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})` +
+        (isFoundryEnabled(effectiveResolved) ? ` + Foundry (auth: ${effectiveResolved.auth.mode})` : ""),
+    );
   } catch (e) {
     log.error("Tracing initialization failed — continuing without tracing:", e);
   }
@@ -88,7 +175,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     const cp = checkpointer;
 
     // Adapter: NodeContext.cache expects get/set/writeCheckpoint
-    // Wave 4 §4.6: get() returns a discriminated hit/miss so nullable values
+    // get() returns a discriminated hit/miss so nullable values
     // are no longer ambiguous with cache misses.
     contextCache = {
       get: async (key: string) => {
@@ -218,7 +305,10 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     cache: contextCache,
     checkpointWriter,
     checkpointer,
-    observer: new NoopObserver(),
+    // Default path: NoopObserver (byte-for-byte unchanged, SC-006/FR-027).
+    // Foundry path: BufferedObserver(AiFoundryObserver) sharing the trace
+    // policy instance — set by composeObservability above.
+    observer,
     logger: log,
     // Read the env-derived flag once at bootstrap; the framework no longer
     // touches process.env. When LLM_TRACE_PROMPTS is true, content passes
@@ -250,6 +340,15 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       log.info("Flushing traces...");
       await tracing.flush();
       await tracing.shutdown();
+    }
+    // Stop the BufferedObserver sweep so it doesn't outlive the process. The
+    // NoopObserver default has no dispose; only the Foundry path's observer is
+    // Disposable. Narrow structurally so the default path is untouched.
+    const disposable = observer as Partial<Disposable> & { close?: () => void };
+    if (typeof disposable.close === "function") {
+      disposable.close();
+    } else if (typeof disposable[Symbol.dispose] === "function") {
+      disposable[Symbol.dispose]!();
     }
     if (redis) {
       await redis.disconnect();
