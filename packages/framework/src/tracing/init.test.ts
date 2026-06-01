@@ -98,7 +98,7 @@ describe("initTracing — lifecycle", () => {
 
   it("rejects an empty exporter list (defense-in-depth at the untyped boundary)", async () => {
     // The public `exporter` type is a non-empty tuple, so `[]` is a compile
-    // error at literal call sites. A dynamically-built list (T5 bootstrap)
+    // error at literal call sites. A dynamically-built list (built by the app bootstrap)
     // crosses an untyped boundary — modelled here with a cast — where `[]`
     // could slip through; the runtime guard must still reject it.
     const dynamicEmpty = [] as unknown as readonly [SpanExporter, ...SpanExporter[]];

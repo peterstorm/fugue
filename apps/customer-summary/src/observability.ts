@@ -5,7 +5,7 @@
  * {@link Config} and produces a validated {@link ResolvedObservability} value (or
  * a typed {@link ObservabilityConfigError}). NO I/O, NO env reads, NO Azure — it
  * is a total function of its `Config` argument and is therefore trivially unit
- * testable. The imperative shell (T5 `bootstrap.ts`) consumes the result to
+ * testable. The imperative shell (`bootstrap.ts`) consumes the result to
  * build the actual `SpanExporter` instances.
  *
  * Requirements satisfied:
@@ -32,9 +32,9 @@ export type { TraceBackend };
  * Resolved auth for the Foundry (Application Insights) exporter.
  *
  * Both modes carry the connection string: the Azure Monitor SDK needs it to
- * locate the ingestion endpoint even under Entra ID (T2 finding). In
+ * locate the ingestion endpoint even under Entra ID. In
  * connection-string mode the string also governs auth; in entra-id mode a
- * `DefaultAzureCredential` (constructed downstream in T5) governs auth while
+ * `DefaultAzureCredential` (constructed in the app bootstrap) governs auth while
  * the connection string supplies the endpoint.
  */
 export type ResolvedAuth =
@@ -65,7 +65,7 @@ export const isFoundryEnabled = (
 
 /**
  * Typed, discriminated configuration error so callers/tests branch on the
- * `cause`, not on parsed message strings.
+ * `reason`, not on parsed message strings.
  *
  * - `missing-connection-string`: foundry is selected but no Application Insights
  *   connection string is available for the resolved auth mode (FR-006/FR-022).
@@ -76,11 +76,11 @@ export const isFoundryEnabled = (
 export type ObservabilityConfigErrorCause = "missing-connection-string";
 
 export class ObservabilityConfigError extends Error {
-  readonly cause: ObservabilityConfigErrorCause;
-  constructor(cause: ObservabilityConfigErrorCause, message: string) {
+  readonly reason: ObservabilityConfigErrorCause;
+  constructor(reason: ObservabilityConfigErrorCause, message: string) {
     super(message);
     this.name = "ObservabilityConfigError";
-    this.cause = cause;
+    this.reason = reason;
   }
 }
 

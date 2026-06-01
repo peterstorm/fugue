@@ -9,10 +9,10 @@
 //
 // The observer is vendor-neutral: it depends only on the `FoundryTelemetrySink`
 // interface, NOT on `applicationinsights`. The Application Insights-backed sink
-// is composed at the app layer (T5), which also wraps this observer in a
-// `BufferedObserver` sharing the TracingHandle policy so that discarded traces
-// produce no orphaned domain events (FR-021 / SC-010). This observer performs
-// NO policy gating itself.
+// is composed at the app layer, which wraps a run-summary observer containing
+// this one in a `BufferedObserver` sharing the TracingHandle policy so that
+// discarded traces produce no orphaned domain events (FR-021 / SC-010). This
+// observer performs NO policy gating itself.
 
 import type { Observer } from "../types/observer.js";
 import type { ObserverEvent } from "../types/events.js";

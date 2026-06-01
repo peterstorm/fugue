@@ -88,7 +88,7 @@ const ConfigSchema = z.object({
 
   // Auth mode for the Foundry (Application Insights) exporter.
   // Default = connection-string (FR-022); entra-id is opt-in (FR-023) and uses
-  // the default Azure credential mechanism downstream (T5).
+  // the default Azure credential mechanism downstream.
   AZURE_AUTH_MODE: z.enum(["connection-string", "entra-id"]).default("connection-string"),
 
   // Eval backend selector (FR-004/FR-005). MLflow is the default eval backend.
@@ -100,7 +100,7 @@ const ConfigSchema = z.object({
   //
   // When foundry is selected as a trace backend it MUST have usable auth.
   // The Azure Monitor SDK needs the Application Insights connection string to
-  // carry the ingestion endpoint EVEN under Entra ID (T2 finding) — so the
+  // carry the ingestion endpoint EVEN under Entra ID — so the
   // connection string is required for BOTH auth modes once foundry is on. A
   // foundry selection with no connection string is contradictory config and is
   // reported clearly here rather than failing silently at export time.

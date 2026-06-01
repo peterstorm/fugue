@@ -58,7 +58,7 @@ export const normalizeExporter = (
     return exporter;
   }
   // Defense-in-depth: the public type forbids `[]`, but dynamically-built
-  // lists (T5 bootstrap) cross an untyped boundary, so re-check at runtime.
+  // lists (built by the app bootstrap) cross an untyped boundary, so re-check at runtime.
   if (exporter.length === 0) {
     throw new Error(
       "TracingConfig.exporter: empty exporter list — provide at least one SpanExporter",

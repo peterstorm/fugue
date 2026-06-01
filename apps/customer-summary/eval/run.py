@@ -131,9 +131,20 @@ def compute_aggregate(eval_table: Any, scorer_names: list[str]) -> AggregateResu
         if key in metrics:
             scorer_means[name] = metrics[key]
         else:
-            # Try alternate key formats
+            # Try an EXACT-suffix match anchored to the scorer name rather than
+            # a loose substring scan: a `name in k` test can bind to the FIRST
+            # loosely-matching key (a `_v2` variant, or a scorer name that is a
+            # substring of another) and silently average in the wrong scorer.
+            # Anchor on `{name}/` ... `/score/mean` and log which non-canonical
+            # key was selected before accepting it.
             for k, v in metrics.items():
-                if name in k and "mean" in k:
+                if k.startswith(f"{name}/") and k.endswith("/score/mean"):
+                    print(
+                        f"WARNING: MLflow metric for scorer {name!r} matched a "
+                        f"non-canonical key {k!r} (value={v}); expected canonical "
+                        f"key {key!r}. Accepting the anchored-suffix match.",
+                        file=sys.stderr,
+                    )
                     scorer_means[name] = v
                     break
 
@@ -371,7 +382,23 @@ def run_both_backends(results: list[EvalResult], mode: str) -> int:
     from parity import compute_parity, parity_within_tolerance, format_parity_table
 
     mlflow_agg = run_mlflow_backend(results, mode)
-    foundry_agg = run_foundry_backend(results, mode)
+
+    # Fault-isolate the Foundry leg: if it raises (missing creds RuntimeError,
+    # SDK import failure, scoring error) the whole `both` run must NOT die with
+    # an uncaught traceback that discards the already-computed MLflow verdict.
+    # Surface a DISTINCT error naming it as a Foundry-leg failure and return 1,
+    # preserving the printed MLflow result.
+    try:
+        foundry_agg = run_foundry_backend(results, mode)
+    except Exception as e:
+        print(format_results_table(results, mlflow_agg, mode=f"{mode} (mlflow)"))
+        print(
+            "ERROR: Foundry-leg construction/scoring FAILED during backend=both "
+            f"({type(e).__name__}: {e}). The MLflow leg already ran (result above) "
+            "and is preserved; failing the parity run fail-closed.",
+            file=sys.stderr,
+        )
+        return 1
 
     print(format_results_table(results, mlflow_agg, mode=f"{mode} (mlflow)"))
     print(format_results_table(results, foundry_agg, mode=f"{mode} (foundry)"))

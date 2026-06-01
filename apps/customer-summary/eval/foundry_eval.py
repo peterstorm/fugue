@@ -317,4 +317,22 @@ def run_evaluation_foundry(
                 file=sys.stderr,
             )
 
+    # Fix 5: surface per-row drops. The EvaluationResult `rows` list holds the
+    # per-row outputs that get folded into the aggregate mean; if fewer rows came
+    # back than were submitted, some rows errored/were dropped and are silently
+    # averaged in. Compare counts and WARN (lossless, additive — does NOT change
+    # the aggregate or the fail-closed verdict). Guarded so a fake return without
+    # a "rows" key (existing tests) is unaffected.
+    if isinstance(outcome, dict) and isinstance(outcome.get("rows"), list):
+        returned = len(outcome["rows"])
+        submitted = len(rows)
+        if returned < submitted:
+            print(
+                f"WARNING: Foundry evaluate() returned {returned} per-row "
+                f"result(s) but {submitted} row(s) were submitted — "
+                f"{submitted - returned} row(s) were dropped/errored and are "
+                "silently averaged into the aggregate mean.",
+                file=sys.stderr,
+            )
+
     return compute_aggregate_foundry(metrics, active_scorer_names(mode))

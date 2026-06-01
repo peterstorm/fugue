@@ -63,8 +63,8 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   // the no-Foundry path (SC-006 / FR-027). composeObservability overrides it
   // only when Foundry is enabled.
   let observer: Observer = new NoopObserver();
-  // Held for the graceful-shutdown drain (FR — flush buffered Foundry domain
-  // events before exit). Null on the default/no-Foundry path.
+  // Held for the graceful-shutdown drain: flush buffered Foundry domain
+  // events before exit. Null on the default/no-Foundry path.
   let foundrySinkForFlush: FoundryTelemetrySink | null = null;
   try {
     const policy = anyOf(errorOnly(), hadRetry(), ratio(config.TRACE_SAMPLE_RATIO));
@@ -329,6 +329,9 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       checkMlflow: async () => {
         try {
           const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`);
+          if (!res.ok) {
+            log.debug(`[health] MLflow returned non-ok status: ${res.status}`);
+          }
           return res.ok;
         } catch (e) {
           log.debug(`[health] MLflow unreachable: ${e instanceof Error ? e.message : String(e)}`);

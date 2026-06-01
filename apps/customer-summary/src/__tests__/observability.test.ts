@@ -112,10 +112,10 @@ describe("resolveObservabilityBackends", () => {
     expect(isErr(result)).toBe(true);
     if (!isErr(result)) return;
     expect(result.error).toBeInstanceOf(ObservabilityConfigError);
-    expect(result.error.cause).toBe("missing-connection-string");
+    expect(result.error.reason).toBe("missing-connection-string");
   });
 
-  test("foundry + entra-id without connection string → fail-closed error (FR-006/T2 rule)", () => {
+  test("foundry + entra-id without connection string → fail-closed error (FR-006)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
@@ -125,7 +125,7 @@ describe("resolveObservabilityBackends", () => {
     );
     expect(isErr(result)).toBe(true);
     if (!isErr(result)) return;
-    expect(result.error.cause).toBe("missing-connection-string");
+    expect(result.error.reason).toBe("missing-connection-string");
   });
 
   test("no-foundry selection ignores a present connection string (auth still absent)", () => {

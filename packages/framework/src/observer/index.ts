@@ -23,7 +23,7 @@ export { TailSamplingProcessor } from "./tail-sampling-processor.js";
 
 // AI Foundry domain-event recording (FR-018/019/020). Pure mapping +
 // vendor-neutral observer over a FoundryTelemetrySink port. The
-// applicationinsights-backed sink is composed at the app layer (T5).
+// applicationinsights-backed sink is composed at the app layer.
 export type { FoundryTelemetrySink } from "./ai-foundry-observer.js";
 export { AiFoundryObserver } from "./ai-foundry-observer.js";
 export type { FoundryEmission, RunSummaryExtras } from "./foundry-event-mapping.js";

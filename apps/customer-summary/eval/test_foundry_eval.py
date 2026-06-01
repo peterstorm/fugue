@@ -270,6 +270,23 @@ class TestRunEvaluationFoundryWithFake:
         assert agg.passed is False
         assert agg.scorer_means == {}
 
+    def test_metrics_value_not_a_dict_is_contract_error(self, capsys):
+        # C1: a dict WITH a "metrics" key whose VALUE is not a dict is a shape
+        # mismatch — must surface an ERROR and fail-closed, never be read as a
+        # genuine low score. Exercises foundry_eval.py:310-318.
+        def fake_evaluate(*, data, evaluators, evaluation_name):
+            return {"metrics": "not-a-dict"}
+
+        agg = run_evaluation_foundry(
+            _three_results(), mode="ci",
+            evaluate_fn=fake_evaluate, evaluators={"grounding": grounding_evaluator},
+        )
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "metrics" in err
+        assert agg.passed is False
+        assert agg.scorer_means == {}
+
     def test_temp_data_file_is_cleaned_up(self):
         seen_path = {}
 

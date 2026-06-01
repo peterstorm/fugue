@@ -138,7 +138,7 @@ describe("loadConfig", () => {
     expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBe("InstrumentationKey=abc;IngestionEndpoint=https://x/");
   });
 
-  test("entra-id auth mode still requires a connection string (T2 rule, FR-023)", () => {
+  test("entra-id auth mode still requires a connection string (FR-023)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
     process.env.AZURE_AUTH_MODE = "entra-id";
     // no connection string → contradictory

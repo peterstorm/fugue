@@ -22,8 +22,8 @@
  *     those global providers.
  *
  * Fail-tolerance (FR-028): track-call fault isolation is provided by the
- * framework observer wrappers (AiFoundryObserver / FoundryRunSummaryObserver),
- * which wrap every emission in try/catch + log. This adapter is intentionally a
+ * observer wrappers (the framework's `AiFoundryObserver` and the app's
+ * `FoundryRunSummaryObserver`), which wrap every emission in try/catch + log. This adapter is intentionally a
  * thin pass-through. `flush()` may reject; its sole caller (graceful shutdown in
  * bootstrap.ts) guards and logs it, so a flush failure is surfaced rather than
  * silently swallowed.

@@ -22,7 +22,7 @@
 //     bare event guarantees (duration, status) plus the run-latency metric.
 //     This is the seam the BufferedObserver replay path can use directly.
 //   * `mapRunSummaryToFoundry(summary, runEnd)` — the FULL FR-019 emission.
-//     The app-layer run-summary bridge (T5) computes a `RunSummary` and calls
+//     The app-layer run-summary bridge computes a `RunSummary` and calls
 //     this so the summary event carries duration, status, nodeCount,
 //     retryCount, cacheHitCount, and totalCost, plus pre-aggregated
 //     cost/run-latency metrics dimensioned by dagId.
@@ -176,6 +176,9 @@ export function mapEventToFoundry(
     )
     .with({ type: "run-start" }, () => [])
     .with({ type: "node-start" }, () => [])
+    // Node failures are DELIBERATELY not emitted as a Foundry domain event:
+    // they already surface via OTel spans and the run-level `status: "error"`
+    // summary, so a separate event would be redundant.
     .with({ type: "node-error" }, () => [])
     .with({ type: "sub-span" }, () => [])
     .with({ type: "witness-captured" }, () => [])
@@ -220,7 +223,7 @@ function runEndEmissions(e: RunEndEvent): readonly FoundryEmission[] {
 }
 
 /**
- * Optional aggregate inputs the app-layer bridge (T5) can supply alongside a
+ * Optional aggregate inputs the app-layer bridge can supply alongside a
  * `RunSummary`. Neither `cacheHitCount` nor `totalTokens` has a home on the
  * framework's `RunSummary` type today (see observer/buffered.ts), so they are
  * accepted here rather than invented as fields on the shared summary type. The
@@ -239,7 +242,7 @@ export interface RunSummaryExtras {
  * for dagId/identity) → the complete FR-019 run-summary event plus
  * pre-aggregated cost/token/run-latency metrics dimensioned by dagId (FR-020).
  *
- * This is the entry point the app-layer run-summary bridge (T5) uses so that
+ * This is the entry point the app-layer run-summary bridge uses so that
  * 100% of completed runs produce a summary event carrying run duration, status,
  * node count, retry count, cache-hit count, and total cost (SC-008).
  */

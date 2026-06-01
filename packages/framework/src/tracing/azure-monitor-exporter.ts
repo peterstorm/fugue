@@ -132,8 +132,8 @@ export const translateSpanForFoundry = (span: ReadableSpan): ReadableSpan => {
  * Defense-in-depth ONLY: the discriminated-union {@link AzureMonitorExporterConfig}
  * makes the empty-auth state unrepresentable from typed call sites, so this is
  * largely unreachable there. It exists for the DYNAMIC / untyped config boundary
- * (later-wave T5 builds this config from parsed env, where a runtime hole could
- * still yield an `auth` object with neither field). Construction is the boundary
+ * (the app's bootstrap builds this config from parsed env, where a runtime hole
+ * could still yield an `auth` object with neither field). Construction is the boundary
  * — there is no useful exporter to return, so we fail fast and loud rather than
  * silently dropping every span at runtime.
  */
@@ -190,7 +190,7 @@ export class AzureMonitorExporter implements SpanExporter {
    * authentication (FR-023).
    *
    * Defense-in-depth: the type makes empty auth unrepresentable, but a dynamic
-   * (T5/env) caller could still smuggle in `{}`. Fail fast and loud here.
+   * (env-derived) caller could still smuggle in `{}`. Fail fast and loud here.
    */
   private static resolveOpts(auth: AzureMonitorAuth): AzureMonitorInnerOpts {
     const connectionString = auth.connectionString;

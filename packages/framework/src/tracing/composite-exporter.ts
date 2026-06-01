@@ -93,7 +93,7 @@ export class CompositeSpanExporter implements SpanExporter {
    *
    * The runtime empty-check is retained as defense-in-depth: the non-empty
    * tuple type rejects `[]` at literal call sites, but the dynamic-config
-   * boundary (T5 bootstrap, {@link normalizeExporter}) builds the child list
+   * boundary (the app bootstrap, {@link normalizeExporter}) builds the child list
    * from resolved config as a wide `readonly SpanExporter[]` and reaches this
    * constructor only via a single audited internal re-narrow (`as` cast). If a
    * future change ever funnels an empty array through that cast, this guard
