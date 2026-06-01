@@ -111,11 +111,15 @@ export interface ComposedObservability {
  */
 export class FoundryRunSummaryObserver implements Observer {
   private readonly inner: AiFoundryObserver;
-  // Inner buffer that makes this observer usable STANDALONE (SC-008 drives it
-  // directly, with no wrapping BufferedObserver). Per-run entries are bounded:
-  // each is deleted on its own `run-end` (`emitRunSummary` → `this.buffered.delete`).
-  // In production this runs UNDER a `BufferedObserver`, which guarantees a
-  // terminal `run-end` per run — so entries cannot accumulate unbounded.
+  // Inner buffer keyed by runId. Per-run entries are bounded ONLY by their own
+  // terminal `run-end` (`emitRunSummary` → `this.buffered.delete`); this class has
+  // NO TTL / orphan-eviction sweep of its own (unlike the framework
+  // `BufferedObserver`). The bounded-growth invariant is therefore enforced by the
+  // wrapping contract: in production (`composeObservability`) this always runs UNDER
+  // a `BufferedObserver`, which guarantees a terminal `run-end` per run, so entries
+  // cannot accumulate unbounded. Direct/standalone use is TEST-ONLY — a run that
+  // never emits `run-end` (crash, abandoned run) would leak its buffer, so do not
+  // wire this observer standalone in production.
   private readonly buffered = new Map<string, ObserverEvent[]>();
 
   constructor(private readonly sink: FoundryTelemetrySink) {

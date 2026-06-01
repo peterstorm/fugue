@@ -280,10 +280,13 @@ def run_evaluation_foundry(
             evaluation_name=f"customer-summary-eval-{mode}",
         )
     finally:
+        # Best-effort cleanup: the OS reaps temp files regardless, and a failed
+        # unlink cannot affect the eval verdict. But log it so a leaking temp dir
+        # is visible rather than silently swallowed.
         try:
             Path(data_path).unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"WARNING: failed to remove eval temp file {data_path}: {exc}", file=sys.stderr)
 
     # C1: do NOT silently coerce an unexpected SDK return into {}. A non-dict
     # return, or a dict missing "metrics", is a SHAPE/contract mismatch — name

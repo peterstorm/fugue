@@ -123,10 +123,12 @@ auth modes; under Entra ID the credential governs auth while the string supplies
 `resolveObservabilityBackends(config: Config): Result<ResolvedObservability,
 ObservabilityConfigError>` is the functional core: a total function of its `Config` argument with
 no I/O, no env reads, no Azure SDK contact, and therefore trivially unit-testable. It returns a
-`Result` rather than throwing. `ResolvedObservability` is a **discriminated union on
-`foundryEnabled`**: the `false` arm carries only `traceBackends`, while the `true` arm carries a
-`ResolvedAuth` value — so the common no-Foundry case cannot carry a meaningless or empty `auth`
-(illegal state made unrepresentable). The `bootstrap.ts` imperative shell consumes the resolved
+`Result` rather than throwing. `ResolvedObservability` is a **flat interface carrying `auth:
+ResolvedAuth | null`**, non-null only when a Foundry backend is selected; "foundry enabled" is
+**derived** via the `isFoundryEnabled` type guard (`auth !== null`) rather than stored as a
+separate discriminant — so there is no boolean to drift from `traceBackends`, and the common
+no-Foundry case cannot carry a meaningless or empty `auth` (illegal state made unrepresentable).
+The `bootstrap.ts` imperative shell consumes the resolved
 value to construct the actual `SpanExporter` instances and compose them per ADR-0044.
 
 **Invariant:** which observability backends are active, and how Foundry authenticates, is decided
@@ -145,9 +147,9 @@ participates in process-level observability wiring.
   knobs, and that integrates with container secret injection for the connection string.
 - Fail-closed at startup: unknown, blank, duplicate, empty, and Foundry-without-connection-string
   selections are hard errors with actionable messages (FR-006) — no silent runtime fallback.
-- The pure resolver returns a `Result` and is a discriminated union on `foundryEnabled`, so the
-  no-Foundry path carries no meaningless auth and the wiring composes with the host's functional
-  error handling.
+- The pure resolver returns a `Result` and carries `auth: ResolvedAuth | null` (foundry-enabled
+  derived via the `isFoundryEnabled` type guard), so the no-Foundry path carries no meaningless
+  auth and the wiring composes with the host's functional error handling.
 
 **Negative:**
 - The selection is not version-controlled alongside DAG code; it lives in deployment environment

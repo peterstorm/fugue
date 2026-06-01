@@ -26,7 +26,7 @@
  *   still carries the ingestion endpoint).
  */
 import { createRequire } from "node:module";
-import type { ExportResult } from "@opentelemetry/core";
+import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { TokenCredential } from "@azure/identity";
 import { fwLogger } from "../logger.js";
@@ -209,16 +209,15 @@ export class AzureMonitorExporter implements SpanExporter {
 
   /**
    * Failure contract: log-but-propagate. On an inner failure
-   * (`result.code !== 0` — note `ExportResultCode.SUCCESS === 0`) we WARN via
-   * `fwLogger` and then forward the ORIGINAL `ExportResult` unchanged. We never
-   * swallow or rewrite the result, so the OTel SDK's own retry/backoff still
-   * sees the true outcome.
+   * (`result.code !== ExportResultCode.SUCCESS`) we WARN via `fwLogger` and then
+   * forward the ORIGINAL `ExportResult` unchanged. We never swallow or rewrite
+   * the result, so the OTel SDK's own retry/backoff still sees the true outcome.
    */
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     // Pass-through: translate (identity while ATTR_MAP is empty) and delegate.
     const translated = spans.map(translateSpanForFoundry);
     this.inner.export(translated, (result) => {
-      if (result.code !== 0) {
+      if (result.code !== ExportResultCode.SUCCESS) {
         fwLogger().warn(
           `[AzureMonitorExporter] Inner exporter failed for ${spans.length} span(s): ${
             result.error?.message ?? "unknown error"

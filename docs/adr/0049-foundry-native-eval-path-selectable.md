@@ -120,7 +120,8 @@ As-built additions beyond the original plan (making parity enforceable end-to-en
 - **The Foundry adapter fails loud on unexpected SDK result shapes.** When the
   `azure-ai-evaluation` result does not match the expected shape — e.g., requested scorers
   are missing, or zero expected scorers matched while metrics were non-empty — the adapter
-  raises with both the requested-but-missing scorers and the actual keys, rather than
+  fails closed: it surfaces both the requested-but-missing scorers and the actual keys on
+  stderr and returns a FAILED aggregate (`overall_mean=0.0, passed=False`), rather than
   silently coercing to an empty (and therefore deceptively "passing-shaped") result.
 
 Invariants:

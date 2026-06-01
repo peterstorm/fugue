@@ -344,19 +344,37 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
 
   // Graceful shutdown
   const shutdown = async () => {
+    // Guard each step independently. On the default single-backend path the
+    // exporter is unwrapped to a bare exporter (bypassing CompositeSpanExporter's
+    // never-reject guarantee), and the OTel shutdown chain propagates rejections.
+    // A rejecting trace flush/shutdown must NOT abort the observer-dispose, sink
+    // drain, or redis disconnect below — otherwise we reintroduce the sweep-timer
+    // leak and lose the final domain-event batch.
     if (tracing) {
       log.info("Flushing traces...");
-      await tracing.flush();
-      await tracing.shutdown();
+      try {
+        await tracing.flush();
+      } catch (e) {
+        log.warn("Trace flush failed during shutdown:", e);
+      }
+      try {
+        await tracing.shutdown();
+      } catch (e) {
+        log.warn("Tracing SDK shutdown failed during shutdown:", e);
+      }
     }
     // Stop the BufferedObserver sweep so it doesn't outlive the process. The
     // NoopObserver default has no dispose; only the Foundry path's observer is
     // Disposable. Narrow structurally so the default path is untouched.
     const disposable = observer as Partial<Disposable> & { close?: () => void };
-    if (typeof disposable.close === "function") {
-      disposable.close();
-    } else if (typeof disposable[Symbol.dispose] === "function") {
-      disposable[Symbol.dispose]!();
+    try {
+      if (typeof disposable.close === "function") {
+        disposable.close();
+      } else if (typeof disposable[Symbol.dispose] === "function") {
+        disposable[Symbol.dispose]!();
+      }
+    } catch (e) {
+      log.warn("Observer dispose failed during shutdown:", e);
     }
     // Drain buffered Foundry domain events before exit. The isolated
     // (connection-string-mode) Application Insights client batches track calls,
@@ -370,7 +388,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       }
     }
     if (redis) {
-      await redis.disconnect();
+      try {
+        await redis.disconnect();
+      } catch (e) {
+        log.warn("Redis disconnect failed during shutdown:", e);
+      }
     }
   };
 

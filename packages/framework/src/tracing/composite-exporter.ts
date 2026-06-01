@@ -7,7 +7,7 @@
  * to every child). One backend failing or hanging must never affect any
  * other (FR-025, FR-026, SC-009).
  *
- * Fault-isolation policy (AD-2):
+ * Fault-isolation policy (ADR-0045):
  * - `export()` fans out to every child concurrently. Each child's `export`
  *   is wrapped so that a synchronous throw OR an error `ExportResult` is
  *   caught, logged (rate-limited), and counted per-child — never rethrown.
@@ -133,7 +133,7 @@ export class CompositeSpanExporter implements SpanExporter {
       if (done) return;
       done = true;
       if (anySuccess) {
-        // SUCCESS unless all children failed (AD-2).
+        // SUCCESS unless all children failed (ADR-0045).
         resultCallback({ code: ExportResultCode.SUCCESS });
         return;
       }
