@@ -1,8 +1,13 @@
 /**
  * Initialize the OTel tracing pipeline with tail-based sampling.
  *
- * Vendor-neutral: accepts any SpanExporter. Use createMlflowExporter() for MLflow,
- * or any standard OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc.
+ * Vendor-neutral: accepts any SpanExporter — createMlflowExporter() for MLflow,
+ * createAzureMonitorExporter() for Azure AI Foundry, or any standard
+ * OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc. It ALSO accepts a non-empty
+ * LIST of exporters for simultaneous multi-backend export (FR-002): the same
+ * spans fan out to every exporter via {@link CompositeSpanExporter}. See
+ * {@link TracingConfig.exporter} and {@link normalizeExporter} for the
+ * single/[1]/[N] normalization rules.
  */
 import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { NodeSDK } from "@opentelemetry/sdk-node";

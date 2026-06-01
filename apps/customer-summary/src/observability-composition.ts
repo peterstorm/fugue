@@ -29,7 +29,6 @@ import {
   computeRunSummary,
   mapRunSummaryToFoundry,
   dispatchEvent,
-  createAzureMonitorExporter,
   fwLogger,
 } from "@fugue/framework";
 import type {
@@ -37,19 +36,18 @@ import type {
   PersistencePolicy,
   FoundryTelemetrySink,
   RunSummaryExtras,
+  SpanExporter,
 } from "@fugue/framework";
 import type { ObserverEvent, RunEndEvent } from "@fugue/framework";
-import type { ResolvedObservability } from "./observability.js";
+import type { ResolvedObservability, TraceBackend } from "./observability.js";
 import { isFoundryEnabled } from "./observability.js";
 
 /**
- * `SpanExporter` derived from the framework's `createAzureMonitorExporter`
- * return type (which is annotated as the abstract OTel `SpanExporter`
- * interface, NOT a concrete class) so the app needs NO direct
- * `@opentelemetry/*` dependency. The framework owns the OTel surface; this keeps
- * the app's dependency graph minimal.
+ * The OTel `SpanExporter` contract, re-exported from the framework barrel (which
+ * owns the `@opentelemetry/*` surface) so the app needs NO direct OTel
+ * dependency and stays decoupled from any one exporter factory's signature.
  */
-export type SpanExporter = ReturnType<typeof createAzureMonitorExporter>;
+export type { SpanExporter };
 
 /** A non-empty tuple of exporters, the exact shape `initTracing` accepts. */
 export type ExporterList = readonly [SpanExporter, ...SpanExporter[]];
@@ -245,22 +243,33 @@ export interface FoundryLegLogger {
 }
 
 /**
- * Outcome of attempting the Foundry construction leg in isolation.
+ * Outcome of attempting the Foundry construction leg in isolation — a
+ * DISCRIMINATED UNION on `outcome` so the prebuilt instances and the effective
+ * selection cannot drift apart:
  *
- * `effective` is the selection {@link composeObservability} should consume:
- * unchanged when the Foundry leg succeeded (or was never enabled), and degraded
- * to an MLflow-only selection (auth: null → {@link isFoundryEnabled} derives
- * `false`) when Foundry construction FAILED — so a runtime Foundry construction
- * fault degrades ONLY the Foundry leg
- * (FR-026 / SC-009) and never disables MLflow tracing (SC-006). The prebuilt
- * instances (present only on success) are handed to the composition's Foundry
- * factories so they are constructed exactly once, here, under this guard.
+ * - `active` — Foundry construction succeeded; BOTH the prebuilt exporter and
+ *   sink are present (never one without the other), and `effective` still
+ *   includes foundry. The instances are handed to the composition's Foundry
+ *   factories so they are constructed exactly once, here, under this guard.
+ * - `inactive` — Foundry was never enabled, OR its construction FAILED and the
+ *   leg degraded to an MLflow-only `effective` selection. Either way there are
+ *   no prebuilt instances. A runtime Foundry construction fault therefore
+ *   degrades ONLY the Foundry leg (FR-026 / SC-009) and never disables MLflow
+ *   tracing (SC-006).
+ *
+ * `{ exporter present, sink null }` (and vice versa) is now unrepresentable.
  */
-export interface ResolvedFoundryLeg {
-  readonly effective: ResolvedObservability;
-  readonly foundryExporter: SpanExporter | null;
-  readonly foundrySink: FoundryTelemetrySink | null;
-}
+export type ResolvedFoundryLeg =
+  | {
+      readonly outcome: "active";
+      readonly effective: ResolvedObservability;
+      readonly foundryExporter: SpanExporter;
+      readonly foundrySink: FoundryTelemetrySink;
+    }
+  | {
+      readonly outcome: "inactive";
+      readonly effective: ResolvedObservability;
+    };
 
 /**
  * Attempt the Foundry exporter + sink construction in ISOLATION from MLflow.
@@ -286,13 +295,13 @@ export const resolveFoundryLeg = (
   log: FoundryLegLogger,
 ): ResolvedFoundryLeg => {
   if (!isFoundryEnabled(resolved)) {
-    return { effective: resolved, foundryExporter: null, foundrySink: null };
+    return { outcome: "inactive", effective: resolved };
   }
 
   try {
     const foundryExporter = buildExporter();
     const foundrySink = buildSink();
-    return { effective: resolved, foundryExporter, foundrySink };
+    return { outcome: "active", effective: resolved, foundryExporter, foundrySink };
   } catch (foundryErr) {
     // Foundry export disabled — MLflow tracing CONTINUES unaffected
     // (FR-026 / SC-009). Degrade the selection to MLflow-only so the
@@ -305,14 +314,16 @@ export const resolveFoundryLeg = (
     const mlflowOnly = resolved.traceBackends.filter((b) => b !== "foundry");
     // MLflow is guaranteed selectable alongside Foundry in well-formed config;
     // if Foundry was the SOLE backend, fall back to MLflow so tracing still
-    // initializes.
+    // initializes. Freeze the array so the degraded selection preserves the same
+    // immutable-traceBackends invariant the config layer establishes (config.ts).
     return {
+      outcome: "inactive",
       effective: {
-        traceBackends: mlflowOnly.length > 0 ? mlflowOnly : ["mlflow"],
-        auth: null,
+        kind: "mlflow-only",
+        traceBackends: Object.freeze(
+          mlflowOnly.length > 0 ? mlflowOnly : (["mlflow"] as TraceBackend[]),
+        ),
       },
-      foundryExporter: null,
-      foundrySink: null,
     };
   }
 };

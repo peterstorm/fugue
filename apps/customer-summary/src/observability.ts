@@ -17,11 +17,12 @@
  *
  * Note on shapes vs. the plan: the plan sketched a FLAT `ResolvedObservability`
  * with an always-present `auth`. Per CLAUDE.md ("make illegal states
- * unrepresentable") this instead models `auth` as REQUIRED but NULLABLE: it is
- * non-null ONLY when foundry is on and `null` otherwise, so a foundry-enabled
- * value without auth is unrepresentable. The foundry-enabled fact is DERIVED
- * from `auth !== null` via {@link isFoundryEnabled} rather than stored as a
- * redundant boolean that could drift from `traceBackends`.
+ * unrepresentable") this instead models the result as a DISCRIMINATED UNION on
+ * `kind`: the `with-foundry` arm carries a non-null `auth`; the `mlflow-only`
+ * arm has no `auth` field at all. A foundry-enabled value without auth — and an
+ * auth attached to a non-foundry selection — are both literally unconstructable.
+ * The foundry-enabled fact is the discriminant itself ({@link isFoundryEnabled}
+ * narrows on `kind`), not a separate boolean that could drift from `traceBackends`.
  */
 import type { Config, TraceBackend } from "./config.js";
 import { type Result, ok, err } from "@fugue/framework";
@@ -42,26 +43,32 @@ export type ResolvedAuth =
   | { readonly mode: "entra-id"; readonly connectionString: string };
 
 /**
- * Resolved observability backend selection. `auth` is REQUIRED but nullable:
- * it is non-null ONLY when a foundry backend is selected, and `null` otherwise.
- * Foundry-enabled is therefore DERIVED from `auth !== null` ({@link isFoundryEnabled}),
- * so a foundry-enabled value without auth is unrepresentable and there is no
- * separate boolean to drift from `traceBackends`.
+ * Resolved observability backend selection, as a DISCRIMINATED UNION on `kind`:
+ *
+ * - `mlflow-only` — no foundry backend selected. There is NO `auth` field, so
+ *   "foundry off but auth present" cannot be expressed.
+ * - `with-foundry` — a foundry backend is selected; `auth` is REQUIRED and
+ *   non-null. So "foundry on but auth missing" cannot be expressed either.
+ *
+ * Both illegal states are unrepresentable by construction (CLAUDE.md), and
+ * foundry-enabled is the discriminant itself rather than a derived boolean.
  */
-export interface ResolvedObservability {
-  readonly traceBackends: readonly TraceBackend[];
-  readonly auth: ResolvedAuth | null;
-}
+export type ResolvedObservability =
+  | { readonly kind: "mlflow-only"; readonly traceBackends: readonly TraceBackend[] }
+  | {
+      readonly kind: "with-foundry";
+      readonly traceBackends: readonly TraceBackend[];
+      readonly auth: ResolvedAuth;
+    };
 
 /**
- * Derived: foundry is enabled iff resolved auth is non-null. `auth` is non-null
- * ONLY when a foundry backend was selected (constructed by {@link resolveObservabilityBackends}),
- * so this is the single source of truth — there is no stored boolean to drift
- * from `traceBackends`.
+ * Foundry is enabled iff the resolved selection is the `with-foundry` arm. The
+ * type guard narrows to that arm, exposing the non-null `auth` to callers — the
+ * single source of truth, with no boolean that could drift from `traceBackends`.
  */
 export const isFoundryEnabled = (
   r: ResolvedObservability,
-): r is ResolvedObservability & { readonly auth: ResolvedAuth } => r.auth !== null;
+): r is Extract<ResolvedObservability, { kind: "with-foundry" }> => r.kind === "with-foundry";
 
 /**
  * Typed, discriminated configuration error so callers/tests branch on the
@@ -87,8 +94,8 @@ export class ObservabilityConfigError extends Error {
 /**
  * Pure resolver. `Config -> Result<ResolvedObservability, ObservabilityConfigError>`.
  *
- * - No foundry selected → `{ traceBackends: ['mlflow', …], auth: null }` (FR-003).
- *   `auth` is `null` by construction, so {@link isFoundryEnabled} derives `false`.
+ * - No foundry selected → `{ kind: 'mlflow-only', traceBackends }` (FR-003).
+ *   The `mlflow-only` arm has no `auth`, so {@link isFoundryEnabled} is `false`.
  * - Foundry selected → requires a connection string for BOTH auth modes
  *   (FR-022/FR-023; the connection string carries the ingestion endpoint).
  *   Missing → fail-closed `ObservabilityConfigError` (FR-006).
@@ -100,7 +107,7 @@ export const resolveObservabilityBackends = (
   const foundryEnabled = traceBackends.includes("foundry");
 
   if (!foundryEnabled) {
-    return ok({ traceBackends, auth: null });
+    return ok({ kind: "mlflow-only", traceBackends });
   }
 
   const connectionString = config.APPLICATIONINSIGHTS_CONNECTION_STRING;
@@ -119,5 +126,5 @@ export const resolveObservabilityBackends = (
       ? { mode: "entra-id", connectionString }
       : { mode: "connection-string", connectionString };
 
-  return ok({ traceBackends, auth });
+  return ok({ kind: "with-foundry", traceBackends, auth });
 };

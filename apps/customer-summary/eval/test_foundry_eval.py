@@ -300,3 +300,40 @@ class TestRunEvaluationFoundryWithFake:
             evaluate_fn=fake_evaluate, evaluators={"grounding": grounding_evaluator},
         )
         assert not os.path.exists(seen_path["path"])  # cleaned up
+
+    def test_fewer_rows_returned_than_submitted_warns(self, capsys):
+        # Fix 5: if evaluate() returns fewer per-row results than submitted, some
+        # rows errored/were dropped and are silently averaged into the aggregate.
+        # Must emit a WARNING naming the drop count — additive, does NOT change
+        # the verdict (the aggregate still comes from the metrics map).
+        def fake_evaluate(*, data, evaluators, evaluation_name):
+            # 3 rows submitted (_three_results), only 1 row comes back.
+            return {"metrics": {"grounding.grounding": 5.0}, "rows": [{"grounding": 5.0}]}
+
+        agg = run_evaluation_foundry(
+            _three_results(), mode="ci",
+            evaluate_fn=fake_evaluate, evaluators={"grounding": grounding_evaluator},
+        )
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "1 per-row" in err      # returned count surfaced
+        assert "3 row(s) were submitted" in err
+        assert "2 row(s) were dropped" in err  # submitted - returned
+        # Verdict still derives from the metrics map, unaffected by the warning.
+        assert agg.scorer_means == {"grounding": 5.0}
+        assert agg.passed is True
+
+    def test_equal_rows_returned_does_not_warn(self, capsys):
+        # Boundary: returned == submitted must NOT warn (no drop).
+        def fake_evaluate(*, data, evaluators, evaluation_name):
+            return {
+                "metrics": {"grounding.grounding": 5.0},
+                "rows": [{"grounding": 5.0}, {"grounding": 5.0}, {"grounding": 5.0}],
+            }
+
+        run_evaluation_foundry(
+            _three_results(), mode="ci",
+            evaluate_fn=fake_evaluate, evaluators={"grounding": grounding_evaluator},
+        )
+        err = capsys.readouterr().err
+        assert "were dropped" not in err

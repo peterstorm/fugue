@@ -26,7 +26,7 @@ export { TailSamplingProcessor } from "./tail-sampling-processor.js";
 // applicationinsights-backed sink is composed at the app layer.
 export type { FoundryTelemetrySink } from "./ai-foundry-observer.js";
 export { AiFoundryObserver } from "./ai-foundry-observer.js";
-export type { FoundryEmission, RunSummaryExtras } from "./foundry-event-mapping.js";
+export type { FoundryEmission, FiniteNumber, RunSummaryExtras } from "./foundry-event-mapping.js";
 export {
   mapEventToFoundry,
   mapRunSummaryToFoundry,

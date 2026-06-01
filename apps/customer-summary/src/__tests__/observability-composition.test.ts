@@ -111,7 +111,7 @@ const runEnd = (runId: string, dagId: string, status: "ok" | "error", duration: 
 // Default path (no Foundry) — byte-for-byte unchanged (SC-006 / FR-003 / FR-027)
 // ---------------------------------------------------------------------------
 describe("composeObservability — default (MLflow-only) path", () => {
-  const resolved: ResolvedObservability = { traceBackends: ["mlflow"], auth: null };
+  const resolved: ResolvedObservability = { kind: "mlflow-only", traceBackends: ["mlflow"] };
 
   test("single MLflow exporter, no Foundry exporter built", () => {
     let foundryBuilds = 0;
@@ -137,6 +137,7 @@ describe("composeObservability — default (MLflow-only) path", () => {
 // ---------------------------------------------------------------------------
 describe("composeObservability — Foundry-only path", () => {
   const resolved: ResolvedObservability = {
+    kind: "with-foundry",
     traceBackends: ["foundry"],
     auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
   };
@@ -156,6 +157,7 @@ describe("composeObservability — Foundry-only path", () => {
 // ---------------------------------------------------------------------------
 describe("composeObservability — dual-export path", () => {
   const resolved: ResolvedObservability = {
+    kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
     auth: { mode: "entra-id", connectionString: "InstrumentationKey=abc" },
   };
@@ -185,6 +187,7 @@ describe("composeObservability — dual-export path", () => {
 // ---------------------------------------------------------------------------
 describe("composeObservability — shared policy gating (FR-021 / SC-010)", () => {
   const resolved: ResolvedObservability = {
+    kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
     auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
   };
@@ -436,6 +439,7 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
 // ---------------------------------------------------------------------------
 describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", () => {
   const dualResolved: ResolvedObservability = {
+    kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
     auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
   };
@@ -451,9 +455,9 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
       log,
     );
 
-    // Foundry leg degraded: no prebuilt instances, foundry dropped from selection.
-    expect(leg.foundryExporter).toBeNull();
-    expect(leg.foundrySink).toBeNull();
+    // Foundry leg degraded: inactive outcome (no prebuilt instances), foundry
+    // dropped from the effective selection.
+    expect(leg.outcome).toBe("inactive");
     expect(isFoundryEnabled(leg.effective)).toBe(false);
     expect(leg.effective.traceBackends).toEqual(["mlflow"]);
     // The failure is observable.
@@ -492,6 +496,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
 
   test("Foundry-only selection that fails falls back to MLflow (tracing still initializes)", () => {
     const foundryOnly: ResolvedObservability = {
+      kind: "with-foundry",
       traceBackends: ["foundry"],
       auth: { mode: "entra-id", connectionString: "InstrumentationKey=abc" },
     };
@@ -514,13 +519,16 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
       () => sink,
       { error: () => { throw new Error("must not log on success"); } },
     );
+    expect(leg.outcome).toBe("active");
+    // Narrow on the discriminant to reach the prebuilt instances.
+    if (leg.outcome !== "active") throw new Error("expected active leg");
     expect(leg.foundryExporter).toBe(exporter);
     expect(leg.foundrySink).toBe(sink);
     expect(leg.effective).toBe(dualResolved);
   });
 
   test("not enabled: passthrough with no Foundry construction", () => {
-    const mlflowOnly: ResolvedObservability = { traceBackends: ["mlflow"], auth: null };
+    const mlflowOnly: ResolvedObservability = { kind: "mlflow-only", traceBackends: ["mlflow"] };
     const leg = resolveFoundryLeg(
       mlflowOnly,
       () => { throw new Error("must not build"); },
@@ -528,7 +536,6 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
       { error: () => { throw new Error("must not log"); } },
     );
     expect(leg.effective).toBe(mlflowOnly);
-    expect(leg.foundryExporter).toBeNull();
-    expect(leg.foundrySink).toBeNull();
+    expect(leg.outcome).toBe("inactive");
   });
 });

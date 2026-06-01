@@ -48,7 +48,7 @@ describe("mapEventToFoundry", () => {
 
     const latency = findMetric(out, FOUNDRY_METRIC_RUN_LATENCY);
     expect(latency).toBeDefined();
-    expect(latency!.value).toBe(1234);
+    expect(latency!.value as number).toBe(1234);
     expect(latency!.properties).toEqual({ dagId: "dag-1" });
   });
 
@@ -113,7 +113,7 @@ describe("mapEventToFoundry", () => {
     const out = mapEventToFoundry(ev);
     const m = findMetric(out, FOUNDRY_METRIC_NODE_LATENCY);
     expect(m).toBeDefined();
-    expect(m!.value).toBe(42);
+    expect(m!.value as number).toBe(42);
     expect(m!.properties).toEqual({ dagId: "dag-1", nodeId: "node-1" });
   });
 
@@ -143,7 +143,7 @@ describe("mapEventToFoundry", () => {
     const out = mapEventToFoundry(ev);
     const m = findMetric(out, FOUNDRY_METRIC_NODE_CACHE_HIT);
     expect(m).toBeDefined();
-    expect(m!.value).toBe(1);
+    expect(m!.value as number).toBe(1);
     expect(m!.properties).toEqual({ dagId: "dag-1", nodeId: "node-1" });
   });
 
@@ -245,9 +245,9 @@ describe("mapRunSummaryToFoundry (FR-019 full summary)", () => {
       totalCost: 0.42,
     });
 
-    expect(findMetric(out, FOUNDRY_METRIC_RUN_LATENCY)!.value).toBe(5000);
-    expect(findMetric(out, FOUNDRY_METRIC_RUN_COST)!.value).toBe(0.42);
-    expect(findMetric(out, FOUNDRY_METRIC_RUN_TOKENS)!.value).toBe(9000);
+    expect(findMetric(out, FOUNDRY_METRIC_RUN_LATENCY)!.value as number).toBe(5000);
+    expect(findMetric(out, FOUNDRY_METRIC_RUN_COST)!.value as number).toBe(0.42);
+    expect(findMetric(out, FOUNDRY_METRIC_RUN_TOKENS)!.value as number).toBe(9000);
     expect(findMetric(out, FOUNDRY_METRIC_RUN_LATENCY)!.properties).toEqual({ dagId: "dag-1" });
   });
 

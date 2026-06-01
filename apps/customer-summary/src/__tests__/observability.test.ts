@@ -42,9 +42,9 @@ describe("resolveObservabilityBackends", () => {
     if (!isOk(result)) return;
     expect(result.value.traceBackends).toEqual(["mlflow"]);
     expect(isFoundryEnabled(result.value)).toBe(false);
-    // `auth` is always present but NULL on the no-foundry arm (illegal state
-    // — foundry-enabled without auth — unrepresentable).
-    expect(result.value.auth).toBeNull();
+    // The `mlflow-only` arm carries NO `auth` field at all (illegal state —
+    // foundry-enabled without auth, or auth without foundry — unrepresentable).
+    expect(result.value.kind).toBe("mlflow-only");
   });
 
   test("dual-export selection (mlflow,foundry) → both backends, foundry enabled (FR-002)", () => {
@@ -138,6 +138,6 @@ describe("resolveObservabilityBackends", () => {
     expect(isOk(result)).toBe(true);
     if (!isOk(result)) return;
     expect(isFoundryEnabled(result.value)).toBe(false);
-    expect(result.value.auth).toBeNull();
+    expect(result.value.kind).toBe("mlflow-only");
   });
 });

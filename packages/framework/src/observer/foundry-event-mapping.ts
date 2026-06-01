@@ -61,13 +61,27 @@ export type FoundryMetricName =
   | typeof FOUNDRY_METRIC_NODE_CACHE_HIT;
 
 /**
+ * A number proven finite (not NaN/±Infinity). Branded so the finiteness
+ * invariant lives in the TYPE: the only way to obtain one is {@link asFinite},
+ * which gates on `Number.isFinite`. A `metric` emission's `value` is therefore
+ * structurally guaranteed ingestible by Application Insights — a NaN/Infinity
+ * `value` is unrepresentable, not merely guarded for at each producer.
+ */
+export type FiniteNumber = number & { readonly __finite: unique symbol };
+
+/** Smart constructor: the sole gateway to a {@link FiniteNumber}. */
+const asFinite = (n: number): FiniteNumber | undefined =>
+  Number.isFinite(n) ? (n as FiniteNumber) : undefined;
+
+/**
  * Vendor-neutral telemetry emission. The observer translates each variant into
  * a `FoundryTelemetrySink` call (`trackEvent` / `trackMetric`).
  *
  * - `event`: a discrete domain event with string `properties` and optional
  *   numeric `measurements` (Application Insights customEvent semantics).
  * - `metric`: a single pre-aggregated numeric sample with optional `properties`
- *   used as dimensions (Application Insights customMetric semantics).
+ *   used as dimensions (Application Insights customMetric semantics). `value` is
+ *   a {@link FiniteNumber}, so NaN/Infinity is unrepresentable by construction.
  */
 export type FoundryEmission =
   | {
@@ -79,9 +93,27 @@ export type FoundryEmission =
   | {
       readonly kind: "metric";
       readonly name: FoundryMetricName;
-      readonly value: number;
+      readonly value: FiniteNumber;
       readonly properties?: Record<string, string>;
     };
+
+/**
+ * Build a `metric` emission, or `undefined` if `value` is non-finite. The single
+ * construction site for `metric` emissions: finiteness is enforced HERE (via
+ * {@link asFinite}) rather than re-checked at every producer. Callers push the
+ * result only when defined.
+ */
+const metricEmission = (
+  name: FoundryMetricName,
+  value: number,
+  properties?: Record<string, string>,
+): Extract<FoundryEmission, { kind: "metric" }> | undefined => {
+  const v = asFinite(value);
+  if (v === undefined) return undefined;
+  return properties !== undefined
+    ? { kind: "metric", name, value: v, properties }
+    : { kind: "metric", name, value: v };
+};
 
 /** Keep only finite numbers — Application Insights rejects NaN/Infinity. */
 const isFinite_ = (n: number): boolean => Number.isFinite(n);
@@ -149,31 +181,22 @@ export function mapEventToFoundry(
       },
     ])
     .with({ type: "node-end" }, (e) => {
-      const out: FoundryEmission[] = [];
-      if (isFinite_(e.duration)) {
-        out.push({
-          kind: "metric",
-          name: FOUNDRY_METRIC_NODE_LATENCY,
-          value: e.duration,
-          properties: { dagId: e.dagId, nodeId: e.nodeId },
-        });
-      }
-      return out;
+      const m = metricEmission(FOUNDRY_METRIC_NODE_LATENCY, e.duration, {
+        dagId: e.dagId,
+        nodeId: e.nodeId,
+      });
+      return m ? [m] : [];
     })
-    .with({ type: "node-skipped" }, (e) =>
+    .with({ type: "node-skipped" }, (e) => {
       // A checkpoint skip is a cache hit (FR-020 cache-hit rate, by nodeId).
       // `already-completed` is a retry-pass artefact, not a cache hit.
-      e.reason === "checkpoint"
-        ? [
-            {
-              kind: "metric" as const,
-              name: FOUNDRY_METRIC_NODE_CACHE_HIT,
-              value: 1,
-              properties: { dagId: e.dagId, nodeId: e.nodeId },
-            },
-          ]
-        : [],
-    )
+      if (e.reason !== "checkpoint") return [];
+      const m = metricEmission(FOUNDRY_METRIC_NODE_CACHE_HIT, 1, {
+        dagId: e.dagId,
+        nodeId: e.nodeId,
+      });
+      return m ? [m] : [];
+    })
     .with({ type: "run-start" }, () => [])
     .with({ type: "node-start" }, () => [])
     // Node failures are DELIBERATELY not emitted as a Foundry domain event:
@@ -211,14 +234,8 @@ function runEndEmissions(e: RunEndEvent): readonly FoundryEmission[] {
           properties: { dagId: e.dagId, runId: e.runId, status: e.status },
         },
   );
-  if (isFinite_(e.duration)) {
-    out.push({
-      kind: "metric",
-      name: FOUNDRY_METRIC_RUN_LATENCY,
-      value: e.duration,
-      properties: { dagId: e.dagId },
-    });
-  }
+  const latency = metricEmission(FOUNDRY_METRIC_RUN_LATENCY, e.duration, { dagId: e.dagId });
+  if (latency) out.push(latency);
   return out;
 }
 
@@ -271,31 +288,19 @@ export function mapRunSummaryToFoundry(
 
   const out: FoundryEmission[] = [summaryEvent];
 
-  // Pre-aggregated metrics dimensioned by dagId (FR-020).
+  // Pre-aggregated metrics dimensioned by dagId (FR-020). `metricEmission`
+  // gates finiteness; the `!== undefined` guards gate PRESENCE (an absent
+  // cost/token total emits no metric, distinct from a present-but-non-finite one).
   const dagDim = { dagId: runEnd.dagId };
-  if (isFinite_(summary.totalDuration)) {
-    out.push({
-      kind: "metric",
-      name: FOUNDRY_METRIC_RUN_LATENCY,
-      value: summary.totalDuration,
-      properties: dagDim,
-    });
+  const latency = metricEmission(FOUNDRY_METRIC_RUN_LATENCY, summary.totalDuration, dagDim);
+  if (latency) out.push(latency);
+  if (summary.totalCostUsd !== undefined) {
+    const cost = metricEmission(FOUNDRY_METRIC_RUN_COST, summary.totalCostUsd, dagDim);
+    if (cost) out.push(cost);
   }
-  if (summary.totalCostUsd !== undefined && isFinite_(summary.totalCostUsd)) {
-    out.push({
-      kind: "metric",
-      name: FOUNDRY_METRIC_RUN_COST,
-      value: summary.totalCostUsd,
-      properties: dagDim,
-    });
-  }
-  if (extras.totalTokens !== undefined && isFinite_(extras.totalTokens)) {
-    out.push({
-      kind: "metric",
-      name: FOUNDRY_METRIC_RUN_TOKENS,
-      value: extras.totalTokens,
-      properties: dagDim,
-    });
+  if (extras.totalTokens !== undefined) {
+    const tokens = metricEmission(FOUNDRY_METRIC_RUN_TOKENS, extras.totalTokens, dagDim);
+    if (tokens) out.push(tokens);
   }
 
   return out;

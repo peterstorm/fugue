@@ -1,10 +1,15 @@
-# MLflow OTLP Tracing Pipeline
+# OTLP Tracing Pipeline
+
+> Scope: this is the authoritative doc for the WHOLE trace export path — the
+> OTLP/MLflow default **and** the multi-backend fan-out (`CompositeSpanExporter`)
+> and the Azure AI Foundry (Application Insights) exporter. It is not
+> MLflow-only; see the "Multi-Backend Trace Export" section below.
 
 ## Overview
 
 The framework exports traces via the **OpenTelemetry Protocol (OTLP)**. Span attributes follow the **OTel GenAI semantic conventions** (`gen_ai.*`) wherever the spec covers what we're emitting, with a small framework-owned `ai.*` namespace for things the spec doesn't address (cost, DAG/run/node identity, guardrail outcomes). See ADR 0023.
 
-The default exporter targets MLflow's OTLP endpoint (`POST /v1/traces`); any other GenAI-aware OTLP backend (Phoenix, Langfuse, Honeycomb, Tempo) works by swapping the exporter in bootstrap — the framework emits standard names.
+The default exporter targets MLflow's OTLP endpoint (`POST /v1/traces`); any other GenAI-aware OTLP backend (Phoenix, Langfuse, Honeycomb, Tempo) works by swapping the exporter in bootstrap — the framework emits standard names. Two or more backends can be selected simultaneously (FR-002): the same spans fan out to every exporter via `CompositeSpanExporter` with per-child fault isolation.
 
 No `@mlflow/core` dependency — uses pure `@opentelemetry/api` and `@opentelemetry/sdk-node`.
 
@@ -114,8 +119,10 @@ Currently configured as `anyOf(errorOnly(), hadRetry(), ratio(0.1))` — traces 
 | `packages/framework/src/tracing/semantic-conventions.ts` | Source-of-truth constants for `gen_ai.*` and `ai.*` names |
 | `packages/framework/src/tracing/span-attribute-registry.ts` | Side-channel for object-valued MLflow attributes |
 | `packages/framework/src/tracing/mlflow-otlp-exporter.ts` | Translator tables + OTLP forwarder |
+| `packages/framework/src/tracing/azure-monitor-exporter.ts` | Azure AI Foundry (Application Insights) pass-through exporter + auth |
+| `packages/framework/src/tracing/composite-exporter.ts` | Multi-backend fan-out with per-child fault isolation (FR-002) |
 | `packages/framework/src/observer/tail-sampling-processor.ts` | Buffers spans, applies persistence policy |
-| `packages/framework/src/tracing/init.ts` | Wires pipeline (single processor) |
+| `packages/framework/src/tracing/init.ts` | Wires pipeline; `normalizeExporter` (single / `[1]`-unwrap / `[N]`-composite) |
 | `packages/framework/src/tracing/span-enrich.ts` | Emits cost + prompt events on the active LLM span |
 | `packages/framework/src/llm/spans.ts` | `withLlmSpan`/`withToolSpan` + GenAI attribute helpers |
 

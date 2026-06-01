@@ -149,8 +149,8 @@ Computes mean score per scorer across all successful cases, then overall mean ac
 
 | Mode | Scorers | LLM calls | Cost | Use case |
 |------|---------|-----------|------|----------|
-| `full` | answer_correctness, faithfulness, relevance, grounding | ~60 gpt-4o-mini calls | ~$0.01 | Local dev, pre-release |
-| `ci` | grounding only | 0 | Free | CI pipeline, fast feedback |
+| `full` | answer_correctness, faithfulness, relevance, grounding | ~60 gpt-4o-mini calls | ~$0.01 | Local dev, pre-release / nightly |
+| `ci` | grounding only | 0 | Free | CI / PR gate (fast feedback) |
 
 ## Evaluation Backends (MLflow + Azure AI Foundry)
 

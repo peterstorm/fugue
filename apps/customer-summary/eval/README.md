@@ -21,8 +21,8 @@ optional Foundry-native scoring backend (`azure-ai-evaluation`).
 
 | Mode | Scorers | Requires Azure OpenAI | Use case |
 |------|---------|-----------------------|----------|
-| `full` | All 4 (3 LLM-judged + 1 deterministic) | Yes | Local dev, nightly CI |
-| `ci` | `grounding` only (deterministic) | No | PR gate |
+| `full` | All 4 (3 LLM-judged + 1 deterministic) | Yes | Local dev, pre-release / nightly |
+| `ci` | `grounding` only (deterministic) | No | CI / PR gate (fast feedback) |
 
 ## Backends
 

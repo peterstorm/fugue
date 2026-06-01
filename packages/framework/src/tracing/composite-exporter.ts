@@ -200,12 +200,20 @@ export class CompositeSpanExporter implements SpanExporter {
       } catch (err) {
         // Synchronous throw from a child's export — isolate it. If the child
         // had not yet fired its callback (and the deadline has not elapsed),
-        // count this as that child's outcome. A throw *after* a successful
-        // callback is swallowed by the latch (no double-count).
+        // count this as that child's outcome.
         if (!childCallbackFired) {
           childCallbackFired = true;
           clearTimeout(timer);
           onChildThrow(index, err);
+        } else {
+          // A throw *after* the child already settled (fired its callback or
+          // timed out): not double-counted (the latch is closed), but a child
+          // misbehaving this badly is anomalous, so surface it instead of
+          // dropping it entirely silently.
+          const reason = err instanceof Error ? err.message : String(err);
+          fwLogger().warn(
+            `[CompositeSpanExporter] child #${index} threw AFTER it already settled (ignored): ${reason}`,
+          );
         }
       }
     });
@@ -230,13 +238,21 @@ export class CompositeSpanExporter implements SpanExporter {
       (timer as { unref?: () => void }).unref?.();
       op().then(
         () => {
-          if (settled) return;
+          // Late settle (deadline already fired): the timer is spent, so the
+          // clearTimeout is defensive hygiene rather than load-bearing.
+          if (settled) {
+            clearTimeout(timer);
+            return;
+          }
           settled = true;
           clearTimeout(timer);
           resolveOp();
         },
         (e) => {
-          if (settled) return;
+          if (settled) {
+            clearTimeout(timer);
+            return;
+          }
           settled = true;
           clearTimeout(timer);
           rejectOp(e instanceof Error ? e : new Error(String(e)));

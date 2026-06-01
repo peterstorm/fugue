@@ -18,6 +18,7 @@ import {
   piiScrubber,
   IDENTITY_FILTER,
   isOk,
+  setFrameworkLogger,
 } from "@fugue/framework";
 import { RedisCache, RedisCheckpointer } from "@fugue/framework/redis";
 import { DefaultAzureCredential } from "@azure/identity";
@@ -31,11 +32,19 @@ import { composeObservability, resolveFoundryLeg, type SpanExporter } from "./ob
 import { createFoundrySink } from "./foundry-sink.js";
 import { consoleAppLogger } from "./logger.js";
 import type { AppLogger } from "./logger.js";
+import { runGracefulShutdown } from "./shutdown.js";
 
 const LLM_CACHE_TTL = 3600; // 1 hour
 
 export const bootstrap = async (injectedLogger?: AppLogger) => {
   const log = injectedLogger ?? consoleAppLogger;
+  // Route the framework's fault-isolation warnings (CompositeSpanExporter,
+  // AzureMonitorExporter, AiFoundryObserver, FoundryRunSummaryObserver — all via
+  // fwLogger()) to the SAME logger the app uses. Without this they fall back to
+  // the framework's console default, so the "swallow-but-log" safety net would
+  // bypass an injected structured/aggregated AppLogger and be invisible to the
+  // operator's log pipeline. AppLogger is structurally a FrameworkLogger.
+  setFrameworkLogger(log);
   const config = loadConfig();
 
   const fixturesDir = resolve(config.FIXTURES_DIR);
@@ -85,7 +94,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     // Foundry leg (returning an MLflow-only effective selection), leaving MLflow
     // tracing live (FR-026 / SC-006 / SC-009). On success the prebuilt instances
     // are handed to composeObservability via thin factories below.
-    const { effective: effectiveResolved, foundryExporter, foundrySink } = resolveFoundryLeg(
+    const leg = resolveFoundryLeg(
       resolved,
       (): SpanExporter => {
         // Reachable only when Foundry is enabled, where `resolved.auth` exists.
@@ -107,6 +116,12 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       },
       log,
     );
+    // Destructure the discriminated leg into the locals the composition factories
+    // close over. The `active` arm carries BOTH instances (coupled by the type);
+    // the `inactive` arm (not enabled / degraded) carries neither.
+    const effectiveResolved = leg.effective;
+    const foundryExporter: SpanExporter | null = leg.outcome === "active" ? leg.foundryExporter : null;
+    const foundrySink: FoundryTelemetrySink | null = leg.outcome === "active" ? leg.foundrySink : null;
     foundrySinkForFlush = foundrySink;
 
     // Compose exporters + observer from the EFFECTIVE selection. Factories are
@@ -328,7 +343,13 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       checkRedis: async () => redisHealthy && redis !== null,
       checkMlflow: async () => {
         try {
-          const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`);
+          // Bound the probe: a black-holed MLflow endpoint must not hang the k8s
+          // readiness check until the platform socket timeout. A timeout aborts
+          // the fetch and is handled as not-ready below (matches checkRedis's
+          // bounded intent).
+          const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`, {
+            signal: AbortSignal.timeout(2000),
+          });
           if (!res.ok) {
             log.debug(`[health] MLflow returned non-ok status: ${res.status}`);
           }
@@ -342,59 +363,22 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   };
   const app = createApp(deps);
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    // Guard each step independently. On the default single-backend path the
-    // exporter is unwrapped to a bare exporter (bypassing CompositeSpanExporter's
-    // never-reject guarantee), and the OTel shutdown chain propagates rejections.
-    // A rejecting trace flush/shutdown must NOT abort the observer-dispose, sink
-    // drain, or redis disconnect below — otherwise we reintroduce the sweep-timer
-    // leak and lose the final domain-event batch.
-    if (tracing) {
-      log.info("Flushing traces...");
-      try {
-        await tracing.flush();
-      } catch (e) {
-        log.warn("Trace flush failed during shutdown:", e);
-      }
-      try {
-        await tracing.shutdown();
-      } catch (e) {
-        log.warn("Tracing SDK shutdown failed during shutdown:", e);
-      }
-    }
-    // Stop the BufferedObserver sweep so it doesn't outlive the process. The
-    // NoopObserver default has no dispose; only the Foundry path's observer is
-    // Disposable. Narrow structurally so the default path is untouched.
-    const disposable = observer as Partial<Disposable> & { close?: () => void };
-    try {
-      if (typeof disposable.close === "function") {
-        disposable.close();
-      } else if (typeof disposable[Symbol.dispose] === "function") {
-        disposable[Symbol.dispose]!();
-      }
-    } catch (e) {
-      log.warn("Observer dispose failed during shutdown:", e);
-    }
-    // Drain buffered Foundry domain events before exit. The isolated
-    // (connection-string-mode) Application Insights client batches track calls,
-    // so without this final flush the last batch is lost on process.exit.
-    if (foundrySinkForFlush) {
-      log.info("Flushing Foundry domain events...");
-      try {
-        await foundrySinkForFlush.flush();
-      } catch (e) {
-        log.warn("Foundry sink flush failed during shutdown:", e);
-      }
-    }
-    if (redis) {
-      try {
-        await redis.disconnect();
-      } catch (e) {
-        log.warn("Redis disconnect failed during shutdown:", e);
-      }
-    }
-  };
+  // Graceful shutdown — orchestration lives in `runGracefulShutdown` (extracted
+  // so the per-step fault isolation is unit-tested directly). Each step is
+  // guarded independently there: a rejecting trace flush must NOT abort the
+  // observer dispose, sink drain, or redis disconnect (the "shutdown wedge"
+  // guarantee). The observer is narrowed structurally so the default
+  // NoopObserver path has no dispose step.
+  const shutdown = async () =>
+    runGracefulShutdown(
+      {
+        tracing,
+        observer: observer as Partial<Disposable> & { close?: () => void },
+        foundrySink: foundrySinkForFlush,
+        redis,
+      },
+      log,
+    );
 
   return { app, config, tracing, shutdown };
 };

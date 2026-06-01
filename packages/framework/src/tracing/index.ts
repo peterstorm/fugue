@@ -43,6 +43,11 @@ export {
 export type { TracingConfig, TracingHandle } from "./init.js";
 export { initTracing, normalizeExporter } from "./init.js";
 
+// Re-export the OTel `SpanExporter` contract so consumers (e.g. the app
+// composition layer) can name the exporter type WITHOUT a direct
+// `@opentelemetry/*` dependency — the framework owns the OTel surface.
+export type { SpanExporter } from "@opentelemetry/sdk-trace-base";
+
 // Multi-backend fan-out exporter (FR-002): deliver the same spans to N backends
 export { CompositeSpanExporter } from "./composite-exporter.js";
 export type { ChildFailureCount } from "./composite-exporter.js";

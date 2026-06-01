@@ -119,8 +119,6 @@ class TestMainDispatch:
 
         called = {"foundry": False, "mlflow": False}
 
-        import foundry_eval
-
         def fake_foundry(results, mode):
             called["foundry"] = True
             return passing
@@ -129,8 +127,12 @@ class TestMainDispatch:
             called["mlflow"] = True
             return passing
 
-        monkeypatch.setattr(foundry_eval, "run_evaluation_foundry", fake_foundry)
-        monkeypatch.setattr(run, "run_evaluation", fake_mlflow)
+        # Patch the dispatch SEAM main() actually calls (run_foundry_backend /
+        # run_mlflow_backend), not the inner run_evaluation* functions — same
+        # boundary the `both` tests patch. This tests the real dispatch and is
+        # robust to the wrappers being refactored.
+        monkeypatch.setattr(run, "run_foundry_backend", fake_foundry)
+        monkeypatch.setattr(run, "run_mlflow_backend", fake_mlflow)
         monkeypatch.setenv("EVAL_BACKEND", "foundry")
         monkeypatch.setattr(sys, "argv", ["run.py", "--mode=ci"])
 
@@ -144,8 +146,6 @@ class TestMainDispatch:
         passing = AggregateResult(scorer_means={"grounding": 5.0}, overall_mean=5.0, passed=True)
         called = {"foundry": False, "mlflow": False}
 
-        import foundry_eval
-
         def fake_foundry(results, mode):
             called["foundry"] = True
             return passing
@@ -154,14 +154,11 @@ class TestMainDispatch:
             called["mlflow"] = True
             return passing
 
-        # mlflow path imports `mlflow` and calls set_experiment; fake the module.
-        import types
-        fake_mlflow_mod = types.ModuleType("mlflow")
-        fake_mlflow_mod.set_experiment = lambda name: None
-        monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow_mod)
-
-        monkeypatch.setattr(foundry_eval, "run_evaluation_foundry", fake_foundry)
-        monkeypatch.setattr(run, "run_evaluation", fake_mlflow)
+        # Patch the dispatch seam. Replacing run_mlflow_backend also removes the
+        # need to fake the `mlflow` module (the real wrapper's `import mlflow` +
+        # set_experiment never runs), so the test exercises pure dispatch.
+        monkeypatch.setattr(run, "run_foundry_backend", fake_foundry)
+        monkeypatch.setattr(run, "run_mlflow_backend", fake_mlflow)
         monkeypatch.setattr(sys, "argv", ["run.py", "--mode=ci", "--backend=mlflow"])
         monkeypatch.delenv("EVAL_BACKEND", raising=False)
 
