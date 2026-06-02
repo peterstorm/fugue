@@ -56,6 +56,16 @@ class TestBackendSelector:
         # argparse accepted the bogus default unchanged (the whole point).
         assert args.backend == "foundryy"
 
+    def test_env_mode_default_bypasses_argparse_choices(self, monkeypatch):
+        """Same argparse gap for --mode: a typo'd EVAL_MODE env default survives
+        parse_args() (choices validates CLI values only), so main() must catch it
+        before a bogus mode silently runs the wrong scorer set."""
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)
+        monkeypatch.setenv("EVAL_MODE", "cii")
+        monkeypatch.setattr(sys, "argv", ["run.py"])
+        args = parse_args()
+        assert args.mode == "cii"
+
 
 class TestBogusEnvFailsLoud:
     """A bogus EVAL_BACKEND must fail loud in main(), NOT silently run mlflow."""
@@ -93,6 +103,46 @@ class TestBogusEnvFailsLoud:
         assert "foundryy" in err
         assert "mlflow|foundry|both" in err
         # MUST fail before ever dispatching to a backend.
+        assert called["mlflow"] is False
+        assert called["foundry"] is False
+
+    def test_bogus_mode_env_exits_nonzero_without_running_backend(self, monkeypatch, capsys):
+        """Symmetric to the EVAL_BACKEND case: a typo'd EVAL_MODE (valid backend)
+        must fail loud in main() — NOT silently run the wrong scorer set."""
+        import scorers
+        import foundry_eval
+
+        called = {"foundry": False, "mlflow": False, "collect": False}
+
+        monkeypatch.setattr(run, "load_cases", lambda path: [EvalCase_stub()])
+        monkeypatch.setattr(scorers, "validate_fixtures", lambda ids: [])
+
+        def fake_collect(base_url, cs, max_workers=4):
+            called["collect"] = True
+            return [EvalResult(customer_id="c1", summary="s", reference_summary="r")]
+
+        monkeypatch.setattr(run, "collect_results", fake_collect)
+        monkeypatch.setattr(
+            run, "run_evaluation",
+            lambda results, mode: called.__setitem__("mlflow", True),
+        )
+        monkeypatch.setattr(
+            foundry_eval, "run_evaluation_foundry",
+            lambda results, mode: called.__setitem__("foundry", True),
+        )
+
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)  # backend valid (default mlflow)
+        monkeypatch.setenv("EVAL_MODE", "cii")  # typo
+        monkeypatch.setattr(sys, "argv", ["run.py"])
+
+        rc = run.main()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "cii" in err
+        assert "full|ci" in err
+        # MUST fail on the mode check before any pipeline work or dispatch.
+        assert called["collect"] is False
         assert called["mlflow"] is False
         assert called["foundry"] is False
 

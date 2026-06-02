@@ -166,9 +166,15 @@ class TestComputeAggregateFoundry:
         agg = compute_aggregate_foundry(metrics, ["grounding"])
         assert agg.passed is False
 
-    def test_empty_metrics(self):
+    def test_empty_metrics_is_contract_error(self, capsys):
+        # An empty-but-present metrics dict (e.g. every row errored inside the
+        # SDK) is as much a contract failure as a missing key — it must surface
+        # at ERROR (not merely WARNING) and fail closed.
         agg = compute_aggregate_foundry({}, ["relevance"])
         assert agg == AggregateResult(scorer_means={}, overall_mean=0.0, passed=False)
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "NO metrics" in err
 
 
 class TestRunEvaluationFoundryWithFake:

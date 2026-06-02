@@ -136,15 +136,20 @@ def compute_aggregate_foundry(metrics: dict[str, Any],
         # it loudly with both the requested-but-missing scorers and the actual
         # metric keys present so a shape mismatch is never silently read as a
         # genuine low/failed score.
-        if not scorer_means and metrics:
-            # ZERO expected scorers matched but metrics were non-empty: this is
-            # an unambiguous contract error, not a low score.
+        if not scorer_means:
+            # ZERO expected scorers matched. Either the SDK returned NO metrics
+            # at all (empty dict — e.g. every row errored) or it returned keys
+            # but none matched what we asked for. BOTH are unambiguous contract
+            # errors (fail-closed at ERROR), never a genuine low score.
+            detail = (
+                "returned NO metrics at all (empty dict)"
+                if not metrics
+                else f"returned metric keys {sorted(metrics.keys())}, none matching the expected scorers"
+            )
             print(
-                "ERROR: Foundry metrics shape mismatch — NONE of the expected "
-                f"scorers {scorer_names} matched the SDK output. Actual metric "
-                f"keys present: {sorted(metrics.keys())}. Returning a FAILED "
-                "aggregate (fail-closed); this is a contract error, not a low "
-                "score.",
+                f"ERROR: Foundry metrics shape mismatch — expected scorers "
+                f"{scorer_names}; the SDK {detail}. Returning a FAILED aggregate "
+                "(fail-closed); this is a contract error, not a low score.",
                 file=sys.stderr,
             )
         else:

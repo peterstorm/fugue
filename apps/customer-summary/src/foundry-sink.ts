@@ -25,12 +25,12 @@
  *     credential through `parseConfig()` into the isolated client's Azure Monitor
  *     exporter — so AAD auth needs NO global `useAzureMonitor` pipeline.
  *
- * Fail-tolerance (FR-028): track-call fault isolation is provided by the
- * observer wrappers (the framework's `AiFoundryObserver` and the app's
- * `FoundryRunSummaryObserver`), which wrap every emission in try/catch + log. This adapter is intentionally a
- * thin pass-through. `flush()` may reject; its sole caller (graceful shutdown in
- * bootstrap.ts) guards and logs it, so a flush failure is surfaced rather than
- * silently swallowed.
+ * Fail-tolerance (FR-028): track-call fault isolation is provided by the observer
+ * wrappers (the framework's `AiFoundryObserver` and the app's
+ * `FoundryRunSummaryObserver`), which wrap every emission in try/catch + log, so
+ * this adapter is intentionally a thin pass-through. `flush()` may reject; its
+ * sole caller (graceful shutdown in bootstrap.ts) guards and logs it, so a flush
+ * failure is surfaced rather than silently swallowed.
  */
 import { TelemetryClient } from "applicationinsights";
 import { DefaultAzureCredential } from "@azure/identity";

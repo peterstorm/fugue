@@ -24,6 +24,7 @@ import { isFoundryEnabled } from "../observability.js";
 import {
   foundrySinkOver,
   createAppInsightsClient,
+  createFoundrySink,
   type AppInsightsClient,
   type AppInsightsClientSeams,
 } from "../foundry-sink.js";
@@ -438,6 +439,45 @@ describe("createAppInsightsClient — auth translation", () => {
       },
     );
     expect(client.config.aadTokenCredential).toBe(fakeCredential);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createFoundrySink — production composer (createAppInsightsClient → foundrySinkOver)
+// The two constituents are covered above; this asserts the one-line wiring:
+// the resolved auth reaches createAppInsightsClient, the seams pass through, and
+// the returned value is a working FoundryTelemetrySink over that client.
+// ---------------------------------------------------------------------------
+describe("createFoundrySink — production composer", () => {
+  test("wires resolved auth + seams through to a sink over the isolated client", () => {
+    const events: Array<{ name: string }> = [];
+    const fakeClient: AppInsightsClient = {
+      trackEvent: (e) => {
+        events.push({ name: e.name });
+      },
+      trackMetric: () => {},
+      flush: () => {},
+    };
+    const clientCalls: Array<{ connectionString: string; options: { useGlobalProviders: boolean } }> = [];
+    const seams: Partial<AppInsightsClientSeams> = {
+      newClient: (connectionString, options) => {
+        clientCalls.push({ connectionString, options });
+        return fakeClient;
+      },
+    };
+
+    const sink = createFoundrySink(
+      { mode: "connection-string", connectionString: "InstrumentationKey=compose" },
+      seams,
+    );
+
+    // The auth's connection string reached the (isolated) client constructor.
+    expect(clientCalls).toEqual([
+      { connectionString: "InstrumentationKey=compose", options: { useGlobalProviders: false } },
+    ]);
+    // The returned sink forwards onto that exact client.
+    sink.trackEvent({ name: "composed-event" });
+    expect(events).toEqual([{ name: "composed-event" }]);
   });
 });
 

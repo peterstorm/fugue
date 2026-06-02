@@ -74,7 +74,9 @@ const ConfigSchema = z.object({
         });
         return z.NEVER;
       }
-      return Object.freeze(backends) as readonly TraceBackend[];
+      // Non-empty by construction: the `backends.length === 0` guard above
+      // returns `z.NEVER`, so the cast to the non-empty tuple is honest.
+      return Object.freeze(backends) as TraceBackends;
     }),
 
   // Application Insights connection string (FR-022). Optional at the schema
@@ -120,6 +122,14 @@ const ConfigSchema = z.object({
 
 /** A selectable trace backend. One = exclusive export, two = dual export (FR-002). */
 export type TraceBackend = "mlflow" | "foundry";
+
+/**
+ * A resolved trace-backend selection: NON-EMPTY, deduped, order-preserving. The
+ * non-emptiness is PROVEN at the parse boundary (the transform rejects an empty
+ * selection with `z.NEVER`) and carried in the type so downstream consumers
+ * (`ResolvedObservability`, `composeObservability`) never re-assert it.
+ */
+export type TraceBackends = readonly [TraceBackend, ...TraceBackend[]];
 
 export type Config = z.infer<typeof ConfigSchema>;
 

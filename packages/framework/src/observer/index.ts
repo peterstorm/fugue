@@ -25,7 +25,7 @@ export { TailSamplingProcessor } from "./tail-sampling-processor.js";
 // vendor-neutral observer over a FoundryTelemetrySink port. The
 // applicationinsights-backed sink is composed at the app layer.
 export type { FoundryTelemetrySink } from "./ai-foundry-observer.js";
-export { AiFoundryObserver } from "./ai-foundry-observer.js";
+export { AiFoundryObserver, forwardEmission } from "./ai-foundry-observer.js";
 export type { FoundryEmission, FiniteNumber, RunSummaryExtras } from "./foundry-event-mapping.js";
 export {
   mapEventToFoundry,

@@ -28,6 +28,7 @@ import {
   NoopObserver,
   computeRunSummary,
   mapRunSummaryToFoundry,
+  forwardEmission,
   dispatchEvent,
   fwLogger,
 } from "@fugue/framework";
@@ -39,7 +40,7 @@ import type {
   SpanExporter,
 } from "@fugue/framework";
 import type { ObserverEvent, RunEndEvent } from "@fugue/framework";
-import type { ResolvedObservability, TraceBackend } from "./observability.js";
+import type { ResolvedObservability, TraceBackend, TraceBackends } from "./observability.js";
 import { isFoundryEnabled } from "./observability.js";
 
 /**
@@ -149,19 +150,7 @@ export class FoundryRunSummaryObserver implements Observer {
     const emissions = mapRunSummaryToFoundry(summary, runEnd, extras);
     for (const emission of emissions) {
       try {
-        if (emission.kind === "event") {
-          this.sink.trackEvent({
-            name: emission.name,
-            properties: emission.properties,
-            ...(emission.measurements ? { measurements: emission.measurements } : {}),
-          });
-        } else {
-          this.sink.trackMetric({
-            name: emission.name,
-            value: emission.value,
-            ...(emission.properties ? { properties: emission.properties } : {}),
-          });
-        }
+        forwardEmission(this.sink, emission);
       } catch (err) {
         // Fail-tolerant: a misbehaving sink must not break the run's tail. This
         // run-summary path calls `this.sink` DIRECTLY (it never routes through
@@ -198,26 +187,15 @@ export const composeObservability = (
   policy: PersistencePolicy,
   factories: ObservabilityFactories,
 ): ComposedObservability => {
-  // Build exporters in the resolved `traceBackends` ORDER (FR-002).
-  const exporterList: SpanExporter[] = [];
-  for (const backend of resolved.traceBackends) {
-    if (backend === "mlflow") {
-      exporterList.push(factories.createMlflowExporter());
-    } else {
-      exporterList.push(factories.createFoundryExporter());
-    }
-  }
-  // `traceBackends` is always non-empty (config rejects empty selection), so the
-  // first element exists. Build the non-empty tuple explicitly rather than a
-  // blind array→tuple cast (the head is proven present; the tail is the rest).
-  const [head, ...tail] = exporterList;
-  if (head === undefined) {
-    // Unreachable: config validation rejects an empty selection. Fail loud.
-    throw new Error(
-      "composeObservability: resolved traceBackends produced no exporters (empty selection)",
-    );
-  }
-  const exporters: ExporterList = [head, ...tail];
+  // Build exporters in the resolved `traceBackends` ORDER (FR-002). The selection
+  // is a NON-EMPTY tuple (config invariant, carried in `TraceBackends`), so the
+  // head backend is proven present at the type level — destructuring yields a
+  // non-optional head and the result is a non-empty `ExporterList` with no
+  // empty-selection runtime guard needed.
+  const toExporter = (backend: TraceBackend): SpanExporter =>
+    backend === "mlflow" ? factories.createMlflowExporter() : factories.createFoundryExporter();
+  const [headBackend, ...tailBackends] = resolved.traceBackends;
+  const exporters: ExporterList = [toExporter(headBackend), ...tailBackends.map(toExporter)];
 
   if (!isFoundryEnabled(resolved)) {
     // Default / MLflow-only path — byte-for-byte the pre-Foundry behaviour:
@@ -311,19 +289,16 @@ export const resolveFoundryLeg = (
         "MLflow tracing continues unaffected:",
       foundryErr,
     );
-    const mlflowOnly = resolved.traceBackends.filter((b) => b !== "foundry");
     // MLflow is guaranteed selectable alongside Foundry in well-formed config;
     // if Foundry was the SOLE backend, fall back to MLflow so tracing still
-    // initializes. Freeze the array so the degraded selection preserves the same
-    // immutable-traceBackends invariant the config layer establishes (config.ts).
+    // initializes. Rebuild as a NON-EMPTY tuple (matching the config-layer
+    // `TraceBackends` invariant) and freeze it so the degraded selection stays
+    // immutable.
+    const [head, ...tail] = resolved.traceBackends.filter((b) => b !== "foundry");
+    const degraded: TraceBackends = head !== undefined ? [head, ...tail] : ["mlflow"];
     return {
       outcome: "inactive",
-      effective: {
-        kind: "mlflow-only",
-        traceBackends: Object.freeze(
-          mlflowOnly.length > 0 ? mlflowOnly : (["mlflow"] as TraceBackend[]),
-        ),
-      },
+      effective: { kind: "mlflow-only", traceBackends: Object.freeze(degraded) },
     };
   }
 };

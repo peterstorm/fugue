@@ -84,8 +84,10 @@ export const runGracefulShutdown = async (
     log.warn("Observer dispose failed during shutdown:", e);
   }
 
-  // Drain buffered Foundry domain events before exit (the isolated
-  // connection-string-mode client batches track calls).
+  // Drain buffered Foundry domain events before exit. The isolated Application
+  // Insights client batches track calls under BOTH auth modes (entra-id differs
+  // only by attaching a credential — see foundry-sink.ts createAppInsightsClient),
+  // so this final flush is required regardless of mode or the last batch is lost.
   if (foundrySink) {
     log.info("Flushing Foundry domain events...");
     try {

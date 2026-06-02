@@ -24,10 +24,10 @@
  * The foundry-enabled fact is the discriminant itself ({@link isFoundryEnabled}
  * narrows on `kind`), not a separate boolean that could drift from `traceBackends`.
  */
-import type { Config, TraceBackend } from "./config.js";
+import type { Config, TraceBackend, TraceBackends } from "./config.js";
 import { type Result, ok, err } from "@fugue/framework";
 
-export type { TraceBackend };
+export type { TraceBackend, TraceBackends };
 
 /**
  * Resolved auth for the Foundry (Application Insights) exporter.
@@ -54,10 +54,10 @@ export type ResolvedAuth =
  * foundry-enabled is the discriminant itself rather than a derived boolean.
  */
 export type ResolvedObservability =
-  | { readonly kind: "mlflow-only"; readonly traceBackends: readonly TraceBackend[] }
+  | { readonly kind: "mlflow-only"; readonly traceBackends: TraceBackends }
   | {
       readonly kind: "with-foundry";
-      readonly traceBackends: readonly TraceBackend[];
+      readonly traceBackends: TraceBackends;
       readonly auth: ResolvedAuth;
     };
 
