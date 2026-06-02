@@ -88,7 +88,7 @@ export type FoundryEmission =
       readonly kind: "event";
       readonly name: FoundryEventName;
       readonly properties: Record<string, string>;
-      readonly measurements?: Record<string, number>;
+      readonly measurements?: Record<string, FiniteNumber>;
     }
   | {
       readonly kind: "metric";
@@ -115,21 +115,22 @@ const metricEmission = (
     : { kind: "metric", name, value: v };
 };
 
-/** Keep only finite numbers — Application Insights rejects NaN/Infinity. */
-const isFinite_ = (n: number): boolean => Number.isFinite(n);
-
 /**
- * Build a `measurements` object containing only finite entries. Returns
+ * Build a `measurements` object containing only finite entries, each branded a
+ * {@link FiniteNumber} via the same {@link asFinite} smart constructor used for
+ * `metric.value` — so the "Application Insights rejects NaN/Infinity" invariant
+ * lives in the type on BOTH telemetry channels, not just metrics. Returns
  * `undefined` if nothing finite survives, so callers never attach an empty bag.
  */
 const finiteMeasurements = (
   entries: Record<string, number>,
-): Record<string, number> | undefined => {
-  const out: Record<string, number> = {};
+): Record<string, FiniteNumber> | undefined => {
+  const out: Record<string, FiniteNumber> = {};
   let any = false;
   for (const [k, v] of Object.entries(entries)) {
-    if (isFinite_(v)) {
-      out[k] = v;
+    const finite = asFinite(v);
+    if (finite !== undefined) {
+      out[k] = finite;
       any = true;
     }
   }

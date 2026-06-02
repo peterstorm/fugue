@@ -44,7 +44,7 @@ describe("mapEventToFoundry", () => {
     const summary = findEvent(out, FOUNDRY_EVENT_RUN_SUMMARY);
     expect(summary).toBeDefined();
     expect(summary!.properties).toEqual({ dagId: "dag-1", runId: "run-1", status: "ok" });
-    expect(summary!.measurements).toEqual({ durationMs: 1234 });
+    expect(summary!.measurements as Record<string, number>).toEqual({ durationMs: 1234 });
 
     const latency = findMetric(out, FOUNDRY_METRIC_RUN_LATENCY);
     expect(latency).toBeDefined();
@@ -75,7 +75,7 @@ describe("mapEventToFoundry", () => {
     expect(event!.properties.chosenTargets).toBe("a,b");
     expect(event!.properties.prunedTargets).toBe("c");
     expect(event!.properties.defaultTaken).toBe("false");
-    expect(event!.measurements).toEqual({ chosenCount: 2, prunedCount: 1 });
+    expect(event!.measurements as Record<string, number>).toEqual({ chosenCount: 2, prunedCount: 1 });
   });
 
   it("node-pruned → node-pruned event with reason", () => {
@@ -237,7 +237,7 @@ describe("mapRunSummaryToFoundry (FR-019 full summary)", () => {
     const event = findEvent(out, FOUNDRY_EVENT_RUN_SUMMARY)!;
     expect(event.properties).toEqual({ dagId: "dag-1", runId: "run-1", status: "ok" });
     // FR-019: duration, status, nodeCount, retryCount, cacheHitCount, total cost.
-    expect(event.measurements).toEqual({
+    expect(event.measurements as Record<string, number>).toEqual({
       durationMs: 5000,
       nodeCount: 7,
       retryCount: 2,
@@ -266,7 +266,7 @@ describe("mapRunSummaryToFoundry (FR-019 full summary)", () => {
     expect(findMetric(out, FOUNDRY_METRIC_RUN_COST)).toBeUndefined();
     expect(findMetric(out, FOUNDRY_METRIC_RUN_TOKENS)).toBeUndefined();
     const event = findEvent(out, FOUNDRY_EVENT_RUN_SUMMARY)!;
-    expect(event.measurements).toEqual({ durationMs: 100, nodeCount: 1, retryCount: 0 });
+    expect(event.measurements as Record<string, number>).toEqual({ durationMs: 100, nodeCount: 1, retryCount: 0 });
   });
 });
 

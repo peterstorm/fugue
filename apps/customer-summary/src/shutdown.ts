@@ -3,7 +3,8 @@
  * per-step fault isolation is unit-testable with plain fakes (no live tracing /
  * redis / Azure).
  *
- * The guarantee (the "shutdown wedge" class fixed across prior rounds, FR-060):
+ * The guarantee (the "shutdown wedge" class fixed across prior rounds, FR-028 —
+ * export stays off the run's critical path, including teardown):
  * each teardown step is guarded INDEPENDENTLY, so a step that throws/rejects is
  * logged and the REMAINING steps still run. A rejecting trace flush must never
  * strand the BufferedObserver sweep timer, the final Foundry domain-event batch,

@@ -72,7 +72,7 @@ export type AzureMonitorInnerFactory = (opts: AzureMonitorInnerOpts) => SpanExpo
 
 /**
  * Exporter config. A discriminated union over `auth` vs `createInner` so the
- * empty state `{}` is a COMPILE error (Fix 2 / CLAUDE.md: illegal states
+ * empty state `{}` is a COMPILE error (CLAUDE.md: illegal states
  * unrepresentable):
  *
  * - `{ auth }` — production: supply an {@link AzureMonitorAuth}. At least one of
@@ -81,7 +81,7 @@ export type AzureMonitorInnerFactory = (opts: AzureMonitorInnerOpts) => SpanExpo
  *   when present, `buildInner` assembles the auth options via the REAL
  *   `resolveOpts(auth)` path and hands the resulting {@link AzureMonitorInnerOpts}
  *   to the seam INSTEAD of constructing the live Azure exporter. This is how
- *   auth-shape tests observe exactly what Azure would receive (Fix 1) — no live
+ *   auth-shape tests observe exactly what Azure would receive — no live
  *   network, no test-only hand-wired spread.
  * - `{ createInner }` (no `auth`) — pure test seam: inject a fake inner
  *   `SpanExporter` with no auth at all. The factory receives empty opts `{}`.
@@ -156,7 +156,7 @@ export class AzureMonitorExporter implements SpanExporter {
    * them through either the `createInner` test seam (no live Azure) or the real
    * `AzureMonitorTraceExporter`. Because the SAME assembled `opts` object flows
    * down BOTH paths, a test injecting `createInner` observes exactly what the
-   * real Azure exporter would receive (Fix 1: no test-only hand-wired spread).
+   * real Azure exporter would receive (no test-only hand-wired spread).
    */
   private static buildInner(config: AzureMonitorExporterConfig): SpanExporter {
     // Assemble the auth options ONCE via the REAL resolveOpts path when auth is
@@ -165,7 +165,7 @@ export class AzureMonitorExporter implements SpanExporter {
       "auth" in config ? AzureMonitorExporter.resolveOpts(config.auth) : {};
 
     // Seam takes precedence and receives the SAME assembled `opts` the real
-    // Azure exporter would (Fix 1) — so auth-shape regressions are caught on the
+    // Azure exporter would — so auth-shape regressions are caught on the
     // real assembly path, with no live network.
     if (config.createInner) return config.createInner(opts);
 

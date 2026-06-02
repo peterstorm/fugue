@@ -57,10 +57,15 @@ afterEach(() => {
 // Fakes / seams — NO live Azure, NO global Application Insights pipeline.
 // ---------------------------------------------------------------------------
 
+// OTel `ExportResultCode.SUCCESS`. Named locally rather than imported so the app
+// test stays decoupled from a direct `@opentelemetry/*` dependency (the app only
+// sees `SpanExporter` re-exported through the framework barrel).
+const EXPORT_RESULT_SUCCESS = 0;
+
 /** A fake SpanExporter so we can identify exporters by reference/tag. */
 const fakeExporter = (tag: string): SpanExporter => ({
   export: (_spans: unknown, cb: (r: { code: number }) => void) => {
-    cb({ code: 0 });
+    cb({ code: EXPORT_RESULT_SUCCESS });
   },
   shutdown: async () => {},
   // Carry an identifying tag for assertions.
@@ -461,6 +466,28 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
     expect(isFoundryEnabled(leg.effective)).toBe(false);
     expect(leg.effective.traceBackends).toEqual(["mlflow"]);
     // The failure is observable.
+    expect(errors.length).toBe(1);
+    expect(errors[0]!.msg).toContain("MLflow tracing continues");
+  });
+
+  test("Foundry SINK factory throws (exporter built first) → MLflow-only + logged", () => {
+    // The exporter constructs fine but the sink construction faults. Both are
+    // built inside the same try, so this branch must degrade identically to the
+    // exporter-throws case — otherwise a half-built leg (exporter, no sink)
+    // could wire an exporter with no observer.
+    const errors: Array<{ msg: string; args: unknown[] }> = [];
+    const log = { error: (msg: string, ...args: unknown[]) => { errors.push({ msg, args }); } };
+
+    const leg = resolveFoundryLeg(
+      dualResolved,
+      () => fakeExporter("foundry"),
+      () => { throw new Error("appinsights-sink-boom"); },
+      log,
+    );
+
+    expect(leg.outcome).toBe("inactive");
+    expect(isFoundryEnabled(leg.effective)).toBe(false);
+    expect(leg.effective.traceBackends).toEqual(["mlflow"]);
     expect(errors.length).toBe(1);
     expect(errors[0]!.msg).toContain("MLflow tracing continues");
   });

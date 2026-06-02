@@ -345,8 +345,9 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
         try {
           // Bound the probe: a black-holed MLflow endpoint must not hang the k8s
           // readiness check until the platform socket timeout. A timeout aborts
-          // the fetch and is handled as not-ready below (matches checkRedis's
-          // bounded intent).
+          // the fetch and is handled as not-ready below. (checkRedis above does
+          // no live I/O — it reads a cached flag — so only this probe needs an
+          // explicit bound.)
           const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`, {
             signal: AbortSignal.timeout(2000),
           });

@@ -169,9 +169,17 @@ def compute_aggregate(eval_table: Any, scorer_names: list[str]) -> AggregateResu
                 "missing scorer(s) as a shape mismatch (fail-closed), not a low score.",
                 file=sys.stderr,
             )
-
-    if not scorer_means:
-        return AggregateResult(scorer_means={}, overall_mean=0.0, passed=False)
+        # Fail closed for ANY missing expected scorer, including the partial case
+        # where some scorers survived: a silently-dropped scorer (judge misconfig,
+        # renamed metric key, SDK output-shape drift) must never be averaged away
+        # to PASS over the survivors. Report the surviving means for visibility but
+        # force passed=False — matching the "fail-closed" log text above.
+        overall_mean = sum(scorer_means.values()) / len(scorer_means) if scorer_means else 0.0
+        return AggregateResult(
+            scorer_means=scorer_means,
+            overall_mean=overall_mean,
+            passed=False,
+        )
 
     overall_mean = sum(scorer_means.values()) / len(scorer_means)
     return AggregateResult(
@@ -417,7 +425,10 @@ def run_both_backends(results: list[EvalResult], mode: str) -> int:
         return 1
 
     print(format_parity_table(deltas))
-    within = parity_within_tolerance(deltas, tol=0.5)
+    # Inherit parity.PARITY_TOLERANCE (the single source of truth) rather than
+    # re-stating 0.5 here — otherwise the printed table and the pass/fail check
+    # could silently disagree if the tolerance is ever retuned.
+    within = parity_within_tolerance(deltas)
     if not within:
         print(
             "ERROR: eval-backend parity OUT OF TOLERANCE (SC-005, +/-0.5).",
@@ -434,7 +445,7 @@ def main() -> int:
     mode = args.mode
     backend = args.backend
 
-    # C2: re-validate the resolved backend (which may have come from the
+    # Re-validate the resolved backend (which may have come from the
     # EVAL_BACKEND env default, NOT validated by argparse choices) BEFORE
     # dispatch so a typo like EVAL_BACKEND=foundryy fails loud instead of
     # silently routing to a catch-all.

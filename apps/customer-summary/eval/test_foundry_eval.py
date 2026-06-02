@@ -144,8 +144,11 @@ class TestComputeAggregateFoundry:
         assert "WARNING" in err
         assert "answer_correctness" in err
         assert "grounding.grounding" in err  # actual keys present surfaced
-        # grounding still scored; the present scorer is honored.
+        # grounding still scored; the present scorer is honored AND surfaced...
         assert agg.scorer_means == {"grounding": 4.5}
+        # ...but the partial shape-mismatch fails closed: the survivor must NOT
+        # average away to PASS (grounding=4.5 alone is above threshold).
+        assert agg.passed is False
 
     def test_zero_expected_matched_but_metrics_nonempty_is_contract_error(self, capsys):
         # NONE of the requested scorers matched but metrics non-empty: an
@@ -236,7 +239,7 @@ class TestRunEvaluationFoundryWithFake:
         assert agg.scorer_means == {}
 
     def test_non_dict_sdk_return_is_contract_error(self, capsys):
-        # C1: a non-dict SDK return must NOT be silently coerced to {} and read
+        # A non-dict SDK return must NOT be silently coerced to {} and read
         # as a low score — it must surface a clear ERROR naming the actual type
         # and fail-closed.
         def fake_evaluate(*, data, evaluators, evaluation_name):
@@ -254,7 +257,7 @@ class TestRunEvaluationFoundryWithFake:
         assert agg.scorer_means == {}
 
     def test_dict_without_metrics_key_is_contract_error(self, capsys):
-        # C1: a dict missing "metrics" is a shape mismatch — surface the actual
+        # A dict missing "metrics" is a shape mismatch — surface the actual
         # top-level keys on stderr and fail-closed.
         def fake_evaluate(*, data, evaluators, evaluation_name):
             return {"rows": [], "studio_url": "https://x"}  # no "metrics"
@@ -271,7 +274,7 @@ class TestRunEvaluationFoundryWithFake:
         assert agg.scorer_means == {}
 
     def test_metrics_value_not_a_dict_is_contract_error(self, capsys):
-        # C1: a dict WITH a "metrics" key whose VALUE is not a dict is a shape
+        # A dict WITH a "metrics" key whose VALUE is not a dict is a shape
         # mismatch — must surface an ERROR and fail-closed, never be read as a
         # genuine low score. Exercises foundry_eval.py:310-318.
         def fake_evaluate(*, data, evaluators, evaluation_name):
@@ -302,7 +305,7 @@ class TestRunEvaluationFoundryWithFake:
         assert not os.path.exists(seen_path["path"])  # cleaned up
 
     def test_fewer_rows_returned_than_submitted_warns(self, capsys):
-        # Fix 5: if evaluate() returns fewer per-row results than submitted, some
+        # If evaluate() returns fewer per-row results than submitted, some
         # rows errored/were dropped and are silently averaged into the aggregate.
         # Must emit a WARNING naming the drop count — additive, does NOT change
         # the verdict (the aggregate still comes from the metrics map).

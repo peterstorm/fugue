@@ -122,6 +122,23 @@ class TestComputeAggregate:
         assert agg.overall_mean == 0.0
         assert agg.passed is False
 
+    def test_partial_missing_scorer_fails_closed(self, capsys):
+        # Some expected scorers present, others silently absent (judge misconfig,
+        # renamed/dropped metric key). The survivor (grounding=4.5) is above
+        # threshold, but a partial shape-mismatch MUST fail closed rather than
+        # average away to PASS — matching the "fail-closed" WARNING text.
+        class FakeResult:
+            metrics = {"grounding/score/mean": 4.5}
+
+        agg = compute_aggregate(
+            FakeResult(), ["answer_correctness", "faithfulness", "relevance", "grounding"]
+        )
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "answer_correctness" in err
+        assert agg.scorer_means == {"grounding": 4.5}  # survivor surfaced
+        assert agg.passed is False  # but fails closed
+
 
 class TestCollectResults:
     def test_attaches_reference_summaries(self):

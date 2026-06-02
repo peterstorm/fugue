@@ -48,17 +48,17 @@ class TestBackendSelector:
             pass
 
     def test_env_default_bypasses_argparse_choices(self, monkeypatch):
-        """C2: argparse `choices` does NOT validate the env-provided default, so
+        """argparse `choices` does NOT validate the env-provided default, so
         a typo'd EVAL_BACKEND survives parse_args() — main() must catch it."""
         monkeypatch.setenv("EVAL_BACKEND", "foundryy")
         monkeypatch.setattr(sys, "argv", ["run.py"])
         args = parse_args()
-        # argparse accepted the bogus default unchanged (the whole point of C2).
+        # argparse accepted the bogus default unchanged (the whole point).
         assert args.backend == "foundryy"
 
 
 class TestBogusEnvFailsLoud:
-    """C2: a bogus EVAL_BACKEND must fail loud in main(), NOT silently run mlflow."""
+    """A bogus EVAL_BACKEND must fail loud in main(), NOT silently run mlflow."""
 
     def test_bogus_env_exits_nonzero_without_running_mlflow(self, monkeypatch, capsys):
         import scorers
@@ -272,6 +272,39 @@ class TestBothBackendDispatch:
 
         rc = run.main()
         assert rc == 1
+
+    def test_foundry_leg_raises_is_fault_isolated(self, monkeypatch, capsys):
+        # Fault isolation (the property the feature emphasizes): if the Foundry
+        # leg RAISES during `--backend=both` (missing creds, SDK import failure,
+        # scoring error), the whole run must NOT die with an uncaught traceback
+        # that discards the already-computed MLflow verdict. The MLflow result is
+        # preserved (printed) and the run fails closed with rc=1.
+        self._stub_pipeline(monkeypatch)
+        called = {"mlflow": False, "foundry": False}
+
+        def fake_mlflow(results, mode):
+            called["mlflow"] = True
+            return AggregateResult(
+                scorer_means={"relevance": 4.5}, overall_mean=4.5, passed=True,
+            )
+
+        def raising_foundry(results, mode):
+            called["foundry"] = True
+            raise RuntimeError("AZURE_OPENAI_ENDPOINT not set")
+
+        monkeypatch.setattr(run, "run_mlflow_backend", fake_mlflow)
+        monkeypatch.setattr(run, "run_foundry_backend", raising_foundry)
+        monkeypatch.setattr(sys, "argv", ["run.py", "--mode=full", "--backend=both"])
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)
+
+        rc = run.main()
+        assert rc == 1  # fail closed, not an uncaught crash
+        assert called["mlflow"] and called["foundry"]
+        out = capsys.readouterr()
+        # The Foundry-leg failure is named distinctly on stderr...
+        assert "Foundry-leg" in out.err
+        # ...and the MLflow leg's already-computed verdict is preserved on stdout.
+        assert "mlflow" in out.out
 
 
 def EvalCase_stub():

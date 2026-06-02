@@ -19,9 +19,10 @@ can be compared 1:1 (see parity.py):
     grounding           -> deterministic score_grounding (reused from scorers.py)
 
 Test seam: `run_evaluation_foundry` takes an injectable `evaluate_fn`
-(defaulting to the real `azure.ai.evaluation.evaluate`, imported lazily so
-tests using a fake never require the real package). The fake must return an
-EvaluationResult-shaped mapping: `{"metrics": {...}, "rows": [...]}`.
+(defaulting to `_real_evaluate`, a thin wrapper that lazily imports and calls
+the real `azure.ai.evaluation.evaluate` so tests using a fake never require the
+real package). The fake must return an EvaluationResult-shaped mapping:
+`{"metrics": {...}, "rows": [...]}`.
 """
 
 import json
@@ -130,7 +131,7 @@ def compute_aggregate_foundry(metrics: dict[str, Any],
 
     missing = [name for name in scorer_names if name not in scorer_means]
     if missing:
-        # C1: a missing scorer means the SDK output shape did not match what we
+        # A missing scorer means the SDK output shape did not match what we
         # asked for (renamed/absent keys) — NOT necessarily a low score. Surface
         # it loudly with both the requested-but-missing scorers and the actual
         # metric keys present so a shape mismatch is never silently read as a
@@ -154,6 +155,16 @@ def compute_aggregate_foundry(metrics: dict[str, Any],
                 "score.",
                 file=sys.stderr,
             )
+        # Fail closed for ANY missing expected scorer, including the partial case
+        # where some scorers survived: a silently-dropped scorer must never be
+        # averaged away to PASS over the survivors. Report the surviving means for
+        # visibility but force passed=False — matching the "fail-closed" log above.
+        overall_mean = sum(scorer_means.values()) / len(scorer_means) if scorer_means else 0.0
+        return AggregateResult(
+            scorer_means=scorer_means,
+            overall_mean=overall_mean,
+            passed=False,
+        )
 
     if not scorer_means:
         return AggregateResult(scorer_means={}, overall_mean=0.0, passed=False)
@@ -288,7 +299,7 @@ def run_evaluation_foundry(
         except OSError as exc:
             print(f"WARNING: failed to remove eval temp file {data_path}: {exc}", file=sys.stderr)
 
-    # C1: do NOT silently coerce an unexpected SDK return into {}. A non-dict
+    # Do NOT silently coerce an unexpected SDK return into {}. A non-dict
     # return, or a dict missing "metrics", is a SHAPE/contract mismatch — name
     # the actual type/keys on stderr before falling through so it can never be
     # confused with a genuine low score. The verdict stays fail-closed.
@@ -320,7 +331,7 @@ def run_evaluation_foundry(
                 file=sys.stderr,
             )
 
-    # Fix 5: surface per-row drops. The EvaluationResult `rows` list holds the
+    # Surface per-row drops. The EvaluationResult `rows` list holds the
     # per-row outputs that get folded into the aggregate mean; if fewer rows came
     # back than were submitted, some rows errored/were dropped and are silently
     # averaged in. Compare counts and WARN (lossless, additive — does NOT change
