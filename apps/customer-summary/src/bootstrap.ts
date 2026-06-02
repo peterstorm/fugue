@@ -360,6 +360,13 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
           return false;
         }
       },
+      // Surface CompositeSpanExporter per-child failure counts on /readyz so a
+      // constructed-but-persistently-failing secondary backend (e.g. Foundry
+      // export erroring while MLflow succeeds) is observable beyond the
+      // exporter's rate-limited logs. Null unless multiple backends fan out.
+      // Informational only — never gates readiness (FR-026). Reads `tracing`
+      // lazily: by request time the bootstrap tracing block has settled.
+      tracingExporterFailures: () => tracing?.exporterFailures() ?? null,
     },
   };
   const app = createApp(deps);

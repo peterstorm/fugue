@@ -96,6 +96,39 @@ describe("initTracing — lifecycle", () => {
     }
   });
 
+  it("exporterFailures() is null for a single exporter (no Composite, nothing to fan out)", async () => {
+    const handle = await initTracing({ exporter: fakeExporter("single"), policy: alwaysOn() });
+    try {
+      expect(handle.exporterFailures()).toBeNull();
+    } finally {
+      await handle.shutdown();
+    }
+  });
+
+  it("exporterFailures() surfaces the Composite's per-child counts for a multi-exporter config", async () => {
+    // For a multi-backend config the handle exposes one failure counter per
+    // child (index-aligned), starting at zero, so a health/diagnostics surface
+    // can observe a degrading-but-constructed backend (FR-026: never gates
+    // readiness, but must be observable beyond the exporter's rate-limited logs).
+    // The counters' increment-on-failure behaviour is covered exhaustively in
+    // composite-exporter.test.ts; here we assert init wires the accessor through.
+    const handle = await initTracing({
+      exporter: [fakeExporter("a"), fakeExporter("b"), fakeExporter("c")],
+      policy: alwaysOn(),
+    });
+    try {
+      const counts = handle.exporterFailures();
+      expect(counts).not.toBeNull();
+      expect(counts).toEqual([
+        { index: 0, failures: 0 },
+        { index: 1, failures: 0 },
+        { index: 2, failures: 0 },
+      ]);
+    } finally {
+      await handle.shutdown();
+    }
+  });
+
   it("rejects an empty exporter list (defense-in-depth at the untyped boundary)", async () => {
     // The public `exporter` type is a non-empty tuple, so `[]` is a compile
     // error at literal call sites. A dynamically-built list (built by the app bootstrap)

@@ -13,7 +13,7 @@ import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { TailSamplingProcessor } from "../observer/tail-sampling-processor.js";
 import type { PersistencePolicy } from "../observer/policy.js";
-import { CompositeSpanExporter } from "./composite-exporter.js";
+import { CompositeSpanExporter, type ChildFailureCount } from "./composite-exporter.js";
 
 export interface TracingConfig {
   /**
@@ -95,6 +95,21 @@ export interface TracingHandle {
   readonly flush: () => Promise<void>;
   /** Shut down the tracing pipeline */
   readonly shutdown: () => Promise<void>;
+  /**
+   * Cumulative per-child export-failure counts when MORE THAN ONE trace backend
+   * fans out via a {@link CompositeSpanExporter}, else `null` (a single backend
+   * is used as-is with no per-child tracking — there is nothing to fan out).
+   *
+   * Closes the loop on `CompositeSpanExporter.childFailureCounts` (otherwise
+   * tracked but unreachable): lets a health / diagnostics surface OBSERVE a
+   * constructed-but-persistently-failing secondary backend (e.g. Foundry export
+   * erroring while MLflow succeeds) which is otherwise visible only via the
+   * exporter's rate-limited `warn` logs. This is purely INFORMATIONAL — a
+   * failing secondary backend must NEVER gate readiness (FR-026: a Foundry
+   * fault must not remove the pod), so callers surface it as a degraded signal,
+   * not a not-ready one.
+   */
+  readonly exporterFailures: () => ReadonlyArray<ChildFailureCount> | null;
 }
 
 export async function initTracing(config: TracingConfig): Promise<TracingHandle> {
@@ -102,6 +117,9 @@ export async function initTracing(config: TracingConfig): Promise<TracingHandle>
   // unwrapped, [N] → Composite, [] → throw. Everything downstream sees one
   // SpanExporter, so the TailSamplingProcessor lifecycle is unchanged.
   const exporter = normalizeExporter(config.exporter);
+  // Only a multi-backend config produces a Composite; a single/[1] exporter is
+  // used as-is (SC-006), so there are no per-child counts to surface.
+  const composite = exporter instanceof CompositeSpanExporter ? exporter : null;
   const tailProcessor = new TailSamplingProcessor(exporter, config.policy);
 
   const sdk = new NodeSDK({ spanProcessors: [tailProcessor] });
@@ -112,5 +130,6 @@ export async function initTracing(config: TracingConfig): Promise<TracingHandle>
     policy: config.policy,
     flush: async () => tailProcessor.forceFlush(),
     shutdown: async () => sdk.shutdown(),
+    exporterFailures: () => (composite ? composite.childFailureCounts : null),
   };
 }

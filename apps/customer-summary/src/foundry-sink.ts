@@ -35,7 +35,7 @@
 import { TelemetryClient } from "applicationinsights";
 import { DefaultAzureCredential } from "@azure/identity";
 import type { TokenCredential } from "@azure/identity";
-import type { FoundryTelemetrySink } from "@fugue/framework";
+import type { FoundryTelemetrySink, FiniteNumber } from "@fugue/framework";
 import type { ResolvedAuth } from "./observability.js";
 
 /**
@@ -43,10 +43,16 @@ import type { ResolvedAuth } from "./observability.js";
  * this sink uses. Declaring it lets tests inject a fake client WITHOUT touching
  * `applicationinsights` or any global pipeline (no live Azure, FR-028 test
  * isolation) while keeping the production path strongly typed.
+ *
+ * Numeric channels are {@link FiniteNumber} (not bare `number`) so the
+ * NaN/Infinity-unrepresentable invariant proven by `mapEventToFoundry` is
+ * preserved through this last hop into the real client (the real
+ * `TelemetryClient` accepts plain numbers; the cast in `defaultSeams.newClient`
+ * narrows it to this stricter view, and we only ever feed it finite values).
  */
 export interface AppInsightsClient {
-  trackEvent(t: { name: string; properties?: Record<string, string>; measurements?: Record<string, number> }): void;
-  trackMetric(t: { name: string; value: number; properties?: Record<string, string> }): void;
+  trackEvent(t: { name: string; properties?: Record<string, string>; measurements?: Record<string, FiniteNumber> }): void;
+  trackMetric(t: { name: string; value: FiniteNumber; properties?: Record<string, string> }): void;
   flush(): Promise<void> | void;
 }
 

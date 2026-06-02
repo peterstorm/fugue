@@ -17,23 +17,30 @@
 import type { Observer } from "../types/observer.js";
 import type { ObserverEvent } from "../types/events.js";
 import { fwLogger } from "../logger.js";
-import { mapEventToFoundry, type FoundryEmission } from "./foundry-event-mapping.js";
+import { mapEventToFoundry, type FoundryEmission, type FiniteNumber } from "./foundry-event-mapping.js";
 
 /**
  * Port for a Foundry / Application Insights telemetry client. The concrete
  * implementation (backed by `applicationinsights`) is supplied by the app at
  * composition time. `trackEvent`/`trackMetric` are fire-and-forget; `flush`
  * is async for graceful shutdown.
+ *
+ * Numeric channels are typed {@link FiniteNumber}, NOT bare `number`: the only
+ * producer (`mapEventToFoundry` via `forwardEmission`) brands every value/
+ * measurement through `asFinite`, so the "Application Insights rejects
+ * NaN/Infinity" invariant is carried all the way to the ingestion call rather
+ * than erased at this port. A future sink implementation gets the same
+ * compile-time guarantee.
  */
 export interface FoundryTelemetrySink {
   trackEvent(e: {
     name: string;
     properties?: Record<string, string>;
-    measurements?: Record<string, number>;
+    measurements?: Record<string, FiniteNumber>;
   }): void;
   trackMetric(m: {
     name: string;
-    value: number;
+    value: FiniteNumber;
     properties?: Record<string, string>;
   }): void;
   flush(): Promise<void>;

@@ -4,9 +4,15 @@ import {
   BufferedObserver,
   alwaysOn,
   errorOnly,
+  anyOf,
+  hadRetry,
+  ratio,
+  initTracing,
+  type PersistencePolicy,
   setFrameworkLogger,
   type ObserverEvent,
   type FoundryTelemetrySink,
+  type FiniteNumber,
   type FrameworkLogger,
   FOUNDRY_EVENT_RUN_SUMMARY,
   FOUNDRY_EVENT_ROUTE_DECISION,
@@ -62,6 +68,12 @@ afterEach(() => {
 // test stays decoupled from a direct `@opentelemetry/*` dependency (the app only
 // sees `SpanExporter` re-exported through the framework barrel).
 const EXPORT_RESULT_SUCCESS = 0;
+
+// Brand a literal as a FiniteNumber for tests that drive the sink port directly.
+// In production every value reaching the sink is branded by `mapEventToFoundry`'s
+// `asFinite`; tests calling `trackEvent`/`trackMetric` by hand must brand too
+// (the port's numeric channels are `FiniteNumber`, not bare `number`).
+const finite = (n: number): FiniteNumber => n as FiniteNumber;
 
 /** A fake SpanExporter so we can identify exporters by reference/tag. */
 const fakeExporter = (tag: string): SpanExporter => ({
@@ -299,7 +311,7 @@ describe("foundrySinkOver — Application Insights adapter", () => {
   test("trackEvent forwards name + properties + measurements", () => {
     const f = fakeClient();
     const sink = foundrySinkOver(f.client);
-    sink.trackEvent({ name: "e", properties: { a: "1" }, measurements: { m: 2 } });
+    sink.trackEvent({ name: "e", properties: { a: "1" }, measurements: { m: finite(2) } });
     expect(f.tracked).toEqual([
       { kind: "event", payload: { name: "e", properties: { a: "1" }, measurements: { m: 2 } } },
     ]);
@@ -308,7 +320,7 @@ describe("foundrySinkOver — Application Insights adapter", () => {
   test("trackMetric forwards name + value + properties", () => {
     const f = fakeClient();
     const sink = foundrySinkOver(f.client);
-    sink.trackMetric({ name: "m", value: 3, properties: { dagId: "d" } });
+    sink.trackMetric({ name: "m", value: finite(3), properties: { dagId: "d" } });
     expect(f.tracked).toEqual([
       { kind: "metric", payload: { name: "m", value: 3, properties: { dagId: "d" } } },
     ]);
@@ -630,5 +642,81 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
     );
     expect(leg.effective).toBe(mlflowOnly);
     expect(leg.outcome).toBe("inactive");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bootstrap wiring — ONE shared persistence-policy instance reaches BOTH the
+// trace pipeline (initTracing) and the domain-event observer (FR-021 / SC-010).
+//
+// The composition layer above proves the observer gates on its given policy, and
+// init.test.ts proves initTracing exposes the policy it was handed. The gap this
+// closes is bootstrap-specific: that the SAME instance flows to both consumers.
+// A regression creating two policies would let a run persist spans while
+// dropping events (or vice versa). We reproduce bootstrap's exact three-step
+// wiring (resolveFoundryLeg → composeObservability → initTracing) with a SINGLE
+// policy const and assert the instance is shared end-to-end.
+// ---------------------------------------------------------------------------
+describe("bootstrap wiring — single shared policy instance (FR-021 / SC-010)", () => {
+  const dualResolved: ResolvedObservability = {
+    kind: "with-foundry",
+    traceBackends: ["mlflow", "foundry"],
+    auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
+  };
+
+  test("the SAME policy instance flows to initTracing and gates the observer", async () => {
+    // A deterministic, controllable policy so the behavioural half is exact (no
+    // ratio() randomness). `flush` toggles the single instance's decision.
+    let flush = false;
+    const policy: PersistencePolicy = { shouldFlush: () => flush };
+
+    const { sink, events } = recordingSink();
+    // Reproduce bootstrap: leg → compose (observer) → initTracing, ONE `policy`.
+    const leg = resolveFoundryLeg(
+      dualResolved,
+      () => fakeExporter("foundry"),
+      () => sink,
+      { error: () => { throw new Error("must not log on success"); } },
+    );
+    const composed = composeObservability(leg.effective, policy, factoriesWith(sink));
+    const tracing = await initTracing({ exporter: composed.exporters, policy });
+    const bo = composed.observer as BufferedObserver;
+
+    try {
+      // 1. initTracing received the EXACT instance (referential identity).
+      expect(tracing.policy).toBe(policy);
+
+      // 2. The observer's flush/drop decision is governed by that SAME instance:
+      //    with flush=false a completed run emits nothing through the sink.
+      bo.observe(runStart("rShared", "dShared"));
+      bo.observe(routeDecided("rShared", "dShared"));
+      bo.observe(runEnd("rShared", "dShared", "ok", 100));
+      expect(events).toEqual([]);
+
+      // Flip the same instance → the next run flushes its buffered events.
+      flush = true;
+      bo.observe(runStart("rShared2", "dShared"));
+      bo.observe(routeDecided("rShared2", "dShared"));
+      bo.observe(runEnd("rShared2", "dShared", "ok", 100));
+      expect(events.map((e) => e.name)).toContain(FOUNDRY_EVENT_RUN_SUMMARY);
+    } finally {
+      bo.close();
+      await tracing.shutdown();
+    }
+  });
+
+  test("bootstrap's actual policy shape (anyOf/errorOnly/hadRetry/ratio) is the instance initTracing exposes", async () => {
+    // Use the literal policy expression bootstrap builds so a refactor that
+    // changes the policy type still exercises the shared-instance contract.
+    const policy = anyOf(errorOnly(), hadRetry(), ratio(0.25));
+    const { sink } = recordingSink();
+    const composed = composeObservability(dualResolved, policy, factoriesWith(sink));
+    const tracing = await initTracing({ exporter: composed.exporters, policy });
+    try {
+      expect(tracing.policy).toBe(policy);
+    } finally {
+      (composed.observer as BufferedObserver).close();
+      await tracing.shutdown();
+    }
   });
 });

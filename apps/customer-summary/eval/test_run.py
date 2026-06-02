@@ -114,11 +114,18 @@ class TestComputeAggregate:
         assert agg.overall_mean == pytest.approx(4.5)
         assert agg.passed is True
 
-    def test_empty_metrics(self):
+    def test_empty_metrics(self, capsys):
+        # MLflow returned NO metrics at all (empty dict — e.g. every row errored).
+        # This is the most severe failure mode and MUST log at ERROR (not WARNING),
+        # matching foundry_eval's equivalent branch, so it is not under-reported in
+        # log-level-filtered pipelines. Still fail-closed.
         class FakeResult:
             metrics = {}
 
         agg = compute_aggregate(FakeResult(), ["answer_correctness"])
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "NO metrics at all" in err
         assert agg.overall_mean == 0.0
         assert agg.passed is False
 

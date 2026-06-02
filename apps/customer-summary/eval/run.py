@@ -154,12 +154,26 @@ def compute_aggregate(eval_table: Any, scorer_names: list[str]) -> AggregateResu
         # the eval output shape did not contain the expected key — NOT a genuine
         # low score. Surface it loudly so a shape mismatch is never silently
         # averaged away (and never escapes the SC-005 parity overlap).
-        if not scorer_means and metrics:
+        if not scorer_means:
+            # ZERO expected scorers matched. Either MLflow returned NO metrics at
+            # all (empty dict — e.g. every row errored) or it returned keys but
+            # none matched what we asked for. BOTH are unambiguous contract errors
+            # (fail-closed at ERROR), never a genuine low score. Mirrors the
+            # severity of foundry_eval.compute_aggregate_foundry's equivalent
+            # branch so the most severe MLflow failure mode is not under-reported
+            # as a mere WARNING in log-level-filtered pipelines.
+            detail = (
+                "returned NO metrics at all (empty dict)"
+                if not metrics
+                else (
+                    f"returned metric keys {sorted(metrics.keys())}, none matching "
+                    "the expected scorers"
+                )
+            )
             print(
-                "ERROR: MLflow metrics shape mismatch — NONE of the expected "
-                f"scorers {scorer_names} matched the eval output. Actual metric "
-                f"keys present: {sorted(metrics.keys())}. Returning a FAILED "
-                "aggregate (fail-closed); this is a contract error, not a low score.",
+                f"ERROR: MLflow metrics shape mismatch — expected scorers "
+                f"{scorer_names}; the run {detail}. Returning a FAILED aggregate "
+                "(fail-closed); this is a contract error, not a low score.",
                 file=sys.stderr,
             )
         else:

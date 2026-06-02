@@ -95,7 +95,7 @@ Successful results become a pandas DataFrame passed to `mlflow.evaluate()`:
 | `inputs` | "Summarize conversation history for customer cust-001." | relevance |
 | `predictions` | The generated summary from the app | All scorers |
 | `targets` | The human-written reference summary | answer_correctness |
-| `context` | Same as targets (reference summary) | faithfulness, relevance |
+| `context` | Same as targets (reference summary) | — (NOT consumed by any MLflow scorer; exists only for the Foundry path's query/response/context/ground_truth schema — see `run.py` `build_eval_data`) |
 | `customer_id` | e.g. "cust-001" | grounding scorer |
 
 ### 4. Scoring

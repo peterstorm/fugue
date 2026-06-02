@@ -26,7 +26,7 @@ The forces in tension:
    - Cons: Adds a conditional code path and a "feature not installed" runtime error surface that must exist and be tested purely to handle a state the project has decided it does not want; the dependency is already config-gated at construction time, so lazy loading buys nothing at runtime; two install states (present / absent) double the surface that must be reasoned about and tested.
 
 2. **Hard dependencies — always installed, eagerly importable (chosen)**
-   - Pros: No lazy `import()` guards, no not-installed branch, no "feature unavailable" error path; the only gate is the existing config check at exporter construction; one install state to reason about and test; imports resolve statically, so type-checking and bundling see the real modules.
+   - Pros: No not-installed branch and no "feature unavailable" error path; the only gate is the existing config check at exporter construction; one install state to reason about and test. The dependency is always resolvable, so type-checking, bundling, and IDE tooling see the real modules. (Note: "always installed" does not mean "always eagerly imported" — see the as-built nuance below.)
    - Cons: Every application carries the Azure SDK install weight even when Foundry is disabled. Accepted as a deliberate trade: install size is paid once at install, not per run.
 
 ## Decision
@@ -47,7 +47,7 @@ Specifically:
 **Positive:**
 - No conditional load paths: no lazy `import()` guards, no "feature not installed" error surface, no dual install-state branching to write or test.
 - A single, simple gate — configuration presence at construction time — governs all Foundry behavior, consistent with how every other exporter is wired (ADR-0044).
-- Static imports mean type-checking, bundling, and IDE tooling see the real modules; no dynamic-import indirection to reason about.
+- The SDKs are always resolvable, so type-checking, bundling, and IDE tooling see the real modules. "Hard dependency, always installed" does NOT, however, imply "always eagerly imported": the framework's Azure Monitor span exporter intentionally lazy-loads `@azure/monitor-opentelemetry-exporter` via `createRequire(__filename)` + a synchronous `require(...)` inside its build step (see `packages/framework/src/tracing/azure-monitor-exporter.ts`) so the default MLflow-only path never loads the Azure SDK. This is a load-cost optimisation, not a feature gate — there is no try/catch or "not installed" branch around it (the SDK is always present), so the Invariant below still holds. The app-layer `applicationinsights` import is a true static import.
 - Dependencies sit where their imports occur, preserving the framework's vendor-neutral `FoundryTelemetrySink` port boundary (ADR-0048) — the framework never imports `applicationinsights`.
 - FR-027 still holds: with Foundry disabled the SDKs are installed but never constructed, so existing framework, host, and app tests pass unchanged and MLflow behavior is untouched.
 
