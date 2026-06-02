@@ -87,11 +87,16 @@ Selection and dispatch:
 Shared functional core vs. divergent seam:
 
 - Shared (pure, written once): case parsing (`parse_cases`), eval-data assembly
-  (`build_eval_data`), aggregate computation (`compute_aggregate`), and results-table
-  formatting (`format_results_table`).
-- Divergent (the only difference between backends): the scoring call and the adapter that
-  reshapes the SDK's per-case result into the harness's common result shape. The MLflow
-  branch is the unchanged `mlflow.evaluate()` path; the Foundry branch is
+  (`build_eval_data`), and results-table formatting (`format_results_table`).
+- Shared *semantics*, per-backend implementation: aggregate computation produces the same
+  `AggregateResult`, applies the same ≥4.0 threshold, and is fail-closed on missing scorers —
+  but is written once per backend (`compute_aggregate` for MLflow, `compute_aggregate_foundry`
+  in `foundry_eval.py`) because the two SDKs emit different metric-key shapes
+  (`<name>/score/mean` vs. `<name>.<name>`). The divergence is a key-shape adapter, not a
+  difference in scoring policy.
+- Divergent (the only difference in *behavior* between backends): the scoring call and the
+  adapter that reshapes the SDK's per-case result into the harness's common result shape. The
+  MLflow branch is the unchanged `mlflow.evaluate()` path; the Foundry branch is
   `run_evaluation_foundry()`, built on `azure-ai-evaluation`. Both reuse the existing Azure
   OpenAI judge-model credentials.
 
@@ -126,9 +131,11 @@ As-built additions beyond the original plan (making parity enforceable end-to-en
 
 Invariants:
 
-- Both backends score the identical `list[EvalResult]` (the same cases) and run through the
-  identical aggregation — divergence is possible only at scoring, never at case selection or
-  aggregation.
+- Both backends score the identical `list[EvalResult]` (the same cases) and run through
+  equivalent aggregation semantics (same `AggregateResult`, same ≥4.0 threshold, same
+  fail-closed-on-missing-scorer policy) — the per-backend `compute_aggregate` /
+  `compute_aggregate_foundry` differ only in the SDK metric-key shape they parse, never in
+  scoring policy or case selection.
 - The MLflow path is the pre-existing code path, unmodified.
 - An unrecognized backend value never reaches dispatch; it fails loud first.
 

@@ -135,8 +135,13 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 export const loadConfig = (): Config => ConfigSchema.parse(process.env);
 
-/** Default model per provider */
-export const DEFAULT_MODELS: Record<string, string> = {
+/**
+ * Default model per provider. Keyed by the `LLM_PROVIDER` enum (not bare
+ * `string`) so every provider is covered exhaustively — a missing provider is a
+ * COMPILE error and `DEFAULT_MODELS[provider]` is `string`, never
+ * `string | undefined` (bootstrap relies on it never being undefined).
+ */
+export const DEFAULT_MODELS: Record<Config["LLM_PROVIDER"], string> = {
   anthropic: "claude-sonnet-4-20250514",
   openai: "gpt-4o",
   azure: "gpt-4o", // Azure uses deployment name, not model name — override with LLM_MODEL or AZURE_OPENAI_DEPLOYMENT

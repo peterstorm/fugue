@@ -217,6 +217,80 @@ class TestMainDispatch:
         assert called["mlflow"] is True
         assert called["foundry"] is False
 
+    def test_single_backend_failure_returns_nonzero(self, monkeypatch):
+        """A single-backend run whose aggregate FAILS its threshold must exit
+        non-zero (distinct from the `both`-mode parity failure path)."""
+        self._stub_pipeline(monkeypatch)
+        failing = AggregateResult(scorer_means={"grounding": 3.0}, overall_mean=3.0, passed=False)
+
+        def fake_mlflow(results, mode):
+            return failing
+
+        monkeypatch.setattr(run, "run_mlflow_backend", fake_mlflow)
+        monkeypatch.setattr(sys, "argv", ["run.py", "--mode=ci", "--backend=mlflow"])
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)
+
+        rc = run.main()
+        assert rc == 1
+
+
+class TestStartupFailClosed:
+    """main()'s startup guards (numeric EVAL_WORKERS, eval-case loading) are
+    fail-closed: a bad value exits non-zero with a named error and NEVER
+    dispatches a backend."""
+
+    def _no_dispatch(self, monkeypatch):
+        """Patch both backends to flip a flag if dispatched — they MUST NOT be."""
+        called = {"mlflow": False, "foundry": False}
+        monkeypatch.setattr(
+            run, "run_mlflow_backend",
+            lambda results, mode: called.__setitem__("mlflow", True),
+        )
+        monkeypatch.setattr(
+            run, "run_foundry_backend",
+            lambda results, mode: called.__setitem__("foundry", True),
+        )
+        return called
+
+    def test_non_numeric_eval_workers_fails_loud(self, monkeypatch, capsys):
+        called = self._no_dispatch(monkeypatch)
+
+        # load_cases must never be reached — the EVAL_WORKERS guard precedes it.
+        def must_not_load(path):
+            raise AssertionError("load_cases reached before EVAL_WORKERS guard")
+
+        monkeypatch.setattr(run, "load_cases", must_not_load)
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)  # default mlflow
+        monkeypatch.delenv("EVAL_MODE", raising=False)
+        monkeypatch.setenv("EVAL_WORKERS", "not-a-number")
+        monkeypatch.setattr(sys, "argv", ["run.py", "--mode=ci"])
+
+        rc = run.main()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "EVAL_WORKERS must be a numeric value" in err
+        assert called["mlflow"] is False
+        assert called["foundry"] is False
+
+    def test_load_cases_failure_fails_loud(self, monkeypatch, capsys):
+        called = self._no_dispatch(monkeypatch)
+
+        def boom_load(path):
+            raise FileNotFoundError(f"no such file: {path}")
+
+        monkeypatch.setattr(run, "load_cases", boom_load)
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)  # default mlflow
+        monkeypatch.delenv("EVAL_MODE", raising=False)
+        monkeypatch.delenv("EVAL_WORKERS", raising=False)  # default "4"
+        monkeypatch.setattr(sys, "argv", ["run.py", "--mode=ci"])
+
+        rc = run.main()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Failed to load eval cases" in err
+        assert called["mlflow"] is False
+        assert called["foundry"] is False
+
 
 class TestBothBackendDispatch:
     """`--backend=both` (and EVAL_BACKEND=both) runs BOTH paths and enforces

@@ -240,7 +240,11 @@ export interface FoundryLegLogger {
 export type ResolvedFoundryLeg =
   | {
       readonly outcome: "active";
-      readonly effective: ResolvedObservability;
+      // An active leg means Foundry construction SUCCEEDED, which is only
+      // attempted when the selection is `with-foundry`. Narrowed to that arm so
+      // the "active ⇒ Foundry enabled" invariant lives in the type, not a
+      // downstream `isFoundryEnabled` re-check.
+      readonly effective: Extract<ResolvedObservability, { kind: "with-foundry" }>;
       readonly foundryExporter: SpanExporter;
       readonly foundrySink: FoundryTelemetrySink;
     }

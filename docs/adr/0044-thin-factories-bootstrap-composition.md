@@ -109,8 +109,11 @@ Concrete shape of the decision:
 - **Application-owned composition.** The customer-summary application composes the active backend set
   in its bootstrap. `apps/customer-summary/src/observability-composition.ts` reads the
   application's validated configuration (Zod-over-env-and-YAML, see ADR-0042), selects which
-  factories to invoke, builds the exporter list, wraps it in `CompositeSpanExporter`, and
-  `apps/customer-summary/src/bootstrap.ts` passes the result to `initTracing`.
+  factories to invoke, and builds the exporter *list*; `apps/customer-summary/src/bootstrap.ts`
+  passes that list to the widened `initTracing`, which wraps it in a `CompositeSpanExporter` only
+  when two or more backends are selected (a single-element list unwraps to the bare exporter — see
+  ADR-0046). Neither app file constructs a `CompositeSpanExporter` itself; the wrapping is owned by
+  the framework's `initTracing`.
 
 **Invariant preserved:** the framework's tracing layer contains no vendor name, no connection-string
 parsing, and no backend-selection logic. The set of active backends is decided exclusively in

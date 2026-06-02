@@ -26,8 +26,8 @@ import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer
 import { NoopObserver, runId as brandRunId } from "@fugue/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
-import { loadConfig, DEFAULT_MODELS } from "./config.js";
-import { resolveObservabilityBackends, isFoundryEnabled } from "./observability.js";
+import { loadConfig, DEFAULT_MODELS, type Config } from "./config.js";
+import { resolveObservabilityBackends, isFoundryEnabled, type ResolvedObservability } from "./observability.js";
 import { composeObservability, resolveFoundryLeg, type SpanExporter } from "./observability-composition.js";
 import { createFoundrySink } from "./foundry-sink.js";
 import { consoleAppLogger } from "./logger.js";
@@ -35,6 +35,129 @@ import type { AppLogger } from "./logger.js";
 import { runGracefulShutdown } from "./shutdown.js";
 
 const LLM_CACHE_TTL = 3600; // 1 hour
+
+/** The resolved tracing state handed back to the bootstrap shell. */
+export interface TracingSetup {
+  /** The started tracing pipeline, or `null` when tracing setup failed/degraded. */
+  readonly tracing: TracingHandle | null;
+  /** Domain-event observer — `NoopObserver` on the default/no-Foundry path or on failure. */
+  readonly observer: Observer;
+  /** Foundry sink held for the graceful-shutdown drain; `null` when not Foundry-active. */
+  readonly foundrySinkForFlush: FoundryTelemetrySink | null;
+}
+
+/**
+ * Test/override seams for {@link setUpTracing}. Each defaults to the real
+ * construction path, so production passes none. Tests inject a throwing
+ * `initTracing` to exercise the "continue without tracing" catch with no live
+ * Azure/OTel pipeline.
+ */
+export interface TracingSeams {
+  readonly initTracing?: typeof initTracing;
+  readonly buildMlflowExporter?: () => SpanExporter;
+  readonly buildFoundryExporter?: () => SpanExporter;
+  readonly buildFoundrySink?: () => FoundryTelemetrySink;
+}
+
+type TracingConfig = Pick<Config, "TRACE_SAMPLE_RATIO" | "MLFLOW_TRACKING_URI" | "MLFLOW_EXPERIMENT_ID">;
+
+/**
+ * Imperative shell for tracing startup, extracted from {@link bootstrap} so the
+ * fault-tolerant "continue without tracing" path is unit-testable WITHOUT the
+ * full bootstrap (Redis/LLM/server).
+ *
+ * MLflow is the always-available trace backend (FR-003): its exporter is built
+ * unconditionally. The Foundry leg is attempted in its OWN isolation guard
+ * ({@link resolveFoundryLeg}); a Foundry CONSTRUCTION fault degrades only the
+ * Foundry leg and leaves MLflow tracing live (FR-026 / SC-006 / SC-009). The
+ * persistence policy is the SINGLE source of truth gating BOTH trace
+ * tail-sampling AND the BufferedObserver's domain-event emission, so a discarded
+ * trace produces no orphaned domain events (FR-021 / SC-010).
+ *
+ * On ANY failure the catch returns a COHERENT un-traced state — `null` tracing,
+ * a fresh `NoopObserver`, and `null` sink — so the "continuing without tracing"
+ * log is truthful and the domain-event leg is never left half-wired.
+ */
+export const setUpTracing = async (
+  resolved: ResolvedObservability,
+  config: TracingConfig,
+  log: AppLogger,
+  seams: TracingSeams = {},
+): Promise<TracingSetup> => {
+  const initTracingFn = seams.initTracing ?? initTracing;
+  const buildMlflowExporter =
+    seams.buildMlflowExporter ??
+    ((): SpanExporter =>
+      createMlflowExporter({
+        url: config.MLFLOW_TRACKING_URI,
+        experimentId: config.MLFLOW_EXPERIMENT_ID,
+      }));
+  const buildFoundryExporter =
+    seams.buildFoundryExporter ??
+    ((): SpanExporter => {
+      // Reachable only when Foundry is enabled, where `resolved.auth` exists.
+      if (!isFoundryEnabled(resolved)) {
+        throw new Error("Foundry exporter requested without Foundry enabled");
+      }
+      const auth = resolved.auth;
+      return createAzureMonitorExporter(
+        auth.mode === "entra-id"
+          ? { auth: { connectionString: auth.connectionString, credential: new DefaultAzureCredential() } }
+          : { auth: { connectionString: auth.connectionString } },
+      );
+    });
+  const buildFoundrySink =
+    seams.buildFoundrySink ??
+    ((): FoundryTelemetrySink => {
+      if (!isFoundryEnabled(resolved)) {
+        throw new Error("Foundry sink requested without Foundry enabled");
+      }
+      return createFoundrySink(resolved.auth);
+    });
+
+  try {
+    const policy = anyOf(errorOnly(), hadRetry(), ratio(config.TRACE_SAMPLE_RATIO));
+
+    // Attempt the Foundry exporter + sink in ISOLATION via the fault-isolation
+    // boundary. On success the prebuilt instances are handed to
+    // composeObservability via thin factories below; on failure the leg is
+    // `inactive` with an MLflow-only effective selection.
+    const leg = resolveFoundryLeg(resolved, buildFoundryExporter, buildFoundrySink, log);
+    const effectiveResolved = leg.effective;
+    const foundryExporter: SpanExporter | null = leg.outcome === "active" ? leg.foundryExporter : null;
+    const foundrySink: FoundryTelemetrySink | null = leg.outcome === "active" ? leg.foundrySink : null;
+
+    // Compose exporters + observer from the EFFECTIVE selection. The Foundry
+    // factories return the prebuilt instances (never re-construct), so the
+    // isolation guard above is authoritative.
+    const composed = composeObservability(effectiveResolved, policy, {
+      createMlflowExporter: buildMlflowExporter,
+      createFoundryExporter: (): SpanExporter => {
+        if (foundryExporter === null) {
+          throw new Error("createFoundryExporter called without a prebuilt Foundry exporter");
+        }
+        return foundryExporter;
+      },
+      createFoundrySink: (): FoundryTelemetrySink => {
+        if (foundrySink === null) {
+          throw new Error("createFoundrySink called without a prebuilt Foundry sink");
+        }
+        return foundrySink;
+      },
+    });
+
+    const tracing = await initTracingFn({ exporter: composed.exporters, policy });
+    log.info(
+      `Tracing initialized — backends [${effectiveResolved.traceBackends.join(", ")}]; ` +
+        `MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})` +
+        (isFoundryEnabled(effectiveResolved) ? ` + Foundry (auth: ${effectiveResolved.auth.mode})` : ""),
+    );
+    return { tracing, observer: composed.observer, foundrySinkForFlush: foundrySink };
+  } catch (e) {
+    log.error("Tracing initialization failed — continuing without tracing:", e);
+    return { tracing: null, observer: new NoopObserver(), foundrySinkForFlush: null };
+  }
+};
 
 export const bootstrap = async (injectedLogger?: AppLogger) => {
   const log = injectedLogger ?? consoleAppLogger;
@@ -63,97 +186,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   const resolved = resolvedObservability.value;
 
   // --- Tracing (OTel + MLflow [+ Foundry] with tail-based sampling) ---
-  // The persistence policy is the SINGLE source of truth: the SAME instance
-  // gates trace tail-sampling AND (in the Foundry path) the BufferedObserver's
-  // domain-event emission, so a discarded trace produces no orphaned domain
-  // events (FR-021 / SC-010).
-  let tracing: TracingHandle | null = null;
-  // Default to NoopObserver: this is the byte-for-byte unchanged behaviour for
-  // the no-Foundry path (SC-006 / FR-027). composeObservability overrides it
-  // only when Foundry is enabled.
-  let observer: Observer = new NoopObserver();
-  // Held for the graceful-shutdown drain: flush buffered Foundry domain
-  // events before exit. Null on the default/no-Foundry path.
-  let foundrySinkForFlush: FoundryTelemetrySink | null = null;
-  try {
-    const policy = anyOf(errorOnly(), hadRetry(), ratio(config.TRACE_SAMPLE_RATIO));
-
-    // MLflow is the always-available trace backend (FR-003). Its exporter is
-    // built unconditionally and the factory is reused below; a Foundry
-    // CONSTRUCTION fault must never disable MLflow tracing (FR-026 / SC-006 /
-    // SC-009), so the Foundry leg is attempted in its OWN guard and, on failure,
-    // we degrade to the MLflow-only selection while leaving MLflow tracing live.
-    const createMlflowExporter_ = (): SpanExporter =>
-      createMlflowExporter({
-        url: config.MLFLOW_TRACKING_URI,
-        experimentId: config.MLFLOW_EXPERIMENT_ID,
-      });
-
-    // Attempt to construct the Foundry exporter + sink in ISOLATION via the
-    // fault-isolation boundary. A Foundry construction fault degrades ONLY the
-    // Foundry leg (returning an MLflow-only effective selection), leaving MLflow
-    // tracing live (FR-026 / SC-006 / SC-009). On success the prebuilt instances
-    // are handed to composeObservability via thin factories below.
-    const leg = resolveFoundryLeg(
-      resolved,
-      (): SpanExporter => {
-        // Reachable only when Foundry is enabled, where `resolved.auth` exists.
-        if (!isFoundryEnabled(resolved)) {
-          throw new Error("Foundry exporter requested without Foundry enabled");
-        }
-        const auth = resolved.auth;
-        return createAzureMonitorExporter(
-          auth.mode === "entra-id"
-            ? { auth: { connectionString: auth.connectionString, credential: new DefaultAzureCredential() } }
-            : { auth: { connectionString: auth.connectionString } },
-        );
-      },
-      (): FoundryTelemetrySink => {
-        if (!isFoundryEnabled(resolved)) {
-          throw new Error("Foundry sink requested without Foundry enabled");
-        }
-        return createFoundrySink(resolved.auth);
-      },
-      log,
-    );
-    // Destructure the discriminated leg into the locals the composition factories
-    // close over. The `active` arm carries BOTH instances (coupled by the type);
-    // the `inactive` arm (not enabled / degraded) carries neither.
-    const effectiveResolved = leg.effective;
-    const foundryExporter: SpanExporter | null = leg.outcome === "active" ? leg.foundryExporter : null;
-    const foundrySink: FoundryTelemetrySink | null = leg.outcome === "active" ? leg.foundrySink : null;
-    foundrySinkForFlush = foundrySink;
-
-    // Compose exporters + observer from the EFFECTIVE selection. Factories are
-    // bound here (the imperative shell); the composition itself is pure-ish. The
-    // Foundry factories return the prebuilt instances (never re-construct), so
-    // the isolation guard above is authoritative.
-    const composed = composeObservability(effectiveResolved, policy, {
-      createMlflowExporter: createMlflowExporter_,
-      createFoundryExporter: (): SpanExporter => {
-        if (foundryExporter === null) {
-          throw new Error("createFoundryExporter called without a prebuilt Foundry exporter");
-        }
-        return foundryExporter;
-      },
-      createFoundrySink: (): FoundryTelemetrySink => {
-        if (foundrySink === null) {
-          throw new Error("createFoundrySink called without a prebuilt Foundry sink");
-        }
-        return foundrySink;
-      },
-    });
-    observer = composed.observer;
-
-    tracing = await initTracing({ exporter: composed.exporters, policy });
-    log.info(
-      `Tracing initialized — backends [${effectiveResolved.traceBackends.join(", ")}]; ` +
-        `MLflow at ${config.MLFLOW_TRACKING_URI} (experiment ${config.MLFLOW_EXPERIMENT_ID})` +
-        (isFoundryEnabled(effectiveResolved) ? ` + Foundry (auth: ${effectiveResolved.auth.mode})` : ""),
-    );
-  } catch (e) {
-    log.error("Tracing initialization failed — continuing without tracing:", e);
-  }
+  // Delegated to the seam-injectable `setUpTracing` shell. It builds the
+  // always-on MLflow backend, attempts the Foundry leg in isolation, composes
+  // exporters + observer, and starts the pipeline — returning a coherent
+  // un-traced state on any failure so the app still boots (SC-006 / FR-026).
+  const { tracing, observer, foundrySinkForFlush } = await setUpTracing(resolved, config, log);
 
   // --- Redis (cache + checkpointer) ---
   // Redis is a hard dependency: it backs the checkpointer (durable resume) and
