@@ -111,9 +111,17 @@ that drifted from the implemented type. The advisory set is hardening + hygiene.
   `ATTR_MAP`; removing it loses the extension point. Leave with its comment.
 - **D7 — shared-policy invariant not type-enforced:** Not cleanly expressible in
   TS without a nominal token; production path threads the same instance.
-- **F1 — entra-id `useAzureMonitor` global-provider coupling:** Real design
-  surface, but re-architecting an isolated `TelemetryClient` path can only be
-  validated against live Azure. Belongs in a follow-up ADR, not a blind edit.
+- **F1 — entra-id `useAzureMonitor` global-provider coupling:** ✅ **FIXED** in a
+  follow-up commit (initially deferred). Investigation of `applicationinsights@3.15.0`
+  internals proved `useAzureMonitor` was unnecessary: an ISOLATED client
+  (`useGlobalProviders: false`) authenticates via AAD by setting
+  `config.aadTokenCredential`, which the shim's lazy `initialize()`/`parseConfig()`
+  forwards into the isolated `TelemetryClientProvider`'s Azure Monitor exporter
+  (verified at `shim-config.js:107-109` and `telemetryClientProvider.js:83/109/135`).
+  Both auth modes now build an isolated client — entra-id differs only by attaching
+  the credential — so the sink no longer registers a process-global OTel provider
+  and can never race the framework's `NodeSDK` `TracerProvider`. The `useAzureMonitor`
+  import, the `configureGlobalPipeline` seam, and the `AzureMonitorInit` type are gone.
 - **F5 — per-export `setTimeout` allocation:** Micro-optimization; timers are
   `unref`'d and cleared. Only worth it if profiled.
 - **B2 — eval verdict ignores errored-case count:** Pre-existing on `main`

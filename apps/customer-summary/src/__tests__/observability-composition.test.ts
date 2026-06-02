@@ -323,8 +323,10 @@ describe("foundrySinkOver — Application Insights adapter", () => {
 
 // ---------------------------------------------------------------------------
 // createAppInsightsClient — auth translation (FR-022 / FR-023)
-// connection-string vs entra-id → DefaultAzureCredential / global pipeline.
-// NO live Azure: every effectful seam (credential, useAzureMonitor,
+// BOTH modes build an ISOLATED client (useGlobalProviders:false); entra-id adds
+// a credential via config.aadTokenCredential — NO global useAzureMonitor distro,
+// so the sink never collides with the framework's global TracerProvider.
+// NO live Azure: every effectful seam (credential, credential application,
 // TelemetryClient ctor) is a fake.
 // ---------------------------------------------------------------------------
 describe("createAppInsightsClient — auth translation", () => {
@@ -334,8 +336,8 @@ describe("createAppInsightsClient — auth translation", () => {
     const fakeCredential = { getToken: async () => null } as unknown as ReturnType<
       AppInsightsClientSeams["credentialFactory"]
     >;
-    const pipelineInits: Array<{ connectionString: string; credentialIsFake: boolean }> = [];
-    const clientCalls: Array<{ connectionString: string; options?: { useGlobalProviders: boolean } }> = [];
+    const credentialApplications: Array<{ toFakeClient: boolean; credentialIsFake: boolean }> = [];
+    const clientCalls: Array<{ connectionString: string; options: { useGlobalProviders: boolean } }> = [];
     const fakeClient: AppInsightsClient = {
       trackEvent: () => {},
       trackMetric: () => {},
@@ -346,26 +348,26 @@ describe("createAppInsightsClient — auth translation", () => {
         credentialCalls.push(1);
         return fakeCredential;
       },
-      configureGlobalPipeline: (init) => {
-        pipelineInits.push({
-          connectionString: init.azureMonitorExporterOptions.connectionString,
-          credentialIsFake: init.azureMonitorExporterOptions.credential === fakeCredential,
-        });
-      },
       newClient: (connectionString, options) => {
-        clientCalls.push(options === undefined ? { connectionString } : { connectionString, options });
+        clientCalls.push({ connectionString, options });
         return fakeClient;
+      },
+      applyCredential: (client, credential) => {
+        credentialApplications.push({
+          toFakeClient: client === fakeClient,
+          credentialIsFake: credential === fakeCredential,
+        });
       },
     };
     return {
       seams,
       get credentialInvocations() { return credentialCalls.length; },
-      pipelineInits,
+      credentialApplications,
       clientCalls,
     };
   };
 
-  test("entra-id mode: invokes credentialFactory + configures the global pipeline", () => {
+  test("entra-id mode: isolated client + credential applied to it", () => {
     const r = recordingSeams();
     createAppInsightsClient(
       { mode: "entra-id", connectionString: "InstrumentationKey=entra" },
@@ -373,18 +375,17 @@ describe("createAppInsightsClient — auth translation", () => {
     );
     // The credential factory IS invoked (FR-023).
     expect(r.credentialInvocations).toBe(1);
-    // The global Azure Monitor pipeline branch runs with that credential + conn string.
-    expect(r.pipelineInits.length).toBe(1);
-    expect(r.pipelineInits[0]).toEqual({
-      connectionString: "InstrumentationKey=entra",
-      credentialIsFake: true,
-    });
-    // The client is constructed WITHOUT the isolation flag (relies on globals).
+    // The credential is applied to the SAME isolated client (config.aadTokenCredential),
+    // not configured through a global pipeline.
+    expect(r.credentialApplications.length).toBe(1);
+    expect(r.credentialApplications[0]).toEqual({ toFakeClient: true, credentialIsFake: true });
+    // The client is ISOLATED — useGlobalProviders:false even for entra-id.
     expect(r.clientCalls.length).toBe(1);
-    expect(r.clientCalls[0]!.options).toBeUndefined();
+    expect(r.clientCalls[0]!.options).toEqual({ useGlobalProviders: false });
+    expect(r.clientCalls[0]!.connectionString).toBe("InstrumentationKey=entra");
   });
 
-  test("connection-string mode: NO credential, NO global pipeline, isolated client", () => {
+  test("connection-string mode: NO credential, isolated client", () => {
     const r = recordingSeams();
     createAppInsightsClient(
       { mode: "connection-string", connectionString: "InstrumentationKey=conn" },
@@ -392,8 +393,8 @@ describe("createAppInsightsClient — auth translation", () => {
     );
     // credentialFactory must NOT be invoked (no Entra path).
     expect(r.credentialInvocations).toBe(0);
-    // The global pipeline must NOT be configured (no global side effects).
-    expect(r.pipelineInits.length).toBe(0);
+    // No credential is applied.
+    expect(r.credentialApplications.length).toBe(0);
     // Isolated client: useGlobalProviders:false MUST be passed (regression guard).
     expect(r.clientCalls.length).toBe(1);
     expect(r.clientCalls[0]!.options).toEqual({ useGlobalProviders: false });
@@ -406,12 +407,37 @@ describe("createAppInsightsClient — auth translation", () => {
     const conn = recordingSeams();
     createAppInsightsClient({ mode: "connection-string", connectionString: "x" }, conn.seams);
 
-    // entra-id touches the global pipeline; connection-string never does.
-    expect(entra.pipelineInits.length).toBe(1);
-    expect(conn.pipelineInits.length).toBe(0);
-    // connection-string isolates; entra-id does not.
+    // entra-id applies a credential; connection-string never does.
+    expect(entra.credentialApplications.length).toBe(1);
+    expect(conn.credentialApplications.length).toBe(0);
+    // BOTH isolate the client — neither registers a global provider.
+    expect(entra.clientCalls[0]!.options).toEqual({ useGlobalProviders: false });
     expect(conn.clientCalls[0]!.options).toEqual({ useGlobalProviders: false });
-    expect(entra.clientCalls[0]!.options).toBeUndefined();
+  });
+
+  test("default applyCredential lands the credential on config.aadTokenCredential", () => {
+    // Override ONLY credentialFactory + newClient; let the REAL default
+    // applyCredential run so we assert the actual wiring that replaces the
+    // global useAzureMonitor distro: an isolated client authenticates via AAD
+    // purely through config.aadTokenCredential (which the shim forwards to its
+    // Azure Monitor exporter on lazy initialize()).
+    const fakeCredential = { getToken: async () => null } as unknown as ReturnType<
+      AppInsightsClientSeams["credentialFactory"]
+    >;
+    const client = {
+      config: {} as { aadTokenCredential?: unknown },
+      trackEvent: () => {},
+      trackMetric: () => {},
+      flush: () => {},
+    };
+    createAppInsightsClient(
+      { mode: "entra-id", connectionString: "InstrumentationKey=entra" },
+      {
+        credentialFactory: () => fakeCredential,
+        newClient: () => client as unknown as AppInsightsClient,
+      },
+    );
+    expect(client.config.aadTokenCredential).toBe(fakeCredential);
   });
 });
 

@@ -11,15 +11,19 @@
  *   - `trackMetric` → `client.trackMetric` (customMetric, single data point)
  *   - `flush`       → `client.flush`        (graceful-shutdown drain)
  *
- * Auth (FR-022 / FR-023):
- *   - connection-string mode: construct an ISOLATED `TelemetryClient` over the
- *     connection string (`useGlobalProviders: false`) — manual track calls only,
- *     no global pipeline side effects.
- *   - entra-id mode: the shim `TelemetryClient` ctor cannot take a credential,
- *     so we configure the global Azure Monitor distro pipeline with the
- *     `DefaultAzureCredential` (the connection string still carries the
- *     ingestion endpoint), then construct a `TelemetryClient` that relies on
- *     those global providers.
+ * Auth (FR-022 / FR-023) — BOTH modes use an ISOLATED `TelemetryClient`
+ * (`useGlobalProviders: false`): manual track calls only, NO global Azure
+ * Monitor distro and NO global OpenTelemetry provider registration. This keeps
+ * the app's domain-event sink from colliding with the framework's own global
+ * `TracerProvider` (the tracing pipeline's `NodeSDK`), which would otherwise
+ * race the distro for the single process-global provider with undefined
+ * last-writer-wins precedence.
+ *   - connection-string mode: the connection string governs auth.
+ *   - entra-id mode: the same isolated client, plus a `DefaultAzureCredential`
+ *     attached via `config.aadTokenCredential` (the connection string still
+ *     carries the ingestion endpoint). The shim's lazy `initialize()` reads that
+ *     credential through `parseConfig()` into the isolated client's Azure Monitor
+ *     exporter — so AAD auth needs NO global `useAzureMonitor` pipeline.
  *
  * Fail-tolerance (FR-028): track-call fault isolation is provided by the
  * observer wrappers (the framework's `AiFoundryObserver` and the app's
@@ -28,7 +32,7 @@
  * bootstrap.ts) guards and logs it, so a flush failure is surfaced rather than
  * silently swallowed.
  */
-import { TelemetryClient, useAzureMonitor } from "applicationinsights";
+import { TelemetryClient } from "applicationinsights";
 import { DefaultAzureCredential } from "@azure/identity";
 import type { TokenCredential } from "@azure/identity";
 import type { FoundryTelemetrySink } from "@fugue/framework";
@@ -74,16 +78,14 @@ export const foundrySinkOver = (client: AppInsightsClient): FoundryTelemetrySink
 });
 
 /**
- * Options describing how the global Azure Monitor distro pipeline is configured
- * in entra-id mode — the exact shape passed to `useAzureMonitor`. Named so the
- * seam below (and its tests) can reason about the entra-id branch without
- * touching `applicationinsights` globals.
+ * The mutable AAD-auth surface of the shim `TelemetryClient`. `applicationinsights@3.x`
+ * exposes `client.config.aadTokenCredential`; the lazy `initialize()` reads it
+ * via `parseConfig()` into the isolated client's Azure Monitor exporter
+ * credential. Narrowed here so {@link applyCredential} can set it without the
+ * whole `Config` surface, and so the cast lives in exactly one place.
  */
-export interface AzureMonitorInit {
-  azureMonitorExporterOptions: {
-    connectionString: string;
-    credential: TokenCredential;
-  };
+interface AadConfigurableClient {
+  config: { aadTokenCredential?: TokenCredential };
 }
 
 /**
@@ -92,35 +94,40 @@ export interface AzureMonitorInit {
  * are exercisable WITHOUT a live Azure pipeline or global Application Insights
  * init:
  *   - `credentialFactory` — defaults to `DefaultAzureCredential`.
- *   - `configureGlobalPipeline` — the entra-id global init (`useAzureMonitor`).
- *     Tests fake it to assert the global-pipeline branch runs without actually
- *     mutating global providers.
- *   - `newClient` — constructs the (structurally typed) `TelemetryClient`. The
- *     `useGlobalProviders: false` isolation flag for connection-string mode is
- *     passed here, so a regression dropping it is observable in tests.
+ *   - `newClient` — constructs the (structurally typed) ISOLATED `TelemetryClient`.
+ *     The `useGlobalProviders: false` isolation flag is ALWAYS passed (both auth
+ *     modes), so a regression dropping it is observable in tests.
+ *   - `applyCredential` — attaches the entra-id credential to the isolated
+ *     client (`config.aadTokenCredential`). Tests fake it to assert the entra-id
+ *     branch wires the credential without touching `applicationinsights`.
  */
 export interface AppInsightsClientSeams {
   readonly credentialFactory: () => TokenCredential;
-  readonly configureGlobalPipeline: (init: AzureMonitorInit) => void;
-  readonly newClient: (connectionString: string, options?: { useGlobalProviders: boolean }) => AppInsightsClient;
+  readonly newClient: (connectionString: string, options: { useGlobalProviders: boolean }) => AppInsightsClient;
+  readonly applyCredential: (client: AppInsightsClient, credential: TokenCredential) => void;
 }
 
 const defaultSeams: AppInsightsClientSeams = {
   credentialFactory: () => new DefaultAzureCredential(),
-  configureGlobalPipeline: (init) => useAzureMonitor(init),
   newClient: (connectionString, options) =>
-    (options === undefined
-      ? new TelemetryClient(connectionString)
-      : new TelemetryClient(connectionString, options)) as unknown as AppInsightsClient,
+    new TelemetryClient(connectionString, options) as unknown as AppInsightsClient,
+  applyCredential: (client, credential) => {
+    // The single sanctioned cast to the real shim shape: an ISOLATED client
+    // (useGlobalProviders:false) still authenticates via AAD by setting
+    // config.aadTokenCredential, which the shim's lazy initialize()/parseConfig()
+    // forwards to the Azure Monitor exporter — no global useAzureMonitor distro.
+    (client as unknown as AadConfigurableClient).config.aadTokenCredential = credential;
+  },
 };
 
 /**
  * Construct the production Application Insights `TelemetryClient` for the
- * resolved auth. This is the IMPERATIVE boundary (touches `applicationinsights`
- * and, for entra-id, the global Azure Monitor pipeline). Tests inject
- * {@link AppInsightsClientSeams} fakes to exercise both auth branches with no
- * live Azure, and {@link foundrySinkOver} bypasses it entirely with a fake
- * client.
+ * resolved auth. This is the IMPERATIVE boundary (touches `applicationinsights`).
+ * BOTH auth modes build an ISOLATED client (`useGlobalProviders: false`) so the
+ * sink never registers a process-global OpenTelemetry provider — entra-id differs
+ * ONLY by attaching the credential. Tests inject {@link AppInsightsClientSeams}
+ * fakes to exercise both branches with no live Azure, and {@link foundrySinkOver}
+ * bypasses it entirely with a fake client.
  *
  * @param auth   the resolved auth mode + connection string.
  * @param seams  injectable for tests; defaults bind the real surface.
@@ -129,23 +136,17 @@ export const createAppInsightsClient = (
   auth: ResolvedAuth,
   seams: Partial<AppInsightsClientSeams> = {},
 ): AppInsightsClient => {
-  const { credentialFactory, configureGlobalPipeline, newClient } = { ...defaultSeams, ...seams };
+  const { credentialFactory, newClient, applyCredential } = { ...defaultSeams, ...seams };
+
+  // Isolated client for BOTH modes: manual track calls only, no global pipeline.
+  const client = newClient(auth.connectionString, { useGlobalProviders: false });
 
   if (auth.mode === "entra-id") {
-    // The shim TelemetryClient ctor takes no credential; configure the global
-    // Azure Monitor distro pipeline with the credential (the connection string
-    // carries the ingestion endpoint), then construct a client that relies on
-    // those global providers.
-    configureGlobalPipeline({
-      azureMonitorExporterOptions: {
-        connectionString: auth.connectionString,
-        credential: credentialFactory(),
-      },
-    });
-    return newClient(auth.connectionString);
+    // Entra ID: attach the credential to the isolated client (the connection
+    // string still carries the ingestion endpoint). No global distro needed.
+    applyCredential(client, credentialFactory());
   }
-  // connection-string mode: isolated client, manual track calls only.
-  return newClient(auth.connectionString, { useGlobalProviders: false });
+  return client;
 };
 
 /** Build the production app-layer sink for the resolved auth. */
