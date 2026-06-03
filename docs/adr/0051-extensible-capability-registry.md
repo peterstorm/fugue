@@ -27,8 +27,9 @@ Open the capability system from a fixed union to an **extensible interface regis
 TypeScript module augmentation:
 
 1. **`CapabilityRegistry`** — a global interface declaring capability name → client type
-   mappings. Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`) are the base set.
-   Adapter packages augment this interface to register new capabilities.
+   mappings. Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`) are the
+   base set (`http` joins via item 5 below). Adapter packages augment this interface to
+   register new capabilities.
 
 2. **`Capability`** — derived as `keyof CapabilityRegistry` (was a hardcoded union).
 
@@ -86,5 +87,19 @@ single source of truth now).
 
 ### Migration
 
-Phase 1 (this ADR): Extract `CapabilityRegistry`, derive types, refactor validation.
-No behavioral change. All existing tests pass without modification.
+Delivered in four phases on the same branch (each phase is tagged with
+`@satisfies ADR-0051` markers in the code):
+
+- **Phase 1 — Registry types.** Extract `CapabilityRegistry`, derive `Capability` as
+  `keyof`, refactor `validateCapabilities` to dynamic property lookup. The type refactor
+  itself is behavior-preserving, but existing test contexts gain the new nullable `http`
+  field (mechanical `http: null` additions across the suite).
+- **Phase 2 — Host lifecycle.** `CapabilityHandle` connect/close sequencing in the host:
+  topological sort over `dependsOn`, connect in dependency order, close in reverse, and
+  close the connected prefix (plus the failing handle itself) on an aborted boot.
+- **Phase 3 — `@fugue/pg` adapter.** First out-of-tree capability package exercising the
+  module augmentation pattern end-to-end.
+- **Phase 4 — Capability tracing.** Opt-in OTel span wrapping via `withTracedCapability`.
+
+New behavior shipped alongside: the built-in `HttpCapability` (item 5) and the
+`createFetchNode` `requires` parameter (item 6).

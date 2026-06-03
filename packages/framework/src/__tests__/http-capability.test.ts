@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { z } from "zod";
-import { createHttpCapability } from "../http/http-capability.js";
+import { createHttpCapability, createFakeHttpCapability } from "../http/http-capability.js";
 import { isOk, isErr } from "../types/result.js";
 
 let server: ReturnType<typeof Bun.serve>;
@@ -151,6 +151,31 @@ describe("createHttpCapability (real HTTP)", () => {
     expect(isOk(result)).toBe(true);
   });
 
+  it("joins a trailing-slash baseUrl with a leading-slash path (no double slash)", async () => {
+    // A double slash would make the path "//users/123" and the server would 404.
+    const http = createHttpCapability({ baseUrl: `${baseUrl}/` }).client;
+    const result = await http.get("/users/123", {
+      schema: z.object({ id: z.string(), name: z.string() }),
+    });
+    expect(isOk(result)).toBe(true);
+  });
+
+  it("joins a path without a leading slash (slash inserted)", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    const result = await http.get("users/123", {
+      schema: z.object({ id: z.string(), name: z.string() }),
+    });
+    expect(isOk(result)).toBe(true);
+  });
+
+  it("joins a trailing-slash baseUrl with a slash-less path", async () => {
+    const http = createHttpCapability({ baseUrl: `${baseUrl}/` }).client;
+    const result = await http.get("users/123", {
+      schema: z.object({ id: z.string(), name: z.string() }),
+    });
+    expect(isOk(result)).toBe(true);
+  });
+
   it("supports abort signal", async () => {
     const http = createHttpCapability({ baseUrl }).client;
     const controller = new AbortController();
@@ -205,5 +230,22 @@ describe("createHttpCapability (real HTTP)", () => {
     }
     expect(added).toBe(3);
     expect(removed).toBe(3);
+  });
+});
+
+describe("createFakeHttpCapability", () => {
+  it("returns node-crash when a fake route body fails the schema — the fake must not diverge from the real capability", async () => {
+    const fakeHttp = createFakeHttpCapability({
+      "GET /users/123": { id: 123, name: "Alice" }, // id is a number — schema wants string
+    }).client;
+    const result = await fakeHttp.get("/users/123", {
+      schema: z.object({ id: z.string(), name: z.string() }),
+    });
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.kind === "node-crash" && result.error.message).toContain("validation failed");
+      expect(result.error.kind === "node-crash" && result.error.retriability).toBe("non-retriable");
+    }
   });
 });

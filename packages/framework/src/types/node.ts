@@ -147,10 +147,11 @@ export type Capability = keyof CapabilityRegistry & string;
  * (spread onto the context dynamically, per ADR-0051).
  *
  * The `satisfies` clause guarantees every entry is a registered capability.
- * The reverse direction (every base-registry key is listed) cannot be
- * type-asserted without breaking under consumer module augmentation — when a
- * new built-in is added to `CapabilityRegistry` + `BaseNodeContext`, add it
- * here in the same change.
+ * The reverse direction (every built-in context field is listed) is asserted
+ * by `_BuiltinKeysComplete` below `BaseNodeContext` — adding a built-in to
+ * `CapabilityRegistry` + `BaseNodeContext` without listing it here is a
+ * compile error. The assertion compares against `BaseNodeContext` (not the
+ * full registry), so consumer module augmentation does not break it.
  */
 export const BUILTIN_CAPABILITY_KEYS = [
   "llm",
@@ -205,6 +206,25 @@ export interface BaseNodeContext {
    */
   readonly contentFilter?: ContentFilter | null;
 }
+
+// ---------------------------------------------------------------------------
+// Negative-space assertion: `BUILTIN_CAPABILITY_KEYS` must equal exactly the
+// capability-named fields of `BaseNodeContext`. The `satisfies` on the array
+// proves the forward direction (every entry is a capability); this proves the
+// reverse (no built-in context field is missing from the array). It compares
+// against `BaseNodeContext` keys — fixed at framework-compile time — so
+// consumer `CapabilityRegistry` augmentation (which only widens `Capability`)
+// cannot break it. If this errors, a built-in was added to the registry +
+// `BaseNodeContext` without updating `BUILTIN_CAPABILITY_KEYS`, and
+// `makeNodeContext` would mis-handle it as a custom capability.
+// ---------------------------------------------------------------------------
+type _Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
+type _StaticAssert<T extends true> = T;
+type _BuiltinKeysComplete = _StaticAssert<
+  _Equal<BuiltinCapabilityKey, Extract<keyof BaseNodeContext, Capability>>
+>;
 
 /**
  * The runtime-facing NodeContext shape (capability fields nullable). The

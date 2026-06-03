@@ -700,8 +700,10 @@ describe("Full Host Lifecycle", () => {
       expect(result.error.message).toContain("refused to connect");
     }
 
-    // db connected before queue failed — it must be closed, not leaked.
-    expect(events).toEqual(["connect:db", "close:db"]);
+    // The failing handle itself is closed first (its adapter may hold
+    // factory-time resources, e.g. a pg Pool), then the connected prefix
+    // (db) — nothing leaks on an aborted boot.
+    expect(events).toEqual(["connect:db", "close:queue", "close:db"]);
   });
 
   test("ADR-0051: capability dependency cycle aborts boot", async () => {

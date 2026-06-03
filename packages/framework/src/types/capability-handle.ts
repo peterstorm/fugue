@@ -63,6 +63,14 @@ export interface CapabilityHandle<K extends Capability = Capability> {
    * Optional dependency ordering. If this capability requires another
    * capability to be connected first, declare it here. The runtime
    * topologically sorts `connect()` calls.
+   *
+   * Only *handle-backed* capabilities are valid targets — built-ins that are
+   * wired directly into `SharedInfra` without a handle (`llm`, `judgeLlm`,
+   * `prompts`, `cache`, `http`) are never registered with the lifecycle
+   * manager, so depending on them always fails the boot-time check. The type
+   * cannot express this narrowing (which capabilities are handle-backed is a
+   * runtime property of the deployment), so it is enforced at boot by
+   * `topoSortHandles`.
    */
   readonly dependsOn?: readonly Capability[];
 }

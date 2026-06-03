@@ -114,6 +114,27 @@ describe("capability-manager", () => {
       }
     });
 
+    it("rejects a handle with a null client — loud at boot, not a phantom missing-capability at run time", () => {
+      const handles = [makeHandle("db", { client: null as any })];
+      const result = topoSortHandles(handles);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("internal-invariant-violated");
+        expect(result.error.message).toContain("'db' has a null client");
+        expect(result.error.context).toEqual({ capability: "db" });
+      }
+    });
+
+    it("rejects a handle with an undefined client", () => {
+      const handles = [makeHandle("db", { client: undefined as any })];
+      const result = topoSortHandles(handles);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("internal-invariant-violated");
+        expect(result.error.message).toContain("null client");
+      }
+    });
+
     it("empty handles array → Ok([])", () => {
       const result = topoSortHandles([]);
       expect(isOk(result)).toBe(true);
@@ -160,6 +181,45 @@ describe("capability-manager", () => {
       const logger = { info: () => {}, error: () => {} };
       const result = await connectAll(handles, logger);
       expect(isOk(result)).toBe(true);
+    });
+
+    it("closes the failing handle itself — adapters construct pools at factory time", async () => {
+      let failingClosed = false;
+      const handles = [
+        makeHandle("a", { connect: async () => {} }),
+        makeHandle("b", {
+          connect: async () => { throw new Error("boom"); },
+          close: async () => { failingClosed = true; },
+        }),
+      ];
+      const logger = { info: () => {}, error: () => {} };
+      const result = await connectAll(handles, logger);
+      expect(isErr(result)).toBe(true);
+      // The failing handle is NOT in the connected prefix (the caller closes
+      // that), so connectAll must close it directly or its pool leaks.
+      expect(failingClosed).toBe(true);
+      if (!result.ok) {
+        expect(result.error.connected.map((h) => h.name)).toEqual(["a"]);
+      }
+    });
+
+    it("a close failure on the failing handle never masks the connect error", async () => {
+      const errorLogs: string[] = [];
+      const handles = [
+        makeHandle("b", {
+          connect: async () => { throw new Error("connect-boom"); },
+          close: async () => { throw new Error("close-boom"); },
+        }),
+      ];
+      const logger = { info: () => {}, error: (msg: string) => { errorLogs.push(msg); } };
+      const result = await connectAll(handles, logger);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        // The surfaced error is the connect failure, not the close failure.
+        expect(result.error.error.message).toContain("connect-boom");
+      }
+      // The close failure is logged, not swallowed.
+      expect(errorLogs.some((m) => m.includes("failed to close after connect failure"))).toBe(true);
     });
   });
 

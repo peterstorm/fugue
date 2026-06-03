@@ -28,7 +28,14 @@ export interface HttpRequestOpts<T> {
  * Options for HTTP requests that include a body.
  */
 export interface HttpBodyRequestOpts<T> extends HttpRequestOpts<T> {
-  /** Content-Type header override. Defaults to "application/json". */
+  /**
+   * Content-Type header override. Defaults to "application/json".
+   *
+   * Note: this changes the *header only* — the request body is always
+   * `JSON.stringify`'d by the built-in capability. Non-JSON request bodies
+   * (form-encoded, multipart, raw text) are not supported here; create a
+   * custom capability adapter for those.
+   */
   readonly contentType?: string;
 }
 

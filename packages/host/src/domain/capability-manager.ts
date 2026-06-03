@@ -47,6 +47,9 @@ export interface CapabilityHealthReport {
  * Returns Err when the handle set violates an invariant:
  * - two handles claim the same capability name (last-writer-wins would
  *   silently drop one)
+ * - a handle's `client` is null/undefined (a malformed adapter must fail
+ *   loudly at boot, not surface later as a phantom `missing-capability`
+ *   at run time)
  * - a `dependsOn` entry names a capability with no registered handle
  *   (the declared dependency contract would be silently unsatisfied)
  * - a dependency cycle is detected
@@ -60,6 +63,17 @@ export const topoSortHandles = (
       return err({
         kind: "internal-invariant-violated",
         message: `Duplicate capability handle for '${handle.name}' — one handle per capability`,
+        context: { capability: handle.name },
+      });
+    }
+    // The type says `client` is non-null, but a malformed JS adapter can
+    // still hand us a null — catch it here (the boot choke point) so the
+    // diagnostic names the broken handle instead of a run-time
+    // `missing-capability` that reads as a wiring gap.
+    if (handle.client == null) {
+      return err({
+        kind: "internal-invariant-violated",
+        message: `Capability handle '${handle.name}' has a null client — the adapter must construct its client at factory time`,
         context: { capability: handle.name },
       });
     }
@@ -143,6 +157,20 @@ export const connectAll = async (
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         logger.error(`Capability '${handle.name}' failed to connect`, { error: message });
+        // The failing handle's adapter may have constructed resources at
+        // factory time (e.g. a pg Pool opens sockets before connect() runs).
+        // Close it best-effort so an aborted boot doesn't orphan them — the
+        // caller only closes the *connected prefix*, which excludes this
+        // handle. A close failure is logged, never masks the connect error.
+        if (handle.close) {
+          try {
+            await handle.close();
+          } catch (closeError) {
+            logger.error(`Capability '${handle.name}' failed to close after connect failure`, {
+              error: closeError instanceof Error ? closeError.message : String(closeError),
+            });
+          }
+        }
         return err({
           error: {
             kind: "internal-invariant-violated",
@@ -194,12 +222,16 @@ export const closeAll = async (
 };
 
 // ---------------------------------------------------------------------------
-// Health Check (effectful — polled by the host)
+// Health Check (effectful — aggregation only; periodic host polling is a
+// follow-up, see capability-handle.ts)
 // ---------------------------------------------------------------------------
 
 /**
  * Run health checks on all capabilities that declare one.
  * Returns aggregated report. Best-effort — never throws.
+ *
+ * Note: nothing in the host runtime calls this yet — it exists for the
+ * degraded-state detection follow-up (periodic polling is not wired).
  */
 export const checkHealth = async (
   handles: readonly CapabilityHandle[],
@@ -244,11 +276,19 @@ export const checkHealth = async (
  * Extract a capabilities record from a set of handles.
  * Used to pass into `makeNodeContext({ capabilities: ... })`.
  *
- * The returned record is keyed by `Capability` with each value typed to its
- * registry entry, so the wiring site needs no cast. The single cast below is
- * where the per-handle `name ↔ client` correlation (carried by
- * `CapabilityHandle<K>` at construction, widened to the union by the array)
- * is restored.
+ * TRUST BOUNDARY — this is the single point where the per-handle
+ * `name ↔ client` correlation (carried by `CapabilityHandle<K>` at
+ * construction, erased when widened to `readonly CapabilityHandle[]`) is
+ * restored via the cast below. Adapter authors are trusted to wire
+ * `CapabilityHandle<K>.name` to a `CapabilityRegistry[K]` client; nothing
+ * downstream re-verifies the client's shape (validation checks presence,
+ * not structure). Keep every such cast here — do not introduce a second
+ * correlation point.
+ *
+ * Duplicate names cannot reach this function through the host boot path:
+ * `topoSortHandles` rejects them (and null clients) before `connectAll`
+ * runs, so the unconditional assignment below never silently drops a
+ * handle in practice.
  */
 export const extractClients = (
   handles: readonly CapabilityHandle[],

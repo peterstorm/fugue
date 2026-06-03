@@ -268,6 +268,30 @@ describe("withTracedCapability", () => {
       expect(failureEvents[0]!.attributes?.message).toBe("extractor bug");
     });
 
+    it("extraction failure becomes a span event on the synchronous return path too", () => {
+      const handle: AnyHandle = {
+        name: "cache" as any,
+        client: { peek: () => ok("warm") },
+      };
+
+      const result = (withTracedCapability(handle, {
+        tracer,
+        extractAttributes: () => { throw new Error("sync extractor bug"); },
+      }).client as any).peek("key");
+
+      // The call itself is unaffected by the extractor failure.
+      expect(result).toEqual(ok("warm"));
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      const failureEvents = spans[0]!.events.filter(
+        (e) => e.name === "fugue.capability.attribute_extraction_failed",
+      );
+      expect(failureEvents).toHaveLength(1);
+      expect(failureEvents[0]!.attributes?.message).toBe("sync extractor bug");
+      expect(spans[0]!.ended).toBe(true);
+    });
+
     it("ends exactly one span per call across success, Result.Err, and throw paths", async () => {
       const handle: AnyHandle = {
         name: "db" as any,

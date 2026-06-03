@@ -2,6 +2,10 @@
 
 import { match } from "ts-pattern";
 import type { RunId, NodeId } from "./ids.js";
+// Type-only circular reference with `types/node.ts` (which imports
+// `FrameworkError` from this module) — safe: type imports erase at compile
+// time, so no runtime cycle exists.
+import type { Capability } from "./node.js";
 
 export type FrameworkError =
   | { readonly kind: "validation"; readonly nodeId: NodeId; readonly message: string; readonly path?: string }
@@ -104,11 +108,6 @@ export type FrameworkError =
 
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
 export type FrameworkErrorKind = FrameworkError["kind"];
-
-// Imported here rather than at top of file to avoid a circular reference at
-// the type-only boundary (Capability lives in `types/node.ts` which itself
-// imports from this module only via the `FrameworkError` type alias).
-import type { Capability } from "./node.js";
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —

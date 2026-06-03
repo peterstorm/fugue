@@ -80,8 +80,11 @@ export interface PgCapability {
   execute(sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>>;
 
   /**
-   * Execute a query and return the raw rows without schema validation.
-   * Use when you need untyped access or the schema is dynamic.
+   * Escape hatch: execute a query and return raw rows as `unknown[]` with NO
+   * schema validation. This bypasses parse-don't-validate — every row must be
+   * narrowed manually before use. Reach for `query` with a Zod schema first;
+   * use this only for genuinely dynamic schemas (e.g. `information_schema`
+   * introspection) or pass-through tooling.
    */
   queryRaw(sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>>;
 }

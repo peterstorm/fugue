@@ -5,8 +5,11 @@ PostgreSQL capability adapter for Fugue workflows.
 ## Installation
 
 ```bash
-bun add @fugue/pg pg
+bun add @fugue/pg pg zod
 ```
+
+`pg` and `zod` are peer dependencies — `pg` provides the connection pool,
+`zod` the schemas every `query`/`queryOne` call validates against.
 
 ## Usage
 
@@ -85,7 +88,7 @@ const ctx = makeNodeContext({
 | `query<T>(schema, sql, params?)` | Execute query, validate all rows against Zod schema |
 | `queryOne<T>(schema, sql, params?)` | Execute query, validate first row (or null) |
 | `execute(sql, params?)` | Execute write, return `{ rowCount }` |
-| `queryRaw(sql, params?)` | Execute query, return raw rows without validation |
+| `queryRaw(sql, params?)` | Escape hatch: raw `unknown[]` rows, no validation — prefer `query` with a schema |
 
 All methods return `Result<T, FrameworkError>` — no exceptions escape.
 
