@@ -1,0 +1,32 @@
+{
+  "name": "@fugue/xlsx",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fugue/framework": "workspace:*",
+    "exceljs": "^4.4.0"
+  },
+  "peerDependencies": {
+    "zod": "^3.25.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": { "optional": false }
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@fugue/fs": "workspace:*",
+    "zod": "^3.25.0"
+  }
+}

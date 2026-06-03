@@ -85,13 +85,13 @@ The file is known to the DAG, so this is a `createFetchNode` with
 
 ```ts
 import { z } from "zod";
-import { createFetchNode, ok, err } from "@fugue/framework";
+import { createFetchNode } from "@fugue/framework";
 import type { Result, FrameworkError } from "@fugue/framework";
 import { localPathRef } from "@fugue/document-source";
-import { parseWorkbook } from "../lib/parse-workbook.js"; // your pure parser (see below)
+import { parseWorkbook } from "@fugue/xlsx";
 
 const InputSchema = z.object({ period: z.string() });           // e.g. "2026-Q2"
-const RowSchema = z.object({ customerId: z.string(), revenue: z.number() });
+const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
 const OutputSchema = z.object({ rows: z.array(RowSchema) });
 
 export const fetchReport = createFetchNode({
@@ -103,7 +103,7 @@ export const fetchReport = createFetchNode({
     const ref = localPathRef(`${input.period}.xlsx`);          // swap for sharePointPathRef in prod
     const bytes = await ctx.documents.getContent(ref);          // I/O
     if (!bytes.ok) return bytes;                                // propagate FrameworkError
-    return parseWorkbook(bytes.value, RowSchema);               // pure: bytes → Result<rows>
+    return parseWorkbook(bytes.value, RowSchema);               // pure: bytes → Result<{ rows }>
   },
 });
 ```
@@ -214,31 +214,31 @@ An unrouted ref returns a non-retriable error (never silent empty bytes).
 
 ---
 
-## Parsing the workbook (pure, app-owned)
+## Parsing the workbook — `@fugue/xlsx`
 
-Parsing is deliberately **not** in the capability. Keep it a pure function so it
-is fixture-testable and provider-agnostic. Pick a parser (`exceljs`, SheetJS) in
-your app; the shape:
+Parsing is deliberately **not** in the capability — it is a pure function so it
+stays fixture-testable and provider-agnostic. `@fugue/xlsx` provides it:
 
 ```ts
-// lib/parse-workbook.ts
-import { ok, err } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
-import type { z } from "zod";
+import { z } from "zod";
+import { parseWorkbook } from "@fugue/xlsx";
 
-export const parseWorkbook = <T>(
-  bytes: Uint8Array,
-  rowSchema: z.ZodType<T>,
-): Result<{ rows: T[] }, FrameworkError> => {
-  // 1. parse `bytes` into raw row objects with your chosen library (pure: no I/O)
-  // 2. validate each row with rowSchema.safeParse
-  // 3. return ok({ rows }) or err({ kind: "validation"|"node-crash", ... })
-  // ...
-};
+const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
+
+const parsed = await parseWorkbook(bytes, RowSchema);  // Promise<Result<{ rows }, FrameworkError>>
+// opts: { sheet?: string | number, headerRow?: number }  (default: first sheet, header row 1)
 ```
 
-This separation means the same parser works regardless of which adapter
-delivered the bytes.
+- Rows are objects keyed by the header-row cells; cells are normalised to
+  primitives (formula → result, rich text / hyperlink → text, dates kept as
+  `Date`). Pair numeric/date columns with `z.coerce.*` if the source stores them
+  as text. Fully-blank rows are skipped.
+- Errors: `node-crash` (non-retriable) for non-workbook bytes or a missing
+  worksheet; `validation` (naming the row) when a row violates `rowSchema`.
+
+The same parser works regardless of which adapter delivered the bytes — verified
+end-to-end (`@fugue/fs` read from disk → `parseWorkbook`) in
+`packages/xlsx/src/__tests__/end-to-end.test.ts`.
 
 ---
 
