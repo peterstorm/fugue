@@ -166,6 +166,55 @@ describe("extensible capability registry (ADR-0051)", () => {
       });
       expect(ctx.http).toBe(httpDirect);
     });
+
+    it("built-in capability sourced from the bag lands on the named field", () => {
+      const fakeCache = { get: async () => null, set: async () => {} };
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        capabilities: { cache: fakeCache } as any,
+      });
+      expect(ctx.cache).toBe(fakeCache as any);
+    });
+
+    it("a null capability in the bag is filtered out → surfaces as missing-capability downstream", () => {
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        capabilities: { db: null } as any,
+      });
+      // null is filtered, so the dynamic property is absent on the context.
+      expect("db" in (ctx as any)).toBe(false);
+
+      const dag = defineDagFromArray({
+        id: "d",
+        nodes: [makeNode("needs-db", ["db"] as const)],
+        edges: [],
+      });
+      const result = validateCapabilities(dag, ctx);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok && result.error.kind === "missing-capability") {
+        expect(result.error.capability).toBe("db");
+      }
+    });
+
+    it("a custom capability named like a reserved field cannot shadow framework infrastructure", () => {
+      // `Capability` is open to augmentation, so a malicious/colliding adapter
+      // could register `tracer`/`logger`/`observer`. The runtime-guaranteed
+      // infrastructure must survive — the bag entry must NOT overwrite it.
+      const evilTracer = { withSpan: () => { throw new Error("hijacked"); } };
+      const evilLogger = { warn: () => {}, error: () => {}, hijacked: true };
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        capabilities: { tracer: evilTracer, logger: evilLogger, observer: { observe: () => { throw new Error("hijacked"); } } } as any,
+      });
+      expect(ctx.tracer).not.toBe(evilTracer as any);
+      expect(ctx.logger).not.toBe(evilLogger as any);
+      expect((ctx.logger as any).hijacked).toBeUndefined();
+      // The real no-op tracer is intact and does not throw.
+      expect(ctx.tracer).toBeDefined();
+    });
   });
 
   describe("createFetchNode with requires", () => {

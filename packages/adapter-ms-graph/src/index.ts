@@ -303,7 +303,7 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
       return ok({
         id: d.id,
         name: d.name,
-        sizeBytes: d.size ?? 0,
+        sizeBytes: d.size ?? null,
         lastModified: d.lastModifiedDateTime,
         ...(d.eTag !== undefined ? { eTag: d.eTag } : {}),
         ...(d.file?.mimeType !== undefined ? { mimeType: d.file.mimeType } : {}),

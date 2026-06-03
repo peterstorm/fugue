@@ -246,8 +246,9 @@ export const createNodeContextForDag = (
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
     // ADR-0051: Custom capability clients from registered handles are passed
-    // via the capabilities record. `extractClients` returns a record typed
-    // per `CapabilityRegistry`, so no cast is needed here.
+    // via the capabilities record. The name↔client correlation is restored
+    // inside `extractClients` — the single trust-boundary cast (see
+    // capability-manager.ts). Do not add a second correlation point here.
     capabilities: extractClients(shared.capabilities),
   });
 };

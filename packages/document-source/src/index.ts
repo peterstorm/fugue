@@ -96,8 +96,8 @@ export interface FileMeta {
   readonly id: string;
   /** File name including extension. */
   readonly name: string;
-  /** Size in bytes (0 if unknown). */
-  readonly sizeBytes: number;
+  /** Size in bytes, or `null` when the backend doesn't report it (distinct from a genuinely empty `0`-byte file). */
+  readonly sizeBytes: number | null;
   /** Last-modified timestamp, ISO 8601 UTC. */
   readonly lastModified: string;
   /** Opaque entity tag for change detection, when present. */

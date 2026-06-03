@@ -213,6 +213,42 @@ describe("createMsGraphAdapter — getContent", () => {
     expect(isErr(res)).toBe(true);
     if (!res.ok) expect(res.error.kind).toBe("transient");
   });
+
+  it("maps a thrown fetch (network error) to a transient error", async () => {
+    const handle = createMsGraphAdapter(
+      baseConfig({
+        fetchImpl: async () => {
+          throw new Error("ECONNRESET");
+        },
+      }),
+    );
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) {
+      expect(res.error.kind).toBe("transient");
+      if (res.error.kind === "transient") expect(res.error.message).toContain("ECONNRESET");
+    }
+  });
+
+  it("maps a body-read failure (arrayBuffer throws) to a transient error", async () => {
+    // A 2xx response whose body cannot be read — graphGet returns ok(res),
+    // then getContent's arrayBuffer() rejects.
+    const brokenBody = {
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        throw new Error("stream aborted");
+      },
+    } as unknown as Response;
+    const handle = createMsGraphAdapter(baseConfig({ fetchImpl: async () => brokenBody }));
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) {
+      expect(res.error.kind).toBe("transient");
+      if (res.error.kind === "transient") expect(res.error.message).toContain("reading Graph response body");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -249,14 +285,23 @@ describe("createMsGraphAdapter — getMetadata", () => {
     expect(stub.lastUrl()).toBe("https://graph.microsoft.com/v1.0/drives/d/items/i");
   });
 
-  it("defaults sizeBytes to 0 when Graph omits size", async () => {
+  it("reports sizeBytes as null when Graph omits size (distinct from a 0-byte file)", async () => {
     const { size: _omit, ...noSize } = driveItemJson;
     const stub = stubFetch(() => new Response(JSON.stringify(noSize), { status: 200 }));
     const handle = createMsGraphAdapter(baseConfig({ fetchImpl: stub.fetchImpl }));
 
     const res = await handle.client.getMetadata(driveItemRef("d", "i"));
     expect(isOk(res)).toBe(true);
-    if (res.ok) expect(res.value.sizeBytes).toBe(0);
+    if (res.ok) expect(res.value.sizeBytes).toBeNull();
+  });
+
+  it("surfaces a malformed metadata JSON body as transient", async () => {
+    const stub = stubFetch(() => new Response("{ not json", { status: 200 }));
+    const handle = createMsGraphAdapter(baseConfig({ fetchImpl: stub.fetchImpl }));
+
+    const res = await handle.client.getMetadata(driveItemRef("d", "i"));
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) expect(res.error.kind).toBe("transient");
   });
 
   it("rejects an unexpected driveItem shape as a non-retriable node-crash", async () => {

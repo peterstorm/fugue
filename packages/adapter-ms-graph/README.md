@@ -92,7 +92,10 @@ const fakeDocs = createFakeDocumentSource({
 Implemented: content + metadata reads for the three `FileRef` variants, Graph
 status → `FrameworkError` mapping, capability lifecycle, and the test fake.
 
-Out of scope (by design / pending): MSAL token-provider wiring (caller's), the
-`parseWorkbook` transform (functional core), and any provider-specific
-operations such as folder listing or upload — those belong on a separate
-capability, never on the shared `DocumentSource` port.
+Out of scope (by design): the `parseWorkbook` transform lives in `@fugue/xlsx`
+(functional core, provider-agnostic), not this adapter; and any
+provider-specific operations such as folder listing or upload belong on a
+separate capability, never on the shared `DocumentSource` port.
+
+Pending (caller's responsibility): MSAL / `@azure/identity` token-provider
+wiring — the adapter takes an injected token provider.

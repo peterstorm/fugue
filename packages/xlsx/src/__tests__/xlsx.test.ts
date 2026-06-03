@@ -77,6 +77,65 @@ describe("parseWorkbook — errors", () => {
   });
 });
 
+describe("parseWorkbook — options", () => {
+  it("reads headers from a custom 1-based header row (headerRow option)", async () => {
+    // Row 1 is a report title; the real headers live on row 2.
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Sheet1");
+    ws.addRow(["Quarterly Revenue Report"]);
+    ws.addRow(["customerId", "revenue"]);
+    ws.addRow(["c-1", 100]);
+    const bytes = new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const r = await parseWorkbook(bytes, RowSchema, { headerRow: 2 });
+    expect(isOk(r)).toBe(true);
+    if (r.ok) expect(r.value.rows).toEqual([{ customerId: "c-1", revenue: 100 }]);
+  });
+
+  it("selects a worksheet by 1-based numeric index (sheet option)", async () => {
+    const wb = new ExcelJS.Workbook();
+    const first = wb.addWorksheet("First");
+    first.addRow(["customerId", "revenue"]);
+    first.addRow(["wrong", 1]);
+    const second = wb.addWorksheet("Second");
+    second.addRow(["customerId", "revenue"]);
+    second.addRow(["c-2", 22]);
+    const bytes = new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const r = await parseWorkbook(bytes, RowSchema, { sheet: 2 });
+    expect(isOk(r)).toBe(true);
+    if (r.ok) expect(r.value.rows).toEqual([{ customerId: "c-2", revenue: 22 }]);
+  });
+
+  it("rejects a duplicate non-empty header instead of silently dropping a column", async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Sheet1");
+    ws.addRow(["customerId", "customerId"]); // collision — second would overwrite the first
+    ws.addRow(["a", "b"]);
+    const bytes = new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const r = await parseWorkbook(bytes, z.object({ customerId: z.string() }));
+    expect(isErr(r)).toBe(true);
+    if (!r.ok) {
+      expect(r.error.kind).toBe("node-crash");
+      expect(r.error.message).toContain("duplicate header");
+      expect(r.error.message).toContain("customerId");
+    }
+  });
+
+  it("tolerates multiple blank header columns (only non-empty duplicates are rejected)", async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Sheet1");
+    ws.addRow(["customerId", "revenue", null, null]); // two trailing blank headers — fine
+    ws.addRow(["c-1", 5, "ignored", "ignored"]);
+    const bytes = new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+
+    const r = await parseWorkbook(bytes, RowSchema);
+    expect(isOk(r)).toBe(true);
+    if (r.ok) expect(r.value.rows).toEqual([{ customerId: "c-1", revenue: 5 }]);
+  });
+});
+
 describe("normalizeCell", () => {
   it("passes through primitives and Date", () => {
     expect(normalizeCell("x")).toBe("x");

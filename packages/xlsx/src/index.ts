@@ -117,9 +117,19 @@ export const parseWorkbook = async <T>(
   const colCount = ws.columnCount;
   const headerRow = ws.getRow(headerRowNum);
   const headers: string[] = [];
+  const seenHeaders = new Set<string>();
   for (let c = 1; c <= colCount; c++) {
     const h = normalizeCell(headerRow.getCell(c).value);
-    headers[c] = h === null ? "" : String(h).trim();
+    const key = h === null ? "" : String(h).trim();
+    // A duplicate non-empty header would silently overwrite the earlier
+    // column when rows are keyed by header (`obj[key] = val`), dropping a whole
+    // column of data. Fail loudly instead. Blank headers are legitimately
+    // skipped (multiple empty columns are fine), so they're exempt.
+    if (key !== "" && seenHeaders.has(key)) {
+      return err(crashErr(`duplicate header column: '${key}' (header row ${headerRowNum})`));
+    }
+    if (key !== "") seenHeaders.add(key);
+    headers[c] = key;
   }
 
   const rows: T[] = [];

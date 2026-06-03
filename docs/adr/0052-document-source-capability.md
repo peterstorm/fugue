@@ -86,7 +86,8 @@ it rots into a lowest-common-denominator lie.
    export type FileRef =
      | { kind: "sharePointPath"; siteHostname: string; sitePath: string; filePath: string }
      | { kind: "driveItem"; driveId: string; itemId: string }   // either backend, IDs known
-     | { kind: "shareUrl"; url: string };                        // any OneDrive/SharePoint share link
+     | { kind: "shareUrl"; url: string }                         // any OneDrive/SharePoint share link
+     | { kind: "localPath"; path: string };                      // local filesystem, relative to the adapter root
      // future, additive: | { kind: "googleDriveFile"; fileId: string }
    ```
 
@@ -216,6 +217,9 @@ Delivered on this branch (compiling, unit-tested, no network):
 - `@fugue/fs` adapter: `createFsAdapter` (root-confined local reads, fs-error
   classification, fail-closed on traversal and foreign variants) — the
   zero-unknowns adapter for wiring a DAG end-to-end today.
+- `@fugue/xlsx`: the pure `parseWorkbook` transform (bytes → Zod-validated typed
+  rows) on `exceljs`, with fixture and end-to-end tests. Lives in the functional
+  core, separate from this capability, so it is provider-agnostic.
 
 Remaining (gated on decisions not yet available):
 
@@ -223,8 +227,6 @@ Remaining (gated on decisions not yet available):
   the Entra app + cert/secret choice).
 - Confirmation of SharePoint vs OneDrive and the concrete `FileRef` variant the
   DAG will author (gated on where the file actually lives).
-- `parseWorkbook` transform + fixtures (gated on a sample file and the
-  `xlsx`/`exceljs` dependency choice).
 
 ## Related
 

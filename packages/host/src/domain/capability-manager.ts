@@ -105,7 +105,7 @@ export const topoSortHandles = (
             context: { capability: name, missingDependency: dep },
           };
         }
-        const depError = visit(dep as string);
+        const depError = visit(dep);
         if (depError) return depError;
       }
     }

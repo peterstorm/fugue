@@ -25,6 +25,27 @@ const asRunId = (s: string | RunId): RunId =>
 const asDagId = (s: string | DagId): DagId =>
   typeof s === "string" ? brandDagId(s) : s;
 
+// Names a custom capability may NOT use, because the runtime guarantees them as
+// named context fields. The built-in capability keys are handled explicitly
+// above; these are the always-present infrastructure fields that are NOT
+// capabilities (so absent from BUILTIN_CAPABILITY_KEYS) but must not be
+// overwritten by a same-named augmented capability spread.
+const ALWAYS_PRESENT_CONTEXT_KEYS = [
+  "runId",
+  "dagId",
+  "logger",
+  "tracer",
+  "observer",
+  "checkpointWriter",
+  "signal",
+  "contentFilter",
+] as const satisfies readonly (keyof NodeContext)[];
+
+const RESERVED_CONTEXT_KEYS: ReadonlySet<string> = new Set<string>([
+  ...BUILTIN_CAPABILITY_KEYS,
+  ...ALWAYS_PRESENT_CONTEXT_KEYS,
+]);
+
 export const makeNodeContext = (init: NodeContextInit): NodeContext => {
   // Merge capabilities from both top-level fields and the capabilities record.
   // Top-level fields take precedence (explicit > bag).
@@ -47,11 +68,14 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
   };
 
   // Spread custom (non-built-in) capabilities onto the context object.
-  // Built-in capabilities are already handled above. BUILTIN_CAPABILITY_KEYS
-  // is the single source of truth shared with the type-level registry.
-  const builtinKeys: ReadonlySet<string> = new Set(BUILTIN_CAPABILITY_KEYS);
+  // Built-in capabilities are already handled above. We filter against the
+  // RESERVED set — built-in capability keys PLUS the always-present
+  // infrastructure fields. `Capability = keyof CapabilityRegistry` is open to
+  // consumer module augmentation, so a custom capability could collide with a
+  // reserved name (`tracer`, `logger`, `observer`, …); without this guard the
+  // `Object.assign` below would clobber framework-guaranteed infrastructure.
   const customEntries = Object.entries(caps).filter(
-    ([k, v]) => !builtinKeys.has(k) && v != null,
+    ([k, v]) => !RESERVED_CONTEXT_KEYS.has(k) && v != null,
   );
 
   if (customEntries.length === 0) return base;

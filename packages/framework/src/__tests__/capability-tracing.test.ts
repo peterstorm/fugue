@@ -292,6 +292,56 @@ describe("withTracedCapability", () => {
       expect(spans[0]!.ended).toBe(true);
     });
 
+    it("records both the extraction-failure event and the exception when an extractor throws AND the method rejects", async () => {
+      const handle: AnyHandle = {
+        name: "http" as any,
+        client: { get: async () => { throw new Error("network failure"); } },
+      };
+
+      await expect(
+        (withTracedCapability(handle, {
+          tracer,
+          extractAttributes: () => { throw new Error("extractor bug"); },
+        }).client as any).get("/x"),
+      ).rejects.toThrow("network failure");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      const span = spans[0]!;
+      // The extractor failure is recorded as a best-effort event...
+      expect(
+        span.events.some((e) => e.name === "fugue.capability.attribute_extraction_failed"),
+      ).toBe(true);
+      // ...and the method's own rejection still errors the span and is recorded.
+      expect(span.events.some((e) => e.name === "exception")).toBe(true);
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span.ended).toBe(true);
+    });
+
+    it("documents the this-rebinding limitation: sibling calls via `this` are NOT traced", async () => {
+      // The proxy invokes `method.apply(target, args)`, so `this` inside a
+      // method is the UNWRAPPED client. A method that calls a sibling via
+      // `this.sibling()` bypasses the proxy — only the outer call is traced.
+      // This is a documented trade-off (capability-tracing.ts) and the reason
+      // built-in adapters are closure-based object literals, not classes.
+      const client = {
+        outer: async function (this: { inner: () => Promise<unknown> }) {
+          return this.inner(); // sibling call — bypasses the proxy
+        },
+        inner: async () => ok("from inner"),
+      };
+      const handle: AnyHandle = { name: "db" as any, client };
+
+      const traced = withTracedCapability(handle, { tracer }).client as any;
+      const result = await traced.outer();
+      expect(result).toEqual(ok("from inner"));
+
+      const spans = exporter.getFinishedSpans();
+      // Only `db.outer` — `db.inner` is invoked on the unwrapped target.
+      expect(spans).toHaveLength(1);
+      expect(spans[0]!.name).toBe("db.outer");
+    });
+
     it("ends exactly one span per call across success, Result.Err, and throw paths", async () => {
       const handle: AnyHandle = {
         name: "db" as any,

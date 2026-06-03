@@ -165,7 +165,7 @@ const createFakeSharedInfra = (
 const fakeCapability = (
   name: string,
   events: string[],
-  opts: { failConnect?: boolean; dependsOn?: string[] } = {},
+  opts: { failConnect?: boolean; failClose?: boolean; dependsOn?: string[] } = {},
 ) => ({
   name: name as never,
   client: { __cap: name } as never,
@@ -175,6 +175,7 @@ const fakeCapability = (
   },
   close: async () => {
     events.push(`close:${name}`);
+    if (opts.failClose) throw new Error(`${name} refused to close`);
   },
   ...(opts.dependsOn ? { dependsOn: opts.dependsOn as never[] } : {}),
 });
@@ -704,6 +705,76 @@ describe("Full Host Lifecycle", () => {
     // factory-time resources, e.g. a pg Pool), then the connected prefix
     // (db) — nothing leaks on an aborted boot.
     expect(events).toEqual(["connect:db", "close:queue", "close:db"]);
+  });
+
+  test("ADR-0051: shutdown reports a non-clean close when a capability fails to close", async () => {
+    const events: string[] = [];
+    const capabilities = [
+      fakeCapability("db", events),
+      fakeCapability("cache", events, { failClose: true }),
+    ];
+    const { port, redis } = createFakeRedis();
+    const logger = createTestLogger();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis, capabilities),
+      logger,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+
+    await host.shutdown();
+    host = null;
+
+    // Both close attempts are made (best-effort), and the failure is surfaced
+    // as a warning rather than silently swallowed.
+    expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
+    const warnLogs = logger.logs.filter((l) => l.level === "warn");
+    const closeWarn = warnLogs.find((l) => l.msg.includes("Capability shutdown completed with"));
+    expect(closeWarn).toBeDefined();
+    expect((closeWarn?.data as { failures: string[] }).failures).toContain("cache");
+  });
+
+  test("ADR-0051: a post-connect boot failure (HTTP bind) closes the already-connected capabilities", async () => {
+    // Occupy a port so the host's Bun.serve bind throws after capabilities have
+    // already connected — exercising the post-connect cleanup path.
+    const blocker = Bun.serve({ port: 0, fetch: () => new Response("busy") });
+    try {
+      const events: string[] = [];
+      const capabilities = [fakeCapability("db", events), fakeCapability("cache", events)];
+      const { port, redis } = createFakeRedis();
+      const logger = createTestLogger();
+      let infraClosed = false;
+
+      const result = await createHost({
+        config: testConfig({ PORT: blocker.port }),
+        git: createFakeGitPort(),
+        loader: createFakeModuleLoader([]),
+        redis: port,
+        sharedInfra: createFakeSharedInfra(redis, capabilities),
+        logger,
+        onShutdown: async () => { infraClosed = true; },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("internal-invariant-violated");
+        expect(result.error.message).toContain("bind HTTP server");
+      }
+
+      // Capabilities connected during boot must be closed (reverse order) so an
+      // aborted boot doesn't leak pools/sockets; infra cleanup also runs.
+      expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
+      expect(infraClosed).toBe(true);
+    } finally {
+      blocker.stop();
+    }
   });
 
   test("ADR-0051: capability dependency cycle aborts boot", async () => {
