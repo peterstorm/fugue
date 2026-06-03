@@ -1,0 +1,33 @@
+{
+  "name": "@fugue/ms-graph",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fugue/framework": "workspace:*",
+    "ts-pattern": "^5.9.0"
+  },
+  "peerDependencies": {
+    "zod": "^3.25.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "zod": "^3.25.0"
+  }
+}

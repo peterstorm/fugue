@@ -31,6 +31,21 @@
         "@types/bun": "^1.3.13",
       },
     },
+    "packages/adapter-ms-graph": {
+      "name": "@fugue/ms-graph",
+      "version": "0.1.0",
+      "dependencies": {
+        "@fugue/framework": "workspace:*",
+        "ts-pattern": "^5.9.0",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "zod": "^3.25.0",
+      },
+      "peerDependencies": {
+        "zod": "^3.25.0",
+      },
+    },
     "packages/adapter-pg": {
       "name": "@fugue/pg",
       "version": "0.1.0",
@@ -45,6 +60,7 @@
       },
       "peerDependencies": {
         "pg": "^8.0.0",
+        "zod": "^3.25.0",
       },
     },
     "packages/framework": {
@@ -147,6 +163,8 @@
     "@fugue/framework": ["@fugue/framework@workspace:packages/framework"],
 
     "@fugue/host": ["@fugue/host@workspace:packages/host"],
+
+    "@fugue/ms-graph": ["@fugue/ms-graph@workspace:packages/adapter-ms-graph"],
 
     "@fugue/pg": ["@fugue/pg@workspace:packages/adapter-pg"],
 
@@ -544,6 +562,10 @@
 
     "@fugue/framework/@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
+    "@fugue/ms-graph/@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+
+    "@fugue/ms-graph/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
+
     "@fugue/pg/@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
     "@fugue/pg/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
@@ -723,6 +745,8 @@
     "@azure/opentelemetry-instrumentation-azure-sdk/@opentelemetry/instrumentation/import-in-the-middle": ["import-in-the-middle@2.0.6", "", { "dependencies": { "acorn": "^8.15.0", "acorn-import-attributes": "^1.9.5", "cjs-module-lexer": "^2.2.0", "module-details-from-path": "^1.0.4" } }, "sha512-3vZV3jX0XRFW3EJDTwzWoZa+RH1b8eTTx6YOCjglrLyPuepwoBti1k3L2dKwdCUrnVEfc5CuRuGstaC/uQJJaw=="],
 
     "@fugue/framework/@types/bun/bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+
+    "@fugue/ms-graph/@types/bun/bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
 
     "@fugue/pg/@types/bun/bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
 
