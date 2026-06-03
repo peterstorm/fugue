@@ -2,6 +2,8 @@
 
 Minimal, copy-paste-ready reference for generating Fugue DAGs.
 For deep dives: `library-ux.md`, `dag-type-system.md`, `packages/host/docs/writing-dags.md`.
+Reading files (Excel/CSV from disk, SharePoint, OneDrive): `llm-document-source.md`.
+Writing a capability adapter: `adapter-authoring.md`.
 
 ---
 
