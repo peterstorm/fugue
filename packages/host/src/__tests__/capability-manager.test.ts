@@ -93,6 +93,27 @@ describe("capability-manager", () => {
       }
     });
 
+    it("rejects a dependsOn entry with no registered handle", () => {
+      const handles = [makeHandle("cache", { dependsOn: ["db"] as any })];
+      const result = topoSortHandles(handles);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("internal-invariant-violated");
+        expect(result.error.message).toContain("'cache' depends on 'db'");
+        expect(result.error.context).toEqual({ capability: "cache", missingDependency: "db" });
+      }
+    });
+
+    it("rejects duplicate capability names", () => {
+      const handles = [makeHandle("db"), makeHandle("db")];
+      const result = topoSortHandles(handles);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("internal-invariant-violated");
+        expect(result.error.message).toContain("Duplicate capability handle for 'db'");
+      }
+    });
+
     it("empty handles array → Ok([])", () => {
       const result = topoSortHandles([]);
       expect(isOk(result)).toBe(true);
@@ -115,7 +136,7 @@ describe("capability-manager", () => {
       expect(order).toEqual(["a", "b"]);
     });
 
-    it("stops on first failure", async () => {
+    it("stops on first failure and reports the connected prefix", async () => {
       const order: string[] = [];
       const handles = [
         makeHandle("a", { connect: async () => { order.push("a"); } }),
@@ -127,8 +148,10 @@ describe("capability-manager", () => {
       expect(isErr(result)).toBe(true);
       expect(order).toEqual(["a"]); // "c" never reached
       if (!result.ok) {
-        expect(result.error.message).toContain("boom");
-        expect(result.error.message).toContain("b");
+        expect(result.error.error.message).toContain("boom");
+        expect(result.error.error.message).toContain("b");
+        // The connected prefix is what the caller must close on aborted boot.
+        expect(result.error.connected.map((h) => h.name)).toEqual(["a"]);
       }
     });
 
@@ -153,7 +176,7 @@ describe("capability-manager", () => {
       expect(order).toEqual(["c", "b", "a"]);
     });
 
-    it("continues on failure (best-effort)", async () => {
+    it("continues on failure (best-effort) and returns the failures", async () => {
       const order: string[] = [];
       const handles = [
         makeHandle("a", { close: async () => { order.push("a"); } }),
@@ -161,9 +184,17 @@ describe("capability-manager", () => {
         makeHandle("c", { close: async () => { order.push("c"); } }),
       ];
       const logger = { info: () => {}, warn: () => {} };
-      await closeAll(handles, logger);
+      const failures = await closeAll(handles, logger);
       // "b" fails but "a" and "c" still close (reversed: c, b-fail, a)
       expect(order).toEqual(["c", "a"]);
+      expect(failures).toEqual([{ name: "b", error: "oops" }]);
+    });
+
+    it("clean close returns no failures", async () => {
+      const handles = [makeHandle("a", { close: async () => {} })];
+      const logger = { info: () => {}, warn: () => {} };
+      const failures = await closeAll(handles, logger);
+      expect(failures).toEqual([]);
     });
   });
 

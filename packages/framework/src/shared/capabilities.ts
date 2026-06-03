@@ -40,9 +40,16 @@ export const validateCapabilities = (
   ctx: BaseNodeContext,
 ): Result<ValidatedNodeContext, FrameworkError> => {
   const missing: { readonly nodeId: typeof dag.nodes[number]["id"]; readonly capability: Capability }[] = [];
+  // Single widening cast: custom capabilities live as dynamic properties on
+  // the context (ADR-0051), so the lookup is keyed by `Capability` rather
+  // than the statically-known `BaseNodeContext` fields. `== null` covers both
+  // "field absent" (custom capability never wired) and "field explicitly
+  // null" (built-in capability unwired) — both are missing for a node that
+  // declared them.
+  const dynamicCtx = ctx as Partial<Record<Capability, unknown>>;
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
-      if ((ctx as unknown as Record<string, unknown>)[cap] == null) {
+      if (dynamicCtx[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }
     }

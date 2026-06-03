@@ -11,6 +11,7 @@
 // exclusively via the `capabilities` record.
 
 import type { NodeContext, NodeContextInit } from "../types/node.js";
+import { BUILTIN_CAPABILITY_KEYS } from "../types/node.js";
 import { runId as brandRunId, dagId as brandDagId } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
 import { consoleLogger, noopObserver, noopTracer } from "./defaults.js";
@@ -46,8 +47,9 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
   };
 
   // Spread custom (non-built-in) capabilities onto the context object.
-  // Built-in capabilities are already handled above.
-  const builtinKeys = new Set(["llm", "cache", "prompts", "judgeLlm", "http"]);
+  // Built-in capabilities are already handled above. BUILTIN_CAPABILITY_KEYS
+  // is the single source of truth shared with the type-level registry.
+  const builtinKeys: ReadonlySet<string> = new Set(BUILTIN_CAPABILITY_KEYS);
   const customEntries = Object.entries(caps).filter(
     ([k, v]) => !builtinKeys.has(k) && v != null,
   );

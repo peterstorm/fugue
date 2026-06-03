@@ -52,10 +52,11 @@ const buildUrl = (baseUrl: string | undefined, url: string): string => {
   return `${base}${path}`;
 };
 
-const makeTransientError = (message: string): FrameworkError => ({
+const makeTransientError = (message: string, httpStatus?: number): FrameworkError => ({
   kind: "transient",
   nodeId: HTTP_NODE_ID,
   message,
+  ...(httpStatus !== undefined ? { httpStatus } : {}),
 });
 
 const makeNodeCrashError = (message: string): FrameworkError => ({
@@ -87,22 +88,24 @@ async function executeRequest<T>(
   // Build abort controller for timeout
   let controller: AbortController | undefined;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let onExternalAbort: (() => void) | undefined;
+  const signal = opts.signal;
 
-  if (timeoutMs != null || opts.signal) {
+  if (timeoutMs != null || signal) {
     controller = new AbortController();
     const ctrl = controller;
 
     // If the signal is already aborted, abort immediately
-    const signal = opts.signal;
     if (signal?.aborted) {
-      return err({ kind: "aborted", reason: `HTTP request aborted: ${method} ${buildUrl(config.baseUrl, url)}` });
+      return err({ kind: "aborted", reason: `HTTP request aborted: ${method} ${fullUrl}` });
     }
 
     if (timeoutMs != null) {
       timeoutId = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
     }
     if (signal) {
-      signal.addEventListener("abort", () => ctrl.abort(signal.reason), { once: true });
+      onExternalAbort = () => ctrl.abort(signal.reason);
+      signal.addEventListener("abort", onExternalAbort, { once: true });
     }
   }
 
@@ -114,16 +117,27 @@ async function executeRequest<T>(
       signal: controller?.signal,
     });
 
-    if (timeoutId != null) clearTimeout(timeoutId);
-
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
+      // Best-effort body read for diagnostics — the status code is the signal.
+      const text = await response.text().catch(() => "<body unreadable>");
       return err(makeTransientError(
         `HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`,
+        response.status,
       ));
     }
 
-    const responseBody = await response.json().catch(() => null);
+    // Distinguish transport/parse failure from schema failure: a malformed
+    // body (truncated JSON, HTML gateway page) must not silently become
+    // `null` and vanish into a nullable schema.
+    let responseBody: unknown;
+    try {
+      responseBody = await response.json();
+    } catch (parseError) {
+      return err(makeNodeCrashError(
+        `Response body was not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)} (${method} ${fullUrl})`,
+      ));
+    }
+
     const parsed = opts.schema.safeParse(responseBody);
 
     if (!parsed.success) {
@@ -134,8 +148,6 @@ async function executeRequest<T>(
 
     return ok(parsed.data);
   } catch (error: unknown) {
-    if (timeoutId != null) clearTimeout(timeoutId);
-
     if (error instanceof Error) {
       if (error.message === "timeout" || error.name === "TimeoutError") {
         return err(makeTransientError(`HTTP request timed out after ${timeoutMs}ms: ${method} ${fullUrl}`));
@@ -146,6 +158,12 @@ async function executeRequest<T>(
       return err(makeTransientError(`HTTP request failed: ${error.message}`));
     }
     return err(makeTransientError(`HTTP request failed: ${String(error)}`));
+  } finally {
+    // Release timer and external-signal listener on every path — without
+    // this, a long-lived shared parent signal accumulates listeners (and
+    // their captured controllers) across requests.
+    if (timeoutId != null) clearTimeout(timeoutId);
+    if (signal && onExternalAbort) signal.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -201,13 +219,17 @@ export const createHttpCapability = (
 
 /**
  * Create a fake HTTP capability for testing. Accepts a response map that
- * matches URL patterns to canned responses.
+ * matches URL patterns to canned responses. Route values are either the raw
+ * response body, or a `FakeHttpRoute` (`{ status?, body }`) when you need to
+ * simulate an error status — a `status` outside 2xx produces the same
+ * `transient` error (with `httpStatus` set) as the real capability.
  *
  * @example
  * ```ts
  * const fakeHttp = createFakeHttpCapability({
- *   "GET /users/123": ok({ id: "123", name: "Alice" }),
- *   "POST /orders": ok({ orderId: "ord-1" }),
+ *   "GET /users/123": { id: "123", name: "Alice" },
+ *   "POST /orders": { body: { orderId: "ord-1" } },
+ *   "GET /users/999": { status: 404, body: "Not Found" },
  * });
  * ```
  */
@@ -247,9 +269,19 @@ function matchRoute<T>(
     return err(makeTransientError(`No fake route matched: ${key}`));
   }
 
-  const body = typeof route === "object" && route !== null && "body" in route
-    ? (route as FakeHttpRoute).body
-    : route;
+  const isShapedRoute = typeof route === "object" && route !== null && "body" in route;
+
+  // Mirror the real capability: a non-2xx status becomes a transient error
+  // carrying `httpStatus`, so nodes branching on status are testable.
+  if (isShapedRoute) {
+    const status = (route as FakeHttpRoute).status;
+    if (status != null && (status < 200 || status >= 300)) {
+      const bodyText = String((route as FakeHttpRoute).body ?? "");
+      return err(makeTransientError(`HTTP ${status}: ${bodyText.slice(0, 500)}`, status));
+    }
+  }
+
+  const body = isShapedRoute ? (route as FakeHttpRoute).body : route;
 
   const parsed = schema.safeParse(body);
   if (!parsed.success) {

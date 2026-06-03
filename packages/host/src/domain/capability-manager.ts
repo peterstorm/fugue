@@ -13,18 +13,12 @@
 
 import type { Result } from "@fugue/framework";
 import { ok, err } from "@fugue/framework";
-import type { CapabilityHandle, Capability } from "@fugue/framework";
+import type { CapabilityHandle, Capability, CapabilityRegistry } from "@fugue/framework";
 import type { HostError } from "./host-error.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/**
- * A set of capability handles registered with the host.
- * Keyed by capability name — one handle per capability.
- */
-export type CapabilitySet = ReadonlyMap<string, CapabilityHandle>;
 
 /**
  * Health status of a single capability.
@@ -49,12 +43,29 @@ export interface CapabilityHealthReport {
 /**
  * Topologically sort capability handles by their `dependsOn` declarations.
  * Returns handles in connect order (dependencies first).
- * Returns Err if a cycle is detected.
+ *
+ * Returns Err when the handle set violates an invariant:
+ * - two handles claim the same capability name (last-writer-wins would
+ *   silently drop one)
+ * - a `dependsOn` entry names a capability with no registered handle
+ *   (the declared dependency contract would be silently unsatisfied)
+ * - a dependency cycle is detected
  */
 export const topoSortHandles = (
   handles: readonly CapabilityHandle[],
 ): Result<readonly CapabilityHandle[], HostError> => {
-  const byName = new Map<string, CapabilityHandle>(handles.map((h) => [h.name, h]));
+  const byName = new Map<string, CapabilityHandle>();
+  for (const handle of handles) {
+    if (byName.has(handle.name)) {
+      return err({
+        kind: "internal-invariant-violated",
+        message: `Duplicate capability handle for '${handle.name}' — one handle per capability`,
+        context: { capability: handle.name },
+      });
+    }
+    byName.set(handle.name, handle);
+  }
+
   const visited = new Set<string>();
   const visiting = new Set<string>();
   const sorted: CapabilityHandle[] = [];
@@ -73,6 +84,13 @@ export const topoSortHandles = (
     const handle = byName.get(name);
     if (handle?.dependsOn) {
       for (const dep of handle.dependsOn) {
+        if (!byName.has(dep)) {
+          return {
+            kind: "internal-invariant-violated",
+            message: `Capability '${name}' depends on '${dep}', but no '${dep}' handle is registered`,
+            context: { capability: name, missingDependency: dep },
+          };
+        }
         const depError = visit(dep as string);
         if (depError) return depError;
       }
@@ -96,13 +114,26 @@ export const topoSortHandles = (
 // ---------------------------------------------------------------------------
 
 /**
+ * A connect failure paired with the handles that successfully connected
+ * before it — the caller MUST close that prefix to avoid leaking pools and
+ * sockets on an aborted boot.
+ */
+export interface ConnectFailure {
+  readonly error: HostError;
+  /** Handles whose `connect()` completed before the failure, in connect order. */
+  readonly connected: readonly CapabilityHandle[];
+}
+
+/**
  * Connect all capability handles in topological order.
- * Stops on first failure and returns error with the failing capability name.
+ * Stops on first failure; the Err carries the connected prefix so the
+ * caller can close it (a crash-loop boot must not leak connections).
  */
 export const connectAll = async (
   handles: readonly CapabilityHandle[],
   logger: { info: (msg: string, data?: Record<string, unknown>) => void; error: (msg: string, data?: Record<string, unknown>) => void },
-): Promise<Result<void, HostError>> => {
+): Promise<Result<void, ConnectFailure>> => {
+  const connected: CapabilityHandle[] = [];
   for (const handle of handles) {
     if (handle.connect) {
       logger.info(`Connecting capability '${handle.name}'...`);
@@ -113,24 +144,37 @@ export const connectAll = async (
         const message = e instanceof Error ? e.message : String(e);
         logger.error(`Capability '${handle.name}' failed to connect`, { error: message });
         return err({
-          kind: "internal-invariant-violated",
-          message: `Capability '${handle.name}' failed to connect: ${message}`,
-          context: { capability: handle.name },
+          error: {
+            kind: "internal-invariant-violated",
+            message: `Capability '${handle.name}' failed to connect: ${message}`,
+            context: { capability: handle.name },
+          },
+          connected,
         });
       }
     }
+    connected.push(handle);
   }
   return ok(undefined);
 };
 
+/** A single capability that failed to close during shutdown. */
+export interface CloseFailure {
+  readonly name: string;
+  readonly error: string;
+}
+
 /**
  * Close all capability handles in reverse order (dependencies close last).
- * Best-effort — continues on failure, logs errors.
+ * Best-effort — continues on failure, logs errors. Returns the failures so
+ * the caller can report a non-clean shutdown instead of silently swallowing
+ * a pool that refused to drain.
  */
 export const closeAll = async (
   handles: readonly CapabilityHandle[],
   logger: { info: (msg: string, data?: Record<string, unknown>) => void; warn: (msg: string, data?: Record<string, unknown>) => void },
-): Promise<void> => {
+): Promise<readonly CloseFailure[]> => {
+  const failures: CloseFailure[] = [];
   // Close in reverse order (dependents close before dependencies)
   const reversed = [...handles].reverse();
   for (const handle of reversed) {
@@ -139,13 +183,14 @@ export const closeAll = async (
         await handle.close();
         logger.info(`Capability '${handle.name}' closed`);
       } catch (e) {
-        logger.warn(`Capability '${handle.name}' failed to close`, {
-          error: e instanceof Error ? e.message : String(e),
-        });
+        const error = e instanceof Error ? e.message : String(e);
+        logger.warn(`Capability '${handle.name}' failed to close`, { error });
+        failures.push({ name: handle.name, error });
         // Best-effort — continue closing others
       }
     }
   }
+  return failures;
 };
 
 // ---------------------------------------------------------------------------
@@ -198,13 +243,19 @@ export const checkHealth = async (
 /**
  * Extract a capabilities record from a set of handles.
  * Used to pass into `makeNodeContext({ capabilities: ... })`.
+ *
+ * The returned record is keyed by `Capability` with each value typed to its
+ * registry entry, so the wiring site needs no cast. The single cast below is
+ * where the per-handle `name ↔ client` correlation (carried by
+ * `CapabilityHandle<K>` at construction, widened to the union by the array)
+ * is restored.
  */
 export const extractClients = (
   handles: readonly CapabilityHandle[],
-): Partial<Record<string, unknown>> => {
+): Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }> => {
   const clients: Record<string, unknown> = {};
   for (const handle of handles) {
     clients[handle.name] = handle.client;
   }
-  return clients;
+  return clients as Partial<{ [K in Capability]: CapabilityRegistry[K] }>;
 };

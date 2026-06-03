@@ -34,6 +34,12 @@ beforeAll(() => {
       if (url.pathname === "/invalid-json" && req.method === "GET") {
         return Response.json({ unexpected: "shape" });
       }
+      if (url.pathname === "/malformed-body" && req.method === "GET") {
+        return new Response("<html>not json</html>", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response("Not Found", { status: 404 });
     },
   });
@@ -65,13 +71,35 @@ describe("createHttpCapability (real HTTP)", () => {
     }
   });
 
-  it("returns transient error on HTTP 500", async () => {
+  it("returns transient error on HTTP 500 with structured httpStatus", async () => {
     const http = createHttpCapability({ baseUrl }).client;
     const result = await http.get("/error", { schema: z.any() });
     expect(isErr(result)).toBe(true);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       expect(result.error.kind === "transient" && result.error.message).toContain("500");
+      expect(result.error.kind === "transient" && result.error.httpStatus).toBe(500);
+    }
+  });
+
+  it("carries httpStatus 404 so callers can branch without string-matching", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    const result = await http.get("/no-such-route", { schema: z.any() });
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      expect(result.error.kind === "transient" && result.error.httpStatus).toBe(404);
+    }
+  });
+
+  it("returns node-crash (not null-through-schema) when a 200 body is not valid JSON", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    // A nullable schema must NOT swallow the parse failure as a null value.
+    const result = await http.get("/malformed-body", { schema: z.object({ x: z.string() }).nullable() });
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error.kind === "node-crash" && result.error.message).toContain("not valid JSON");
     }
   });
 
@@ -135,5 +163,47 @@ describe("createHttpCapability (real HTTP)", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
     }
+  });
+
+  it("aborts a mid-flight request when the signal fires", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    const controller = new AbortController();
+    // /slow takes 2s — abort shortly after the request is in flight.
+    const pending = http.get("/slow", { schema: z.any(), signal: controller.signal });
+    setTimeout(() => controller.abort(), 20);
+    const result = await pending;
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  it("removes its abort listener from a shared signal after completion", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    const controller = new AbortController();
+    let added = 0;
+    let removed = 0;
+    const origAdd = controller.signal.addEventListener.bind(controller.signal);
+    const origRemove = controller.signal.removeEventListener.bind(controller.signal);
+    controller.signal.addEventListener = ((...args: Parameters<typeof origAdd>) => {
+      added++;
+      return origAdd(...args);
+    }) as typeof controller.signal.addEventListener;
+    controller.signal.removeEventListener = ((...args: Parameters<typeof origRemove>) => {
+      removed++;
+      return origRemove(...args);
+    }) as typeof controller.signal.removeEventListener;
+
+    // Several sequential requests against the SAME long-lived signal must not
+    // accumulate listeners.
+    for (let i = 0; i < 3; i++) {
+      const result = await http.get("/users/123", {
+        schema: z.object({ id: z.string(), name: z.string() }),
+        signal: controller.signal,
+      });
+      expect(isOk(result)).toBe(true);
+    }
+    expect(added).toBe(3);
+    expect(removed).toBe(3);
   });
 });

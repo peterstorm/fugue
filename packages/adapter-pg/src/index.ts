@@ -41,6 +41,7 @@
  * @satisfies ADR-0051 — Extensible capability registry
  */
 
+import { createRequire } from "node:module";
 import type { z } from "zod";
 import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
 import { ok, err, nodeId } from "@fugue/framework";
@@ -120,7 +121,14 @@ export interface PgAdapterConfig {
 // Implementation
 // ---------------------------------------------------------------------------
 
-const mapPgError = (error: unknown, sql: string): FrameworkError => {
+/**
+ * Map a `pg` error to a `FrameworkError`. Connection-class SQLSTATEs
+ * (08xxx), insufficient-resources (53xxx), and admin shutdown (57P01) are
+ * `transient` (retriable); everything else (syntax, constraint, etc.) is a
+ * non-retriable `node-crash`. Exported for testing — this classification
+ * drives retry behavior.
+ */
+export const mapPgError = (error: unknown, sql: string): FrameworkError => {
   const message = error instanceof Error ? error.message : String(error);
   // Determine if the error is transient (connection issues) or permanent (syntax, constraint)
   if (error instanceof Error && "code" in error) {
@@ -138,7 +146,20 @@ const mapPgError = (error: unknown, sql: string): FrameworkError => {
   };
 };
 
-const createPgClient = (pool: PgPool, _statementTimeoutMs: number): PgCapability => ({
+/**
+ * The slice of `pg.Pool` the capability client actually uses. Tests inject a
+ * fake; production passes the real pool (structurally compatible).
+ */
+export interface PgQueryable {
+  query(sql: string, params?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
+}
+
+/**
+ * Build a `PgCapability` over an injected pool. Exported for testing —
+ * `createPgAdapter` is the production entry point that owns pool
+ * construction and lifecycle.
+ */
+export const createPgClient = (pool: PgQueryable): PgCapability => ({
   query: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
     try {
       const result = await pool.query(sql, params);
@@ -203,13 +224,16 @@ const createPgClient = (pool: PgPool, _statementTimeoutMs: number): PgCapability
 // Adapter Factory
 // ---------------------------------------------------------------------------
 
+/** Health checks are bounded by this timeout so a hung pool reports unhealthy. */
+const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+
 /**
  * Create a PostgreSQL capability handle.
  *
  * The handle manages the connection pool lifecycle:
  * - `connect()`: validates connectivity with a SELECT 1 query
  * - `close()`: drains the pool
- * - `healthCheck()`: runs SELECT 1 within 5s timeout
+ * - `healthCheck()`: runs SELECT 1, racing a 5s timeout
  *
  * @example
  * ```ts
@@ -224,22 +248,25 @@ const createPgClient = (pool: PgPool, _statementTimeoutMs: number): PgCapability
  * ```
  */
 export const createPgAdapter = (config: PgAdapterConfig): CapabilityHandle<"db"> => {
-  // Lazy pool creation — constructed at handle creation, connected at boot
-  const { Pool } = require("pg") as typeof import("pg");
+  // Lazy pool creation — constructed at handle creation, connected at boot.
+  // `createRequire` keeps the lazy-CJS load working under both Bun and plain
+  // Node ESM (a bare `require` is undefined in Node ESM module scope).
+  const requireModule = createRequire(import.meta.url);
+  const { Pool } = requireModule("pg") as typeof import("pg");
 
   const poolConfig: PoolConfig = {
     connectionString: config.connectionString,
     max: config.poolSize ?? 10,
     connectionTimeoutMillis: config.connectionTimeoutMs ?? 5_000,
     idleTimeoutMillis: config.idleTimeoutMs ?? 10_000,
+    statement_timeout: config.statementTimeoutMs ?? 30_000,
   };
 
   const pool = new Pool(poolConfig);
-  const statementTimeoutMs = config.statementTimeoutMs ?? 30_000;
 
   return {
     name: "db",
-    client: createPgClient(pool, statementTimeoutMs),
+    client: createPgClient(pool),
 
     connect: async () => {
       // Validate connectivity
@@ -255,15 +282,36 @@ export const createPgAdapter = (config: PgAdapterConfig): CapabilityHandle<"db">
       await pool.end();
     },
 
-    healthCheck: async () => {
-      try {
-        await pool.query("SELECT 1");
-        return ok(undefined);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
-    },
+    healthCheck: () => healthCheckWithTimeout(pool, HEALTH_CHECK_TIMEOUT_MS),
   };
+};
+
+/**
+ * Race SELECT 1 against a timeout. A pool that hangs (e.g. exhausted
+ * connections, dead network) reports unhealthy instead of stalling the
+ * caller. Exported for testing.
+ */
+export const healthCheckWithTimeout = async (
+  pool: PgQueryable,
+  timeoutMs: number,
+): Promise<Result<void, string>> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      pool.query("SELECT 1"),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`health check timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return ok(undefined);
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
 };
 
 // ---------------------------------------------------------------------------

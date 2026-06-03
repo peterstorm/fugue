@@ -246,8 +246,8 @@ export const createNodeContextForDag = (
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
     // ADR-0051: Custom capability clients from registered handles are passed
-    // via the capabilities record. The type cast is sound because
-    // `extractClients` returns the exact client instances from typed handles.
-    capabilities: extractClients(shared.capabilities) as unknown as Record<string, never>,
+    // via the capabilities record. `extractClients` returns a record typed
+    // per `CapabilityRegistry`, so no cast is needed here.
+    capabilities: extractClients(shared.capabilities),
   });
 };

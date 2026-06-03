@@ -94,7 +94,9 @@ All methods return `Result<T, FrameworkError>` — no exceptions escape.
 Creates a `CapabilityHandle<"db">` with lifecycle management:
 - `connect()`: validates connectivity with SELECT 1
 - `close()`: drains the connection pool
-- `healthCheck()`: SELECT 1 with 5s timeout
+- `healthCheck()`: SELECT 1, racing a 5s timeout (a hung pool reports unhealthy)
+
+Config options: `poolSize` (default 10), `statementTimeoutMs` (default 30000, applied as the pool's `statement_timeout`), `connectionTimeoutMs` (default 5000), `idleTimeoutMs` (default 10000).
 
 ### `createFakePgCapability(routes)`
 

@@ -5,10 +5,14 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { z } from "zod";
-import { ok, isOk, isErr, makeNodeContext } from "@fugue/framework";
+import { isOk, isErr, makeNodeContext } from "@fugue/framework";
 import { createFakeHttpCapability } from "@fugue/framework/testing";
 import { createHttpFetchCustomerNode } from "../dag/nodes/fetch-customer-http.js";
+
+// The node's `run` expects a TypedNodeContext<["http"]> (non-null `http`).
+// `makeNodeContext` returns the nullable runtime shape; in production the
+// capability validator performs this narrowing, so the cast mirrors it.
+type FetchCustomerCtx = Parameters<ReturnType<typeof createHttpFetchCustomerNode>["run"]>[1];
 
 // Sample CRM response matching the CrmRecordSchema
 const sampleCustomer = {
@@ -43,7 +47,7 @@ describe("fetch-customer-http (capability-based)", () => {
       http: fakeHttp.client,
     });
 
-    const result = await node.run({ customerId: "cust-001" }, ctx as any);
+    const result = await node.run({ customerId: "cust-001" }, ctx as FetchCustomerCtx);
     expect(isOk(result)).toBe(true);
     if (result.ok) {
       expect(result.value.customer).not.toBeNull();
@@ -51,9 +55,9 @@ describe("fetch-customer-http (capability-based)", () => {
     }
   });
 
-  it("returns null customer for 404", async () => {
+  it("returns null customer for HTTP 404", async () => {
     const fakeHttp = createFakeHttpCapability({
-      // No route for cust-999 → transient error with "No fake route matched"
+      "GET https://crm.example.com/api/v1/customers/cust-999": { status: 404, body: "Not Found" },
     });
 
     const node = createHttpFetchCustomerNode("https://crm.example.com/api/v1");
@@ -64,11 +68,49 @@ describe("fetch-customer-http (capability-based)", () => {
       http: fakeHttp.client,
     });
 
-    // The fake returns a transient error for unmatched routes
-    const result = await node.run({ customerId: "cust-999" }, ctx as any);
-    // In production, a 404 would be caught and returned as { customer: null }
-    // With the fake, it returns a transient error (which is the correct behavior
-    // for a genuinely unreachable endpoint vs a 404)
+    // A 404 means "customer does not exist" — the node maps it to a
+    // successful null, not an error.
+    const result = await node.run({ customerId: "cust-999" }, ctx as FetchCustomerCtx);
+    expect(isOk(result)).toBe(true);
+    if (result.ok) {
+      expect(result.value.customer).toBeNull();
+    }
+  });
+
+  it("propagates non-404 failures as errors (does not mask them as not-found)", async () => {
+    const fakeHttp = createFakeHttpCapability({
+      // A 500 whose body happens to contain "404" must NOT be treated as not-found.
+      "GET https://crm.example.com/api/v1/customers/cust-500": { status: 500, body: "upstream error id 404" },
+    });
+
+    const node = createHttpFetchCustomerNode("https://crm.example.com/api/v1");
+
+    const ctx = makeNodeContext({
+      runId: "test-run",
+      dagId: "test-dag",
+      http: fakeHttp.client,
+    });
+
+    const result = await node.run({ customerId: "cust-500" }, ctx as FetchCustomerCtx);
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      expect(result.error.kind === "transient" && result.error.httpStatus).toBe(500);
+    }
+  });
+
+  it("unreachable endpoint (no route) is an error, not a null customer", async () => {
+    const fakeHttp = createFakeHttpCapability({});
+
+    const node = createHttpFetchCustomerNode("https://crm.example.com/api/v1");
+
+    const ctx = makeNodeContext({
+      runId: "test-run",
+      dagId: "test-dag",
+      http: fakeHttp.client,
+    });
+
+    const result = await node.run({ customerId: "cust-999" }, ctx as FetchCustomerCtx);
     expect(isErr(result)).toBe(true);
   });
 

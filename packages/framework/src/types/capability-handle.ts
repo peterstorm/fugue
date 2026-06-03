@@ -6,7 +6,9 @@
  * The runtime manages the lifecycle:
  *   - `connect()` is called once at startup (after config validation).
  *   - `close()` is called at shutdown (graceful drain).
- *   - `healthCheck()` is polled for degraded-state detection.
+ *   - `healthCheck()` is available for degraded-state detection (host
+ *     polling is not yet wired; `checkHealth` aggregation exists in the
+ *     host's capability manager).
  *
  * @example
  * ```ts
@@ -51,8 +53,9 @@ export interface CapabilityHandle<K extends Capability = Capability> {
   readonly close?: () => Promise<void>;
 
   /**
-   * Optional health check. The host polls this for degraded-state detection.
-   * Return `Err(reason)` to signal unhealthy.
+   * Optional health check for degraded-state detection. Return `Err(reason)`
+   * to signal unhealthy. (The host's `checkHealth` aggregates these; periodic
+   * polling is not yet wired into the host runtime.)
    */
   readonly healthCheck?: () => Promise<Result<void, string>>;
 

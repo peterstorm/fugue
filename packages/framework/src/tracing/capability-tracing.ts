@@ -15,6 +15,7 @@
  */
 
 import { trace, SpanStatusCode } from "@opentelemetry/api";
+import type { Tracer as OtelTracer } from "@opentelemetry/api";
 import type { CapabilityHandle } from "../types/capability-handle.js";
 import type { Capability } from "../types/node.js";
 import type { Result } from "../types/result.js";
@@ -42,6 +43,13 @@ export interface TracedCapabilityOpts {
   readonly tracerName?: string;
 
   /**
+   * Explicit OTel tracer. When provided, `tracerName` is ignored and spans
+   * are created on this tracer instead of the global registry — useful for
+   * tests (in-memory exporters) and multi-provider setups.
+   */
+  readonly tracer?: OtelTracer;
+
+  /**
    * Optional function to extract extra span attributes from method arguments.
    * Called before each method invocation.
    */
@@ -56,14 +64,24 @@ export interface TracedCapabilityOpts {
 // ---------------------------------------------------------------------------
 
 /**
- * Wrap a capability client's async methods in OTel spans.
+ * Wrap a capability client's methods in OTel spans.
  *
- * Only functions returning Promises are wrapped — synchronous properties
- * and non-function values are passed through unchanged.
+ * Every function-valued property is wrapped; non-function properties pass
+ * through unchanged. Promise returns are awaited for `Result`-error tagging;
+ * synchronous returns end the span immediately (with the same `Result`
+ * inspection).
  *
  * Each wrapped call creates a span named `{capabilityName}.{methodName}`.
  * If the returned value is a `Result` with `ok: false`, the span is marked
- * as errored with the error kind as an attribute.
+ * as errored with the error kind as an attribute. Failure detection is
+ * structural (`{ ok: false }`) — capability methods that signal failure by
+ * any other convention trace as OK; return the framework `Result` shape to
+ * get error tagging.
+ *
+ * Contract: wrapped methods are invoked with `this` bound to the *unwrapped*
+ * client. Closure-based clients (every built-in adapter) are unaffected;
+ * class-based clients whose methods call siblings via `this` will bypass
+ * tracing for those inner calls.
  *
  * @example
  * ```ts
@@ -77,7 +95,7 @@ export const withTracedCapability = <K extends Capability>(
   opts: TracedCapabilityOpts = {},
 ): CapabilityHandle<K> => {
   const tracerName = opts.tracerName ?? "fugue.capability";
-  const otelTracer = trace.getTracer(tracerName);
+  const otelTracer = opts.tracer ?? trace.getTracer(tracerName);
   const capName = handle.name as string;
 
   const tracedClient = new Proxy(handle.client as object, {
@@ -100,8 +118,13 @@ export const withTracedCapability = <K extends Capability>(
               for (const [k, v] of Object.entries(attrs)) {
                 span.setAttribute(k, v);
               }
-            } catch {
-              // Best-effort — don't crash the actual call for attribute extraction
+            } catch (extractError) {
+              // Best-effort — don't crash the actual call for attribute
+              // extraction, but leave a trace of the failure on the span so
+              // a buggy extractor is diagnosable.
+              span.addEvent("fugue.capability.attribute_extraction_failed", {
+                message: extractError instanceof Error ? extractError.message : String(extractError),
+              });
             }
           }
 
@@ -133,7 +156,13 @@ export const withTracedCapability = <K extends Capability>(
               );
             }
 
-            // Synchronous return (unlikely for capabilities but handle gracefully)
+            // Synchronous return (unlikely for capabilities but handle
+            // gracefully) — a sync `Result` Err still errors the span.
+            if (isErrResult(result)) {
+              const errKind = (result as { error: { kind?: string } }).error?.kind ?? "unknown";
+              span.setAttribute(FUGUE_CAPABILITY_ERROR_KIND, errKind);
+              span.setStatus({ code: SpanStatusCode.ERROR, message: errKind });
+            }
             span.end();
             return result;
           } catch (error) {

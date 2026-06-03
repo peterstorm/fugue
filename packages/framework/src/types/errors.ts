@@ -1,5 +1,6 @@
 // Discriminated union of all framework errors
 
+import { match } from "ts-pattern";
 import type { RunId, NodeId } from "./ids.js";
 
 export type FrameworkError =
@@ -65,7 +66,17 @@ export type FrameworkError =
   | { readonly kind: "aborted"; readonly reason: string }
   | { readonly kind: "rejected"; readonly nodeId: NodeId; readonly reason: string }
   | { readonly kind: "invalid-reroute"; readonly targetNodeId: NodeId; readonly message: string }
-  | { readonly kind: "transient"; readonly nodeId: NodeId; readonly message: string }
+  | {
+      readonly kind: "transient";
+      readonly nodeId: NodeId;
+      readonly message: string;
+      /**
+       * HTTP status code when the transient failure originated from an HTTP
+       * response (e.g. the built-in http capability). Lets consumers branch
+       * on `httpStatus === 404` instead of string-matching the message.
+       */
+      readonly httpStatus?: number;
+    }
   | { readonly kind: "missing-default-edge"; readonly nodeId: NodeId }
   | {
       readonly kind: "output-unreachable-under-routing";
@@ -101,57 +112,32 @@ import type { Capability } from "./node.js";
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —
- * adding a new `kind` without a case here is a compile error via the
- * `never` guard.
+ * adding a new `kind` without a case here is a compile error via
+ * ts-pattern's `.exhaustive()`.
  */
-export const formatFrameworkError = (e: FrameworkError): string => {
-  switch (e.kind) {
-    case "validation":
-      return `${e.message} (node '${e.nodeId}')`;
-    case "missing-default-edge":
-      return `node '${e.nodeId}' has conditional out-edges but no default edge`;
-    case "output-unreachable-under-routing":
-      return `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges (frontier at '${e.missedFromNode}')`;
-    case "duplicate-edge":
-      return `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`;
-    case "predicate-malformed":
-      return `${e.message} (node '${e.nodeId}')`;
-    case "cycle-detected":
-      return `cycle detected: ${e.nodeIds.join(" -> ")}`;
-    case "retry-exhausted":
-      return `node '${e.nodeId}' exhausted ${e.attempts} retries (root: ${e.rootErrorKind}): ${e.lastError}`;
-    case "node-crash":
-      return `node '${e.nodeId}' crashed (${e.retriability}): ${e.message}`;
-    case "aborted":
-      return `run aborted: ${e.reason}`;
-    case "rejected":
-      return `node '${e.nodeId}' rejected: ${e.reason}`;
-    case "transient":
-      return `node '${e.nodeId}' transient failure: ${e.message}`;
-    case "prompt-not-found":
-      return `prompt '${e.promptName}' not found: ${e.reason}`;
-    case "cache-error":
-      return `cache ${e.operation} failed: ${e.message}`;
-    case "invalid-reroute":
-      return `invalid reroute to '${e.targetNodeId}': ${e.message}`;
-    case "checkpoint-missing":
-      return `checkpoint missing for run '${e.runId}'`;
-    case "checkpoint-expired":
-      return `checkpoint for run '${e.runId}' expired at ${e.expiredAt}`;
-    case "checkpoint-corrupt":
-      return `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`;
-    case "checkpoint-version-mismatch":
-      return `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`;
-    case "checkpoint-write-failed":
-      return `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`;
-    case "missing-capability":
-      return `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`;
-    default: {
-      const _exhaustive: never = e;
-      return `unhandled error kind: ${JSON.stringify(_exhaustive)}`;
-    }
-  }
-};
+export const formatFrameworkError = (e: FrameworkError): string =>
+  match(e)
+    .with({ kind: "validation" }, (e) => `${e.message} (node '${e.nodeId}')`)
+    .with({ kind: "missing-default-edge" }, (e) => `node '${e.nodeId}' has conditional out-edges but no default edge`)
+    .with({ kind: "output-unreachable-under-routing" }, (e) => `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges (frontier at '${e.missedFromNode}')`)
+    .with({ kind: "duplicate-edge" }, (e) => `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`)
+    .with({ kind: "predicate-malformed" }, (e) => `${e.message} (node '${e.nodeId}')`)
+    .with({ kind: "cycle-detected" }, (e) => `cycle detected: ${e.nodeIds.join(" -> ")}`)
+    .with({ kind: "retry-exhausted" }, (e) => `node '${e.nodeId}' exhausted ${e.attempts} retries (root: ${e.rootErrorKind}): ${e.lastError}`)
+    .with({ kind: "node-crash" }, (e) => `node '${e.nodeId}' crashed (${e.retriability}): ${e.message}`)
+    .with({ kind: "aborted" }, (e) => `run aborted: ${e.reason}`)
+    .with({ kind: "rejected" }, (e) => `node '${e.nodeId}' rejected: ${e.reason}`)
+    .with({ kind: "transient" }, (e) => `node '${e.nodeId}' transient failure: ${e.message}`)
+    .with({ kind: "prompt-not-found" }, (e) => `prompt '${e.promptName}' not found: ${e.reason}`)
+    .with({ kind: "cache-error" }, (e) => `cache ${e.operation} failed: ${e.message}`)
+    .with({ kind: "invalid-reroute" }, (e) => `invalid reroute to '${e.targetNodeId}': ${e.message}`)
+    .with({ kind: "checkpoint-missing" }, (e) => `checkpoint missing for run '${e.runId}'`)
+    .with({ kind: "checkpoint-expired" }, (e) => `checkpoint for run '${e.runId}' expired at ${e.expiredAt}`)
+    .with({ kind: "checkpoint-corrupt" }, (e) => `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`)
+    .with({ kind: "checkpoint-version-mismatch" }, (e) => `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`)
+    .with({ kind: "checkpoint-write-failed" }, (e) => `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`)
+    .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
+    .exhaustive();
 
 /**
  * Error subclass thrown by `runDagAsWorkerJob` so queue adapters (BullMQ)

@@ -54,9 +54,16 @@ async function ensureExperiment(): Promise<string> {
 // ---------------------------------------------------------------------------
 async function waitForTrace(experimentId: string, traceId: string, timeoutMs = 15_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
+  const reportedStatuses = new Set<number>();
   while (Date.now() < deadline) {
     const res = await fetch(`${MLFLOW_URL}/api/2.0/mlflow/traces?experiment_ids=${experimentId}&max_results=20`);
     if (!res.ok) {
+      // Log each distinct failure status once — a 4xx misconfiguration must
+      // be distinguishable from "trace not there yet".
+      if (!reportedStatuses.has(res.status)) {
+        reportedStatuses.add(res.status);
+        console.warn(`⚠️   Traces poll returned HTTP ${res.status} ${res.statusText} — retrying until timeout`);
+      }
       await new Promise(r => setTimeout(r, 500));
       continue;
     }

@@ -8,9 +8,17 @@
  * - Records exceptions on thrown errors
  * - Extracts custom attributes
  * - Does not interfere with return values
+ * - Real OTel span behavior (names, attributes, status, end) via
+ *   BasicTracerProvider + InMemorySpanExporter — no mocking
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterAll } from "bun:test";
+import { SpanStatusCode } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { ok, err } from "../types/result.js";
 import { withTracedCapability } from "../tracing/capability-tracing.js";
 import type { CapabilityHandle } from "../types/capability-handle.js";
@@ -18,25 +26,6 @@ import type { CapabilityHandle } from "../types/capability-handle.js";
 // We use `as any` for CapabilityHandle in these tests because we're testing
 // the proxy behavior generically, not specific capability type compliance.
 type AnyHandle = CapabilityHandle<any>;
-
-// ---------------------------------------------------------------------------
-// In-memory span collector (mimics OTel API)
-// ---------------------------------------------------------------------------
-
-interface CollectedSpan {
-  name: string;
-  attributes: Record<string, unknown>;
-  status?: { code: number; message?: string };
-  exceptions: unknown[];
-  ended: boolean;
-}
-
-let collectedSpans: CollectedSpan[] = [];
-
-// We can't easily mock @opentelemetry/api's global tracer in a unit test.
-// Instead, test the proxy behavior directly — verify method calls are
-// intercepted, return values are preserved, and errors are handled.
-// The OTel span creation is an integration concern tested separately.
 
 describe("withTracedCapability", () => {
   describe("proxy behavior", () => {
@@ -95,11 +84,10 @@ describe("withTracedCapability", () => {
     });
 
     it("preserves handle metadata (name, connect, close)", () => {
-      let connected = false;
       const handle: AnyHandle = {
         name: "db" as any,
         client: { query: async () => ok([]) },
-        connect: async () => { connected = true; },
+        connect: async () => {},
         close: async () => {},
         healthCheck: async () => ok(undefined),
       };
@@ -167,6 +155,137 @@ describe("withTracedCapability", () => {
       // Should still return the result despite attribute extraction failure
       const result = await (traced.client as any).query("SELECT 1");
       expect(result).toEqual(ok([{ id: 1 }]));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Real OTel span behavior — BasicTracerProvider + InMemorySpanExporter.
+  // No mocking: spans are exported in-memory and asserted directly.
+  // -------------------------------------------------------------------------
+  describe("OTel span behavior (InMemorySpanExporter)", () => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    // Injected tracer — independent of the global registry, so these tests
+    // are immune to other test files registering a global provider first.
+    const tracer = provider.getTracer("capability-tracing-test");
+
+    beforeEach(() => {
+      exporter.reset();
+    });
+
+    afterAll(async () => {
+      await provider.shutdown();
+    });
+
+    it("creates a '{capability}.{method}' span with capability attributes, ended OK on success", async () => {
+      const handle: AnyHandle = {
+        name: "db" as any,
+        client: { query: async () => ok([{ id: 1 }]) },
+      };
+
+      await (withTracedCapability(handle, { tracer }).client as any).query("SELECT 1");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      const span = spans[0]!;
+      expect(span.name).toBe("db.query");
+      expect(span.attributes["fugue.capability.name"]).toBe("db");
+      expect(span.attributes["fugue.capability.method"]).toBe("query");
+      expect(span.status.code).not.toBe(SpanStatusCode.ERROR);
+    });
+
+    it("marks the span errored with error_kind on a Result.Err", async () => {
+      const handle: AnyHandle = {
+        name: "db" as any,
+        client: { query: async () => err({ kind: "transient", nodeId: "n" as any, message: "timeout" }) },
+      };
+
+      await (withTracedCapability(handle, { tracer }).client as any).query("SELECT 1");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      const span = spans[0]!;
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span.status.message).toBe("transient");
+      expect(span.attributes["fugue.capability.error_kind"]).toBe("transient");
+    });
+
+    it("records the exception and ends the span when the method throws", async () => {
+      const handle: AnyHandle = {
+        name: "http" as any,
+        client: { get: async () => { throw new Error("network failure"); } },
+      };
+
+      await expect((withTracedCapability(handle, { tracer }).client as any).get("/x")).rejects.toThrow("network failure");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      const span = spans[0]!;
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span.events.some((e) => e.name === "exception")).toBe(true);
+      expect(span.ended).toBe(true);
+    });
+
+    it("errors the span for a synchronous Result.Err return", async () => {
+      const handle: AnyHandle = {
+        name: "cache" as any,
+        client: { peek: () => err({ kind: "cache-error", operation: "peek", message: "cold" }) },
+      };
+
+      (withTracedCapability(handle, { tracer }).client as any).peek("key");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      expect(spans[0]!.status.code).toBe(SpanStatusCode.ERROR);
+      expect(spans[0]!.attributes["fugue.capability.error_kind"]).toBe("cache-error");
+    });
+
+    it("custom extractAttributes land on the span; extraction failure becomes a span event", async () => {
+      const okHandle: AnyHandle = {
+        name: "db" as any,
+        client: { query: async () => ok([]) },
+      };
+
+      await (withTracedCapability(okHandle, {
+        tracer,
+        extractAttributes: (_method, args) => ({ "db.sql": String(args[0]) }),
+      }).client as any).query("SELECT 1");
+
+      await (withTracedCapability(okHandle, {
+        tracer,
+        extractAttributes: () => { throw new Error("extractor bug"); },
+      }).client as any).query("SELECT 2");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(2);
+      expect(spans[0]!.attributes["db.sql"]).toBe("SELECT 1");
+      const failureEvents = spans[1]!.events.filter(
+        (e) => e.name === "fugue.capability.attribute_extraction_failed",
+      );
+      expect(failureEvents).toHaveLength(1);
+      expect(failureEvents[0]!.attributes?.message).toBe("extractor bug");
+    });
+
+    it("ends exactly one span per call across success, Result.Err, and throw paths", async () => {
+      const handle: AnyHandle = {
+        name: "db" as any,
+        client: {
+          good: async () => ok(1),
+          bad: async () => err({ kind: "transient", nodeId: "n" as any, message: "x" }),
+          boom: async () => { throw new Error("boom"); },
+        },
+      };
+      const traced = withTracedCapability(handle, { tracer }).client as any;
+
+      await traced.good();
+      await traced.bad();
+      await expect(traced.boom()).rejects.toThrow("boom");
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans).toHaveLength(3);
+      expect(spans.every((s) => s.ended)).toBe(true);
     });
   });
 });

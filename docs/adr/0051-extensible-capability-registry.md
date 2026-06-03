@@ -72,7 +72,7 @@ single source of truth now).
 - AI authors declare `requires: ["db"]` and get `ctx.db: PgCapability` — fully typed, non-null.
 - Existing code unchanged: `requires: ["llm"]` works exactly as before.
 - Adapter lifecycle (connection pools, graceful shutdown) is framework-managed.
-- Health checks enable the host's degraded-state detection.
+- Health checks lay the groundwork for the host's degraded-state detection (aggregation via `checkHealth` exists; periodic host polling is a follow-up).
 - The "write an adapter" recipe is < 50 LOC.
 
 ### Negative

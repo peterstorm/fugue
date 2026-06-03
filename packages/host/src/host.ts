@@ -123,7 +123,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     sortedHandles = sortResult.value;
     const connectResult = await connectAll(sortedHandles, logger);
     if (!connectResult.ok) {
-      return connectResult as Result<never, import("./domain/host-error.js").HostError>;
+      // Boot aborts — close the handles that already connected so a
+      // crash-loop boot doesn't leak pools/sockets on every restart.
+      await closeAll(connectResult.error.connected, logger);
+      return err(connectResult.error.error);
     }
     logger.info(`${sortedHandles.length} external capabilities connected`);
   }
@@ -316,7 +319,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
 
     // Clean up external capabilities (ADR-0051) — close in reverse topological order
     if (sortedHandles.length > 0) {
-      await closeAll(sortedHandles, logger);
+      const closeFailures = await closeAll(sortedHandles, logger);
+      if (closeFailures.length > 0) {
+        logger.warn(`Capability shutdown completed with ${closeFailures.length} failure(s)`, {
+          failures: closeFailures.map((f) => f.name),
+        });
+      }
     }
 
     // Clean up infrastructure (e.g., close Redis connections)

@@ -66,8 +66,10 @@ export const createHttpFetchCustomerNode = (crmBaseUrl: string) =>
       );
 
       if (!result.ok) {
-        // HTTP 404 → customer not found (not an error, just null)
-        if (result.error.kind === "transient" && result.error.message.includes("404")) {
+        // HTTP 404 → customer not found (not an error, just null).
+        // Branch on the structured status — message text can contain "404"
+        // in a body for entirely unrelated reasons.
+        if (result.error.kind === "transient" && result.error.httpStatus === 404) {
           return ok({ customer: null });
         }
         return result as Result<never, FrameworkError>;

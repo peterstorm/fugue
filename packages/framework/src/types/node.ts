@@ -141,6 +141,28 @@ export interface CapabilityRegistry {
 export type Capability = keyof CapabilityRegistry & string;
 
 /**
+ * The built-in capability keys — exactly the capability fields declared on
+ * `BaseNodeContext`. Single source of truth for runtime code that must
+ * distinguish built-in capabilities (named context fields) from custom ones
+ * (spread onto the context dynamically, per ADR-0051).
+ *
+ * The `satisfies` clause guarantees every entry is a registered capability.
+ * The reverse direction (every base-registry key is listed) cannot be
+ * type-asserted without breaking under consumer module augmentation — when a
+ * new built-in is added to `CapabilityRegistry` + `BaseNodeContext`, add it
+ * here in the same change.
+ */
+export const BUILTIN_CAPABILITY_KEYS = [
+  "llm",
+  "cache",
+  "prompts",
+  "judgeLlm",
+  "http",
+] as const satisfies readonly Capability[];
+
+export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
+
+/**
  * Concrete types injected for each capability when a node declares it in
  * `requires`. Alias for `CapabilityRegistry` — kept for backward
  * compatibility with existing consumer code that references this type.

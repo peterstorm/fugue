@@ -148,14 +148,35 @@ const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivi
   };
 };
 
-const createFakeSharedInfra = (redis: RedisPort): SharedInfra => ({
+const createFakeSharedInfra = (
+  redis: RedisPort,
+  capabilities: SharedInfra["capabilities"] = [],
+): SharedInfra => ({
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
   redis,
   tracer: noopTracer,
   contentFilter: null,
   prompts: null,
   logger: { info: () => {}, warn: () => {}, error: () => {} },
-  capabilities: [],
+  capabilities,
+});
+
+/** Fake capability handle that records connect/close events into `events`. */
+const fakeCapability = (
+  name: string,
+  events: string[],
+  opts: { failConnect?: boolean; dependsOn?: string[] } = {},
+) => ({
+  name: name as never,
+  client: { __cap: name } as never,
+  connect: async () => {
+    if (opts.failConnect) throw new Error(`${name} refused to connect`);
+    events.push(`connect:${name}`);
+  },
+  close: async () => {
+    events.push(`close:${name}`);
+  },
+  ...(opts.dependsOn ? { dependsOn: opts.dependsOn as never[] } : {}),
 });
 
 const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string; data?: unknown }> } => {
@@ -620,6 +641,93 @@ describe("Full Host Lifecycle", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("git-clone-failed");
     }
+  });
+
+  test("ADR-0051: capabilities connect in dependency order at boot and close in reverse on shutdown", async () => {
+    const events: string[] = [];
+    // "cache" depends on "db" → db must connect first despite array order.
+    const capabilities = [
+      fakeCapability("cache", events, { dependsOn: ["db"] }),
+      fakeCapability("db", events),
+    ];
+    const { port, redis } = createFakeRedis();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis, capabilities),
+      logger: createTestLogger(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+
+    expect(events).toEqual(["connect:db", "connect:cache"]);
+
+    await host.shutdown();
+    host = null;
+
+    // Close happens in reverse topological order (dependents first).
+    expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
+  });
+
+  test("ADR-0051: capability connect failure aborts boot AND closes the already-connected prefix", async () => {
+    const events: string[] = [];
+    const capabilities = [
+      fakeCapability("db", events),
+      fakeCapability("queue", events, { failConnect: true }),
+      fakeCapability("cache", events),
+    ];
+    const { port, redis } = createFakeRedis();
+    const logger = createTestLogger();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis, capabilities),
+      logger,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("internal-invariant-violated");
+      expect(result.error.message).toContain("queue");
+      expect(result.error.message).toContain("refused to connect");
+    }
+
+    // db connected before queue failed — it must be closed, not leaked.
+    expect(events).toEqual(["connect:db", "close:db"]);
+  });
+
+  test("ADR-0051: capability dependency cycle aborts boot", async () => {
+    const events: string[] = [];
+    const capabilities = [
+      fakeCapability("a", events, { dependsOn: ["b"] }),
+      fakeCapability("b", events, { dependsOn: ["a"] }),
+    ];
+    const { port, redis } = createFakeRedis();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis, capabilities),
+      logger: createTestLogger(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("internal-invariant-violated");
+      expect(result.error.message).toContain("cycle");
+    }
+    // Nothing connected — the sort failed before connectAll.
+    expect(events).toEqual([]);
   });
 
   test("sync completion is ignored when host is draining", async () => {
