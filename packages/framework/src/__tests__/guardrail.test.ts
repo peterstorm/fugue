@@ -18,7 +18,7 @@ const makeCtx = (observer = new NoopObserver()) => ({
   cache: null,
   logger: { warn: () => {}, error: () => {} },
   prompts: null,
-  llm: null,
+  llm: null, http: null,
 });
 
 describe("createGuardrailNode", () => {

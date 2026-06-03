@@ -80,6 +80,7 @@ export type {
   NodeRetryConfig,
   NodeHumanReviewConfig,
   ConfidenceMode,
+  CapabilityRegistry,
   Capability,
   CapabilityFields,
   BaseNodeContext,
@@ -92,9 +93,13 @@ export type {
   PromptAccess,
   Logger,
   Tracer,
+  HttpCapability,
 } from "./node.js";
 // `ValidatedNodeContext` and `brandAsValidatedNodeContext` are intentionally
 // not re-exported — only `validateCapabilities` constructs them.
+
+// ── Capability lifecycle ──────────────────────────────────────────────────
+export type { CapabilityHandle, AdapterFactory } from "./capability-handle.js";
 
 // ── DAG shape ─────────────────────────────────────────────────────────────
 export type {

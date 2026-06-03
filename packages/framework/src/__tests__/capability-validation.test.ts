@@ -41,7 +41,7 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
   tracer: noopTracer,
   observer: new NoopObserver(),
   cache: null,
-  llm: null,
+  llm: null, http: null,
   prompts: null,
   judgeLlm: null,
   ...overrides,

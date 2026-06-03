@@ -8,8 +8,10 @@ import type { RunId, NodeId, DagId } from "./ids.js";
 import type { ContentFilter } from "./content-filter.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
+import type { HttpCapability } from "./http-capability.js";
 
 export type { Tracer };
+export type { HttpCapability } from "./http-capability.js";
 
 /**
  * Confidence extraction mode for a node. Every node declares how (or whether)
@@ -99,47 +101,64 @@ export interface CheckpointWriter {
 //    capabilities, and validates the wired ctx against that set. A missing
 //    capability fails the run *before* the first `node.run` is called, with
 //    `Err({ kind: "missing-capability", capability, nodeId })`.
+//
+// ADR-0051: The registry is now an extensible interface. Adapter packages
+// augment `CapabilityRegistry` via module augmentation to register new
+// capabilities. `Capability` is derived as `keyof CapabilityRegistry`.
 // ---------------------------------------------------------------------------
 
 /**
- * The set of capability names a node can require. Each maps to a non-null
- * concrete type in `CapabilityFields` below.
+ * Extensible capability registry. Adapter packages augment this interface
+ * to register new capabilities via TypeScript module augmentation.
+ *
+ * Built-in capabilities are declared here as the base set. To add a custom
+ * capability:
+ *
+ * ```ts
+ * declare module "@fugue/framework" {
+ *   interface CapabilityRegistry {
+ *     db: PgCapability;
+ *   }
+ * }
+ * ```
+ *
+ * After augmentation, `requires: ["db"]` becomes valid and `ctx.db` is typed
+ * as `PgCapability` (non-null) in the node's `run` function.
  */
-export type Capability = "llm" | "cache" | "prompts" | "judgeLlm";
-
-/**
- * Concrete types injected for each capability when a node declares it in
- * `requires`. The field name on `NodeContext` matches the capability name.
- */
-export interface CapabilityFields {
+export interface CapabilityRegistry {
   readonly llm: LlmClient;
   readonly cache: ContextCacheAdapter;
   readonly prompts: PromptAccess;
   readonly judgeLlm: LlmClient;
+  readonly http: HttpCapability;
 }
 
-// ---------------------------------------------------------------------------
-// Compile-time bijection assertion: Capability ↔ CapabilityFields.
-//
-// Adding a key to one side without the other makes the `_capabilityCheck`
-// assignment fail with a descriptive type error. Runtime cost: zero (erased
-// by TypeScript). This pattern is the compile-time complement to
-// `validateCapabilities`' runtime check.
-// ---------------------------------------------------------------------------
-type _AssertCapabilitySync =
-  | (Capability extends keyof CapabilityFields
-      ? never
-      : "Capability has a key missing from CapabilityFields")
-  | (keyof CapabilityFields extends Capability
-      ? never
-      : "CapabilityFields has a key missing from Capability");
-// Assignment to `never` proves the union collapsed — any drift surfaces here.
-const _capabilityCheck: _AssertCapabilitySync = undefined as never;
-void _capabilityCheck;
+/**
+ * The set of capability names a node can require. Derived from the
+ * extensible `CapabilityRegistry` — adding a key to the registry
+ * automatically makes it a valid capability name.
+ */
+export type Capability = keyof CapabilityRegistry & string;
+
+/**
+ * Concrete types injected for each capability when a node declares it in
+ * `requires`. Alias for `CapabilityRegistry` — kept for backward
+ * compatibility with existing consumer code that references this type.
+ */
+export type CapabilityFields = CapabilityRegistry;
 
 /**
  * Always-present part of NodeContext — fields the runtime guarantees by
  * injecting a no-op default when none is supplied.
+ *
+ * Capability fields appear as nullable here (the runtime may or may not have
+ * them wired). After `validateCapabilities` passes, the `TypedNodeContext<R>`
+ * narrows declared capabilities to non-null.
+ *
+ * Custom capabilities registered via `CapabilityRegistry` augmentation do NOT
+ * appear as named fields here — they are accessible at runtime as dynamic
+ * properties on the context object, and the `TypedNodeContext<R>` type
+ * intersection adds their concrete types when declared in `requires`.
  */
 export interface BaseNodeContext {
   readonly runId: RunId;
@@ -152,6 +171,7 @@ export interface BaseNodeContext {
   readonly llm: LlmClient | null;
   readonly prompts: PromptAccess | null;
   readonly judgeLlm: LlmClient | null;
+  readonly http: HttpCapability | null;
   readonly signal?: AbortSignal;
   /**
    * Optional content filter for trace span data. When set, content (prompts,
@@ -177,7 +197,7 @@ export type NodeContext = BaseNodeContext;
  */
 export type TypedNodeContext<R extends readonly Capability[]> =
   Omit<BaseNodeContext, R[number]> & {
-    readonly [K in R[number]]: CapabilityFields[K];
+    readonly [K in R[number]]: CapabilityRegistry[K];
   };
 
 /**
@@ -267,6 +287,9 @@ export interface NodeDef<
  * Caller-facing input shape for `makeNodeContext`. `logger`, `tracer`, and
  * `observer` are optional — when omitted the runtime injects no-op defaults.
  * Capability fields stay as in `BaseNodeContext`.
+ *
+ * Custom capabilities can be passed via the `capabilities` record or as
+ * top-level fields (built-in capabilities remain top-level for backward compat).
  */
 export type NodeContextInit = {
   readonly runId: string | RunId;
@@ -279,6 +302,15 @@ export type NodeContextInit = {
   readonly llm?: LlmClient | null;
   readonly prompts?: PromptAccess | null;
   readonly judgeLlm?: LlmClient | null;
+  readonly http?: HttpCapability | null;
   readonly signal?: AbortSignal;
   readonly contentFilter?: ContentFilter | null;
+  /**
+   * Extensible capabilities record. Keys correspond to `CapabilityRegistry`
+   * entries. Values are the capability client instances.
+   *
+   * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`) can
+   * also be passed here instead of as top-level fields.
+   */
+  readonly capabilities?: Partial<{ readonly [K in Capability]: CapabilityRegistry[K] | null }>;
 };

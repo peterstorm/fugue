@@ -15,6 +15,7 @@ export * from "./checkpoint/index.js";
 export * from "./cache/index.js";
 export * from "./prompts/index.js";
 export * from "./llm/index.js";
+export * from "./http/index.js";
 export * from "./describe/index.js";
 export * from "./tracing/index.js";
 export { setFrameworkLogger, fwLogger } from "./logger.js";
@@ -91,4 +92,5 @@ export { createCronScheduler } from "./scheduler/scheduler.js";
 // NodeContexts and the always-present field defaults.
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver } from "./shared/index.js";
-export type { Capability, CapabilityFields, BaseNodeContext, TypedNodeContext, NodeContextInit } from "./types/node.js";
+export type { Capability, CapabilityRegistry, CapabilityFields, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
+export type { CapabilityHandle, AdapterFactory } from "./types/capability-handle.js";

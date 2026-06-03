@@ -5,6 +5,10 @@
 // capability is satisfied by the wired NodeContext. A missing capability fails
 // the run with `Err({ kind: "missing-capability" })` before any `node.run` is
 // called.
+//
+// ADR-0051: Now uses dynamic property access on the context object instead of
+// a hardcoded switch. This supports extensible capabilities registered via
+// module augmentation of `CapabilityRegistry`.
 
 import type { DagDef } from "../types/dag.js";
 import type {
@@ -15,22 +19,6 @@ import type {
 import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
-
-const capabilityField = (
-  ctx: BaseNodeContext,
-  capability: Capability,
-): unknown => {
-  switch (capability) {
-    case "llm":
-      return ctx.llm;
-    case "cache":
-      return ctx.cache;
-    case "prompts":
-      return ctx.prompts;
-    case "judgeLlm":
-      return ctx.judgeLlm;
-  }
-};
 
 /**
  * Walk `dag.nodes`, collect `union(node.requires)`, and verify each capability
@@ -43,6 +31,9 @@ const capabilityField = (
  * Returns a phantom-branded `ValidatedNodeContext` token when all
  * declarations are satisfied. Downstream code requires the token, so any
  * path that bypasses this check fails to typecheck.
+ *
+ * Uses dynamic property lookup (`ctx[cap]`) to support extensible capabilities
+ * registered via `CapabilityRegistry` module augmentation (ADR-0051).
  */
 export const validateCapabilities = (
   dag: DagDef,
@@ -51,7 +42,7 @@ export const validateCapabilities = (
   const missing: { readonly nodeId: typeof dag.nodes[number]["id"]; readonly capability: Capability }[] = [];
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
-      if (capabilityField(ctx, cap) == null) {
+      if ((ctx as unknown as Record<string, unknown>)[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }
     }

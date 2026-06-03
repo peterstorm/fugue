@@ -107,7 +107,7 @@ describe("predicate-malformed — runtime check throws when predicate check() th
       judgeLlm: null,
       cache: null,
       prompts: null,
-      llm: null,
+      llm: null, http: null,
       logger: { warn: () => {}, error: () => {} },
     });
 

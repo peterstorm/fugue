@@ -36,7 +36,7 @@ const makeCtx = (observer: RecordingObserver) => ({
   tracer: { startActiveSpan: (_n: string, _o: unknown, fn: (span: unknown) => unknown) => fn({ setAttribute: () => {}, addEvent: () => {}, setStatus: () => {}, end: () => {} }) } as unknown as import("../types/tracer.js").Tracer,
   observer,
   cache: null,
-  llm: null,
+  llm: null, http: null,
   prompts: null,
   judgeLlm: null,
 });

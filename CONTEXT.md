@@ -38,7 +38,11 @@ gates, freshness-aware state management, and production observability.
 | **Branded ID** | `RunId`, `NodeId`, `DagId` — string newtypes with compile-time brands. Only smart constructors or `__brand` escapes produce them. |
 | **Result\<T, E\>** | Either-style type: `Ok<T>` or `Err<E>`. No exceptions cross module boundaries. |
 | **FrameworkError** | Discriminated union of 17+ error kinds, exhaustively formatted via `formatFrameworkError`. |
-| **Capability** | A resource a node requires: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`. Validated at run start before any node executes. |
+| **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
+| **CapabilityRegistry** | Extensible interface mapping capability names to client types. Adapter packages augment it via `declare module "@fugue/framework"`. |
+| **CapabilityHandle\<K\>** | Runtime lifecycle wrapper: `{ name, client, connect?, close?, healthCheck? }`. Adapters produce these; runtime manages lifecycle. |
+| **AdapterFactory\<K, C\>** | `(config: C) => CapabilityHandle<K>`. Standard factory shape for adapter packages. |
+| **HttpCapability** | Built-in capability for HTTP API calls. Returns `Result`, validates responses against Zod schemas. |
 | **ValidatedNodeContext** | Phantom-branded `NodeContext` proving capability validation passed. Only `validateCapabilities` can produce it. |
 
 ### Routing & Confidence

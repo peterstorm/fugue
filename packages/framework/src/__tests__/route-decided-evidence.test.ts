@@ -49,7 +49,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null,
+  llm: null, http: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
