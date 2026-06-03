@@ -58,9 +58,9 @@ export interface ParseWorkbookOpts {
 
 /**
  * Normalise an ExcelJS cell value to a primitive (or `null`). Handles formulas
- * (`{ formula, result }`), rich text (`{ richText }`), hyperlinks
- * (`{ text, hyperlink }`), and error cells; passes through string/number/
- * boolean/Date unchanged.
+ * (`{ formula, result }` → the computed result), rich text (`{ richText }`),
+ * hyperlinks (`{ text, hyperlink }`), and error cells (`#REF!`, `#DIV/0!`, … →
+ * `null`); passes through string/number/boolean/Date unchanged.
  */
 export const normalizeCell = (value: unknown): string | number | boolean | Date | null => {
   if (value === null || value === undefined) return null;
@@ -94,7 +94,7 @@ export const parseWorkbook = async <T>(
   bytes: Uint8Array,
   rowSchema: z.ZodType<T>,
   opts: ParseWorkbookOpts = {},
-): Promise<Result<{ rows: T[] }, FrameworkError>> => {
+): Promise<Result<{ rows: readonly T[] }, FrameworkError>> => {
   const wb = new ExcelJS.Workbook();
   try {
     // exceljs types `load` as the global Buffer; recent @types/node makes

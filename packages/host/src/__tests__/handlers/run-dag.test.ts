@@ -49,7 +49,7 @@ const makeReadyState = (registry: Registry): HostState => ({
 const makeBootingState = (): HostState => ({ phase: "booting", startedAt: Date.now() });
 
 const successExecuteDag = (async () => ok({ result: "success" })) as RunDagDeps["executeDag"];
-const failExecuteDag = (async () => err({ kind: "node-execution-failed", message: "boom", nodeId: "n" } as unknown as FrameworkError)) as RunDagDeps["executeDag"];
+const failExecuteDag = (async () => err({ kind: "node-crash", message: "boom", nodeId: "n", retriability: "non-retriable" } as unknown as FrameworkError)) as RunDagDeps["executeDag"];
 
 const defaultDeps = (overrides?: Partial<RunDagDeps>): RunDagDeps => {
   let concurrency = initConcurrency(50, 10);

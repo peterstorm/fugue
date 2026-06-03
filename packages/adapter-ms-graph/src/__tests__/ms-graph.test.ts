@@ -168,6 +168,48 @@ describe("createMsGraphAdapter — getContent", () => {
     expect(stub.lastUrl()).toBe("https://graph.microsoft.com/v1.0/drives/d/items/i/content");
   });
 
+  it("follows a /content 302 redirect WITHOUT forwarding the bearer token to the storage host", async () => {
+    const bytes = new Uint8Array([5, 6, 7]);
+    const cdnUrl = "https://storage.example.net/blob?sig=presigned";
+    const seen: { url: string; auth: string | undefined }[] = [];
+    const handle = createMsGraphAdapter({
+      getAccessToken: async () => TOKEN,
+      fetchImpl: async (u, init) => {
+        const auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+        seen.push({ url: u, auth });
+        // First hop: the Graph /content endpoint redirects to a presigned URL.
+        if (u.endsWith("/content")) {
+          return new Response(null, { status: 302, headers: { location: cdnUrl } });
+        }
+        // Second hop: the off-origin storage host serves the bytes.
+        return new Response(bytes, { status: 200 });
+      },
+    });
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+    expect(isOk(res)).toBe(true);
+    if (res.ok) expect(Array.from(res.value)).toEqual([5, 6, 7]);
+
+    expect(seen).toHaveLength(2);
+    // Graph hop carries the token…
+    expect(seen[0].url).toBe("https://graph.microsoft.com/v1.0/drives/d/items/i/content");
+    expect(seen[0].auth).toBe(`Bearer ${TOKEN}`);
+    // …the off-origin redirect target must NOT.
+    expect(seen[1].url).toBe(cdnUrl);
+    expect(seen[1].auth).toBeUndefined();
+  });
+
+  it("maps a redirect with no Location header to a transient error", async () => {
+    const handle = createMsGraphAdapter(
+      baseConfig({
+        fetchImpl: async () => new Response(null, { status: 302 }),
+      }),
+    );
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) expect(res.error.kind).toBe("transient");
+  });
+
   it("maps a 404 to a non-retriable node-crash", async () => {
     const stub = stubFetch(() => new Response("not found", { status: 404 }));
     const handle = createMsGraphAdapter(baseConfig({ fetchImpl: stub.fetchImpl }));

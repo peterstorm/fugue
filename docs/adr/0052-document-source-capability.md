@@ -59,6 +59,12 @@ createFetchNode({ requires: ["documents"] })   // ref is config/input, fixed
    → createTransformNode(parseWorkbook)         // pure: bytes → Zod-validated rows
 ```
 
+> The parse step is shown as a dedicated transform node for clarity, but
+> `parseWorkbook` is a pure function and may equally be called *inline* inside
+> the fetch node (`bytes → parseWorkbook` in one node) — the runnable examples
+> in the guides and adapter READMEs favour the inline form. Both are valid; the
+> split is a structuring choice, not a requirement.
+
 ### The capability surface is exactly two operations
 
 ```ts

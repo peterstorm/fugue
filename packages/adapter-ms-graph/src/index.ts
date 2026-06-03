@@ -237,11 +237,26 @@ const graphGet = async (
       method: "GET",
       headers: { Authorization: `Bearer ${token}`, Accept: accept },
       signal: buildSignal(opts, timeoutMs),
-      // Graph `/content` 302-redirects to a pre-authenticated download URL.
-      // Default redirect-following works; a hardened impl would refetch the
-      // location without the Authorization header.
-      redirect: "follow",
+      // Graph `/content` 302-redirects to a pre-authenticated, short-lived
+      // download URL on a foreign storage host. Follow the redirect manually so
+      // the bearer token is NOT forwarded off the Graph origin — the redirect
+      // target is already authenticated via its signed query string.
+      redirect: "manual",
     });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (location == null || location.length === 0) {
+        return err(transientErr(`Graph ${res.status} redirect missing Location for ${url.split("?")[0]}`));
+      }
+      const redirected = await fetchImpl(location, {
+        method: "GET",
+        headers: { Accept: accept }, // deliberately no Authorization on the off-origin hop
+        signal: buildSignal(opts, timeoutMs),
+        redirect: "follow",
+      });
+      if (!redirected.ok) return err(mapGraphStatus(redirected.status, url));
+      return ok(redirected);
+    }
     if (!res.ok) return err(mapGraphStatus(res.status, url));
     return ok(res);
   } catch (e) {

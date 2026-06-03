@@ -66,11 +66,13 @@ export interface CapabilityHandle<K extends Capability = Capability> {
    *
    * Only *handle-backed* capabilities are valid targets — built-ins that are
    * wired directly into `SharedInfra` without a handle (`llm`, `judgeLlm`,
-   * `prompts`, `cache`, `http`) are never registered with the lifecycle
-   * manager, so depending on them always fails the boot-time check. The type
-   * cannot express this narrowing (which capabilities are handle-backed is a
-   * runtime property of the deployment), so it is enforced at boot by
-   * `topoSortHandles`.
+   * `prompts`, `cache`) are never registered with the lifecycle manager, so
+   * depending on them always fails the boot-time check. (`http`, by contrast,
+   * is handle-backed via `createHttpCapability` and reaches the host through
+   * the `capabilities` array — so it *is* a valid target when an HTTP handle
+   * is registered.) The type cannot express this narrowing (which capabilities
+   * are handle-backed is a runtime property of the deployment), so it is
+   * enforced at boot by `topoSortHandles`.
    */
   readonly dependsOn?: readonly Capability[];
 }
