@@ -1,0 +1,34 @@
+{
+  "name": "@fugue/pg",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fugue/framework": "workspace:*"
+  },
+  "peerDependencies": {
+    "pg": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/pg": "^8.0.0",
+    "@types/bun": "latest",
+    "pg": "^8.13.0",
+    "zod": "^3.25.0"
+  }
+}
