@@ -60,6 +60,15 @@ class TestToleranceBoundary:
         assert parity_within_tolerance(deltas, tol=0.2) is False
         assert parity_within_tolerance(deltas, tol=0.4) is True
 
+    def test_nan_scorer_mean_fails_closed(self):
+        # A NaN mean from one backend yields a NaN delta, and `nan <= tol` is
+        # False, so parity FAILS closed rather than vacuously passing. Consistent
+        # with the eval pipeline's fail-closed posture elsewhere.
+        nan = float("nan")
+        deltas = compute_parity({"relevance": 4.0}, {"relevance": nan})
+        assert deltas["relevance"] != deltas["relevance"]  # NaN: not equal to itself
+        assert parity_within_tolerance(deltas) is False
+
     def test_default_tolerance_is_half_point(self):
         assert PARITY_TOLERANCE == 0.5
 

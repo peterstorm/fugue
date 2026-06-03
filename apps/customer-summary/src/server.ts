@@ -234,11 +234,21 @@ export const createApp = (deps: AppDeps): Hono => {
   // Redis (queues / checkpoints / cache) is required; MLflow (tracing) is
   // informational and never gates readiness — losing it must not remove pods.
   const checkReadiness = async () => {
+    // A rejecting probe is treated as "down", but the rejection reason is logged
+    // here so the seam is safe-by-construction: a future probe that throws
+    // WITHOUT its own internal logging still leaves an operator breadcrumb rather
+    // than flipping readiness silently.
     const redisOk = deps.health?.checkRedis
-      ? await deps.health.checkRedis().catch(() => false)
+      ? await deps.health.checkRedis().catch((err) => {
+          log.debug("[/readyz] checkRedis probe threw — treating Redis as not-ready:", err);
+          return false;
+        })
       : true;
     const mlflowOk = deps.health?.checkMlflow
-      ? await deps.health.checkMlflow().catch(() => false)
+      ? await deps.health.checkMlflow().catch((err) => {
+          log.debug("[/readyz] checkMlflow probe threw — treating MLflow as unavailable:", err);
+          return false;
+        })
       : true;
     // Cumulative per-backend export failures (multi-backend fan-out only).
     // Informational: a failing SECONDARY trace backend degrades the signal but

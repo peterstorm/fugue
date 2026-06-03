@@ -180,6 +180,41 @@ describe("pass-through translation leaves spans untouched", () => {
     // FR-012: the exporter does not re-filter — no content keys were stripped/added.
     expect(Object.keys(exported[0]!.attributes)).toEqual(Object.keys(attrs));
   });
+
+  it("export forwards an EMPTY span batch verbatim (no spurious work, SUCCESS)", async () => {
+    const inner = new FakeInner();
+    const exp = createAzureMonitorExporter({ createInner: () => inner });
+    const result = await exportOnce(exp, []);
+    expect(result.code).toBe(ExportResultCode.SUCCESS);
+    expect(inner.exportCalls).toHaveLength(1);
+    expect(inner.exportCalls[0]!).toHaveLength(0);
+  });
+
+  it("export forwards a MULTI-span batch, each span identity-translated in order", async () => {
+    const inner = new FakeInner();
+    const exp = createAzureMonitorExporter({ createInner: () => inner });
+    const spans = [
+      fakeSpan("s1", { "ai.node.id": "n1" }),
+      fakeSpan("s2", { "ai.node.id": "n2" }),
+      fakeSpan("s3", { "ai.node.id": "n3" }),
+    ];
+    await exportOnce(exp, spans);
+    expect(inner.exportCalls).toHaveLength(1);
+    const exported = inner.exportCalls[0]!;
+    expect(exported).toHaveLength(3);
+    // Identity pass-through preserves both order and span references.
+    expect(exported.map((s) => s.name)).toEqual(["s1", "s2", "s3"]);
+    spans.forEach((s, i) => expect(exported[i]).toBe(s));
+  });
+
+  it("MULTI-span batch surfaces the inner FAILED code and logs the batch size", async () => {
+    const inner = new FakeInner({ kind: "result-failed", message: "ingest 500" });
+    const exp = createAzureMonitorExporter({ createInner: () => inner });
+    const result = await exportOnce(exp, [fakeSpan("a"), fakeSpan("b")]);
+    expect(result.code).toBe(ExportResultCode.FAILED);
+    // The failure log interpolates `${spans.length}` — exercise it with N>1.
+    expect(warnings.some((w) => w.includes("ingest 500"))).toBe(true);
+  });
 });
 
 describe("SpanExporter contract delegates to inner", () => {

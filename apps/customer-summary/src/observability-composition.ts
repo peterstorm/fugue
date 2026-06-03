@@ -31,6 +31,7 @@ import {
   forwardEmission,
   dispatchEvent,
   fwLogger,
+  isCacheHit,
 } from "@fugue/framework";
 import type {
   Observer,
@@ -142,8 +143,12 @@ export class FoundryRunSummaryObserver implements Observer {
     this.buffered.delete(runEnd.runId);
 
     const summary = computeRunSummary(events, runEnd);
+    // Cache-hit rule is the framework's single `isCacheHit` definition (exhaustive
+    // over the skip-reason union) so this count and the per-event cache-hit metric
+    // in `mapEventToFoundry` cannot drift. The `node-skipped` check narrows `e` so
+    // `isCacheHit` receives the right variant.
     const cacheHitCount = events.filter(
-      (e) => e.type === "node-skipped" && e.reason === "checkpoint",
+      (e) => e.type === "node-skipped" && isCacheHit(e),
     ).length;
     const extras: RunSummaryExtras = { cacheHitCount };
 

@@ -146,6 +146,42 @@ class TestComputeAggregate:
         assert agg.scorer_means == {"grounding": 4.5}  # survivor surfaced
         assert agg.passed is False  # but fails closed
 
+    def test_non_numeric_canonical_value_fails_closed(self, capsys):
+        # The canonical key is PRESENT but its value is non-numeric (None / str —
+        # shape drift). The numeric guard (mirroring foundry_eval) must REJECT it
+        # rather than fold it into overall_mean, so the scorer is treated as
+        # missing and the run fails closed instead of crashing on `sum(...)`.
+        class FakeResult:
+            metrics = {
+                "answer_correctness/score/mean": None,
+                "faithfulness/score/mean": "n/a",
+                "relevance/score/mean": 4.0,
+                "grounding/score/mean": 4.0,
+            }
+
+        agg = compute_aggregate(
+            FakeResult(), ["answer_correctness", "faithfulness", "relevance", "grounding"]
+        )
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        # The non-numeric scorers are reported missing; only the numeric ones survive.
+        assert agg.scorer_means == {"relevance": 4.0, "grounding": 4.0}
+        assert "answer_correctness" in err
+        assert "faithfulness" in err
+        assert agg.passed is False
+
+    def test_bool_canonical_value_rejected(self, capsys):
+        # `bool` is an `int` subclass in Python; the guard must exclude it so a
+        # `True` mean is never silently averaged as 1.0. Treated as missing.
+        class FakeResult:
+            metrics = {"grounding/score/mean": True}
+
+        agg = compute_aggregate(FakeResult(), ["grounding"])
+        err = capsys.readouterr().err
+        assert "ERROR" in err  # zero scorers matched → most-severe fail-closed branch
+        assert agg.scorer_means == {}
+        assert agg.passed is False
+
 
 class TestCollectResults:
     def test_attaches_reference_summaries(self):

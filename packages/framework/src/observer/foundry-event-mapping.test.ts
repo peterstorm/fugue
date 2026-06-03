@@ -11,9 +11,10 @@ import {
   FOUNDRY_METRIC_RUN_TOKENS,
   FOUNDRY_METRIC_NODE_LATENCY,
   FOUNDRY_METRIC_NODE_CACHE_HIT,
+  isCacheHit,
   type FoundryEmission,
 } from "./foundry-event-mapping.js";
-import type { ObserverEvent, RunEndEvent } from "../types/events.js";
+import type { NodeSkippedEvent, ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { RunSummary } from "./buffered.js";
 import { runId, nodeId, dagId } from "../types/ids.js";
 import { confidence } from "../types/confidence.js";
@@ -157,6 +158,27 @@ describe("mapEventToFoundry", () => {
       reason: "already-completed",
     };
     expect(mapEventToFoundry(ev)).toEqual([]);
+  });
+
+  it("run-end with non-finite duration → summary event WITHOUT measurements bag, no latency metric", () => {
+    // All-non-finite measurements path on the EVENT channel: the run-summary
+    // event is still emitted (status/dagId are always present) but carries no
+    // `measurements` bag, and the latency metric is dropped.
+    const ev: RunEndEvent = {
+      type: "run-end",
+      runId: RID,
+      dagId: DID,
+      timestamp: T,
+      duration: Number.POSITIVE_INFINITY,
+      status: "error",
+    };
+    const out = mapEventToFoundry(ev);
+    const summary = findEvent(out, FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summary).toBeDefined();
+    expect(summary!.properties).toEqual({ dagId: "dag-1", runId: "run-1", status: "error" });
+    expect(summary!.measurements).toBeUndefined();
+    expect(findMetric(out, FOUNDRY_METRIC_RUN_LATENCY)).toBeUndefined();
+    expect(out).toHaveLength(1);
   });
 
   it.each([
@@ -347,6 +369,36 @@ const arbEvent: fc.Arbitrary<ObserverEvent> = fc
         return { type: "human-intervention", runId: rid, dagId: did, nodeId: nid, action: { kind: "approve" }, actor: "a", elapsedMsSinceAwait: 0, context: { nodeConfidence: c, nodeSideEffects: "none", priorWitnesses: [] }, timestamp: ts };
     }
   });
+
+describe("isCacheHit (single source of truth for the cache-hit rule)", () => {
+  const skip = (reason: NodeSkippedEvent["reason"]): NodeSkippedEvent => ({
+    type: "node-skipped",
+    runId: RID,
+    dagId: DID,
+    nodeId: NID,
+    timestamp: T,
+    reason,
+  });
+
+  it("checkpoint is a cache hit", () => {
+    expect(isCacheHit(skip("checkpoint"))).toBe(true);
+  });
+
+  it("already-completed is NOT a cache hit", () => {
+    expect(isCacheHit(skip("already-completed"))).toBe(false);
+  });
+
+  it("agrees with the per-event cache-hit metric mapping", () => {
+    // The predicate and mapEventToFoundry must stay coupled: a cache hit emits
+    // the metric, a non-cache-hit emits nothing.
+    for (const reason of ["checkpoint", "already-completed"] as const) {
+      const emitted = mapEventToFoundry(skip(reason)).some(
+        (e) => e.kind === "metric" && e.name === FOUNDRY_METRIC_NODE_CACHE_HIT,
+      );
+      expect(emitted).toBe(isCacheHit(skip(reason)));
+    }
+  });
+});
 
 describe("mapEventToFoundry property", () => {
   it("never throws and all numeric outputs are finite", () => {

@@ -233,6 +233,34 @@ class TestMainDispatch:
         rc = run.main()
         assert rc == 1
 
+    def test_standalone_foundry_leg_failure_is_fault_isolated(self, monkeypatch, capsys):
+        """A standalone backend=foundry run whose leg RAISES (e.g. missing
+        credentials RuntimeError) must surface a NAMED fail-closed error and exit
+        non-zero — NOT propagate an uncaught traceback — mirroring the backend=both
+        Foundry guard. MLflow must never be touched on the foundry-only path."""
+        self._stub_pipeline(monkeypatch)
+        mlflow_called = {"hit": False}
+
+        def boom_foundry(results, mode):
+            raise RuntimeError("AZURE_AI_FOUNDRY credentials not configured")
+
+        def fake_mlflow(results, mode):
+            mlflow_called["hit"] = True
+            return AggregateResult(scorer_means={"grounding": 5.0}, overall_mean=5.0, passed=True)
+
+        monkeypatch.setattr(run, "run_foundry_backend", boom_foundry)
+        monkeypatch.setattr(run, "run_mlflow_backend", fake_mlflow)
+        monkeypatch.setenv("EVAL_BACKEND", "foundry")
+        monkeypatch.setattr(sys, "argv", ["run.py", "--mode=ci"])
+
+        rc = run.main()
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Foundry-leg" in err
+        assert "backend=foundry" in err
+        assert "RuntimeError" in err
+        assert mlflow_called["hit"] is False  # foundry-only path never runs MLflow
+
 
 class TestStartupFailClosed:
     """main()'s startup guards (numeric EVAL_WORKERS, eval-case loading) are

@@ -262,6 +262,23 @@ describe("CompositeSpanExporter — fault isolation", () => {
     // No log at a non-power-of-ten milestone like 20.
     expect(warnings.some((w) => w.includes("occurrence 20"))).toBe(false);
   });
+
+  it("rate-limit logs at the 1000th occurrence (Math.log10 power-of-ten float edge)", async () => {
+    // `Math.log10(1000)` can round to 2.999… in some engines, which would make
+    // `Math.pow(10, Math.floor(...))` yield 100 ≠ 1000 and SILENTLY skip the
+    // milestone. Lock the boundary: 1000 failures must log at 1, 10, 100, 1000
+    // (exactly 4 warns) and the 1000th warn must be present.
+    const bad = new FakeExporter({ kind: "result-failed" });
+    const composite = new CompositeSpanExporter([bad, new FakeExporter()]);
+    for (let i = 0; i < 1000; i++) await exportOnce(composite, [fakeSpan("s")]);
+    expect(warnings.length).toBe(4);
+    expect(warnings.map((w) => w.match(/occurrence (\d+)/)?.[1])).toEqual([
+      "1",
+      "10",
+      "100",
+      "1000",
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -128,24 +128,37 @@ def compute_aggregate(eval_table: Any, scorer_names: list[str]) -> AggregateResu
 
     for name in scorer_names:
         key = f"{name}/score/mean"
-        if key in metrics:
-            scorer_means[name] = metrics[key]
+        canonical = metrics.get(key)
+        # Numeric guard mirrors foundry_eval.compute_aggregate_foundry: only a
+        # plain int/float (never bool) is accepted, and it is cast to float. A
+        # present-but-NON-numeric canonical value (None/str/bool — shape drift)
+        # falls through to the suffix fallback and, failing that, to the
+        # fail-closed missing-scorer branch below rather than being folded into
+        # `overall_mean` unchecked.
+        if isinstance(canonical, (int, float)) and not isinstance(canonical, bool):
+            scorer_means[name] = float(canonical)
         else:
             # Try an EXACT-suffix match anchored to the scorer name rather than
             # a loose substring scan: a `name in k` test can bind to the FIRST
             # loosely-matching key (a `_v2` variant, or a scorer name that is a
             # substring of another) and silently average in the wrong scorer.
-            # Anchor on `{name}/` ... `/score/mean` and log which non-canonical
-            # key was selected before accepting it.
+            # Anchor on `{name}/` ... `/score/mean`, require a numeric value
+            # (same guard as above), and log which non-canonical key was
+            # selected before accepting it.
             for k, v in metrics.items():
-                if k.startswith(f"{name}/") and k.endswith("/score/mean"):
+                if (
+                    k.startswith(f"{name}/")
+                    and k.endswith("/score/mean")
+                    and isinstance(v, (int, float))
+                    and not isinstance(v, bool)
+                ):
                     print(
                         f"WARNING: MLflow metric for scorer {name!r} matched a "
                         f"non-canonical key {k!r} (value={v}); expected canonical "
                         f"key {key!r}. Accepting the anchored-suffix match.",
                         file=sys.stderr,
                     )
-                    scorer_means[name] = v
+                    scorer_means[name] = float(v)
                     break
 
     missing = [name for name in scorer_names if name not in scorer_means]
@@ -519,7 +532,19 @@ def main() -> int:
     if backend == "both":
         return run_both_backends(results, mode)
     elif backend == "foundry":
-        aggregate = run_foundry_backend(results, mode)
+        # Fault-isolate the standalone Foundry leg exactly as backend=both does:
+        # a missing-credentials RuntimeError / SDK import / scoring failure must
+        # surface as a NAMED fail-closed error with a non-zero exit, not an
+        # uncaught traceback (parity with run_both_backends' Foundry guard).
+        try:
+            aggregate = run_foundry_backend(results, mode)
+        except Exception as e:
+            print(
+                "ERROR: Foundry-leg construction/scoring FAILED for backend=foundry "
+                f"({type(e).__name__}: {e}). Failing the eval fail-closed.",
+                file=sys.stderr,
+            )
+            return 1
     elif backend == "mlflow":
         aggregate = run_mlflow_backend(results, mode)
     else:

@@ -30,6 +30,7 @@ export type { FoundryEmission, FiniteNumber, RunSummaryExtras } from "./foundry-
 export {
   mapEventToFoundry,
   mapRunSummaryToFoundry,
+  isCacheHit,
   FOUNDRY_EVENT_RUN_SUMMARY,
   FOUNDRY_EVENT_ROUTE_DECISION,
   FOUNDRY_EVENT_NODE_PRUNED,

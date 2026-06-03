@@ -31,7 +31,7 @@
 // FR-019/SC-008 summary use `mapRunSummaryToFoundry`.
 
 import { match } from "ts-pattern";
-import type { ObserverEvent, RunEndEvent } from "../types/events.js";
+import type { NodeSkippedEvent, ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { RunSummary } from "./buffered.js";
 
 // Stable event/metric names. Centralised so the sink contract and tests share
@@ -138,6 +138,25 @@ const finiteMeasurements = (
 };
 
 /**
+ * Whether a `node-skipped` event counts as a cache hit (FR-020 cache-hit rate).
+ *
+ * A `checkpoint` skip restored a persisted result — a genuine cache hit. An
+ * `already-completed` skip is a retry-pass artefact (the node succeeded earlier
+ * in THIS run), not a cache hit. Exhaustive over the reason union via
+ * `.exhaustive()` so a NEW skip reason becomes a compile error here rather than
+ * silently falling into the not-a-cache-hit branch.
+ *
+ * This is the SINGLE definition of the rule. Both the per-event cache-hit metric
+ * (below) and the app-layer run-summary `cacheHitCount` consume it, so the two
+ * cannot drift when the set of cache-hit reasons changes.
+ */
+export const isCacheHit = (event: NodeSkippedEvent): boolean =>
+  match(event.reason)
+    .with("checkpoint", () => true)
+    .with("already-completed", () => false)
+    .exhaustive();
+
+/**
  * Pure map: a single `ObserverEvent` → zero or more `FoundryEmission`s.
  *
  * Exhaustive over the discriminant via ts-pattern `.exhaustive()`. Adding a new
@@ -189,9 +208,10 @@ export function mapEventToFoundry(
       return m ? [m] : [];
     })
     .with({ type: "node-skipped" }, (e) => {
-      // A checkpoint skip is a cache hit (FR-020 cache-hit rate, by nodeId).
-      // `already-completed` is a retry-pass artefact, not a cache hit.
-      if (e.reason !== "checkpoint") return [];
+      // A checkpoint skip is a cache hit (FR-020 cache-hit rate, by nodeId);
+      // `already-completed` is a retry-pass artefact, not a cache hit. The rule
+      // is centralised in `isCacheHit` (exhaustive over the reason union).
+      if (!isCacheHit(e)) return [];
       const m = metricEmission(FOUNDRY_METRIC_NODE_CACHE_HIT, 1, {
         dagId: e.dagId,
         nodeId: e.nodeId,
