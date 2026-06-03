@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import {
   NoopObserver,
   BufferedObserver,
+  asNonEmptyString,
   type TracingHandle,
   type FoundryTelemetrySink,
 } from "@fugue/framework";
@@ -9,6 +10,9 @@ import { setUpTracing, type TracingSeams } from "../bootstrap.js";
 import type { ResolvedObservability } from "../observability.js";
 import type { SpanExporter } from "../observability-composition.js";
 import type { AppLogger } from "../logger.js";
+
+/** Brand a known-good literal connection string for tests (non-blank by inspection). */
+const conn = (s: string) => asNonEmptyString(s)!;
 
 // A recording AppLogger so tests assert WHAT was logged (the "continuing
 // without tracing" error vs. the "Tracing initialized" info line).
@@ -44,7 +48,7 @@ const MLFLOW_ONLY: ResolvedObservability = { kind: "mlflow-only", traceBackends:
 const WITH_FOUNDRY: ResolvedObservability = {
   kind: "with-foundry",
   traceBackends: ["mlflow", "foundry"],
-  auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
+  auth: { mode: "connection-string", connectionString: conn("InstrumentationKey=abc") },
 };
 
 // A seam set that never touches live Azure/OTel: fake exporters/sink/handle.

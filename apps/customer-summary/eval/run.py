@@ -416,7 +416,20 @@ def run_both_backends(results: list[EvalResult], mode: str) -> int:
     """
     from parity import compute_parity, parity_within_tolerance, format_parity_table
 
-    mlflow_agg = run_mlflow_backend(results, mode)
+    # Fault-isolate the MLflow leg symmetrically with the Foundry leg below: a
+    # raise here (tracking-server down, scoring error) must surface as a DISTINCT
+    # MLflow-leg failure and return 1 fail-closed, not abort `both` with a bare
+    # traceback. Nothing has been printed yet, so there is no prior result to
+    # preserve — unlike the Foundry leg, which runs after MLflow has reported.
+    try:
+        mlflow_agg = run_mlflow_backend(results, mode)
+    except Exception as e:
+        print(
+            "ERROR: MLflow-leg construction/scoring FAILED during backend=both "
+            f"({type(e).__name__}: {e}). Failing the parity run fail-closed.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Fault-isolate the Foundry leg: if it raises (missing creds RuntimeError,
     # SDK import failure, scoring error) the whole `both` run must NOT die with

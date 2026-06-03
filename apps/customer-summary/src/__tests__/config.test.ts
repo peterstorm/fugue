@@ -1,5 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { asNonEmptyString } from "@fugue/framework";
 import { loadConfig } from "../config.js";
+
+/** Brand a known-good literal connection string for tests (non-blank by inspection). */
+const conn = (s: string) => asNonEmptyString(s)!;
 
 describe("loadConfig", () => {
   const origEnv = { ...process.env };
@@ -135,7 +139,7 @@ describe("loadConfig", () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc;IngestionEndpoint=https://x/";
     const config = loadConfig();
     expect(config.OBSERVABILITY_TRACE_BACKENDS).toEqual(["foundry"]);
-    expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBe("InstrumentationKey=abc;IngestionEndpoint=https://x/");
+    expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
   });
 
   test("entra-id auth mode still requires a connection string (FR-023)", () => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { asNonEmptyString } from "@fugue/framework";
 
 const ConfigSchema = z.object({
   PORT: z.coerce.number().default(3000),
@@ -81,12 +82,15 @@ const ConfigSchema = z.object({
 
   // Application Insights connection string (FR-022). Optional at the schema
   // level because it is only REQUIRED when foundry is selected; the cross-field
-  // refinement below enforces that. Blank string is normalized to undefined so
-  // `APPLICATIONINSIGHTS_CONNECTION_STRING=` (set-but-empty) is treated as absent.
+  // refinement below enforces that. `asNonEmptyString` normalizes blank →
+  // undefined so `APPLICATIONINSIGHTS_CONNECTION_STRING=` (set-but-empty) is
+  // treated as absent, AND brands the surviving value as `NonEmptyString` — the
+  // non-blank invariant is minted HERE at the parse boundary and threaded
+  // through `ResolvedAuth`/`AzureMonitorAuth` without any downstream re-check.
   APPLICATIONINSIGHTS_CONNECTION_STRING: z
     .string()
     .optional()
-    .transform((v) => (v && v.trim() !== "" ? v : undefined)),
+    .transform((v) => (v === undefined ? undefined : asNonEmptyString(v))),
 
   // Auth mode for the Foundry (Application Insights) exporter.
   // Default = connection-string (FR-022); entra-id is opt-in (FR-023) and uses

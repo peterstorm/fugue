@@ -29,6 +29,7 @@ import { createRequire } from "node:module";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { TokenCredential } from "@azure/identity";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 import { fwLogger } from "../logger.js";
 
 // ESM-safe synchronous `require`. Under Bun this module executes as native ESM,
@@ -62,10 +63,15 @@ export interface AzureMonitorInnerOpts {
  *   - connection-string + credential (Entra ID needs both — the connection
  *     string carries the ingestion endpoint; the credential governs auth)
  * The one forbidden combination — neither field — cannot be constructed.
+ *
+ * `connectionString` is a {@link NonEmptyString}, so a blank connection string
+ * (`""`) is ALSO unrepresentable at compile time — the brand pushes the
+ * non-blank invariant out of the runtime guard in `resolveOpts` and into the
+ * type. The guard is retained for the dynamic (env-derived) boundary.
  */
 export type AzureMonitorAuth =
-  | { readonly connectionString: string; readonly credential?: TokenCredential }
-  | { readonly credential: TokenCredential; readonly connectionString?: string };
+  | { readonly connectionString: NonEmptyString; readonly credential?: TokenCredential }
+  | { readonly credential: TokenCredential; readonly connectionString?: NonEmptyString };
 
 /** Test seam: receives the REAL assembled {@link AzureMonitorInnerOpts}. */
 export type AzureMonitorInnerFactory = (opts: AzureMonitorInnerOpts) => SpanExporter;

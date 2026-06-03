@@ -458,6 +458,38 @@ class TestBothBackendDispatch:
         # ...and the MLflow leg's already-computed verdict is preserved on stdout.
         assert "mlflow" in out.out
 
+    def test_mlflow_leg_raises_is_fault_isolated(self, monkeypatch, capsys):
+        # Symmetry with the Foundry leg: if the MLflow leg RAISES during
+        # `--backend=both` (tracking server down, scoring error) the run must
+        # fail CLOSED with rc=1 and a DISTINCT "MLflow-leg" error on stderr —
+        # NOT abort with a bare traceback. The MLflow leg runs FIRST, so the
+        # Foundry leg must NOT be dispatched once it fails.
+        self._stub_pipeline(monkeypatch)
+        called = {"mlflow": False, "foundry": False}
+
+        def raising_mlflow(results, mode):
+            called["mlflow"] = True
+            raise RuntimeError("MLflow tracking server unreachable")
+
+        def fake_foundry(results, mode):
+            called["foundry"] = True
+            return AggregateResult(
+                scorer_means={"relevance": 4.5}, overall_mean=4.5, passed=True,
+            )
+
+        monkeypatch.setattr(run, "run_mlflow_backend", raising_mlflow)
+        monkeypatch.setattr(run, "run_foundry_backend", fake_foundry)
+        monkeypatch.setattr(sys, "argv", ["run.py", "--mode=full", "--backend=both"])
+        monkeypatch.delenv("EVAL_BACKEND", raising=False)
+
+        rc = run.main()
+        assert rc == 1  # fail closed, not an uncaught crash
+        # The MLflow leg ran and failed; the Foundry leg is never reached.
+        assert called["mlflow"] is True
+        assert called["foundry"] is False
+        err = capsys.readouterr().err
+        assert "MLflow-leg" in err
+
 
 def EvalCase_stub():
     from run import EvalCase

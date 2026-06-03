@@ -25,7 +25,7 @@
  * narrows on `kind`), not a separate boolean that could drift from `traceBackends`.
  */
 import type { Config, TraceBackend, TraceBackends } from "./config.js";
-import { type Result, ok, err } from "@fugue/framework";
+import { type Result, type NonEmptyString, ok, err } from "@fugue/framework";
 
 export type { TraceBackend, TraceBackends };
 
@@ -37,10 +37,14 @@ export type { TraceBackend, TraceBackends };
  * connection-string mode the string also governs auth; in entra-id mode a
  * `DefaultAzureCredential` (constructed in the app bootstrap) governs auth while
  * the connection string supplies the endpoint.
+ *
+ * `connectionString` is a {@link NonEmptyString}: it is minted at the config
+ * parse boundary (blank → absent) and threaded through unchanged, so a blank
+ * connection string is unrepresentable here without a re-check.
  */
 export type ResolvedAuth =
-  | { readonly mode: "connection-string"; readonly connectionString: string }
-  | { readonly mode: "entra-id"; readonly connectionString: string };
+  | { readonly mode: "connection-string"; readonly connectionString: NonEmptyString }
+  | { readonly mode: "entra-id"; readonly connectionString: NonEmptyString };
 
 /**
  * Resolved observability backend selection, as a DISCRIMINATED UNION on `kind`:

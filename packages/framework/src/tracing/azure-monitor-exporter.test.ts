@@ -10,6 +10,10 @@ import {
   type AzureMonitorInnerOpts,
 } from "./azure-monitor-exporter.js";
 import { setFrameworkLogger, __resetFrameworkLogger, type FrameworkLogger } from "../logger.js";
+import { asNonEmptyString } from "../types/non-empty-string.js";
+
+/** Brand a known-good literal connection string for tests (non-blank by inspection). */
+const conn = (s: string) => asNonEmptyString(s)!;
 
 // ---------------------------------------------------------------------------
 // Test doubles — NO live Azure / network.
@@ -116,7 +120,7 @@ describe("createAzureMonitorExporter — factory + config", () => {
 describe("auth branches: REAL buildInner forwards the expected auth shape to the inner factory", () => {
   it("connection-string only (FR-022): forwards { connectionString }, no credential, no stray keys", () => {
     const spy = recordingFactory();
-    const connectionString = "InstrumentationKey=abc;IngestionEndpoint=https://x";
+    const connectionString = conn("InstrumentationKey=abc;IngestionEndpoint=https://x");
     createAzureMonitorExporter({ auth: { connectionString }, createInner: spy.factory });
     expect(spy.received).toEqual({ connectionString });
     expect(Object.keys(spy.received!)).toEqual(["connectionString"]);
@@ -133,13 +137,42 @@ describe("auth branches: REAL buildInner forwards the expected auth shape to the
 
   it("connection-string + credential (Entra ID, FR-023): forwards BOTH, no stray keys", () => {
     const credential = fakeCredential();
-    const connectionString = "InstrumentationKey=abc;IngestionEndpoint=https://x";
+    const connectionString = conn("InstrumentationKey=abc;IngestionEndpoint=https://x");
     const spy = recordingFactory();
     createAzureMonitorExporter({ auth: { connectionString, credential }, createInner: spy.factory });
     expect(spy.received).toEqual({ connectionString, credential });
     expect(spy.received!.connectionString).toBe(connectionString);
     expect(spy.received!.credential).toBe(credential);
     expect(new Set(Object.keys(spy.received!))).toEqual(new Set(["connectionString", "credential"]));
+  });
+});
+
+// Integration smoke test for the ONE path every other test routes around: the
+// REAL synchronous load `createRequire(__filename)` →
+// `require("@azure/monitor-opentelemetry-exporter")` → destructure
+// `{ AzureMonitorTraceExporter }` → `new AzureMonitorTraceExporter(opts)`, with
+// NO `createInner` seam. It constructs the live exporter OBJECT only — the OTel
+// exporter is passive (a BatchSpanProcessor drives batching/timers, not the
+// exporter), so construction touches no network and starts no background work.
+// A regression in the package's export shape (renamed/removed
+// `AzureMonitorTraceExporter`) or in the `__filename` require anchor surfaces
+// HERE instead of only at production startup (closes the seam-only gap).
+describe("real Azure exporter load path (no seam) — integration smoke", () => {
+  // Well-formed connection string: zero-GUID instrumentation key + a parseable
+  // ingestion endpoint. The SDK parses this in its constructor; it never dials.
+  const realConn = conn(
+    "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.com/",
+  );
+
+  it("loads the Azure SDK and constructs a usable SpanExporter without a seam", () => {
+    let exp: SpanExporter | undefined;
+    expect(() => {
+      exp = createAzureMonitorExporter({ auth: { connectionString: realConn } });
+    }).not.toThrow();
+    expect(exp).toBeInstanceOf(AzureMonitorExporter);
+    // Lifecycle is delegated to the real inner exporter; both must be present.
+    expect(typeof exp!.export).toBe("function");
+    expect(typeof exp!.shutdown).toBe("function");
   });
 });
 

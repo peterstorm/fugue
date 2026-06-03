@@ -10,6 +10,7 @@ import {
   initTracing,
   type PersistencePolicy,
   setFrameworkLogger,
+  asNonEmptyString,
   type ObserverEvent,
   type FoundryTelemetrySink,
   type FiniteNumber,
@@ -34,6 +35,13 @@ import {
   type AppInsightsClient,
   type AppInsightsClientSeams,
 } from "../foundry-sink.js";
+
+/**
+ * Brand a known-good literal connection string for tests (non-blank by
+ * inspection). Named `nes` here to avoid colliding with the local `conn`
+ * recordingSeams variable used in the mode-distinction tests.
+ */
+const nes = (s: string) => asNonEmptyString(s)!;
 
 // A recording FrameworkLogger that restores the console default after each test.
 const recordingFrameworkLogger = () => {
@@ -157,7 +165,7 @@ describe("composeObservability — Foundry-only path", () => {
   const resolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["foundry"],
-    auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
+    auth: { mode: "connection-string", connectionString: nes("InstrumentationKey=abc") },
   };
 
   test("single Foundry exporter, observer is a BufferedObserver", () => {
@@ -177,7 +185,7 @@ describe("composeObservability — dual-export path", () => {
   const resolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
-    auth: { mode: "entra-id", connectionString: "InstrumentationKey=abc" },
+    auth: { mode: "entra-id", connectionString: nes("InstrumentationKey=abc") },
   };
 
   test("exporters built in traceBackends order [mlflow, foundry]", () => {
@@ -207,7 +215,7 @@ describe("composeObservability — shared policy gating (FR-021 / SC-010)", () =
   const resolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
-    auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
+    auth: { mode: "connection-string", connectionString: nes("InstrumentationKey=abc") },
   };
 
   test("errorOnly policy: an OK run emits NO domain events through the sink", () => {
@@ -383,7 +391,7 @@ describe("createAppInsightsClient — auth translation", () => {
   test("entra-id mode: isolated client + credential applied to it", () => {
     const r = recordingSeams();
     createAppInsightsClient(
-      { mode: "entra-id", connectionString: "InstrumentationKey=entra" },
+      { mode: "entra-id", connectionString: nes("InstrumentationKey=entra") },
       r.seams,
     );
     // The credential factory IS invoked (FR-023).
@@ -401,7 +409,7 @@ describe("createAppInsightsClient — auth translation", () => {
   test("connection-string mode: NO credential, isolated client", () => {
     const r = recordingSeams();
     createAppInsightsClient(
-      { mode: "connection-string", connectionString: "InstrumentationKey=conn" },
+      { mode: "connection-string", connectionString: nes("InstrumentationKey=conn") },
       r.seams,
     );
     // credentialFactory must NOT be invoked (no Entra path).
@@ -416,9 +424,9 @@ describe("createAppInsightsClient — auth translation", () => {
 
   test("swapping the two modes would fail: branches are distinct", () => {
     const entra = recordingSeams();
-    createAppInsightsClient({ mode: "entra-id", connectionString: "x" }, entra.seams);
+    createAppInsightsClient({ mode: "entra-id", connectionString: nes("x") }, entra.seams);
     const conn = recordingSeams();
-    createAppInsightsClient({ mode: "connection-string", connectionString: "x" }, conn.seams);
+    createAppInsightsClient({ mode: "connection-string", connectionString: nes("x") }, conn.seams);
 
     // entra-id applies a credential; connection-string never does.
     expect(entra.credentialApplications.length).toBe(1);
@@ -444,7 +452,7 @@ describe("createAppInsightsClient — auth translation", () => {
       flush: () => {},
     };
     createAppInsightsClient(
-      { mode: "entra-id", connectionString: "InstrumentationKey=entra" },
+      { mode: "entra-id", connectionString: nes("InstrumentationKey=entra") },
       {
         credentialFactory: () => fakeCredential,
         newClient: () => client as unknown as AppInsightsClient,
@@ -479,7 +487,7 @@ describe("createFoundrySink — production composer", () => {
     };
 
     const sink = createFoundrySink(
-      { mode: "connection-string", connectionString: "InstrumentationKey=compose" },
+      { mode: "connection-string", connectionString: nes("InstrumentationKey=compose") },
       seams,
     );
 
@@ -524,7 +532,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
   const dualResolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
-    auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
+    auth: { mode: "connection-string", connectionString: nes("InstrumentationKey=abc") },
   };
 
   test("Foundry exporter factory throws → effective selection is MLflow-only + logged", () => {
@@ -603,7 +611,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
     const foundryOnly: ResolvedObservability = {
       kind: "with-foundry",
       traceBackends: ["foundry"],
-      auth: { mode: "entra-id", connectionString: "InstrumentationKey=abc" },
+      auth: { mode: "entra-id", connectionString: nes("InstrumentationKey=abc") },
     };
     const leg = resolveFoundryLeg(
       foundryOnly,
@@ -661,7 +669,7 @@ describe("bootstrap wiring — single shared policy instance (FR-021 / SC-010)",
   const dualResolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
-    auth: { mode: "connection-string", connectionString: "InstrumentationKey=abc" },
+    auth: { mode: "connection-string", connectionString: nes("InstrumentationKey=abc") },
   };
 
   test("the SAME policy instance flows to initTracing and gates the observer", async () => {

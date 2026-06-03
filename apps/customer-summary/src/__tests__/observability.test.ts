@@ -1,11 +1,14 @@
 import { describe, test, expect } from "bun:test";
-import { isOk, isErr } from "@fugue/framework";
+import { isOk, isErr, asNonEmptyString } from "@fugue/framework";
 import {
   resolveObservabilityBackends,
   isFoundryEnabled,
   ObservabilityConfigError,
 } from "../observability.js";
 import type { Config } from "../config.js";
+
+/** Brand a known-good literal connection string for tests (non-blank by inspection). */
+const conn = (s: string) => asNonEmptyString(s)!;
 
 /**
  * Build a minimal `Config` for the resolver. The resolver only reads the four
@@ -51,7 +54,7 @@ describe("resolveObservabilityBackends", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["mlflow", "foundry"],
-        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=abc;IngestionEndpoint=https://x/",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"),
       }),
     );
     expect(isOk(result)).toBe(true);
@@ -64,7 +67,7 @@ describe("resolveObservabilityBackends", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
-        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=abc;IngestionEndpoint=https://x/",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"),
       }),
     );
     expect(isOk(result)).toBe(true);
@@ -78,13 +81,13 @@ describe("resolveObservabilityBackends", () => {
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
         AZURE_AUTH_MODE: "connection-string",
-        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=abc;IngestionEndpoint=https://x/",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"),
       }),
     );
     expect(isOk(result)).toBe(true);
     if (!isOk(result) || !isFoundryEnabled(result.value)) return;
     expect(result.value.auth.mode).toBe("connection-string");
-    expect(result.value.auth.connectionString).toBe("InstrumentationKey=abc;IngestionEndpoint=https://x/");
+    expect(result.value.auth.connectionString).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
   });
 
   test("foundry + entra-id mode → auth {mode:'entra-id'} and still carries the connection string (FR-023)", () => {
@@ -92,13 +95,13 @@ describe("resolveObservabilityBackends", () => {
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
         AZURE_AUTH_MODE: "entra-id",
-        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=abc;IngestionEndpoint=https://x/",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"),
       }),
     );
     expect(isOk(result)).toBe(true);
     if (!isOk(result) || !isFoundryEnabled(result.value)) return;
     expect(result.value.auth.mode).toBe("entra-id");
-    expect(result.value.auth.connectionString).toBe("InstrumentationKey=abc;IngestionEndpoint=https://x/");
+    expect(result.value.auth.connectionString).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
   });
 
   test("foundry selected without connection string → fail-closed error (FR-006)", () => {
@@ -132,7 +135,7 @@ describe("resolveObservabilityBackends", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["mlflow"],
-        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=abc;IngestionEndpoint=https://x/",
+        APPLICATIONINSIGHTS_CONNECTION_STRING: conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"),
       }),
     );
     expect(isOk(result)).toBe(true);
