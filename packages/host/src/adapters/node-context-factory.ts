@@ -30,6 +30,7 @@ import type {
 import { makeNodeContext, ok } from "@fugue/framework";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
+import { extractClients } from "../domain/capability-manager.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -244,5 +245,9 @@ export const createNodeContextForDag = (
     signal,
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
+    // ADR-0051: Custom capability clients from registered handles are passed
+    // via the capabilities record. The type cast is sound because
+    // `extractClients` returns the exact client instances from typed handles.
+    capabilities: extractClients(shared.capabilities) as unknown as Record<string, never>,
   });
 };

@@ -155,6 +155,7 @@ const createFakeSharedInfra = (redis: RedisPort): SharedInfra => ({
   contentFilter: null,
   prompts: null,
   logger: { info: () => {}, warn: () => {}, error: () => {} },
+  capabilities: [],
 });
 
 const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string; data?: unknown }> } => {

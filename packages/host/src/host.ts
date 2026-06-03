@@ -41,6 +41,7 @@ import type { SignalHandlerHandle } from "./lifecycle/signals.js";
 import { startRedisProbe } from "./lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
+import { topoSortHandles, connectAll, closeAll } from "./domain/capability-manager.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -107,6 +108,25 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   }
 
   const { registry, sha, syncConfig } = startupResult.value;
+
+  // ── Connect External Capabilities (ADR-0051) ─────────────────────────────
+  // Topologically sort handles so dependencies connect first, then connect all.
+  // Failure here aborts boot — a missing capability at runtime is worse than
+  // a clean boot failure.
+  const capHandles = sharedInfra.capabilities;
+  let sortedHandles: readonly import("@fugue/framework").CapabilityHandle[] = [];
+  if (capHandles.length > 0) {
+    const sortResult = topoSortHandles(capHandles);
+    if (!sortResult.ok) {
+      return sortResult as Result<never, import("./domain/host-error.js").HostError>;
+    }
+    sortedHandles = sortResult.value;
+    const connectResult = await connectAll(sortedHandles, logger);
+    if (!connectResult.ok) {
+      return connectResult as Result<never, import("./domain/host-error.js").HostError>;
+    }
+    logger.info(`${sortedHandles.length} external capabilities connected`);
+  }
 
   // Transition to ready
   const readyResult = bootComplete(hostState, registry, sha, Date.now());
@@ -292,6 +312,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     if (server) {
       server.stop();
       server = null;
+    }
+
+    // Clean up external capabilities (ADR-0051) — close in reverse topological order
+    if (sortedHandles.length > 0) {
+      await closeAll(sortedHandles, logger);
     }
 
     // Clean up infrastructure (e.g., close Redis connections)

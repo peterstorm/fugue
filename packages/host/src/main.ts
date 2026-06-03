@@ -184,6 +184,7 @@ const main = async () => {
       contentFilter: null,
       prompts: null,
       logger,
+      capabilities: [],
     };
 
     // Step 4: Create git adapter (local or remote)

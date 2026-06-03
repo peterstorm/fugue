@@ -9,6 +9,7 @@
  */
 
 import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess } from "@fugue/framework";
+import type { CapabilityHandle } from "@fugue/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
 import type { ContentFilter } from "@fugue/framework";
@@ -142,6 +143,14 @@ export type SharedInfra = {
   readonly contentFilter: ContentFilter | null;
   readonly prompts: PromptAccess | null;
   readonly logger: LogPort;
+  /**
+   * External capability handles registered at host creation.
+   * Connected during boot, closed during shutdown.
+   * Clients are injected into per-request NodeContexts.
+   *
+   * @satisfies ADR-0051 — Extensible capability registry
+   */
+  readonly capabilities: readonly CapabilityHandle[];
 }
 
 // NOTE: CircuitPort / CircuitConfig intentionally live in domain/circuit-guard.ts,
