@@ -77,3 +77,7 @@ export type { SpanAttributeRegistry, SpanAttributes } from "./span-attribute-reg
 // Content filter / PII scrubber
 export type { ContentFilter } from "./content-filter.js";
 export { piiScrubber, IDENTITY_FILTER, composeFilters, resolveContentFilter } from "./content-filter.js";
+
+// Capability tracing (ADR-0051 Phase 4)
+export { withTracedCapability } from "./capability-tracing.js";
+export type { TracedCapabilityOpts } from "./capability-tracing.js";
