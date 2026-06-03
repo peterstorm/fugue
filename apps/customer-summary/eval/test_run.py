@@ -114,12 +114,72 @@ class TestComputeAggregate:
         assert agg.overall_mean == pytest.approx(4.5)
         assert agg.passed is True
 
-    def test_empty_metrics(self):
+    def test_empty_metrics(self, capsys):
+        # MLflow returned NO metrics at all (empty dict — e.g. every row errored).
+        # This is the most severe failure mode and MUST log at ERROR (not WARNING),
+        # matching foundry_eval's equivalent branch, so it is not under-reported in
+        # log-level-filtered pipelines. Still fail-closed.
         class FakeResult:
             metrics = {}
 
         agg = compute_aggregate(FakeResult(), ["answer_correctness"])
+        err = capsys.readouterr().err
+        assert "ERROR" in err
+        assert "NO metrics at all" in err
         assert agg.overall_mean == 0.0
+        assert agg.passed is False
+
+    def test_partial_missing_scorer_fails_closed(self, capsys):
+        # Some expected scorers present, others silently absent (judge misconfig,
+        # renamed/dropped metric key). The survivor (grounding=4.5) is above
+        # threshold, but a partial shape-mismatch MUST fail closed rather than
+        # average away to PASS — matching the "fail-closed" WARNING text.
+        class FakeResult:
+            metrics = {"grounding/score/mean": 4.5}
+
+        agg = compute_aggregate(
+            FakeResult(), ["answer_correctness", "faithfulness", "relevance", "grounding"]
+        )
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "answer_correctness" in err
+        assert agg.scorer_means == {"grounding": 4.5}  # survivor surfaced
+        assert agg.passed is False  # but fails closed
+
+    def test_non_numeric_canonical_value_fails_closed(self, capsys):
+        # The canonical key is PRESENT but its value is non-numeric (None / str —
+        # shape drift). The numeric guard (mirroring foundry_eval) must REJECT it
+        # rather than fold it into overall_mean, so the scorer is treated as
+        # missing and the run fails closed instead of crashing on `sum(...)`.
+        class FakeResult:
+            metrics = {
+                "answer_correctness/score/mean": None,
+                "faithfulness/score/mean": "n/a",
+                "relevance/score/mean": 4.0,
+                "grounding/score/mean": 4.0,
+            }
+
+        agg = compute_aggregate(
+            FakeResult(), ["answer_correctness", "faithfulness", "relevance", "grounding"]
+        )
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        # The non-numeric scorers are reported missing; only the numeric ones survive.
+        assert agg.scorer_means == {"relevance": 4.0, "grounding": 4.0}
+        assert "answer_correctness" in err
+        assert "faithfulness" in err
+        assert agg.passed is False
+
+    def test_bool_canonical_value_rejected(self, capsys):
+        # `bool` is an `int` subclass in Python; the guard must exclude it so a
+        # `True` mean is never silently averaged as 1.0. Treated as missing.
+        class FakeResult:
+            metrics = {"grounding/score/mean": True}
+
+        agg = compute_aggregate(FakeResult(), ["grounding"])
+        err = capsys.readouterr().err
+        assert "ERROR" in err  # zero scorers matched → most-severe fail-closed branch
+        assert agg.scorer_means == {}
         assert agg.passed is False
 
 

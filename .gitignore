@@ -11,3 +11,10 @@ coverage/
 .pi/cortex-memory.local.md
 bun.lockb
 dump.rdb
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Loom orchestration state (machine-local)
+.claude/state/

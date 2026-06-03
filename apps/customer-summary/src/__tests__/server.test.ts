@@ -394,4 +394,79 @@ describe("GET /readyz", () => {
     expect(res.status).toBe(503);
     expect((await res.json()).status).toBe("not-ready");
   });
+
+  test("a failing secondary trace backend degrades the signal but does NOT gate readiness (FR-026)", async () => {
+    // Multi-backend deployment where one exporter (e.g. Foundry) keeps failing
+    // while MLflow succeeds. This must surface as ready-degraded@200 with the
+    // per-child counts visible — never 503 (a Foundry fault must not remove the pod).
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => true,
+        tracingExporterFailures: () => [
+          { index: 0, failures: 0 },
+          { index: 1, failures: 42 },
+        ],
+      },
+    });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.status).toBe("ready-degraded");
+    expect(json.redis).toBe(true);
+    expect(json.mlflow).toBe(true);
+    // The counts are surfaced for the operator.
+    expect(json.tracingExporterFailures).toEqual([
+      { index: 0, failures: 0 },
+      { index: 1, failures: 42 },
+    ]);
+  });
+
+  test("multi-backend with zero failures stays fully ready and reports the counts", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => true,
+        tracingExporterFailures: () => [
+          { index: 0, failures: 0 },
+          { index: 1, failures: 0 },
+        ],
+      },
+    });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.status).toBe("ready");
+    expect(json.tracingExporterFailures).toEqual([
+      { index: 0, failures: 0 },
+      { index: 1, failures: 0 },
+    ]);
+  });
+
+  test("single-backend deployment (null counts) omits the field and stays ready", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => true,
+        tracingExporterFailures: () => null,
+      },
+    });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.status).toBe("ready");
+    expect(json.tracingExporterFailures).toBeUndefined();
+  });
 });

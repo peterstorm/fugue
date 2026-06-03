@@ -1,5 +1,8 @@
-// `tracing/` — OTel SDK setup, span helpers, semantic conventions, and the
-// MLflow exporter. For typed *domain* events (`run-start`, `node-end`, etc.)
+// `tracing/` — OTel SDK setup, span helpers, semantic conventions, the
+// multi-backend fan-out exporter (CompositeSpanExporter, which delivers the
+// same spans to N trace backends with fault isolation), the MLflow exporter,
+// and the Azure AI Foundry (Application Insights) pass-through exporter. For
+// typed *domain* events (`run-start`, `node-end`, etc.)
 // see `observer/`. A consumer building a custom Observer should never have
 // to touch OTel SDK plumbing, and vice versa.
 
@@ -38,12 +41,34 @@ export {
 
 // OTel pipeline setup
 export type { TracingConfig, TracingHandle } from "./init.js";
-export { initTracing } from "./init.js";
+export { initTracing, normalizeExporter } from "./init.js";
+
+// Re-export the OTel `SpanExporter` contract so consumers (e.g. the app
+// composition layer) can name the exporter type WITHOUT a direct
+// `@opentelemetry/*` dependency — the framework owns the OTel surface.
+export type { SpanExporter } from "@opentelemetry/sdk-trace-base";
+
+// Multi-backend fan-out exporter (FR-002): deliver the same spans to N backends
+export { CompositeSpanExporter } from "./composite-exporter.js";
+export type { ChildFailureCount } from "./composite-exporter.js";
 export { setFrameworkTracer, fwTracer } from "./global-tracer.js";
 
 // MLflow-specific OTLP exporter
 export { MlflowOtlpExporter, createMlflowExporter } from "./mlflow-otlp-exporter.js";
 export type { MlflowOtlpExporterConfig } from "./mlflow-otlp-exporter.js";
+
+// Azure AI Foundry (Application Insights) exporter — pure pass-through
+export {
+  AzureMonitorExporter,
+  AzureMonitorExporterConfigError,
+  createAzureMonitorExporter,
+} from "./azure-monitor-exporter.js";
+export type {
+  AzureMonitorExporterConfig,
+  AzureMonitorAuth,
+  AzureMonitorInnerOpts,
+  AzureMonitorInnerFactory,
+} from "./azure-monitor-exporter.js";
 
 // Side-channel registry for object-valued span attributes (advanced)
 export { createSpanAttributeRegistry } from "./span-attribute-registry.js";

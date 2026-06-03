@@ -1,20 +1,85 @@
 /**
  * Initialize the OTel tracing pipeline with tail-based sampling.
  *
- * Vendor-neutral: accepts any SpanExporter. Use createMlflowExporter() for MLflow,
- * or any standard OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc.
+ * Vendor-neutral: accepts any SpanExporter — createMlflowExporter() for MLflow,
+ * createAzureMonitorExporter() for Azure AI Foundry, or any standard
+ * OTLPTraceExporter for Jaeger/Tempo/Honeycomb/etc. It ALSO accepts a non-empty
+ * LIST of exporters for simultaneous multi-backend export (FR-002): the same
+ * spans fan out to every exporter via {@link CompositeSpanExporter}. See
+ * {@link TracingConfig.exporter} and {@link normalizeExporter} for the
+ * single/[1]/[N] normalization rules.
  */
 import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { TailSamplingProcessor } from "../observer/tail-sampling-processor.js";
 import type { PersistencePolicy } from "../observer/policy.js";
+import { CompositeSpanExporter, type ChildFailureCount } from "./composite-exporter.js";
 
 export interface TracingConfig {
-  /** Any OTel-compatible span exporter */
-  readonly exporter: SpanExporter;
+  /**
+   * One OTel-compatible span exporter, or a list of them. A list selects
+   * multiple trace backends simultaneously (FR-002): the same spans are
+   * delivered to every exporter via {@link CompositeSpanExporter}.
+   *
+   * Normalization (see {@link normalizeExporter}):
+   * - a single exporter is used as-is (no wrapping);
+   * - a one-element list is unwrapped to its bare exporter — byte-for-byte
+   *   identical to passing that exporter directly (SC-006 no-regression);
+   * - a list of two or more is wrapped in a CompositeSpanExporter;
+   * - an empty list is rejected.
+   *
+   * The list form is a *non-empty tuple* (`[SpanExporter, ...SpanExporter[]]`),
+   * so `exporter: []` is a compile error at literal call sites — the non-empty
+   * invariant is unrepresentable, not merely a runtime throw (CLAUDE.md: make
+   * illegal states impossible). The runtime check in {@link normalizeExporter}
+   * is retained as defense-in-depth for dynamically-built lists that cross an
+   * untyped boundary.
+   */
+  readonly exporter: SpanExporter | readonly [SpanExporter, ...SpanExporter[]];
   /** Persistence policy for tail-based sampling */
   readonly policy: PersistencePolicy;
 }
+
+/** Narrowing guard for the array arm of the exporter union. */
+const isExporterList = (
+  exporter: SpanExporter | readonly SpanExporter[],
+): exporter is readonly SpanExporter[] => Array.isArray(exporter);
+
+/**
+ * Collapse the (possibly multi-backend) exporter config into the single
+ * `SpanExporter` the tail-sampling processor consumes.
+ *
+ * Pure function (functional core): no I/O, no SDK side effects — trivially
+ * unit-testable. The `[1] → bare exporter` path is the critical guarantee for
+ * SC-006: with exactly one backend, no Composite wrapper is introduced, so the
+ * export pipeline is identical to the pre-multi-backend behaviour.
+ */
+export const normalizeExporter = (
+  exporter: SpanExporter | readonly SpanExporter[],
+): SpanExporter => {
+  // Clean union narrowing via a typed predicate — no `as SpanExporter` casts.
+  if (!isExporterList(exporter)) {
+    // Single exporter — as-is, no Composite wrapper.
+    return exporter;
+  }
+  // Defense-in-depth: the public type forbids `[]`, but dynamically-built
+  // lists (built by the app bootstrap) cross an untyped boundary, so re-check at runtime.
+  if (exporter.length === 0) {
+    throw new Error(
+      "TracingConfig.exporter: empty exporter list — provide at least one SpanExporter",
+    );
+  }
+  // Unwrap a one-element list to the bare exporter: byte-for-byte identical to
+  // passing that exporter directly (no Composite wrapper). Critical for SC-006.
+  if (exporter.length === 1) return exporter[0]!;
+  // length >= 2 here: the length===0 (throw) and length===1 (unwrap) cases
+  // returned above, so this cast from the wide dynamic-boundary array to a
+  // non-empty tuple is sound. This is the SINGLE sanctioned widening->narrowing
+  // point; the constructor's type otherwise enforces the non-empty invariant.
+  return new CompositeSpanExporter(
+    exporter as readonly [SpanExporter, ...SpanExporter[]],
+  );
+};
 
 export interface TracingHandle {
   /** The tail-sampling processor (for monitoring exported/dropped counts) */
@@ -30,10 +95,32 @@ export interface TracingHandle {
   readonly flush: () => Promise<void>;
   /** Shut down the tracing pipeline */
   readonly shutdown: () => Promise<void>;
+  /**
+   * Cumulative per-child export-failure counts when MORE THAN ONE trace backend
+   * fans out via a {@link CompositeSpanExporter}, else `null` (a single backend
+   * is used as-is with no per-child tracking — there is nothing to fan out).
+   *
+   * Closes the loop on `CompositeSpanExporter.childFailureCounts` (otherwise
+   * tracked but unreachable): lets a health / diagnostics surface OBSERVE a
+   * constructed-but-persistently-failing secondary backend (e.g. Foundry export
+   * erroring while MLflow succeeds) which is otherwise visible only via the
+   * exporter's rate-limited `warn` logs. This is purely INFORMATIONAL — a
+   * failing secondary backend must NEVER gate readiness (FR-026: a Foundry
+   * fault must not remove the pod), so callers surface it as a degraded signal,
+   * not a not-ready one.
+   */
+  readonly exporterFailures: () => ReadonlyArray<ChildFailureCount> | null;
 }
 
 export async function initTracing(config: TracingConfig): Promise<TracingHandle> {
-  const tailProcessor = new TailSamplingProcessor(config.exporter, config.policy);
+  // Normalize at the boundary (imperative shell): single → as-is, [1] →
+  // unwrapped, [N] → Composite, [] → throw. Everything downstream sees one
+  // SpanExporter, so the TailSamplingProcessor lifecycle is unchanged.
+  const exporter = normalizeExporter(config.exporter);
+  // Only a multi-backend config produces a Composite; a single/[1] exporter is
+  // used as-is (SC-006), so there are no per-child counts to surface.
+  const composite = exporter instanceof CompositeSpanExporter ? exporter : null;
+  const tailProcessor = new TailSamplingProcessor(exporter, config.policy);
 
   const sdk = new NodeSDK({ spanProcessors: [tailProcessor] });
   sdk.start();
@@ -43,5 +130,6 @@ export async function initTracing(config: TracingConfig): Promise<TracingHandle>
     policy: config.policy,
     flush: async () => tailProcessor.forceFlush(),
     shutdown: async () => sdk.shutdown(),
+    exporterFailures: () => (composite ? composite.childFailureCounts : null),
   };
 }

@@ -1,5 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { asNonEmptyString } from "@fugue/framework";
 import { loadConfig } from "../config.js";
+
+/** Brand a known-good literal connection string for tests (non-blank by inspection). */
+const conn = (s: string) => asNonEmptyString(s)!;
 
 describe("loadConfig", () => {
   const origEnv = { ...process.env };
@@ -12,7 +16,8 @@ describe("loadConfig", () => {
       "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_VERSION",
       "AZURE_OPENAI_DEPLOYMENT", "EVAL_JUDGE_MODEL", "LLM_TRACE_PROMPTS",
       "ENABLE_THINKING", "THINKING_BUDGET_TOKENS", "FIXTURES_DIR", "PROMPTS_DIR",
-      "TRACE_SAMPLE_RATIO",
+      "TRACE_SAMPLE_RATIO", "OBSERVABILITY_TRACE_BACKENDS",
+      "APPLICATIONINSIGHTS_CONNECTION_STRING", "AZURE_AUTH_MODE", "EVAL_BACKEND",
     ]) {
       delete process.env[key];
     }
@@ -73,5 +78,89 @@ describe("loadConfig", () => {
   test("rejects invalid LLM_PROVIDER", () => {
     process.env.LLM_PROVIDER = "gemini";
     expect(() => loadConfig()).toThrow();
+  });
+
+  // ── Observability backend selection (FR-001 … FR-006, FR-022, FR-023) ──────
+
+  test("OBSERVABILITY_TRACE_BACKENDS defaults to [mlflow] (FR-003)", () => {
+    const config = loadConfig();
+    expect(config.OBSERVABILITY_TRACE_BACKENDS).toEqual(["mlflow"]);
+    expect(config.AZURE_AUTH_MODE).toBe("connection-string");
+    expect(config.EVAL_BACKEND).toBe("mlflow");
+    expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBeUndefined();
+  });
+
+  test("parses comma-separated dual selection mlflow,foundry (FR-002)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,foundry";
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc;IngestionEndpoint=https://x/";
+    expect(loadConfig().OBSERVABILITY_TRACE_BACKENDS).toEqual(["mlflow", "foundry"]);
+  });
+
+  test("trims whitespace around tokens", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = " mlflow , foundry ";
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc;IngestionEndpoint=https://x/";
+    expect(loadConfig().OBSERVABILITY_TRACE_BACKENDS).toEqual(["mlflow", "foundry"]);
+  });
+
+  test("rejects unknown trace backend token (fail-closed, FR-006)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,datadog";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects duplicate trace backend token (fail-closed, FR-006)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,mlflow";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects blank entry in trace backend list (fail-closed, FR-006)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects empty trace backend string (fail-closed, FR-006)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects foundry selected without connection string (contradictory config, FR-006)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
+    // no APPLICATIONINSIGHTS_CONNECTION_STRING
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects foundry selected with blank connection string (FR-006)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "   ";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("accepts foundry with connection string (FR-022)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc;IngestionEndpoint=https://x/";
+    const config = loadConfig();
+    expect(config.OBSERVABILITY_TRACE_BACKENDS).toEqual(["foundry"]);
+    expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
+  });
+
+  test("entra-id auth mode still requires a connection string (FR-023)", () => {
+    process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
+    process.env.AZURE_AUTH_MODE = "entra-id";
+    // no connection string → contradictory
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects invalid AZURE_AUTH_MODE", () => {
+    process.env.AZURE_AUTH_MODE = "managed-identity";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("rejects invalid EVAL_BACKEND", () => {
+    process.env.EVAL_BACKEND = "datadog";
+    expect(() => loadConfig()).toThrow();
+  });
+
+  test("accepts EVAL_BACKEND = both (FR-004)", () => {
+    process.env.EVAL_BACKEND = "both";
+    expect(loadConfig().EVAL_BACKEND).toBe("both");
   });
 });
