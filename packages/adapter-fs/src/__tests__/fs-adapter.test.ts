@@ -117,7 +117,18 @@ describe("createFsAdapter — getMetadata", () => {
   it("omits mimeType for an unknown extension", async () => {
     const h = createFsAdapter({ rootDir: ROOT, fsImpl: fakeFs({ "/data/reports/notes.bin": new Uint8Array(1) }) });
     const m = await h.client.getMetadata(localPathRef("notes.bin"));
+    expect(isOk(m)).toBe(true);
     if (m.ok) expect(m.value.mimeType).toBeUndefined();
+  });
+
+  it("reports sizeBytes 0 for an empty file (distinct from null 'unreported')", async () => {
+    const h = createFsAdapter({ rootDir: ROOT, fsImpl: fakeFs({ "/data/reports/empty.xlsx": new Uint8Array(0) }) });
+    const m = await h.client.getMetadata(localPathRef("empty.xlsx"));
+    expect(isOk(m)).toBe(true);
+    if (m.ok) {
+      expect(m.value.sizeBytes).toBe(0);
+      expect(m.value.sizeBytes).not.toBeNull();
+    }
   });
 });
 

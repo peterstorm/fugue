@@ -18,7 +18,7 @@ const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() 
 
 // inside a createFetchNode `fetch`, after ctx.documents.getContent(ref):
 const parsed = await parseWorkbook(bytes, RowSchema);
-//    Promise<Result<{ rows: { customerId: string; revenue: number }[] }, FrameworkError>>
+//    Promise<Result<{ rows: readonly { customerId: string; revenue: number }[] }, FrameworkError>>
 ```
 
 ## API
@@ -28,7 +28,7 @@ parseWorkbook<T>(
   bytes: Uint8Array,
   rowSchema: z.ZodType<T>,
   opts?: { sheet?: string | number; headerRow?: number },  // default: first sheet, header row 1
-): Promise<Result<{ rows: T[] }, FrameworkError>>
+): Promise<Result<{ rows: readonly T[] }, FrameworkError>>
 
 normalizeCell(value: unknown): string | number | boolean | Date | null  // exported for testing
 ```

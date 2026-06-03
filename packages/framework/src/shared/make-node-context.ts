@@ -27,7 +27,8 @@ const asDagId = (s: string | DagId): DagId =>
 
 // Names a custom capability may NOT use, because the runtime guarantees them as
 // named context fields. The built-in capability keys are handled explicitly
-// above; these are the always-present infrastructure fields that are NOT
+// in the `base` object below (and folded into RESERVED_CONTEXT_KEYS); these
+// are the always-present infrastructure fields that are NOT
 // capabilities (so absent from BUILTIN_CAPABILITY_KEYS) but must not be
 // overwritten by a same-named augmented capability spread.
 const ALWAYS_PRESENT_CONTEXT_KEYS = [

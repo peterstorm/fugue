@@ -7,6 +7,12 @@ import type { RunId, NodeId } from "./ids.js";
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
 
+/** A single unsatisfied capability declaration: which node required which capability. */
+export type MissingCapability = {
+  readonly nodeId: NodeId;
+  readonly capability: Capability;
+};
+
 export type FrameworkError =
   | { readonly kind: "validation"; readonly nodeId: NodeId; readonly message: string; readonly path?: string }
   | {
@@ -95,15 +101,17 @@ export type FrameworkError =
        * (`requires: ["llm"]`, etc.) that the wired NodeContext does not
        * supply. The run aborts before any `node.run` is called.
        *
-       * `nodeId` and `capability` describe the first miss (kept for
-       * backwards-compatible programmatic access); `missing` lists every
-       * `(nodeId, capability)` pair so callers can fix all gaps in one pass
-       * instead of replaying the run for each missing field.
+       * `missing` is a non-empty tuple — an error of this kind always names
+       * at least one gap. `nodeId` and `capability` mirror `missing[0]` (the
+       * first miss) for backwards-compatible programmatic access; both
+       * constructors derive them from `missing[0]` so they cannot disagree.
+       * `missing` lists every `(nodeId, capability)` pair so callers can fix
+       * all gaps in one pass instead of replaying the run for each field.
        */
       readonly kind: "missing-capability";
       readonly nodeId: NodeId;
       readonly capability: Capability;
-      readonly missing: readonly { readonly nodeId: NodeId; readonly capability: Capability }[];
+      readonly missing: readonly [MissingCapability, ...MissingCapability[]];
     };
 
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */

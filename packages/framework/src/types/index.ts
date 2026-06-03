@@ -27,7 +27,7 @@ export {
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
-export type { FrameworkError, FrameworkErrorKind } from "./errors.js";
+export type { FrameworkError, FrameworkErrorKind, MissingCapability } from "./errors.js";
 export { formatFrameworkError, FrameworkAugmentedError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 

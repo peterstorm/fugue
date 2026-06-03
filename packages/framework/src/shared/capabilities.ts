@@ -17,7 +17,7 @@ import type {
   ValidatedNodeContext,
 } from "../types/node.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
-import type { FrameworkError } from "../types/errors.js";
+import type { FrameworkError, MissingCapability } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 
 /**
@@ -39,7 +39,7 @@ export const validateCapabilities = (
   dag: DagDef,
   ctx: BaseNodeContext,
 ): Result<ValidatedNodeContext, FrameworkError> => {
-  const missing: { readonly nodeId: typeof dag.nodes[number]["id"]; readonly capability: Capability }[] = [];
+  const missing: MissingCapability[] = [];
   // Single widening cast: custom capabilities live as dynamic properties on
   // the context (ADR-0051), so the lookup is keyed by `Capability` rather
   // than the statically-known `BaseNodeContext` fields. `== null` covers both
@@ -54,13 +54,16 @@ export const validateCapabilities = (
       }
     }
   }
-  if (missing.length > 0) {
-    const first = missing[0]!;
+  // Destructure to prove non-emptiness to the type system: when `first` is
+  // present, `[first, ...rest]` is a `[MissingCapability, ...MissingCapability[]]`
+  // tuple, satisfying the error's non-empty `missing` field without a cast.
+  const [first, ...rest] = missing;
+  if (first !== undefined) {
     return err({
       kind: "missing-capability" as const,
       nodeId: first.nodeId,
       capability: first.capability,
-      missing,
+      missing: [first, ...rest],
     });
   }
   return ok(brandAsValidatedNodeContext(ctx));

@@ -23,6 +23,18 @@ beforeAll(() => {
       if (url.pathname === "/orders" && req.method === "POST") {
         return Response.json({ orderId: "ord-1", status: "created" });
       }
+      // Echoes the request body, verb, and Content-Type back so tests can
+      // assert the body is actually serialized and transmitted (not dropped)
+      // and that the capability defaults Content-Type when a body is present.
+      if (url.pathname === "/echo" && (req.method === "POST" || req.method === "PUT")) {
+        return req.json().then((body) =>
+          Response.json({
+            method: req.method,
+            received: body,
+            contentType: req.headers.get("content-type"),
+          }),
+        );
+      }
       if (url.pathname === "/slow" && req.method === "GET") {
         return new Promise((resolve) =>
           setTimeout(() => resolve(Response.json({ done: true })), 2000),
@@ -68,6 +80,31 @@ describe("createHttpCapability (real HTTP)", () => {
     expect(isOk(result)).toBe(true);
     if (result.ok) {
       expect(result.value).toEqual({ orderId: "ord-1", status: "created" });
+    }
+  });
+
+  it("transmits the JSON body and defaults Content-Type for POST and PUT", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    const EchoSchema = z.object({
+      method: z.string(),
+      received: z.object({ items: z.array(z.number()) }),
+      contentType: z.string(),
+    });
+
+    const post = await http.post("/echo", { items: [1, 2, 3] }, { schema: EchoSchema });
+    expect(isOk(post)).toBe(true);
+    if (post.ok) {
+      expect(post.value.method).toBe("POST");
+      expect(post.value.received).toEqual({ items: [1, 2, 3] });
+      expect(post.value.contentType).toBe("application/json");
+    }
+
+    const put = await http.put("/echo", { items: [9] }, { schema: EchoSchema });
+    expect(isOk(put)).toBe(true);
+    if (put.ok) {
+      expect(put.value.method).toBe("PUT");
+      expect(put.value.received).toEqual({ items: [9] });
+      expect(put.value.contentType).toBe("application/json");
     }
   });
 

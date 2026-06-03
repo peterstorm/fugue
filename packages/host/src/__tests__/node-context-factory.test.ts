@@ -6,16 +6,17 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha } from "@fugue/framework";
+import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fugue/framework";
 import type { Result, DagId, RunId, NodeId } from "@fugue/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { RedisPort, LogPort } from "../ports.js";
+import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
 import { z } from "zod";
 import {
   resolveTtl,
   createNamespacedCache,
   createNamespacedCheckpointWriter,
+  createNodeContextForDag,
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
@@ -264,5 +265,42 @@ describe("createNamespacedCheckpointWriter", () => {
     circular.self = circular;
     await writer.write(testRunId, testNodeId, circular);
     expect(logs.some(l => l.msg.includes("not serializable"))).toBe(true);
+  });
+});
+
+// ── Built-in http capability wiring (ADR-0051) ──────────────────────────────
+
+describe("createNodeContextForDag — built-in http capability", () => {
+  const baseSharedInfra = (
+    capabilities: SharedInfra["capabilities"],
+  ): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities,
+  });
+
+  // Regression guard: main.ts wires `createHttpCapability()` into
+  // `sharedInfra.capabilities`. If that wiring is dropped, `ctx.http` is null
+  // and any `requires: ["http"]` DAG fails the boot-time capability check.
+  it("surfaces a usable http client when the handle is wired into capabilities", () => {
+    const shared = baseSharedInfra([createHttpCapability()]);
+    const ctx = createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal);
+
+    expect(ctx.http).not.toBeNull();
+    // The presence check `ctx.http != null` is exactly what
+    // `validateCapabilities` gates a `requires: ["http"]` node on.
+    expect(typeof ctx.http?.get).toBe("function");
+    expect(typeof ctx.http?.post).toBe("function");
+  });
+
+  it("leaves http null when no http handle is wired (documents the gap the wiring closes)", () => {
+    const shared = baseSharedInfra([]);
+    const ctx = createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal);
+
+    expect(ctx.http).toBeNull();
   });
 });

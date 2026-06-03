@@ -19,7 +19,7 @@ import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 import { createModuleLoader } from "./adapters/module-loader.js";
 import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient } from "@fugue/framework";
+import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability } from "@fugue/framework";
 import type { Result, LlmClient } from "@fugue/framework";
 
 // ── Logger ─────────────────────────────────────────────────────────────────
@@ -184,7 +184,13 @@ const main = async () => {
       contentFilter: null,
       prompts: null,
       logger,
-      capabilities: [],
+      // ADR-0051: the built-in `http` capability ships with the framework so
+      // every workflow can declare `requires: ["http"]`. It reaches each node's
+      // NodeContext via this `capabilities` array (the handle's name↔client
+      // correlation is restored in `extractClients`). Without this wiring
+      // `ctx.http` would be null and a `requires: ["http"]` DAG would fail the
+      // boot-time capability check.
+      capabilities: [createHttpCapability()],
     };
 
     // Step 4: Create git adapter (local or remote)
