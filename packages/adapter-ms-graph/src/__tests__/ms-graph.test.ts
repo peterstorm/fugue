@@ -6,6 +6,7 @@ import {
   driveItemRef,
   sharePointPathRef,
   shareUrlRef,
+  localPathRef,
   fileRefKey,
   resolveUrls,
   encodeShareUrl,
@@ -14,6 +15,13 @@ import {
   type FileMeta,
   type MsGraphAdapterConfig,
 } from "../index.js";
+
+/** Unwrap a resolveUrls Result in tests, failing loudly on the error path. */
+const urls = (...args: Parameters<typeof resolveUrls>) => {
+  const r = resolveUrls(...args);
+  if (!r.ok) throw new Error(`resolveUrls unexpectedly failed: ${JSON.stringify(r.error)}`);
+  return r.value;
+};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -68,13 +76,13 @@ describe("FileRef constructors and keys", () => {
 
 describe("resolveUrls", () => {
   it("driveItem → /drives/{id}/items/{id}[/content]", () => {
-    const { content, metadata } = resolveUrls(driveItemRef("drive 1", "item/2"));
+    const { content, metadata } = urls(driveItemRef("drive 1", "item/2"));
     expect(metadata).toBe("https://graph.microsoft.com/v1.0/drives/drive%201/items/item%2F2");
     expect(content).toBe(`${metadata}/content`);
   });
 
   it("sharePointPath → colon-addressed site + drive path, content delimits with a trailing colon", () => {
-    const { content, metadata } = resolveUrls(
+    const { content, metadata } = urls(
       sharePointPathRef({
         siteHostname: "contoso.sharepoint.com",
         sitePath: "/sites/Finance",
@@ -89,14 +97,23 @@ describe("resolveUrls", () => {
 
   it("shareUrl → /shares/{u!base64url}/driveItem", () => {
     const url = "https://contoso.sharepoint.com/:x:/s/Finance/abc?e=1";
-    const { content, metadata } = resolveUrls(shareUrlRef(url));
+    const { content, metadata } = urls(shareUrlRef(url));
     expect(metadata).toBe(`https://graph.microsoft.com/v1.0/shares/${encodeShareUrl(url)}/driveItem`);
     expect(content).toBe(`${metadata}/content`);
   });
 
   it("honours a custom graph base URL (sovereign cloud / test server)", () => {
-    const { metadata } = resolveUrls(driveItemRef("d", "i"), "https://graph.microsoft.us/v1.0");
+    const { metadata } = urls(driveItemRef("d", "i"), "https://graph.microsoft.us/v1.0");
     expect(metadata).toBe("https://graph.microsoft.us/v1.0/drives/d/items/i");
+  });
+
+  it("fails closed (non-retriable) on a foreign FileRef variant (localPath)", () => {
+    const r = resolveUrls(localPathRef("reports/q2.xlsx"));
+    expect(isErr(r)).toBe(true);
+    if (!r.ok) {
+      expect(r.error.kind).toBe("node-crash");
+      if (r.error.kind === "node-crash") expect(r.error.retriability).toBe("non-retriable");
+    }
   });
 });
 

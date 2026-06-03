@@ -1,12 +1,11 @@
 /**
  * @fugue/ms-graph — Microsoft Graph adapter for the generic `DocumentSource`
- * capability.
+ * capability (`@fugue/document-source`).
  *
- * Provides a provider-neutral `DocumentSource` interface that nodes access via
- * `requires: ["documents"]` and `ctx.documents`, plus a Microsoft Graph
- * implementation (`createMsGraphAdapter`) that reads files from SharePoint and
- * OneDrive. The same interface is intended to gain a Google Drive adapter
- * later; see ADR-0052 for the extraction trigger.
+ * Reads files from SharePoint and OneDrive for nodes that declare
+ * `requires: ["documents"]` and use `ctx.documents`. The port types
+ * (`DocumentSource`, `FileRef`, `FileMeta`) live in `@fugue/document-source`
+ * and are re-exported here for convenience.
  *
  * The capability is exactly two operations — `getContent` (bytes) and
  * `getMetadata`. Parsing `.xlsx`/`.csv` bytes into typed rows is a *separate*
@@ -41,11 +40,9 @@
  * });
  * ```
  *
- * ## Module Augmentation
- *
- * This package augments `@fugue/framework`'s `CapabilityRegistry` to add the
- * `"documents"` capability. After importing this package, `requires:
- * ["documents"]` becomes valid and `ctx.documents` is typed as `DocumentSource`.
+ * Importing this package (via `@fugue/document-source`) augments
+ * `CapabilityRegistry` so `requires: ["documents"]` becomes valid and
+ * `ctx.documents` is typed as `DocumentSource`.
  *
  * @satisfies ADR-0052 — Document-source capability (MS Graph adapter)
  * @satisfies ADR-0051 — Extensible capability registry
@@ -55,119 +52,25 @@ import { z } from "zod";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
 import { ok, err, nodeId } from "@fugue/framework";
+import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fugue/document-source";
+import { unsupportedRefError } from "@fugue/document-source";
 
-// ---------------------------------------------------------------------------
-// File reference ADT — how a DAG names the file it wants
-// ---------------------------------------------------------------------------
-
-/**
- * A reference to a file, independent of which provider stores it.
- *
- * A discriminated union: each variant is independently valid and complete, so
- * illegal states (a drive id without an item id, a half-specified SharePoint
- * path, mixed addressing modes) cannot be represented. New providers extend
- * this union additively — e.g. a future `{ kind: "googleDriveFile"; fileId }`.
- */
-export type FileRef =
-  /** SharePoint, human-authored in config: site host + server-relative site path + file path. */
-  | {
-      readonly kind: "sharePointPath";
-      readonly siteHostname: string;
-      readonly sitePath: string;
-      readonly filePath: string;
-    }
-  /** Either backend, once the stable Graph drive + item ids are already held. */
-  | { readonly kind: "driveItem"; readonly driveId: string; readonly itemId: string }
-  /** Any OneDrive/SharePoint sharing link — Graph resolves the backend via `/shares`. */
-  | { readonly kind: "shareUrl"; readonly url: string };
-
-/** Smart constructor for the SharePoint path variant. */
-export const sharePointPathRef = (args: {
-  siteHostname: string;
-  sitePath: string;
-  filePath: string;
-}): FileRef => ({ kind: "sharePointPath", ...args });
-
-/** Smart constructor for the drive-item-id variant. */
-export const driveItemRef = (driveId: string, itemId: string): FileRef => ({
-  kind: "driveItem",
-  driveId,
-  itemId,
-});
-
-/** Smart constructor for the sharing-link variant. */
-export const shareUrlRef = (url: string): FileRef => ({ kind: "shareUrl", url });
-
-/**
- * Stable string key for a `FileRef`. Used by the fake to route canned
- * responses, and useful for logging/caching. Exported for testing.
- */
-export const fileRefKey = (ref: FileRef): string =>
-  match(ref)
-    .with({ kind: "driveItem" }, (r) => `driveItem:${r.driveId}/${r.itemId}`)
-    .with(
-      { kind: "sharePointPath" },
-      (r) => `sharePointPath:${r.siteHostname}:${r.sitePath}:${r.filePath}`,
-    )
-    .with({ kind: "shareUrl" }, (r) => `shareUrl:${r.url}`)
-    .exhaustive();
-
-// ---------------------------------------------------------------------------
-// Capability interface — what nodes see on `ctx.documents`
-// ---------------------------------------------------------------------------
-
-/** Lightweight file metadata. Lets a fetch node witness freshness / skip work. */
-export interface FileMeta {
-  /** Graph driveItem id. */
-  readonly id: string;
-  /** File name including extension. */
-  readonly name: string;
-  /** Size in bytes (0 if Graph omits it). */
-  readonly sizeBytes: number;
-  /** Last-modified timestamp, ISO 8601 UTC. */
-  readonly lastModified: string;
-  /** Opaque entity tag for change detection, when present. */
-  readonly eTag?: string;
-  /** MIME type, when present. */
-  readonly mimeType?: string;
-}
-
-/** Per-call read options. */
-export interface ReadOpts {
-  /** Caller abort signal (composed with the adapter's request timeout). */
-  readonly signal?: AbortSignal;
-}
-
-/**
- * Provider-neutral document-source capability — the irreducible core every
- * backend shares. Holds ONLY content + metadata reads by design (ADR-0052);
- * provider-specific operations (listing, revisions, upload, search) must NOT
- * be added here — they belong on a provider-specific capability.
- *
- * All methods return `Result` — no exceptions escape.
- */
-export interface DocumentSource {
-  /** Fetch the raw bytes of a file. A missing file is a non-retriable error. */
-  getContent(ref: FileRef, opts?: ReadOpts): Promise<Result<Uint8Array, FrameworkError>>;
-
-  /** Fetch lightweight metadata for a file (also a way to test existence). */
-  getMetadata(ref: FileRef, opts?: ReadOpts): Promise<Result<FileMeta, FrameworkError>>;
-}
-
-// ---------------------------------------------------------------------------
-// Module Augmentation
-// ---------------------------------------------------------------------------
-
-declare module "@fugue/framework" {
-  interface CapabilityRegistry {
-    /**
-     * Generic cloud document-source capability. Access via `ctx.documents` in
-     * nodes. Backed here by Microsoft Graph; intended to gain peer adapters
-     * (e.g. Google Drive) sharing this same interface — see ADR-0052.
-     */
-    documents: DocumentSource;
-  }
-}
+// Re-export the port surface so `@fugue/ms-graph` is a one-stop import.
+export {
+  sharePointPathRef,
+  driveItemRef,
+  shareUrlRef,
+  localPathRef,
+  fileRefKey,
+  createFakeDocumentSource,
+} from "@fugue/document-source";
+export type {
+  FileRef,
+  FileMeta,
+  ReadOpts,
+  DocumentSource,
+  FakeDocRoute,
+} from "@fugue/document-source";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -274,30 +177,30 @@ export const encodeShareUrl = (url: string): string => {
 };
 
 /**
- * Resolve a `FileRef` to its Graph content + metadata URLs. Exported for
- * testing. Exhaustive over the current union; a new variant (e.g. a foreign
- * `googleDriveFile`) becomes a compile error here until handled, and — once the
- * port type is shared across adapters (ADR-0052) — a runtime fail-closed error.
+ * Resolve a `FileRef` to its Graph content + metadata URLs. Handles the three
+ * MS Graph variants; any other variant (e.g. `localPath`, or a future foreign
+ * provider) fails closed with an `unsupported-ref` error — the runtime half of
+ * the ref↔adapter contract (ADR-0052). Exported for testing.
  */
 export const resolveUrls = (
   ref: FileRef,
   base: string = DEFAULT_GRAPH_BASE,
-): { content: string; metadata: string } =>
+): Result<{ content: string; metadata: string }, FrameworkError> =>
   match(ref)
     .with({ kind: "driveItem" }, (r) => {
       const item = `${base}/drives/${encodeURIComponent(r.driveId)}/items/${encodeURIComponent(r.itemId)}`;
-      return { content: `${item}/content`, metadata: item };
+      return ok({ content: `${item}/content`, metadata: item });
     })
     .with({ kind: "sharePointPath" }, (r) => {
       const site = `${base}/sites/${encodeURIComponent(r.siteHostname)}:/${encodePath(r.sitePath)}:`;
       const item = `${site}/drive/root:/${encodePath(r.filePath)}`;
-      return { content: `${item}:/content`, metadata: item };
+      return ok({ content: `${item}:/content`, metadata: item });
     })
     .with({ kind: "shareUrl" }, (r) => {
       const item = `${base}/shares/${encodeShareUrl(r.url)}/driveItem`;
-      return { content: `${item}/content`, metadata: item };
+      return ok({ content: `${item}/content`, metadata: item });
     })
-    .exhaustive();
+    .otherwise((r) => err(unsupportedRefError("ms-graph", r)));
 
 /** Shape of the Graph driveItem JSON the adapter relies on. */
 const DriveItemSchema = z.object({
@@ -367,8 +270,9 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
     getContent: async (ref, opts): Promise<Result<Uint8Array, FrameworkError>> => {
       const token = await acquireToken(config.getAccessToken);
       if (!token.ok) return token;
-      const { content } = resolveUrls(ref, base);
-      const res = await graphGet(fetchImpl, content, token.value, "application/octet-stream", opts, timeoutMs);
+      const urls = resolveUrls(ref, base);
+      if (!urls.ok) return urls;
+      const res = await graphGet(fetchImpl, urls.value.content, token.value, "application/octet-stream", opts, timeoutMs);
       if (!res.ok) return res;
       try {
         const buf = await res.value.arrayBuffer();
@@ -381,8 +285,9 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
     getMetadata: async (ref, opts): Promise<Result<FileMeta, FrameworkError>> => {
       const token = await acquireToken(config.getAccessToken);
       if (!token.ok) return token;
-      const { metadata } = resolveUrls(ref, base);
-      const res = await graphGet(fetchImpl, metadata, token.value, "application/json", opts, timeoutMs);
+      const urls = resolveUrls(ref, base);
+      if (!urls.ok) return urls;
+      const res = await graphGet(fetchImpl, urls.value.metadata, token.value, "application/json", opts, timeoutMs);
       if (!res.ok) return res;
       let json: unknown;
       try {
@@ -430,49 +335,4 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
       }
     },
   };
-};
-
-// ---------------------------------------------------------------------------
-// Fake for Testing
-// ---------------------------------------------------------------------------
-
-/** A canned response for one `FileRef` (keyed by `fileRefKey`). */
-export interface FakeDocRoute {
-  readonly content?: Uint8Array;
-  readonly metadata?: FileMeta;
-  /** If set, both reads return this error (takes precedence). */
-  readonly error?: FrameworkError;
-}
-
-/**
- * In-memory fake `DocumentSource` for unit-testing nodes that use
- * `ctx.documents`. Routes are keyed by `fileRefKey(ref)`.
- *
- * @example
- * ```ts
- * const fakeDocs = createFakeDocumentSource({
- *   [fileRefKey(driveItemRef("d1", "i1"))]: { content: new Uint8Array([1, 2, 3]) },
- * });
- * ```
- */
-export const createFakeDocumentSource = (
-  routes: Readonly<Record<string, FakeDocRoute>>,
-): CapabilityHandle<"documents"> => {
-  const client: DocumentSource = {
-    getContent: async (ref): Promise<Result<Uint8Array, FrameworkError>> => {
-      const route = routes[fileRefKey(ref)];
-      if (route?.error) return err(route.error);
-      if (route?.content) return ok(route.content);
-      return err(crashErr(`fake: no content route for ${fileRefKey(ref)}`));
-    },
-
-    getMetadata: async (ref): Promise<Result<FileMeta, FrameworkError>> => {
-      const route = routes[fileRefKey(ref)];
-      if (route?.error) return err(route.error);
-      if (route?.metadata) return ok(route.metadata);
-      return err(crashErr(`fake: no metadata route for ${fileRefKey(ref)}`));
-    },
-  };
-
-  return { name: "documents", client };
 };

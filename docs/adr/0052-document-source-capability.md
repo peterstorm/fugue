@@ -113,18 +113,53 @@ a future foreign variant (`googleDriveFile`) handed to it returns a
 union, this is enforced at compile time; the runtime guard becomes load-bearing
 once the type is extracted and shared — see below.)
 
-### Where the port type lives (and when to move it)
+### Where the port type lives
 
-For now, `DocumentSource` / `FileRef` / `FileMeta` live **in `@fugue/ms-graph`**
-(matching the ADR-0051 convention that the capability interface ships with its
-adapter), and that package augments `CapabilityRegistry` with
-`documents: DocumentSource`. **Extraction trigger:** when a second adapter
-(e.g. `@fugue/google-drive`) is added, extract the port (`DocumentSource`,
-`FileRef`, `FileMeta`) into a provider-neutral home (framework types or a small
-`@fugue/document-source` package) so both adapters import the same type and the
-runtime ref-guard becomes meaningful. This honours "do not pre-abstract; extract
-when the second implementation is real" — at that point you factor against two
-concrete adapters instead of guessing.
+The port (`DocumentSource`, `FileRef`, `FileMeta`, `ReadOpts`, the smart
+constructors, `fileRefKey`, the test fake, and `unsupportedRefError`) lives in a
+dedicated **`@fugue/document-source`** package, which augments
+`CapabilityRegistry` with `documents: DocumentSource` exactly once. Adapter
+packages (`@fugue/ms-graph`, `@fugue/fs`, and any future
+`@fugue/google-drive`) depend on it, import the port, and implement
+`DocumentSource` for one backend; each re-exports the port surface so it stays a
+one-stop import.
+
+This extraction was triggered by the **second adapter** (`@fugue/fs`), exactly
+per "do not pre-abstract; extract when the second implementation is real" — the
+port was factored against two concrete adapters, not guessed. With two adapters
+now sharing `FileRef`, the runtime ref-guard below is load-bearing rather than
+theoretical.
+
+### Local files in a container (OpenShift)
+
+The `@fugue/fs` adapter reads from a `rootDir` on the pod filesystem, confined to
+that tree (the local equivalent of `Sites.Selected` — `../` traversal and
+absolute escapes are rejected non-retriably). Because a pod's filesystem is
+ephemeral and per-replica, "get the file onto disk" in OpenShift is a *delivery*
+question separate from the read, and ranks roughly:
+
+1. **Don't — read it remotely.** If the file lives in SharePoint, use
+   `@fugue/ms-graph` and fetch at runtime over the network; nothing is placed on
+   disk. This is the expected production path for the SharePoint source.
+2. **PersistentVolume (RWX), populated by another process.** A ReadWriteMany
+   volume (NFS / CephFS / Azure Files) mounted into the pod; a separate job,
+   uploader, or external system writes the file and the DAG reads it via
+   `@fugue/fs` with `rootDir` = the mount path. The realistic "file on a shared
+   disk" production case.
+3. **initContainer fetch → `emptyDir`.** An init container pulls the file (from
+   object storage, an API, or git) into an `emptyDir` shared with the app
+   container, which then reads it via `@fugue/fs`. Bridges a remote source to a
+   local read without a persistent volume.
+4. **ConfigMap / Secret volume.** Only for small (<~1 MiB), static files; use a
+   Secret (binary via `binaryData`) for sensitive content. Most spreadsheets are
+   too large.
+5. **Baked into the image** (`COPY`). Only for truly static, non-sensitive,
+   build-time data; immutable and versioned with the image.
+
+Object storage (S3 / Azure Blob) is the cloud-native answer to "a file in the
+cloud" and would be a *separate* adapter (`@fugue/s3`) implementing the same
+`DocumentSource` port — not the `localPath` variant. The generic port means any
+of these is a wiring choice, not a node change.
 
 ### Parsing stays a pure transform
 
@@ -161,9 +196,8 @@ posture enforced elsewhere.
 - Ref↔adapter compatibility is a runtime-checked contract once the port type is
   shared, not a compile-time one. Mitigated: fail-closed `FrameworkError` on an
   unsupported ref, never a crash.
-- Module augmentation of `documents` currently lives in `@fugue/ms-graph`; a
-  second adapter forces the documented extraction. Accepted as the correct
-  "extract on second implementation" moment, not upfront cost.
+- Adapters must depend on `@fugue/document-source` and the port owns the single
+  registry augmentation; importing an adapter transitively loads it.
 - The shared port deliberately cannot express provider-specific operations;
   those require a separate capability. This is the guardrail working as intended,
   but it means richer per-provider features are out of band by design.
@@ -172,10 +206,16 @@ posture enforced elsewhere.
 
 Delivered on this branch (compiling, unit-tested, no network):
 
-- `@fugue/ms-graph` adapter: `DocumentSource` interface, `FileRef` ADT,
-  `FileMeta`, registry augmentation, `createMsGraphAdapter` factory (real Graph
-  URL building for all three ref variants, injected token provider, HTTP-status
-  → `FrameworkError` mapping), and `createFakeDocumentSource` for node tests.
+- `@fugue/document-source` port package: `DocumentSource` interface, `FileRef`
+  ADT (four variants incl. `localPath`), `FileMeta`, `ReadOpts`, smart
+  constructors, `fileRefKey`, `unsupportedRefError`, the registry augmentation,
+  and `createFakeDocumentSource`.
+- `@fugue/ms-graph` adapter: `createMsGraphAdapter` (real Graph URL building for
+  the three MS variants, injected token provider, HTTP-status → `FrameworkError`
+  mapping, fail-closed on foreign variants).
+- `@fugue/fs` adapter: `createFsAdapter` (root-confined local reads, fs-error
+  classification, fail-closed on traversal and foreign variants) — the
+  zero-unknowns adapter for wiring a DAG end-to-end today.
 
 Remaining (gated on decisions not yet available):
 
