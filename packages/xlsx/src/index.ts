@@ -88,13 +88,17 @@ export const normalizeCell = (value: unknown): string | number | boolean | Date 
  * - `node-crash` (non-retriable) when the bytes aren't a readable workbook or
  *   the requested worksheet is absent — deterministic, so not retried.
  * - `validation` when a row does not match `rowSchema` (message names the row).
- * - `ok({ rows })` otherwise. Fully-blank rows are skipped.
+ * - `ok({ rows })` otherwise. Rows are skipped when every cell normalises to
+ *   empty — this includes rows whose cells are all error cells (`#REF!`,
+ *   `#DIV/0!`, …), since `normalizeCell` maps those to `null`. A row mixing an
+ *   error cell with real values is kept and fails `rowSchema` validation unless
+ *   the offending column is nullable.
  */
 export const parseWorkbook = async <T>(
   bytes: Uint8Array,
   rowSchema: z.ZodType<T>,
   opts: ParseWorkbookOpts = {},
-): Promise<Result<{ rows: readonly T[] }, FrameworkError>> => {
+): Promise<Result<{ rows: T[] }, FrameworkError>> => {
   const wb = new ExcelJS.Workbook();
   try {
     // exceljs types `load` as the global Buffer; recent @types/node makes

@@ -116,10 +116,11 @@ describe("parseWorkbook — options", () => {
 
     const r = await parseWorkbook(bytes, z.object({ customerId: z.string() }));
     expect(isErr(r)).toBe(true);
-    if (!r.ok) {
-      expect(r.error.kind).toBe("node-crash");
+    if (!r.ok && r.error.kind === "node-crash") {
       expect(r.error.message).toContain("duplicate header");
       expect(r.error.message).toContain("customerId");
+    } else {
+      throw new Error(`expected node-crash, got ${r.ok ? "ok" : r.error.kind}`);
     }
   });
 
