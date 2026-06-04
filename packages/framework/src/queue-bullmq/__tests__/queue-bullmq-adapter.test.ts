@@ -1096,7 +1096,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
   judgeLlm: null,
       cache: null,
       prompts: null,
-      llm: null,
+      llm: null, http: null,
       logger: { warn: () => {}, error: () => {} },
     });
 

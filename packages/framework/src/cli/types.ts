@@ -66,6 +66,43 @@ export type LintError =
     };
 
 /**
+ * One entry in the built-in capability catalogue emitted by `fugue
+ * capabilities`. Stable JSON shape: `name` is what goes in a node's
+ * `requires`, `clientType` names the value injected into `ctx[name]`.
+ */
+export interface CapabilityCatalogEntry {
+  readonly name: string;
+  readonly description: string;
+  readonly clientType: string;
+  readonly reference: string;
+}
+
+/**
+ * Outcome of `fugue capabilities`: the framework's built-in capability
+ * catalogue plus the mechanism for obtaining custom (adapter-provided) ones.
+ *
+ * Always `ok: true` — the catalogue is static framework data with no failure
+ * mode — but the field is kept so machine consumers branch on `ok` uniformly
+ * across all three CLI commands.
+ *
+ * `builtin` lists capabilities the framework ships. Adapter-provided
+ * capabilities (e.g. `documents`, `db`) are deployment-specific: they exist
+ * only when the host wires the corresponding `CapabilityHandle`, so they are
+ * described via `custom` rather than enumerated here. Use `fugue describe
+ * <dag>` to see which capabilities a *specific* DAG requires.
+ */
+export interface CapabilitiesResult {
+  readonly ok: true;
+  readonly builtin: readonly CapabilityCatalogEntry[];
+  readonly custom: {
+    readonly mechanism: string;
+    readonly howToDeclare: string;
+    readonly discover: string;
+    readonly seeAlso: readonly string[];
+  };
+}
+
+/**
  * Describe outcome: a structured summary of a valid DAG file. Always wraps
  * a lint pass — a file that fails to lint also fails to describe, surfacing
  * the same `LintError` array.

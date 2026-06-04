@@ -8,8 +8,10 @@ import type { RunId, NodeId, DagId } from "./ids.js";
 import type { ContentFilter } from "./content-filter.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
+import type { HttpCapability } from "./http-capability.js";
 
 export type { Tracer };
+export type { HttpCapability } from "./http-capability.js";
 
 /**
  * Confidence extraction mode for a node. Every node declares how (or whether)
@@ -98,48 +100,142 @@ export interface CheckpointWriter {
 //  - At run start, the runtime walks `dag.nodes`, unions the declared
 //    capabilities, and validates the wired ctx against that set. A missing
 //    capability fails the run *before* the first `node.run` is called, with
-//    `Err({ kind: "missing-capability", capability, nodeId })`.
+//    `Err({ kind: "missing-capability", missing: [{ nodeId, capability }, ...] })`.
+//
+// ADR-0051: The registry is now an extensible interface. Adapter packages
+// augment `CapabilityRegistry` via module augmentation to register new
+// capabilities. `Capability` is derived as `keyof CapabilityRegistry`.
 // ---------------------------------------------------------------------------
 
 /**
- * The set of capability names a node can require. Each maps to a non-null
- * concrete type in `CapabilityFields` below.
+ * Extensible capability registry. Adapter packages augment this interface
+ * to register new capabilities via TypeScript module augmentation.
+ *
+ * Built-in capabilities are declared here as the base set. To add a custom
+ * capability:
+ *
+ * ```ts
+ * declare module "@fugue/framework" {
+ *   interface CapabilityRegistry {
+ *     db: PgCapability;
+ *   }
+ * }
+ * ```
+ *
+ * After augmentation, `requires: ["db"]` becomes valid and `ctx.db` is typed
+ * as `PgCapability` (non-null) in the node's `run` function.
  */
-export type Capability = "llm" | "cache" | "prompts" | "judgeLlm";
-
-/**
- * Concrete types injected for each capability when a node declares it in
- * `requires`. The field name on `NodeContext` matches the capability name.
- */
-export interface CapabilityFields {
+export interface CapabilityRegistry {
   readonly llm: LlmClient;
   readonly cache: ContextCacheAdapter;
   readonly prompts: PromptAccess;
   readonly judgeLlm: LlmClient;
+  readonly http: HttpCapability;
 }
 
-// ---------------------------------------------------------------------------
-// Compile-time bijection assertion: Capability ↔ CapabilityFields.
-//
-// Adding a key to one side without the other makes the `_capabilityCheck`
-// assignment fail with a descriptive type error. Runtime cost: zero (erased
-// by TypeScript). This pattern is the compile-time complement to
-// `validateCapabilities`' runtime check.
-// ---------------------------------------------------------------------------
-type _AssertCapabilitySync =
-  | (Capability extends keyof CapabilityFields
-      ? never
-      : "Capability has a key missing from CapabilityFields")
-  | (keyof CapabilityFields extends Capability
-      ? never
-      : "CapabilityFields has a key missing from Capability");
-// Assignment to `never` proves the union collapsed — any drift surfaces here.
-const _capabilityCheck: _AssertCapabilitySync = undefined as never;
-void _capabilityCheck;
+/**
+ * The set of capability names a node can require. Derived from the
+ * extensible `CapabilityRegistry` — adding a key to the registry
+ * automatically makes it a valid capability name.
+ *
+ * Reserved infrastructure keys (`ReservedNonCapabilityKey`, e.g. `logger`,
+ * `tracer`) are excluded: a consumer that augments `CapabilityRegistry` with a
+ * reserved name creates a capability the runtime can never satisfy (see
+ * `RESERVED_NON_CAPABILITY_KEYS`). Excluding them here turns `requires:
+ * ["logger"]` into a compile error at the consumer's use site — where the
+ * augmented registry is visible — rather than a guaranteed runtime failure. The
+ * built-in capabilities never collide, so this is a no-op for the framework.
+ */
+export type Capability = Exclude<keyof CapabilityRegistry & string, ReservedNonCapabilityKey>;
+
+/**
+ * The built-in capability keys — exactly the capability fields declared on
+ * `BaseNodeContext`. Single source of truth for runtime code that must
+ * distinguish built-in capabilities (named context fields) from custom ones
+ * (spread onto the context dynamically, per ADR-0051).
+ *
+ * The `satisfies` clause guarantees every entry is a registered capability.
+ * The reverse direction (every built-in context field is listed) is asserted
+ * by `_BuiltinKeysComplete` below `BaseNodeContext` — adding a built-in to
+ * `CapabilityRegistry` + `BaseNodeContext` without listing it here is a
+ * compile error. The assertion compares against `BaseNodeContext` (not the
+ * full registry), so consumer module augmentation does not break it.
+ */
+export const BUILTIN_CAPABILITY_KEYS = [
+  "llm",
+  "cache",
+  "prompts",
+  "judgeLlm",
+  "http",
+] as const satisfies readonly Capability[];
+
+export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
+
+/**
+ * Human-readable metadata for one capability — the description, the name of the
+ * client type injected into `ctx`, and a pointer to the factory/field that
+ * consumes it. Used by `fugue capabilities` to emit a machine- and
+ * LLM-readable catalogue of the framework's built-in capabilities.
+ */
+export interface CapabilityInfo {
+  readonly description: string;
+  readonly clientType: string;
+  /** Where this capability surfaces in authoring (factory or field). */
+  readonly reference: string;
+}
+
+/**
+ * Catalogue metadata for the built-in capabilities. The `satisfies
+ * Record<BuiltinCapabilityKey, ...>` clause is the single-source-of-truth
+ * guard: adding a key to `BUILTIN_CAPABILITY_KEYS` without describing it here
+ * (or describing a key that isn't built-in) is a compile error, so the
+ * `fugue capabilities` catalogue can never silently drift from the registry.
+ */
+export const BUILTIN_CAPABILITY_INFO = {
+  llm: {
+    description:
+      "Structured and tool-use LLM calls (sendStructured, tool loops). Wired from the host's SharedInfra.",
+    clientType: "LlmClient",
+    reference: "createLlmNode / createLlmWithToolsNode",
+  },
+  cache: {
+    description:
+      "Context/result cache backend for memoizing node output across runs.",
+    clientType: "ContextCacheAdapter",
+    reference: "computeCacheKey on createLlmNode",
+  },
+  prompts: {
+    description:
+      "Prompt-template registry; resolves a node's promptName to template text at run time.",
+    clientType: "PromptAccess",
+    reference: "promptName on createLlmNode",
+  },
+  judgeLlm: {
+    description:
+      "Separate LLM client used by eval-judge nodes, kept distinct from the main `llm` client so judging never contends with generation.",
+    clientType: "LlmClient",
+    reference: "createEvalJudgeNode (DagDef.evalJudges)",
+  },
+  http: {
+    description:
+      "Schema-validated HTTP client returning Result<T, FrameworkError>. Handle-backed via createHttpCapability; every workflow does HTTP, so it ships in the base set.",
+    clientType: "HttpCapability",
+    reference: "createFetchNode with requires: ['http']",
+  },
+} as const satisfies Record<BuiltinCapabilityKey, CapabilityInfo>;
 
 /**
  * Always-present part of NodeContext — fields the runtime guarantees by
  * injecting a no-op default when none is supplied.
+ *
+ * Capability fields appear as nullable here (the runtime may or may not have
+ * them wired). After `validateCapabilities` passes, the `TypedNodeContext<R>`
+ * narrows declared capabilities to non-null.
+ *
+ * Custom capabilities registered via `CapabilityRegistry` augmentation do NOT
+ * appear as named fields here — they are accessible at runtime as dynamic
+ * properties on the context object, and the `TypedNodeContext<R>` type
+ * intersection adds their concrete types when declared in `requires`.
  */
 export interface BaseNodeContext {
   readonly runId: RunId;
@@ -152,6 +248,7 @@ export interface BaseNodeContext {
   readonly llm: LlmClient | null;
   readonly prompts: PromptAccess | null;
   readonly judgeLlm: LlmClient | null;
+  readonly http: HttpCapability | null;
   readonly signal?: AbortSignal;
   /**
    * Optional content filter for trace span data. When set, content (prompts,
@@ -163,6 +260,57 @@ export interface BaseNodeContext {
    */
   readonly contentFilter?: ContentFilter | null;
 }
+
+// ---------------------------------------------------------------------------
+// Negative-space assertion: `BUILTIN_CAPABILITY_KEYS` must equal exactly the
+// capability-named fields of `BaseNodeContext`. The `satisfies` on the array
+// proves the forward direction (every entry is a capability); this proves the
+// reverse (no built-in context field is missing from the array). It compares
+// against `BaseNodeContext` keys — fixed at framework-compile time — so
+// consumer `CapabilityRegistry` augmentation (which only widens `Capability`)
+// cannot break it. If this errors, a built-in was added to the registry +
+// `BaseNodeContext` without updating `BUILTIN_CAPABILITY_KEYS`, and
+// `makeNodeContext` would mis-handle it as a custom capability.
+// ---------------------------------------------------------------------------
+type _Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
+type _StaticAssert<T extends true> = T;
+type _BuiltinKeysComplete = _StaticAssert<
+  _Equal<BuiltinCapabilityKey, Extract<keyof BaseNodeContext, Capability>>
+>;
+
+/**
+ * Always-present `BaseNodeContext` fields that are NOT capabilities — the
+ * framework guarantees them by injecting a no-op default, so they live as named
+ * fields rather than registry entries.
+ *
+ * A consumer that augments `CapabilityRegistry` with a key equal to one of these
+ * creates a name collision: `makeNodeContext` refuses to spread such a
+ * capability (it would clobber framework infrastructure), so its client is never
+ * wired — meaning the capability can never be satisfied. `validateCapabilities`
+ * therefore treats a required capability with one of these names as missing
+ * (fail-closed) rather than reading the infra field and passing falsely.
+ *
+ * Compile-time coverage: `Capability` excludes these keys, so `requires:
+ * ["logger"]` is a type error at the *consumer's* use site (where the augmented
+ * registry is visible) — the framework's own compilation cannot observe consumer
+ * augmentation, but the consumer's can. The runtime fail-closed guard above
+ * remains as defense-in-depth for code that bypasses the type system (e.g. an
+ * `as Capability[]` cast on a dynamically-built `requires`).
+ */
+export const RESERVED_NON_CAPABILITY_KEYS = [
+  "runId",
+  "dagId",
+  "logger",
+  "tracer",
+  "observer",
+  "checkpointWriter",
+  "signal",
+  "contentFilter",
+] as const satisfies readonly (keyof BaseNodeContext)[];
+
+export type ReservedNonCapabilityKey = (typeof RESERVED_NON_CAPABILITY_KEYS)[number];
 
 /**
  * The runtime-facing NodeContext shape (capability fields nullable). The
@@ -177,7 +325,7 @@ export type NodeContext = BaseNodeContext;
  */
 export type TypedNodeContext<R extends readonly Capability[]> =
   Omit<BaseNodeContext, R[number]> & {
-    readonly [K in R[number]]: CapabilityFields[K];
+    readonly [K in R[number]]: CapabilityRegistry[K];
   };
 
 /**
@@ -267,6 +415,9 @@ export interface NodeDef<
  * Caller-facing input shape for `makeNodeContext`. `logger`, `tracer`, and
  * `observer` are optional — when omitted the runtime injects no-op defaults.
  * Capability fields stay as in `BaseNodeContext`.
+ *
+ * Custom capabilities can be passed via the `capabilities` record or as
+ * top-level fields (built-in capabilities remain top-level for backward compat).
  */
 export type NodeContextInit = {
   readonly runId: string | RunId;
@@ -279,6 +430,15 @@ export type NodeContextInit = {
   readonly llm?: LlmClient | null;
   readonly prompts?: PromptAccess | null;
   readonly judgeLlm?: LlmClient | null;
+  readonly http?: HttpCapability | null;
   readonly signal?: AbortSignal;
   readonly contentFilter?: ContentFilter | null;
+  /**
+   * Extensible capabilities record. Keys correspond to `CapabilityRegistry`
+   * entries. Values are the capability client instances.
+   *
+   * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`) can
+   * also be passed here instead of as top-level fields.
+   */
+  readonly capabilities?: Partial<{ readonly [K in Capability]: CapabilityRegistry[K] | null }>;
 };

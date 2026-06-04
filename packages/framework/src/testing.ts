@@ -4,3 +4,4 @@
 // path for test tooling.
 
 export { FakeLlmClient } from "./llm/fake-client.js";
+export { createFakeHttpCapability, type FakeHttpRoute } from "./http/http-capability.js";

@@ -1,0 +1,35 @@
+{
+  "name": "@fugue/pg",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fugue/framework": "workspace:*"
+  },
+  "peerDependencies": {
+    "pg": "^8.0.0",
+    "zod": "^3.25.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": false
+    },
+    "zod": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/pg": "^8.0.0",
+    "@types/bun": "latest",
+    "pg": "^8.13.0",
+    "zod": "^3.25.0"
+  }
+}

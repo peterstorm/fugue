@@ -41,7 +41,7 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
   tracer: noopTracer,
   observer: new NoopObserver(),
   cache: null,
-  llm: null,
+  llm: null, http: null,
   prompts: null,
   judgeLlm: null,
   ...overrides,
@@ -84,9 +84,9 @@ describe("validateCapabilities", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("missing-capability");
       if (result.error.kind === "missing-capability") {
-        expect(result.error.capability).toBe("llm");
-        expect(result.error.nodeId).toBe(N("a"));
         expect(result.error.missing).toHaveLength(1);
+        expect(result.error.missing[0].capability).toBe("llm");
+        expect(result.error.missing[0].nodeId).toBe(N("a"));
       }
     }
   });
@@ -122,7 +122,27 @@ describe("validateCapabilities", () => {
     }
   });
 
-  it("first miss is surfaced at top-level nodeId/capability fields", () => {
+  it("a capability colliding with a reserved infra field is treated as missing (fail-closed)", () => {
+    // A consumer could augment `CapabilityRegistry` with a name that shadows a
+    // reserved infra field (e.g. `logger`). `makeNodeContext` refuses to wire
+    // such a capability, so it can never be satisfied — but `ctx.logger` is
+    // always present. Validation must NOT read the infra logger and pass; it
+    // must report the capability as missing.
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["logger" as Capability])],
+      edges: [],
+    });
+    // `makeCtx` always provides a non-null `logger` infra field.
+    const result = validateCapabilities(dag, makeCtx());
+    expect(isErr(result)).toBe(true);
+    if (!result.ok && result.error.kind === "missing-capability") {
+      expect(result.error.missing[0].capability).toBe("logger" as Capability);
+      expect(result.error.missing[0].nodeId).toBe(N("a"));
+    }
+  });
+
+  it("first miss is `missing[0]`, following node iteration order", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [
@@ -134,8 +154,8 @@ describe("validateCapabilities", () => {
     const result = validateCapabilities(dag, makeCtx());
     if (!result.ok && result.error.kind === "missing-capability") {
       // First miss should be node "a" / "llm" since nodes are iterated in order
-      expect(result.error.nodeId).toBe(N("a"));
-      expect(result.error.capability).toBe("llm");
+      expect(result.error.missing[0].nodeId).toBe(N("a"));
+      expect(result.error.missing[0].capability).toBe("llm");
     }
   });
 });

@@ -6,7 +6,7 @@
 
 import { nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
 import type { NodeId, RunId } from "./ids.js";
-import type { FrameworkError } from "./errors.js";
+import type { FrameworkError, MissingCapability } from "./errors.js";
 import type { Capability } from "./node.js";
 
 const toNodeId = (nid: string | NodeId): NodeId => brandNodeId(nid as string);
@@ -30,8 +30,8 @@ export const frameworkError = {
     ...(opts?.stack !== undefined ? { stack: opts.stack } : {}),
   }),
 
-  transient: (nid: string | NodeId, message: string): FrameworkError =>
-    ({ kind: "transient", nodeId: toNodeId(nid), message }),
+  transient: (nid: string | NodeId, message: string, httpStatus?: number): FrameworkError =>
+    ({ kind: "transient", nodeId: toNodeId(nid), message, ...(httpStatus !== undefined ? { httpStatus } : {}) }),
 
   rejected: (nid: string | NodeId, reason: string): FrameworkError =>
     ({ kind: "rejected", nodeId: toNodeId(nid), reason }),
@@ -62,13 +62,19 @@ export const frameworkError = {
   missingCapability: (
     nid: string | NodeId,
     capability: Capability,
-    missing: readonly { readonly nodeId: string | NodeId; readonly capability: Capability }[],
-  ): FrameworkError => ({
-    kind: "missing-capability",
-    nodeId: toNodeId(nid),
-    capability,
-    missing: missing.map((m) => ({ nodeId: toNodeId(m.nodeId as string), capability: m.capability })),
-  }),
+    rest: readonly { readonly nodeId: string | NodeId; readonly capability: Capability }[] = [],
+  ): FrameworkError => {
+    // `nid`/`capability` are the guaranteed first miss; `rest` adds any further
+    // gaps. Building the tuple head-first proves the non-empty `missing` field
+    // to the type system without a cast. Consumers read `missing[0]` for the
+    // first miss — it is never duplicated as a scalar field.
+    const head: MissingCapability = { nodeId: toNodeId(nid), capability };
+    const tail = rest.map((m) => ({ nodeId: toNodeId(m.nodeId as string), capability: m.capability }));
+    return {
+      kind: "missing-capability",
+      missing: [head, ...tail],
+    };
+  },
 
   // --- Run-scoped errors ---
 

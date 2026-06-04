@@ -181,20 +181,31 @@ Exceptions are **invisible in the type system**. Any function can throw anything
 
 Each node declares `requires: readonly Capability[]` (e.g., `["llm", "prompts"]`). At run start — **before any node executes** — the runtime validates that the wired context satisfies all declared capabilities. The node's `run` function receives a narrowed `TypedNodeContext<R>` where required fields are guaranteed non-null.
 
+The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
+
 ### What It Catches
 
 ```typescript
-// Node declaration
+// LLM nodes auto-declare their capabilities — createLlmNode fixes
+// requires: ["llm", "prompts"], so you never pass `requires` to it.
+// Inside the framework, ctx.llm / ctx.prompts are non-null.
 const synthesize = createLlmNode({
   id: "synthesize",
-  requires: ["llm", "prompts"] as const,  // Declares what it needs
-  // ...
-  run: async (input, ctx) => {
-    // ctx.llm is LlmClient (non-null) — no null check needed
-    // ctx.prompts is PromptAccess (non-null) — no null check needed
-    const result = await ctx.llm.sendStructured({ ... });
-    return result;
-  },
+  inputSchema: UserSchema,
+  outputSchema: SummarySchema,
+  promptName: "summary",
+  model: "claude-sonnet-4-20250514",
+  buildInput: (u) => ({ name: u.name }),
+});
+
+// Fetch nodes declare what THEY need — here the built-in `http` capability.
+const loadProfile = createFetchNode({
+  id: "load-profile",
+  inputSchema: InputSchema,
+  outputSchema: UserSchema,
+  requires: ["http"] as const,             // ctx.http is non-null below
+  fetch: async (input, ctx) =>
+    ctx.http.get(`https://api.example.com/users/${input.id}`, { schema: UserSchema }),
 });
 
 // ❌ CAUGHT AT RUN START: Missing capability

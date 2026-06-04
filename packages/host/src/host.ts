@@ -41,6 +41,7 @@ import type { SignalHandlerHandle } from "./lifecycle/signals.js";
 import { startRedisProbe } from "./lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
+import { topoSortHandles, connectAll, closeAll } from "./domain/capability-manager.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -108,9 +109,35 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
 
   const { registry, sha, syncConfig } = startupResult.value;
 
+  // ── Connect External Capabilities (ADR-0051) ─────────────────────────────
+  // Topologically sort handles so dependencies connect first, then connect all.
+  // Failure here aborts boot — a missing capability at runtime is worse than
+  // a clean boot failure.
+  const capHandles = sharedInfra.capabilities;
+  let sortedHandles: readonly import("@fugue/framework").CapabilityHandle[] = [];
+  if (capHandles.length > 0) {
+    const sortResult = topoSortHandles(capHandles);
+    if (!sortResult.ok) {
+      return sortResult as Result<never, import("./domain/host-error.js").HostError>;
+    }
+    sortedHandles = sortResult.value;
+    const connectResult = await connectAll(sortedHandles, logger);
+    if (!connectResult.ok) {
+      // Boot aborts — close the handles that already connected so a
+      // crash-loop boot doesn't leak pools/sockets on every restart.
+      await closeAll(connectResult.error.connected, logger);
+      return err(connectResult.error.error);
+    }
+    logger.info(`${sortedHandles.length} external capabilities connected`);
+  }
+
   // Transition to ready
   const readyResult = bootComplete(hostState, registry, sha, Date.now());
   if (!readyResult.ok) {
+    // Capabilities already connected — close them before aborting boot so a
+    // crash-loop boot doesn't leak pools/sockets (same guarantee as the
+    // connect-failure path above).
+    if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
     return err({ kind: "internal-invariant-violated", message: "Boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
   }
   hostState = readyResult.value;
@@ -166,7 +193,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       maxRequestBodySize: 10 * 1024 * 1024, // 10MB — prevents request body DoS
     });
   } catch (e) {
-    // Clean up resources acquired during boot before returning error
+    // Clean up resources acquired during boot before returning error.
+    // Close connected capabilities first (reverse topological order), then
+    // infrastructure — mirrors the happy-path shutdown ordering.
+    if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
     if (deps.onShutdown) {
       await deps.onShutdown().catch((cleanupErr) => {
         logger.error("Failed to clean up resources after port bind failure", {
@@ -292,6 +322,16 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     if (server) {
       server.stop();
       server = null;
+    }
+
+    // Clean up external capabilities (ADR-0051) — close in reverse topological order
+    if (sortedHandles.length > 0) {
+      const closeFailures = await closeAll(sortedHandles, logger);
+      if (closeFailures.length > 0) {
+        logger.warn(`Capability shutdown completed with ${closeFailures.length} failure(s)`, {
+          failures: closeFailures.map((f) => f.name),
+        });
+      }
     }
 
     // Clean up infrastructure (e.g., close Redis connections)

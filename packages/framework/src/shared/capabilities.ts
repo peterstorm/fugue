@@ -5,6 +5,10 @@
 // capability is satisfied by the wired NodeContext. A missing capability fails
 // the run with `Err({ kind: "missing-capability" })` before any `node.run` is
 // called.
+//
+// ADR-0051: Now uses dynamic property access on the context object instead of
+// a hardcoded switch. This supports extensible capabilities registered via
+// module augmentation of `CapabilityRegistry`.
 
 import type { DagDef } from "../types/dag.js";
 import type {
@@ -12,57 +16,58 @@ import type {
   Capability,
   ValidatedNodeContext,
 } from "../types/node.js";
-import { brandAsValidatedNodeContext } from "../types/node.js";
-import type { FrameworkError } from "../types/errors.js";
+import { brandAsValidatedNodeContext, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
+import type { FrameworkError, MissingCapability } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
-
-const capabilityField = (
-  ctx: BaseNodeContext,
-  capability: Capability,
-): unknown => {
-  switch (capability) {
-    case "llm":
-      return ctx.llm;
-    case "cache":
-      return ctx.cache;
-    case "prompts":
-      return ctx.prompts;
-    case "judgeLlm":
-      return ctx.judgeLlm;
-  }
-};
 
 /**
  * Walk `dag.nodes`, collect `union(node.requires)`, and verify each capability
  * resolves to a non-null value on `ctx`. Returns all missing pairs as a
  * single Err — callers see the full set of gaps in one pass rather than
- * having to re-run after each fix. The first miss is also surfaced at the
- * top-level `nodeId`/`capability` fields so existing pattern-matchers stay
- * working unchanged.
+ * having to re-run after each fix. The first miss is `missing[0]`; the
+ * non-empty tuple guarantees it always exists.
  *
  * Returns a phantom-branded `ValidatedNodeContext` token when all
  * declarations are satisfied. Downstream code requires the token, so any
  * path that bypasses this check fails to typecheck.
+ *
+ * Uses dynamic property lookup (`ctx[cap]`) to support extensible capabilities
+ * registered via `CapabilityRegistry` module augmentation (ADR-0051).
  */
 export const validateCapabilities = (
   dag: DagDef,
   ctx: BaseNodeContext,
 ): Result<ValidatedNodeContext, FrameworkError> => {
-  const missing: { readonly nodeId: typeof dag.nodes[number]["id"]; readonly capability: Capability }[] = [];
+  const missing: MissingCapability[] = [];
+  // Single widening cast: custom capabilities live as dynamic properties on
+  // the context (ADR-0051), so the lookup is keyed by `Capability` rather
+  // than the statically-known `BaseNodeContext` fields. `== null` covers both
+  // "field absent" (custom capability never wired) and "field explicitly
+  // null" (built-in capability unwired) — both are missing for a node that
+  // declared them.
+  const dynamicCtx = ctx as Partial<Record<Capability, unknown>>;
+  // A capability whose name collides with a reserved infrastructure field
+  // (e.g. a consumer augments `CapabilityRegistry` with `logger`) can never be
+  // wired: `makeNodeContext` refuses to spread it (it would clobber the framework
+  // field), so `dynamicCtx[cap]` would resolve to the always-present infra value
+  // rather than the capability client. Treat such a requirement as missing —
+  // fail closed rather than pass validation on a mistyped value.
+  const reservedNonCapabilityKeys: ReadonlySet<string> = new Set(RESERVED_NON_CAPABILITY_KEYS);
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
-      if (capabilityField(ctx, cap) == null) {
+      if (reservedNonCapabilityKeys.has(cap) || dynamicCtx[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }
     }
   }
-  if (missing.length > 0) {
-    const first = missing[0]!;
+  // Destructure to prove non-emptiness to the type system: when `first` is
+  // present, `[first, ...rest]` is a `[MissingCapability, ...MissingCapability[]]`
+  // tuple, satisfying the error's non-empty `missing` field without a cast.
+  const [first, ...rest] = missing;
+  if (first !== undefined) {
     return err({
       kind: "missing-capability" as const,
-      nodeId: first.nodeId,
-      capability: first.capability,
-      missing,
+      missing: [first, ...rest],
     });
   }
   return ok(brandAsValidatedNodeContext(ctx));

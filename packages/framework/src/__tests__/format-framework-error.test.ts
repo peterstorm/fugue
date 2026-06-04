@@ -117,7 +117,7 @@ describe("formatFrameworkError", () => {
     },
     {
       name: "missing-capability",
-      error: { kind: "missing-capability", nodeId: N("llm-node"), capability: "llm", missing: [{ nodeId: N("llm-node"), capability: "llm" }] },
+      error: { kind: "missing-capability", missing: [{ nodeId: N("llm-node"), capability: "llm" }] },
       contains: ["missing capabilities", "llm", "llm-node"],
     },
   ];

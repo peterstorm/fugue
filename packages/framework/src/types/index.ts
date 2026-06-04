@@ -27,7 +27,7 @@ export {
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
-export type { FrameworkError, FrameworkErrorKind } from "./errors.js";
+export type { FrameworkError, FrameworkErrorKind, MissingCapability } from "./errors.js";
 export { formatFrameworkError, FrameworkAugmentedError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
@@ -80,8 +80,8 @@ export type {
   NodeRetryConfig,
   NodeHumanReviewConfig,
   ConfidenceMode,
+  CapabilityRegistry,
   Capability,
-  CapabilityFields,
   BaseNodeContext,
   NodeContext,
   TypedNodeContext,
@@ -92,9 +92,13 @@ export type {
   PromptAccess,
   Logger,
   Tracer,
+  HttpCapability,
 } from "./node.js";
 // `ValidatedNodeContext` and `brandAsValidatedNodeContext` are intentionally
 // not re-exported — only `validateCapabilities` constructs them.
+
+// ── Capability lifecycle ──────────────────────────────────────────────────
+export type { CapabilityHandle, AdapterFactory } from "./capability-handle.js";
 
 // ── DAG shape ─────────────────────────────────────────────────────────────
 export type {

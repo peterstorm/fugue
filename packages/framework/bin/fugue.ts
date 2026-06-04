@@ -15,15 +15,18 @@
 import { match } from "ts-pattern";
 import { runLint } from "../src/cli/lint.js";
 import { runDescribe } from "../src/cli/describe.js";
+import { runCapabilities } from "../src/cli/capabilities.js";
 
-const USAGE = `Usage: fugue <command> <path>
+const USAGE = `Usage: fugue <command> [path]
 
 Commands:
   lint <path>      Validate a DAG file. Prints JSON, exits 0 on success.
   describe <path>  Print a structured summary of a DAG file as JSON.
+  capabilities     List the framework's built-in capabilities as JSON
+                   (takes no path).
 
-The path must point to a dag.ts (or other module) that default-exports a
-DagRegistration: { dag: defineDag(...), inputSchema, ... }`;
+For lint/describe the path must point to a dag.ts (or other module) that
+default-exports a DagRegistration: { dag: defineDag(...), inputSchema, ... }`;
 
 const printUsage = (stream: NodeJS.WriteStream): void => {
   stream.write(`${USAGE}\n`);
@@ -45,6 +48,16 @@ const main = async (): Promise<number> => {
 
   if (command === "--help" || command === "-h") {
     printUsage(process.stdout);
+    return 0;
+  }
+
+  // `capabilities` is the one command that takes no path — it emits static
+  // framework data. Handle it before the <path> requirement below.
+  if (command === "capabilities") {
+    if (pathArg !== undefined) {
+      dieUsage("`capabilities` takes no arguments.");
+    }
+    process.stdout.write(`${JSON.stringify(runCapabilities(), null, 2)}\n`);
     return 0;
   }
 
