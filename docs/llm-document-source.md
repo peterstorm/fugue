@@ -209,7 +209,8 @@ const documents = createFakeDocumentSource({
   },
 });
 
-// build a NodeContext with `documents.client`, run the node, assert on the Result.
+// `createFakeDocumentSource` returns a DocumentSource (the capability client).
+// Wire it straight onto the context as `ctx.documents`, run the node, assert on the Result.
 ```
 
 A route can also force an error: `{ error: { kind: "transient", nodeId, message } }`.

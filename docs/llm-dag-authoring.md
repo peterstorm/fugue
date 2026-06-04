@@ -5,6 +5,7 @@ For deep dives: `library-ux.md`, `dag-type-system.md`, `packages/host/docs/writi
 Reading files (Excel/CSV from disk, SharePoint, OneDrive): `llm-document-source.md`.
 Parsing `.xlsx` bytes → typed rows: `@fugue/xlsx` (`parseWorkbook`).
 Writing a capability adapter: `adapter-authoring.md`.
+Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
 
 ---
 
@@ -88,7 +89,25 @@ createFetchNode<I, O>({
   inputSchema: z.ZodType<I>,
   outputSchema: z.ZodType<O>,
   fetch: (input: I, ctx: NodeContext) => Promise<Result<O, FrameworkError>>,
-  sideEffects?: SideEffectProfile,  // default: { kind: "reads", resource: id }
+  requires?: readonly Capability[],  // default: [] — capabilities this node needs (see "Capabilities")
+  sideEffects?: SideEffectProfile,   // default: { kind: "reads", resource: id }
+})
+```
+
+`requires` is how a fetch node declares the I/O capabilities it needs (e.g.
+`["http"]`, `["documents"]`, `["db"]`). Each declared name narrows `ctx` so the
+matching field is typed non-null — `requires: ["http"] as const` makes
+`ctx.http` available without a null check. See the **Capabilities** section.
+
+```ts
+// fetch node that calls a JSON API via the built-in `http` capability:
+createFetchNode({
+  id: "fetch-user",
+  inputSchema: z.object({ id: z.string() }),
+  outputSchema: UserSchema,
+  requires: ["http"] as const,
+  fetch: async (input, ctx) =>
+    ctx.http.get(`https://api.example.com/users/${input.id}`, { schema: UserSchema }),
 })
 ```
 
@@ -151,6 +170,85 @@ createGuardrailNode<I, T>({
   validate: (input: I) => GuardrailResult<T>,  // pure, no I/O
 })
 ```
+
+### `createEvalJudgeNode` — LLM quality gate (runs after the pipeline)
+
+Eval judges score the DAG's output against a rubric. They are **not** placed in
+`nodes`/`edges` — pass them to `defineDag`'s `evalJudges` array. A judge uses the
+`judgeLlm` capability (kept separate from `llm`), so it never takes a `requires`.
+
+```ts
+createEvalJudgeNode({
+  id: string,
+  criteria: readonly string[],          // dimensions to score, e.g. ["factuality", "relevance"]
+  threshold?: number,                   // pass mark, default 0.8
+  rubric?:                              // omit to auto-generate from `criteria`
+    | { source: "template"; templateId: string }
+    | { source: "inline"; text: string },
+  model?: string,                       // judge model; default is a small/cheap model
+})
+```
+
+> **Note — LLM node capabilities are automatic.** Unlike `createFetchNode`,
+> `createLlmNode` and `createLlmWithToolsNode` declare their own `requires`
+> (`["llm","prompts"]` and `["llm"]` respectively) — you don't pass `requires`
+> to them. Only fetch nodes (which do arbitrary I/O) take an author-set
+> `requires`.
+
+---
+
+## Capabilities
+
+A capability is a typed client the runtime injects into a node's `ctx`. A node
+names what it needs with `requires`; at run start — **before any node runs** —
+the runtime validates the wired context satisfies every declared capability,
+failing fast with `Err({ kind: "missing-capability", missing: [...] })` if not.
+Each declared name is also narrowed to non-null in `ctx`, so `requires: ["http"]
+as const` lets you write `ctx.http.get(...)` with no null check.
+
+Only **`createFetchNode`** takes an author-set `requires` (fetch nodes do the
+I/O). LLM nodes declare their own; transforms and guardrails are pure and
+require nothing.
+
+### Built-in capabilities (ship with the framework)
+
+Run `fugue capabilities` for the authoritative, machine-readable list. As of now:
+
+| Name | Client type | Notes |
+|---|---|---|
+| `llm` | `LlmClient` | Auto-declared by `createLlmNode` / `createLlmWithToolsNode`. |
+| `prompts` | `PromptAccess` | Auto-declared by `createLlmNode`. |
+| `judgeLlm` | `LlmClient` | Used by `createEvalJudgeNode`; separate from `llm`. |
+| `cache` | `ContextCacheAdapter` | Result/context cache. |
+| `http` | `HttpCapability` | Schema-validated JSON HTTP. Declare `requires: ["http"]` on a fetch node. |
+
+### Custom capabilities (adapter-provided)
+
+Anything beyond HTTP — files, databases, queues — is a custom capability added
+by an adapter package that augments `CapabilityRegistry` (TypeScript module
+augmentation) and ships a `CapabilityHandle` the host wires at boot. The DAG
+never names the provider; only the capability:
+
+```ts
+import { localPathRef } from "@fugue/document-source"; // brings the `documents` capability into scope
+
+createFetchNode({
+  id: "fetch-report",
+  inputSchema: z.object({ period: z.string() }),
+  outputSchema: ReportSchema,
+  requires: ["documents"] as const,   // ctx.documents is now typed non-null
+  fetch: async (input, ctx) => {
+    const bytes = await ctx.documents.getContent(localPathRef(`${input.period}.xlsx`));
+    if (!bytes.ok) return bytes;       // capabilities return Result — never throw
+    return parseWorkbook(bytes.value, RowSchema);
+  },
+})
+```
+
+- Reading files (Excel/CSV from disk, SharePoint, OneDrive): **`llm-document-source.md`**.
+- Writing your own adapter (`db`, S3, …): **`adapter-authoring.md`**.
+- `fugue describe <dag>` reports the capabilities a specific DAG requires; the
+  set actually *available* is a deployment choice (which handles the host wired).
 
 ---
 
@@ -569,6 +667,35 @@ $ bunx fugue describe dags/cx/customer-summary/dag.ts
 ```
 
 On lint failure, `describe` returns the same `errors[]` array as `lint`.
+
+### `fugue capabilities`
+
+Lists the framework's **built-in** capabilities (the legal names for a fetch
+node's `requires`) plus how to obtain custom, adapter-provided ones. Takes no
+path — it is static framework data. Exits `0`.
+
+```bash
+$ bunx fugue capabilities
+{
+  "ok": true,
+  "builtin": [
+    { "name": "llm",      "clientType": "LlmClient",            "description": "...", "reference": "createLlmNode / createLlmWithToolsNode" },
+    { "name": "cache",    "clientType": "ContextCacheAdapter",  "description": "...", "reference": "computeCacheKey on createLlmNode" },
+    { "name": "prompts",  "clientType": "PromptAccess",         "description": "...", "reference": "promptName on createLlmNode" },
+    { "name": "judgeLlm", "clientType": "LlmClient",            "description": "...", "reference": "createEvalJudgeNode (DagDef.evalJudges)" },
+    { "name": "http",     "clientType": "HttpCapability",       "description": "...", "reference": "createFetchNode with requires: ['http']" }
+  ],
+  "custom": {
+    "mechanism": "Adapter packages augment CapabilityRegistry and ship a CapabilityHandle the host wires at boot.",
+    "howToDeclare": "Add the name to a node's `requires: [...] as const`; ctx.<name> is then typed non-null.",
+    "discover": "Run `fugue describe <dag>` to see what a specific DAG requires.",
+    "seeAlso": ["docs/llm-document-source.md", "docs/adapter-authoring.md", "..."]
+  }
+}
+```
+
+Use this to learn which capability names are valid before writing `requires` —
+the `builtin` list is generated from the framework's registry, so it never drifts.
 
 ### Typical LLM authoring loop
 
