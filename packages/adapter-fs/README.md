@@ -1,4 +1,4 @@
-# @fugue/fs
+# @fuguejs/fs
 
 Local-filesystem adapter for the generic [`DocumentSource`](../document-source)
 capability. Reads files from a mounted directory for nodes that declare
@@ -6,7 +6,7 @@ capability. Reads files from a mounted directory for nodes that declare
 
 This is the adapter with **no external unknowns** (no auth, no network): wire a
 DAG end-to-end against a local `.xlsx` for dev/test, then swap in
-[`@fugue/ms-graph`](../adapter-ms-graph) by configuration with no node changes.
+[`@fuguejs/ms-graph`](../adapter-ms-graph) by configuration with no node changes.
 
 - **AI/usage guide:** [`docs/llm-document-source.md`](../../docs/llm-document-source.md)
 - **Design:** [`docs/adr/0052-document-source-capability.md`](../../docs/adr/0052-document-source-capability.md)
@@ -14,8 +14,8 @@ DAG end-to-end against a local `.xlsx` for dev/test, then swap in
 ## Usage
 
 ```ts
-import { createFsAdapter } from "@fugue/fs";
-import { localPathRef } from "@fugue/document-source"; // also re-exported from @fugue/fs
+import { createFsAdapter } from "@fuguejs/fs";
+import { localPathRef } from "@fuguejs/document-source"; // also re-exported from @fuguejs/fs
 
 const docs = createFsAdapter({ rootDir: "/data/reports" }); // e.g. a PVC mount
 
@@ -60,7 +60,7 @@ createFsAdapter({
 The pod filesystem is ephemeral — get the file there via an RWX
 PersistentVolume, an initContainer staging into an `emptyDir`, or (small static
 files) a ConfigMap/Secret volume. If the file lives in SharePoint, prefer
-`@fugue/ms-graph` and skip disk entirely. See ADR-0052 for the ranked options.
+`@fuguejs/ms-graph` and skip disk entirely. See ADR-0052 for the ranked options.
 
 ## Exports
 

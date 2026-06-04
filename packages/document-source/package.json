@@ -1,5 +1,5 @@
 {
-  "name": "@fugue/document-source",
+  "name": "@fuguejs/document-source",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
@@ -12,10 +12,17 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@fugue/framework": "workspace:*",
+    "@fuguejs/framework": "workspace:*",
     "ts-pattern": "^5.9.0"
   },
   "devDependencies": {
     "@types/bun": "latest"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/__tests__"
+  ]
 }

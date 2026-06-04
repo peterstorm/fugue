@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr } from "@fugue/framework";
+import { isOk, isErr } from "@fuguejs/framework";
 import {
   createMsGraphAdapter,
   createFakeDocumentSource,

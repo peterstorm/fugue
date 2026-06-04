@@ -12,8 +12,8 @@
  */
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { ok, err, noopTracer, gitSha } from "@fugue/framework";
-import type { Result, DagId, DagDef, NodeContext, FrameworkError, RunOptions } from "@fugue/framework";
+import { ok, err, noopTracer, gitSha } from "@fuguejs/framework";
+import type { Result, DagId, DagDef, NodeContext, FrameworkError, RunOptions } from "@fuguejs/framework";
 import { z } from "zod";
 import type { GitPort } from "../../ports.js";
 import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../../ports.js";

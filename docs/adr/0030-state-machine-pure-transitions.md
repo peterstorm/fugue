@@ -7,7 +7,7 @@
 
 ## Context
 
-The `@fugue/host` platform manages a non-trivial lifecycle: boot → initial git clone → DAG loading → ready to serve → periodic sync → possible degradation → graceful shutdown. Each phase has different invariants (e.g., HTTP handlers must not serve until DAGs are loaded; sync must not run concurrently with another sync; a degraded host must still serve from its last-known-good registry).
+The `@fuguejs/host` platform manages a non-trivial lifecycle: boot → initial git clone → DAG loading → ready to serve → periodic sync → possible degradation → graceful shutdown. Each phase has different invariants (e.g., HTTP handlers must not serve until DAGs are loaded; sync must not run concurrently with another sync; a degraded host must still serve from its last-known-good registry).
 
 Without an explicit model, lifecycle state ends up scattered across mutable boolean flags (`isReady`, `isSyncing`, `isShuttingDown`) checked ad-hoc throughout the codebase. This pattern is fragile: illegal combinations of flags are representable, transitions are implicit, and testing requires constructing complex mutable object graphs.
 

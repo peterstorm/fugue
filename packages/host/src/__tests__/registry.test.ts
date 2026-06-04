@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { dagId, gitSha } from "@fugue/framework";
-import type { DagId, GitSha } from "@fugue/framework";
+import { dagId, gitSha } from "@fuguejs/framework";
+import type { DagId, GitSha } from "@fuguejs/framework";
 import { z } from "zod";
 import {
   emptyRegistry, withDag, withoutDag, freeze,

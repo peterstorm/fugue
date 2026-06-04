@@ -10,7 +10,7 @@
  * ignored once shutdown has begun.
  */
 
-import type { DagId, GitSha } from "@fugue/framework";
+import type { DagId, GitSha } from "@fuguejs/framework";
 import type { Registry } from "../domain/registry.js";
 import type { HostState } from "../domain/host-state.js";
 import { syncStarted, syncCompleted, syncFailed, getRegistry } from "../domain/host-state.js";

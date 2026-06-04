@@ -9,8 +9,8 @@
 
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import type { DagDef, RunId } from "@fugue/framework";
-import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, gitSha } from "@fugue/framework";
+import type { DagDef, RunId } from "@fuguejs/framework";
+import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, gitSha } from "@fuguejs/framework";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
 import {
@@ -48,7 +48,7 @@ const makeFakeRegistration = (id: string): DagRegistration => ({
 });
 
 const makeRegisteredDag = (id: string): RegisteredDag => ({
-  id: id as unknown as import("@fugue/framework").DagId,
+  id: id as unknown as import("@fuguejs/framework").DagId,
   team: "test",
   route: `/dags/${id}/run`,
   dag: makeFakeDag(id),
@@ -91,7 +91,7 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
 };
 
 const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
-  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as unknown as import("@fugue/framework").LlmClient,
+  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as unknown as import("@fuguejs/framework").LlmClient,
   redis,
   tracer: noopTracer,
   contentFilter: null,

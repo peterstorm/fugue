@@ -1,9 +1,9 @@
 /**
- * @fugue/document-source — the provider-neutral document-source capability port.
+ * @fuguejs/document-source — the provider-neutral document-source capability port.
  *
  * Defines the `DocumentSource` capability (registry key `documents`), the
  * `FileRef` addressing ADT, `FileMeta`, and a test fake. Adapter packages
- * (`@fugue/ms-graph`, `@fugue/fs`, …) depend on this package, import the port
+ * (`@fuguejs/ms-graph`, `@fuguejs/fs`, …) depend on this package, import the port
  * types, and implement `DocumentSource` for one storage backend. A node
  * declares `requires: ["documents"]` and forwards whatever `FileRef` its
  * configuration provides — so the storage backend is a wiring choice, not a
@@ -20,8 +20,8 @@
  */
 
 import { match } from "ts-pattern";
-import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
-import { ok, err, nodeId } from "@fugue/framework";
+import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // File reference ADT — how a DAG names the file it wants
@@ -131,12 +131,12 @@ export interface DocumentSource {
 // Module Augmentation — registered once, here, for every adapter
 // ---------------------------------------------------------------------------
 
-declare module "@fugue/framework" {
+declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
     /**
      * Generic cloud/local document-source capability. Access via `ctx.documents`
      * in nodes. Implemented by one of the adapter packages
-     * (`@fugue/ms-graph`, `@fugue/fs`, …) — chosen at wiring time. See ADR-0052.
+     * (`@fuguejs/ms-graph`, `@fuguejs/fs`, …) — chosen at wiring time. See ADR-0052.
      */
     documents: DocumentSource;
   }

@@ -91,9 +91,9 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
   }
 
   // A DagRegistration is `{ dag: DagDef, inputSchema, ... }`. We don't deep-
-  // validate the host-shape here (that's `@fugue/host`'s contract); we only
+  // validate the host-shape here (that's `@fuguejs/host`'s contract); we only
   // require that .dag is present and brand-shaped. If a downstream LLM tool
-  // wants stricter validation, it can use `@fugue/host/contract` separately.
+  // wants stricter validation, it can use `@fuguejs/host/contract` separately.
   const dagField = (defaultExport as Record<string, unknown>)?.dag;
   if (dagField === undefined || dagField === null || typeof dagField !== "object") {
     return {

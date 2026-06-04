@@ -1,4 +1,4 @@
-# @fugue/host
+# @fuguejs/host
 
 The Fugue Host is a production-grade runtime that discovers, loads, and serves DAG-based AI workflows via HTTP. It polls a git repository for DAG definitions, validates them at load time, and exposes them as authenticated REST endpoints with concurrency limiting, circuit breaking, and graceful shutdown.
 

@@ -6,7 +6,7 @@
  */
 
 import type { Context } from "hono";
-import type { DescribedDag, DescribedEdge, DescribedNode } from "@fugue/framework";
+import type { DescribedDag, DescribedEdge, DescribedNode } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Response Types
@@ -47,7 +47,7 @@ export interface DagListResponse {
 // ---------------------------------------------------------------------------
 // Manifest response — GET /dags/:id/manifest
 //
-// The per-DAG fields are imported verbatim from `@fugue/framework`'s
+// The per-DAG fields are imported verbatim from `@fuguejs/framework`'s
 // `DescribedDag` so the host's HTTP contract stays in lockstep with what
 // `fugue describe` emits. Host-specific deployment metadata (team, healthy,
 // sha, loadedAt) is appended on top of that shape.

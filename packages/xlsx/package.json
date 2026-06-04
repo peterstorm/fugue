@@ -1,5 +1,5 @@
 {
-  "name": "@fugue/xlsx",
+  "name": "@fuguejs/xlsx",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
@@ -12,18 +12,28 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@fugue/framework": "workspace:*",
-    "exceljs": "^4.4.0"
+    "@fuguejs/framework": "workspace:*",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1"
   },
   "peerDependencies": {
-    "zod": "^3.25.0"
+    "zod": "^4.3.6"
   },
   "peerDependenciesMeta": {
-    "zod": { "optional": false }
+    "zod": {
+      "optional": false
+    }
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@fugue/fs": "workspace:*",
-    "zod": "^3.25.0"
-  }
+    "@fuguejs/fs": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/__tests__"
+  ]
 }

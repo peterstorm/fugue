@@ -5,9 +5,9 @@
 // the caller) inspect. Use it to surface quality signals without throwing.
 
 import { z } from "zod";
-import { defineDag, createTransformNode, createGuardrailNode, ok } from "@fugue/framework";
-import type { GuardrailResult } from "@fugue/framework";
-import type { DagRegistration } from "@fugue/host/contract";
+import { defineDag, createTransformNode, createGuardrailNode, ok } from "@fuguejs/framework";
+import type { GuardrailResult } from "@fuguejs/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
 
 const InputSchema = z.object({ draft: z.string() });
 const DraftSchema = z.object({ draft: z.string() });

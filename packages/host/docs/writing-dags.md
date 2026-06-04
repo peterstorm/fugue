@@ -39,8 +39,8 @@ your-dags-repo/
 ```typescript
 // dag.ts
 import { z } from "zod";
-import type { DagRegistration } from "@fugue/host/contract";
-import { defineDag, createLlmNode, createFetchNode } from "@fugue/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
+import { defineDag, createLlmNode, createFetchNode } from "@fuguejs/framework";
 
 // 1. Define your input schema
 const InputSchema = z.object({

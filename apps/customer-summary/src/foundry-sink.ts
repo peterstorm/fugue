@@ -35,7 +35,7 @@
 import { TelemetryClient } from "applicationinsights";
 import { DefaultAzureCredential } from "@azure/identity";
 import type { TokenCredential } from "@azure/identity";
-import type { FoundryTelemetrySink, FiniteNumber } from "@fugue/framework";
+import type { FoundryTelemetrySink, FiniteNumber } from "@fuguejs/framework";
 import type { ResolvedAuth } from "./observability.js";
 
 /**

@@ -439,7 +439,7 @@ The `resource` string should be a stable identifier matching the pattern `{syste
 Every `NodeDef` requires a `confidence` field. Opt out explicitly with `{ mode: "none" }` or declare an extractor:
 
 ```ts
-import { bucketFromProbability } from "@fugue/framework";
+import { bucketFromProbability } from "@fuguejs/framework";
 
 // No confidence signal (deterministic node)
 const deterministicNode = {
@@ -559,7 +559,7 @@ const executeRefundNode = {
 For nodes with no side effects and no confidence, use the constants:
 
 ```ts
-import { NO_SIDE_EFFECTS, NO_CONFIDENCE } from "@fugue/framework";
+import { NO_SIDE_EFFECTS, NO_CONFIDENCE } from "@fuguejs/framework";
 
 const simpleNode = {
   sideEffects: NO_SIDE_EFFECTS,  // { kind: "none" }

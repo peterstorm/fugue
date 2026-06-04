@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { formatHostError, httpStatusFor } from "../domain/host-error.js";
 import type { HostError } from "../domain/host-error.js";
-import type { DagId, RunId } from "@fugue/framework";
+import type { DagId, RunId } from "@fuguejs/framework";
 
 // Test helpers for branded types
 const did = (s: string) => s as unknown as DagId;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { ok, err, gitSha } from "@fugue/framework";
-import type { Result, GitSha } from "@fugue/framework";
+import { ok, err, gitSha } from "@fuguejs/framework";
+import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "../adapters/git-sync.js";

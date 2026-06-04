@@ -10,7 +10,7 @@ Accepted — Not Yet Implemented (design decision for future sprint)
 
 The host orchestrates multiple subsystems (git sync, DAG import, HTTP request routing, concurrency management, circuit breaking) that can fail in production. Diagnosing issues like "why did this DAG take 45s to respond" or "why did sync fail silently" requires distributed tracing that correlates events across subsystem boundaries.
 
-The framework (`@fugue/framework`) already has its own OpenTelemetry instrumentation — it traces node execution, LLM calls, and DAG run lifecycle. The host adds a layer above: request routing, concurrency acquisition, DAG selection, and the sync loop itself. These host-level spans provide the "outer envelope" that framework spans nest inside.
+The framework (`@fuguejs/framework`) already has its own OpenTelemetry instrumentation — it traces node execution, LLM calls, and DAG run lifecycle. The host adds a layer above: request routing, concurrency acquisition, DAG selection, and the sync loop itself. These host-level spans provide the "outer envelope" that framework spans nest inside.
 
 The question is whether to use OTel's standard instrumentation, a custom tracing system, or rely on structured logging alone.
 

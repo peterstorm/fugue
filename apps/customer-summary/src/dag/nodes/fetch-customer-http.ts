@@ -13,12 +13,12 @@
  *
  * This replaces the source-injection pattern when your data comes from
  * an HTTP API. For database-backed data, use `requires: ["db"]` with
- * the @fugue/pg adapter instead.
+ * the @fuguejs/pg adapter instead.
  */
 
 import { z } from "zod";
-import { createFetchNode, ok, err, witness, resourceName } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
+import { createFetchNode, ok, err, witness, resourceName } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 
 const InputSchema = z.object({ customerId: z.string() });

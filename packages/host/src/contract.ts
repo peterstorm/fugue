@@ -1,13 +1,13 @@
 /**
- * @fugue/host/contract — Pure library exports for DAG authors.
+ * @fuguejs/host/contract — Pure library exports for DAG authors.
  *
  * This module exports the DagRegistration contract types and validation
  * WITHOUT triggering the host's main() bootstrap. Use this entry point
  * from DAG packages that need to import DagRegistration.
  *
  * Usage:
- *   import type { DagRegistration } from "@fugue/host/contract";
- *   import { DagRegistrationSchema, validateDagRegistration, resolveDefaults } from "@fugue/host/contract";
+ *   import type { DagRegistration } from "@fuguejs/host/contract";
+ *   import { DagRegistrationSchema, validateDagRegistration, resolveDefaults } from "@fuguejs/host/contract";
  */
 
 export type {

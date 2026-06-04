@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { ok, err } from "@fugue/framework";
+import { ok, err } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { RedisConnectivityPort, LogPort } from "../../ports.js";
 import { startRedisProbe } from "../../lifecycle/redis-probe.js";

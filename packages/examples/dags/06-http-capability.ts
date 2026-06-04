@@ -7,9 +7,9 @@
 // Run `fugue capabilities` to see every built-in capability name.
 
 import { z } from "zod";
-import { defineLinearDag, createFetchNode } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
-import type { DagRegistration } from "@fugue/host/contract";
+import { defineLinearDag, createFetchNode } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
 
 const InputSchema = z.object({ userId: z.string() });
 const UserSchema = z.object({ id: z.string(), name: z.string() });

@@ -4,8 +4,8 @@
 
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { gitSha, dagId } from "@fugue/framework";
-import type { DagDef } from "@fugue/framework";
+import { gitSha, dagId } from "@fuguejs/framework";
+import type { DagDef } from "@fuguejs/framework";
 import { z } from "zod";
 import { listDagsHandler } from "../../http/handlers/list-dags.js";
 import type { HostState } from "../../domain/host-state.js";

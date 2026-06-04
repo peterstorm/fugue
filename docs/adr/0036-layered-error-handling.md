@@ -10,7 +10,7 @@
 The host encounters errors from two distinct layers:
 
 1. **Host-level errors:** Git clone/pull failures, module import errors, DAG validation failures, concurrency limits exceeded, timeouts, Redis unavailability, configuration problems.
-2. **Framework-level errors:** DAG execution failures (`FrameworkError` from `@fugue/framework`) — node execution errors, routing failures, checkpoint failures.
+2. **Framework-level errors:** DAG execution failures (`FrameworkError` from `@fuguejs/framework`) — node execution errors, routing failures, checkpoint failures.
 
 Both types of errors must ultimately be mapped to HTTP responses. The HTTP layer needs to produce machine-readable JSON with appropriate status codes, human-readable messages, and enough context for operators to diagnose issues.
 
@@ -55,7 +55,7 @@ Key forces:
 
 ## Decision
 
-**`HostError` is a discriminated union for host-level concerns. `FrameworkError` from `@fugue/framework` passes through unchanged. The HTTP error-handler middleware maps both to appropriate HTTP status codes and machine-readable JSON responses.**
+**`HostError` is a discriminated union for host-level concerns. `FrameworkError` from `@fuguejs/framework` passes through unchanged. The HTTP error-handler middleware maps both to appropriate HTTP status codes and machine-readable JSON responses.**
 
 Concrete design:
 

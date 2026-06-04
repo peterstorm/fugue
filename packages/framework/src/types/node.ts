@@ -115,7 +115,7 @@ export interface CheckpointWriter {
  * capability:
  *
  * ```ts
- * declare module "@fugue/framework" {
+ * declare module "@fuguejs/framework" {
  *   interface CapabilityRegistry {
  *     db: PgCapability;
  *   }

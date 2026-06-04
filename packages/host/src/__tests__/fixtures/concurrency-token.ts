@@ -1,4 +1,4 @@
-import type { DagId } from "@fugue/framework";
+import type { DagId } from "@fuguejs/framework";
 import type { AcquireToken } from "../../domain/concurrency.js";
 
 /**

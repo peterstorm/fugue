@@ -1,5 +1,5 @@
 /**
- * Unit tests for @fugue/pg adapter.
+ * Unit tests for @fuguejs/pg adapter.
  *
  * Covers the real client (`createPgClient` over an injected fake pool —
  * error classification, row validation, health-check timeout) and the
@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { ok, isOk, isErr } from "@fugue/framework";
+import { ok, isOk, isErr } from "@fuguejs/framework";
 import {
   createFakePgCapability,
   createPgClient,
@@ -24,7 +24,7 @@ const UserSchema = z.object({
   email: z.string().email(),
 });
 
-describe("@fugue/pg — createFakePgCapability", () => {
+describe("@fuguejs/pg — createFakePgCapability", () => {
   const fakeHandle = createFakePgCapability({
     "SELECT * FROM users": [
       { id: "1", name: "Alice", email: "alice@example.com" },
@@ -163,7 +163,7 @@ const poolWithRows = (rows: unknown[], rowCount: number | null = rows.length): P
   query: async () => ({ rows, rowCount }),
 });
 
-describe("@fugue/pg — mapPgError classification", () => {
+describe("@fuguejs/pg — mapPgError classification", () => {
   it.each([
     ["08006", "connection failure"],
     ["08001", "unable to connect"],
@@ -223,7 +223,7 @@ describe("@fugue/pg — mapPgError classification", () => {
   });
 });
 
-describe("@fugue/pg — createPgClient (real client, fake pool)", () => {
+describe("@fuguejs/pg — createPgClient (real client, fake pool)", () => {
   it("query validates all rows against the schema", async () => {
     const client = createPgClient(poolWithRows([
       { id: "1", name: "Alice", email: "alice@example.com" },
@@ -310,7 +310,7 @@ describe("@fugue/pg — createPgClient (real client, fake pool)", () => {
   });
 });
 
-describe("@fugue/pg — healthCheckWithTimeout", () => {
+describe("@fuguejs/pg — healthCheckWithTimeout", () => {
   it("healthy pool → Ok", async () => {
     const result = await healthCheckWithTimeout(poolWithRows([{ "?column?": 1 }]), 1_000);
     expect(isOk(result)).toBe(true);

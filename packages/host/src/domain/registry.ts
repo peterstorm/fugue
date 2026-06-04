@@ -10,7 +10,7 @@
  * @satisfies NFR-010 — Failing DAG import cannot corrupt existing registry
  */
 
-import type { DagId, DagDef, GitSha } from "@fugue/framework";
+import type { DagId, DagDef, GitSha } from "@fuguejs/framework";
 import type { z } from "zod";
 
 // ── Types ──────────────────────────────────────────────────────────────────

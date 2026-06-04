@@ -13,9 +13,9 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err } from "@fugue/framework";
-import type { Result, GitSha } from "@fugue/framework";
-import { gitSha } from "@fugue/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { Result, GitSha } from "@fuguejs/framework";
+import { gitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { HostConfig } from "../domain/config.js";
 import type { Registry } from "../domain/registry.js";

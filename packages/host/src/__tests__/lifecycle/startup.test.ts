@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, gitSha } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, err, gitSha } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { HostConfig } from "../../domain/config.js";
 import type { RedisConnectivityPort, GitPort, ModuleLoaderPort } from "../../ports.js";

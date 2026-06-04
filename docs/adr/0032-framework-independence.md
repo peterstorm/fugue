@@ -7,9 +7,9 @@
 
 ## Context
 
-The monorepo contains two primary packages: `@fugue/framework` (the DAG execution engine — defines `DagDef`, `NodeDef`, `runDag`, `NodeContext`) and `@fugue/host` (the new hosting platform that clones DAG code, validates it, and serves it over HTTP).
+The monorepo contains two primary packages: `@fuguejs/framework` (the DAG execution engine — defines `DagDef`, `NodeDef`, `runDag`, `NodeContext`) and `@fuguejs/host` (the new hosting platform that clones DAG code, validates it, and serves it over HTTP).
 
-A critical architectural boundary must be drawn between these two. The framework was designed to be usable standalone: in unit tests, CLI scripts, and custom runtimes that have nothing to do with the host. DAG authors import `@fugue/framework` directly to define their DAGs. The host also needs framework types to execute DAGs.
+A critical architectural boundary must be drawn between these two. The framework was designed to be usable standalone: in unit tests, CLI scripts, and custom runtimes that have nothing to do with the host. DAG authors import `@fuguejs/framework` directly to define their DAGs. The host also needs framework types to execute DAGs.
 
 The question is: should the framework know about the host? Should there be shared types between them? Or should the dependency be strictly one-directional?
 
@@ -22,11 +22,11 @@ Two forces pull in different directions:
 1. **Strict one-way dependency: host imports framework, framework has zero knowledge of host (chosen)**
    - Pros:
      - Framework remains fully standalone — usable in tests, CLIs, notebooks, or alternative runtimes without host.
-     - DAG authors can develop and test DAGs locally using only `@fugue/framework`, without running the host.
+     - DAG authors can develop and test DAGs locally using only `@fuguejs/framework`, without running the host.
      - Clear ownership: framework owns execution semantics, host owns deployment semantics. No conflation.
      - Import-graph lint (existing from ADR 0001) can mechanically enforce the boundary.
    - Cons:
-     - DAG authors need two imports: `@fugue/framework` for `DagDef`/nodes, `@fugue/host` for `DagRegistration`. Slightly more ceremony.
+     - DAG authors need two imports: `@fuguejs/framework` for `DagDef`/nodes, `@fuguejs/host` for `DagRegistration`. Slightly more ceremony.
      - Host must adapt framework types at the boundary (e.g., constructing `NodeContext` from host infrastructure) — no framework helpers for this.
 
 2. **Framework aware of host (bidirectional dependency)**
@@ -50,15 +50,15 @@ Two forces pull in different directions:
 
 ## Decision
 
-**`@fugue/framework` has zero imports from or dependency on `@fugue/host`. The host imports framework types (`DagDef`, `NodeContext`, `runDag`) as a consumer. DAG code in the dags repository also imports `@fugue/framework` directly.**
+**`@fuguejs/framework` has zero imports from or dependency on `@fuguejs/host`. The host imports framework types (`DagDef`, `NodeContext`, `runDag`) as a consumer. DAG code in the dags repository also imports `@fuguejs/framework` directly.**
 
 Concrete enforcement:
 
-- **Import direction:** `@fugue/host` → `@fugue/framework` (allowed). `@fugue/framework` → `@fugue/host` (forbidden).
-- **DAG imports:** DAG code imports `@fugue/framework` for execution types and `@fugue/host` for `DagRegistration` only.
+- **Import direction:** `@fuguejs/host` → `@fuguejs/framework` (allowed). `@fuguejs/framework` → `@fuguejs/host` (forbidden).
+- **DAG imports:** DAG code imports `@fuguejs/framework` for execution types and `@fuguejs/host` for `DagRegistration` only.
 - **Lint rule:** The existing import-graph lint (`scripts/check-imports.ts` from ADR 0001) is extended to verify `packages/framework/src/**` never imports from `packages/host/**`.
 - **NodeContext construction:** The host's `node-context-factory.ts` adapter constructs `NodeContext` using framework's public API (`makeNodeContext` or direct construction). The framework doesn't provide host-specific helpers.
-- **Type compatibility:** The host declares `@fugue/framework` as a `dependencies` entry in `packages/host/package.json`. Framework types (`DagDef`, `NodeDef`, etc.) are consumed as-is; no wrappers or re-exports.
+- **Type compatibility:** The host declares `@fuguejs/framework` as a `dependencies` entry in `packages/host/package.json`. Framework types (`DagDef`, `NodeDef`, etc.) are consumed as-is; no wrappers or re-exports.
 
 ## Consequences
 
@@ -71,6 +71,6 @@ Concrete enforcement:
 
 **Negative:**
 
-- DAG authors must import from two packages (`@fugue/framework` for DagDef, `@fugue/host` for DagRegistration). Minor ergonomic cost.
+- DAG authors must import from two packages (`@fuguejs/framework` for DagDef, `@fuguejs/host` for DagRegistration). Minor ergonomic cost.
 - The host must implement NodeContext construction logic that could hypothetically be a framework utility. This keeps the framework clean but means the host owns more adapter code.
 - If the framework's `NodeContext` interface changes, the host's factory adapter must be updated. This coupling is intentional (host *is* a consumer) but means framework changes can break host builds.

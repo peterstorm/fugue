@@ -13,7 +13,7 @@
 
 import { describe, it } from "bun:test";
 import * as fc from "fast-check";
-import { dagId, gitSha } from "@fugue/framework";
+import { dagId, gitSha } from "@fuguejs/framework";
 import { diffDags, hasChanges, diffSummary } from "../domain/dag-diff.js";
 import type { DagSnapshot } from "../domain/dag-diff.js";
 

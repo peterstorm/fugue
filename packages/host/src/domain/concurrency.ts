@@ -13,9 +13,9 @@
  * FR-051: Host MUST enforce a per-DAG max concurrent execution limit (default: 10, overridable)
  */
 
-import type { DagId } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
-import { ok, err } from "@fugue/framework";
+import type { DagId } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Types

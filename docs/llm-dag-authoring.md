@@ -3,7 +3,7 @@
 Minimal, copy-paste-ready reference for generating Fugue DAGs.
 For deep dives: `library-ux.md`, `dag-type-system.md`, `packages/host/docs/writing-dags.md`.
 Reading files (Excel/CSV from disk, SharePoint, OneDrive): `llm-document-source.md`.
-Parsing `.xlsx` bytes → typed rows: `@fugue/xlsx` (`parseWorkbook`).
+Parsing `.xlsx` bytes → typed rows: `@fuguejs/xlsx` (`parseWorkbook`).
 Writing a capability adapter: `adapter-authoring.md`.
 Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
 
@@ -14,9 +14,9 @@ Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
 ```ts
 // dags/my-team/my-dag/dag.ts
 import { z } from "zod";
-import type { DagRegistration } from "@fugue/host/contract";
-import { defineDag, createFetchNode, createLlmNode, createTransformNode, ok } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
+import { defineDag, createFetchNode, createLlmNode, createTransformNode, ok } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // --- Schemas ---
 const InputSchema = z.object({ userId: z.string() });
@@ -195,6 +195,35 @@ createEvalJudgeNode({
 > to them. Only fetch nodes (which do arbitrary I/O) take an author-set
 > `requires`.
 
+### Emitting confidence from a node
+
+`Confidence` is a semantic bucket with provenance (`{high|medium|low|unknown}`
++ source) — never a raw number. Factories default to `confidence: { mode:
+"none" }`; to emit, override the `NodeDef` field by spreading the factory
+result (the same pattern as `humanReview`). Have the LLM pick a **bucket** in
+its output schema and extract it:
+
+```ts
+import { confidence } from "@fuguejs/framework";
+import type { LlmNodeDef } from "@fuguejs/framework";
+
+const node = createLlmNode<In, Out>({ /* …, output schema includes
+  confidence: z.enum(["high", "medium", "low"]) — a bucket, never a number */ });
+
+// Annotate the widened type explicitly — under `composite: true` the inferred
+// spread type trips TS4023 (unexportable NodeId brand) without it.
+export const withConfidence: LlmNodeDef<In, Out> = {
+  ...node,
+  confidence: {
+    mode: "value",
+    extract: (output: Out) => confidence(output.confidence, "self-reported-bucket"),
+  },
+};
+```
+
+Downstream predicates can then gate on it via `minConfidence` (see "Predicate
+shape").
+
 ---
 
 ## Capabilities
@@ -230,7 +259,7 @@ augmentation) and ships a `CapabilityHandle` the host wires at boot. The DAG
 never names the provider; only the capability:
 
 ```ts
-import { localPathRef } from "@fugue/document-source"; // brings the `documents` capability into scope
+import { localPathRef } from "@fuguejs/document-source"; // brings the `documents` capability into scope
 
 createFetchNode({
   id: "fetch-report",
@@ -353,7 +382,7 @@ export default registration;
 ### Linear pipeline (A → B → C) — `defineLinearDag`
 
 ```ts
-import { defineLinearDag } from "@fugue/framework";
+import { defineLinearDag } from "@fuguejs/framework";
 
 const dag = defineLinearDag({
   id: "pipeline",
@@ -365,7 +394,7 @@ const dag = defineLinearDag({
 ### Fan-out (parallel siblings) — `defineFanOut`
 
 ```ts
-import { defineFanOut } from "@fugue/framework";
+import { defineFanOut } from "@fuguejs/framework";
 
 // One source → N parallel branches → optional join
 const dag = defineFanOut({
@@ -383,7 +412,7 @@ const dag = defineFanOut({
 ### Diamond (fan-out + fan-in) — `defineDiamond`
 
 ```ts
-import { defineDiamond } from "@fugue/framework";
+import { defineDiamond } from "@fuguejs/framework";
 
 const dag = defineDiamond({
   id: "diamond",
@@ -397,7 +426,7 @@ const dag = defineDiamond({
 ### Conditional routing — `defineRouter`
 
 ```ts
-import { defineRouter } from "@fugue/framework";
+import { defineRouter } from "@fuguejs/framework";
 
 const dag = defineRouter({
   id: "intent-router",
@@ -554,19 +583,31 @@ Loaded by the host at discovery time. Accessed via `promptName` in `createLlmNod
 
 ## Result Type
 
-All node functions return `Result<T, FrameworkError>`:
+All node functions return `Result<T, FrameworkError>`. The error kinds an
+author typically constructs are `transient`, `validation`, and `node-crash` —
+all three carry the (branded) `nodeId`; there is **no** `permanent` kind — a
+deterministic failure is `node-crash` with `retriability: "non-retriable"`:
 
 ```ts
-import { ok, err } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // Success
 return ok(value);
 
-// Failure
-return err({ kind: "transient", message: "API timeout" });
-return err({ kind: "validation", message: "Invalid response shape" });
-return err({ kind: "permanent", message: "Customer not found" });
+// Retriable failure — the runtime applies the node's retry budget
+return err({ kind: "transient", nodeId: nodeId("fetch-user"), message: "API timeout" });
+
+// Bad input / bad upstream data — names the problem, optional path
+return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not found", path: "cvr" });
+
+// Deterministic failure — fast-fails without consuming the retry budget
+return err({
+  kind: "node-crash",
+  nodeId: nodeId("fetch-config"),
+  message: "config sheet is missing required rows",
+  retriability: "non-retriable",
+});
 ```
 
 ---
@@ -592,6 +633,12 @@ DAGs throw `DagDefinitionError` immediately, with a message pointing at the prob
 The `fugue` binary (`packages/framework/bin/fugue.ts`) validates and
 introspects a DAG file without needing to start the host. **All output is JSON
 on stdout**, designed for machine consumption.
+
+> Run `bunx fugue …` from a directory whose package depends on
+> `@fuguejs/framework` (bun links the bin per dependent). From an unrelated
+> directory `bunx` falls through to the npm registry — and rewrites the
+> lockfile while failing. Equivalent direct form:
+> `bun node_modules/@fuguejs/framework/bin/fugue.ts lint <path>`.
 
 ### `fugue lint <path>`
 

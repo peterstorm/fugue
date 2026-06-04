@@ -1,4 +1,4 @@
-// @fugue/framework/bullmq — BullMQ adapter subpath export.
+// @fuguejs/framework/bullmq — BullMQ adapter subpath export.
 //
 // Consumers that need durable queue/worker/event-log backed by BullMQ + Redis
 // import from this subpath. Consumers using only in-memory queues (tests,

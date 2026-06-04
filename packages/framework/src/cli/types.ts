@@ -11,7 +11,7 @@ import type {
 } from "../describe/index.js";
 
 // Re-export the shared describe shapes so existing CLI consumers keep their
-// import path. The canonical home is `@fugue/framework`'s `describe` module —
+// import path. The canonical home is `@fuguejs/framework`'s `describe` module —
 // the host's `GET /dags/:id/manifest` handler imports from there directly.
 export type { DescribedDag, DescribedNode, DescribedEdge };
 

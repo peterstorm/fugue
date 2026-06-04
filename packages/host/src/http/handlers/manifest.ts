@@ -12,7 +12,7 @@
  */
 
 import type { Context } from "hono";
-import { tryDagId, buildDescribedDag, formatFrameworkError } from "@fugue/framework";
+import { tryDagId, buildDescribedDag, formatFrameworkError } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";
 import type { LogPort } from "../../ports.js";
 import type { AuthIdentity } from "../../domain/auth.js";

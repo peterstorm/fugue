@@ -18,7 +18,7 @@ import {
   FOUNDRY_EVENT_RUN_SUMMARY,
   FOUNDRY_EVENT_ROUTE_DECISION,
   FOUNDRY_METRIC_RUN_LATENCY,
-} from "@fugue/framework";
+} from "@fuguejs/framework";
 import {
   composeObservability,
   resolveFoundryLeg,

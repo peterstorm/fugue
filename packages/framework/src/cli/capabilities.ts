@@ -28,7 +28,7 @@ export const runCapabilities = (): CapabilitiesResult => ({
   })),
   custom: {
     mechanism:
-      "Adapter packages (e.g. @fugue/fs and @fugue/ms-graph provide `documents`; @fugue/pg provides `db`) augment the `CapabilityRegistry` interface via TypeScript module augmentation and ship a `CapabilityHandle` that the host wires at boot.",
+      "Adapter packages (e.g. @fuguejs/fs and @fuguejs/ms-graph provide `documents`; @fuguejs/pg provides `db`) augment the `CapabilityRegistry` interface via TypeScript module augmentation and ship a `CapabilityHandle` that the host wires at boot.",
     howToDeclare:
       "Add the capability name to a node's `requires: [...] as const`. The matching `ctx.<name>` is then typed non-null inside `run`. Import the adapter (or its port package) so the augmented name is visible to the type checker.",
     discover:

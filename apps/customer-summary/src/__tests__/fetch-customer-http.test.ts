@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr, makeNodeContext, witness } from "@fugue/framework";
-import { createFakeHttpCapability } from "@fugue/framework/testing";
+import { isOk, isErr, makeNodeContext, witness } from "@fuguejs/framework";
+import { createFakeHttpCapability } from "@fuguejs/framework/testing";
 import { createHttpFetchCustomerNode } from "../dag/nodes/fetch-customer-http.js";
 import type { CrmRecord } from "../schemas/crm.js";
 

@@ -8,9 +8,9 @@
  */
 
 import type { Context } from "hono";
-import type { DagId, Result, NodeContext, FrameworkError } from "@fugue/framework";
-import { formatFrameworkError, tryDagId } from "@fugue/framework";
-import type { DagDef, RunOptions } from "@fugue/framework";
+import type { DagId, Result, NodeContext, FrameworkError } from "@fuguejs/framework";
+import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
+import type { DagDef, RunOptions } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
@@ -41,10 +41,18 @@ export interface RunDagDeps {
 
 /**
  * Creates the run-dag handler with injected dependencies.
+ *
+ * `resolveRawId` extracts the target DAG id from the request — defaults to the
+ * `:id` path param. The custom-route fallback (router.ts) injects a resolver
+ * that maps a registration's `route` override back to its DAG id, so both
+ * entry points share this one handler (auth, concurrency, circuit, caching).
  */
-export const createRunDagHandler = (deps: RunDagDeps) => {
+export const createRunDagHandler = (
+  deps: RunDagDeps,
+  resolveRawId: (c: Context<HostEnv>) => string = (c) => c.req.param("id") ?? "",
+) => {
   return async (c: Context<HostEnv>): Promise<Response> => {
-    const rawId = c.req.param("id") ?? "";
+    const rawId = resolveRawId(c);
     const dagIdResult = tryDagId(rawId);
     if (!dagIdResult.ok) {
       return errorResponse(c, 400, "invalid-dag-id", `Invalid DAG ID '${rawId}': ${dagIdResult.error}`, {
@@ -189,7 +197,7 @@ export const createRunDagHandler = (deps: RunDagDeps) => {
 
       // Declare ctx before the execution try so it's accessible in the catch block.
       // Guard the createContext call so the timer is cleared if it throws (leak prevention).
-      let ctx: import("@fugue/framework").NodeContext;
+      let ctx: import("@fuguejs/framework").NodeContext;
       try {
         ctx = deps.createContext(registered, controller.signal);
       } catch (setupErr) {

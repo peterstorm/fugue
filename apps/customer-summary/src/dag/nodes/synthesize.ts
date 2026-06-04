@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { createLlmNode } from "@fugue/framework";
-import type { LlmNodeDef } from "@fugue/framework";
+import { createLlmNode } from "@fuguejs/framework";
+import type { LlmNodeDef } from "@fuguejs/framework";
 import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 import type { Message } from "../../schemas/crm.js";

@@ -17,7 +17,7 @@ The recipe is < 50 LOC of boilerplate. Mirror an existing adapter:
 | You are… | Do this |
 |---|---|
 | Adding a **brand-new capability** (e.g. a vector store) | Define the capability interface + augment `CapabilityRegistry` in your package. |
-| Adding a **new backend** for an existing capability (e.g. S3 for `documents`) | Depend on the port package (`@fugue/document-source`), implement its interface, add a `FileRef`/ref variant there. Do **not** redefine the interface. |
+| Adding a **new backend** for an existing capability (e.g. S3 for `documents`) | Depend on the port package (`@fuguejs/document-source`), implement its interface, add a `FileRef`/ref variant there. Do **not** redefine the interface. |
 
 A capability becomes a *port with multiple adapters* only once a second backend
 appears — extract the shared interface then, not before (ADR-0052). Until then,
@@ -29,7 +29,7 @@ keep the interface in the single adapter package.
 
 ```
 packages/adapter-<name>/
-├── package.json        # name "@fugue/<name>", deps on @fugue/framework (+ port pkg)
+├── package.json        # name "@fuguejs/<name>", deps on @fuguejs/framework (+ port pkg)
 ├── tsconfig.json       # extends ../../tsconfig.base.json
 ├── README.md
 └── src/
@@ -41,7 +41,7 @@ packages/adapter-<name>/
 `src/index.ts` and `exports: { ".": "./src/index.ts" }` (this is a **source-first**
 monorepo — workspace packages publish their TypeScript entry directly, no build
 step), `scripts: { build: "tsc", typecheck: "tsc --noEmit", test: "bun test" }`,
-`dependencies: { "@fugue/framework": "workspace:*" }`. Put heavy backend SDKs in
+`dependencies: { "@fuguejs/framework": "workspace:*" }`. Put heavy backend SDKs in
 `peerDependencies` (or inject them — see §5).
 
 `tsconfig.json`:
@@ -69,13 +69,13 @@ step), `scripts: { build: "tsc", typecheck: "tsc --noEmit", test: "bun test" }`,
 New capability — define it and augment the registry **once**:
 
 ```ts
-import type { Result, FrameworkError } from "@fugue/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 
 export interface VectorStore {
   search(query: string, k: number): Promise<Result<Match[], FrameworkError>>;
 }
 
-declare module "@fugue/framework" {
+declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
     /** Access via `ctx.vectors` in nodes. */
     vectors: VectorStore;
@@ -86,8 +86,8 @@ declare module "@fugue/framework" {
 New backend for an existing port — import it, don't redefine:
 
 ```ts
-import type { DocumentSource, FileRef, FileMeta } from "@fugue/document-source";
-import { unsupportedRefError } from "@fugue/document-source";
+import type { DocumentSource, FileRef, FileMeta } from "@fuguejs/document-source";
+import { unsupportedRefError } from "@fuguejs/document-source";
 ```
 
 After augmentation (or importing a package that augments), `requires: ["vectors"]`
@@ -100,8 +100,8 @@ is valid and `ctx.vectors` is typed and non-null.
 The factory takes config and returns a handle the host lifecycle-manages.
 
 ```ts
-import { ok, err, nodeId } from "@fugue/framework";
-import type { CapabilityHandle } from "@fugue/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
+import type { CapabilityHandle } from "@fuguejs/framework";
 
 const NODE = nodeId("vectors-capability"); // sentinel for errors from this adapter
 
@@ -167,7 +167,7 @@ they can be unit-tested directly. Provide a `createFake<Capability>` for
 *consumers* testing nodes that use your capability.
 
 Tests use `bun:test`, live in `src/__tests__/`, and assert on `Result` via
-`isOk`/`isErr` from `@fugue/framework`.
+`isOk`/`isErr` from `@fuguejs/framework`.
 
 ---
 

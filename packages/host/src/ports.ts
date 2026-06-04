@@ -8,11 +8,11 @@
  * for operations that can fail, making failure explicit at the type level.
  */
 
-import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess } from "@fugue/framework";
-import type { CapabilityHandle } from "@fugue/framework";
+import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess } from "@fuguejs/framework";
+import type { CapabilityHandle } from "@fuguejs/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
-import type { ContentFilter } from "@fugue/framework";
+import type { ContentFilter } from "@fuguejs/framework";
 import type { TokenGrant, TokenHash } from "./domain/auth.js";
 
 // ── Logger ──────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
-import { dagId, gitSha } from "@fugue/framework";
-import type { DagDef } from "@fugue/framework";
+import { dagId, gitSha } from "@fuguejs/framework";
+import type { DagDef } from "@fuguejs/framework";
 import { z } from "zod";
 import {
   extractTeam,

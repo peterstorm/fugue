@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { asNonEmptyString } from "@fugue/framework";
+import { asNonEmptyString } from "@fuguejs/framework";
 
 const ConfigSchema = z.object({
   PORT: z.coerce.number().default(3000),

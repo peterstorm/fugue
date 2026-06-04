@@ -1,4 +1,4 @@
-# @fugue/ms-graph
+# @fuguejs/ms-graph
 
 Microsoft Graph adapter for the generic **`DocumentSource`** capability. Reads
 files (Excel, CSV, anything) from **SharePoint** and **OneDrive** for nodes that
@@ -39,7 +39,7 @@ You provide `getAccessToken`; wire it to MSAL / `@azure/identity` (app-only
 client credentials). The token cache/refresh policy stays yours.
 
 ```ts
-import { createMsGraphAdapter } from "@fugue/ms-graph";
+import { createMsGraphAdapter } from "@fuguejs/ms-graph";
 import { ClientSecretCredential } from "@azure/identity";
 
 const credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
@@ -80,7 +80,7 @@ createFetchNode({
 Use the in-memory fake — no network, no Azure:
 
 ```ts
-import { createFakeDocumentSource, driveItemRef, fileRefKey } from "@fugue/ms-graph";
+import { createFakeDocumentSource, driveItemRef, fileRefKey } from "@fuguejs/ms-graph";
 
 const fakeDocs = createFakeDocumentSource({
   [fileRefKey(driveItemRef("d1", "i1"))]: { content: new Uint8Array([1, 2, 3]) },
@@ -92,7 +92,7 @@ const fakeDocs = createFakeDocumentSource({
 Implemented: content + metadata reads for the three `FileRef` variants, Graph
 status → `FrameworkError` mapping, capability lifecycle, and the test fake.
 
-Out of scope (by design): the `parseWorkbook` transform lives in `@fugue/xlsx`
+Out of scope (by design): the `parseWorkbook` transform lives in `@fuguejs/xlsx`
 (functional core, provider-agnostic), not this adapter; and any
 provider-specific operations such as folder listing or upload belong on a
 separate capability, never on the shared `DocumentSource` port.

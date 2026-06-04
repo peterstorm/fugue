@@ -19,11 +19,11 @@ import {
   IDENTITY_FILTER,
   isOk,
   setFrameworkLogger,
-} from "@fugue/framework";
-import { RedisCache, RedisCheckpointer } from "@fugue/framework/redis";
+} from "@fuguejs/framework";
+import { RedisCache, RedisCheckpointer } from "@fuguejs/framework/redis";
 import { DefaultAzureCredential } from "@azure/identity";
-import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink } from "@fugue/framework";
-import { NoopObserver, runId as brandRunId } from "@fugue/framework";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink } from "@fuguejs/framework";
+import { NoopObserver, runId as brandRunId } from "@fuguejs/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS, type Config } from "./config.js";

@@ -10,7 +10,7 @@
  */
 
 import { z } from "zod";
-import type { DagRegistration } from "@fugue/host/contract";
+import type { DagRegistration } from "@fuguejs/host/contract";
 import { createSummaryDag } from "./dag/summary-dag.js";
 import { join } from "node:path";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";

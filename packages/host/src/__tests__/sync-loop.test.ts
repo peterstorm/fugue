@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { ok, err, gitSha } from "@fugue/framework";
-import type { GitSha } from "@fugue/framework";
+import { ok, err, gitSha } from "@fuguejs/framework";
+import type { GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort, ModuleLoaderPort, BulkLoadResult } from "../ports.js";
 import { executeSyncCycle, startSyncLoop } from "../sync/sync-loop.js";

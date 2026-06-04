@@ -2,7 +2,7 @@
   "boundaries": [
     {
       "module": "packages/host/src/domain/",
-      "allow": ["./", "packages/host/src/domain/", "@fugue/framework", "zod", "ts-pattern"],
+      "allow": ["./", "packages/host/src/domain/", "@fuguejs/framework", "zod", "ts-pattern"],
       "deny": [
         "packages/host/src/adapters/",
         "packages/host/src/http/",
@@ -17,7 +17,7 @@
     },
     {
       "module": "packages/host/src/sync/",
-      "allow": ["./", "packages/host/src/sync/", "packages/host/src/domain/", "packages/host/src/adapters/", "@fugue/framework"],
+      "allow": ["./", "packages/host/src/sync/", "packages/host/src/domain/", "packages/host/src/adapters/", "@fuguejs/framework"],
       "deny": [
         "packages/host/src/http/",
         "packages/host/src/lifecycle/",
@@ -29,7 +29,7 @@
     },
     {
       "module": "packages/host/src/http/",
-      "allow": ["./", "packages/host/src/http/", "packages/host/src/domain/", "@fugue/framework", "hono", "ts-pattern"],
+      "allow": ["./", "packages/host/src/http/", "packages/host/src/domain/", "@fuguejs/framework", "hono", "ts-pattern"],
       "deny": [
         "packages/host/src/adapters/",
         "packages/host/src/sync/",
@@ -41,7 +41,7 @@
     },
     {
       "module": "packages/host/src/lifecycle/",
-      "allow": ["./", "packages/host/src/lifecycle/", "packages/host/src/domain/", "packages/host/src/adapters/", "packages/host/src/sync/", "@fugue/framework"],
+      "allow": ["./", "packages/host/src/lifecycle/", "packages/host/src/domain/", "packages/host/src/adapters/", "packages/host/src/sync/", "@fuguejs/framework"],
       "deny": [
         "packages/host/src/http/",
         "packages/host/src/host",
@@ -52,7 +52,7 @@
     },
     {
       "module": "packages/host/src/adapters/",
-      "allow": ["./", "packages/host/src/adapters/", "packages/host/src/domain/", "@fugue/framework", "ts-pattern"],
+      "allow": ["./", "packages/host/src/adapters/", "packages/host/src/domain/", "@fuguejs/framework", "ts-pattern"],
       "deny": [
         "packages/host/src/http/",
         "packages/host/src/sync/",

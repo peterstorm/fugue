@@ -1,5 +1,5 @@
 /**
- * @fugue/host — Library surface.
+ * @fuguejs/host — Library surface.
  *
  * Pure re-exports only. NO side effects, NO process control.
  * Consumers can import types and utilities without triggering boot.

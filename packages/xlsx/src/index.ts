@@ -1,16 +1,16 @@
 /**
- * @fugue/xlsx — pure workbook parsing for Fugue DAGs.
+ * @fuguejs/xlsx — pure workbook parsing for Fugue DAGs.
  *
  * `parseWorkbook` turns `.xlsx` bytes into Zod-validated typed rows. It is a
  * pure function (deterministic, no I/O) — the byte fetching is a `documents`
- * capability concern (`@fugue/ms-graph`, `@fugue/fs`), and parsing stays here
+ * capability concern (`@fuguejs/ms-graph`, `@fuguejs/fs`), and parsing stays here
  * so it is fixture-testable and provider-agnostic. See ADR-0052.
  *
  * ## Usage
  *
  * ```ts
  * import { z } from "zod";
- * import { parseWorkbook } from "@fugue/xlsx";
+ * import { parseWorkbook } from "@fuguejs/xlsx";
  *
  * const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
  *
@@ -26,8 +26,8 @@
 
 import ExcelJS from "exceljs";
 import type { z } from "zod";
-import type { Result, FrameworkError } from "@fugue/framework";
-import { ok, err, nodeId } from "@fugue/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
 
 /** Sentinel node ID for parse errors (parsing is a lib, not a DAG node). */
 const XLSX_NODE_ID = nodeId("xlsx-parse");
@@ -55,6 +55,33 @@ export interface ParseWorkbookOpts {
   /** 1-based row holding the column headers. Default: 1. */
   readonly headerRow?: number;
 }
+
+/**
+ * Strip `<dateGroupItem …/>` elements from `xl/tables/*.xml`.
+ *
+ * Real-world exports (Dynamics 365, BI tools) save date-grouped table
+ * autofilters as `dateGroupItem` nodes, which ExcelJS's table parser does not
+ * know and crashes on ("Unexpected xml node in parseOpen"). The nodes only
+ * describe a UI filter selection — never cell data — so removing them is
+ * lossless for row extraction. `ignoreNodes` can't reach them (tables are
+ * parsed outside the worksheet xform), hence the zip-level rewrite. Uses
+ * jszip, which ExcelJS already depends on.
+ */
+const stripDateGroupItems = async (bytes: Uint8Array): Promise<Uint8Array> => {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(bytes);
+  const tableFiles = zip.file(/^xl\/tables\/.*\.xml$/);
+  for (const file of tableFiles) {
+    const xml = await file.async("string");
+    if (xml.includes("<dateGroupItem")) {
+      zip.file(file.name, xml.replace(/<dateGroupItem\b[^>]*\/>/g, ""));
+    }
+  }
+  return zip.generateAsync({ type: "uint8array" });
+};
+
+const isDateGroupItemCrash = (e: unknown): boolean =>
+  e instanceof Error && e.message.includes("parseOpen") && e.message.includes("dateGroupItem");
 
 /**
  * Normalise an ExcelJS cell value to a primitive (or `null`). Handles formulas
@@ -105,7 +132,17 @@ export const parseWorkbook = async <T>(
     // Buffer.from return Buffer<ArrayBuffer> — cast to exceljs's exact param.
     await wb.xlsx.load(Buffer.from(bytes) as unknown as Parameters<typeof wb.xlsx.load>[0]);
   } catch (e) {
-    return err(crashErr(`failed to parse workbook: ${msg(e)}`));
+    if (!isDateGroupItemCrash(e)) {
+      return err(crashErr(`failed to parse workbook: ${msg(e)}`));
+    }
+    // Date-grouped table autofilter (Dynamics/BI exports) — strip the
+    // UI-only filter nodes and retry once. See stripDateGroupItems.
+    try {
+      const cleaned = await stripDateGroupItems(bytes);
+      await wb.xlsx.load(Buffer.from(cleaned) as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    } catch (e2) {
+      return err(crashErr(`failed to parse workbook: ${msg(e2)}`));
+    }
   }
 
   const ws =

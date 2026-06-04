@@ -10,8 +10,8 @@ import {
   createFetchNode,
   createTransformNode,
   ok,
-} from "@fugue/framework";
-import type { DagRegistration } from "@fugue/host/contract";
+} from "@fuguejs/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
 
 const InputSchema = z.object({ docId: z.string() });
 const DocSchema = z.object({ docId: z.string(), text: z.string() });

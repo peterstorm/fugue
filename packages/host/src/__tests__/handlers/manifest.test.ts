@@ -17,7 +17,7 @@ import {
   createFetchNode,
   createTransformNode,
   ok,
-} from "@fugue/framework";
+} from "@fuguejs/framework";
 import { createManifestHandler, buildManifest } from "../../http/handlers/manifest.js";
 import type { HostState } from "../../domain/host-state.js";
 import { freeze } from "../../domain/registry.js";
