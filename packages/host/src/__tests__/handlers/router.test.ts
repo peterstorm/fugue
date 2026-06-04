@@ -86,3 +86,93 @@ describe("createRouter — /admin/* defense-in-depth guard", () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Custom route overrides (DagRegistration.route / fugue.yaml route)
+// ---------------------------------------------------------------------------
+
+import { z } from "zod";
+import { dagId } from "@fugue/framework";
+import type { Registry, RegisteredDag } from "../../domain/registry.js";
+
+const makeRoutedDag = (id: string, route: string): RegisteredDag => ({
+  id: dagId(id),
+  team: "test-team",
+  route,
+  dag: { id: dagId(id), nodes: [], edges: [] } as unknown as RegisteredDag["dag"],
+  inputSchema: z.object({ query: z.string() }),
+  config: { timeout: 5000, maxConcurrency: 10 },
+  meta: { description: "test", version: "1.0" },
+  loadedAt: Date.now(),
+  sha: SHA,
+  status: { kind: "healthy" },
+  prompts: new Map(),
+  modulePath: `/tmp/dags/test-team/${id}/dag.ts`,
+});
+
+const stateWith = (registry: Registry): HostState => ({
+  phase: "ready",
+  registry,
+  lastSyncAt: Date.now(),
+  lastSyncSha: SHA,
+});
+
+describe("createRouter — custom route overrides", () => {
+  const routedDeps = (registry: Registry): RouterDeps => ({
+    ...makeRouterDeps(createInMemoryTokenStore()),
+    getHostState: () => stateWith(registry),
+  });
+
+  it("serves a DAG at its registration route override", async () => {
+    const registry = freeze([makeRoutedDag("lead-scoring", "/score-leads")], SHA, Date.now());
+    const app = createRouter(routedDeps(registry));
+    const res = await app.request("/score-leads", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ query: "x" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  it("still serves the same DAG at the default /dags/:id/run route", async () => {
+    const registry = freeze([makeRoutedDag("lead-scoring", "/score-leads")], SHA, Date.now());
+    const app = createRouter(routedDeps(registry));
+    const res = await app.request("/dags/lead-scoring/run", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ query: "x" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("404s an unregistered path with a typed error (no handler fall-through)", async () => {
+    const registry = freeze([makeRoutedDag("lead-scoring", "/score-leads")], SHA, Date.now());
+    const app = createRouter(routedDeps(registry));
+    const res = await app.request("/not-a-route", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ query: "x" }),
+    });
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe("not-found");
+  });
+
+  it("custom routes resolve against the CURRENT registry (hot-reload safe)", async () => {
+    let registry = freeze([makeRoutedDag("lead-scoring", "/score-leads")], SHA, Date.now());
+    const deps: RouterDeps = {
+      ...makeRouterDeps(createInMemoryTokenStore()),
+      getHostState: () => stateWith(registry),
+    };
+    const app = createRouter(deps);
+    const hit = () => app.request("/score-leads", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ query: "x" }),
+    });
+    expect((await hit()).status).toBe(200);
+    // Simulate a sync that renames the route — the old path must 404 immediately.
+    registry = freeze([makeRoutedDag("lead-scoring", "/score-leads-v2")], SHA, Date.now());
+    expect((await hit()).status).toBe(404);
+  });
+});

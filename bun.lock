@@ -106,7 +106,7 @@
     },
     "packages/framework": {
       "name": "@fugue/framework",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "bin": {
         "fugue": "./bin/fugue.ts",
       },
@@ -140,7 +140,7 @@
     },
     "packages/host": {
       "name": "@fugue/host",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "bin": "src/main.ts",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.91.1",
@@ -162,6 +162,7 @@
       "dependencies": {
         "@fugue/framework": "workspace:*",
         "exceljs": "^4.4.0",
+        "jszip": "^3.10.1",
       },
       "devDependencies": {
         "@fugue/fs": "workspace:*",

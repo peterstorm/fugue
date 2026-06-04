@@ -41,10 +41,18 @@ export interface RunDagDeps {
 
 /**
  * Creates the run-dag handler with injected dependencies.
+ *
+ * `resolveRawId` extracts the target DAG id from the request — defaults to the
+ * `:id` path param. The custom-route fallback (router.ts) injects a resolver
+ * that maps a registration's `route` override back to its DAG id, so both
+ * entry points share this one handler (auth, concurrency, circuit, caching).
  */
-export const createRunDagHandler = (deps: RunDagDeps) => {
+export const createRunDagHandler = (
+  deps: RunDagDeps,
+  resolveRawId: (c: Context<HostEnv>) => string = (c) => c.req.param("id") ?? "",
+) => {
   return async (c: Context<HostEnv>): Promise<Response> => {
-    const rawId = c.req.param("id") ?? "";
+    const rawId = resolveRawId(c);
     const dagIdResult = tryDagId(rawId);
     if (!dagIdResult.ok) {
       return errorResponse(c, 400, "invalid-dag-id", `Invalid DAG ID '${rawId}': ${dagIdResult.error}`, {

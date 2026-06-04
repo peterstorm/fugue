@@ -101,5 +101,28 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   const runDagHandler = createRunDagHandler(deps);
   app.post("/dags/:id/run", runDagHandler);
 
+  // ── Custom route overrides (DagRegistration.route / fugue.yaml route) ────
+  // Registered as a POST fallback so hot-reloaded DAGs (whose routes change
+  // between syncs) resolve against the CURRENT registry on every request —
+  // static mounts would leak stale routes after a sync removes/renames a DAG.
+  // The resolver maps the request path back to the owning DAG id and reuses
+  // the same run handler (auth, team isolation, concurrency, circuit).
+  const routeOf = (c: { get: (k: "hostState") => HostState; req: { path: string } }): string => {
+    const state = c.get("hostState");
+    const registry = "registry" in state ? state.registry : undefined;
+    if (!registry) return "";
+    for (const dag of registry.dags.values()) {
+      if (dag.route === c.req.path) return dag.id;
+    }
+    return "";
+  };
+  const runDagByRouteHandler = createRunDagHandler(deps, (c) => routeOf(c));
+  app.post("*", async (c) => {
+    if (routeOf(c) === "") {
+      return errorResponse(c, 404, "not-found", `No DAG is registered at route '${c.req.path}'`);
+    }
+    return runDagByRouteHandler(c);
+  });
+
   return app;
 };

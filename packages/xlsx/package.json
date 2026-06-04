@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@fugue/framework": "workspace:*",
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1"
   },
   "peerDependencies": {
     "zod": "^4.3.6"
