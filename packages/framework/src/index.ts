@@ -94,3 +94,23 @@ export { createCronScheduler } from "./scheduler/scheduler.js";
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver } from "./shared/index.js";
 export type { Capability, CapabilityRegistry, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
 export type { CapabilityHandle, AdapterFactory } from "./types/capability-handle.js";
+// Built-in capability catalogue — runtime values consumed by `fugue capabilities`
+// and any tooling that needs the authoritative built-in set + its metadata.
+export { BUILTIN_CAPABILITY_KEYS, BUILTIN_CAPABILITY_INFO } from "./types/node.js";
+export type { BuiltinCapabilityKey, CapabilityInfo } from "./types/node.js";
+
+// ---------------------------------------------------------------------------
+// DAG authoring CLI — the programmatic API behind the `fugue` binary. Exposed
+// so tooling (and the @fugue/examples lint suite) can validate, describe, and
+// enumerate capabilities in-process without spawning the bin.
+// ---------------------------------------------------------------------------
+export { runLint } from "./cli/lint.js";
+export { runDescribe } from "./cli/describe.js";
+export { runCapabilities } from "./cli/capabilities.js";
+export type {
+  LintResult,
+  LintError,
+  DescribeResult,
+  CapabilitiesResult,
+  CapabilityCatalogEntry,
+} from "./cli/types.js";

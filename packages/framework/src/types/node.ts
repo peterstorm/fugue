@@ -172,6 +172,59 @@ export const BUILTIN_CAPABILITY_KEYS = [
 export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
 
 /**
+ * Human-readable metadata for one capability — the description, the name of the
+ * client type injected into `ctx`, and a pointer to the factory/field that
+ * consumes it. Used by `fugue capabilities` to emit a machine- and
+ * LLM-readable catalogue of the framework's built-in capabilities.
+ */
+export interface CapabilityInfo {
+  readonly description: string;
+  readonly clientType: string;
+  /** Where this capability surfaces in authoring (factory or field). */
+  readonly reference: string;
+}
+
+/**
+ * Catalogue metadata for the built-in capabilities. The `satisfies
+ * Record<BuiltinCapabilityKey, ...>` clause is the single-source-of-truth
+ * guard: adding a key to `BUILTIN_CAPABILITY_KEYS` without describing it here
+ * (or describing a key that isn't built-in) is a compile error, so the
+ * `fugue capabilities` catalogue can never silently drift from the registry.
+ */
+export const BUILTIN_CAPABILITY_INFO = {
+  llm: {
+    description:
+      "Structured and tool-use LLM calls (sendStructured, tool loops). Wired from the host's SharedInfra.",
+    clientType: "LlmClient",
+    reference: "createLlmNode / createLlmWithToolsNode",
+  },
+  cache: {
+    description:
+      "Context/result cache backend for memoizing node output across runs.",
+    clientType: "ContextCacheAdapter",
+    reference: "computeCacheKey on createLlmNode",
+  },
+  prompts: {
+    description:
+      "Prompt-template registry; resolves a node's promptName to template text at run time.",
+    clientType: "PromptAccess",
+    reference: "promptName on createLlmNode",
+  },
+  judgeLlm: {
+    description:
+      "Separate LLM client used by eval-judge nodes, kept distinct from the main `llm` client so judging never contends with generation.",
+    clientType: "LlmClient",
+    reference: "createEvalJudgeNode (DagDef.evalJudges)",
+  },
+  http: {
+    description:
+      "Schema-validated HTTP client returning Result<T, FrameworkError>. Handle-backed via createHttpCapability; every workflow does HTTP, so it ships in the base set.",
+    clientType: "HttpCapability",
+    reference: "createFetchNode with requires: ['http']",
+  },
+} as const satisfies Record<BuiltinCapabilityKey, CapabilityInfo>;
+
+/**
  * Always-present part of NodeContext — fields the runtime guarantees by
  * injecting a no-op default when none is supplied.
  *

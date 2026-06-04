@@ -2,6 +2,8 @@ import { describe, it, expect } from "bun:test";
 import { resolve } from "node:path";
 import { runLint } from "../../cli/lint.js";
 import { runDescribe } from "../../cli/describe.js";
+import { runCapabilities } from "../../cli/capabilities.js";
+import { BUILTIN_CAPABILITY_KEYS } from "../../types/node.js";
 
 const fixturePath = (name: string): string =>
   resolve(__dirname, "fixtures", name);
@@ -149,6 +151,37 @@ describe("runDescribe", () => {
   });
 });
 
+describe("runCapabilities", () => {
+  it("lists exactly the built-in capability set with full metadata", () => {
+    const result = runCapabilities();
+    expect(result.ok).toBe(true);
+
+    const names = result.builtin.map((c) => c.name);
+    // Must match the registry's single source of truth — no more, no less.
+    expect([...names].sort()).toEqual([...BUILTIN_CAPABILITY_KEYS].sort());
+
+    // Every entry carries non-empty metadata.
+    for (const entry of result.builtin) {
+      expect(entry.description.length).toBeGreaterThan(0);
+      expect(entry.clientType.length).toBeGreaterThan(0);
+      expect(entry.reference.length).toBeGreaterThan(0);
+    }
+
+    // Spot-check the load-bearing ones the docs lean on.
+    const http = result.builtin.find((c) => c.name === "http");
+    expect(http?.clientType).toBe("HttpCapability");
+    const judge = result.builtin.find((c) => c.name === "judgeLlm");
+    expect(judge?.clientType).toBe("LlmClient");
+  });
+
+  it("explains how to obtain custom (adapter-provided) capabilities", () => {
+    const result = runCapabilities();
+    expect(result.custom.mechanism).toContain("module augmentation");
+    expect(result.custom.howToDeclare).toContain("requires");
+    expect(result.custom.seeAlso).toContain("docs/adapter-authoring.md");
+  });
+});
+
 describe("fugue bin (subprocess)", () => {
   it("lint exits 0 and emits ok JSON on a valid DAG", async () => {
     const { exitCode, stdout } = await runBin(["lint", fixturePath("valid-dag.ts")]);
@@ -173,6 +206,21 @@ describe("fugue bin (subprocess)", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.dag.id).toBe("valid-fixture");
     expect(parsed.dag.waves).toEqual([["fetch-user"], ["summarize"]]);
+  });
+
+  it("capabilities exits 0 and emits the built-in catalogue as JSON", async () => {
+    const { exitCode, stdout } = await runBin(["capabilities"]);
+    expect(exitCode).toBe(0);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.builtin.map((c: { name: string }) => c.name)).toContain("http");
+    expect(parsed.custom.seeAlso).toContain("docs/adapter-authoring.md");
+  });
+
+  it("capabilities exits 2 when given an argument", async () => {
+    const { exitCode, stderr } = await runBin(["capabilities", "some/path.ts"]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("takes no arguments");
   });
 
   it("exits 2 with usage text on missing args", async () => {
