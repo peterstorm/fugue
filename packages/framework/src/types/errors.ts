@@ -101,16 +101,15 @@ export type FrameworkError =
        * (`requires: ["llm"]`, etc.) that the wired NodeContext does not
        * supply. The run aborts before any `node.run` is called.
        *
-       * `missing` is a non-empty tuple — an error of this kind always names
-       * at least one gap. `nodeId` and `capability` mirror `missing[0]` (the
-       * first miss) for backwards-compatible programmatic access; both
-       * constructors derive them from `missing[0]` so they cannot disagree.
-       * `missing` lists every `(nodeId, capability)` pair so callers can fix
-       * all gaps in one pass instead of replaying the run for each field.
+       * `missing` is a non-empty tuple — an error of this kind always names at
+       * least one gap, so `missing[0]` is the guaranteed first miss (read it
+       * for single-gap programmatic access). The full tuple lists every
+       * `(nodeId, capability)` pair so callers can fix all gaps in one pass
+       * instead of replaying the run for each field. The first miss is *not*
+       * duplicated as scalar fields — that would be a representable illegal
+       * state (scalar disagreeing with `missing[0]`).
        */
       readonly kind: "missing-capability";
-      readonly nodeId: NodeId;
-      readonly capability: Capability;
       readonly missing: readonly [MissingCapability, ...MissingCapability[]];
     };
 

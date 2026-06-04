@@ -72,6 +72,56 @@ describe("frameworkError factories", () => {
         expect(e.message).toBe("rate limited");
       }
     });
+
+    it("includes httpStatus when provided", () => {
+      const e = frameworkError.transient("n", "not found", 404);
+      if (e.kind === "transient") {
+        expect(e.httpStatus).toBe(404);
+      }
+    });
+
+    it("omits httpStatus when not provided (no undefined-valued key)", () => {
+      const e = frameworkError.transient("n", "rate limited");
+      if (e.kind === "transient") {
+        expect(e.httpStatus).toBeUndefined();
+        expect(Object.prototype.hasOwnProperty.call(e, "httpStatus")).toBe(false);
+      }
+    });
+  });
+
+  describe("missingCapability", () => {
+    it("single miss → missing tuple of length 1 carrying the branded nodeId", () => {
+      const e = frameworkError.missingCapability("fetch-users", "llm");
+      expect(e.kind).toBe("missing-capability");
+      if (e.kind === "missing-capability") {
+        expect(e.missing).toHaveLength(1);
+        expect(e.missing[0].nodeId).toBe(nodeId("fetch-users"));
+        expect(e.missing[0].capability).toBe("llm");
+      }
+    });
+
+    it("head + rest → ordered tuple, head first", () => {
+      const e = frameworkError.missingCapability("a", "llm", [
+        { nodeId: "b", capability: "cache" },
+        { nodeId: "c", capability: "prompts" },
+      ]);
+      if (e.kind === "missing-capability") {
+        expect(e.missing).toHaveLength(3);
+        expect(e.missing.map((m) => [String(m.nodeId), m.capability])).toEqual([
+          ["a", "llm"],
+          ["b", "cache"],
+          ["c", "prompts"],
+        ]);
+      }
+    });
+
+    it("brands string node IDs across head and rest", () => {
+      const e = frameworkError.missingCapability("a", "llm", [{ nodeId: "b", capability: "cache" }]);
+      if (e.kind === "missing-capability") {
+        expect(e.missing[0].nodeId).toBe(N("a"));
+        expect(e.missing[1].nodeId).toBe(N("b"));
+      }
+    });
   });
 
   describe("rejected", () => {

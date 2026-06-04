@@ -288,14 +288,22 @@ export const checkHealth = async (
  *
  * Duplicate names cannot reach this function through the host boot path:
  * `topoSortHandles` rejects them (and null clients) before `connectAll`
- * runs, so the unconditional assignment below never silently drops a
- * handle in practice.
+ * runs. The duplicate guard below is defence-in-depth: if that invariant is
+ * ever violated by a future caller, it fails loudly here rather than silently
+ * dropping a handle (last-writer-wins) and surfacing later as a phantom
+ * `missing-capability`.
  */
 export const extractClients = (
   handles: readonly CapabilityHandle[],
 ): Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }> => {
   const clients: Record<string, unknown> = {};
   for (const handle of handles) {
+    if (Object.prototype.hasOwnProperty.call(clients, handle.name)) {
+      throw new Error(
+        `extractClients: duplicate capability handle name '${handle.name}' — ` +
+          `topoSortHandles should have rejected this at boot. This is a wiring bug.`,
+      );
+    }
     clients[handle.name] = handle.client;
   }
   return clients as Partial<{ [K in Capability]: CapabilityRegistry[K] }>;

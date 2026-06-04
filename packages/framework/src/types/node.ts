@@ -100,7 +100,7 @@ export interface CheckpointWriter {
 //  - At run start, the runtime walks `dag.nodes`, unions the declared
 //    capabilities, and validates the wired ctx against that set. A missing
 //    capability fails the run *before* the first `node.run` is called, with
-//    `Err({ kind: "missing-capability", capability, nodeId })`.
+//    `Err({ kind: "missing-capability", missing: [{ nodeId, capability }, ...] })`.
 //
 // ADR-0051: The registry is now an extensible interface. Adapter packages
 // augment `CapabilityRegistry` via module augmentation to register new
@@ -162,13 +162,6 @@ export const BUILTIN_CAPABILITY_KEYS = [
 ] as const satisfies readonly Capability[];
 
 export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
-
-/**
- * Concrete types injected for each capability when a node declares it in
- * `requires`. Alias for `CapabilityRegistry` — kept for backward
- * compatibility with existing consumer code that references this type.
- */
-export type CapabilityFields = CapabilityRegistry;
 
 /**
  * Always-present part of NodeContext — fields the runtime guarantees by

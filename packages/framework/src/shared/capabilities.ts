@@ -24,9 +24,8 @@ import { type Result, ok, err } from "../types/result.js";
  * Walk `dag.nodes`, collect `union(node.requires)`, and verify each capability
  * resolves to a non-null value on `ctx`. Returns all missing pairs as a
  * single Err — callers see the full set of gaps in one pass rather than
- * having to re-run after each fix. The first miss is also surfaced at the
- * top-level `nodeId`/`capability` fields so existing pattern-matchers stay
- * working unchanged.
+ * having to re-run after each fix. The first miss is `missing[0]`; the
+ * non-empty tuple guarantees it always exists.
  *
  * Returns a phantom-branded `ValidatedNodeContext` token when all
  * declarations are satisfied. Downstream code requires the token, so any
@@ -68,8 +67,6 @@ export const validateCapabilities = (
   if (first !== undefined) {
     return err({
       kind: "missing-capability" as const,
-      nodeId: first.nodeId,
-      capability: first.capability,
       missing: [first, ...rest],
     });
   }

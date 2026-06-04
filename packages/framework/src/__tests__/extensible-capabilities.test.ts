@@ -89,8 +89,8 @@ describe("extensible capability registry (ADR-0051)", () => {
       const result = validateCapabilities(dag, makeCtx());
       expect(isErr(result)).toBe(true);
       if (!result.ok && result.error.kind === "missing-capability") {
-        expect(result.error.capability).toBe("db");
-        expect(result.error.nodeId).toBe(N("fetch-users"));
+        expect(result.error.missing[0].capability).toBe("db");
+        expect(result.error.missing[0].nodeId).toBe(N("fetch-users"));
       }
     });
 
@@ -125,7 +125,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const result = validateCapabilities(dag, ctx);
       expect(isErr(result)).toBe(true);
       if (!result.ok && result.error.kind === "missing-capability") {
-        expect(result.error.capability).toBe("llm");
+        expect(result.error.missing[0].capability).toBe("llm");
         expect(result.error.missing).toHaveLength(1);
       }
     });
@@ -194,7 +194,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const result = validateCapabilities(dag, ctx);
       expect(isErr(result)).toBe(true);
       if (!result.ok && result.error.kind === "missing-capability") {
-        expect(result.error.capability).toBe("db");
+        expect(result.error.missing[0].capability).toBe("db");
       }
     });
 

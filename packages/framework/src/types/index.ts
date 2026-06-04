@@ -82,7 +82,6 @@ export type {
   ConfidenceMode,
   CapabilityRegistry,
   Capability,
-  CapabilityFields,
   BaseNodeContext,
   NodeContext,
   TypedNodeContext,

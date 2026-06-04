@@ -239,7 +239,11 @@ export interface FakeHttpRoute {
 }
 
 export const createFakeHttpCapability = (
-  routes: Readonly<Record<string, FakeHttpRoute | unknown>>,
+  // A route value is either a raw response body or a shaped `FakeHttpRoute`
+  // (`{ status, body }`); the two are discriminated structurally at runtime in
+  // `matchRoute`. The type is `unknown` because `FakeHttpRoute | unknown`
+  // collapses to `unknown` and would convey no extra information.
+  routes: Readonly<Record<string, unknown>>,
 ): CapabilityHandle<"http"> => {
   const client: HttpCapability = {
     get: async <T>(url: string, opts: HttpRequestOpts<T>) =>
@@ -261,7 +265,7 @@ function matchRoute<T>(
   method: string,
   url: string,
   schema: z.ZodType<T>,
-  routes: Readonly<Record<string, FakeHttpRoute | unknown>>,
+  routes: Readonly<Record<string, unknown>>,
 ): Result<T, FrameworkError> {
   const key = `${method} ${url}`;
   const route = routes[key] ?? routes[url];

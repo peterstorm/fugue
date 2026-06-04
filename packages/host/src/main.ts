@@ -46,7 +46,15 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
     const port: RedisConnectivityPort = {
       ping: async () => {
         try {
-          await client.connect();
+          // `lazyConnect: true` leaves the client in the "wait" state until the
+          // first probe dials it. Guard the connect on that state: after the
+          // initial connection ioredis owns reconnection, and calling
+          // `connect()` on an already-connected client rejects — which would
+          // make every probe tick after the first falsely report Redis dead and
+          // flap the host into `degraded:redis-disconnected`.
+          if (client.status === "wait") {
+            await client.connect();
+          }
           await client.ping();
           return ok(undefined);
         } catch (e) {

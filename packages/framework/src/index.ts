@@ -92,5 +92,5 @@ export { createCronScheduler } from "./scheduler/scheduler.js";
 // NodeContexts and the always-present field defaults.
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver } from "./shared/index.js";
-export type { Capability, CapabilityRegistry, CapabilityFields, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
+export type { Capability, CapabilityRegistry, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
 export type { CapabilityHandle, AdapterFactory } from "./types/capability-handle.js";

@@ -66,13 +66,12 @@ export const frameworkError = {
   ): FrameworkError => {
     // `nid`/`capability` are the guaranteed first miss; `rest` adds any further
     // gaps. Building the tuple head-first proves the non-empty `missing` field
-    // to the type system, and keeps the scalars equal to `missing[0]`.
+    // to the type system without a cast. Consumers read `missing[0]` for the
+    // first miss — it is never duplicated as a scalar field.
     const head: MissingCapability = { nodeId: toNodeId(nid), capability };
     const tail = rest.map((m) => ({ nodeId: toNodeId(m.nodeId as string), capability: m.capability }));
     return {
       kind: "missing-capability",
-      nodeId: head.nodeId,
-      capability: head.capability,
       missing: [head, ...tail],
     };
   },

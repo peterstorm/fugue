@@ -98,7 +98,7 @@ export const parseWorkbook = async <T>(
   bytes: Uint8Array,
   rowSchema: z.ZodType<T>,
   opts: ParseWorkbookOpts = {},
-): Promise<Result<{ rows: T[] }, FrameworkError>> => {
+): Promise<Result<{ rows: readonly T[] }, FrameworkError>> => {
   const wb = new ExcelJS.Workbook();
   try {
     // exceljs types `load` as the global Buffer; recent @types/node makes

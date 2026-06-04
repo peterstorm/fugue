@@ -84,9 +84,9 @@ describe("validateCapabilities", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("missing-capability");
       if (result.error.kind === "missing-capability") {
-        expect(result.error.capability).toBe("llm");
-        expect(result.error.nodeId).toBe(N("a"));
         expect(result.error.missing).toHaveLength(1);
+        expect(result.error.missing[0].capability).toBe("llm");
+        expect(result.error.missing[0].nodeId).toBe(N("a"));
       }
     }
   });
@@ -137,12 +137,12 @@ describe("validateCapabilities", () => {
     const result = validateCapabilities(dag, makeCtx());
     expect(isErr(result)).toBe(true);
     if (!result.ok && result.error.kind === "missing-capability") {
-      expect(result.error.capability).toBe("logger" as Capability);
-      expect(result.error.nodeId).toBe(N("a"));
+      expect(result.error.missing[0].capability).toBe("logger" as Capability);
+      expect(result.error.missing[0].nodeId).toBe(N("a"));
     }
   });
 
-  it("first miss is surfaced at top-level nodeId/capability fields", () => {
+  it("first miss is `missing[0]`, following node iteration order", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [
@@ -154,8 +154,8 @@ describe("validateCapabilities", () => {
     const result = validateCapabilities(dag, makeCtx());
     if (!result.ok && result.error.kind === "missing-capability") {
       // First miss should be node "a" / "llm" since nodes are iterated in order
-      expect(result.error.nodeId).toBe(N("a"));
-      expect(result.error.capability).toBe("llm");
+      expect(result.error.missing[0].nodeId).toBe(N("a"));
+      expect(result.error.missing[0].capability).toBe("llm");
     }
   });
 });
