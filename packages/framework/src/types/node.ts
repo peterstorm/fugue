@@ -137,8 +137,16 @@ export interface CapabilityRegistry {
  * The set of capability names a node can require. Derived from the
  * extensible `CapabilityRegistry` — adding a key to the registry
  * automatically makes it a valid capability name.
+ *
+ * Reserved infrastructure keys (`ReservedNonCapabilityKey`, e.g. `logger`,
+ * `tracer`) are excluded: a consumer that augments `CapabilityRegistry` with a
+ * reserved name creates a capability the runtime can never satisfy (see
+ * `RESERVED_NON_CAPABILITY_KEYS`). Excluding them here turns `requires:
+ * ["logger"]` into a compile error at the consumer's use site — where the
+ * augmented registry is visible — rather than a guaranteed runtime failure. The
+ * built-in capabilities never collide, so this is a no-op for the framework.
  */
-export type Capability = keyof CapabilityRegistry & string;
+export type Capability = Exclude<keyof CapabilityRegistry & string, ReservedNonCapabilityKey>;
 
 /**
  * The built-in capability keys — exactly the capability fields declared on
@@ -231,11 +239,12 @@ type _BuiltinKeysComplete = _StaticAssert<
  * therefore treats a required capability with one of these names as missing
  * (fail-closed) rather than reading the infra field and passing falsely.
  *
- * Enforcement is necessarily at runtime: the collision is introduced by
- * *consumer* module augmentation, which the framework's own compilation cannot
- * observe, so a static `Capability & ReservedNonCapabilityKey extends never`
- * assertion here would only cover the framework's built-ins (which never
- * collide) and give false reassurance about consumer keys.
+ * Compile-time coverage: `Capability` excludes these keys, so `requires:
+ * ["logger"]` is a type error at the *consumer's* use site (where the augmented
+ * registry is visible) — the framework's own compilation cannot observe consumer
+ * augmentation, but the consumer's can. The runtime fail-closed guard above
+ * remains as defense-in-depth for code that bypasses the type system (e.g. an
+ * `as Capability[]` cast on a dynamically-built `requires`).
  */
 export const RESERVED_NON_CAPABILITY_KEYS = [
   "runId",

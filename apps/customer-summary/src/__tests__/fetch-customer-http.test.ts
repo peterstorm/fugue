@@ -5,9 +5,10 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr, makeNodeContext } from "@fugue/framework";
+import { isOk, isErr, makeNodeContext, witness } from "@fugue/framework";
 import { createFakeHttpCapability } from "@fugue/framework/testing";
 import { createHttpFetchCustomerNode } from "../dag/nodes/fetch-customer-http.js";
+import type { CrmRecord } from "../schemas/crm.js";
 
 // The node's `run` expects a TypedNodeContext<["http"]> (non-null `http`).
 // `makeNodeContext` returns the nullable runtime shape; in production the
@@ -31,7 +32,7 @@ const sampleCustomer = {
       ],
     },
   ],
-};
+} satisfies CrmRecord;
 
 describe("fetch-customer-http (capability-based)", () => {
   it("fetches customer via http capability", async () => {
@@ -118,5 +119,29 @@ describe("fetch-customer-http (capability-based)", () => {
     const node = createHttpFetchCustomerNode("https://crm.example.com/api/v1");
     expect(node.requires).toEqual(["http"]);
     expect(node.kind).toBe("fetch");
+  });
+
+  it("emits a version witness encoding createdAt + conversation count", () => {
+    const node = createHttpFetchCustomerNode("https://crm.example.com/api/v1");
+    const se = node.sideEffects;
+    expect(se.kind).toBe("reads");
+    if (se.kind !== "reads") return;
+    const w = se.extractWitness?.({ customer: sampleCustomer });
+    expect(w).toEqual(
+      witness(
+        "version",
+        "crm:customers",
+        `${sampleCustomer.createdAt}:${sampleCustomer.conversations.length}`,
+      ),
+    );
+  });
+
+  it("emits a 'not-found' witness sentinel when the customer is null", () => {
+    const node = createHttpFetchCustomerNode("https://crm.example.com/api/v1");
+    const se = node.sideEffects;
+    expect(se.kind).toBe("reads");
+    if (se.kind !== "reads") return;
+    const w = se.extractWitness?.({ customer: null });
+    expect(w).toEqual(witness("version", "crm:customers", "not-found"));
   });
 });

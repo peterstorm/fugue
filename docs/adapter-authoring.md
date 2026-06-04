@@ -30,15 +30,17 @@ keep the interface in the single adapter package.
 ```
 packages/adapter-<name>/
 ├── package.json        # name "@fugue/<name>", deps on @fugue/framework (+ port pkg)
-├── tsconfig.json       # extends ../../tsconfig.base.json; references ../framework (+ port)
+├── tsconfig.json       # extends ../../tsconfig.base.json
 ├── README.md
 └── src/
     ├── index.ts
     └── __tests__/<name>.test.ts
 ```
 
-`package.json` (mirror `adapter-pg`): `"type": "module"`, `main`/`types` →
-`dist/`, `scripts: { build: "tsc", test: "bun test" }`,
+`package.json` (mirror `adapter-pg`): `"type": "module"`, `main` →
+`src/index.ts` and `exports: { ".": "./src/index.ts" }` (this is a **source-first**
+monorepo — workspace packages publish their TypeScript entry directly, no build
+step), `scripts: { build: "tsc", typecheck: "tsc --noEmit", test: "bun test" }`,
 `dependencies: { "@fugue/framework": "workspace:*" }`. Put heavy backend SDKs in
 `peerDependencies` (or inject them — see §5).
 
@@ -48,15 +50,17 @@ packages/adapter-<name>/
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist", "types": ["@types/bun"] },
-  "include": ["src"],
-  "references": [{ "path": "../framework" }]
+  "include": ["src"]
 }
 ```
 
-> **Cross-package imports need the dependency built.** Bun resolves a workspace
-> package via its `main` (`dist/index.js`). After adding a new package, run
-> `bunx tsc --build packages/adapter-<name>/tsconfig.json` so `dist/` exists,
-> then `bun install`. Otherwise importers fail with "Cannot find module".
+> **No build step for cross-package imports.** Because every workspace package
+> points `main`/`exports` at `./src/index.ts`, Bun resolves importers straight to
+> source — `bun install` after adding the package is enough. Do **not** add a TS
+> project-`references` block: this monorepo deliberately omits them (Bun runs the
+> TypeScript directly; references would only help an emit-to-`dist/` build the
+> runtime never uses). The `build`/`typecheck` scripts run `tsc` for type
+> verification, not for resolution.
 
 ---
 

@@ -116,9 +116,10 @@ system cannot guarantee that the `FileRef` variant handed in is one this
 adapter understands. The MS Graph adapter handles the `msGraph`-style variants;
 a future foreign variant (`googleDriveFile`) handed to it returns a
 **fail-closed `FrameworkError`**, not a crash. This is the deliberate price of
-"the node doesn't know the provider." (Today, with one adapter and a closed
-union, this is enforced at compile time; the runtime guard becomes load-bearing
-once the type is extracted and shared — see below.)
+"the node doesn't know the provider." (Before the second adapter, with a single
+adapter over a closed union, this was a compile-time guarantee; now that
+`FileRef` is shared across `@fugue/ms-graph` and `@fugue/fs`, the runtime guard
+below is load-bearing rather than theoretical — see below.)
 
 ### Where the port type lives
 
