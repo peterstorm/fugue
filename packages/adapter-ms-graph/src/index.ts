@@ -206,7 +206,10 @@ const DriveItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   size: z.number().optional(),
-  lastModifiedDateTime: z.string(),
+  // Validated as ISO 8601 UTC so the value can be passed straight to
+  // FileMeta.lastModified (whose contract is ISO 8601 UTC) without the
+  // fs adapter's true-ISO output and this one ever disagreeing in format.
+  lastModifiedDateTime: z.string().datetime(),
   eTag: z.string().optional(),
   file: z.object({ mimeType: z.string().optional() }).optional(),
 });

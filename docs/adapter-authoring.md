@@ -179,5 +179,5 @@ Tests use `bun:test`, live in `src/__tests__/`, and assert on `Result` via
 - [ ] `connect`/`close` manage all external resources; boot fails loudly.
 - [ ] Backend transport is injectable; unit tests need no network/disk.
 - [ ] A `createFake…` is exported for downstream node tests.
-- [ ] `dist/` builds (`tsc --build`) and `bun test` is green.
+- [ ] Types check (`bun run typecheck`) and `bun test` is green.
 - [ ] README shows wiring into the host `capabilities` array.
