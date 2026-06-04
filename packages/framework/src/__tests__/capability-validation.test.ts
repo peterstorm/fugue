@@ -122,6 +122,26 @@ describe("validateCapabilities", () => {
     }
   });
 
+  it("a capability colliding with a reserved infra field is treated as missing (fail-closed)", () => {
+    // A consumer could augment `CapabilityRegistry` with a name that shadows a
+    // reserved infra field (e.g. `logger`). `makeNodeContext` refuses to wire
+    // such a capability, so it can never be satisfied — but `ctx.logger` is
+    // always present. Validation must NOT read the infra logger and pass; it
+    // must report the capability as missing.
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["logger" as Capability])],
+      edges: [],
+    });
+    // `makeCtx` always provides a non-null `logger` infra field.
+    const result = validateCapabilities(dag, makeCtx());
+    expect(isErr(result)).toBe(true);
+    if (!result.ok && result.error.kind === "missing-capability") {
+      expect(result.error.capability).toBe("logger" as Capability);
+      expect(result.error.nodeId).toBe(N("a"));
+    }
+  });
+
   it("first miss is surfaced at top-level nodeId/capability fields", () => {
     const dag = defineDagFromArray({
       id: "d",

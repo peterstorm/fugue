@@ -16,7 +16,7 @@ import type {
   Capability,
   ValidatedNodeContext,
 } from "../types/node.js";
-import { brandAsValidatedNodeContext } from "../types/node.js";
+import { brandAsValidatedNodeContext, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import type { FrameworkError, MissingCapability } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 
@@ -47,9 +47,16 @@ export const validateCapabilities = (
   // null" (built-in capability unwired) — both are missing for a node that
   // declared them.
   const dynamicCtx = ctx as Partial<Record<Capability, unknown>>;
+  // A capability whose name collides with a reserved infrastructure field
+  // (e.g. a consumer augments `CapabilityRegistry` with `logger`) can never be
+  // wired: `makeNodeContext` refuses to spread it (it would clobber the framework
+  // field), so `dynamicCtx[cap]` would resolve to the always-present infra value
+  // rather than the capability client. Treat such a requirement as missing —
+  // fail closed rather than pass validation on a mistyped value.
+  const reservedNonCapabilityKeys: ReadonlySet<string> = new Set(RESERVED_NON_CAPABILITY_KEYS);
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
-      if (dynamicCtx[cap] == null) {
+      if (reservedNonCapabilityKeys.has(cap) || dynamicCtx[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }
     }

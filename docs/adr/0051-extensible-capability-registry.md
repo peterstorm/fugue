@@ -47,7 +47,8 @@ TypeScript module augmentation:
 ### Module augmentation pattern (adapter packages)
 
 ```ts
-// In @fugue/pg
+// In @fugue/pg — illustrative subset; the shipped PgCapability also has
+// `execute` and `queryRaw` (see packages/adapter-pg/src/index.ts).
 export interface PgCapability {
   query<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>>;
   queryOne<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>>;
@@ -59,6 +60,14 @@ declare module "@fugue/framework" {
   }
 }
 ```
+
+`CapabilityRegistry` is, by design, a **shared kernel**: every adapter package
+co-owns it via `declare module`. A consequence is that `Capability =
+keyof CapabilityRegistry` is a function of the importing app's dependency
+closure, and capability-name validity/collision is resolved at **runtime**
+(`topoSortHandles` rejects duplicate handle names at boot; `validateCapabilities`
+fails closed on names that collide with reserved infra fields), not at the type
+level. This is the accepted cost of open extensibility.
 
 ### Validation
 
@@ -87,8 +96,9 @@ single source of truth now).
 
 ### Migration
 
-Delivered in four phases on the same branch (each phase is tagged with
-`@satisfies ADR-0051` markers in the code):
+Delivered in four phases on the same branch (the code carries `@satisfies
+ADR-0051` markers; Phase 4 is labelled with its phase number, the earlier
+markers are unnumbered):
 
 - **Phase 1 — Registry types.** Extract `CapabilityRegistry`, derive `Capability` as
   `keyof`, refactor `validateCapabilities` to dynamic property lookup. The type refactor

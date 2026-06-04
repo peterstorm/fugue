@@ -152,4 +152,12 @@ describe("normalizeCell", () => {
     expect(normalizeCell({ text: "label", hyperlink: "https://x" })).toBe("label");
     expect(normalizeCell({ error: "#REF!" })).toBeNull();
   });
+
+  it("recurses when a formula result is itself an object (rich text / nested)", () => {
+    // A formula whose computed result is a rich-text object must be unwrapped
+    // through the recursion, not stringified or dropped.
+    expect(normalizeCell({ formula: "CONCAT(...)", result: { richText: [{ text: "x" }, { text: "y" }] } })).toBe("xy");
+    // A formula whose result is an error cell normalises to null.
+    expect(normalizeCell({ formula: "1/0", result: { error: "#DIV/0!" } })).toBeNull();
+  });
 });

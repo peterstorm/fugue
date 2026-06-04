@@ -1,12 +1,13 @@
 /**
- * Capability Manager — manages lifecycle of CapabilityHandle instances.
+ * Capability Manager — lifecycle of CapabilityHandle instances.
  *
- * Pure domain logic for:
- * - Topological sort of handles based on `dependsOn` declarations
- * - Connect/close sequencing
- * - Health check aggregation
- *
- * The host's imperative shell calls these during boot and shutdown.
+ * Mixed module, split into two clearly-marked sections:
+ * - PURE: `topoSortHandles` — orders handles by their `dependsOn` declarations
+ *   and rejects malformed handle sets. No I/O; fixture-testable.
+ * - EFFECTFUL: `connectAll` / `closeAll` / `checkHealth` — drive the handles'
+ *   async lifecycle hooks. These are imperative-shell orchestration; the host's
+ *   boot/shutdown calls them. They live here for cohesion with the topo-sort
+ *   they consume, not because they are pure.
  *
  * @satisfies ADR-0051 — Extensible capability registry lifecycle management
  */

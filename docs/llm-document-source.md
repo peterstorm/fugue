@@ -111,7 +111,10 @@ export const fetchReport = createFetchNode({
 `getContent` does the I/O; `parseWorkbook` is a pure function so it stays
 fixture-testable. (You may also split parsing into a separate
 `createTransformNode` if you prefer the fetch node to return raw bytes —
-`outputSchema: z.object({ bytes: z.instanceof(Uint8Array) })`.)
+`outputSchema: z.object({ bytes: z.instanceof(Uint8Array) })`.) Both shapes are
+equally valid — ADR-0052 leads with the separate-transform form in its pipeline
+diagram; this guide leads with the inline form. Pick whichever keeps your DAG
+readable.
 
 ### Freshness / skip-work with metadata
 

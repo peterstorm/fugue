@@ -298,6 +298,32 @@ describe("createMsGraphAdapter — getContent", () => {
     }
   });
 
+  it("composes the caller's abort signal with the request timeout and propagates a caller abort", async () => {
+    // Exercises buildSignal's two-signal path: opts.signal + the per-request
+    // timeout are merged via AbortSignal.any, and the merged signal reaches
+    // fetch. A caller that aborts surfaces as a transient error.
+    const controller = new AbortController();
+    controller.abort(new Error("caller cancelled"));
+    let sawAbortedSignal = false;
+    const handle = createMsGraphAdapter(
+      baseConfig({
+        fetchImpl: async (_u, init) => {
+          // The composed signal must carry the caller's already-aborted state.
+          if (init.signal?.aborted) {
+            sawAbortedSignal = true;
+            throw Object.assign(new Error("aborted"), { name: "AbortError" });
+          }
+          return new Response(new Uint8Array([1]), { status: 200 });
+        },
+      }),
+    );
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"), { signal: controller.signal });
+    expect(sawAbortedSignal).toBe(true);
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) expect(res.error.kind).toBe("transient");
+  });
+
   it("maps a body-read failure (arrayBuffer throws) to a transient error", async () => {
     // A 2xx response whose body cannot be read — graphGet returns ok(res),
     // then getContent's arrayBuffer() rejects.

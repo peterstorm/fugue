@@ -133,11 +133,17 @@ export interface PgAdapterConfig {
  */
 export const mapPgError = (error: unknown, sql: string): FrameworkError => {
   const message = error instanceof Error ? error.message : String(error);
-  // Determine if the error is transient (connection issues) or permanent (syntax, constraint)
+  // Determine if the error is transient (connection issues) or permanent (syntax, constraint).
+  // Guard the SQLSTATE on its runtime type — a non-string `code` (a driver that
+  // sets it numeric, or an unrelated object carrying a `code` field) must not
+  // make `.startsWith` throw out of this function and escape the client's catch.
   if (error instanceof Error && "code" in error) {
-    const pgCode = (error as { code: string }).code;
+    const pgCode = (error as { code?: unknown }).code;
     // Connection-class errors (08xxx) and insufficient resources (53xxx) are transient
-    if (pgCode.startsWith("08") || pgCode.startsWith("53") || pgCode === "57P01") {
+    if (
+      typeof pgCode === "string" &&
+      (pgCode.startsWith("08") || pgCode.startsWith("53") || pgCode === "57P01")
+    ) {
       return { kind: "transient", nodeId: PG_NODE_ID, message: `PG transient: ${message} (${pgCode})` };
     }
   }

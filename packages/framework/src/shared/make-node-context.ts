@@ -11,7 +11,7 @@
 // exclusively via the `capabilities` record.
 
 import type { NodeContext, NodeContextInit } from "../types/node.js";
-import { BUILTIN_CAPABILITY_KEYS } from "../types/node.js";
+import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import { runId as brandRunId, dagId as brandDagId } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
 import { consoleLogger, noopObserver, noopTracer } from "./defaults.js";
@@ -26,25 +26,14 @@ const asDagId = (s: string | DagId): DagId =>
   typeof s === "string" ? brandDagId(s) : s;
 
 // Names a custom capability may NOT use, because the runtime guarantees them as
-// named context fields. The built-in capability keys are handled explicitly
-// in the `base` object below (and folded into RESERVED_CONTEXT_KEYS); these
-// are the always-present infrastructure fields that are NOT
-// capabilities (so absent from BUILTIN_CAPABILITY_KEYS) but must not be
-// overwritten by a same-named augmented capability spread.
-const ALWAYS_PRESENT_CONTEXT_KEYS = [
-  "runId",
-  "dagId",
-  "logger",
-  "tracer",
-  "observer",
-  "checkpointWriter",
-  "signal",
-  "contentFilter",
-] as const satisfies readonly (keyof NodeContext)[];
-
+// named context fields: the built-in capability keys (handled explicitly in the
+// `base` object below) plus the always-present non-capability infrastructure
+// fields (`RESERVED_NON_CAPABILITY_KEYS`, the single source of truth shared with
+// `validateCapabilities`). A same-named augmented capability spread would clobber
+// framework-guaranteed infrastructure, so both groups are excluded below.
 const RESERVED_CONTEXT_KEYS: ReadonlySet<string> = new Set<string>([
   ...BUILTIN_CAPABILITY_KEYS,
-  ...ALWAYS_PRESENT_CONTEXT_KEYS,
+  ...RESERVED_NON_CAPABILITY_KEYS,
 ]);
 
 export const makeNodeContext = (init: NodeContextInit): NodeContext => {

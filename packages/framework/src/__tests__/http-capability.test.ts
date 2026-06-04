@@ -108,6 +108,28 @@ describe("createHttpCapability (real HTTP)", () => {
     }
   });
 
+  it("preserves an explicit non-JSON contentType instead of defaulting to application/json", async () => {
+    const http = createHttpCapability({ baseUrl }).client;
+    const EchoSchema = z.object({
+      method: z.string(),
+      received: z.object({ items: z.array(z.number()) }),
+      contentType: z.string(),
+    });
+
+    const post = await http.post(
+      "/echo",
+      { items: [7] },
+      { schema: EchoSchema, contentType: "text/plain" },
+    );
+    expect(isOk(post)).toBe(true);
+    if (post.ok) {
+      // The body is still JSON.stringify'd, but the caller-chosen Content-Type
+      // header must survive (the default only applies when none is set).
+      expect(post.value.contentType).toContain("text/plain");
+      expect(post.value.received).toEqual({ items: [7] });
+    }
+  });
+
   it("returns transient error on HTTP 500 with structured httpStatus", async () => {
     const http = createHttpCapability({ baseUrl }).client;
     const result = await http.get("/error", { schema: z.any() });

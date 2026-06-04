@@ -227,6 +227,37 @@ type _BuiltinKeysComplete = _StaticAssert<
 >;
 
 /**
+ * Always-present `BaseNodeContext` fields that are NOT capabilities — the
+ * framework guarantees them by injecting a no-op default, so they live as named
+ * fields rather than registry entries.
+ *
+ * A consumer that augments `CapabilityRegistry` with a key equal to one of these
+ * creates a name collision: `makeNodeContext` refuses to spread such a
+ * capability (it would clobber framework infrastructure), so its client is never
+ * wired — meaning the capability can never be satisfied. `validateCapabilities`
+ * therefore treats a required capability with one of these names as missing
+ * (fail-closed) rather than reading the infra field and passing falsely.
+ *
+ * Enforcement is necessarily at runtime: the collision is introduced by
+ * *consumer* module augmentation, which the framework's own compilation cannot
+ * observe, so a static `Capability & ReservedNonCapabilityKey extends never`
+ * assertion here would only cover the framework's built-ins (which never
+ * collide) and give false reassurance about consumer keys.
+ */
+export const RESERVED_NON_CAPABILITY_KEYS = [
+  "runId",
+  "dagId",
+  "logger",
+  "tracer",
+  "observer",
+  "checkpointWriter",
+  "signal",
+  "contentFilter",
+] as const satisfies readonly (keyof BaseNodeContext)[];
+
+export type ReservedNonCapabilityKey = (typeof RESERVED_NON_CAPABILITY_KEYS)[number];
+
+/**
  * The runtime-facing NodeContext shape (capability fields nullable). The
  * runtime executor passes this to `runNodeShared`; each node's `run` callback
  * sees a `TypedNodeContext<R>` derived from its own `requires`.

@@ -208,6 +208,19 @@ describe("@fugue/pg — mapPgError classification", () => {
       expect(mapped.message).toContain("weird string failure");
     }
   });
+
+  it("a non-string `code` does not throw — falls through to non-retriable node-crash", () => {
+    // A driver/edge case that sets `code` to a non-string (here: numeric) must
+    // not make `pgCode.startsWith(...)` throw out of mapPgError and escape the
+    // client's catch as an unclassified rejection.
+    const weird = Object.assign(new Error("odd driver error"), { code: 42 });
+    const mapped = mapPgError(weird, "SELECT 1");
+    expect(mapped.kind).toBe("node-crash");
+    if (mapped.kind === "node-crash") {
+      expect(mapped.retriability).toBe("non-retriable");
+      expect(mapped.message).toContain("odd driver error");
+    }
+  });
 });
 
 describe("@fugue/pg — createPgClient (real client, fake pool)", () => {
