@@ -51,7 +51,7 @@
 import { z } from "zod";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
-import { ok, err, nodeId } from "@fugue/framework";
+import { ok, err, nodeId, frameworkError } from "@fugue/framework";
 import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fugue/document-source";
 import { unsupportedRefError } from "@fugue/document-source";
 
@@ -119,12 +119,11 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-const transientErr = (message: string, httpStatus?: number): FrameworkError => ({
-  kind: "transient",
-  nodeId: MS_GRAPH_NODE_ID,
-  message,
-  ...(httpStatus !== undefined ? { httpStatus } : {}),
-});
+// Route through the canonical `frameworkError.transient` factory so the
+// `httpStatus` spread logic lives in exactly one place; this helper just pins
+// the ms-graph sentinel node id.
+const transientErr = (message: string, httpStatus?: number): FrameworkError =>
+  frameworkError.transient(MS_GRAPH_NODE_ID, message, httpStatus);
 
 const crashErr = (message: string): FrameworkError => ({
   kind: "node-crash",

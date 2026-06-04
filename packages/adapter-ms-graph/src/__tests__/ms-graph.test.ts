@@ -199,6 +199,32 @@ describe("createMsGraphAdapter — getContent", () => {
     expect(seen[1].auth).toBeUndefined();
   });
 
+  it("maps an error status from the off-origin redirect target to a node-crash (an expired presigned download URL → 403)", async () => {
+    const cdnUrl = "https://storage.example.net/blob?sig=expired";
+    const seen: string[] = [];
+    const handle = createMsGraphAdapter({
+      getAccessToken: async () => TOKEN,
+      fetchImpl: async (u) => {
+        seen.push(u);
+        // First hop: Graph /content redirects to the presigned download URL.
+        if (u.endsWith("/content")) {
+          return new Response(null, { status: 302, headers: { location: cdnUrl } });
+        }
+        // Second hop: the signed URL has expired, so the storage host rejects it.
+        return new Response("expired", { status: 403 });
+      },
+    });
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) {
+      expect(res.error.kind).toBe("node-crash");
+      if (res.error.kind === "node-crash") expect(res.error.retriability).toBe("non-retriable");
+    }
+    // The failure surfaced only after both hops were attempted.
+    expect(seen).toHaveLength(2);
+  });
+
   it("maps a redirect with no Location header to a transient error", async () => {
     const handle = createMsGraphAdapter(
       baseConfig({

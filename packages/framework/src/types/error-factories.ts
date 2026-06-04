@@ -30,8 +30,8 @@ export const frameworkError = {
     ...(opts?.stack !== undefined ? { stack: opts.stack } : {}),
   }),
 
-  transient: (nid: string | NodeId, message: string): FrameworkError =>
-    ({ kind: "transient", nodeId: toNodeId(nid), message }),
+  transient: (nid: string | NodeId, message: string, httpStatus?: number): FrameworkError =>
+    ({ kind: "transient", nodeId: toNodeId(nid), message, ...(httpStatus !== undefined ? { httpStatus } : {}) }),
 
   rejected: (nid: string | NodeId, reason: string): FrameworkError =>
     ({ kind: "rejected", nodeId: toNodeId(nid), reason }),

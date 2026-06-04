@@ -285,4 +285,22 @@ describe("createFakeHttpCapability", () => {
       expect(result.error.kind === "node-crash" && result.error.retriability).toBe("non-retriable");
     }
   });
+
+  it("maps a non-2xx route status to a transient error carrying httpStatus — the documented contract that lets status-branching nodes be tested against the fake", async () => {
+    const fakeHttp = createFakeHttpCapability({
+      "GET /users/999": { status: 404, body: "Not Found" },
+    }).client;
+    const result = await fakeHttp.get("/users/999", {
+      schema: z.object({ id: z.string(), name: z.string() }),
+    });
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      // The headline feature: a 4xx status surfaces as `httpStatus`, identical
+      // to the real capability, so a node's `httpStatus === 404` branch is
+      // reachable in a fake-backed test.
+      expect(result.error.kind === "transient" && result.error.httpStatus).toBe(404);
+      expect(result.error.kind === "transient" && result.error.message).toContain("404");
+    }
+  });
 });

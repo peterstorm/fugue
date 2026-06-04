@@ -24,6 +24,7 @@ import { ok, err } from "../types/result.js";
 import type { HttpCapability, HttpRequestOpts, HttpBodyRequestOpts } from "../types/http-capability.js";
 import type { CapabilityHandle } from "../types/capability-handle.js";
 import { nodeId } from "../types/ids.js";
+import { frameworkError } from "../types/error-factories.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -52,12 +53,11 @@ const buildUrl = (baseUrl: string | undefined, url: string): string => {
   return `${base}${path}`;
 };
 
-const makeTransientError = (message: string, httpStatus?: number): FrameworkError => ({
-  kind: "transient",
-  nodeId: HTTP_NODE_ID,
-  message,
-  ...(httpStatus !== undefined ? { httpStatus } : {}),
-});
+// Route through the canonical `frameworkError.transient` factory so the
+// `httpStatus` spread logic lives in exactly one place; this helper just pins
+// the HTTP sentinel node id.
+const makeTransientError = (message: string, httpStatus?: number): FrameworkError =>
+  frameworkError.transient(HTTP_NODE_ID, message, httpStatus);
 
 const makeNodeCrashError = (message: string): FrameworkError => ({
   kind: "node-crash",
