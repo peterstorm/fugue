@@ -5,6 +5,8 @@ node_modules/
 dist/
 .env
 *.tsbuildinfo
+# Transient doc-example extraction scratch (swept up by tsconfig include otherwise)
+**/__doc_check_dir__/
 coverage/
 .venv
 .direnv

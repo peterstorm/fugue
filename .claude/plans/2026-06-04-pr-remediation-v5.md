@@ -3,7 +3,7 @@
 **Date:** 2026-06-04
 **Branch:** feat/extensible-capabilities
 **Cycle:** 8th review (v1–v7 prior); 103 files, 8282 insertions vs `main`
-**Findings:** 1 critical, 14 advisory (after dedup) → 3 fixed, 11 deferred (intentional / out-of-scope)
+**Findings:** 1 critical, 14 advisory (after dedup) → 6 fixed (incl. the typecheck-gate follow-up, Fixes 4–6), 8 deferred (intentional design / optional)
 
 ## Review Cohort
 
@@ -101,21 +101,49 @@ bun run --filter @fugue/framework typecheck   # exit 0
   strings follow the codebase's fail-at-boot (not at-factory) convention, with
   path-confinement enforced at use in `resolveWithinRoot`.
 
-## Deferred — Out of Scope (separate infra task)
+## Fixed in follow-up — per-package typecheck gate (Fixes 4–6)
 
-### New packages lack a `typecheck` script → skipped by the gate
+### Fix 4: new packages were skipped by the typecheck gate
 - **Source:** code-reviewer (process note)
-- **Detail:** `xlsx`, `document-source`, `adapter-fs/ms-graph/pg` have only
-  `build`/`test`, so `bun run --filter '*' typecheck` silently skips them — which
-  is how Fixes 1 & 2 escaped. Wiring `tsc --noEmit` cleanly is blocked on two
-  environmental issues that surface when tsc runs standalone in these packages:
-  (a) the untracked generated `src/__doc_check_dir__/` is picked up by
-  `include: ["src"]`, and (b) a zod-version-resolution mismatch against the
-  framework's committed (stale) `dist/.d.ts`. Resolving these (source-based
-  cross-package resolution / excluding the doc-check scratch dir) is a
-  build-infrastructure change deserving its own PR; adding a failing gate now
-  would be a net negative. **Recommendation:** dedicated follow-up to stop
-  committing `dist/`, resolve `@fugue/*` via source, then add `typecheck` scripts.
+- **Issue:** `xlsx`, `document-source`, `adapter-fs/ms-graph/pg` had only
+  `build`/`test`, so `bun run --filter '*' typecheck` silently skipped them —
+  which is how Fixes 1 & 2 escaped to the 8th cycle.
+- **Fix:** Added `"typecheck": "tsc --noEmit"` to all five packages.
+
+### Fix 5: `references` broke cross-package typecheck on a clean checkout
+- **Source:** investigation triggered by Fix 4
+- **Issue:** Six tsconfigs (`host` + the five new packages) declared
+  `references: [{ path: "../framework" }, …]`. TypeScript resolves *referenced*
+  projects via their declaration **output** (`dist/`), not the package's
+  `exports`. Since `dist/` is gitignored (never committed), a clean `tsc --noEmit`
+  fails with `TS6305 "… has not been built from source file"`, and a *stale*
+  local `dist/` silently resolves out-of-date declarations (this is why
+  `ms-graph` appeared to call a 2-arg `transient` — the stale `.d.ts` predated
+  `httpStatus`). The `host` gate was **already broken** on a clean checkout for
+  this reason; it only "passed" because a stale `dist/` happened to exist locally.
+- **Fix:** Removed the `references` arrays from all six tsconfigs, matching the
+  already-correct `framework` (`references: []`) and `customer-summary` (none).
+  `tsc --noEmit` now resolves cross-package imports to source via `exports`.
+
+### Fix 6: new packages pointed `exports` at non-existent `dist/`
+- **Source:** investigation triggered by Fix 5
+- **Issue:** The five new packages set `main`/`types`/`exports` to `dist/index.js`
+  / `dist/index.d.ts`. With `dist/` gitignored, an adapter importing a sibling
+  (`@fugue/document-source`) resolved to a missing declaration file
+  (`Cannot find module`). `framework` avoids this by exporting source.
+- **Fix:** Pointed all five packages' `main`/`exports` at `./src/index.ts`
+  (source-first, Bun-native — Bun runs the TS directly, no build step), matching
+  `framework`. Also gitignored `**/__doc_check_dir__/` (a transient doc-example
+  extraction scratch that `include: ["src"]` would otherwise sweep into the gate).
+
+**Verification (clean, no `dist/` — i.e. what CI sees):**
+```bash
+rm -rf packages/*/dist apps/*/dist
+bun run typecheck   # all 8 packages exit 0 (was: host broken, 5 pkgs skipped)
+bun test packages/framework            # 1445 pass, 0 fail
+bun run --filter @fugue/host test      # 593 + 10 pass, 0 fail
+bun test packages/{xlsx,document-source,adapter-fs,adapter-ms-graph,adapter-pg} apps/customer-summary  # 301 pass, 0 fail
+```
 
 ## Deferred — Optional Completeness
 

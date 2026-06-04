@@ -5,8 +5,5 @@
     "outDir": "dist",
     "types": ["@types/bun"]
   },
-  "include": ["src"],
-  "references": [
-    { "path": "../framework" }
-  ]
+  "include": ["src"]
 }
