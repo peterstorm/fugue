@@ -18,5 +18,12 @@
   },
   "devDependencies": {
     "@types/bun": "latest"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/__tests__"
+  ]
 }

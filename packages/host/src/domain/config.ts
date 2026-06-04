@@ -78,6 +78,16 @@ export const HostConfigSchema = z.object({
   DEFAULT_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(300_000),
   /** Default checkpoint TTL for DAG checkpoint entries (FR-040) */
   DEFAULT_CHECKPOINT_TTL_MS: z.coerce.number().int().min(1000).default(86_400_000),
+  /**
+   * Optional `documents` capability adapter (ADR-0052). When unset, DAGs
+   * declaring `requires: ["documents"]` fail the boot-time capability check.
+   * `fs` wires @fugue/fs rooted at DOCUMENTS_FS_ROOT (mounted volume /
+   * initContainer-staged files). Other adapters (ms-graph, …) are wired by
+   * extending this enum alongside their credential config.
+   */
+  DOCUMENTS_ADAPTER: z.enum(["fs"]).optional(),
+  /** Root directory for the fs documents adapter — required when DOCUMENTS_ADAPTER=fs */
+  DOCUMENTS_FS_ROOT: z.string().optional(),
 }).refine(
   (c) => c.DEFAULT_DAG_TIMEOUT_MS <= c.MAX_DAG_TIMEOUT_MS,
   { message: "DEFAULT_DAG_TIMEOUT_MS must not exceed MAX_DAG_TIMEOUT_MS" },
@@ -90,6 +100,9 @@ export const HostConfigSchema = z.object({
   }
   if (c.LLM_PROVIDER === "azure" && (!c.AZURE_OPENAI_ENDPOINT || !c.AZURE_OPENAI_API_KEY || !c.AZURE_OPENAI_DEPLOYMENT)) {
     ctx.addIssue({ code: "custom", path: ["AZURE_OPENAI_ENDPOINT"], message: "AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_OPENAI_DEPLOYMENT required when LLM_PROVIDER is 'azure'" });
+  }
+  if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
+    ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });
   }
 });
 

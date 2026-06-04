@@ -70,6 +70,30 @@ describe("HostConfigSchema", () => {
     expect(result.value.PORT).toBe(8080);
   });
 
+  it("accepts DOCUMENTS_ADAPTER=fs with a root dir (ADR-0052)", () => {
+    const result = parseHostConfig({ ...validEnv, DOCUMENTS_ADAPTER: "fs", DOCUMENTS_FS_ROOT: "/data/reports" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.DOCUMENTS_ADAPTER).toBe("fs");
+    expect(result.value.DOCUMENTS_FS_ROOT).toBe("/data/reports");
+  });
+
+  it("rejects DOCUMENTS_ADAPTER=fs without DOCUMENTS_FS_ROOT", () => {
+    const result = parseHostConfig({ ...validEnv, DOCUMENTS_ADAPTER: "fs" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("DOCUMENTS_FS_ROOT");
+  });
+
+  it("leaves documents capability unconfigured by default", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.DOCUMENTS_ADAPTER).toBeUndefined();
+  });
+
   it("coerces string numbers for MAX_GLOBAL_CONCURRENCY", () => {
     const result = parseHostConfig({ ...validEnv, MAX_GLOBAL_CONCURRENCY: "100" });
     expect(result.ok).toBe(true);

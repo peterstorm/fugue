@@ -1,0 +1,46 @@
+# Publish the @fugue/* packages to npmjs on a version tag.
+#
+# Usage:
+#   1. Bump versions (keep them in lockstep) and commit.
+#   2. git tag v0.1.0 && git push --tags
+#
+# Requires the NPM_TOKEN repository secret (npm automation token for the
+# `fugue` org). Packages ship TypeScript source (bun-first distribution) —
+# `bun publish` rewrites `workspace:*` ranges to the real versions at pack
+# time, so dependency order below only matters for registry visibility.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck + test
+        run: |
+          (cd packages/framework && bunx tsc --noEmit && bun test)
+          (cd packages/xlsx && bunx tsc --noEmit && bun test)
+          (cd packages/document-source && bunx tsc --noEmit && bun test)
+          (cd packages/adapter-fs && bunx tsc --noEmit && bun test)
+          (cd packages/adapter-ms-graph && bunx tsc --noEmit && bun test)
+          (cd packages/host && bunx tsc --noEmit && bun test)
+
+      - name: Publish (dependency order)
+        env:
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host; do
+            (cd "packages/$pkg" && bun publish --access public)
+          done

@@ -20,7 +20,7 @@ import { createModuleLoader } from "./adapters/module-loader.js";
 import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability } from "@fugue/framework";
-import type { Result, LlmClient } from "@fugue/framework";
+import type { Result, LlmClient, CapabilityHandle } from "@fugue/framework";
 
 // ── Logger ─────────────────────────────────────────────────────────────────
 
@@ -184,6 +184,25 @@ const main = async () => {
   const { port: redisPort, redis, disconnect: disconnectRedis } = redisResult.value;
 
   try {
+    // ADR-0051: the built-in `http` capability ships with the framework so
+    // every workflow can declare `requires: ["http"]`. It reaches each node's
+    // NodeContext via this `capabilities` array (the handle's name↔client
+    // correlation is restored in `extractClients`). Without this wiring
+    // `ctx.http` would be null and a `requires: ["http"]` DAG would fail the
+    // boot-time capability check.
+    const capabilities: CapabilityHandle[] = [createHttpCapability()];
+
+    // ADR-0052: optional `documents` capability, selected by environment.
+    // Dynamic import mirrors the ioredis/Anthropic pattern — the adapter
+    // package loads only when configured. createHost calls connect() on the
+    // handle at boot (validates the mount) and close() at shutdown.
+    if (config.DOCUMENTS_ADAPTER === "fs") {
+      const { createFsAdapter } = await import("@fugue/fs");
+      // Config validation (superRefine) guarantees DOCUMENTS_FS_ROOT is set.
+      capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
+      logger.info(`documents capability: @fugue/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
+    }
+
     // Step 3: Create shared infrastructure
     const sharedInfra: SharedInfra = {
       llm: await createLlmClient(config),
@@ -192,13 +211,7 @@ const main = async () => {
       contentFilter: null,
       prompts: null,
       logger,
-      // ADR-0051: the built-in `http` capability ships with the framework so
-      // every workflow can declare `requires: ["http"]`. It reaches each node's
-      // NodeContext via this `capabilities` array (the handle's name↔client
-      // correlation is restored in `extractClients`). Without this wiring
-      // `ctx.http` would be null and a `requires: ["http"]` DAG would fail the
-      // boot-time capability check.
-      capabilities: [createHttpCapability()],
+      capabilities,
     };
 
     // Step 4: Create git adapter (local or remote)

@@ -151,6 +151,19 @@ const sharedInfra = { /* ...llm, cache, prompts... */, capabilities: [documents]
 The host calls `connect()` at boot (validates auth / mount), `close()` at
 shutdown, and can `healthCheck()` for degraded-state detection.
 
+### Stock host binary: wire by environment
+
+The host binary (`packages/host/src/main.ts`) wires the fs adapter from env —
+no code change needed to serve `requires: ["documents"]` DAGs:
+
+```bash
+DOCUMENTS_ADAPTER=fs DOCUMENTS_FS_ROOT=/data/reports bun run packages/host/src/main.ts
+```
+
+`DOCUMENTS_FS_ROOT` is required when `DOCUMENTS_ADAPTER=fs` (validated at
+startup). Unset `DOCUMENTS_ADAPTER` → no documents capability, and any DAG
+requiring it fails the boot-time capability check with `missing-capability`.
+
 ### Adapter config quick reference
 
 ```ts
@@ -202,15 +215,22 @@ Use the backend-agnostic fake. Route by `fileRefKey(ref)`.
 ```ts
 import { createFakeDocumentSource, fileRefKey, localPathRef } from "@fugue/document-source";
 
-const documents = createFakeDocumentSource({
+const fakeDocs = createFakeDocumentSource({
   [fileRefKey(localPathRef("2026-Q2.xlsx"))]: {
     content: new Uint8Array([/* xlsx bytes, or a fixture */]),
     metadata: { id: "2026-Q2.xlsx", name: "2026-Q2.xlsx", sizeBytes: 1024, lastModified: "2026-05-30T12:00:00Z" },
   },
 });
 
-// `createFakeDocumentSource` returns a DocumentSource (the capability client).
-// Wire it straight onto the context as `ctx.documents`, run the node, assert on the Result.
+// `createFakeDocumentSource` returns a CapabilityHandle<"documents"> — the
+// same shape the real adapters return. The DocumentSource client is on
+// `.client`; wire THAT onto the context:
+const ctx = makeNodeContext({
+  runId: runId("test-1"),
+  dagId: "test",
+  capabilities: { documents: fakeDocs.client },
+});
+// …run the node (or the whole DAG via runDag), assert on the Result.
 ```
 
 A route can also force an error: `{ error: { kind: "transient", nodeId, message } }`.

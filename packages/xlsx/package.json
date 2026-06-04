@@ -19,11 +19,20 @@
     "zod": "^4.3.6"
   },
   "peerDependenciesMeta": {
-    "zod": { "optional": false }
+    "zod": {
+      "optional": false
+    }
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@fugue/fs": "workspace:*",
     "zod": "^4.3.6"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/__tests__"
+  ]
 }
