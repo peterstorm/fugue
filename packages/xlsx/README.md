@@ -1,9 +1,9 @@
-# @fugue/xlsx
+# @fuguejs/xlsx
 
 Pure workbook parsing for Fugue DAGs. `parseWorkbook` turns `.xlsx` bytes into
 Zod-validated typed rows. It is a pure function (deterministic, no I/O) — fetching
 the bytes is a [`documents`](../document-source) capability concern
-([`@fugue/fs`](../adapter-fs), [`@fugue/ms-graph`](../adapter-ms-graph)); parsing
+([`@fuguejs/fs`](../adapter-fs), [`@fuguejs/ms-graph`](../adapter-ms-graph)); parsing
 stays here so it is fixture-testable and provider-agnostic (ADR-0052).
 
 - **AI/usage guide:** [`docs/llm-document-source.md`](../../docs/llm-document-source.md)
@@ -12,7 +12,7 @@ stays here so it is fixture-testable and provider-agnostic (ADR-0052).
 
 ```ts
 import { z } from "zod";
-import { parseWorkbook } from "@fugue/xlsx";
+import { parseWorkbook } from "@fuguejs/xlsx";
 
 const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
 
@@ -49,5 +49,5 @@ normalizeCell(value: unknown): string | number | boolean | Date | null  // expor
 ## Tests
 
 Unit tests build `.xlsx` fixtures in memory (no committed binaries). An
-end-to-end test reads a real file from disk through `@fugue/fs` and parses it,
+end-to-end test reads a real file from disk through `@fuguejs/fs` and parses it,
 proving the `getContent → parseWorkbook` path.

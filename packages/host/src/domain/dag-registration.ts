@@ -11,10 +11,10 @@
  * at runtime using DagRegistrationSchema before registering.
  */
 
-import type { DagDef } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
-import { ok, err, dagId as makeDagId, tryDagId } from "@fugue/framework";
-import type { DagId } from "@fugue/framework";
+import type { DagDef } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import { ok, err, dagId as makeDagId, tryDagId } from "@fuguejs/framework";
+import type { DagId } from "@fuguejs/framework";
 import { z } from "zod";
 import type { HostError } from "./host-error.js";
 import type { FugueYaml } from "./config.js";

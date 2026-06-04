@@ -25,7 +25,7 @@
  * narrows on `kind`), not a separate boolean that could drift from `traceBackends`.
  */
 import type { Config, TraceBackend, TraceBackends } from "./config.js";
-import { type Result, type NonEmptyString, ok, err } from "@fugue/framework";
+import { type Result, type NonEmptyString, ok, err } from "@fuguejs/framework";
 
 export type { TraceBackend, TraceBackends };
 

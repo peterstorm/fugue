@@ -19,8 +19,8 @@ import {
   FakeLlmClient,
   NoopObserver,
   runDag,
-} from "@fugue/framework";
-import type { NodeContext } from "@fugue/framework";
+} from "@fuguejs/framework";
+import type { NodeContext } from "@fuguejs/framework";
 import type { SummaryResponse } from "../src/schemas/response.js";
 import type { SynthesisOutput } from "../src/schemas/summary.js";
 import { JsonFixtureSource } from "../src/sources/json-fixture-source.js";

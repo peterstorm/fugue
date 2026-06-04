@@ -35,9 +35,9 @@ import {
   createEvalJudgeNode,
   makeNodeContext,
   ok,
-} from "@fugue/framework";
-import type { ToolDef, ToolCall, NodeContext } from "@fugue/framework";
-import { OpenAILlmClient } from "@fugue/framework";
+} from "@fuguejs/framework";
+import type { ToolDef, ToolCall, NodeContext } from "@fuguejs/framework";
+import { OpenAILlmClient } from "@fuguejs/framework";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { JsonFixtureSource } from "../src/sources/json-fixture-source.js";
 import { createSummaryDag } from "../src/dag/summary-dag.js";

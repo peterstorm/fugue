@@ -11,8 +11,8 @@
 
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
-import { dagId, gitSha } from "@fugue/framework";
-import type { DagId, GitSha, DagDef } from "@fugue/framework";
+import { dagId, gitSha } from "@fuguejs/framework";
+import type { DagId, GitSha, DagDef } from "@fuguejs/framework";
 import { z } from "zod";
 import {
   emptyRegistry, freeze, withDag, withoutDag,

@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { err } from "@fugue/framework";
+import { err } from "@fuguejs/framework";
 import { createAuthMiddleware } from "../../http/middleware/auth.js";
 import type { AuthMiddlewareDeps } from "../../http/middleware/auth.js";
 import { createInMemoryTokenStore } from "../../adapters/token-store.js";

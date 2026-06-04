@@ -1,5 +1,5 @@
 /**
- * @fugue/host — Binary entry point.
+ * @fuguejs/host — Binary entry point.
  *
  * Parses host config from environment, creates the host, boots it.
  * Catches config errors, logs them, and exits.
@@ -19,8 +19,8 @@ import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 import { createModuleLoader } from "./adapters/module-loader.js";
 import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability } from "@fugue/framework";
-import type { Result, LlmClient, CapabilityHandle } from "@fugue/framework";
+import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability } from "@fuguejs/framework";
+import type { Result, LlmClient, CapabilityHandle } from "@fuguejs/framework";
 
 // ── Logger ─────────────────────────────────────────────────────────────────
 
@@ -197,10 +197,10 @@ const main = async () => {
     // package loads only when configured. createHost calls connect() on the
     // handle at boot (validates the mount) and close() at shutdown.
     if (config.DOCUMENTS_ADAPTER === "fs") {
-      const { createFsAdapter } = await import("@fugue/fs");
+      const { createFsAdapter } = await import("@fuguejs/fs");
       // Config validation (superRefine) guarantees DOCUMENTS_FS_ROOT is set.
       capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
-      logger.info(`documents capability: @fugue/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
+      logger.info(`documents capability: @fuguejs/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
     }
 
     // Step 3: Create shared infrastructure

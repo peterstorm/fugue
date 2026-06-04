@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { createFetchNode, ok, err, witness, resourceName } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
+import { createFetchNode, ok, err, witness, resourceName } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord } from "../../schemas/crm.js";
 import type { ConversationSource } from "../../sources/conversation-source.js";

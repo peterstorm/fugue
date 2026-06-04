@@ -11,7 +11,7 @@ import {
   type FrameworkError,
   type NodeDef,
   type ToolDef,
-} from "@fugue/framework";
+} from "@fuguejs/framework";
 import type { CrmRecord } from "../../schemas/crm.js";
 
 // --- Tool definition ---------------------------------------------------------

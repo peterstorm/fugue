@@ -1,8 +1,8 @@
 import { describe, test, expect } from "bun:test";
 import * as fc from "fast-check";
-import { dagId } from "@fugue/framework";
-import type { DagId } from "@fugue/framework";
-import { isOk, isErr } from "@fugue/framework";
+import { dagId } from "@fuguejs/framework";
+import type { DagId } from "@fuguejs/framework";
+import { isOk, isErr } from "@fuguejs/framework";
 import {
   initConcurrency,
   acquire,

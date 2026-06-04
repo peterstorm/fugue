@@ -9,7 +9,7 @@
 import { describe, it, expect } from "bun:test";
 import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { runLint } from "@fugue/framework";
+import { runLint } from "@fuguejs/framework";
 
 const dagsDir = resolve(import.meta.dir, "..", "..", "dags");
 

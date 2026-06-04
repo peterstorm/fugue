@@ -13,7 +13,7 @@ import {
   DagRegistrationSchema,
   validateDagRegistration,
   resolveDefaults,
-} from "@fugue/host/contract";
+} from "@fuguejs/host/contract";
 
 // ---------------------------------------------------------------------------
 // DagRegistration shape validation

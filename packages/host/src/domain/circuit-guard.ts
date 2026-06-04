@@ -16,7 +16,7 @@
  * to the injected handle. Testable with a trivial Map-backed fake.
  */
 
-import type { DagId } from "@fugue/framework";
+import type { DagId } from "@fuguejs/framework";
 import type { CircuitState } from "./circuit-breaker.js";
 import { attemptReset, isAllowed, consumeTestRequest, recordSuccess, recordFailure, DEFAULTS } from "./circuit-breaker.js";
 

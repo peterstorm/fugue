@@ -3,7 +3,7 @@
 Minimal, copy-paste-ready reference for generating Fugue DAGs.
 For deep dives: `library-ux.md`, `dag-type-system.md`, `packages/host/docs/writing-dags.md`.
 Reading files (Excel/CSV from disk, SharePoint, OneDrive): `llm-document-source.md`.
-Parsing `.xlsx` bytes → typed rows: `@fugue/xlsx` (`parseWorkbook`).
+Parsing `.xlsx` bytes → typed rows: `@fuguejs/xlsx` (`parseWorkbook`).
 Writing a capability adapter: `adapter-authoring.md`.
 Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
 
@@ -14,9 +14,9 @@ Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
 ```ts
 // dags/my-team/my-dag/dag.ts
 import { z } from "zod";
-import type { DagRegistration } from "@fugue/host/contract";
-import { defineDag, createFetchNode, createLlmNode, createTransformNode, ok } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
+import { defineDag, createFetchNode, createLlmNode, createTransformNode, ok } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // --- Schemas ---
 const InputSchema = z.object({ userId: z.string() });
@@ -204,8 +204,8 @@ result (the same pattern as `humanReview`). Have the LLM pick a **bucket** in
 its output schema and extract it:
 
 ```ts
-import { confidence } from "@fugue/framework";
-import type { LlmNodeDef } from "@fugue/framework";
+import { confidence } from "@fuguejs/framework";
+import type { LlmNodeDef } from "@fuguejs/framework";
 
 const node = createLlmNode<In, Out>({ /* …, output schema includes
   confidence: z.enum(["high", "medium", "low"]) — a bucket, never a number */ });
@@ -259,7 +259,7 @@ augmentation) and ships a `CapabilityHandle` the host wires at boot. The DAG
 never names the provider; only the capability:
 
 ```ts
-import { localPathRef } from "@fugue/document-source"; // brings the `documents` capability into scope
+import { localPathRef } from "@fuguejs/document-source"; // brings the `documents` capability into scope
 
 createFetchNode({
   id: "fetch-report",
@@ -382,7 +382,7 @@ export default registration;
 ### Linear pipeline (A → B → C) — `defineLinearDag`
 
 ```ts
-import { defineLinearDag } from "@fugue/framework";
+import { defineLinearDag } from "@fuguejs/framework";
 
 const dag = defineLinearDag({
   id: "pipeline",
@@ -394,7 +394,7 @@ const dag = defineLinearDag({
 ### Fan-out (parallel siblings) — `defineFanOut`
 
 ```ts
-import { defineFanOut } from "@fugue/framework";
+import { defineFanOut } from "@fuguejs/framework";
 
 // One source → N parallel branches → optional join
 const dag = defineFanOut({
@@ -412,7 +412,7 @@ const dag = defineFanOut({
 ### Diamond (fan-out + fan-in) — `defineDiamond`
 
 ```ts
-import { defineDiamond } from "@fugue/framework";
+import { defineDiamond } from "@fuguejs/framework";
 
 const dag = defineDiamond({
   id: "diamond",
@@ -426,7 +426,7 @@ const dag = defineDiamond({
 ### Conditional routing — `defineRouter`
 
 ```ts
-import { defineRouter } from "@fugue/framework";
+import { defineRouter } from "@fuguejs/framework";
 
 const dag = defineRouter({
   id: "intent-router",
@@ -589,8 +589,8 @@ all three carry the (branded) `nodeId`; there is **no** `permanent` kind — a
 deterministic failure is `node-crash` with `retriability: "non-retriable"`:
 
 ```ts
-import { ok, err, nodeId } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // Success
 return ok(value);
@@ -635,10 +635,10 @@ introspects a DAG file without needing to start the host. **All output is JSON
 on stdout**, designed for machine consumption.
 
 > Run `bunx fugue …` from a directory whose package depends on
-> `@fugue/framework` (bun links the bin per dependent). From an unrelated
+> `@fuguejs/framework` (bun links the bin per dependent). From an unrelated
 > directory `bunx` falls through to the npm registry — and rewrites the
 > lockfile while failing. Equivalent direct form:
-> `bun node_modules/@fugue/framework/bin/fugue.ts lint <path>`.
+> `bun node_modules/@fuguejs/framework/bin/fugue.ts lint <path>`.
 
 ### `fugue lint <path>`
 

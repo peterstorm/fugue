@@ -8,7 +8,7 @@
 import type { RegisteredDag } from "./registry.js";
 import type { LoadResult } from "../ports.js";
 import type { DagSnapshot } from "./dag-diff.js";
-import type { GitSha } from "@fugue/framework";
+import type { GitSha } from "@fuguejs/framework";
 import { resolveDefaults } from "./dag-registration.js";
 
 // ── Host-level timeout defaults (threaded from HostConfig) ─────────────────

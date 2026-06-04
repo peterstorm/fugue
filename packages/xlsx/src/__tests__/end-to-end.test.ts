@@ -1,5 +1,5 @@
 /**
- * End-to-end: fetch a real .xlsx from disk via the @fugue/fs `documents`
+ * End-to-end: fetch a real .xlsx from disk via the @fuguejs/fs `documents`
  * adapter, then parse it with parseWorkbook. Exercises the full
  * `getContent → parseWorkbook` path against actual disk I/O (no injection),
  * mirroring what a `createFetchNode` does at runtime.
@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ExcelJS from "exceljs";
 import { z } from "zod";
-import { isOk } from "@fugue/framework";
-import { createFsAdapter, localPathRef } from "@fugue/fs";
+import { isOk } from "@fuguejs/framework";
+import { createFsAdapter, localPathRef } from "@fuguejs/fs";
 import { parseWorkbook } from "../index.js";
 
 const RowSchema = z.object({ customerId: z.string(), revenue: z.number() });

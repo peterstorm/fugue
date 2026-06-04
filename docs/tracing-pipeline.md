@@ -129,7 +129,7 @@ Currently configured as `anyOf(errorOnly(), hadRetry(), ratio(0.1))` — traces 
 ## Configuration
 
 ```typescript
-import { initTracing, createMlflowExporter, anyOf, errorOnly, hadRetry, ratio } from "@fugue/framework";
+import { initTracing, createMlflowExporter, anyOf, errorOnly, hadRetry, ratio } from "@fuguejs/framework";
 
 const exporter = createMlflowExporter({ url: "http://mlflow:5000", experimentId: "0" });
 

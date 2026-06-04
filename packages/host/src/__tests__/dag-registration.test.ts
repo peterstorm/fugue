@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import type { DagDef } from "@fugue/framework";
+import type { DagDef } from "@fuguejs/framework";
 import {
   DagRegistrationSchema,
   validateDagRegistration,

@@ -7,7 +7,7 @@
 
 import { match } from "ts-pattern";
 import type { z } from "zod";
-import type { DagId, RunId } from "@fugue/framework";
+import type { DagId, RunId } from "@fuguejs/framework";
 
 // Zod 4 re-exports $ZodIssue as the canonical issue type
 type ZodIssue = z.core.$ZodIssue;

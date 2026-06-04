@@ -13,9 +13,9 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err, runId as makeRunId } from "@fugue/framework";
-import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fugue/framework";
-import { runDag } from "@fugue/framework";
+import { ok, err, runId as makeRunId } from "@fuguejs/framework";
+import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fuguejs/framework";
+import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
@@ -114,7 +114,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // Failure here aborts boot — a missing capability at runtime is worse than
   // a clean boot failure.
   const capHandles = sharedInfra.capabilities;
-  let sortedHandles: readonly import("@fugue/framework").CapabilityHandle[] = [];
+  let sortedHandles: readonly import("@fuguejs/framework").CapabilityHandle[] = [];
   if (capHandles.length > 0) {
     const sortResult = topoSortHandles(capHandles);
     if (!sortResult.ok) {

@@ -1,5 +1,5 @@
 {
-  "name": "@fugue/host",
+  "name": "@fuguejs/host",
   "version": "0.1.0",
   "main": "src/index.ts",
   "bin": "src/main.ts",
@@ -13,8 +13,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
-    "@fugue/framework": "workspace:*",
-    "@fugue/fs": "workspace:*",
+    "@fuguejs/framework": "workspace:*",
+    "@fuguejs/fs": "workspace:*",
     "hono": "^4.7.11",
     "ioredis": "^5.10.1",
     "ts-pattern": "^5.9.0",

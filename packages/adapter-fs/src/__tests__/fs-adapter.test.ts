@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr } from "@fugue/framework";
-import { driveItemRef, localPathRef } from "@fugue/document-source";
+import { isOk, isErr } from "@fuguejs/framework";
+import { driveItemRef, localPathRef } from "@fuguejs/document-source";
 import {
   createFsAdapter,
   resolveWithinRoot,

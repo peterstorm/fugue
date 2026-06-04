@@ -8,7 +8,7 @@ Accepted — Implemented
 
 ## Context
 
-The framework (`@fugue/framework`) emits OpenTelemetry execution traces to exactly one
+The framework (`@fuguejs/framework`) emits OpenTelemetry execution traces to exactly one
 backend today: MLflow. The Azure AI Foundry observability feature requires that traces become a
 **selectable, fan-out-capable** signal — an application can send traces to MLflow, to Azure AI
 Foundry, or to **both at once** (for migration and side-by-side comparison), with the selection

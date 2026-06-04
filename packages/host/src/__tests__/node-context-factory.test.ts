@@ -6,8 +6,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fugue/framework";
-import type { Result, DagId, RunId, NodeId } from "@fugue/framework";
+import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fuguejs/framework";
+import type { Result, DagId, RunId, NodeId } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";

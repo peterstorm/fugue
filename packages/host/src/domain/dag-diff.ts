@@ -11,7 +11,7 @@
  * @satisfies FR-007 — Track DAG versions by git commit SHA
  */
 
-import type { DagId, GitSha } from "@fugue/framework";
+import type { DagId, GitSha } from "@fuguejs/framework";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

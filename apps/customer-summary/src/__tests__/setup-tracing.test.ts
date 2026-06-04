@@ -5,7 +5,7 @@ import {
   asNonEmptyString,
   type TracingHandle,
   type FoundryTelemetrySink,
-} from "@fugue/framework";
+} from "@fuguejs/framework";
 import { setUpTracing, type TracingSeams } from "../bootstrap.js";
 import type { ResolvedObservability } from "../observability.js";
 import type { SpanExporter } from "../observability-composition.js";

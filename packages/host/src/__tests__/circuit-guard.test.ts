@@ -6,8 +6,8 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { dagId } from "@fugue/framework";
-import type { DagId } from "@fugue/framework";
+import { dagId } from "@fuguejs/framework";
+import type { DagId } from "@fuguejs/framework";
 import type { CircuitState } from "../domain/circuit-breaker.js";
 import { initCircuit, DEFAULTS } from "../domain/circuit-breaker.js";
 import { checkCircuit, markSuccess, markFailure, DEFAULT_CIRCUIT_CONFIG } from "../domain/circuit-guard.js";

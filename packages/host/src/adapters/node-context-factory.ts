@@ -26,8 +26,8 @@ import type {
   NodeId,
   Result,
   FrameworkError,
-} from "@fugue/framework";
-import { makeNodeContext, ok } from "@fugue/framework";
+} from "@fuguejs/framework";
+import { makeNodeContext, ok } from "@fuguejs/framework";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";

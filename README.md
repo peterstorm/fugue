@@ -6,9 +6,9 @@ DAG-shaped, durable runtime for LLM-bearing workflows. Typed orchestration of mu
 
 | Package | Description |
 |---------|-------------|
-| [`@fugue/framework`](packages/framework/) | Core DAG runtime — node types, execution engine, Result types, branded IDs |
-| [`@fugue/host`](packages/host/) | Production HTTP host — git sync, auth, concurrency, circuit breakers |
-| [`@fugue/customer-summary`](apps/customer-summary/) | Example DAG app — CRM summarization pipeline |
+| [`@fuguejs/framework`](packages/framework/) | Core DAG runtime — node types, execution engine, Result types, branded IDs |
+| [`@fuguejs/host`](packages/host/) | Production HTTP host — git sync, auth, concurrency, circuit breakers |
+| [`@fuguejs/customer-summary`](apps/customer-summary/) | Example DAG app — CRM summarization pipeline |
 
 ## Quick Start
 

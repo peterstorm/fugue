@@ -1,11 +1,11 @@
-# @fugue/pg
+# @fuguejs/pg
 
 PostgreSQL capability adapter for Fugue workflows.
 
 ## Installation
 
 ```bash
-bun add @fugue/pg pg zod
+bun add @fuguejs/pg pg zod
 ```
 
 `pg` and `zod` are peer dependencies — `pg` provides the connection pool,
@@ -16,7 +16,7 @@ bun add @fugue/pg pg zod
 ### Register with the host
 
 ```ts
-import { createPgAdapter } from "@fugue/pg";
+import { createPgAdapter } from "@fuguejs/pg";
 
 const pgHandle = createPgAdapter({
   connectionString: process.env.DATABASE_URL!,
@@ -34,7 +34,7 @@ const sharedInfra = {
 ### Use in a node
 
 ```ts
-import { createFetchNode } from "@fugue/framework";
+import { createFetchNode } from "@fuguejs/framework";
 import { z } from "zod";
 
 const UserSchema = z.object({
@@ -62,7 +62,7 @@ const fetchUser = createFetchNode({
 ### Testing with the fake
 
 ```ts
-import { createFakePgCapability } from "@fugue/pg";
+import { createFakePgCapability } from "@fuguejs/pg";
 
 const fakeDb = createFakePgCapability({
   "SELECT * FROM users WHERE id": [

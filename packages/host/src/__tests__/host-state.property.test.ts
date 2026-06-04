@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
-import { gitSha } from "@fugue/framework";
+import { gitSha } from "@fuguejs/framework";
 import { freeze } from "../domain/registry.js";
 import {
   booting, bootComplete, syncStarted, syncCompleted, syncFailed,

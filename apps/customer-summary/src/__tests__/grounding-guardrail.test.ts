@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { createGroundingGuardrailNode } from "../dag/nodes/grounding-guardrail.js";
-import { makeNodeContext } from "@fugue/framework";
+import { makeNodeContext } from "@fuguejs/framework";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { CrmRecord } from "../schemas/crm.js";
 

@@ -1,5 +1,5 @@
 /**
- * @fugue/pg — PostgreSQL capability adapter for Fugue.
+ * @fuguejs/pg — PostgreSQL capability adapter for Fugue.
  *
  * Provides a typed `PgCapability` interface that nodes access via
  * `requires: ["db"]` and `ctx.db`. Wraps the `pg` Pool with:
@@ -12,7 +12,7 @@
  * ## Usage
  *
  * ```ts
- * import { createPgAdapter } from "@fugue/pg";
+ * import { createPgAdapter } from "@fuguejs/pg";
  *
  * const pgHandle = createPgAdapter({
  *   connectionString: process.env.DATABASE_URL,
@@ -34,7 +34,7 @@
  *
  * ## Module Augmentation
  *
- * This package augments `@fugue/framework`'s `CapabilityRegistry` to add the
+ * This package augments `@fuguejs/framework`'s `CapabilityRegistry` to add the
  * `"db"` capability. After importing this package, `requires: ["db"]` becomes
  * valid and `ctx.db` is typed as `PgCapability`.
  *
@@ -43,8 +43,8 @@
 
 import { createRequire } from "node:module";
 import type { z } from "zod";
-import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
-import { ok, err, nodeId } from "@fugue/framework";
+import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
 import type { Pool as PgPool, PoolConfig } from "pg";
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ export interface PgCapability {
 // Module Augmentation
 // ---------------------------------------------------------------------------
 
-declare module "@fugue/framework" {
+declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
     /** PostgreSQL database capability. Access via `ctx.db` in nodes. */
     db: PgCapability;

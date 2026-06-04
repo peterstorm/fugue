@@ -8,9 +8,9 @@
  */
 
 import type { Context } from "hono";
-import type { DagId, Result, NodeContext, FrameworkError } from "@fugue/framework";
-import { formatFrameworkError, tryDagId } from "@fugue/framework";
-import type { DagDef, RunOptions } from "@fugue/framework";
+import type { DagId, Result, NodeContext, FrameworkError } from "@fuguejs/framework";
+import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
+import type { DagDef, RunOptions } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
@@ -197,7 +197,7 @@ export const createRunDagHandler = (
 
       // Declare ctx before the execution try so it's accessible in the catch block.
       // Guard the createContext call so the timer is cleared if it throws (leak prevention).
-      let ctx: import("@fugue/framework").NodeContext;
+      let ctx: import("@fuguejs/framework").NodeContext;
       try {
         ctx = deps.createContext(registered, controller.signal);
       } catch (setupErr) {

@@ -1,4 +1,4 @@
-# @fugue/document-source
+# @fuguejs/document-source
 
 The provider-neutral **document-source capability port**. Defines the
 `DocumentSource` capability (registry key `documents`), the `FileRef` addressing
@@ -7,7 +7,7 @@ adapters depend on this package and implement `DocumentSource` for one store.
 
 - **AI/usage guide:** [`docs/llm-document-source.md`](../../docs/llm-document-source.md)
 - **Design:** [`docs/adr/0052-document-source-capability.md`](../../docs/adr/0052-document-source-capability.md)
-- **Adapters:** [`@fugue/fs`](../adapter-fs) (local disk), [`@fugue/ms-graph`](../adapter-ms-graph) (SharePoint/OneDrive)
+- **Adapters:** [`@fuguejs/fs`](../adapter-fs) (local disk), [`@fuguejs/ms-graph`](../adapter-ms-graph) (SharePoint/OneDrive)
 
 ## The port
 
@@ -54,7 +54,7 @@ is typed.
 
 ## Why a separate package
 
-Extracted from `@fugue/ms-graph` when the second adapter (`@fugue/fs`) arrived,
+Extracted from `@fuguejs/ms-graph` when the second adapter (`@fuguejs/fs`) arrived,
 so both share one `FileRef` type and one registry augmentation — per
 "extract on second implementation" (ADR-0052). The runtime ref↔adapter guard
 (each adapter fails closed on variants it doesn't implement) is load-bearing now

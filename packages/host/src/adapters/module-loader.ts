@@ -11,9 +11,9 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { ok, err } from "@fugue/framework";
-import type { Result, DagId, GitSha } from "@fugue/framework";
-import { tryDagId, dagId } from "@fugue/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { Result, DagId, GitSha } from "@fuguejs/framework";
+import { tryDagId, dagId } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { validateDagRegistration, applyFugueYaml, missingEnvVars } from "../domain/dag-registration.js";
 import { parseFugueYaml } from "../domain/config.js";

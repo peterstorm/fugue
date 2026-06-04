@@ -1,11 +1,11 @@
 {
-  "name": "@fugue/customer-summary",
+  "name": "@fuguejs/customer-summary",
   "version": "0.0.1",
   "type": "module",
   "private": true,
   "dependencies": {
-    "@fugue/framework": "workspace:*",
-    "@fugue/host": "workspace:*",
+    "@fuguejs/framework": "workspace:*",
+    "@fuguejs/host": "workspace:*",
     "@anthropic-ai/sdk": "^0.91.1",
     "@azure/identity": "^4.13.0",
     "applicationinsights": "^3.10.0",

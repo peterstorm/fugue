@@ -32,7 +32,7 @@ The host needs to discover, validate, and load DAG code at runtime. The mechanis
 Repository structure:
 ```
 fugue-dags/                     # Separate git repo
-├── package.json                # depends on @fugue/framework
+├── package.json                # depends on @fuguejs/framework
 ├── bun.lockb
 └── dags/
     └── {team}/
@@ -63,5 +63,5 @@ The host imports DAGs via dynamic `import()` with cache-busting (append `?sha={c
 **Negative:**
 - Eventual consistency — up to `DAGS_POLL_INTERVAL_MS` delay between push and live. Acceptable for the use case (not real-time).
 - Git remote must be available at startup. If unreachable, host cannot boot (by design — no DAGs = no value). During operation, unreachable remote means existing DAGs continue serving.
-- Cross-repo type checking is not atomic — a breaking change in `@fugue/framework` requires updating the dags repo's dependency. Mitigated: framework follows semver, breaking changes are rare.
+- Cross-repo type checking is not atomic — a breaking change in `@fuguejs/framework` requires updating the dags repo's dependency. Mitigated: framework follows semver, breaking changes are rare.
 - `bun install` during sync adds latency when dependencies change. Mitigated: `--frozen-lockfile` is fast when lockfile matches.

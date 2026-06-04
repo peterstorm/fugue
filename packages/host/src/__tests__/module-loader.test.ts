@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { ok, err, dagId, gitSha } from "@fugue/framework";
-import type { Result, DagId, DagDef, GitSha } from "@fugue/framework";
+import { ok, err, dagId, gitSha } from "@fuguejs/framework";
+import type { Result, DagId, DagDef, GitSha } from "@fuguejs/framework";
 import { z } from "zod";
 import type { HostError } from "../domain/host-error.js";
 import {

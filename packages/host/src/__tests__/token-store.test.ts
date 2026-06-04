@@ -8,8 +8,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
 import type { RedisPort, LogPort } from "../ports.js";

@@ -1,16 +1,16 @@
 /**
- * @fugue/xlsx — pure workbook parsing for Fugue DAGs.
+ * @fuguejs/xlsx — pure workbook parsing for Fugue DAGs.
  *
  * `parseWorkbook` turns `.xlsx` bytes into Zod-validated typed rows. It is a
  * pure function (deterministic, no I/O) — the byte fetching is a `documents`
- * capability concern (`@fugue/ms-graph`, `@fugue/fs`), and parsing stays here
+ * capability concern (`@fuguejs/ms-graph`, `@fuguejs/fs`), and parsing stays here
  * so it is fixture-testable and provider-agnostic. See ADR-0052.
  *
  * ## Usage
  *
  * ```ts
  * import { z } from "zod";
- * import { parseWorkbook } from "@fugue/xlsx";
+ * import { parseWorkbook } from "@fuguejs/xlsx";
  *
  * const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
  *
@@ -26,8 +26,8 @@
 
 import ExcelJS from "exceljs";
 import type { z } from "zod";
-import type { Result, FrameworkError } from "@fugue/framework";
-import { ok, err, nodeId } from "@fugue/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
 
 /** Sentinel node ID for parse errors (parsing is a lib, not a DAG node). */
 const XLSX_NODE_ID = nodeId("xlsx-parse");

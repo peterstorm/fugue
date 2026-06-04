@@ -51,7 +51,7 @@ functional core, not in the capability and not in a tool.
 
 Introduce a generic **`DocumentSource`** capability registered under the
 registry key **`documents`**, with **Microsoft Graph** as its first adapter
-package (`@fugue/ms-graph`). The pipeline for a DAG-known Excel file is:
+package (`@fuguejs/ms-graph`). The pipeline for a DAG-known Excel file is:
 
 ```
 createFetchNode({ requires: ["documents"] })   // ref is config/input, fixed
@@ -118,21 +118,21 @@ a future foreign variant (`googleDriveFile`) handed to it returns a
 **fail-closed `FrameworkError`**, not a crash. This is the deliberate price of
 "the node doesn't know the provider." (Before the second adapter, with a single
 adapter over a closed union, this was a compile-time guarantee; now that
-`FileRef` is shared across `@fugue/ms-graph` and `@fugue/fs`, the runtime guard
+`FileRef` is shared across `@fuguejs/ms-graph` and `@fuguejs/fs`, the runtime guard
 below is load-bearing rather than theoretical — see below.)
 
 ### Where the port type lives
 
 The port (`DocumentSource`, `FileRef`, `FileMeta`, `ReadOpts`, the smart
 constructors, `fileRefKey`, the test fake, and `unsupportedRefError`) lives in a
-dedicated **`@fugue/document-source`** package, which augments
+dedicated **`@fuguejs/document-source`** package, which augments
 `CapabilityRegistry` with `documents: DocumentSource` exactly once. Adapter
-packages (`@fugue/ms-graph`, `@fugue/fs`, and any future
-`@fugue/google-drive`) depend on it, import the port, and implement
+packages (`@fuguejs/ms-graph`, `@fuguejs/fs`, and any future
+`@fuguejs/google-drive`) depend on it, import the port, and implement
 `DocumentSource` for one backend; each re-exports the port surface so it stays a
 one-stop import.
 
-This extraction was triggered by the **second adapter** (`@fugue/fs`), exactly
+This extraction was triggered by the **second adapter** (`@fuguejs/fs`), exactly
 per "do not pre-abstract; extract when the second implementation is real" — the
 port was factored against two concrete adapters, not guessed. With two adapters
 now sharing `FileRef`, the runtime ref-guard below is load-bearing rather than
@@ -140,23 +140,23 @@ theoretical.
 
 ### Local files in a container (OpenShift)
 
-The `@fugue/fs` adapter reads from a `rootDir` on the pod filesystem, confined to
+The `@fuguejs/fs` adapter reads from a `rootDir` on the pod filesystem, confined to
 that tree (the local equivalent of `Sites.Selected` — `../` traversal and
 absolute escapes are rejected non-retriably). Because a pod's filesystem is
 ephemeral and per-replica, "get the file onto disk" in OpenShift is a *delivery*
 question separate from the read, and ranks roughly:
 
 1. **Don't — read it remotely.** If the file lives in SharePoint, use
-   `@fugue/ms-graph` and fetch at runtime over the network; nothing is placed on
+   `@fuguejs/ms-graph` and fetch at runtime over the network; nothing is placed on
    disk. This is the expected production path for the SharePoint source.
 2. **PersistentVolume (RWX), populated by another process.** A ReadWriteMany
    volume (NFS / CephFS / Azure Files) mounted into the pod; a separate job,
    uploader, or external system writes the file and the DAG reads it via
-   `@fugue/fs` with `rootDir` = the mount path. The realistic "file on a shared
+   `@fuguejs/fs` with `rootDir` = the mount path. The realistic "file on a shared
    disk" production case.
 3. **initContainer fetch → `emptyDir`.** An init container pulls the file (from
    object storage, an API, or git) into an `emptyDir` shared with the app
-   container, which then reads it via `@fugue/fs`. Bridges a remote source to a
+   container, which then reads it via `@fuguejs/fs`. Bridges a remote source to a
    local read without a persistent volume.
 4. **ConfigMap / Secret volume.** Only for small (<~1 MiB), static files; use a
    Secret (binary via `binaryData`) for sensitive content. Most spreadsheets are
@@ -165,7 +165,7 @@ question separate from the read, and ranks roughly:
    build-time data; immutable and versioned with the image.
 
 Object storage (S3 / Azure Blob) is the cloud-native answer to "a file in the
-cloud" and would be a *separate* adapter (`@fugue/s3`) implementing the same
+cloud" and would be a *separate* adapter (`@fuguejs/s3`) implementing the same
 `DocumentSource` port — not the `localPath` variant. The generic port means any
 of these is a wiring choice, not a node change.
 
@@ -204,7 +204,7 @@ posture enforced elsewhere.
 - Ref↔adapter compatibility is a runtime-checked contract once the port type is
   shared, not a compile-time one. Mitigated: fail-closed `FrameworkError` on an
   unsupported ref, never a crash.
-- Adapters must depend on `@fugue/document-source` and the port owns the single
+- Adapters must depend on `@fuguejs/document-source` and the port owns the single
   registry augmentation; importing an adapter transitively loads it.
 - The shared port deliberately cannot express provider-specific operations;
   those require a separate capability. This is the guardrail working as intended,
@@ -214,17 +214,17 @@ posture enforced elsewhere.
 
 Delivered on this branch (compiling, unit-tested, no network):
 
-- `@fugue/document-source` port package: `DocumentSource` interface, `FileRef`
+- `@fuguejs/document-source` port package: `DocumentSource` interface, `FileRef`
   ADT (four variants incl. `localPath`), `FileMeta`, `ReadOpts`, smart
   constructors, `fileRefKey`, `unsupportedRefError`, the registry augmentation,
   and `createFakeDocumentSource`.
-- `@fugue/ms-graph` adapter: `createMsGraphAdapter` (real Graph URL building for
+- `@fuguejs/ms-graph` adapter: `createMsGraphAdapter` (real Graph URL building for
   the three MS variants, injected token provider, HTTP-status → `FrameworkError`
   mapping, fail-closed on foreign variants).
-- `@fugue/fs` adapter: `createFsAdapter` (root-confined local reads, fs-error
+- `@fuguejs/fs` adapter: `createFsAdapter` (root-confined local reads, fs-error
   classification, fail-closed on traversal and foreign variants) — the
   zero-unknowns adapter for wiring a DAG end-to-end today.
-- `@fugue/xlsx`: the pure `parseWorkbook` transform (bytes → Zod-validated typed
+- `@fuguejs/xlsx`: the pure `parseWorkbook` transform (bytes → Zod-validated typed
   rows) on `exceljs`, with fixture and end-to-end tests. Lives in the functional
   core, separate from this capability, so it is provider-agnostic.
 

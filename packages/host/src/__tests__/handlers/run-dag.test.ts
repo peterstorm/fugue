@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { dagId, gitSha, ok, err } from "@fugue/framework";
-import type { NodeContext, FrameworkError, DagId } from "@fugue/framework";
+import { dagId, gitSha, ok, err } from "@fuguejs/framework";
+import type { NodeContext, FrameworkError, DagId } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";

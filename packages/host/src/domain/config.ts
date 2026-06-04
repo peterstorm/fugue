@@ -13,8 +13,8 @@
  */
 
 import { z } from "zod";
-import { ok, err } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ export const HostConfigSchema = z.object({
   /**
    * Optional `documents` capability adapter (ADR-0052). When unset, DAGs
    * declaring `requires: ["documents"]` fail the boot-time capability check.
-   * `fs` wires @fugue/fs rooted at DOCUMENTS_FS_ROOT (mounted volume /
+   * `fs` wires @fuguejs/fs rooted at DOCUMENTS_FS_ROOT (mounted volume /
    * initContainer-staged files). Other adapters (ms-graph, …) are wired by
    * extending this enum alongside their credential config.
    */

@@ -12,9 +12,9 @@
  * @satisfies ADR-0051 — Extensible capability registry lifecycle management
  */
 
-import type { Result } from "@fugue/framework";
-import { ok, err } from "@fugue/framework";
-import type { CapabilityHandle, Capability, CapabilityRegistry } from "@fugue/framework";
+import type { Result } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { CapabilityHandle, Capability, CapabilityRegistry } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 
 // ---------------------------------------------------------------------------

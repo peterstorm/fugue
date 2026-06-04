@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import ExcelJS from "exceljs";
 import { z } from "zod";
-import { isOk, isErr } from "@fugue/framework";
+import { isOk, isErr } from "@fuguejs/framework";
 import { parseWorkbook, normalizeCell } from "../index.js";
 
 const RowSchema = z.object({ customerId: z.string(), revenue: z.number() });

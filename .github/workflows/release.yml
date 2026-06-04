@@ -1,46 +1,78 @@
-# Publish the @fugue/* packages to npmjs on a version tag.
+# Publish the @fuguejs/* packages to npmjs on a version tag.
 #
 # Usage:
 #   1. Bump versions (keep them in lockstep) and commit.
 #   2. git tag v0.1.0 && git push --tags
 #
-# Requires the NPM_TOKEN repository secret (npm automation token for the
-# `fugue` org). Packages ship TypeScript source (bun-first distribution) —
-# `bun publish` rewrites `workspace:*` ranges to the real versions at pack
-# time, so dependency order below only matters for registry visibility.
+# Auth: npm OIDC trusted publishing — no NPM_TOKEN secret. One-time setup per
+# package on npmjs.com (package → Settings → Trusted Publisher → GitHub
+# Actions: owner/repo + workflow filename `release.yml`). Note: npm only lets
+# you configure a trusted publisher on a package that already exists, so the
+# very first publish of each package is manual (`bun publish` from a logged-in
+# shell); every release after that runs through here with provenance.
+#
+# Packages ship TypeScript source (bun-first distribution). `bun pm pack`
+# rewrites `workspace:*` ranges to the real versions at pack time; the tarball
+# is then handed to `npm publish` (npm >= 11.5.1 for OIDC). Publish order
+# below only matters for registry visibility.
 name: release
 
 on:
   push:
     tags: ["v*"]
 
+env:
+  # Publish order: dependencies before dependents.
+  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance
+      id-token: write # npm OIDC trusted publishing + provenance
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # npm >= 11.5.1 required for OIDC trusted publishing
 
       - run: bun install --frozen-lockfile
 
+      - name: Verify tag matches package versions
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          for pkg in $PACKAGES; do
+            actual=$(bun -e "console.log(require('./packages/$pkg/package.json').version)")
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::packages/$pkg is at $actual but tag expects $expected" >&2
+              exit 1
+            fi
+          done
+
       - name: Typecheck + test
         run: |
-          (cd packages/framework && bunx tsc --noEmit && bun test)
-          (cd packages/xlsx && bunx tsc --noEmit && bun test)
-          (cd packages/document-source && bunx tsc --noEmit && bun test)
-          (cd packages/adapter-fs && bunx tsc --noEmit && bun test)
-          (cd packages/adapter-ms-graph && bunx tsc --noEmit && bun test)
-          (cd packages/host && bunx tsc --noEmit && bun test)
+          for pkg in $PACKAGES; do
+            (cd "packages/$pkg" && bunx tsc --noEmit && bun run test)
+          done
 
-      - name: Publish (dependency order)
-        env:
-          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish (skip versions already on the registry)
         run: |
-          for pkg in framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host; do
-            (cd "packages/$pkg" && bun publish --access public)
+          for pkg in $PACKAGES; do
+            name=$(bun -e "console.log(require('./packages/$pkg/package.json').name)")
+            version=$(bun -e "console.log(require('./packages/$pkg/package.json').version)")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published — skipping"
+              continue
+            fi
+            # bun pm pack rewrites workspace:* ranges; npm publishes the tarball via OIDC.
+            (
+              cd "packages/$pkg"
+              rm -rf .release && mkdir .release
+              bun pm pack --destination .release
+              npm publish .release/*.tgz --provenance --access public
+            )
           done

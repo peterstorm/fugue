@@ -1,5 +1,5 @@
 {
-  "name": "@fugue/framework",
+  "name": "@fuguejs/framework",
   "version": "0.1.0",
   "main": "src/index.ts",
   "exports": {

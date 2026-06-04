@@ -8,8 +8,8 @@
  *   fugue:teams:<team>    →  JSON { hash, grant }  (reverse index for revocation/listing)
  */
 
-import { ok, err } from "@fugue/framework";
-import type { Result } from "@fugue/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import { redisUnavailable, teamAlreadyExists } from "../domain/host-error.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
 import type { TokenStorePort, RedisPort, LogPort } from "../ports.js";

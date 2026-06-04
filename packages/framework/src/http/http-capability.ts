@@ -197,7 +197,7 @@ const createHttpClient = (config: HttpCapabilityConfig): HttpCapability => ({
  *
  * @example
  * ```ts
- * import { createHttpCapability } from "@fugue/framework";
+ * import { createHttpCapability } from "@fuguejs/framework";
  *
  * const http = createHttpCapability({
  *   baseUrl: "https://api.example.com",

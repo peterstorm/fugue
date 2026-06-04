@@ -71,6 +71,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-05-22: all 43 ADRs present, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fugue/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing).
+Verified 2026-05-22: all 43 ADRs present, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing).
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

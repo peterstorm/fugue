@@ -10,7 +10,7 @@ Accepted
 
 The monorepo originally used the `@ai-summary` package scope, named after the first DAG (customer summary generation). As the project evolved into a general-purpose DAG hosting platform, the name no longer reflected the product identity. The product name is "Fugue" — a term evoking concurrent, interleaving execution (from music theory: independent voices weaving together).
 
-The rename touches every `package.json` name field, all TypeScript import paths (`@ai-summary/framework` → `@fugue/framework`), workspace references, and the root `package.json`. Two approaches exist: gradual migration with dual-name support, or a single atomic rename.
+The rename touches every `package.json` name field, all TypeScript import paths (`@ai-summary/framework` → `@fuguejs/framework`), workspace references, and the root `package.json`. Two approaches exist: gradual migration with dual-name support, or a single atomic rename.
 
 The monorepo is private — published to no external registry, consumed by no external teams. There are zero downstream consumers who would break.
 
@@ -29,15 +29,15 @@ The monorepo is private — published to no external registry, consumed by no ex
    - Cons: Large diff in one PR, must verify all imports resolve post-rename
 
 ## Decision
-**Rename all packages from `@ai-summary/*` to `@fugue/*` in a single PR, atomically.**
+**Rename all packages from `@ai-summary/*` to `@fuguejs/*` in a single PR, atomically.**
 
 Changes:
-- `packages/framework/package.json` → `name: "@fugue/framework"`
-- `apps/customer-summary/package.json` → `name: "@fugue/customer-summary"`
+- `packages/framework/package.json` → `name: "@fuguejs/framework"`
+- `apps/customer-summary/package.json` → `name: "@fuguejs/customer-summary"`
 - Root `package.json` → `name: "fugue"`
-- All `.ts` files: `@ai-summary/framework` → `@fugue/framework`
+- All `.ts` files: `@ai-summary/framework` → `@fuguejs/framework`
 - `tsconfig.json` path mappings updated
-- New `packages/host/package.json` → `name: "@fugue/host"` (created fresh with new name)
+- New `packages/host/package.json` → `name: "@fuguejs/host"` (created fresh with new name)
 
 The rename is done in the same PR that introduces the host package, since the PR already touches most of the codebase. Verification: `bun run typecheck` and `bun test` pass after rename.
 
@@ -45,7 +45,7 @@ The rename is done in the same PR that introduces the host package, since the PR
 
 **Positive:**
 - Clean product identity from day one of the host feature.
-- No confusion about which package scope to use — there is only `@fugue/*`.
+- No confusion about which package scope to use — there is only `@fuguejs/*`.
 - No alias machinery, no `exports` map workarounds, no dual-path resolution.
 - AI agents authoring DAGs see a coherent namespace that matches the product name.
 

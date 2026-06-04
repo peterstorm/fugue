@@ -9,8 +9,8 @@
  */
 
 import { match } from "ts-pattern";
-import type { Result, GitSha } from "@fugue/framework";
-import { ok, err } from "@fugue/framework";
+import type { Result, GitSha } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
 import type { Registry } from "./registry.js";
 
 // ── Transition Error ───────────────────────────────────────────────────────

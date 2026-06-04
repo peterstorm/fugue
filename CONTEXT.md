@@ -39,7 +39,7 @@ gates, freshness-aware state management, and production observability.
 | **Result\<T, E\>** | Either-style type: `Ok<T>` or `Err<E>`. No exceptions cross module boundaries. |
 | **FrameworkError** | Discriminated union of 17+ error kinds, exhaustively formatted via `formatFrameworkError`. |
 | **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
-| **CapabilityRegistry** | Extensible interface mapping capability names to client types. Adapter packages augment it via `declare module "@fugue/framework"`. |
+| **CapabilityRegistry** | Extensible interface mapping capability names to client types. Adapter packages augment it via `declare module "@fuguejs/framework"`. |
 | **CapabilityHandle\<K\>** | Runtime lifecycle wrapper: `{ name, client, connect?, close?, healthCheck? }`. Adapters produce these; runtime manages lifecycle. |
 | **AdapterFactory\<K, C\>** | `(config: C) => CapabilityHandle<K>`. Standard factory shape for adapter packages. |
 | **HttpCapability** | Built-in capability for HTTP API calls. Returns `Result`, validates responses against Zod schemas. |
@@ -109,12 +109,12 @@ gates, freshness-aware state management, and production observability.
 | `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
 | `tracing/` | `types/` | OpenTelemetry integration |
 
-**Subpath exports.** The main barrel (`@fugue/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
+**Subpath exports.** The main barrel (`@fuguejs/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
 
 | Subpath | Exports | Optional peer dep |
 |---------|---------|-------------------|
-| `@fugue/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
-| `@fugue/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
+| `@fuguejs/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
+| `@fuguejs/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
 
 `check-imports.ts` enforces that `ioredis` is reachable only from `cache/redis-cache.ts`, `checkpoint/redis-*.ts`, and `queue-bullmq/`.
 
@@ -129,7 +129,7 @@ gates, freshness-aware state management, and production observability.
 7. **Freshness is fail-closed** — extractor failures abort the wave; proceeding without witness data would allow stale writes.
 8. **Pre-release: no backward-compat shims** — internal renames are first-class refactors, not aliased. No `@deprecated` re-exports for code that has not shipped.
 
-### Host Layer (`@fugue/host`)
+### Host Layer (`@fuguejs/host`)
 
 The host is the **imperative shell** that wires the framework into a production HTTP service.
 

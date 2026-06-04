@@ -1,11 +1,11 @@
 /**
- * @fugue/fs — local-filesystem adapter for the generic `DocumentSource`
- * capability (`@fugue/document-source`).
+ * @fuguejs/fs — local-filesystem adapter for the generic `DocumentSource`
+ * capability (`@fuguejs/document-source`).
  *
  * Reads files from a mounted directory for nodes that declare
  * `requires: ["documents"]` and use `ctx.documents`. This is the adapter with
  * no external unknowns (no auth, no network): wire a DAG end-to-end against a
- * local `.xlsx` for dev/test, then swap in `@fugue/ms-graph` by configuration
+ * local `.xlsx` for dev/test, then swap in `@fuguejs/ms-graph` by configuration
  * with no node changes.
  *
  * Handles the `localPath` `FileRef` variant only; any other variant fails
@@ -22,8 +22,8 @@
  * ## Usage
  *
  * ```ts
- * import { createFsAdapter } from "@fugue/fs";
- * import { localPathRef } from "@fugue/document-source";
+ * import { createFsAdapter } from "@fuguejs/fs";
+ * import { localPathRef } from "@fuguejs/document-source";
  *
  * const docs = createFsAdapter({ rootDir: "/data/reports" });   // a mounted volume
  *
@@ -40,14 +40,14 @@
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { readFile as nodeReadFile, stat as nodeStat } from "node:fs/promises";
 import { match } from "ts-pattern";
-import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
-import { ok, err, nodeId } from "@fugue/framework";
-import type { DocumentSource, FileRef, FileMeta } from "@fugue/document-source";
-import { unsupportedRefError } from "@fugue/document-source";
+import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
+import type { DocumentSource, FileRef, FileMeta } from "@fuguejs/document-source";
+import { unsupportedRefError } from "@fuguejs/document-source";
 
-// Re-export the port surface so `@fugue/fs` is a one-stop import.
-export { localPathRef, fileRefKey, createFakeDocumentSource } from "@fugue/document-source";
-export type { FileRef, FileMeta, ReadOpts, DocumentSource, FakeDocRoute } from "@fugue/document-source";
+// Re-export the port surface so `@fuguejs/fs` is a one-stop import.
+export { localPathRef, fileRefKey, createFakeDocumentSource } from "@fuguejs/document-source";
+export type { FileRef, FileMeta, ReadOpts, DocumentSource, FakeDocRoute } from "@fuguejs/document-source";
 
 // ---------------------------------------------------------------------------
 // Configuration

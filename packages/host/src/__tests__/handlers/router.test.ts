@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { gitSha } from "@fugue/framework";
-import type { NodeContext, DagId } from "@fugue/framework";
+import { gitSha } from "@fuguejs/framework";
+import type { NodeContext, DagId } from "@fuguejs/framework";
 import { createRouter } from "../../http/router.js";
 import type { RouterDeps } from "../../http/router.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
@@ -92,7 +92,7 @@ describe("createRouter — /admin/* defense-in-depth guard", () => {
 // ---------------------------------------------------------------------------
 
 import { z } from "zod";
-import { dagId } from "@fugue/framework";
+import { dagId } from "@fuguejs/framework";
 import type { Registry, RegisteredDag } from "../../domain/registry.js";
 
 const makeRoutedDag = (id: string, route: string): RegisteredDag => ({

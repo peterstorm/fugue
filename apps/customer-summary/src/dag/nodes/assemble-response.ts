@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { createTransformNode, ok, fwLogger } from "@fugue/framework";
+import { createTransformNode, ok, fwLogger } from "@fuguejs/framework";
 import { match } from "ts-pattern";
-import type { Result, FrameworkError, GuardrailResult } from "@fugue/framework";
+import type { Result, FrameworkError, GuardrailResult } from "@fuguejs/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
 import type { SummaryResponse } from "../../schemas/response.js";
 import { SynthesisOutputSchema } from "../../schemas/summary.js";

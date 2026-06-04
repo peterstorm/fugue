@@ -359,8 +359,8 @@ mkdir -p dags/cx/customer-summary/prompts
 ```typescript
 // dags/cx/customer-summary/dag.ts
 import { z } from "zod";
-import type { DagRegistration } from "@fugue/host/contract";
-import { defineDag, createFetchNode, createLlmNode } from "@fugue/framework";
+import type { DagRegistration } from "@fuguejs/host/contract";
+import { defineDag, createFetchNode, createLlmNode } from "@fuguejs/framework";
 
 const InputSchema = z.object({
   customerId: z.string().min(1),

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { asNonEmptyString } from "@fugue/framework";
+import { asNonEmptyString } from "@fuguejs/framework";
 import { loadConfig } from "../config.js";
 
 /** Brand a known-good literal connection string for tests (non-blank by inspection). */

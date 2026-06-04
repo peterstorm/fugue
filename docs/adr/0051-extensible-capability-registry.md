@@ -47,14 +47,14 @@ TypeScript module augmentation:
 ### Module augmentation pattern (adapter packages)
 
 ```ts
-// In @fugue/pg — illustrative subset; the shipped PgCapability also has
+// In @fuguejs/pg — illustrative subset; the shipped PgCapability also has
 // `execute` and `queryRaw` (see packages/adapter-pg/src/index.ts).
 export interface PgCapability {
   query<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>>;
   queryOne<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>>;
 }
 
-declare module "@fugue/framework" {
+declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
     db: PgCapability;
   }
@@ -107,7 +107,7 @@ markers are unnumbered):
 - **Phase 2 — Host lifecycle.** `CapabilityHandle` connect/close sequencing in the host:
   topological sort over `dependsOn`, connect in dependency order, close in reverse, and
   close the connected prefix (plus the failing handle itself) on an aborted boot.
-- **Phase 3 — `@fugue/pg` adapter.** First out-of-tree capability package exercising the
+- **Phase 3 — `@fuguejs/pg` adapter.** First out-of-tree capability package exercising the
   module augmentation pattern end-to-end.
 - **Phase 4 — Capability tracing.** Opt-in OTel span wrapping via `withTracedCapability`.
 

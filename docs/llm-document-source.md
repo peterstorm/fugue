@@ -35,13 +35,13 @@ All adapters implement the same `DocumentSource` port and register under the
 
 | Adapter | Package | Backend | Auth | Use when |
 |---|---|---|---|---|
-| Filesystem | `@fugue/fs` | local/mounted disk | none | dev/test, RWX volume, initContainer-staged file |
-| Microsoft Graph | `@fugue/ms-graph` | SharePoint / OneDrive | injected bearer token (MSAL) | the file lives in the Microsoft stack |
-| *(future)* S3/Blob | `@fugue/s3` | object storage | — | cloud-native object storage |
-| *(future)* Google Drive | `@fugue/google-drive` | Google Drive | — | the file lives in Google Drive |
+| Filesystem | `@fuguejs/fs` | local/mounted disk | none | dev/test, RWX volume, initContainer-staged file |
+| Microsoft Graph | `@fuguejs/ms-graph` | SharePoint / OneDrive | injected bearer token (MSAL) | the file lives in the Microsoft stack |
+| *(future)* S3/Blob | `@fuguejs/s3` | object storage | — | cloud-native object storage |
+| *(future)* Google Drive | `@fuguejs/google-drive` | Google Drive | — | the file lives in Google Drive |
 
-**Start with `@fugue/fs`** — it has no external unknowns, so you can wire a DAG
-end-to-end immediately, then swap in `@fugue/ms-graph` by config with no node
+**Start with `@fuguejs/fs`** — it has no external unknowns, so you can wire a DAG
+end-to-end immediately, then swap in `@fuguejs/ms-graph` by config with no node
 changes.
 
 ---
@@ -49,7 +49,7 @@ changes.
 ## `FileRef` — how you name the file
 
 A discriminated union. Use the smart constructor for the variant you need.
-Import from `@fugue/document-source` (or from whichever adapter — each re-exports
+Import from `@fuguejs/document-source` (or from whichever adapter — each re-exports
 these).
 
 ```ts
@@ -58,7 +58,7 @@ import {
   sharePointPathRef,   // SharePoint by site + path
   driveItemRef,        // MS Graph drive item, by stable ids
   shareUrlRef,         // any OneDrive/SharePoint sharing link
-} from "@fugue/document-source";
+} from "@fuguejs/document-source";
 
 localPathRef("reports/2026-Q2.xlsx");
 
@@ -85,10 +85,10 @@ The file is known to the DAG, so this is a `createFetchNode` with
 
 ```ts
 import { z } from "zod";
-import { createFetchNode } from "@fugue/framework";
-import type { Result, FrameworkError } from "@fugue/framework";
-import { localPathRef } from "@fugue/document-source";
-import { parseWorkbook } from "@fugue/xlsx";
+import { createFetchNode } from "@fuguejs/framework";
+import type { Result, FrameworkError } from "@fuguejs/framework";
+import { localPathRef } from "@fuguejs/document-source";
+import { parseWorkbook } from "@fuguejs/xlsx";
 
 const InputSchema = z.object({ period: z.string() });           // e.g. "2026-Q2"
 const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
@@ -133,8 +133,8 @@ Adapters produce a `CapabilityHandle`; add it to the host's `capabilities`
 array. Pick the adapter by environment — the DAG is unchanged.
 
 ```ts
-import { createFsAdapter } from "@fugue/fs";
-import { createMsGraphAdapter } from "@fugue/ms-graph";
+import { createFsAdapter } from "@fuguejs/fs";
+import { createMsGraphAdapter } from "@fuguejs/ms-graph";
 
 const documents =
   process.env.NODE_ENV === "production"
@@ -213,7 +213,7 @@ if (!r.ok) {
 Use the backend-agnostic fake. Route by `fileRefKey(ref)`.
 
 ```ts
-import { createFakeDocumentSource, fileRefKey, localPathRef } from "@fugue/document-source";
+import { createFakeDocumentSource, fileRefKey, localPathRef } from "@fuguejs/document-source";
 
 const fakeDocs = createFakeDocumentSource({
   [fileRefKey(localPathRef("2026-Q2.xlsx"))]: {
@@ -238,14 +238,14 @@ An unrouted ref returns a non-retriable error (never silent empty bytes).
 
 ---
 
-## Parsing the workbook — `@fugue/xlsx`
+## Parsing the workbook — `@fuguejs/xlsx`
 
 Parsing is deliberately **not** in the capability — it is a pure function so it
-stays fixture-testable and provider-agnostic. `@fugue/xlsx` provides it:
+stays fixture-testable and provider-agnostic. `@fuguejs/xlsx` provides it:
 
 ```ts
 import { z } from "zod";
-import { parseWorkbook } from "@fugue/xlsx";
+import { parseWorkbook } from "@fuguejs/xlsx";
 
 const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
 
@@ -261,19 +261,19 @@ const parsed = await parseWorkbook(bytes, RowSchema);  // Promise<Result<{ rows 
   worksheet; `validation` (naming the row) when a row violates `rowSchema`.
 
 The same parser works regardless of which adapter delivered the bytes — verified
-end-to-end (`@fugue/fs` read from disk → `parseWorkbook`) in
+end-to-end (`@fuguejs/fs` read from disk → `parseWorkbook`) in
 `packages/xlsx/src/__tests__/end-to-end.test.ts`.
 
 ---
 
 ## Deployment: getting the file onto disk (OpenShift)
 
-If you use `@fugue/fs` in a container, the file must reach the pod. Ranked
+If you use `@fuguejs/fs` in a container, the file must reach the pod. Ranked
 (see ADR-0052 for detail):
 
-1. **Don't — read remotely** with `@fugue/ms-graph` (SharePoint over network).
+1. **Don't — read remotely** with `@fuguejs/ms-graph` (SharePoint over network).
 2. **RWX PersistentVolume** populated by another job; `rootDir` = mount path.
-3. **initContainer** fetches into a shared `emptyDir`; app reads via `@fugue/fs`.
+3. **initContainer** fetches into a shared `emptyDir`; app reads via `@fuguejs/fs`.
 4. **ConfigMap/Secret volume** — only for small (<~1 MiB) / sensitive static files.
 5. **Baked into the image** (`COPY`) — only for static build-time data.
 
@@ -284,8 +284,8 @@ If you use `@fugue/fs` in a container, the file must reach the pod. Ranked
 To support a new backend (e.g. S3), add a peer adapter — do **not** touch nodes
 or the port's two methods. See `docs/adapter-authoring.md` for the full template.
 
-1. Add a `FileRef` variant in `@fugue/document-source` (e.g. `{ kind: "s3Object"; bucket; key }`) + a smart constructor + a `fileRefKey` case.
-2. New package `@fugue/<backend>` depending on `@fugue/document-source`; implement `DocumentSource`, handling your variant and returning `unsupportedRefError("<backend>", ref)` for others.
+1. Add a `FileRef` variant in `@fuguejs/document-source` (e.g. `{ kind: "s3Object"; bucket; key }`) + a smart constructor + a `fileRefKey` case.
+2. New package `@fuguejs/<backend>` depending on `@fuguejs/document-source`; implement `DocumentSource`, handling your variant and returning `unsupportedRefError("<backend>", ref)` for others.
 3. Map backend errors to `FrameworkError` (transient vs non-retriable `node-crash`).
 4. Provide `connect`/`close`/`healthCheck` on the `CapabilityHandle`.
 5. Re-export the port surface; add unit tests with an injected client (no network).
@@ -300,5 +300,5 @@ or the port's two methods. See `docs/adapter-authoring.md` for the full template
 - [ ] `getContent` result is checked (`if (!r.ok) return r`) before use.
 - [ ] Parsing is a pure function, not inline I/O.
 - [ ] An adapter is wired into the host `capabilities` array.
-- [ ] `@fugue/fs` paths are relative to `rootDir` (no `../`, no absolute).
+- [ ] `@fuguejs/fs` paths are relative to `rootDir` (no `../`, no absolute).
 - [ ] Tests use `createFakeDocumentSource`, not a real backend.

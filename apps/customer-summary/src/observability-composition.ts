@@ -32,15 +32,15 @@ import {
   dispatchEvent,
   fwLogger,
   isCacheHit,
-} from "@fugue/framework";
+} from "@fuguejs/framework";
 import type {
   Observer,
   PersistencePolicy,
   FoundryTelemetrySink,
   RunSummaryExtras,
   SpanExporter,
-} from "@fugue/framework";
-import type { ObserverEvent, RunEndEvent } from "@fugue/framework";
+} from "@fuguejs/framework";
+import type { ObserverEvent, RunEndEvent } from "@fuguejs/framework";
 import type { ResolvedObservability, TraceBackend, TraceBackends } from "./observability.js";
 import { isFoundryEnabled } from "./observability.js";
 

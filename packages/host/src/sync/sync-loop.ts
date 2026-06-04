@@ -21,8 +21,8 @@
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
-import { ok } from "@fugue/framework";
-import type { Result, GitSha } from "@fugue/framework";
+import { ok } from "@fuguejs/framework";
+import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";

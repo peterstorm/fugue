@@ -49,7 +49,7 @@ For 2-3 teams adopting the framework in the next 6 months, this boilerplate is a
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  AI Agent (Claude, Cursor, etc.)                             │
-│  - Reads @fugue/framework types + llms.txt                   │
+│  - Reads @fuguejs/framework types + llms.txt                   │
 │  - Generates DAG definitions, nodes                          │
 │  - Uses CLI: fugue validate / fugue test / fugue run --dry   │
 └────────────────────────┬─────────────────────────────────────┘
@@ -108,7 +108,7 @@ For 2-3 teams adopting the framework in the next 6 months, this boilerplate is a
                       │ exports DagRegistration
                       ▼
 ┌─────────────────────────────────────────────┐
-│  @fugue/host (this package)                 │
+│  @fuguejs/host (this package)                 │
 │  - Git sync + DAG discovery                 │
 │  - HTTP server (Hono)                       │
 │  - Bootstrap (LLM, Redis, tracing)          │
@@ -121,7 +121,7 @@ For 2-3 teams adopting the framework in the next 6 months, this boilerplate is a
                       │ uses
                       ▼
 ┌─────────────────────────────────────────────┐
-│  @fugue/framework (existing library)        │
+│  @fuguejs/framework (existing library)        │
 │  - DAG executor                             │
 │  - State machine kernel                     │
 │  - Tracing / content filter                 │
@@ -131,7 +131,7 @@ For 2-3 teams adopting the framework in the next 6 months, this boilerplate is a
 └─────────────────────────────────────────────┘
 ```
 
-**Naming decision:** Call it `@fugue/host`, NOT `@fugue/runtime`. The framework IS the runtime (executor, state machine, transitions). The host provides process lifecycle, HTTP serving, and dependency wiring.
+**Naming decision:** Call it `@fuguejs/host`, NOT `@fuguejs/runtime`. The framework IS the runtime (executor, state machine, transitions). The host provides process lifecycle, HTTP serving, and dependency wiring.
 
 ---
 
@@ -271,7 +271,7 @@ interface DagConfig {
 | Option | Description | Pros | Cons |
 |--------|-------------|------|------|
 | **A: Monorepo deps** | All deps in root `package.json`. Host runs `bun install` after pull if lockfile changed. | Simple, consistent | One team adding a dep affects everyone. Version conflicts. |
-| **B: Framework-only** | DAGs may ONLY import from `@fugue/framework` + Bun built-ins. External calls via `fetch`. | Zero dep conflicts | Limiting (no SDKs) |
+| **B: Framework-only** | DAGs may ONLY import from `@fuguejs/framework` + Bun built-ins. External calls via `fetch`. | Zero dep conflicts | Limiting (no SDKs) |
 | **C: Pre-bundled** | Teams esbuild their DAG into a single .js file. All deps inlined. | Full isolation | Loses TypeScript source (harder to debug), build step per team |
 
 **Recommendation:** Start with A with a constraint: DAGs should prefer `fetch` + framework capabilities. If a team genuinely needs an SDK, it goes in root `package.json` via PR. For 2-3 teams this is fine.
@@ -488,7 +488,7 @@ function createContextFactory(dag: DagRegistration, sharedDeps: SharedDeps) {
 - ~5 files, ~300 LoC of actual DAG logic
 
 **Migration plan:**
-1. Extract bootstrap/server/config logic into `@fugue/host`
+1. Extract bootstrap/server/config logic into `@fuguejs/host`
 2. Move DAG logic into `dags/customer/summary/` in the registry repo format
 3. Express `customer-summary` as a `DagRegistration` with `route: "/summarize"` (backwards-compat)
 4. Verify: all existing tests pass, MLflow traces land, checkpointing/resume works
@@ -521,7 +521,7 @@ dags/customer/summary/
 **Proposed (the entire host configuration):**
 ```typescript
 // host/index.ts
-import { FugueHost } from "@fugue/host";
+import { FugueHost } from "@fuguejs/host";
 
 const host = FugueHost.create({
   dagSource: {
@@ -553,7 +553,7 @@ export default host.serve({ port: 3000 });
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Package name | `@fugue/host` (not `runtime`) | Framework IS the runtime. Host provides lifecycle + HTTP. |
+| Package name | `@fuguejs/host` (not `runtime`) | Framework IS the runtime. Host provides lifecycle + HTTP. |
 | DAG loading | GitOps (poll + hot-reload) | No deploy pipeline per DAG. Git push = live. |
 | Process model | Single host per org | Simplicity. Teams don't manage infra. |
 | TypeScript-only DAGs | Yes | Type system = validation. Agents read types well. |
@@ -568,7 +568,7 @@ export default host.serve({ port: 3000 });
 
 1. ~~Multiple LLM clients per DAG~~ → **Solved.** `NodeDef.requires` already supports `"llm"` and `"judgeLlm"` separately. Per-node model selection = model-routing client, not N clients.
 
-2. ~~Shared node libraries~~ → **Deferred.** Copy-paste for 2-3 teams. Extract `@fugue/nodes-common` when a 3rd consumer appears with the exact same contract.
+2. ~~Shared node libraries~~ → **Deferred.** Copy-paste for 2-3 teams. Extract `@fuguejs/nodes-common` when a 3rd consumer appears with the exact same contract.
 
 3. **Background/async DAG runs** → DQ-9 above.
 
@@ -595,7 +595,7 @@ export default host.serve({ port: 3000 });
 
 ## Implementation Phases (Tentative)
 
-**Phase 1: Extract @fugue/host core**
+**Phase 1: Extract @fuguejs/host core**
 - Git syncer (poll-based)
 - DAG discovery + validation + dynamic import
 - HTTP router (run endpoint + health)

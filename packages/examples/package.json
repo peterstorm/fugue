@@ -1,5 +1,5 @@
 {
-  "name": "@fugue/examples",
+  "name": "@fuguejs/examples",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,12 +9,12 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@fugue/framework": "workspace:*",
-    "@fugue/document-source": "workspace:*"
+    "@fuguejs/framework": "workspace:*",
+    "@fuguejs/document-source": "workspace:*"
   },
   "devDependencies": {
-    "@fugue/host": "workspace:*",
-    "@fugue/pg": "workspace:*",
+    "@fuguejs/host": "workspace:*",
+    "@fuguejs/pg": "workspace:*",
     "@types/bun": "latest",
     "zod": "^4.3.6"
   },

@@ -20,7 +20,7 @@ Key forces:
 
 ## Options Considered
 
-1. **`DagRegistration` type defined in `@fugue/host`, wrapping `DagDef` with host metadata, Zod-validated at import time (chosen)**
+1. **`DagRegistration` type defined in `@fuguejs/host`, wrapping `DagDef` with host metadata, Zod-validated at import time (chosen)**
    - Pros:
      - Clean separation: `DagDef` is a framework concept (execution shape), `DagRegistration` is a host concept (deployment contract).
      - Atomic validation: one `import()` + one Zod parse validates the entire DAG contract.
@@ -28,7 +28,7 @@ Key forces:
      - `inputSchema` is mandatory — every DAG explicitly declares what HTTP input it accepts. No implicit `any`.
      - Framework stays unaware of host (ADR 0032 preserved).
    - Cons:
-     - DAG authors must import from `@fugue/host` for the `DagRegistration` type (additional dependency).
+     - DAG authors must import from `@fuguejs/host` for the `DagRegistration` type (additional dependency).
      - If host becomes heavy (many deps), DAG projects pull in those deps transitively. Mitigated: `DagRegistration` is just a type + Zod schema with no heavy deps.
 
 2. **Extend `DagDef` with optional host fields (e.g., `inputSchema`, `meta`)**
@@ -52,7 +52,7 @@ Key forces:
 
 ## Decision
 
-**DAG authors export a `DagRegistration` object as the default export from `dag.ts`. `DagRegistration` is defined in `@fugue/host` (not framework), wraps a `DagDef` with `inputSchema` and optional `meta`, and is Zod-validated at import time.**
+**DAG authors export a `DagRegistration` object as the default export from `dag.ts`. `DagRegistration` is defined in `@fuguejs/host` (not framework), wraps a `DagDef` with `inputSchema` and optional `meta`, and is Zod-validated at import time.**
 
 Concrete design:
 
@@ -84,7 +84,7 @@ Concrete design:
 
 **Negative:**
 
-- DAG authors take a dependency on `@fugue/host` for the `DagRegistration` type. If host grows heavy dependencies, this becomes a concern. Mitigation: `DagRegistration` and its schema have zero heavy deps (only Zod, which DAGs already use for `inputSchema`). If this becomes an issue, we can extract a thin `@fugue/dag-contract` package.
+- DAG authors take a dependency on `@fuguejs/host` for the `DagRegistration` type. If host grows heavy dependencies, this becomes a concern. Mitigation: `DagRegistration` and its schema have zero heavy deps (only Zod, which DAGs already use for `inputSchema`). If this becomes an issue, we can extract a thin `@fuguejs/dag-contract` package.
 - Dynamic import validation has a cost: Zod parse on every DAG load. Negligible — happens once per sync cycle per DAG, not on the request hot path.
 - The contract is structural (Zod validates shape, not semantics). A DAG could export a syntactically valid `DagRegistration` with a nonsensical `inputSchema`. The host can't catch semantic errors — only execution failures reveal those.
 

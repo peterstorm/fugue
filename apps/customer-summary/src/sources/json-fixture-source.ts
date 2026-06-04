@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ok, err, frameworkError, type Result, type FrameworkError } from "@fugue/framework";
+import { ok, err, frameworkError, type Result, type FrameworkError } from "@fuguejs/framework";
 import { CrmRecordSchema, type CrmRecord } from "../schemas/crm.js";
 import type { ConversationSource } from "./conversation-source.js";
 

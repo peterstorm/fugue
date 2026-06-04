@@ -8,7 +8,7 @@
  * @satisfies SC-008 — Two DAGs using same cache key string are isolated
  */
 
-import type { DagId, RunId, NodeId } from "@fugue/framework";
+import type { DagId, RunId, NodeId } from "@fuguejs/framework";
 
 /**
  * Build the Redis key prefix for cache entries of a specific DAG.

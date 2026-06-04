@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { createGuardrailNode } from "@fugue/framework";
-import type { GuardrailResult } from "@fugue/framework";
+import { createGuardrailNode } from "@fuguejs/framework";
+import type { GuardrailResult } from "@fuguejs/framework";
 import { validateGrounding } from "../../validation/grounding.js";
 import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";

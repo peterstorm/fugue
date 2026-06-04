@@ -1,10 +1,10 @@
 /**
- * @fugue/ms-graph — Microsoft Graph adapter for the generic `DocumentSource`
- * capability (`@fugue/document-source`).
+ * @fuguejs/ms-graph — Microsoft Graph adapter for the generic `DocumentSource`
+ * capability (`@fuguejs/document-source`).
  *
  * Reads files from SharePoint and OneDrive for nodes that declare
  * `requires: ["documents"]` and use `ctx.documents`. The port types
- * (`DocumentSource`, `FileRef`, `FileMeta`) live in `@fugue/document-source`
+ * (`DocumentSource`, `FileRef`, `FileMeta`) live in `@fuguejs/document-source`
  * and are re-exported here for convenience.
  *
  * The capability is exactly two operations — `getContent` (bytes) and
@@ -14,7 +14,7 @@
  * ## Usage
  *
  * ```ts
- * import { createMsGraphAdapter, sharePointPathRef } from "@fugue/ms-graph";
+ * import { createMsGraphAdapter, sharePointPathRef } from "@fuguejs/ms-graph";
  *
  * // `getAccessToken` is the caller's MSAL / @azure/identity wiring
  * // (app-only client credentials). This adapter never bundles an auth SDK.
@@ -40,7 +40,7 @@
  * });
  * ```
  *
- * Importing this package (via `@fugue/document-source`) augments
+ * Importing this package (via `@fuguejs/document-source`) augments
  * `CapabilityRegistry` so `requires: ["documents"]` becomes valid and
  * `ctx.documents` is typed as `DocumentSource`.
  *
@@ -50,12 +50,12 @@
 
 import { z } from "zod";
 import { match } from "ts-pattern";
-import type { Result, FrameworkError, CapabilityHandle } from "@fugue/framework";
-import { ok, err, nodeId, frameworkError } from "@fugue/framework";
-import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fugue/document-source";
-import { unsupportedRefError } from "@fugue/document-source";
+import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
+import { ok, err, nodeId, frameworkError } from "@fuguejs/framework";
+import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fuguejs/document-source";
+import { unsupportedRefError } from "@fuguejs/document-source";
 
-// Re-export the port surface so `@fugue/ms-graph` is a one-stop import.
+// Re-export the port surface so `@fuguejs/ms-graph` is a one-stop import.
 export {
   sharePointPathRef,
   driveItemRef,
@@ -63,14 +63,14 @@ export {
   localPathRef,
   fileRefKey,
   createFakeDocumentSource,
-} from "@fugue/document-source";
+} from "@fuguejs/document-source";
 export type {
   FileRef,
   FileMeta,
   ReadOpts,
   DocumentSource,
   FakeDocRoute,
-} from "@fugue/document-source";
+} from "@fuguejs/document-source";
 
 // ---------------------------------------------------------------------------
 // Configuration

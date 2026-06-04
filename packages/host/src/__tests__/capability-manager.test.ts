@@ -11,8 +11,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, isOk, isErr } from "@fugue/framework";
-import type { CapabilityHandle } from "@fugue/framework";
+import { ok, err, isOk, isErr } from "@fuguejs/framework";
+import type { CapabilityHandle } from "@fuguejs/framework";
 import {
   topoSortHandles,
   connectAll,

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { isOk, isErr, asNonEmptyString } from "@fugue/framework";
+import { isOk, isErr, asNonEmptyString } from "@fuguejs/framework";
 import {
   resolveObservabilityBackends,
   isFoundryEnabled,

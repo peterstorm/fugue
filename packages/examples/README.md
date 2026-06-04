@@ -1,4 +1,4 @@
-# @fugue/examples
+# @fuguejs/examples
 
 Golden, **lint-tested** DAG examples — the canonical copy-paste source for
 authoring Fugue DAGs. One file per topology and capability pattern.
