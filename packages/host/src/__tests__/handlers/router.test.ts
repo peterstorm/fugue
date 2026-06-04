@@ -175,4 +175,21 @@ describe("createRouter — custom route overrides", () => {
     registry = freeze([makeRoutedDag("lead-scoring", "/score-leads-v2")], SHA, Date.now());
     expect((await hit()).status).toBe(404);
   });
+
+  it("returns 503 for custom-route requests during boot (not 404)", async () => {
+    const bootingState: HostState = { phase: "booting", startedAt: Date.now() };
+    const deps: RouterDeps = {
+      ...makeRouterDeps(createInMemoryTokenStore()),
+      getHostState: () => bootingState,
+    };
+    const app = createRouter(deps);
+    const res = await app.request("/score-leads", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ query: "x" }),
+    });
+    // During boot, custom routes should signal "retry later" (503), not "no such route" (404)
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("host-unavailable");
+  });
 });
