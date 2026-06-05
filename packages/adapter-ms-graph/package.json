@@ -1,6 +1,6 @@
 {
   "name": "@fuguejs/ms-graph",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peterstorm/fugue.git",

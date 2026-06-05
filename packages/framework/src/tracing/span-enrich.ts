@@ -27,6 +27,8 @@ const getCostRates = (model: string) => PRICE_TABLE[model] ?? { inputPer1M: 0, o
 export interface EnrichLlmSpanOpts {
   readonly model: string;
   readonly promptName?: string;
+  /** Fingerprint of the prompt sources — ties a trace to the prompt version that produced it. */
+  readonly promptHash?: string;
   readonly system: string;
   readonly user: string;
   readonly tokensIn: number;
@@ -57,6 +59,7 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   otelSpan.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, opts.tokensIn);
   otelSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.tokensOut);
   otelSpan.setAttribute(AI_LLM_COST_USD, totalCost);
+  if (opts.promptHash !== undefined) otelSpan.setAttribute("ai.prompt_hash", opts.promptHash);
 
   const filter = resolveContentFilter(opts);
 

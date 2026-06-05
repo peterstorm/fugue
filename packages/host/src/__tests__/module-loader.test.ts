@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { ok, err, dagId, gitSha } from "@fuguejs/framework";
+import { ok, err, dagId, gitSha, computePromptHash } from "@fuguejs/framework";
 import type { Result, DagId, DagDef, GitSha } from "@fuguejs/framework";
 import { z } from "zod";
 import type { HostError } from "../domain/host-error.js";
@@ -389,7 +389,12 @@ describe("Module Loader", () => {
       mkdirSync(promptsDir, { recursive: true });
       writeFileSync(join(promptsDir, "synthesis.txt"), "Hello {{name}}");
       writeFileSync(join(promptsDir, "greeting.txt"), "Welcome!");
-      writeFileSync(join(promptsDir, "registry.json"), '{"synthesis":{}}'); // non-.txt ignored
+      // A VALID registry (hashes match) — non-.txt files are ignored as
+      // prompts, and a present registry is validated (see prompt versioning).
+      writeFileSync(join(promptsDir, "registry.json"), JSON.stringify({
+        synthesis: { version: "1.0.0", hash: computePromptHash("Hello {{name}}") },
+        greeting: { version: "1.0.0", hash: computePromptHash("Welcome!") },
+      }));
 
       const path = join(dagDir, "dag.ts");
       const result = await loadDagModule(path, gitSha("prompt-test-sha"));
@@ -518,5 +523,81 @@ describe("Module Loader", () => {
       if (!result.ok) return;
       expect(result.value.team).toBe("cx");
     });
+  });
+});
+
+// ── Prompt versioning (prompts/registry.json, opt-in) ───────────────────────
+
+describe("prompt registry validation (opt-in via prompts/registry.json)", () => {
+  const REG_DIR = join(import.meta.dir, "__fixtures_module_loader_registry__");
+  const dagDir = join(REG_DIR, "dags", "cx", "versioned");
+  const promptsDir = join(dagDir, "prompts");
+  const PROMPT_TEXT = "Skriv en åbner for {{companyName}}.";
+
+  const setup = (registry: string | null, promptText: string | null = PROMPT_TEXT) => {
+    if (existsSync(REG_DIR)) rmSync(REG_DIR, { recursive: true });
+    mkdirSync(promptsDir, { recursive: true });
+    writeFileSync(join(dagDir, "dag.ts"), VALID_DAG_MODULE);
+    if (promptText !== null) writeFileSync(join(promptsDir, "opener.txt"), promptText);
+    if (registry !== null) writeFileSync(join(promptsDir, "registry.json"), registry);
+  };
+
+  afterAll(() => {
+    if (existsSync(REG_DIR)) rmSync(REG_DIR, { recursive: true });
+  });
+
+  const load = (sha: string) => loadDagModule(join(dagDir, "dag.ts"), gitSha(sha));
+
+  it("absent registry.json skips validation (versioning is opt-in)", async () => {
+    setup(null);
+    const result = await load("reg-sha-absent");
+    expect(result.ok).toBe(true);
+  });
+
+  it("valid registry (matching hash) loads", async () => {
+    setup(JSON.stringify({ opener: { version: "1.0.0", hash: computePromptHash(PROMPT_TEXT) } }));
+    const result = await load("reg-sha-valid");
+    expect(result.ok).toBe(true);
+  });
+
+  it("hash mismatch fails the load — prompt edited without version bump", async () => {
+    setup(JSON.stringify({ opener: { version: "1.0.0", hash: computePromptHash("OLD TEXT") } }));
+    const result = await load("reg-sha-mismatch");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("dag-validation-failed");
+    expect(result.error.kind === "dag-validation-failed" && result.error.reason).toContain("version bump");
+  });
+
+  it("prompt file present but missing from the registry fails the load", async () => {
+    setup(JSON.stringify({}));
+    const result = await load("reg-sha-unregistered");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind === "dag-validation-failed" && result.error.reason).toContain("not in registry.json");
+  });
+
+  it("registered prompt whose file is missing fails the load", async () => {
+    setup(JSON.stringify({ opener: { version: "1.0.0", hash: "abc" } }), null);
+    const result = await load("reg-sha-missing-file");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind === "dag-validation-failed" && result.error.reason).toContain("missing");
+  });
+
+  it("malformed registry JSON fails the load", async () => {
+    setup("{not json");
+    const result = await load("reg-sha-malformed");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind === "dag-validation-failed" && result.error.reason).toContain("not valid JSON");
+  });
+
+  it("entry without version/hash shape fails the load", async () => {
+    setup(JSON.stringify({ opener: {} }));
+    const result = await load("reg-sha-bad-entry");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind === "dag-validation-failed" && result.error.reason).toContain("version: string");
   });
 });

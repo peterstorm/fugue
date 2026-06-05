@@ -16,14 +16,19 @@ import { match } from "ts-pattern";
 import { runLint } from "../src/cli/lint.js";
 import { runDescribe } from "../src/cli/describe.js";
 import { runCapabilities } from "../src/cli/capabilities.js";
+import { runPromptsSync, runPromptsCheck } from "../src/cli/prompts.js";
 
 const USAGE = `Usage: fugue <command> [path]
 
 Commands:
-  lint <path>      Validate a DAG file. Prints JSON, exits 0 on success.
-  describe <path>  Print a structured summary of a DAG file as JSON.
-  capabilities     List the framework's built-in capabilities as JSON
-                   (takes no path).
+  lint <path>              Validate a DAG file. Prints JSON, exits 0 on success.
+  describe <path>          Print a structured summary of a DAG file as JSON.
+  capabilities             List the framework's built-in capabilities as JSON
+                           (takes no path).
+  prompts sync <dagDir>    Rewrite prompts/registry.json from the prompt files
+                           (new prompt → 1.0.0, edited prompt → patch bump).
+  prompts check <dagDir>   Verify prompts/registry.json matches the prompt
+                           files. Exits 1 on drift — use in CI.
 
 For lint/describe the path must point to a dag.ts (or other module) that
 default-exports a DagRegistration: { dag: defineDag(...), inputSchema, ... }`;
@@ -49,6 +54,21 @@ const main = async (): Promise<number> => {
   if (command === "--help" || command === "-h") {
     printUsage(process.stdout);
     return 0;
+  }
+
+  // `prompts` takes a subcommand + dag directory — handle before the generic
+  // single-<path> requirement below.
+  if (command === "prompts") {
+    const [sub, dagDir] = [pathArg, ...rest];
+    if (sub !== "sync" && sub !== "check") {
+      dieUsage("`prompts` requires a subcommand: sync | check");
+    }
+    if (!dagDir || rest.length > 1) {
+      dieUsage("`prompts` requires exactly one <dagDir> argument.");
+    }
+    const result = sub === "sync" ? await runPromptsSync(dagDir) : await runPromptsCheck(dagDir);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return result.ok ? 0 : 1;
   }
 
   // `capabilities` is the one command that takes no path — it emits static

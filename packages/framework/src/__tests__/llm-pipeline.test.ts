@@ -111,6 +111,27 @@ describe("runLlmCallPipeline", () => {
     if (result.ok) expect(result.value).toEqual({ answer: "hi" });
   });
 
+  it("promptFingerprint is appended to the cache key — a prompt edit misses the old cache", async () => {
+    const seenKeys: string[] = [];
+    const cache = makeCache({
+      get: async () => ({ hit: false }),
+      set: async (key) => {
+        seenKeys.push(key);
+        return ok(undefined) as Result<void, FrameworkError>;
+      },
+    });
+
+    await runLlmCallPipeline(
+      { ...baseConfig, promptFingerprint: "aaaa" }, makeCallFn({ answer: "v1" }), makeCtx(cache));
+    await runLlmCallPipeline(
+      { ...baseConfig, promptFingerprint: "bbbb" }, makeCallFn({ answer: "v2" }), makeCtx(cache));
+
+    expect(seenKeys).toHaveLength(2);
+    expect(seenKeys[0]).toBe(`${baseConfig.cacheKey}:pf:aaaa`);
+    expect(seenKeys[1]).toBe(`${baseConfig.cacheKey}:pf:bbbb`);
+    expect(seenKeys[0]).not.toBe(seenKeys[1]); // same caller key, different prompt version
+  });
+
   it("cache write passes NO per-call TTL — the adapter's configured default governs", async () => {
     // Regression: a hardcoded TTL here silently overrode every DAG's
     // cacheTtlMs (the host adapter treats the per-call value as an override).
