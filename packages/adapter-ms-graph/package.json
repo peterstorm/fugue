@@ -1,6 +1,11 @@
 {
   "name": "@fuguejs/ms-graph",
-  "version": "0.1.2",
+  "version": "0.1.3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peterstorm/fugue.git",
+    "directory": "packages/adapter-ms-graph"
+  },
   "type": "module",
   "main": "src/index.ts",
   "exports": {
