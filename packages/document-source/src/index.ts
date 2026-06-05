@@ -143,6 +143,94 @@ declare module "@fuguejs/framework" {
 }
 
 // ---------------------------------------------------------------------------
+// Cached document parsing — metadata-fingerprinted memo for expensive parses
+// ---------------------------------------------------------------------------
+
+/**
+ * Memoize an expensive bytes→value parse, keyed by file identity + version.
+ *
+ * Re-parsing a large workbook (or PDF, CSV, …) on every DAG run dominates
+ * request latency long before the LLM does. This helper turns the repeat case
+ * into a single `getMetadata` round-trip: the parsed value is cached in
+ * process memory and reused while the file's fingerprint (`eTag`, falling
+ * back to `lastModified` + `sizeBytes`) is unchanged. A refreshed file is
+ * re-read and re-parsed on the next call — the "drop a newer export with the
+ * same name" workflow needs no cache invalidation step.
+ *
+ * Semantics:
+ * - `getMetadata` failure FAILS OPEN to a direct read+parse — metadata
+ *   support is an optimization, never a correctness requirement.
+ * - Parse failures are never cached.
+ * - Concurrent calls for the same (ref, fingerprint) share one in-flight
+ *   read+parse instead of racing duplicate work.
+ * - One entry per `FileRef` (latest fingerprint wins), so memory is bounded
+ *   by the number of distinct files, not by refresh count.
+ *
+ * Create the parser at MODULE scope so the memo is shared across DAG
+ * instances/runs; module cache-busting on deploy gives a fresh memo per
+ * code version.
+ *
+ * @example
+ * ```ts
+ * const readReport = createCachedDocumentParser((bytes) => parseWorkbook(bytes, RowSchema));
+ * // inside a fetch node:
+ * const rows = await readReport(ctx.documents, localPathRef("report.xlsx"));
+ * ```
+ */
+export const createCachedDocumentParser = <T>(
+  parse: (bytes: Uint8Array) => Promise<Result<T, FrameworkError>>,
+): ((
+  documents: DocumentSource,
+  ref: FileRef,
+  opts?: ReadOpts,
+) => Promise<Result<T, FrameworkError>>) => {
+  const memo = new Map<string, { readonly fingerprint: string; readonly value: T }>();
+  const inFlight = new Map<string, Promise<Result<T, FrameworkError>>>();
+
+  const readAndParse = async (
+    documents: DocumentSource,
+    ref: FileRef,
+    key: string,
+    fingerprint: string | null,
+    opts?: ReadOpts,
+  ): Promise<Result<T, FrameworkError>> => {
+    const bytes = await documents.getContent(ref, opts);
+    if (!bytes.ok) return bytes;
+    const parsed = await parse(bytes.value);
+    if (parsed.ok && fingerprint !== null) {
+      memo.set(key, { fingerprint, value: parsed.value });
+    }
+    return parsed;
+  };
+
+  return async (documents, ref, opts) => {
+    const key = fileRefKey(ref);
+
+    const meta = await documents.getMetadata(ref, opts);
+    if (!meta.ok) {
+      // Fail open: no metadata → no caching, but the read still works.
+      return readAndParse(documents, ref, key, null, opts);
+    }
+
+    const m = meta.value;
+    const fingerprint = m.eTag ?? `${m.lastModified}:${m.sizeBytes ?? "?"}`;
+
+    const hit = memo.get(key);
+    if (hit !== undefined && hit.fingerprint === fingerprint) return ok(hit.value);
+
+    const flightKey = `${key}@${fingerprint}`;
+    const pending = inFlight.get(flightKey);
+    if (pending !== undefined) return pending;
+
+    const work = readAndParse(documents, ref, key, fingerprint, opts).finally(() => {
+      inFlight.delete(flightKey);
+    });
+    inFlight.set(flightKey, work);
+    return work;
+  };
+};
+
+// ---------------------------------------------------------------------------
 // Shared error helper for adapters
 // ---------------------------------------------------------------------------
 

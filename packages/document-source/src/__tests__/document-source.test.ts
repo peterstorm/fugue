@@ -8,6 +8,7 @@ import {
   fileRefKey,
   unsupportedRefError,
   createFakeDocumentSource,
+  createCachedDocumentParser,
   type FileMeta,
 } from "../index.js";
 
@@ -77,5 +78,121 @@ describe("createFakeDocumentSource", () => {
 
   it("registers under the documents capability", () => {
     expect(createFakeDocumentSource({}).name).toBe("documents");
+  });
+});
+
+describe("createCachedDocumentParser", () => {
+  const ref = localPathRef("report.xlsx");
+  const meta = (lastModified: string, sizeBytes = 100, eTag?: string): FileMeta => ({
+    id: "report.xlsx", name: "report.xlsx", sizeBytes, lastModified,
+    ...(eTag !== undefined ? { eTag } : {}),
+  });
+
+  /** Counting DocumentSource: tracks getContent/getMetadata calls; mutable routes. */
+  const countingSource = (initial: { content: Uint8Array; metadata: FileMeta }) => {
+    const state = { ...initial, contentCalls: 0, metadataCalls: 0 };
+    const source = {
+      getContent: async () => { state.contentCalls++; return { ok: true as const, value: state.content }; },
+      getMetadata: async () => { state.metadataCalls++; return { ok: true as const, value: state.metadata }; },
+    };
+    return { source, state };
+  };
+
+  it("parses once while the fingerprint is unchanged — repeats cost one getMetadata", async () => {
+    let parses = 0;
+    const read = createCachedDocumentParser(async (bytes) => {
+      parses++;
+      return { ok: true as const, value: bytes.length };
+    });
+    const { source, state } = countingSource({ content: new Uint8Array(7), metadata: meta("2026-06-01T00:00:00Z", 7) });
+
+    const a = await read(source, ref);
+    const b = await read(source, ref);
+    const c = await read(source, ref);
+
+    expect(isOk(a) && a.value).toBe(7);
+    expect(isOk(c) && c.value).toBe(7);
+    expect(parses).toBe(1);
+    expect(state.contentCalls).toBe(1);
+    expect(state.metadataCalls).toBe(3);
+  });
+
+  it("re-parses when the file changes (lastModified+size fingerprint)", async () => {
+    let parses = 0;
+    const read = createCachedDocumentParser(async (bytes) => {
+      parses++;
+      return { ok: true as const, value: bytes.length };
+    });
+    const { source, state } = countingSource({ content: new Uint8Array(7), metadata: meta("2026-06-01T00:00:00Z", 7) });
+
+    await read(source, ref);
+    // Newer export dropped with the same name:
+    state.content = new Uint8Array(9);
+    state.metadata = meta("2026-06-02T00:00:00Z", 9);
+    const after = await read(source, ref);
+
+    expect(isOk(after) && after.value).toBe(9);
+    expect(parses).toBe(2);
+    expect(state.contentCalls).toBe(2);
+  });
+
+  it("prefers eTag over lastModified for the fingerprint", async () => {
+    let parses = 0;
+    const read = createCachedDocumentParser(async () => { parses++; return { ok: true as const, value: parses }; });
+    const { source, state } = countingSource({ content: new Uint8Array(1), metadata: meta("2026-06-01T00:00:00Z", 1, "v1") });
+
+    await read(source, ref);
+    // lastModified changes but eTag is stable → still cached
+    state.metadata = meta("2026-06-02T00:00:00Z", 1, "v1");
+    await read(source, ref);
+    expect(parses).toBe(1);
+
+    state.metadata = meta("2026-06-02T00:00:00Z", 1, "v2");
+    await read(source, ref);
+    expect(parses).toBe(2);
+  });
+
+  it("fails open to a direct read when getMetadata errors — and does not cache", async () => {
+    let parses = 0;
+    const read = createCachedDocumentParser(async () => { parses++; return { ok: true as const, value: parses }; });
+    const source = {
+      getContent: async () => ({ ok: true as const, value: new Uint8Array(1) }),
+      getMetadata: async () => ({ ok: false as const, error: { kind: "transient", nodeId: "n", message: "no stat" } as never }),
+    };
+
+    const a = await read(source, ref);
+    const b = await read(source, ref);
+    expect(isOk(a) && isOk(b)).toBe(true);
+    expect(parses).toBe(2); // no fingerprint → no memo
+  });
+
+  it("does not cache parse failures", async () => {
+    let parses = 0;
+    const read = createCachedDocumentParser<number>(async () => {
+      parses++;
+      if (parses === 1) return { ok: false as const, error: { kind: "validation", nodeId: "n", message: "bad row" } as never };
+      return { ok: true as const, value: 42 };
+    });
+    const { source } = countingSource({ content: new Uint8Array(1), metadata: meta("2026-06-01T00:00:00Z", 1) });
+
+    const first = await read(source, ref);
+    const second = await read(source, ref);
+    expect(isErr(first)).toBe(true);
+    expect(isOk(second) && second.value).toBe(42);
+  });
+
+  it("dedupes concurrent reads of the same fingerprint into one parse", async () => {
+    let parses = 0;
+    const read = createCachedDocumentParser(async () => {
+      parses++;
+      await new Promise((r) => setTimeout(r, 20));
+      return { ok: true as const, value: "parsed" };
+    });
+    const { source, state } = countingSource({ content: new Uint8Array(1), metadata: meta("2026-06-01T00:00:00Z", 1) });
+
+    const [a, b, c] = await Promise.all([read(source, ref), read(source, ref), read(source, ref)]);
+    expect(isOk(a) && isOk(b) && isOk(c)).toBe(true);
+    expect(parses).toBe(1);
+    expect(state.contentCalls).toBe(1);
   });
 });
