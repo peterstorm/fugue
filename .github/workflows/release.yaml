@@ -6,7 +6,7 @@
 #
 # Auth: npm OIDC trusted publishing — no NPM_TOKEN secret. One-time setup per
 # package on npmjs.com (package → Settings → Trusted Publisher → GitHub
-# Actions: owner/repo + workflow filename `release.yml`). Note: npm only lets
+# Actions: owner/repo + workflow filename `release.yaml`). Note: npm only lets
 # you configure a trusted publisher on a package that already exists, so the
 # very first publish of each package is manual (`bun publish` from a logged-in
 # shell); every release after that runs through here with provenance.
