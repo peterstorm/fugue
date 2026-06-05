@@ -83,6 +83,25 @@ jobs:
               cd "packages/$pkg"
               rm -rf .release && mkdir .release
               bun pm pack --destination .release
+
+              # GATE: bun pm pack resolves workspace:* from bun.lock, whose
+              # workspace "version" fields bun install does NOT refresh on a
+              # version bump — v0.1.4 shipped pinning siblings at 0.1.0 this
+              # way. Refuse to publish a tarball whose @fuguejs/* pins don't
+              # all equal the release version.
+              bad=$(tar -xzOf .release/*.tgz package/package.json \
+                | bun -e 'const pj = await new Response(Bun.stdin.stream()).json();
+                    const want = process.argv[1]; // bun -e: argv = [bun, ...args]
+                    const deps = { ...pj.dependencies, ...pj.peerDependencies };
+                    const bad = Object.entries(deps)
+                      .filter(([n, v]) => n.startsWith("@fuguejs/") && v !== want)
+                      .map(([n, v]) => n + "@" + v);
+                    console.log(bad.join(" "));' "$version")
+              if [ -n "$bad" ]; then
+                echo "::error::$name tarball pins stale workspace versions: $bad — bump the workspace \"version\" fields in bun.lock" >&2
+                exit 1
+              fi
+
               npm publish .release/*.tgz --access public
             )
           done
