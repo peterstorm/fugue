@@ -20,3 +20,6 @@ __pycache__/
 
 # Loom orchestration state (machine-local)
 .claude/state/
+
+# cortex memory plugin scratch
+.cortex_extract.json
