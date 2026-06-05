@@ -17,8 +17,6 @@ import { type Result, ok, err } from "../types/result.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 import { formatFrameworkError } from "../types/errors.js";
 
-const DEFAULT_CACHE_TTL_SEC = 86400;
-
 export interface LlmPipelineConfig<O> {
   readonly nodeId: NodeId;
   readonly model: string;
@@ -125,10 +123,13 @@ export const runLlmCallPipeline = async <O>(
 
   const output = llmResponse.output as O;
 
-  // 5. Cache write (best-effort — failures must never break a successful run)
+  // 5. Cache write (best-effort — failures must never break a successful run).
+  // No per-call TTL: expiry policy belongs to the adapter (the host wires the
+  // per-DAG cacheTtlMs / host default into it). A hardcoded TTL here silently
+  // overrode every DAG's configured cacheTtlMs — see ContextCacheAdapter.set.
   if (ctx.cache) {
     try {
-      const setResult = await ctx.cache.set(config.cacheKey, output, DEFAULT_CACHE_TTL_SEC);
+      const setResult = await ctx.cache.set(config.cacheKey, output);
       if (!setResult.ok) {
         ctx.logger.warn(
           `[${config.nodeId}] Cache write failed: ${setResult.error.kind === "cache-error" ? setResult.error.message : String(setResult.error)}`,

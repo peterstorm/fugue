@@ -111,6 +111,23 @@ describe("runLlmCallPipeline", () => {
     if (result.ok) expect(result.value).toEqual({ answer: "hi" });
   });
 
+  it("cache write passes NO per-call TTL — the adapter's configured default governs", async () => {
+    // Regression: a hardcoded TTL here silently overrode every DAG's
+    // cacheTtlMs (the host adapter treats the per-call value as an override).
+    let seenTtl: number | undefined | "unset" = "unset";
+    const cache = makeCache({
+      set: async (_key, _value, ttlSec) => {
+        seenTtl = ttlSec;
+        return ok(undefined) as Result<void, FrameworkError>;
+      },
+    });
+
+    const result = await runLlmCallPipeline(baseConfig, makeCallFn({ answer: "hi" }), makeCtx(cache));
+
+    expect(result.ok).toBe(true);
+    expect(seenTtl).toBeUndefined(); // set was called, with no TTL argument
+  });
+
   it("cache write .ok=false logs but still returns ok", async () => {
     const cache = makeCache({
       set: async () => err({ kind: "cache-error", operation: "SET", message: "disk full" }) as Result<void, FrameworkError>,

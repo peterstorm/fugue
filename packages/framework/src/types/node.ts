@@ -69,6 +69,14 @@ export type CacheLookup =
 /** Cache adapter for ephemeral LLM response caching. */
 export interface ContextCacheAdapter {
   readonly get: (key: string) => Promise<CacheLookup>;
+  /**
+   * `ttlSec` is a PER-CALL OVERRIDE of the adapter's configured default
+   * expiry — when omitted, the adapter's own policy applies (the host wires
+   * per-DAG `cacheTtlMs` / its global default into the adapter). Framework
+   * code (e.g. the LLM pipeline) deliberately omits it so DAG-level TTL
+   * configuration is honored; pass it only when a node has a genuine
+   * call-specific expiry requirement.
+   */
   readonly set: (
     key: string,
     value: unknown,
