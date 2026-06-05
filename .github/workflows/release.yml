@@ -15,6 +15,12 @@
 # rewrites `workspace:*` ranges to the real versions at pack time; the tarball
 # is then handed to `npm publish` (npm >= 11.5.1 for OIDC). Publish order
 # below only matters for registry visibility.
+#
+# GOTCHA: npm OIDC rejects workflow RE-RUNS (ENEEDAUTH at publish — see
+# npm/cli#8730; observed here on v0.1.1 attempt 2). If a release run fails,
+# do not re-run it: fix the problem, bump to the next patch version, and push
+# a fresh tag. The "skip versions already on the registry" step makes
+# partially-published releases safe to supersede.
 name: release
 
 on:
