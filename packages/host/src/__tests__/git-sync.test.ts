@@ -1,9 +1,12 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterAll } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ok, err, gitSha } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
-import { createBunGitAdapter, createLocalGitAdapter } from "../adapters/git-sync.js";
+import { createBunGitAdapter, createLocalGitAdapter, runBunInstall } from "../adapters/git-sync.js";
 
 // ── Fake GitPort for Unit Tests ────────────────────────────────────────────
 
@@ -234,6 +237,82 @@ describe("GitPort interface", () => {
       if (!result.ok) {
         expect(result.error.kind).toBe("git-clone-failed");
       }
+    });
+  });
+
+  describe("BunGitAdapter.hasLockfileChanged (integration — real git repo)", () => {
+    const tempDirs: string[] = [];
+    afterAll(async () => {
+      await Promise.allSettled(tempDirs.map((d) => rm(d, { recursive: true, force: true })));
+    });
+
+    const sh = async (args: string[], cwd: string): Promise<void> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" });
+      const code = await proc.exited;
+      if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code})`);
+    };
+
+    const headSha = async (cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd, stdout: "pipe" });
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
+      return out.trim();
+    };
+
+    /** Init a repo with three commits: base → bun.lock change → unrelated change. */
+    const makeRepo = async (): Promise<{ base: string; lockChanged: string; unrelated: string; dir: string }> => {
+      const dir = await mkdtemp(join(tmpdir(), "fugue-git-sync-test-"));
+      tempDirs.push(dir);
+      await sh(["init", "-b", "main"], dir);
+      await sh(["config", "user.email", "test@example.com"], dir);
+      await sh(["config", "user.name", "Test"], dir);
+
+      await writeFile(join(dir, "bun.lock"), "{}\n");
+      await sh(["add", "."], dir);
+      await sh(["commit", "-m", "base"], dir);
+      const base = await headSha(dir);
+
+      await writeFile(join(dir, "bun.lock"), '{"changed": true}\n');
+      await sh(["add", "."], dir);
+      await sh(["commit", "-m", "bump deps"], dir);
+      const lockChanged = await headSha(dir);
+
+      await writeFile(join(dir, "readme.md"), "unrelated\n");
+      await sh(["add", "."], dir);
+      await sh(["commit", "-m", "unrelated"], dir);
+      const unrelated = await headSha(dir);
+
+      return { base, lockChanged, unrelated, dir };
+    };
+
+    it("detects a change to the text lockfile bun.lock", async () => {
+      const { base, lockChanged, dir } = await makeRepo();
+      const adapter = createBunGitAdapter();
+      const result = await adapter.hasLockfileChanged(dir, base, lockChanged);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value).toBe(true);
+    });
+
+    it("ignores commits that touch neither lockfile", async () => {
+      const { lockChanged, unrelated, dir } = await makeRepo();
+      const adapter = createBunGitAdapter();
+      const result = await adapter.hasLockfileChanged(dir, lockChanged, unrelated);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value).toBe(false);
+    });
+  });
+
+  describe("runBunInstall", () => {
+    const tempDirs: string[] = [];
+    afterAll(async () => {
+      await Promise.allSettled(tempDirs.map((d) => rm(d, { recursive: true, force: true })));
+    });
+
+    it("is a no-op success when the directory has no package.json", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "fugue-install-test-"));
+      tempDirs.push(dir);
+      const result = await runBunInstall(dir);
+      expect(result.ok).toBe(true);
     });
   });
 });

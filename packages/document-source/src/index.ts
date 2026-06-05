@@ -186,11 +186,16 @@ const fakeMiss = (ref: FileRef, op: string): FrameworkError => ({
  * `ctx.documents`. Routes are keyed by `fileRefKey(ref)`. Backend-agnostic —
  * use it regardless of which real adapter the DAG will run against.
  *
+ * Returns a `CapabilityHandle<"documents">` — the same shape the real
+ * adapters return. The `DocumentSource` client is on `.client`; wire THAT
+ * onto the node context (`capabilities: { documents: fakeDocs.client }`).
+ *
  * @example
  * ```ts
  * const fakeDocs = createFakeDocumentSource({
  *   [fileRefKey(localPathRef("reports/q2.xlsx"))]: { content: new Uint8Array([1, 2, 3]) },
  * });
+ * const ctx = makeNodeContext({ ..., capabilities: { documents: fakeDocs.client } });
  * ```
  */
 export const createFakeDocumentSource = (

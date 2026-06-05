@@ -8,10 +8,11 @@
  * directly and hashes file mtimes for SHA comparison.
  *
  * @satisfies FR-001 — Poll git branch and detect new commits by comparing SHAs
- * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
+ * @satisfies FR-005 — Run bun install if the lockfile (bun.lock / bun.lockb) changed between commits
  * @satisfies ADR-0034 — Raw git via Bun.spawn
  */
 
+import { join } from "node:path";
 import { ok, err, gitSha as brandGitSha } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -145,8 +146,11 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
   },
 
   hasLockfileChanged: async (repoPath, fromSha, toSha) => {
+    // Bun ≥1.2 writes the text lockfile `bun.lock` by default; older repos
+    // carry the binary `bun.lockb`. Watch both — missing the text variant
+    // means dependency bumps never trigger reinstall and DAG imports break.
     const result = await spawnGit(
-      ["diff", "--name-only", fromSha, toSha, "--", "bun.lockb"],
+      ["diff", "--name-only", fromSha, toSha, "--", "bun.lock", "bun.lockb"],
       repoPath,
       timeoutMs,
     );
@@ -159,8 +163,8 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
       });
     }
 
-    // If stdout contains "bun.lockb", the lockfile changed
-    return ok(result.value.stdout.includes("bun.lockb"));
+    // Non-empty stdout means at least one lockfile changed between the SHAs
+    return ok(result.value.stdout.length > 0);
   },
 
   install: (repoPath) => runBunInstall(repoPath),
@@ -213,13 +217,21 @@ export const createLocalGitAdapter = (): GitPort => ({
 
 /**
  * Run `bun install --frozen-lockfile` in the given directory.
- * @satisfies FR-005 — Run bun install --frozen-lockfile when bun.lockb has changed
+ *
+ * A directory without a `package.json` is a no-op success — a dags repo with
+ * zero dependencies has nothing to install, and `bun install` erroring on it
+ * must not block host startup.
+ *
+ * @satisfies FR-005 — Run bun install --frozen-lockfile when the lockfile has changed
  */
 export const runBunInstall = async (
   cwd: string,
   timeoutMs: number = 60_000,
 ): Promise<Result<void, HostError>> => {
   try {
+    if (!(await Bun.file(join(cwd, "package.json")).exists())) {
+      return ok(undefined);
+    }
     const proc = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
       cwd,
       stdout: "pipe",
