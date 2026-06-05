@@ -1,0 +1,35 @@
+# Typecheck + test every publishable package on each push/PR.
+#
+# This is the same gate release.yml runs at tag time — running it on every
+# change means a broken host/framework can't sit unnoticed on main until the
+# next release. Same package list, same loop, so the two workflows can't
+# drift apart silently.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Keep in lockstep with release.yml's PACKAGES.
+  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck + test
+        run: |
+          for pkg in $PACKAGES; do
+            echo "::group::$pkg"
+            (cd "packages/$pkg" && bunx tsc --noEmit && bun run test)
+            echo "::endgroup::"
+          done
