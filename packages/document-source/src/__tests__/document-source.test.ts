@@ -8,6 +8,8 @@ import {
   fileRefKey,
   unsupportedRefError,
   createFakeDocumentSource,
+  isoUtcFromDate,
+  parseIsoUtc,
   type FileMeta,
 } from "../index.js";
 
@@ -37,6 +39,44 @@ describe("fileRefKey", () => {
   });
 });
 
+describe("FileRef constructor validation", () => {
+  it("rejects blank fields (empty or whitespace-only) loudly at construction", () => {
+    expect(() => localPathRef("")).toThrow(/non-empty/);
+    expect(() => localPathRef("   ")).toThrow(/path/);
+    expect(() => shareUrlRef("")).toThrow(/url/);
+    expect(() => driveItemRef("d", "")).toThrow(/itemId/);
+    expect(() => driveItemRef("", "i")).toThrow(/driveId/);
+    expect(() => sharePointPathRef({ siteHostname: "", sitePath: "/s", filePath: "/f" })).toThrow(
+      /siteHostname/,
+    );
+    expect(() => sharePointPathRef({ siteHostname: "h", sitePath: " ", filePath: "/f" })).toThrow(
+      /sitePath/,
+    );
+  });
+
+  it("accepts non-blank fields unchanged", () => {
+    expect(localPathRef(" a/b.xlsx ")).toEqual({ kind: "localPath", path: " a/b.xlsx " });
+  });
+});
+
+describe("IsoUtcTimestamp", () => {
+  it("isoUtcFromDate produces canonical UTC", () => {
+    expect(isoUtcFromDate(new Date("2026-01-01T00:00:00Z")) as string).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("parseIsoUtc normalises an offset form to canonical UTC", () => {
+    const r = parseIsoUtc("2026-01-01T02:00:00+02:00");
+    expect(isOk(r)).toBe(true);
+    if (r.ok) expect(r.value as string).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("parseIsoUtc rejects an unparseable timestamp as a non-retriable node-crash", () => {
+    const r = parseIsoUtc("not-a-date");
+    expect(isErr(r)).toBe(true);
+    if (!r.ok) expect(r.error.kind).toBe("node-crash");
+  });
+});
+
 describe("unsupportedRefError", () => {
   it("is a non-retriable node-crash naming the adapter and ref kind", () => {
     const e = unsupportedRefError("fs", driveItemRef("d", "i"));
@@ -51,7 +91,7 @@ describe("unsupportedRefError", () => {
 
 describe("createFakeDocumentSource", () => {
   const ref = localPathRef("reports/q2.xlsx");
-  const meta: FileMeta = { id: "reports/q2.xlsx", name: "q2.xlsx", sizeBytes: 4, lastModified: "2026-01-01T00:00:00Z" };
+  const meta: FileMeta = { id: "reports/q2.xlsx", name: "q2.xlsx", sizeBytes: 4, lastModified: isoUtcFromDate(new Date("2026-01-01T00:00:00Z")) };
 
   it("returns canned content and metadata by ref key", async () => {
     const h = createFakeDocumentSource({ [fileRefKey(ref)]: { content: new Uint8Array([1, 2, 3, 4]), metadata: meta } });

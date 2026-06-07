@@ -51,25 +51,55 @@ export type FileRef =
   /** A file on the local filesystem, addressed relative to the adapter's root. */
   | { readonly kind: "localPath"; readonly path: string };
 
+/**
+ * Reject a blank (empty or whitespace-only) constructor argument.
+ *
+ * Smart constructors are wiring/authoring helpers, almost always called with
+ * literals or DAG input. A blank field is a programmer/wiring error, not a
+ * runtime I/O failure — so we fail loud at the call site (which is boot/authoring
+ * time, or a node `fetch` where it surfaces as a `node-crash`) rather than let an
+ * empty `siteHostname`/`itemId`/`url`/`path` flow to an adapter and resolve to a
+ * surprising URL or the filesystem root. Returning `Result` here was rejected: it
+ * would force every `localPathRef(...)` inside a node `fetch` to be unwrapped,
+ * destroying ergonomics for no real safety gain over fail-loud construction.
+ */
+const requireNonBlank = (value: string, field: string): string => {
+  if (value.trim() === "") {
+    throw new Error(`FileRef: '${field}' must be a non-empty string`);
+  }
+  return value;
+};
+
 /** Smart constructor for the SharePoint path variant. */
 export const sharePointPathRef = (args: {
   siteHostname: string;
   sitePath: string;
   filePath: string;
-}): FileRef => ({ kind: "sharePointPath", ...args });
+}): FileRef => ({
+  kind: "sharePointPath",
+  siteHostname: requireNonBlank(args.siteHostname, "siteHostname"),
+  sitePath: requireNonBlank(args.sitePath, "sitePath"),
+  filePath: requireNonBlank(args.filePath, "filePath"),
+});
 
 /** Smart constructor for the MS Graph drive-item-id variant. */
 export const driveItemRef = (driveId: string, itemId: string): FileRef => ({
   kind: "driveItem",
-  driveId,
-  itemId,
+  driveId: requireNonBlank(driveId, "driveId"),
+  itemId: requireNonBlank(itemId, "itemId"),
 });
 
 /** Smart constructor for the sharing-link variant. */
-export const shareUrlRef = (url: string): FileRef => ({ kind: "shareUrl", url });
+export const shareUrlRef = (url: string): FileRef => ({
+  kind: "shareUrl",
+  url: requireNonBlank(url, "url"),
+});
 
 /** Smart constructor for the local-filesystem variant (path relative to the adapter root). */
-export const localPathRef = (path: string): FileRef => ({ kind: "localPath", path });
+export const localPathRef = (path: string): FileRef => ({
+  kind: "localPath",
+  path: requireNonBlank(path, "path"),
+});
 
 /**
  * Stable string key for a `FileRef`. Used by the fake to route canned
@@ -87,6 +117,46 @@ export const fileRefKey = (ref: FileRef): string =>
     .exhaustive();
 
 // ---------------------------------------------------------------------------
+// ISO-8601-UTC timestamp — invariant carried by the type, not a comment
+// ---------------------------------------------------------------------------
+
+/**
+ * A timestamp guaranteed to be canonical ISO 8601 UTC (e.g.
+ * `2026-01-01T00:00:00.000Z`). Branded so an arbitrary `string` cannot be
+ * assigned to `FileMeta.lastModified` — every adapter must mint one through
+ * `isoUtcFromDate` or `parseIsoUtc`, so the "ISO 8601 UTC" contract lives in the
+ * type rather than in per-adapter convention.
+ */
+export type IsoUtcTimestamp = string & { readonly __brand: "IsoUtcTimestamp" };
+
+/**
+ * Mint an `IsoUtcTimestamp` from a `Date`. Total: a `Date` is always
+ * serialisable to canonical UTC via `toISOString()`. Use this when you already
+ * hold a `Date` (e.g. `fs.stat().mtimeMs`).
+ */
+export const isoUtcFromDate = (d: Date): IsoUtcTimestamp =>
+  d.toISOString() as IsoUtcTimestamp;
+
+/**
+ * Parse a string into a canonical-UTC `IsoUtcTimestamp`, normalising any valid
+ * ISO 8601 input (including offset forms like `+02:00`) to the `…Z` form.
+ * Returns an `Err` for unparseable input — use at the boundary where a backend
+ * hands you a timestamp string (e.g. MS Graph `lastModifiedDateTime`).
+ */
+export const parseIsoUtc = (value: string): Result<IsoUtcTimestamp, FrameworkError> => {
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    return err({
+      kind: "node-crash",
+      nodeId: nodeId("document-source"),
+      message: `not a valid ISO 8601 timestamp: '${value}'`,
+      retriability: "non-retriable",
+    });
+  }
+  return ok(new Date(ms).toISOString() as IsoUtcTimestamp);
+};
+
+// ---------------------------------------------------------------------------
 // Capability interface — what nodes see on `ctx.documents`
 // ---------------------------------------------------------------------------
 
@@ -98,8 +168,8 @@ export interface FileMeta {
   readonly name: string;
   /** Size in bytes, or `null` when the backend doesn't report it (distinct from a genuinely empty `0`-byte file). */
   readonly sizeBytes: number | null;
-  /** Last-modified timestamp, ISO 8601 UTC. */
-  readonly lastModified: string;
+  /** Last-modified timestamp, canonical ISO 8601 UTC (see {@link IsoUtcTimestamp}). */
+  readonly lastModified: IsoUtcTimestamp;
   /** Opaque entity tag for change detection, when present. */
   readonly eTag?: string;
   /** MIME type, when present/derivable. */

@@ -11,6 +11,7 @@ import {
   resolveUrls,
   encodeShareUrl,
   mapGraphStatus,
+  isoUtcFromDate,
   type FetchLike,
   type FileMeta,
   type MsGraphAdapterConfig,
@@ -372,7 +373,8 @@ describe("createMsGraphAdapter — getMetadata", () => {
       expect(meta.id).toBe("01ABC");
       expect(meta.name).toBe("2026-Q2.xlsx");
       expect(meta.sizeBytes).toBe(20480);
-      expect(meta.lastModified).toBe("2026-05-30T12:00:00Z");
+      // Normalised to canonical UTC (IsoUtcTimestamp) — `…Z` gains explicit ms.
+      expect(meta.lastModified as string).toBe("2026-05-30T12:00:00.000Z");
       expect(meta.mimeType).toContain("spreadsheetml");
     }
     // metadata URL omits the /content suffix
@@ -448,7 +450,7 @@ describe("createFakeDocumentSource", () => {
   const ref = driveItemRef("d1", "i1");
 
   it("returns canned content and metadata by ref key", async () => {
-    const meta: FileMeta = { id: "x", name: "f.xlsx", sizeBytes: 10, lastModified: "2026-01-01T00:00:00Z" };
+    const meta: FileMeta = { id: "x", name: "f.xlsx", sizeBytes: 10, lastModified: isoUtcFromDate(new Date("2026-01-01T00:00:00Z")) };
     const handle = createFakeDocumentSource({
       [fileRefKey(ref)]: { content: new Uint8Array([9]), metadata: meta },
     });

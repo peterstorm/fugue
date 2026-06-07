@@ -5,7 +5,9 @@
  * - Zod schema validation of response bodies
  * - Result-based error handling (no exceptions escape)
  * - Configurable base URL, default headers, and timeout
- * - FrameworkError mapping for network, timeout, and validation failures
+ * - FrameworkError mapping for network, timeout, caller-abort, and validation
+ *   failures (timeout/network → `transient`; caller-abort → `aborted`; invalid
+ *   JSON or schema mismatch → non-retriable `node-crash`)
  *
  * @example
  * ```ts
@@ -101,6 +103,13 @@ async function executeRequest<T>(
     }
 
     if (timeoutMs != null) {
+      // Abort with a sentinel `Error("timeout")`: the catch block below
+      // discriminates a timeout from a caller-abort by matching this reason
+      // (`error.message === "timeout"`). This couples the abort reason here to
+      // the string match there — keep them in sync. If a runtime does not
+      // forward the abort reason to the fetch rejection, the error surfaces as a
+      // generic `AbortError` and falls through to the `aborted` branch instead
+      // (a timeout reported as a caller-abort — acceptable degradation).
       timeoutId = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
     }
     if (signal) {
@@ -220,9 +229,15 @@ export const createHttpCapability = (
 /**
  * Create a fake HTTP capability for testing. Accepts a response map that
  * matches URL patterns to canned responses. Route values are either the raw
- * response body, or a `FakeHttpRoute` (`{ status?, body }`) when you need to
- * simulate an error status — a `status` outside 2xx produces the same
- * `transient` error (with `httpStatus` set) as the real capability.
+ * response body, or a `FakeHttpRoute` (`{ status?, body, matchBody? }`) when you
+ * need to simulate an error status or assert the request payload — a `status`
+ * outside 2xx produces the same `transient` error (with `httpStatus` set) as the
+ * real capability.
+ *
+ * To pin the request body a node sends (the real capability serialises it; this
+ * fake otherwise ignores it), supply `matchBody`: if it returns `false` for the
+ * request body, the route does not match and a transient error is returned — so
+ * a wrong-payload bug fails the test instead of silently passing.
  *
  * @example
  * ```ts
@@ -230,32 +245,44 @@ export const createHttpCapability = (
  *   "GET /users/123": { id: "123", name: "Alice" },
  *   "POST /orders": { body: { orderId: "ord-1" } },
  *   "GET /users/999": { status: 404, body: "Not Found" },
+ *   // Assert the node POSTed the expected payload:
+ *   "POST /events": {
+ *     body: { ok: true },
+ *     matchBody: (b) => (b as { type?: string }).type === "click",
+ *   },
  * });
  * ```
  */
 export interface FakeHttpRoute {
   readonly status?: number;
   readonly body: unknown;
+  /**
+   * Optional assertion on the request body the node sent. When present and it
+   * returns `false`, the route does not match (transient error) — lets a test
+   * catch a node that sends the wrong payload, which the body-agnostic fake
+   * would otherwise let pass.
+   */
+  readonly matchBody?: (body: unknown) => boolean;
 }
 
 export const createFakeHttpCapability = (
   // A route value is either a raw response body or a shaped `FakeHttpRoute`
-  // (`{ status, body }`); the two are discriminated structurally at runtime in
-  // `matchRoute`. The type is `unknown` because `FakeHttpRoute | unknown`
-  // collapses to `unknown` and would convey no extra information.
+  // (`{ status, body, matchBody? }`); the two are discriminated structurally at
+  // runtime in `matchRoute`. The type is `unknown` because `FakeHttpRoute |
+  // unknown` collapses to `unknown` and would convey no extra information.
   routes: Readonly<Record<string, unknown>>,
 ): CapabilityHandle<"http"> => {
   const client: HttpCapability = {
     get: async <T>(url: string, opts: HttpRequestOpts<T>) =>
-      matchRoute("GET", url, opts.schema, routes),
-    post: async <T>(url: string, _body: unknown, opts: HttpBodyRequestOpts<T>) =>
-      matchRoute("POST", url, opts.schema, routes),
-    put: async <T>(url: string, _body: unknown, opts: HttpBodyRequestOpts<T>) =>
-      matchRoute("PUT", url, opts.schema, routes),
-    patch: async <T>(url: string, _body: unknown, opts: HttpBodyRequestOpts<T>) =>
-      matchRoute("PATCH", url, opts.schema, routes),
+      matchRoute("GET", url, undefined, opts.schema, routes),
+    post: async <T>(url: string, body: unknown, opts: HttpBodyRequestOpts<T>) =>
+      matchRoute("POST", url, body, opts.schema, routes),
+    put: async <T>(url: string, body: unknown, opts: HttpBodyRequestOpts<T>) =>
+      matchRoute("PUT", url, body, opts.schema, routes),
+    patch: async <T>(url: string, body: unknown, opts: HttpBodyRequestOpts<T>) =>
+      matchRoute("PATCH", url, body, opts.schema, routes),
     delete: async <T>(url: string, opts: HttpRequestOpts<T>) =>
-      matchRoute("DELETE", url, opts.schema, routes),
+      matchRoute("DELETE", url, undefined, opts.schema, routes),
   };
 
   return { name: "http", client };
@@ -264,6 +291,7 @@ export const createFakeHttpCapability = (
 function matchRoute<T>(
   method: string,
   url: string,
+  requestBody: unknown,
   schema: z.ZodType<T>,
   routes: Readonly<Record<string, unknown>>,
 ): Result<T, FrameworkError> {
@@ -274,6 +302,15 @@ function matchRoute<T>(
   }
 
   const isShapedRoute = typeof route === "object" && route !== null && "body" in route;
+
+  // Optional request-body assertion: a mismatch means this node sent the wrong
+  // payload — surface it loudly rather than returning the canned success.
+  if (isShapedRoute) {
+    const matchBody = (route as FakeHttpRoute).matchBody;
+    if (matchBody && !matchBody(requestBody)) {
+      return err(makeTransientError(`Fake route ${key}: request body did not match matchBody`));
+    }
+  }
 
   // Mirror the real capability: a non-2xx status becomes a transient error
   // carrying `httpStatus`, so nodes branching on status are testable.

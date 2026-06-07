@@ -2,9 +2,13 @@
  * @fuguejs/xlsx — pure workbook parsing for Fugue DAGs.
  *
  * `parseWorkbook` turns `.xlsx` bytes into Zod-validated typed rows. It is a
- * pure function (deterministic, no I/O) — the byte fetching is a `documents`
- * capability concern (`@fuguejs/ms-graph`, `@fuguejs/fs`), and parsing stays here
- * so it is fixture-testable and provider-agnostic. See ADR-0052.
+ * deterministic, side-effect-free transform: no filesystem or network I/O, and
+ * the same bytes always yield the same result. (It is not "pure" in the strict
+ * sense — it drives a stateful `ExcelJS.Workbook` and dynamically imports `jszip`
+ * for the dateGroupItem recovery path — but it is observationally referentially
+ * transparent and fully fixture-testable.) The byte fetching is a `documents`
+ * capability concern (`@fuguejs/ms-graph`, `@fuguejs/fs`); parsing stays here so it
+ * is fixture-testable and provider-agnostic. See ADR-0052.
  *
  * ## Usage
  *

@@ -314,5 +314,16 @@ describe("capability-manager", () => {
     it("empty handles → empty record", () => {
       expect(extractClients([])).toEqual({});
     });
+
+    it("throws on duplicate handle names (defence-in-depth past topoSort)", () => {
+      // topoSortHandles rejects duplicates at boot, so this branch is only
+      // reachable if a future caller bypasses it — it must fail loudly here
+      // rather than silently drop a handle (last-writer-wins).
+      const handles = [
+        makeHandle("db", { client: { a: 1 } as any }),
+        makeHandle("db", { client: { b: 2 } as any }),
+      ];
+      expect(() => extractClients(handles)).toThrow(/duplicate capability handle name 'db'/);
+    });
   });
 });

@@ -330,7 +330,15 @@ export const healthCheckWithTimeout = async (
 /**
  * In-memory fake PgCapability for unit testing nodes that use `ctx.db`.
  *
- * Accepts a response map that returns canned results for SQL patterns.
+ * Accepts a response map that returns canned results for SQL patterns. A key
+ * matches by exact SQL first, then by **longest prefix**.
+ *
+ * ⚠️ Prefix-match foot-gun: because matching falls back to `startsWith`, a route
+ * key that is a prefix of an unrelated query will match it in tests while the
+ * real adapter runs the exact SQL the pool is given. Prefer full-SQL keys; reach
+ * for short prefixes only when you deliberately want a broad match, and keep keys
+ * specific enough that one can't accidentally swallow another's query. Params are
+ * not inspected, so this fake cannot catch a wrong-`$n`-binding bug.
  *
  * @example
  * ```ts
