@@ -433,6 +433,17 @@ The `outputs` Map *is* the resume cache for the read-only / pure side of
 the graph. For nodes whose `run` has external side effects, idempotency
 is the node author's contract with the framework.
 
+Make that contract **declarative** rather than ad-hoc: a `writes` /
+`external-call` node can carry `idempotencyKey: (input) => string` on its
+`sideEffects` profile. The framework computes it every run, emits it as the
+`ai.node.idempotency_key` span, and fails the node closed if the closure
+throws — but the dedupe itself is the downstream sink's job (the framework does
+not store the key). For the read-then-write lost-update race, declare freshness
+witnesses (`extractWitness` on the read, `extractConditionedOn` /
+`extractNewWitness` on the write) and the framework detects the conflict. See
+`features.md` §9 and the "Side effects, idempotency & freshness" section of
+`llm-dag-authoring.md`.
+
 #### Why this is event-sourced too
 
 Every transition that produced this envelope was also `XADD`-ed to

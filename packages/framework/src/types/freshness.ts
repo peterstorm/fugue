@@ -59,6 +59,32 @@ export type Witness = {
   readonly value: string;
 } & { readonly [__witnessBrand]: void };
 
+/**
+ * The resource-free part of a witness. Returned by the self-referential
+ * extractors (`extractWitness` on reads, `extractNewWitness` on writes): those
+ * always witness the node's *own* resource, so the author supplies only the
+ * domain-specific `(kind, value)` and the framework stamps `sideEffects.resource`
+ * at emission time (see `dag-runtime/freshness-emission.ts`). This makes a
+ * resource mismatch between the profile and its witness unrepresentable.
+ *
+ * `extractConditionedOn` still returns a full `Witness` — a write may be
+ * conditioned on a *different* resource it read upstream, so that resource is a
+ * genuine free variable the author must name.
+ */
+export type WitnessValue = {
+  readonly kind: WitnessKind;
+  /** Opaque to the framework — never parsed or compared beyond string equality. */
+  readonly value: string;
+};
+
+/** Smart constructor for a resource-free witness value. Validates non-empty value. */
+export const witnessValue = (kind: WitnessKind, value: string): WitnessValue => {
+  if (!value) {
+    throw new Error("Witness value must be non-empty");
+  }
+  return { kind, value };
+};
+
 /** Smart constructor — validates non-empty resource and value. */
 export const witness = (
   kind: WitnessKind,
@@ -73,6 +99,10 @@ export const witness = (
   }
   return { kind, resource: resource as ResourceName, value } as Witness;
 };
+
+/** Stamp a `WitnessValue` with a resource to produce a full `Witness`. */
+export const stampWitness = (resource: ResourceName, wv: WitnessValue): Witness =>
+  witness(wv.kind, resource, wv.value);
 
 /**
  * @internal — Bypass validation for trusted internal code (deserialization,

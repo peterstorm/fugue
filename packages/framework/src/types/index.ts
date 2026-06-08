@@ -66,8 +66,8 @@ export type {
 export { CONFIDENCE_ORDER, meetsConfidence, confidence, tryConfidence } from "./confidence.js";
 
 // ── Freshness witness types ───────────────────────────────────────────────
-export type { WitnessKind, Witness, ResourceName } from "./freshness.js";
-export { witness, resourceName } from "./freshness.js";
+export type { WitnessKind, Witness, WitnessValue, ResourceName } from "./freshness.js";
+export { witness, witnessValue, stampWitness, resourceName } from "./freshness.js";
 
 // ── JSON Patch ────────────────────────────────────────────────────────────
 export type { JsonPatchOp, JsonPatch } from "./json-patch.js";

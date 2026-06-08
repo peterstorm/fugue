@@ -90,7 +90,7 @@ createFetchNode<I, O>({
   outputSchema: z.ZodType<O>,
   fetch: (input: I, ctx: NodeContext) => Promise<Result<O, FrameworkError>>,
   requires?: readonly Capability[],  // default: [] — capabilities this node needs (see "Capabilities")
-  sideEffects?: SideEffectProfile,   // default: { kind: "reads", resource: id }
+  sideEffects?: SideEffectProfile,   // default: { kind: "reads", resource: id } — see "Side effects, idempotency & freshness"
 })
 ```
 
@@ -278,6 +278,122 @@ createFetchNode({
 - Writing your own adapter (`db`, S3, …): **`adapter-authoring.md`**.
 - `fugue describe <dag>` reports the capabilities a specific DAG requires; the
   set actually *available* is a deployment choice (which handles the host wired).
+
+---
+
+## Side effects, idempotency & freshness
+
+Every node carries a `sideEffects: SideEffectProfile` declaring how it touches
+the outside world. The factories set a sensible default, so you only specify it
+when a node **writes** or makes a **non-idempotent external call** and you need
+the framework's safety machinery.
+
+| Factory | Default profile | How to override |
+|---|---|---|
+| `createTransformNode`, `createGuardrailNode` | `{ kind: "none" }` | — (pure, cannot carry extractors) |
+| `createFetchNode` | `{ kind: "reads", resource: id }` | pass a `sideEffects` field |
+| `createLlmNode`, `createLlmWithToolsNode` | `{ kind: "external-call", resource: "llm:<model>" }` | spread + override the returned def (see below) |
+
+The four kinds, and what each may carry:
+
+- **`none`** — pure compute. No resource, no extractors.
+- **`reads`** — fetches external state. May carry `extractWitness`.
+- **`writes`** — mutates a resource you own. May carry `idempotencyKey` **and** freshness witnesses.
+- **`external-call`** — calls someone else's API. May carry `idempotencyKey`.
+
+`SideEffectKind`, `SideEffectProfile`, `Witness`, `ResourceName`, plus the
+`witness` and `resourceName` smart constructors, all import from
+`@fuguejs/framework`.
+
+### Idempotency keys — dedupe writes & external calls
+
+Trigger: a `writes`/`external-call` node whose **repeat is destructive** — a
+charge, an email, a row insert (a node *may* re-run on crash-resume or a
+queue-level retry). On every run the framework calls `idempotencyKey(input)`,
+emits the result as the `ai.node.idempotency_key` span attribute, and **fails
+the node closed if the closure throws** (no key ⇒ no safe write).
+
+The framework does **not** itself store or dedupe on the key — it computes and
+propagates it, and the **downstream sink must honor it**: Stripe/SendGrid
+`Idempotency-Key` headers, `INSERT … ON CONFLICT DO NOTHING`, an upsert keyed on
+the value, etc. The key is your contract with that sink, made deterministic and
+observable.
+
+```ts
+import { resourceName } from "@fuguejs/framework";
+
+createFetchNode({
+  id: "charge-customer",
+  inputSchema: ChargeSchema,
+  outputSchema: ReceiptSchema,
+  requires: ["http"] as const,
+  sideEffects: {
+    kind: "external-call",
+    resource: resourceName("stripe:charges"),
+    idempotencyKey: (input) => `charge:${input.invoiceId}`, // pass as Stripe's Idempotency-Key header
+  },
+  fetch: async (input, ctx) => ctx.http.post(/* … */),
+})
+```
+
+LLM nodes are already deduped by `ctx.cache` (keyed on input hash), so they
+rarely need a key. To add one anyway, spread the returned def — same pattern as
+emitting confidence, since the factory owns `sideEffects`:
+
+```ts
+const node = createLlmNode<In, Out>({ /* … */ });
+export const deduped: LlmNodeDef<In, Out> = {
+  ...node,
+  sideEffects: { ...node.sideEffects, idempotencyKey: (input) => `summary:${input.docId}` },
+};
+```
+
+### Freshness witnesses — optimistic concurrency for read-then-write
+
+Trigger: two runs can **read the same resource, then write it** — the classic
+lost-update race (e.g. two agents updating the same record). A `reads` node
+emits a **witness** (a version token); the `writes` node declares which witness
+it is *conditioned on* and the new witness its write produced. If an intervening
+write superseded the conditioned-on witness, the framework emits a
+`FreshnessViolationEvent` the operator sees and the node can route on.
+Fail-closed: an extractor that throws aborts the wave rather than writing blind.
+
+```ts
+import { witness, witnessValue, resourceName } from "@fuguejs/framework";
+
+// reads → emit the version it saw. Resource-free: the framework stamps
+// `resource` from the profile, so the witness can't name a different resource.
+sideEffects: {
+  kind: "reads",
+  resource: resourceName("postgres:customers:123"),
+  extractWitness: (out) => witnessValue("version", String(out.xmin)),
+}
+
+// writes → declare what it's conditioned on + the new version it produced
+sideEffects: {
+  kind: "writes",
+  resource: resourceName("postgres:customers:123"),
+  // conditionedOn returns a FULL witness — a write may condition on a different
+  // resource it read upstream, so you name that resource explicitly.
+  extractConditionedOn: (input) => witness("version", "postgres:customers:123", String(input.customerVersion)),
+  // newWitness is this node's own resource → resource-free, framework-stamped.
+  extractNewWitness:    (out)   => witnessValue("version", String(out.newXmin)),
+}
+```
+
+Rules:
+
+- `extractWitness` (reads) and `extractNewWitness` (writes) return a resource-free `witnessValue(kind, value)` — they always witness the node's *own* resource, which the framework stamps. A profile↔witness resource mismatch is therefore unrepresentable, not a thing you can get wrong.
+- `extractConditionedOn` (writes) returns a full `witness(kind, resource, value)` — its resource is a genuine free variable (you may condition on a resource read upstream).
+- A `writes` node declares **both** `extractConditionedOn` and `extractNewWitness`, or **neither** — one without the other fails `fugue lint` at load time.
+- Witness `kind` is one of `version | etag | timestamp | lsn | idempotency-key | custom`.
+
+Note: idempotency keys and freshness witnesses are **independent** — a node can
+declare both, either, or neither. They solve different problems (dedupe one
+logical operation vs. detect a concurrent overwrite), and neither allocates work
+across callers; that's an application-level concern (e.g. a claims table).
+
+Deep dive + rationale: `features.md` §9, `docs/adr/0025-freshness-witness-contract.md`.
 
 ---
 
@@ -747,6 +863,10 @@ $ bunx fugue describe dags/cx/customer-summary/dag.ts
 ```
 
 On lint failure, `describe` returns the same `errors[]` array as `lint`.
+
+`sideEffects` is summarized here to its `kind` string only; the full profile
+(idempotency key, freshness witnesses) is set in `dag.ts` — see "Side effects,
+idempotency & freshness".
 
 ### `fugue capabilities`
 

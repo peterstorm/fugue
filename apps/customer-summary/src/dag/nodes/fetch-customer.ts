@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createFetchNode, ok, err, witness, resourceName } from "@fuguejs/framework";
+import { createFetchNode, ok, err, witnessValue, resourceName } from "@fuguejs/framework";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord } from "../../schemas/crm.js";
@@ -22,12 +22,12 @@ export const createFetchCustomerNode = (source: ConversationSource) =>
       // Emit a freshness witness from the CRM record's createdAt field and
       // conversation count. Downstream writes (if any) can condition on this
       // witness to detect stale-read → write hazards. When customer is null
-      // (not found), the witness value is "not-found".
+      // (not found), the witness value is "not-found". The framework stamps
+      // the `resource` above, so we supply only (kind, value).
       extractWitness: (output) => {
         const o = output as Output;
-        return witness(
+        return witnessValue(
           "version",
-          "crm:customers",
           o.customer
             ? `${o.customer.createdAt}:${o.customer.conversations.length}`
             : "not-found",

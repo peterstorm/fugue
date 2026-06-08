@@ -158,3 +158,40 @@ semantics can implement them in their extractors or predicate logic.
   any node code.
 - Property tests pin the invariant: for any sequence of read/write events,
   the framework's violation set equals the reference implementation's.
+
+## Amendment — resource-free self-referential extractors (2026-06-08)
+
+**Status:** Accepted. Refines "Extractor placement" and "Witness schema" above.
+
+The original contract had `extractWitness` and `extractNewWitness` each return a
+full `Witness`, including its `resource`. But those two extractors *always*
+witness the node's **own** resource (`sideEffects.resource`) — the `resource`
+field was a second, hand-typed copy of a value already declared on the profile.
+Nothing enforced that the two agreed: a typo (`witness("version",
+"crm:customer", …)` vs. a profile of `crm:customers`) silently pointed conflict
+detection at the wrong resource key, because detection compares by
+`(resource, value)` and the framework used the *witness's* resource, not the
+profile's. A lint rule couldn't catch this — the resource is computed inside a
+runtime closure.
+
+We removed the redundancy instead of policing it:
+
+- A new `WitnessValue = { kind, value }` type (resource-free) is the return type
+  of `extractWitness` (reads) and `extractNewWitness` (writes). The framework
+  **stamps** `sideEffects.resource` onto it at emission time (`stampWitness`),
+  so the witness can never name a different resource than its node. The mismatch
+  is now *unrepresentable*, not merely *validated*.
+- `extractConditionedOn` is **unchanged** — it still returns a full `Witness`.
+  Its resource is a genuine free variable: a write may be conditioned on a
+  different resource it read upstream. Forcing the node's own resource here
+  would be wrong.
+
+Public surface added to `@fuguejs/framework`: the `WitnessValue` type, the
+`witnessValue(kind, value)` smart constructor, and the internal
+`stampWitness(resource, value)` helper. The `Witness` type and `witness(...)`
+constructor are unchanged (still used for `extractConditionedOn`, emitted
+events, and the freshness index).
+
+This is a breaking change to the two self-referential extractor signatures,
+taken pre-1.0 while the only call sites were the `customer-summary` example app
+and the framework's own tests; no published DAG consumed them.

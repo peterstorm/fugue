@@ -13,6 +13,7 @@ import { match } from "ts-pattern";
 import type { NodeDef } from "../types/node.js";
 import type { NodeId } from "../types/ids.js";
 import type { Witness } from "../types/freshness.js";
+import { stampWitness } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { fwLogger } from "../logger.js";
@@ -55,17 +56,19 @@ export async function emitFreshnessWitnessEvents(
       .with({ kind: "reads" }, async (se) => {
         if (!se.extractWitness) return ok(undefined);
         try {
-          const witness: Witness = se.extractWitness(output);
+          // The extractor returns only (kind, value); stamp this node's
+          // resource so the witness can never name a different resource.
+          const capturedWitness: Witness = stampWitness(se.resource, se.extractWitness(output));
           emit(nodeCtx, {
             type: "witness-captured",
             runId: nodeCtx.runId,
             dagId,
             nodeId,
-            witness,
+            witness: capturedWitness,
             capturedAtMs: nowFn(),
             timestamp: stamp(),
           });
-          witnessAccumulator?.set(witness.resource, witness);
+          witnessAccumulator?.set(capturedWitness.resource, capturedWitness);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           fwLogger().warn(
@@ -136,8 +139,11 @@ export async function emitFreshnessWitnessEvents(
         let conditionedOn: Witness;
         let newWitness: Witness;
         try {
+          // conditionedOn keeps its own resource (a write may condition on a
+          // different resource it read upstream). newWitness is the new version
+          // of *this* node's resource, so the framework stamps it.
           conditionedOn = se.extractConditionedOn(nodeInput);
-          newWitness = se.extractNewWitness(output);
+          newWitness = stampWitness(se.resource, se.extractNewWitness(output));
         } catch (e) {
           const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
           fwLogger().warn(`[emitFreshnessWitnessEvents] ${msg}`);
