@@ -43,11 +43,17 @@ import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, FileMeta } from "@fuguejs/document-source";
-import { unsupportedRefError } from "@fuguejs/document-source";
+import { unsupportedRefError, isoUtcFromDate } from "@fuguejs/document-source";
 
 // Re-export the port surface so `@fuguejs/fs` is a one-stop import.
-export { localPathRef, fileRefKey, createFakeDocumentSource } from "@fuguejs/document-source";
-export type { FileRef, FileMeta, ReadOpts, DocumentSource, FakeDocRoute } from "@fuguejs/document-source";
+export {
+  localPathRef,
+  fileRefKey,
+  createFakeDocumentSource,
+  isoUtcFromDate,
+  parseIsoUtc,
+} from "@fuguejs/document-source";
+export type { FileRef, FileMeta, ReadOpts, DocumentSource, FakeDocRoute, IsoUtcTimestamp } from "@fuguejs/document-source";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -55,7 +61,8 @@ export type { FileRef, FileMeta, ReadOpts, DocumentSource, FakeDocRoute } from "
 
 /** Minimal slice of `node:fs/promises` the adapter uses. Tests inject a fake. */
 export interface FsLike {
-  readFile(path: string): Promise<Uint8Array>;
+  /** Read a file. `opts.signal` aborts an in-flight read (`node:fs` honors it). */
+  readFile(path: string, opts?: { signal?: AbortSignal }): Promise<Uint8Array>;
   stat(path: string): Promise<{ size: number; mtimeMs: number }>;
 }
 
@@ -91,6 +98,15 @@ const transientErr = (message: string): FrameworkError => ({
   nodeId: FS_NODE_ID,
   message,
 });
+
+const abortedErr = (path: string): FrameworkError => ({
+  kind: "aborted",
+  reason: `fs read aborted by caller signal: ${path}`,
+});
+
+/** True when an error is an abort (caller signal) rather than a real fs fault. */
+const isAbort = (e: unknown): boolean =>
+  e instanceof Error && (e.name === "AbortError" || e.name === "TimeoutError");
 
 const MIME_BY_EXT: Readonly<Record<string, string>> = {
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -131,7 +147,7 @@ export const resolveWithinRoot = (
 };
 
 const defaultFs: FsLike = {
-  readFile: (p) => nodeReadFile(p),
+  readFile: (p, opts) => nodeReadFile(p, opts),
   stat: async (p) => {
     const s = await nodeStat(p);
     return { size: s.size, mtimeMs: s.mtimeMs };
@@ -162,19 +178,27 @@ export const createFsAdapter = (config: FsAdapterConfig): CapabilityHandle<"docu
       .otherwise((r) => err(unsupportedRefError("fs", r)));
 
   const client: DocumentSource = {
-    getContent: async (ref): Promise<Result<Uint8Array, FrameworkError>> => {
+    getContent: async (ref, opts): Promise<Result<Uint8Array, FrameworkError>> => {
       const abs = pathFor(ref);
       if (!abs.ok) return abs;
+      if (opts?.signal?.aborted) return err(abortedErr(abs.value));
       try {
-        return ok(await fs.readFile(abs.value));
+        // `node:fs` honors `signal`, so a mid-read abort rejects with an
+        // AbortError that we map to the `aborted` error kind (not a transient
+        // fs fault) — keeping abort semantics consistent with the ms-graph adapter.
+        return ok(await fs.readFile(abs.value, { signal: opts?.signal }));
       } catch (e) {
+        if (isAbort(e) || opts?.signal?.aborted) return err(abortedErr(abs.value));
         return err(mapFsError(e, abs.value));
       }
     },
 
-    getMetadata: async (ref): Promise<Result<FileMeta, FrameworkError>> => {
+    getMetadata: async (ref, opts): Promise<Result<FileMeta, FrameworkError>> => {
       const abs = pathFor(ref);
       if (!abs.ok) return abs;
+      // `node:fs.stat` takes no signal, so abort can only be honored up front
+      // (a stat is a single near-instant syscall, not a streamable read).
+      if (opts?.signal?.aborted) return err(abortedErr(abs.value));
       try {
         const s = await fs.stat(abs.value);
         const name = basename(abs.value);
@@ -185,7 +209,7 @@ export const createFsAdapter = (config: FsAdapterConfig): CapabilityHandle<"docu
           id,
           name,
           sizeBytes: s.size,
-          lastModified: new Date(s.mtimeMs).toISOString(),
+          lastModified: isoUtcFromDate(new Date(s.mtimeMs)),
           ...(mime !== undefined ? { mimeType: mime } : {}),
         });
       } catch (e) {

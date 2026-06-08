@@ -109,7 +109,7 @@ describe("createFsAdapter — getMetadata", () => {
       expect(m.value.id).toBe("sub/q2.xlsx");
       expect(m.value.name).toBe("q2.xlsx");
       expect(m.value.sizeBytes).toBe(2048);
-      expect(m.value.lastModified).toBe("2026-05-30T12:00:00.000Z");
+      expect(m.value.lastModified as string).toBe("2026-05-30T12:00:00.000Z");
       expect(m.value.mimeType).toContain("spreadsheetml");
     }
   });
@@ -129,6 +129,59 @@ describe("createFsAdapter — getMetadata", () => {
       expect(m.value.sizeBytes).toBe(0);
       expect(m.value.sizeBytes).not.toBeNull();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abort signal (ReadOpts.signal) — honored like the ms-graph adapter
+// ---------------------------------------------------------------------------
+
+describe("createFsAdapter — abort signal", () => {
+  it("returns an aborted error when the signal is already aborted (getContent)", async () => {
+    const h = createFsAdapter({ rootDir: ROOT, fsImpl: fakeFs({ "/data/reports/q2.xlsx": new Uint8Array([1]) }) });
+    const c = await h.client.getContent(localPathRef("q2.xlsx"), { signal: AbortSignal.abort() });
+    expect(isErr(c)).toBe(true);
+    if (!c.ok) expect(c.error.kind).toBe("aborted");
+  });
+
+  it("returns an aborted error when the signal is already aborted (getMetadata)", async () => {
+    const h = createFsAdapter({ rootDir: ROOT, fsImpl: fakeFs({ "/data/reports/q2.xlsx": new Uint8Array([1]) }) });
+    const m = await h.client.getMetadata(localPathRef("q2.xlsx"), { signal: AbortSignal.abort() });
+    expect(isErr(m)).toBe(true);
+    if (!m.ok) expect(m.error.kind).toBe("aborted");
+  });
+
+  it("threads the signal to readFile and maps a mid-read AbortError to aborted", async () => {
+    let received: AbortSignal | undefined;
+    const fsImpl: FsLike = {
+      readFile: async (_p, opts) => {
+        received = opts?.signal;
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      },
+      stat: async () => ({ size: 1, mtimeMs: 0 }),
+    };
+    const ctrl = new AbortController();
+    const h = createFsAdapter({ rootDir: ROOT, fsImpl });
+    const c = await h.client.getContent(localPathRef("q2.xlsx"), { signal: ctrl.signal });
+    expect(received).toBe(ctrl.signal);
+    expect(isErr(c)).toBe(true);
+    if (!c.ok) expect(c.error.kind).toBe("aborted");
+  });
+
+  it("maps a mid-read TimeoutError to aborted (caller-supplied AbortSignal.timeout)", async () => {
+    // `isAbort` treats TimeoutError like AbortError: a caller who threads an
+    // `AbortSignal.timeout` and hits it has cancelled the read, so it's the
+    // non-retriable `aborted` kind rather than a transient fs fault.
+    const fsImpl: FsLike = {
+      readFile: async () => {
+        throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+      },
+      stat: async () => ({ size: 1, mtimeMs: 0 }),
+    };
+    const h = createFsAdapter({ rootDir: ROOT, fsImpl });
+    const c = await h.client.getContent(localPathRef("q2.xlsx"));
+    expect(isErr(c)).toBe(true);
+    if (!c.ok) expect(c.error.kind).toBe("aborted");
   });
 });
 

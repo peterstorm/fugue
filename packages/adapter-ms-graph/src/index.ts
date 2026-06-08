@@ -53,9 +53,12 @@ import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
 import { ok, err, nodeId, frameworkError } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fuguejs/document-source";
-import { unsupportedRefError } from "@fuguejs/document-source";
+import { unsupportedRefError, parseIsoUtc } from "@fuguejs/document-source";
 
 // Re-export the port surface so `@fuguejs/ms-graph` is a one-stop import.
+// `localPathRef` is re-exported for port-surface completeness only — this
+// adapter fails closed on the `localPath` variant (see `resolveUrls`); use
+// `@fuguejs/fs` to actually read local files.
 export {
   sharePointPathRef,
   driveItemRef,
@@ -63,6 +66,8 @@ export {
   localPathRef,
   fileRefKey,
   createFakeDocumentSource,
+  isoUtcFromDate,
+  parseIsoUtc,
 } from "@fuguejs/document-source";
 export type {
   FileRef,
@@ -70,6 +75,7 @@ export type {
   ReadOpts,
   DocumentSource,
   FakeDocRoute,
+  IsoUtcTimestamp,
 } from "@fuguejs/document-source";
 
 // ---------------------------------------------------------------------------
@@ -130,6 +136,11 @@ const crashErr = (message: string): FrameworkError => ({
   nodeId: MS_GRAPH_NODE_ID,
   message,
   retriability: "non-retriable",
+});
+
+const abortedErr = (url: string): FrameworkError => ({
+  kind: "aborted",
+  reason: `Graph request aborted by caller signal: ${url.split("?")[0]}`,
 });
 
 /**
@@ -206,10 +217,10 @@ const DriveItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   size: z.number().optional(),
-  // Validated as ISO 8601 UTC so the value can be passed straight to
-  // FileMeta.lastModified (whose contract is ISO 8601 UTC) without the
-  // fs adapter's true-ISO output and this one ever disagreeing in format.
-  lastModifiedDateTime: z.string().datetime(),
+  // Validated as ISO 8601 here; re-normalised to canonical UTC via `parseIsoUtc`
+  // before it becomes `FileMeta.lastModified` (an `IsoUtcTimestamp`), so this
+  // adapter and the fs adapter can never disagree on timestamp format.
+  lastModifiedDateTime: z.string().datetime({ offset: true }),
   eTag: z.string().optional(),
   file: z.object({ mimeType: z.string().optional() }).optional(),
 });
@@ -234,6 +245,9 @@ const graphGet = async (
   opts: ReadOpts | undefined,
   timeoutMs: number,
 ): Promise<Result<Response, FrameworkError>> => {
+  // Fail fast on a caller signal that's already aborted — a non-retriable
+  // `aborted` (not a retriable `transient`), so the retry policy fast-fails it.
+  if (opts?.signal?.aborted) return err(abortedErr(url));
   try {
     const res = await fetchImpl(url, {
       method: "GET",
@@ -262,6 +276,12 @@ const graphGet = async (
     if (!res.ok) return err(mapGraphStatus(res.status, url));
     return ok(res);
   } catch (e) {
+    // A caller-initiated cancel is terminal (non-retriable `aborted`); the
+    // adapter's own per-request timeout is a retriable `transient`. Both surface
+    // as an AbortError on the composed signal (`buildSignal`), so discriminate on
+    // the caller's *own* signal rather than the error name — retrying a timeout
+    // is correct, retrying a deliberate cancel is not.
+    if (opts?.signal?.aborted) return err(abortedErr(url));
     return err(transientErr(`Graph request failed for ${url.split("?")[0]}: ${msg(e)}`));
   }
 };
@@ -317,11 +337,15 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
         return err(crashErr(`unexpected Graph driveItem shape: ${parsed.error.message}`));
       }
       const d = parsed.data;
+      const lastModified = parseIsoUtc(d.lastModifiedDateTime);
+      // Unreachable in practice (zod already validated the datetime shape), but
+      // keeps the brand honest rather than casting an unvalidated string.
+      if (!lastModified.ok) return lastModified;
       return ok({
         id: d.id,
         name: d.name,
         sizeBytes: d.size ?? null,
-        lastModified: d.lastModifiedDateTime,
+        lastModified: lastModified.value,
         ...(d.eTag !== undefined ? { eTag: d.eTag } : {}),
         ...(d.file?.mimeType !== undefined ? { mimeType: d.file.mimeType } : {}),
       });

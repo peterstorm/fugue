@@ -11,6 +11,7 @@ import {
   resolveUrls,
   encodeShareUrl,
   mapGraphStatus,
+  isoUtcFromDate,
   type FetchLike,
   type FileMeta,
   type MsGraphAdapterConfig,
@@ -298,10 +299,12 @@ describe("createMsGraphAdapter — getContent", () => {
     }
   });
 
-  it("composes the caller's abort signal with the request timeout and propagates a caller abort", async () => {
+  it("composes the caller's abort signal with the request timeout and propagates a caller abort as non-retriable `aborted`", async () => {
     // Exercises buildSignal's two-signal path: opts.signal + the per-request
     // timeout are merged via AbortSignal.any, and the merged signal reaches
-    // fetch. A caller that aborts surfaces as a transient error.
+    // fetch. A caller cancel is terminal — it must surface as the non-retriable
+    // `aborted` kind (not retriable `transient`), so the retry policy fast-fails
+    // it instead of retrying through the backoff budget.
     const controller = new AbortController();
     controller.abort(new Error("caller cancelled"));
     let sawAbortedSignal = false;
@@ -319,9 +322,31 @@ describe("createMsGraphAdapter — getContent", () => {
     );
 
     const res = await handle.client.getContent(driveItemRef("d", "i"), { signal: controller.signal });
-    expect(sawAbortedSignal).toBe(true);
+    // The up-front guard short-circuits before fetch when the signal is already
+    // aborted, so `sawAbortedSignal` stays false — the point is the error kind.
+    expect(sawAbortedSignal).toBe(false);
     expect(isErr(res)).toBe(true);
-    if (!res.ok) expect(res.error.kind).toBe("transient");
+    if (!res.ok) expect(res.error.kind).toBe("aborted");
+  });
+
+  it("maps a mid-flight caller cancel to `aborted` while leaving a request timeout as retriable `transient`", async () => {
+    // Caller signal NOT pre-aborted: fetch starts, then the caller aborts and the
+    // composed signal rejects. `opts.signal.aborted` is now true → non-retriable
+    // `aborted`. (A request *timeout* would leave opts.signal unaborted and stay
+    // `transient` — see the network-error test above, which covers that path.)
+    const controller = new AbortController();
+    const handle = createMsGraphAdapter(
+      baseConfig({
+        fetchImpl: async () => {
+          controller.abort(new Error("caller cancelled mid-flight"));
+          throw Object.assign(new Error("aborted"), { name: "AbortError" });
+        },
+      }),
+    );
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"), { signal: controller.signal });
+    expect(isErr(res)).toBe(true);
+    if (!res.ok) expect(res.error.kind).toBe("aborted");
   });
 
   it("maps a body-read failure (arrayBuffer throws) to a transient error", async () => {
@@ -372,11 +397,26 @@ describe("createMsGraphAdapter — getMetadata", () => {
       expect(meta.id).toBe("01ABC");
       expect(meta.name).toBe("2026-Q2.xlsx");
       expect(meta.sizeBytes).toBe(20480);
-      expect(meta.lastModified).toBe("2026-05-30T12:00:00Z");
+      // Normalised to canonical UTC (IsoUtcTimestamp) — `…Z` gains explicit ms.
+      expect(meta.lastModified as string).toBe("2026-05-30T12:00:00.000Z");
       expect(meta.mimeType).toContain("spreadsheetml");
     }
     // metadata URL omits the /content suffix
     expect(stub.lastUrl()).toBe("https://graph.microsoft.com/v1.0/drives/d/items/i");
+  });
+
+  it("normalizes an offset-form lastModifiedDateTime to canonical UTC", async () => {
+    // The schema accepts `{ offset: true }` ISO forms and `parseIsoUtc` re-normalizes
+    // them to the `…Z` brand. Graph can return either UTC or a local offset; this
+    // exercises the actual offset→UTC wiring (a plain `…Z` fixture would pass under
+    // the older, stricter schema too and wouldn't prove offset handling).
+    const offsetJson = { ...driveItemJson, lastModifiedDateTime: "2026-05-30T14:00:00+02:00" };
+    const stub = stubFetch(() => new Response(JSON.stringify(offsetJson), { status: 200 }));
+    const handle = createMsGraphAdapter(baseConfig({ fetchImpl: stub.fetchImpl }));
+
+    const res = await handle.client.getMetadata(driveItemRef("d", "i"));
+    expect(isOk(res)).toBe(true);
+    if (res.ok) expect(res.value.lastModified as string).toBe("2026-05-30T12:00:00.000Z");
   });
 
   it("reports sizeBytes as null when Graph omits size (distinct from a 0-byte file)", async () => {
@@ -448,7 +488,7 @@ describe("createFakeDocumentSource", () => {
   const ref = driveItemRef("d1", "i1");
 
   it("returns canned content and metadata by ref key", async () => {
-    const meta: FileMeta = { id: "x", name: "f.xlsx", sizeBytes: 10, lastModified: "2026-01-01T00:00:00Z" };
+    const meta: FileMeta = { id: "x", name: "f.xlsx", sizeBytes: 10, lastModified: isoUtcFromDate(new Date("2026-01-01T00:00:00Z")) };
     const handle = createFakeDocumentSource({
       [fileRefKey(ref)]: { content: new Uint8Array([9]), metadata: meta },
     });

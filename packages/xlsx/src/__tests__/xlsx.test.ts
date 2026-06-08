@@ -75,6 +75,30 @@ describe("parseWorkbook — errors", () => {
     expect(isErr(r)).toBe(true);
     if (!r.ok) expect(r.error.kind).toBe("node-crash");
   });
+
+  it("keeps a row mixing an error cell with real values (error → null), so a non-nullable column fails validation", async () => {
+    // The row has a real customerId and a `#REF!` error in revenue. The row is
+    // NOT skipped (it has a real value); the error cell normalises to null.
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Sheet1");
+    ws.addRow(["customerId", "revenue"]);
+    const row = ws.addRow(["c-1", null]);
+    row.getCell(2).value = { error: "#REF!" } as unknown as ExcelJS.CellValue;
+    const bytes = new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+
+    // revenue is non-nullable → null fails validation (row is kept, not skipped).
+    const strict = await parseWorkbook(bytes, RowSchema);
+    expect(isErr(strict)).toBe(true);
+    if (!strict.ok) expect(strict.error.kind).toBe("validation");
+
+    // revenue nullable → the same row is kept with null.
+    const lenient = await parseWorkbook(
+      bytes,
+      z.object({ customerId: z.string(), revenue: z.number().nullable() }),
+    );
+    expect(isOk(lenient)).toBe(true);
+    if (lenient.ok) expect(lenient.value.rows).toEqual([{ customerId: "c-1", revenue: null }]);
+  });
 });
 
 describe("parseWorkbook — options", () => {

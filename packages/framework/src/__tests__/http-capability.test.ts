@@ -325,4 +325,27 @@ describe("createFakeHttpCapability", () => {
       expect(result.error.kind === "transient" && result.error.message).toContain("404");
     }
   });
+
+  it("matchBody pins the request payload — a wrong body fails instead of silently passing", async () => {
+    const schema = z.object({ ok: z.boolean() });
+    const fakeHttp = createFakeHttpCapability({
+      "POST /events": {
+        body: { ok: true },
+        matchBody: (b: unknown) => (b as { type?: string }).type === "click",
+      },
+    }).client;
+
+    // Correct payload → the canned success body comes back.
+    const good = await fakeHttp.post("/events", { type: "click" }, { schema });
+    expect(isOk(good)).toBe(true);
+    if (good.ok) expect(good.value).toEqual({ ok: true });
+
+    // Wrong payload → the route does not match; the bug surfaces loudly.
+    const bad = await fakeHttp.post("/events", { type: "scroll" }, { schema });
+    expect(isErr(bad)).toBe(true);
+    if (!bad.ok) {
+      expect(bad.error.kind).toBe("transient");
+      expect(bad.error.kind === "transient" && bad.error.message).toContain("matchBody");
+    }
+  });
 });

@@ -20,7 +20,15 @@ const RowSchema = z.object({
   CloseDate: z.union([z.string(), z.number(), z.date()]).nullable(),
 });
 
-const buildFixture = async (): Promise<Uint8Array> => {
+/**
+ * Build the fixture, injecting `filtersInner` as the children of `<filters>` on
+ * the date column. Defaults to the self-closing `dateGroupItem` nodes Dynamics
+ * emits (which `stripDateGroupItems` removes losslessly).
+ */
+const buildFixture = async (
+  filtersInner = '<dateGroupItem year="2023" dateTimeGrouping="year"/>' +
+    '<dateGroupItem year="2024" month="2" dateTimeGrouping="month"/>',
+): Promise<Uint8Array> => {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Data");
   ws.addTable({
@@ -42,10 +50,7 @@ const buildFixture = async (): Promise<Uint8Array> => {
   const xml = await tableFile.async("string");
   const withFilter = xml.replace(
     /<filterColumn colId="1"[^>]*\/>/,
-    '<filterColumn colId="1"><filters>' +
-      '<dateGroupItem year="2023" dateTimeGrouping="year"/>' +
-      '<dateGroupItem year="2024" month="2" dateTimeGrouping="month"/>' +
-      "</filters></filterColumn>",
+    `<filterColumn colId="1"><filters>${filtersInner}</filters></filterColumn>`,
   );
   if (withFilter === xml) throw new Error("fixture bug: filterColumn not found in table XML");
   zip.file(tableFile.name, withFilter);
@@ -68,5 +73,25 @@ describe("dateGroupItem table autofilters", () => {
     if (!result.ok) return;
     expect(result.value.rows).toHaveLength(2);
     expect(result.value.rows[0]!.Topic).toBe("Nysalg");
+  });
+
+  test("returns node-crash when the workbook still fails to load after stripping", async () => {
+    // First load crashes on the self-closing dateGroupItem (triggering the strip
+    // + retry path); the strip removes only that node, leaving an undefined XML
+    // entity (`&nope;`) that makes the retry load itself fail — exercising the
+    // `catch (e2)` branch that returns a fresh node-crash. The entity is a
+    // parser-level well-formedness error, so this does not depend on ExcelJS's
+    // tolerance of any particular element.
+    const bytes = await buildFixture(
+      '<dateGroupItem year="2023" dateTimeGrouping="year"/>&nope;',
+    );
+    const result = await parseWorkbook(bytes, RowSchema);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("node-crash");
+    if (result.error.kind === "node-crash") {
+      expect(result.error.message).toContain("failed to parse workbook");
+      expect(result.error.retriability).toBe("non-retriable");
+    }
   });
 });
