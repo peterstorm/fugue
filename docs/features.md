@@ -417,8 +417,11 @@ Nodes declare their side-effect profile: `"none"`, `"reads"`, `"writes"`, `"exte
 // ✅ WITH FRESHNESS WITNESSES:
 // extractWitness / extractNewWitness return a resource-free `witnessValue` — the
 // framework stamps the profile's `resource`, so a witness can never name a
-// different resource than the node it lives on. extractConditionedOn returns a
-// full `witness` because a write may condition on a resource it read upstream.
+// different resource than the node it lives on. This mismatch is unrepresentable
+// at *compile time* (WitnessValue declares `resource?: never`, so a full
+// `witness` is unassignable to these slots), not merely overwritten at runtime.
+// extractConditionedOn returns a full `witness` because a write may condition on
+// a resource it read upstream.
 const fetchCustomer: NodeDef = {
   sideEffects: {
     kind: "reads",

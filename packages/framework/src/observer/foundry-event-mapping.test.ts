@@ -214,7 +214,7 @@ describe("mapEventToFoundry", () => {
       "freshness-violation": {
         type: "freshness-violation",
         ...base,
-        resource: "res",
+        resource: resourceName("res"),
         conditionedOnWitness: w,
         conflictingWrite: { runId: RID, nodeId: NID, newWitness: w, succeededAtMs: 0 },
         detectedAtMs: 0,
@@ -364,7 +364,7 @@ const arbEvent: fc.Arbitrary<ObserverEvent> = fc
       case "write-attempted":
         return { type: "write-attempted", runId: rid, dagId: did, nodeId: nid, conditionedOn: w, newWitness: w, succeededAtMs: 0, timestamp: ts };
       case "freshness-violation":
-        return { type: "freshness-violation", runId: rid, dagId: did, nodeId: nid, resource: "res", conditionedOnWitness: w, conflictingWrite: { runId: rid, nodeId: nid, newWitness: w, succeededAtMs: 0 }, detectedAtMs: 0, timestamp: ts };
+        return { type: "freshness-violation", runId: rid, dagId: did, nodeId: nid, resource: resourceName("res"), conditionedOnWitness: w, conflictingWrite: { runId: rid, nodeId: nid, newWitness: w, succeededAtMs: 0 }, detectedAtMs: 0, timestamp: ts };
       case "human-intervention":
         return { type: "human-intervention", runId: rid, dagId: did, nodeId: nid, action: { kind: "approve" }, actor: "a", elapsedMsSinceAwait: 0, context: { nodeConfidence: c, nodeSideEffects: "none", priorWitnesses: [] }, timestamp: ts };
     }

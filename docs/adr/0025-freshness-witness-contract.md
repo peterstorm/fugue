@@ -21,6 +21,8 @@ version state of external resources at each handoff.
 
 The framework defines a `Witness` type:
 
+> **Superseded — see the [Amendment](#amendment--resource-free-self-referential-extractors-2026-06-08).** `resource` is now the branded `ResourceName`, and the self-referential extractors return a resource-free `WitnessValue` rather than a full `Witness`. The shape below is retained for historical context.
+
 ```ts
 type WitnessKind = "version" | "etag" | "timestamp" | "lsn" | "idempotency-key" | "custom";
 
@@ -39,6 +41,8 @@ write to the same resource, not to evaluate version ordering.
 ### Extractor placement on `NodeDef`
 
 Node authors declare extractors as optional fields on `NodeDef`:
+
+> **Superseded — see the [Amendment](#amendment--resource-free-self-referential-extractors-2026-06-08).** `extractWitness` and `extractNewWitness` now return a resource-free `WitnessValue`; `extractConditionedOn` still returns a full `Witness`.
 
 - **`reads` nodes:** `extractWitness: (output: O) => Witness` — called after
   successful execution, emits `WitnessCapturedEvent`.
@@ -77,6 +81,8 @@ do, one Map lookup per write.
 ZRANGEBYSCORE scan. Both operations are O(log N + M).
 
 Both implementations satisfy the `FreshnessIndex` interface:
+
+> **Superseded — signature drifted since acceptance.** `findConflict` now takes a single `Witness` (keeping `resource` ↔ `value` bonded) and both methods return `Promise<Result<…, FrameworkError>>`. See `packages/framework/src/types/freshness.ts` for the current contract.
 
 ```ts
 interface FreshnessIndex {

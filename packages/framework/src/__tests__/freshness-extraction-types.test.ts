@@ -153,6 +153,32 @@ describe("freshness extraction types (Phase 3)", () => {
     expect(() => stampWitness(RN("postgres:orders"), { kind: "version", value: "" } as WitnessValue)).toThrow();
   });
 
+  test("stampWitness overrides any stray runtime resource with the stamped one", () => {
+    // `resource?: never` is a compile-time guarantee only; a hand-built object
+    // cast to WitnessValue could smuggle a `resource` field at runtime. The
+    // framework must always win — the stamped resource is authoritative, so a
+    // mismatch cannot leak into the emitted witness. This makes the
+    // "framework stamps, author never names own resource" contract explicit
+    // rather than incidental.
+    const smuggled = { kind: "version", value: "42", resource: RN("attacker:controlled") } as unknown as WitnessValue;
+    const stamped = stampWitness(RN("postgres:orders"), smuggled);
+    expect(stamped.resource).toBe(RN("postgres:orders"));
+    expect(stamped.value).toBe("42");
+  });
+
+  test("stampWitness throws an actionable error when an extractor returns no WitnessValue", () => {
+    // An author extractor whose body falls through to an implicit `return`
+    // yields undefined. Fail-closed is preserved (it throws), but the message
+    // must name the authoring mistake rather than surfacing an opaque
+    // "Cannot read properties of undefined" TypeError.
+    expect(() => stampWitness(RN("postgres:orders"), undefined as unknown as WitnessValue)).toThrow(
+      /returned no WitnessValue/,
+    );
+    expect(() => stampWitness(RN("postgres:orders"), "version" as unknown as WitnessValue)).toThrow(
+      /returned no WitnessValue/,
+    );
+  });
+
   test("witnessValue rejects an empty value (smart-constructor invariant)", () => {
     expect(() => witnessValue("version", "")).toThrow();
     // witness() enforces non-empty value; the non-empty-resource invariant now

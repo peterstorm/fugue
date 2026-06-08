@@ -150,7 +150,7 @@ const dag = defineDag({
       kind: "fetch",
       sideEffects: {
         kind: "reads",
-        resource: "postgres:orders",
+        resource: resourceName("postgres:orders"),
         // resource-free: the framework stamps sideEffects.resource
         extractWitness: (output) => witnessValue("version", String(output.xmin)),
       },
@@ -173,7 +173,7 @@ const dag = defineDag({
       kind: "transform",
       sideEffects: {
         kind: "writes",
-        resource: "postgres:orders",
+        resource: resourceName("postgres:orders"),
         // conditionedOn keeps a full witness (its resource is a free variable);
         // newWitness is this node's own resource, so it's resource-free.
         extractConditionedOn: (input) => witness("version", resourceName("postgres:orders"), String(input.orderVersion)),
@@ -404,7 +404,7 @@ const transformNode = {
 
 // Reads from an external resource
 const fetchNode = {
-  sideEffects: { kind: "reads", resource: "postgres:customers" },
+  sideEffects: { kind: "reads", resource: resourceName("postgres:customers") },
   // ...
 };
 
@@ -412,7 +412,7 @@ const fetchNode = {
 const writeNode = {
   sideEffects: {
     kind: "writes",
-    resource: "postgres:orders",
+    resource: resourceName("postgres:orders"),
     idempotencyKey: (input) => `refund-${input.orderId}`,
   },
   // ...
@@ -422,7 +422,7 @@ const writeNode = {
 const apiNode = {
   sideEffects: {
     kind: "external-call",
-    resource: "stripe:charges",
+    resource: resourceName("stripe:charges"),
     idempotencyKey: (input) => input.chargeId,
   },
   // ...
@@ -498,7 +498,7 @@ const fetchOrderNode = {
   kind: "fetch",
   sideEffects: {
     kind: "reads",
-    resource: "postgres:orders",
+    resource: resourceName("postgres:orders"),
     // Returns only (kind, value); the framework stamps sideEffects.resource.
     extractWitness: (output) => witnessValue("version", String(output.xmin)), // Postgres xmin is a monotonic integer
   },
@@ -520,7 +520,7 @@ const executeRefundNode = {
   kind: "transform",
   sideEffects: {
     kind: "writes",
-    resource: "postgres:orders",
+    resource: resourceName("postgres:orders"),
     // conditionedOn returns a full witness — its resource is a free variable
     // (a write may condition on a resource read upstream).
     extractConditionedOn: (input) => witness("version", resourceName("postgres:orders"), String(input.orderVersion)), // version from upstream fetch

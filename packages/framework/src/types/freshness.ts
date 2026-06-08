@@ -125,8 +125,18 @@ export const witness = (
  * `sideEffects.resource` at emission time. Not exported from the package barrel;
  * DAG authors never stamp (they return a resource-free `witnessValue(...)`).
  */
-export const stampWitness = (resource: ResourceName, wv: WitnessValue): Witness =>
-  witness(wv.kind, resource, wv.value);
+export const stampWitness = (resource: ResourceName, wv: WitnessValue): Witness => {
+  // An author extractor whose body falls through to an implicit `return`
+  // (or returns a non-object) yields `undefined` here. Name the authoring
+  // mistake before the property access throws an opaque TypeError — the
+  // wave still fails closed, but with an actionable operator-facing message.
+  if (!wv || typeof wv !== "object") {
+    throw new Error("witness extractor returned no WitnessValue (expected { kind, value })");
+  }
+  // `resource` is stamped from the node's profile; any `resource` smuggled onto
+  // `wv` at runtime (the `?: never` field is compile-time only) is ignored.
+  return witness(wv.kind, resource, wv.value);
+};
 
 /**
  * @internal — Bypass validation for trusted internal code (deserialization,
@@ -156,7 +166,8 @@ export interface FreshnessConflict {
   /** The write node that is conditioned on a stale witness. */
   readonly writeNodeId: NodeId;
   readonly writeRunId: RunId;
-  readonly resource: string;
+  /** Branded — derived from `conditionedOnWitness.resource`, cannot drift from it. */
+  readonly resource: ResourceName;
   readonly conditionedOnWitness: Witness;
   /** The conflicting write that superseded the conditioned-on witness. */
   readonly conflictingWrite: {
