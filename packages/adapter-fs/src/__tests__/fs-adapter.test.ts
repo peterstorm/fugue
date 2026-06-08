@@ -167,6 +167,22 @@ describe("createFsAdapter — abort signal", () => {
     expect(isErr(c)).toBe(true);
     if (!c.ok) expect(c.error.kind).toBe("aborted");
   });
+
+  it("maps a mid-read TimeoutError to aborted (caller-supplied AbortSignal.timeout)", async () => {
+    // `isAbort` treats TimeoutError like AbortError: a caller who threads an
+    // `AbortSignal.timeout` and hits it has cancelled the read, so it's the
+    // non-retriable `aborted` kind rather than a transient fs fault.
+    const fsImpl: FsLike = {
+      readFile: async () => {
+        throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+      },
+      stat: async () => ({ size: 1, mtimeMs: 0 }),
+    };
+    const h = createFsAdapter({ rootDir: ROOT, fsImpl });
+    const c = await h.client.getContent(localPathRef("q2.xlsx"));
+    expect(isErr(c)).toBe(true);
+    if (!c.ok) expect(c.error.kind).toBe("aborted");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -57,9 +57,12 @@ export type FileRef =
  * Smart constructors are wiring/authoring helpers, almost always called with
  * literals or DAG input. A blank field is a programmer/wiring error, not a
  * runtime I/O failure — so we fail loud at the call site (which is boot/authoring
- * time, or a node `fetch` where it surfaces as a `node-crash`) rather than let an
- * empty `siteHostname`/`itemId`/`url`/`path` flow to an adapter and resolve to a
- * surprising URL or the filesystem root. Returning `Result` here was rejected: it
+ * time, or a node `fetch` where the throw is caught and surfaces as a
+ * `node-crash`) rather than let an empty `siteHostname`/`itemId`/`url`/`path` flow
+ * to an adapter and resolve to a surprising URL or the filesystem root. Note: a
+ * crash caught inside a node `fetch` is classified `retriability: "retriable"`
+ * (see `run-node.ts`), so a blank-field bug is retried through the node's budget
+ * before the loud error finally surfaces — fail-loud, not fail-fast. Returning `Result` here was rejected: it
  * would force every `localPathRef(...)` inside a node `fetch` to be unwrapped,
  * destroying ergonomics for no real safety gain over fail-loud construction.
  */

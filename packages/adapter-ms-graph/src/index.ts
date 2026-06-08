@@ -138,6 +138,11 @@ const crashErr = (message: string): FrameworkError => ({
   retriability: "non-retriable",
 });
 
+const abortedErr = (url: string): FrameworkError => ({
+  kind: "aborted",
+  reason: `Graph request aborted by caller signal: ${url.split("?")[0]}`,
+});
+
 /**
  * Map a Graph HTTP status to a `FrameworkError`. Auth-token expiry (401),
  * request-timeout (408), throttling (429), and server errors (5xx) are
@@ -240,6 +245,9 @@ const graphGet = async (
   opts: ReadOpts | undefined,
   timeoutMs: number,
 ): Promise<Result<Response, FrameworkError>> => {
+  // Fail fast on a caller signal that's already aborted — a non-retriable
+  // `aborted` (not a retriable `transient`), so the retry policy fast-fails it.
+  if (opts?.signal?.aborted) return err(abortedErr(url));
   try {
     const res = await fetchImpl(url, {
       method: "GET",
@@ -268,6 +276,12 @@ const graphGet = async (
     if (!res.ok) return err(mapGraphStatus(res.status, url));
     return ok(res);
   } catch (e) {
+    // A caller-initiated cancel is terminal (non-retriable `aborted`); the
+    // adapter's own per-request timeout is a retriable `transient`. Both surface
+    // as an AbortError on the composed signal (`buildSignal`), so discriminate on
+    // the caller's *own* signal rather than the error name — retrying a timeout
+    // is correct, retrying a deliberate cancel is not.
+    if (opts?.signal?.aborted) return err(abortedErr(url));
     return err(transientErr(`Graph request failed for ${url.split("?")[0]}: ${msg(e)}`));
   }
 };
