@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
 import { describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
 import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";
@@ -90,7 +90,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits witness-captured for reads node with extractWitness", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: (output: unknown) => witness("version", "pg:orders", String((output as { version: number }).version)) },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, { version: 42 }]]);
@@ -108,7 +108,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits write-attempted for writes node with both extractors", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witness("version", "pg:orders", "43")) },
+      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witnessValue("version", "43")) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -129,7 +129,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits freshness-violation when conflict detected", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witness("version", "pg:orders", "44")) },
+      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witnessValue("version", "44")) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -177,7 +177,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("skips freshness events for skipped nodes", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => (witness("version", "pg:orders", "1")) },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => (witnessValue("version", "1")) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -229,7 +229,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("populates witness accumulator map by resource", async () => {
     const obs = new RecordingObserver();
     const readNode = makeNodeDef("read-node", {
-      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => (witness("version", "pg:orders", "99")) },
+      sideEffects: { kind: "reads", resource: RN("pg:orders"), extractWitness: () => (witnessValue("version", "99")) },
     });
     const nodeMap = new Map([[NID_READ, readNode]]);
     const newOutputs = new Map([[NID_READ, {}]]);
@@ -250,7 +250,7 @@ describe("emitFreshnessWitnessEvents", () => {
         kind: "writes",
         resource: RN("pg:orders"),
         extractConditionedOn: () => (witness("version", "pg:orders", "1")),
-        extractNewWitness: () => (witness("version", "pg:orders", "2")),
+        extractNewWitness: () => (witnessValue("version", "2")),
       },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
@@ -282,7 +282,7 @@ describe("emitFreshnessWitnessEvents", () => {
         kind: "writes",
         resource: RN("pg:orders"),
         extractConditionedOn: () => { throw new Error("broken extractor"); },
-        extractNewWitness: () => (witness("version", "pg:orders", "2")),
+        extractNewWitness: () => (witnessValue("version", "2")),
       },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
@@ -310,7 +310,7 @@ describe("emitFreshnessWitnessEvents", () => {
         kind: "writes",
         resource: RN("pg:orders"),
         extractConditionedOn: () => (witness("version", "pg:orders", "1")),
-        extractNewWitness: () => (witness("version", "pg:orders", "2")),
+        extractNewWitness: () => (witnessValue("version", "2")),
       },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
@@ -335,5 +335,62 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
     // A failed conflict check must NOT be reported as a freshness-violation.
     expect(obs.events.some((e) => e.type === "freshness-violation")).toBe(false);
+  });
+
+  it("stamps the profile resource onto a resource-free read witness (stamping is not a no-op)", async () => {
+    const obs = new RecordingObserver();
+    // The extractor returns ONLY (kind, value) — it has no way to name a
+    // resource. The emitted witness's resource can therefore *only* come from
+    // the framework stamping se.resource. If stampWitness were a no-op the
+    // resource would be absent and this assertion would fail.
+    const readNode = makeNodeDef("read-node", {
+      sideEffects: { kind: "reads", resource: RN("crm:customers"), extractWitness: () => witnessValue("etag", "abc123") },
+    });
+    const nodeMap = new Map([[NID_READ, readNode]]);
+    const newOutputs = new Map([[NID_READ, {}]]);
+    const index = new InMemoryFreshnessIndex();
+
+    const ctx = makePostWaveCtx([NID_READ], nodeMap as any, makeMachineCtx(), obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
+
+    const captured = obs.events.filter((e) => e.type === "witness-captured") as WitnessCapturedEvent[];
+    expect(captured).toHaveLength(1);
+    // Resource came from the profile, not the extractor.
+    expect(captured[0]!.witness.resource).toBe(RN("crm:customers"));
+    expect(captured[0]!.witness.kind).toBe("etag");
+    expect(captured[0]!.witness.value).toBe("abc123");
+  });
+
+  it("stamps newWitness with the node's own resource while conditionedOn keeps its upstream resource", async () => {
+    const obs = new RecordingObserver();
+    // The write's OWN resource is "pg:orders". It is conditioned on a DIFFERENT
+    // resource ("pg:accounts") it read upstream: conditionedOn must pass that
+    // through verbatim (its resource is a free variable), while the resource-free
+    // newWitness is stamped with this node's own resource.
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => witness("version", "pg:accounts", "7"),
+        extractNewWitness: () => witnessValue("version", "8"),
+      },
+    });
+    const nodeMap = new Map([[NID_WRITE, writeNode]]);
+    const machineCtx = makeMachineCtx();
+    const ctxWithOutput = { ...machineCtx, outputs: new Map([[NID_READ, { version: 7 }]]) };
+    const newOutputs = new Map([[NID_WRITE, { ok: true }]]);
+    const index = new InMemoryFreshnessIndex();
+
+    const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, index);
+    await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
+
+    const writes = obs.events.filter((e) => e.type === "write-attempted") as WriteAttemptedEvent[];
+    expect(writes).toHaveLength(1);
+    // conditionedOn passes through verbatim — its resource is a free variable.
+    expect(writes[0]!.conditionedOn.resource).toBe(RN("pg:accounts"));
+    expect(writes[0]!.conditionedOn.value).toBe("7");
+    // newWitness is stamped with this node's OWN resource, not the conditioned-on one.
+    expect(writes[0]!.newWitness.resource).toBe(RN("pg:orders"));
+    expect(writes[0]!.newWitness.value).toBe("8");
   });
 });

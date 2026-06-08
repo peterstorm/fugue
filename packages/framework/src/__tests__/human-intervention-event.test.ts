@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
 // Phase 4 — HumanInterventionEvent tests
 // Verifies that `HumanInterventionEvent` is emitted via the observer for each
 // human-action variant, with correct fields (actor, action, context, elapsedMs).
@@ -291,7 +291,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
       id: "test-witnesses",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witness("version", "postgres:orders", String((output as { version: number }).version)) },
+          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
           run: async () => ok({ version: 42 }),
         }),
         review: makeNode("review", {

@@ -186,11 +186,13 @@ We removed the redundancy instead of policing it:
   different resource it read upstream. Forcing the node's own resource here
   would be wrong.
 
-Public surface added to `@fuguejs/framework`: the `WitnessValue` type, the
-`witnessValue(kind, value)` smart constructor, and the internal
-`stampWitness(resource, value)` helper. The `Witness` type and `witness(...)`
-constructor are unchanged (still used for `extractConditionedOn`, emitted
-events, and the freshness index).
+Public surface added to `@fuguejs/framework`: the `WitnessValue` type and the
+`witnessValue(kind, value)` smart constructor. The stamping itself is performed
+by an internal `stampWitness(resource: ResourceName, wv: WitnessValue)` helper
+that is **not** exported from the package barrel — only
+`dag-runtime/freshness-emission.ts` calls it; DAG authors never stamp. The
+`Witness` type and `witness(...)` constructor are unchanged (still used for
+`extractConditionedOn`, emitted events, and the freshness index).
 
 This is a breaking change to the two self-referential extractor signatures,
 taken pre-1.0 while the only call sites were the `customer-summary` example app

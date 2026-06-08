@@ -70,11 +70,25 @@ export type Witness = {
  * `extractConditionedOn` still returns a full `Witness` — a write may be
  * conditioned on a *different* resource it read upstream, so that resource is a
  * genuine free variable the author must name.
+ *
+ * `resource?: never` makes the mismatch a *compile-time* error, not merely a
+ * runtime one: a full `Witness` (which carries `resource`) is not assignable to
+ * a self-referential extractor slot, so an author cannot even name a resource
+ * there.
+ *
+ * Deliberately *unbranded* (unlike `Witness`/`ResourceName`): a `WitnessValue`
+ * has no swap hazard (its two fields are a `WitnessKind` enum and an opaque
+ * `string`, not confusable), never crosses a serialization boundary or port,
+ * and its sole invariant (non-empty value) is re-validated at the only place it
+ * matters — `stampWitness`, which routes through `witness()`. Branding it would
+ * add ceremony for no bug-prevention gain.
  */
 export type WitnessValue = {
   readonly kind: WitnessKind;
   /** Opaque to the framework — never parsed or compared beyond string equality. */
   readonly value: string;
+  /** Always absent — the framework stamps the resource. Makes a full `Witness` unassignable here. */
+  readonly resource?: never;
 };
 
 /** Smart constructor for a resource-free witness value. Validates non-empty value. */
@@ -100,7 +114,14 @@ export const witness = (
   return { kind, resource: resource as ResourceName, value } as Witness;
 };
 
-/** Stamp a `WitnessValue` with a resource to produce a full `Witness`. */
+/**
+ * Stamp a `WitnessValue` with a resource to produce a full `Witness`.
+ *
+ * @internal — framework-internal; the only caller is
+ * `dag-runtime/freshness-emission.ts`, which stamps the node's own
+ * `sideEffects.resource` at emission time. Not exported from the package barrel;
+ * DAG authors never stamp (they return a resource-free `witnessValue(...)`).
+ */
 export const stampWitness = (resource: ResourceName, wv: WitnessValue): Witness =>
   witness(wv.kind, resource, wv.value);
 

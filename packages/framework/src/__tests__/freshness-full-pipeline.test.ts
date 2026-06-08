@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Wave 6 — Test gap coverage for review remediation.
  *
@@ -162,11 +162,11 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       id: "pipeline",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witness("version", "postgres:orders", String((output as { version: number }).version)) },
+          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
           run: async () => ok({ version: 42 }),
         }),
         writer: makeNode("writer", {
-          sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: (input: unknown) => witness("version", "postgres:orders", String((input as { version: number }).version)), extractNewWitness: (output: unknown) => witness("version", "postgres:orders", String((output as { newVersion: number }).newVersion)) },
+          sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: (input: unknown) => witness("version", "postgres:orders", String((input as { version: number }).version)), extractNewWitness: (output: unknown) => witnessValue("version", String((output as { newVersion: number }).newVersion)) },
           run: async () => ok({ newVersion: 44 }),
         }),
         review: makeNode("review", {
@@ -277,7 +277,7 @@ describe("Freshness extractor failure (fail-closed)", () => {
         writer: makeNode("writer", {
           sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: () => {
             throw new Error("conditionedOn boom");
-          }, extractNewWitness: () => witness("version", "postgres:orders", "99") },
+          }, extractNewWitness: () => witnessValue("version", "99") },
           run: async () => ok({ written: true }),
         }),
       },

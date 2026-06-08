@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness extraction type-level assertions.
  *
@@ -107,9 +107,30 @@ describe("freshness extraction types (Phase 3)", () => {
     expect(result.value).toBe("99");
   });
 
+  test("a full Witness is rejected from a resource-free extractor slot (compile-time guarantee)", () => {
+    const se: Extract<SideEffectProfile, { kind: "reads" }> = {
+      kind: "reads",
+      resource: RN("postgres:orders"),
+      // @ts-expect-error — extractWitness returns WitnessValue, whose `resource`
+      // is `never`; a full Witness carries `resource: ResourceName` and is
+      // therefore unassignable. This makes a resource mismatch *unrepresentable*
+      // at compile time, not merely overwritten at runtime. If this directive
+      // ever stops erroring, the type-level guarantee has regressed.
+      extractWitness: () => witness("version", "wrong:resource", "1"),
+    };
+    expect(se.extractWitness).toBeDefined();
+  });
+
+  test("witnessValue rejects an empty value (smart-constructor invariant)", () => {
+    expect(() => witnessValue("version", "")).toThrow();
+    // The full constructor enforces non-empty resource AND value.
+    expect(() => witness("version", "postgres:orders", "")).toThrow();
+    expect(() => witness("version", "", "1")).toThrow();
+  });
+
   test("node without extractors compiles (freshness tracking silently skipped)", () => {
     const node: NodeDef<unknown, unknown> = {
-      id: "pure" as any,
+      id: "pure" as unknown as NodeId,
       kind: "transform",
       inputSchema: z.unknown(),
       outputSchema: z.unknown(),

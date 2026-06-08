@@ -67,7 +67,10 @@ export { CONFIDENCE_ORDER, meetsConfidence, confidence, tryConfidence } from "./
 
 // ── Freshness witness types ───────────────────────────────────────────────
 export type { WitnessKind, Witness, WitnessValue, ResourceName } from "./freshness.js";
-export { witness, witnessValue, stampWitness, resourceName } from "./freshness.js";
+// `stampWitness` is intentionally NOT exported here — it is framework-internal
+// (only `dag-runtime/freshness-emission.ts` stamps). Authors return a
+// resource-free `witnessValue(...)`; the framework supplies the resource.
+export { witness, witnessValue, resourceName } from "./freshness.js";
 
 // ── JSON Patch ────────────────────────────────────────────────────────────
 export type { JsonPatchOp, JsonPatch } from "./json-patch.js";
