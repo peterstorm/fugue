@@ -180,7 +180,10 @@ We removed the redundancy instead of policing it:
   of `extractWitness` (reads) and `extractNewWitness` (writes). The framework
   **stamps** `sideEffects.resource` onto it at emission time (`stampWitness`),
   so the witness can never name a different resource than its node. The mismatch
-  is now *unrepresentable*, not merely *validated*.
+  is now *unrepresentable*, not merely *validated*: `WitnessValue` declares
+  `resource?: never`, so a full `Witness` (which carries `resource: ResourceName`)
+  is not assignable to a self-referential extractor slot — the typo is a
+  compile error, not a runtime overwrite.
 - `extractConditionedOn` is **unchanged** — it still returns a full `Witness`.
   Its resource is a genuine free variable: a write may be conditioned on a
   different resource it read upstream. Forcing the node's own resource here

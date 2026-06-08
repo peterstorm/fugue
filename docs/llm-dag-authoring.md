@@ -301,9 +301,9 @@ The four kinds, and what each may carry:
 - **`writes`** — mutates a resource you own. May carry `idempotencyKey` **and** freshness witnesses.
 - **`external-call`** — calls someone else's API. May carry `idempotencyKey`.
 
-`SideEffectKind`, `SideEffectProfile`, `Witness`, `ResourceName`, plus the
-`witness` and `resourceName` smart constructors, all import from
-`@fuguejs/framework`.
+`SideEffectKind`, `SideEffectProfile`, `Witness`, `WitnessValue`,
+`ResourceName`, plus the `witness`, `witnessValue`, and `resourceName` smart
+constructors, all import from `@fuguejs/framework`.
 
 ### Idempotency keys — dedupe writes & external calls
 

@@ -41,8 +41,10 @@ export type SideEffectProfile<I = unknown, O = unknown> =
       readonly resource: ResourceName;
       readonly idempotencyKey?: (input: I) => string;
       /**
-       * Declare which witness this write is conditioned on. Called with the
-       * node's assembled input before execution. Returns a full `Witness`
+       * Declare which witness this write is conditioned on. Called after the
+       * node completes, with its assembled input (which carries the upstream
+       * read's version this write assumed was still current). Returns a full
+       * `Witness`
        * (including `resource`) because a write may be conditioned on a
        * *different* resource it read upstream — that resource is a genuine
        * free variable the author must name.

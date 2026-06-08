@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, stampWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness extraction type-level assertions.
  *
@@ -20,7 +20,7 @@ import { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { NodeId } from "../types/ids.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
-import type { Witness, WitnessValue } from "../types/freshness.js";
+import type { Witness, WitnessValue, WitnessKind } from "../types/freshness.js";
 import { ok } from "../types/result.js";
 
 describe("freshness extraction types (Phase 3)", () => {
@@ -121,6 +121,36 @@ describe("freshness extraction types (Phase 3)", () => {
     expect(se.extractWitness).toBeDefined();
   });
 
+  test("a full Witness is rejected from the writes extractNewWitness slot (compile-time guarantee)", () => {
+    const se: Extract<SideEffectProfile, { kind: "writes" }> = {
+      kind: "writes",
+      resource: RN("postgres:orders"),
+      // @ts-expect-error — extractNewWitness is the symmetric resource-free slot:
+      // it returns WitnessValue (`resource: never`), so a full Witness is
+      // unassignable here too. Same guarantee as extractWitness above; if this
+      // directive stops erroring, the writes-side guarantee has regressed.
+      extractNewWitness: () => witness("version", "wrong:resource", "1"),
+    };
+    expect(se.extractNewWitness).toBeDefined();
+  });
+
+  test("stampWitness produces the same full Witness as the witness constructor (roundtrip)", () => {
+    const stamped = stampWitness(RN("postgres:orders"), witnessValue("etag", "abc123"));
+    // Pins the (kind, resource, value) argument order independent of the
+    // emission wiring — a transposed stampWitness arg would fail here.
+    expect(stamped.kind).toBe("etag");
+    expect(stamped.resource).toBe(RN("postgres:orders"));
+    expect(stamped.value).toBe("abc123");
+    expect(stamped).toEqual(witness("etag", "postgres:orders", "abc123"));
+  });
+
+  test("stampWitness re-validates the non-empty value invariant at the stamping boundary", () => {
+    // The WitnessValue doc promises its sole invariant is re-validated where it
+    // matters — stampWitness, which routes through witness(). A hand-built
+    // empty value bypassing witnessValue() must still be rejected here.
+    expect(() => stampWitness(RN("postgres:orders"), { kind: "version", value: "" } as WitnessValue)).toThrow();
+  });
+
   test("witnessValue rejects an empty value (smart-constructor invariant)", () => {
     expect(() => witnessValue("version", "")).toThrow();
     // The full constructor enforces non-empty resource AND value.
@@ -144,14 +174,22 @@ describe("freshness extraction types (Phase 3)", () => {
   });
 
   test("WitnessKind covers all expected variants", () => {
-    const witnesses: Witness[] = [
-      witness("version", "r", "1"),
-      witness("etag", "r", "abc"),
-      witness("timestamp", "r", "1234567890"),
-      witness("lsn", "r", "0/1234"),
-      witness("idempotency-key", "r", "idem-1"),
-      witness("custom", "r", "custom-val"),
-    ];
-    expect(witnesses).toHaveLength(6);
+    // `satisfies Record<WitnessKind, …>` makes this exhaustiveness check
+    // compile-enforced: adding or removing a WitnessKind variant without
+    // updating this map is a type error, not a silently-passing length assert.
+    const samples = {
+      version: "1",
+      etag: "abc",
+      timestamp: "1234567890",
+      lsn: "0/1234",
+      "idempotency-key": "idem-1",
+      custom: "custom-val",
+    } satisfies Record<WitnessKind, string>;
+
+    const witnesses: Witness[] = (Object.entries(samples) as [WitnessKind, string][]).map(
+      ([kind, value]) => witness(kind, "r", value),
+    );
+    expect(witnesses).toHaveLength(Object.keys(samples).length);
+    expect(new Set(witnesses.map((w) => w.kind)).size).toBe(witnesses.length);
   });
 });
