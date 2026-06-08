@@ -1,6 +1,11 @@
 {
   "name": "@fuguejs/framework",
-  "version": "0.1.0",
+  "version": "0.1.8",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peterstorm/fugue.git",
+    "directory": "packages/framework"
+  },
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",

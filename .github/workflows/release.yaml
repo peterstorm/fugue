@@ -6,7 +6,7 @@
 #
 # Auth: npm OIDC trusted publishing — no NPM_TOKEN secret. One-time setup per
 # package on npmjs.com (package → Settings → Trusted Publisher → GitHub
-# Actions: owner/repo + workflow filename `release.yml`). Note: npm only lets
+# Actions: owner/repo + workflow filename `release.yaml`). Note: npm only lets
 # you configure a trusted publisher on a package that already exists, so the
 # very first publish of each package is manual (`bun publish` from a logged-in
 # shell); every release after that runs through here with provenance.
@@ -15,6 +15,13 @@
 # rewrites `workspace:*` ranges to the real versions at pack time; the tarball
 # is then handed to `npm publish` (npm >= 11.5.1 for OIDC). Publish order
 # below only matters for registry visibility.
+#
+# GOTCHA: OIDC validation requires each package.json's repository.url to
+# EXACTLY match this GitHub repo — a missing/mismatched field fails with a
+# misleading ENEEDAUTH (npm/cli#9088; cost us v0.1.1 and v0.1.2). When a
+# release run fails, prefer fixing forward: bump to the next patch version
+# and push a fresh tag — the "skip versions already on the registry" step
+# makes partially-published releases safe to supersede.
 name: release
 
 on:
@@ -68,11 +75,33 @@ jobs:
               echo "$name@$version already published — skipping"
               continue
             fi
-            # bun pm pack rewrites workspace:* ranges; npm publishes the tarball via OIDC.
+            # bun pm pack rewrites workspace:* ranges; npm publishes the tarball via
+            # OIDC. No --provenance flag: trusted publishing generates provenance
+            # automatically, and OIDC validation requires package.json's
+            # repository.url to exactly match this repo (else: misleading ENEEDAUTH).
             (
               cd "packages/$pkg"
               rm -rf .release && mkdir .release
               bun pm pack --destination .release
-              npm publish .release/*.tgz --provenance --access public
+
+              # GATE: bun pm pack resolves workspace:* from bun.lock, whose
+              # workspace "version" fields bun install does NOT refresh on a
+              # version bump — v0.1.4 shipped pinning siblings at 0.1.0 this
+              # way. Refuse to publish a tarball whose @fuguejs/* pins don't
+              # all equal the release version.
+              bad=$(tar -xzOf .release/*.tgz package/package.json \
+                | bun -e 'const pj = await new Response(Bun.stdin.stream()).json();
+                    const want = process.argv[1]; // bun -e: argv = [bun, ...args]
+                    const deps = { ...pj.dependencies, ...pj.peerDependencies };
+                    const bad = Object.entries(deps)
+                      .filter(([n, v]) => n.startsWith("@fuguejs/") && v !== want)
+                      .map(([n, v]) => n + "@" + v);
+                    console.log(bad.join(" "));' "$version")
+              if [ -n "$bad" ]; then
+                echo "::error::$name tarball pins stale workspace versions: $bad — bump the workspace \"version\" fields in bun.lock" >&2
+                exit 1
+              fi
+
+              npm publish .release/*.tgz --access public
             )
           done

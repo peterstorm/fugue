@@ -7,6 +7,7 @@ import { type Result, ok, err } from "../types/result.js";
 import { resourceName } from "../types/freshness.js";
 import { stableHash } from "../shared/hash.js";
 import { nodeId } from "../types/ids.js";
+import { computePromptHash } from "../prompts/hash.js";
 import { runLlmCallPipeline } from "./llm-pipeline.js";
 
 /**
@@ -122,6 +123,10 @@ export const createLlmWithToolsNode = <I, O>(
         toolNamesHash,
         input,
       })}`;
+    // System prompt is the prompt SOURCE here (user message comes from
+    // buildUser, so it is input, not template). Appended to the cache key by
+    // the pipeline so a system-prompt edit invalidates custom cache keys too.
+    const promptFingerprint = computePromptHash(systemPrompt);
 
     return runLlmCallPipeline(
       {
@@ -132,6 +137,7 @@ export const createLlmWithToolsNode = <I, O>(
         cacheKey,
         disableValidationRetry: config.disableValidationRetry,
         promptName: config.promptName,
+        promptFingerprint,
         thinking: config.thinking,
       },
       () => {

@@ -43,9 +43,9 @@ fugue-dags/                     # Separate git repo
 ```
 
 Host behavior:
-- **Startup:** `git clone --depth=1 --branch={branch} {DAGS_REPO_URL}` into a working directory
+- **Startup:** `git clone --depth=1 --branch={branch} {DAGS_REPO_URL}` into a working directory, then `bun install --frozen-lockfile` (skipped when the repo has no `package.json`)
 - **Poll loop:** Every `DAGS_POLL_INTERVAL_MS` (default 30s), `git fetch` + compare remote HEAD SHA
-- **On new commit:** `git pull`, optionally `bun install --frozen-lockfile` if `bun.lockb` changed, re-scan and re-import DAGs
+- **On new commit:** `git pull`, optionally `bun install --frozen-lockfile` if the lockfile (`bun.lock` / `bun.lockb`) changed, re-scan and re-import DAGs
 - **Dev mode:** `DAGS_LOCAL_PATH` env var skips git entirely, uses a local directory (for development)
 - **Discovery:** Scan `dags/*/*/dag.ts` pattern — one level of team nesting
 

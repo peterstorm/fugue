@@ -11,7 +11,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, computePromptHash } from "@fuguejs/framework";
 import type { Result, DagId, GitSha } from "@fuguejs/framework";
 import { tryDagId, dagId } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -143,6 +143,14 @@ export const loadDagModule = async (
   });
   const prompts = await loadPromptsForModule(modulePath, promptErrorHandler);
 
+  // Opt-in prompt versioning: when prompts/registry.json exists, every prompt
+  // must match its registered hash. Fail-closed per DAG (NFR-010): an edited-
+  // without-bump prompt must not deploy.
+  const registryResult = await validatePromptRegistry(modulePath, prompts, idResult.value);
+  if (!registryResult.ok) {
+    return registryResult;
+  }
+
   return ok({
     id: idResult.value,
     registration,
@@ -151,6 +159,86 @@ export const loadDagModule = async (
     team: yaml?.team,
     owner: yaml?.owner,
   });
+};
+
+/**
+ * Validate the optional `prompts/registry.json` (prompt versioning, opt-in).
+ *
+ * Shape: `{ "<prompt-name>": { "version": "1.0.0", "hash": "<sha256/16>" } }` —
+ * the same contract as the framework's `FilePromptRegistry`. When the file is
+ * absent the check is skipped (prompts are still implicitly versioned by git).
+ * When present, ALL of these fail the DAG load:
+ * - malformed registry JSON / entry shape,
+ * - a loaded prompt missing from the registry,
+ * - a registry entry whose prompt file is missing,
+ * - a hash mismatch (prompt edited without a version bump).
+ */
+export const validatePromptRegistry = async (
+  modulePath: string,
+  prompts: ReadonlyMap<string, string>,
+  forDagId: DagId,
+): Promise<Result<void, HostError>> => {
+  const registryPath = join(dirname(modulePath), "prompts", "registry.json");
+  let raw: string;
+  try {
+    raw = await readFile(registryPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return ok(undefined); // opt-in
+    return err({
+      kind: "dag-validation-failed",
+      dagId: forDagId,
+      reason: `Cannot read prompt registry: ${e instanceof Error ? e.message : String(e)}`,
+      message: `DAG '${forDagId}': cannot read ${registryPath}`,
+    });
+  }
+
+  const invalid = (reason: string): Result<void, HostError> =>
+    err({
+      kind: "dag-validation-failed",
+      dagId: forDagId,
+      reason,
+      message: `DAG '${forDagId}' prompt registry: ${reason}`,
+    });
+
+  let registry: unknown;
+  try {
+    registry = JSON.parse(raw);
+  } catch (e) {
+    return invalid(`registry.json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (registry === null || typeof registry !== "object" || Array.isArray(registry)) {
+    return invalid("registry.json must be an object keyed by prompt name");
+  }
+
+  const entries = registry as Record<string, unknown>;
+  const problems: string[] = [];
+
+  for (const [name, entry] of Object.entries(entries)) {
+    const e = entry as { version?: unknown; hash?: unknown } | null;
+    if (e === null || typeof e !== "object" || typeof e.version !== "string" || typeof e.hash !== "string") {
+      problems.push(`'${name}': entry must be { version: string, hash: string }`);
+      continue;
+    }
+    const text = prompts.get(name);
+    if (text === undefined) {
+      problems.push(`'${name}': registered but prompts/${name}.txt is missing`);
+      continue;
+    }
+    const actual = computePromptHash(text);
+    if (actual !== e.hash) {
+      problems.push(`'${name}': hash mismatch (registry ${e.hash}, file ${actual}) — prompt edited without version bump`);
+    }
+  }
+  for (const name of prompts.keys()) {
+    if (!(name in entries)) {
+      problems.push(`'${name}': prompt file present but not in registry.json`);
+    }
+  }
+
+  if (problems.length > 0) {
+    return invalid(problems.join("; "));
+  }
+  return ok(undefined);
 };
 
 /**

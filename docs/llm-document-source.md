@@ -125,6 +125,25 @@ if (meta.ok && meta.value.eTag === input.knownETag) return ok(cachedResult);
 
 `FileMeta = { id, name, sizeBytes, lastModified /* ISO 8601 */, eTag?, mimeType? }`.
 
+For the common "re-parsing this big file dominates every run" case, use
+`createCachedDocumentParser` instead of hand-rolling the check: it memoizes a
+bytes→value parse keyed by the file's fingerprint (`eTag`, else
+`lastModified`+`sizeBytes`), so an unchanged file costs one `getMetadata`
+round-trip. Create it at module scope so the memo outlives individual runs:
+
+```ts
+import { createCachedDocumentParser, localPathRef } from "@fuguejs/document-source";
+import { parseWorkbook } from "@fuguejs/xlsx";
+
+const readReport = createCachedDocumentParser((bytes) => parseWorkbook(bytes, RowSchema));
+
+// inside the fetch node:
+fetch: async (_input, ctx) => readReport(ctx.documents, localPathRef("report.xlsx")),
+```
+
+Metadata failures fail open to a direct read+parse; parse failures are never
+cached; concurrent calls share one in-flight parse.
+
 ---
 
 ## Wire an adapter into the host

@@ -14,7 +14,7 @@
  * Error isolation: A single DAG import failure does NOT block others.
  *
  * @satisfies FR-001 — Poll git branch at configurable interval and detect new commits
- * @satisfies FR-005 — Run bun install if bun.lockb changed between commits
+ * @satisfies FR-005 — Run bun install if the lockfile (bun.lock / bun.lockb) changed between commits
  * @satisfies FR-002 — Discover DAGs by scanning dags/{team}/{name}/dag.ts convention
  * @satisfies FR-003 — Dynamically import discovered DAG modules with SHA cache-busting
  * @satisfies NFR-003 — Git sync detection MUST complete within poll interval + 5s (individual ops timeout at 30s; overall cycle timeout TBD — tracked for future enforcement)
@@ -182,7 +182,7 @@ export const executeSyncCycle = async (
         };
       }
     } else if (lockResult.value) {
-      logger.info("bun.lockb changed, running bun install");
+      logger.info("lockfile changed, running bun install");
       const installResult = await git.install(config.repoPath);
       if (!installResult.ok) {
         logger.error("bun install failed", { error: installResult.error });
@@ -320,7 +320,8 @@ export const startSyncLoop = (
 
 /**
  * Perform a single initial sync (used at startup before starting the loop).
- * Clones the repo if not in local mode, then loads all DAGs.
+ * Clones the repo and installs its dependencies if not in local mode, then
+ * loads all DAGs.
  */
 export const initialSync = async (
   git: GitPort,
@@ -337,6 +338,16 @@ export const initialSync = async (
     });
     if (!cloneResult.ok) {
       return cloneResult;
+    }
+
+    // A fresh clone has no node_modules — install before the first dynamic
+    // import, or every dag.ts with a dependency fails to load (import-failed)
+    // and the host boots with 0 DAGs. Fail closed instead: a refused start
+    // names the real problem. (No-op when the repo has no package.json.)
+    logger.info("Installing DAG repo dependencies (initial clone)...");
+    const installResult = await git.install(config.repoPath);
+    if (!installResult.ok) {
+      return installResult;
     }
   }
 

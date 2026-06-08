@@ -579,6 +579,39 @@ Generate a summary with key points.
 
 Loaded by the host at discovery time. Accessed via `promptName` in `createLlmNode`.
 
+### Prompt versioning
+
+Three layers, two automatic and one opt-in:
+
+1. **Cache safety (automatic).** Every LLM cache key gets the prompt
+   fingerprint appended (hash of the system prompt + un-interpolated user
+   template). Editing a prompt — or the `system` string — always misses the
+   old cache, even with a custom `computeCacheKey`. No stale outputs from a
+   predecessor prompt.
+2. **Trace attribution (automatic).** LLM spans carry `ai.prompt_hash`, so a
+   trace identifies exactly which prompt version produced an output.
+3. **Explicit versions (opt-in).** Add `prompts/registry.json` next to the
+   prompt files:
+
+   ```json
+   { "user-summary": { "version": "1.0.0", "hash": "<sha256/16>" } }
+   ```
+
+   When this file exists, the host validates every prompt's hash against it
+   at load time and REFUSES to register the DAG on any drift (hash mismatch,
+   unregistered prompt, registered-but-missing file) — "prompt edited without
+   version bump" becomes a deploy failure, not a silent change. Without the
+   file, prompts are versioned implicitly by git only.
+
+Authoring workflow — never hand-edit hashes:
+
+```bash
+# after editing any prompts/*.txt (new prompt → 1.0.0, edited → patch bump):
+bunx fugue prompts sync  dags/<team>/<name>
+# CI / pre-merge (exit 1 on drift):
+bunx fugue prompts check dags/<team>/<name>
+```
+
 ---
 
 ## Result Type

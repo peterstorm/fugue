@@ -3,7 +3,7 @@ import { ok, err, gitSha } from "@fuguejs/framework";
 import type { GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort, ModuleLoaderPort, BulkLoadResult } from "../ports.js";
-import { executeSyncCycle, startSyncLoop } from "../sync/sync-loop.js";
+import { executeSyncCycle, initialSync, startSyncLoop } from "../sync/sync-loop.js";
 import type { SyncConfig, SyncLogger } from "../sync/sync-loop.js";
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
@@ -190,6 +190,42 @@ describe("executeSyncCycle", () => {
     });
     await executeSyncCycle(git, fakeLoader(), config, null, noopLogger);
     expect(pullCalled).toBe(false);
+  });
+});
+
+// ── initialSync tests ─────────────────────────────────────────────────────────
+
+describe("initialSync", () => {
+  it("installs dependencies after clone in remote mode — a fresh clone has no node_modules", async () => {
+    const calls: string[] = [];
+    const git = fakeGit({
+      clone: async () => { calls.push("clone"); return ok(undefined); },
+      install: async () => { calls.push("install"); return ok(undefined); },
+    });
+    const result = await initialSync(git, fakeLoader(), config, noopLogger);
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual(["clone", "install"]);
+  });
+
+  it("fails closed when the initial install fails — host must not boot with 0 importable DAGs", async () => {
+    const git = fakeGit({
+      install: async () => err({ kind: "bun-install-failed", message: "registry down" } as HostError),
+    });
+    const result = await initialSync(git, fakeLoader(), config, noopLogger);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("bun-install-failed");
+  });
+
+  it("skips clone and install in local mode", async () => {
+    const calls: string[] = [];
+    const git = fakeGit({
+      clone: async () => { calls.push("clone"); return ok(undefined); },
+      install: async () => { calls.push("install"); return ok(undefined); },
+    });
+    const result = await initialSync(git, fakeLoader(), localConfig, noopLogger);
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([]);
   });
 });
 

@@ -88,7 +88,16 @@ function makeFaultyMarkerStore(opts: {
 function makeNowSupplierForDelay(delayMs: number): () => Date {
   // Find the nearest upcoming minute boundary
   const realNow = Date.now();
-  const nextMinuteBoundary = Math.ceil(realNow / 60_000) * 60_000;
+  let nextMinuteBoundary = Math.ceil(realNow / 60_000) * 60_000;
+  // Never anchor against an HOUR boundary: tests assume an hourly cron
+  // (`0 * * * *`) is far away from the fake now, but in the last minute of a
+  // real hour the next minute boundary IS the hour boundary — the hourly task
+  // would fire `delayMs` later and the test flakes once per hour (observed at
+  // 05:59 UTC in CI). Shifting back 30 minutes keeps every minute-cron delay
+  // identical while pushing the next hour boundary ~30 minutes out.
+  if (nextMinuteBoundary % 3_600_000 === 0) {
+    nextMinuteBoundary -= 30 * 60_000;
+  }
   // We want: cronNextDate - fakeNow = delayMs
   // cronNextDate = nextMinuteBoundary (or the one after)
   // fakeNow = nextMinuteBoundary - delayMs
