@@ -60,8 +60,8 @@ const toWriteAttemptedEvent = (spec: WriteSpec): WriteAttemptedEvent => ({
   runId: spec.runId,
   dagId: D("d"),
   nodeId: spec.nodeId,
-  conditionedOn: witness("version", spec.resource, spec.conditionedOnValue),
-  newWitness: witness("version", spec.resource, spec.newWitnessValue),
+  conditionedOn: witness("version", RN(spec.resource), spec.conditionedOnValue),
+  newWitness: witness("version", RN(spec.resource), spec.newWitnessValue),
   succeededAtMs: spec.succeededAtMs,
   timestamp: new Date(spec.succeededAtMs),
 });
@@ -172,8 +172,8 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
               runId: R(`r${i}`),
               dagId: D("d"),
               nodeId: N(`w${i}`),
-              conditionedOn: witness("version", resource, String(currentVersion)),
-              newWitness: witness("version", resource, String(nextVersion)),
+              conditionedOn: witness("version", RN(resource), String(currentVersion)),
+              newWitness: witness("version", RN(resource), String(nextVersion)),
               succeededAtMs: (i + 1) * 1000,
               timestamp: new Date((i + 1) * 1000),
             });

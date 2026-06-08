@@ -10,7 +10,7 @@ export type { Witness, WitnessValue, ResourceName };
 
 /** Shorthand for creating a Witness in tests. Defaults to kind="version". */
 export const mkWitness = (resource: string, value: string, kind: "version" | "etag" | "timestamp" | "lsn" | "idempotency-key" | "custom" = "version"): Witness =>
-  witness(kind, resource, value);
+  witness(kind, resourceName(resource), value);
 
 /** Shorthand for creating a ResourceName in tests. */
 export const RN = (name: string): ResourceName => resourceName(name);

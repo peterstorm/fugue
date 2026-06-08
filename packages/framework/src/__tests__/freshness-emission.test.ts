@@ -108,7 +108,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits write-attempted for writes node with both extractors", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witnessValue("version", "43")) },
+      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", RN("pg:orders"), "42")), extractNewWitness: () => (witnessValue("version", "43")) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -129,7 +129,7 @@ describe("emitFreshnessWitnessEvents", () => {
   it("emits freshness-violation when conflict detected", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
-      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", "pg:orders", "42")), extractNewWitness: () => (witnessValue("version", "44")) },
+      sideEffects: { kind: "writes", resource: RN("pg:orders"), extractConditionedOn: () => (witness("version", RN("pg:orders"), "42")), extractNewWitness: () => (witnessValue("version", "44")) },
     });
     const nodeMap = new Map([[NID_WRITE, writeNode]]);
     const machineCtx = makeMachineCtx();
@@ -143,8 +143,8 @@ describe("emitFreshnessWitnessEvents", () => {
       runId: runId("other-run"),
       dagId: DID,
       nodeId: nodeId("other-writer"),
-      conditionedOn: witness("version", "pg:orders", "41"),
-      newWitness: witness("version", "pg:orders", "43"),
+      conditionedOn: witness("version", RN("pg:orders"), "41"),
+      newWitness: witness("version", RN("pg:orders"), "43"),
       succeededAtMs: Date.now() - 1000,
       timestamp: new Date(),
     });
@@ -249,7 +249,7 @@ describe("emitFreshnessWitnessEvents", () => {
       sideEffects: {
         kind: "writes",
         resource: RN("pg:orders"),
-        extractConditionedOn: () => (witness("version", "pg:orders", "1")),
+        extractConditionedOn: () => (witness("version", RN("pg:orders"), "1")),
         extractNewWitness: () => (witnessValue("version", "2")),
       },
     });
@@ -309,7 +309,7 @@ describe("emitFreshnessWitnessEvents", () => {
       sideEffects: {
         kind: "writes",
         resource: RN("pg:orders"),
-        extractConditionedOn: () => (witness("version", "pg:orders", "1")),
+        extractConditionedOn: () => (witness("version", RN("pg:orders"), "1")),
         extractNewWitness: () => (witnessValue("version", "2")),
       },
     });
@@ -371,7 +371,7 @@ describe("emitFreshnessWitnessEvents", () => {
       sideEffects: {
         kind: "writes",
         resource: RN("pg:orders"),
-        extractConditionedOn: () => witness("version", "pg:accounts", "7"),
+        extractConditionedOn: () => witness("version", RN("pg:accounts"), "7"),
         extractNewWitness: () => witnessValue("version", "8"),
       },
     });

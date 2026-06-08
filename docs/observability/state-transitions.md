@@ -176,7 +176,7 @@ const dag = defineDag({
         resource: "postgres:orders",
         // conditionedOn keeps a full witness (its resource is a free variable);
         // newWitness is this node's own resource, so it's resource-free.
-        extractConditionedOn: (input) => witness("version", "postgres:orders", String(input.orderVersion)),
+        extractConditionedOn: (input) => witness("version", resourceName("postgres:orders"), String(input.orderVersion)),
         extractNewWitness: (output) => witnessValue("version", String(output.newXmin)),
       },
       confidence: { mode: "none" },
@@ -523,7 +523,7 @@ const executeRefundNode = {
     resource: "postgres:orders",
     // conditionedOn returns a full witness — its resource is a free variable
     // (a write may condition on a resource read upstream).
-    extractConditionedOn: (input) => witness("version", "postgres:orders", String(input.orderVersion)), // version from upstream fetch
+    extractConditionedOn: (input) => witness("version", resourceName("postgres:orders"), String(input.orderVersion)), // version from upstream fetch
     // newWitness is this node's own resource → resource-free, framework-stamped.
     extractNewWitness: (output) => witnessValue("version", String(output.newXmin)), // version after our write
   },

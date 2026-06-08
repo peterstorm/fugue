@@ -16,7 +16,7 @@ import type { Witness } from "../types/freshness.js";
 import { isOk, unwrap } from "../types/result.js";
 
 const mkWitness = (resource: string, value: string): Witness =>
-  witness("version", resource, value);
+  witness("version", resourceName(resource), value);
 
 const mkWriteEvent = (
   runId: string,

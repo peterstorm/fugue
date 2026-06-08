@@ -314,7 +314,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     expect(result.ok).toBe(true);
     const evt = findInterventionEvent(observer.events);
     expect(evt).toBeDefined();
-    expect(evt!.context.priorWitnesses).toContainEqual(witness("version", "postgres:orders", "42"));
+    expect(evt!.context.priorWitnesses).toContainEqual(witness("version", RN("postgres:orders"), "42"));
   });
 
   test("I9: retrying-hook path emits HumanInterventionEvent", async () => {

@@ -99,19 +99,22 @@ export const witnessValue = (kind: WitnessKind, value: string): WitnessValue => 
   return { kind, value };
 };
 
-/** Smart constructor — validates non-empty resource and value. */
+/**
+ * Smart constructor for a full `Witness`. Takes a branded `ResourceName`
+ * (mint one with `resourceName(...)`), not a raw string — so the resource
+ * cannot be silently swapped with `value` at the call site, and the
+ * non-empty-resource invariant is enforced once, at the `ResourceName`
+ * boundary. Validates non-empty value.
+ */
 export const witness = (
   kind: WitnessKind,
-  resource: string,
+  resource: ResourceName,
   value: string,
 ): Witness => {
-  if (!resource) {
-    throw new Error("Witness resource must be non-empty");
-  }
   if (!value) {
     throw new Error("Witness value must be non-empty");
   }
-  return { kind, resource: resource as ResourceName, value } as Witness;
+  return { kind, resource, value } as Witness;
 };
 
 /**

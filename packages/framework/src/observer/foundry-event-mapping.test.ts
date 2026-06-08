@@ -18,7 +18,7 @@ import type { NodeSkippedEvent, ObserverEvent, RunEndEvent } from "../types/even
 import type { RunSummary } from "./buffered.js";
 import { runId, nodeId, dagId } from "../types/ids.js";
 import { confidence } from "../types/confidence.js";
-import { witness } from "../types/freshness.js";
+import { witness, resourceName } from "../types/freshness.js";
 
 const RID = runId("run-1");
 const DID = dagId("dag-1");
@@ -192,7 +192,7 @@ describe("mapEventToFoundry", () => {
     "human-intervention",
   ] as const)("ignored event type %s → []", (type) => {
     const base = { runId: RID, dagId: DID, nodeId: NID, timestamp: T };
-    const w = witness("version", "res", "v1");
+    const w = witness("version", resourceName("res"), "v1");
     const c = confidence("high", "heuristic", "x");
     const events: Record<string, ObserverEvent> = {
       "run-start": { type: "run-start", runId: RID, dagId: DID, timestamp: T },
@@ -338,7 +338,7 @@ const arbEvent: fc.Arbitrary<ObserverEvent> = fc
     const did = dagId(r.did);
     const nid = nodeId(r.nid);
     const ts = new Date(0);
-    const w = witness("version", "res", "v");
+    const w = witness("version", resourceName("res"), "v");
     const c = confidence("high", "heuristic", "x");
     switch (r.which) {
       case "run-start":

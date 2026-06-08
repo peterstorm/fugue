@@ -193,10 +193,17 @@ Public surface added to `@fuguejs/framework`: the `WitnessValue` type and the
 `witnessValue(kind, value)` smart constructor. The stamping itself is performed
 by an internal `stampWitness(resource: ResourceName, wv: WitnessValue)` helper
 that is **not** exported from the package barrel — only
-`dag-runtime/freshness-emission.ts` calls it; DAG authors never stamp. The
-`Witness` type and `witness(...)` constructor are unchanged (still used for
-`extractConditionedOn`, emitted events, and the freshness index).
+`dag-runtime/freshness-emission.ts` calls it; DAG authors never stamp.
 
-This is a breaking change to the two self-referential extractor signatures,
-taken pre-1.0 while the only call sites were the `customer-summary` example app
-and the framework's own tests; no published DAG consumed them.
+The `Witness` type is unchanged, but `witness(...)` is tightened to take a
+branded `ResourceName` (mint with `resourceName(...)`) rather than a raw
+`string`. `extractConditionedOn` is now the **only** authoring path that still
+hands a resource to a witness; taking a `ResourceName` there closes the residual
+swap hazard (resource ↔ value are no longer two interchangeable raw strings) and
+moves the non-empty-resource invariant to the single `ResourceName` boundary
+instead of duplicating it inside `witness()`.
+
+This is a breaking change to the two self-referential extractor signatures and
+to `witness(...)` (now `ResourceName`, not `string`), taken pre-1.0 while the
+only call sites were the `customer-summary` example app and the framework's own
+tests; no published DAG consumed them.

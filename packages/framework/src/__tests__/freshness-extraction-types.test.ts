@@ -62,7 +62,7 @@ describe("freshness extraction types (Phase 3)", () => {
       // variable (a write may condition on a different resource read upstream).
       extractConditionedOn: (input: unknown) => {
         const v: number = (input as { version: number }).version;
-        return witness("version", "postgres:orders", String(v));
+        return witness("version", RN("postgres:orders"), String(v));
       },
       // extractNewWitness is resource-free — the framework stamps this node's resource.
       extractNewWitness: (output: unknown) => {
@@ -115,8 +115,10 @@ describe("freshness extraction types (Phase 3)", () => {
       // is `never`; a full Witness carries `resource: ResourceName` and is
       // therefore unassignable. This makes a resource mismatch *unrepresentable*
       // at compile time, not merely overwritten at runtime. If this directive
-      // ever stops erroring, the type-level guarantee has regressed.
-      extractWitness: () => witness("version", "wrong:resource", "1"),
+      // ever stops erroring, the type-level guarantee has regressed. (The
+      // witness() call itself is well-typed — the error is purely the
+      // return-type mismatch against the resource-free slot.)
+      extractWitness: () => witness("version", RN("wrong:resource"), "1"),
     };
     expect(se.extractWitness).toBeDefined();
   });
@@ -129,7 +131,7 @@ describe("freshness extraction types (Phase 3)", () => {
       // it returns WitnessValue (`resource: never`), so a full Witness is
       // unassignable here too. Same guarantee as extractWitness above; if this
       // directive stops erroring, the writes-side guarantee has regressed.
-      extractNewWitness: () => witness("version", "wrong:resource", "1"),
+      extractNewWitness: () => witness("version", RN("wrong:resource"), "1"),
     };
     expect(se.extractNewWitness).toBeDefined();
   });
@@ -141,7 +143,7 @@ describe("freshness extraction types (Phase 3)", () => {
     expect(stamped.kind).toBe("etag");
     expect(stamped.resource).toBe(RN("postgres:orders"));
     expect(stamped.value).toBe("abc123");
-    expect(stamped).toEqual(witness("etag", "postgres:orders", "abc123"));
+    expect(stamped).toEqual(witness("etag", RN("postgres:orders"), "abc123"));
   });
 
   test("stampWitness re-validates the non-empty value invariant at the stamping boundary", () => {
@@ -153,9 +155,11 @@ describe("freshness extraction types (Phase 3)", () => {
 
   test("witnessValue rejects an empty value (smart-constructor invariant)", () => {
     expect(() => witnessValue("version", "")).toThrow();
-    // The full constructor enforces non-empty resource AND value.
-    expect(() => witness("version", "postgres:orders", "")).toThrow();
-    expect(() => witness("version", "", "1")).toThrow();
+    // witness() enforces non-empty value; the non-empty-resource invariant now
+    // lives at the ResourceName boundary (witness() takes an already-branded
+    // resource, so it cannot be handed a raw — possibly empty — string).
+    expect(() => witness("version", RN("postgres:orders"), "")).toThrow();
+    expect(() => resourceName("")).toThrow();
   });
 
   test("node without extractors compiles (freshness tracking silently skipped)", () => {
@@ -187,7 +191,7 @@ describe("freshness extraction types (Phase 3)", () => {
     } satisfies Record<WitnessKind, string>;
 
     const witnesses: Witness[] = (Object.entries(samples) as [WitnessKind, string][]).map(
-      ([kind, value]) => witness(kind, "r", value),
+      ([kind, value]) => witness(kind, RN("r"), value),
     );
     expect(witnesses).toHaveLength(Object.keys(samples).length);
     expect(new Set(witnesses.map((w) => w.kind)).size).toBe(witnesses.length);

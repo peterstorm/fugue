@@ -375,7 +375,7 @@ sideEffects: {
   resource: resourceName("postgres:customers:123"),
   // conditionedOn returns a FULL witness — a write may condition on a different
   // resource it read upstream, so you name that resource explicitly.
-  extractConditionedOn: (input) => witness("version", "postgres:customers:123", String(input.customerVersion)),
+  extractConditionedOn: (input) => witness("version", resourceName("postgres:customers:123"), String(input.customerVersion)),
   // newWitness is this node's own resource → resource-free, framework-stamped.
   extractNewWitness:    (out)   => witnessValue("version", String(out.newXmin)),
 }
@@ -384,7 +384,7 @@ sideEffects: {
 Rules:
 
 - `extractWitness` (reads) and `extractNewWitness` (writes) return a resource-free `witnessValue(kind, value)` — they always witness the node's *own* resource, which the framework stamps. A profile↔witness resource mismatch is therefore unrepresentable, not a thing you can get wrong.
-- `extractConditionedOn` (writes) returns a full `witness(kind, resource, value)` — its resource is a genuine free variable (you may condition on a resource read upstream).
+- `extractConditionedOn` (writes) returns a full `witness(kind, resourceName(...), value)` — its resource is a genuine free variable (you may condition on a resource read upstream), so you name it explicitly with a branded `resourceName(...)`.
 - A `writes` node declares **both** `extractConditionedOn` and `extractNewWitness`, or **neither** — one without the other fails `fugue lint` at load time.
 - Witness `kind` is one of `version | etag | timestamp | lsn | idempotency-key | custom`.
 

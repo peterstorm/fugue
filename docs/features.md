@@ -431,7 +431,7 @@ const updateCustomer: NodeDef = {
   sideEffects: {
     kind: "writes",
     resource: resourceName("postgres:customers:123"),
-    extractConditionedOn: (input) => witness("version", "postgres:customers:123", String(input.customerVersion)),
+    extractConditionedOn: (input) => witness("version", resourceName("postgres:customers:123"), String(input.customerVersion)),
     extractNewWitness: (output) => witnessValue("version", String(output.newXmin)),
   },
 };
