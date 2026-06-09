@@ -1,6 +1,6 @@
-# Fugue Host — OpenShift Deployment Guide
+# Fugue Host — Deployment Guide (OpenShift)
 
-Step-by-step guide to deploying the Fugue Host on OpenShift with Redis, team provisioning, and DAG authoring.
+Deploy a Fugue Host instance for a team on OpenShift with their own LLM credentials, Redis, and DAG repository.
 
 ---
 
@@ -14,89 +14,116 @@ Step-by-step guide to deploying the Fugue Host on OpenShift with Redis, team pro
 6. [Deploy the Host](#deploy-the-host)
 7. [Expose via Route](#expose-via-route)
 8. [Verify the Deployment](#verify-the-deployment)
-9. [Provision Teams](#provision-teams)
+9. [Provision the Team Token](#provision-the-team-token)
 10. [Add a DAG](#add-a-dag)
 11. [Execute a DAG](#execute-a-dag)
-12. [Monitoring & Troubleshooting](#monitoring--troubleshooting)
-13. [Scaling Considerations](#scaling-considerations)
-14. [Upgrading](#upgrading)
+12. [Multiple Teams](#multiple-teams)
+13. [Monitoring & Troubleshooting](#monitoring--troubleshooting)
+14. [Scaling](#scaling)
+15. [Upgrading](#upgrading)
 
 ---
 
 ## Prerequisites
 
-- OpenShift CLI (`oc`) logged in with project-admin privileges
-- Access to a container registry (e.g., `image-registry.openshift-image-registry.svc:5000`)
-- A git repository for your DAG definitions (can be private — host clones via HTTPS or SSH)
-- Azure OpenAI (or Anthropic/OpenAI) API credentials
-- `openssl` or similar for generating secrets
+- OpenShift CLI (`oc`) with project-admin privileges
+- Container registry access
+- Team's DAGs git repository (HTTPS or SSH)
+- Team's LLM API credentials (OpenAI, Anthropic, or Azure)
+- `openssl` for generating secrets
 
 ---
 
 ## Build the Container Image
 
-The Dockerfile is at `packages/host/Dockerfile`:
+One image serves all team instances — only config differs.
 
 ```bash
 # From the monorepo root
-cd /path/to/fugue
-
-# Build the image
 podman build -f packages/host/Dockerfile -t fugue-host:latest .
 
-# Tag for your registry
+# Tag and push
 podman tag fugue-host:latest your-registry.example.com/fugue/host:1.0.0
-
-# Push
 podman push your-registry.example.com/fugue/host:1.0.0
 ```
 
 **What's in the image:**
 - Bun 1.2 runtime (Alpine-based, ~50MB)
 - `git` (for DAG repo sync)
-- `packages/framework/` + `packages/host/` source code
-- Dependencies installed via `bun install --frozen-lockfile --production`
-- Runs as non-root user `fugue`
-- Exposes port 3000 (configurable via `PORT`)
-- Health check built-in: `GET /health`
+- `packages/framework/` + `packages/host/` source
+- Dependencies via `bun install --frozen-lockfile --production`
+- Non-root user `fugue`, port 3000, health check at `GET /health`
 
 ---
 
 ## Create the OpenShift Project
 
+One project per team's host instance:
+
 ```bash
-oc new-project fugue --display-name="Fugue DAG Runtime"
+oc new-project fugue-cx --display-name="Fugue Host — CX Team"
 ```
 
 ---
 
 ## Deploy Redis
 
-The host requires Redis for token storage, cache, and checkpoints.
+All Fugue host instances can share a single Redis instance. Keys are namespaced by prefix, so there are no collisions.
 
-### Option A: OpenShift Redis Template
-
-```bash
-oc new-app redis-persistent \
-  --name=fugue-redis \
-  -p REDIS_PASSWORD=your-redis-password \
-  -p VOLUME_CAPACITY=1Gi \
-  -p MEMORY_LIMIT=256Mi
-```
-
-### Option B: Redis via Helm (recommended for production)
+### Deploy shared Redis (recommended)
 
 ```bash
-helm install fugue-redis bitnami/redis \
-  --set auth.password=your-redis-password \
-  --set master.persistence.size=2Gi \
-  --set replica.replicaCount=1
+helm install platform-redis bitnami/redis \
+  --set auth.password=<generated-password> \
+  --set master.persistence.size=5Gi \
+  --set replica.replicaCount=2  # HA setup
 ```
 
-Either way, note the connection URL:
+Note the connection URL: `redis://:password@platform-redis-master:6379`
+
+Use this same URL for all host instances.
+
+### Key namespacing
+
+Multiple hosts use the same Redis with no conflicts:
+
 ```
-redis://:your-redis-password@fugue-redis-master:6379
+Host instance "cx"        Host instance "leads"       Host instance "billing"
+       │                          │                           │
+       └─ fugue:tokens:<hash>     ├─ fugue:tokens:<hash>      ├─ fugue:tokens:<hash>
+       ├─ fugue:teams:cx          ├─ fugue:teams:leads        ├─ fugue:teams:billing
+       ├─ fugue:customer-summary: ├─ fugue:lead-scoring:      ├─ fugue:invoice-processor:
+       │  cache:<key>             │  cache:<key>              │  cache:<key>
+       └─ fugue:customer-summary: └─ fugue:lead-scoring:      └─ fugue:invoice-processor:
+          <runId>:<nodeId>           <runId>:<nodeId>            <runId>:<nodeId>
+                                                                    ↓
+                                              [Single Shared Redis Instance]
 ```
+
+All keys are prefixed with their scope:
+- `fugue:tokens:*` — team tokens (all teams)
+- `fugue:teams:*` — team metadata (all teams)
+- `fugue:<dagId>:*` — per-DAG cache and checkpoints (team-scoped by DAG ownership)
+
+### Sizing the shared Redis
+
+| Metric | Estimate |
+|--------|----------|
+| Team tokens (per team) | ~1KB (hash + metadata) |
+| Cache entries | Depends on DAG cache usage; TTL auto-cleanup |
+| Checkpoints | Depends on DAG complexity; TTL auto-cleanup |
+| **Total** (3 teams, light usage) | ~500MB—1GB |
+
+Monitor Redis memory with `redis-cli INFO memory`. Set `maxmemory` and eviction policy:
+
+```bash
+helm install platform-redis bitnami/redis \
+  --set master.persistence.size=5Gi \
+  --set redis.masterConfiguration.maxmemory=4gb \
+  --set redis.masterConfiguration.maxmemoryPolicy=allkeys-lru
+```
+
+> **Optional: Separate Redis per team** — If you need complete isolation (e.g., one team's high cache usage shouldn't evict another's), deploy independent Redis instances. But shared Redis is simpler and more resource-efficient.
 
 ---
 
@@ -106,19 +133,34 @@ redis://:your-redis-password@fugue-redis-master:6379
 
 ```bash
 ADMIN_TOKEN=$(openssl rand -base64 32)
-echo "Save this admin token securely: $ADMIN_TOKEN"
+echo "Save this: $ADMIN_TOKEN"
 ```
 
-### Create the OpenShift secret
+### Create the secret (example: team on OpenAI)
 
 ```bash
 oc create secret generic fugue-host-secrets \
   --from-literal=ADMIN_TOKEN="$ADMIN_TOKEN" \
-  --from-literal=REDIS_URL="redis://:your-redis-password@fugue-redis-master:6379" \
-  --from-literal=AZURE_OPENAI_API_KEY="your-azure-key" \
-  --from-literal=AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com" \
-  --from-literal=AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini" \
-  --from-literal=AZURE_OPENAI_API_VERSION="2025-04-01-preview"
+  --from-literal=REDIS_URL="redis://:password@fugue-redis-master:6379" \
+  --from-literal=OPENAI_API_KEY="sk-proj-team-cx-key..."
+```
+
+**For Anthropic:**
+```bash
+oc create secret generic fugue-host-secrets \
+  --from-literal=ADMIN_TOKEN="$ADMIN_TOKEN" \
+  --from-literal=REDIS_URL="redis://:password@fugue-redis-master:6379" \
+  --from-literal=ANTHROPIC_API_KEY="sk-ant-team-key..."
+```
+
+**For Azure:**
+```bash
+oc create secret generic fugue-host-secrets \
+  --from-literal=ADMIN_TOKEN="$ADMIN_TOKEN" \
+  --from-literal=REDIS_URL="redis://:password@fugue-redis-master:6379" \
+  --from-literal=AZURE_OPENAI_API_KEY="team-azure-key" \
+  --from-literal=AZURE_OPENAI_ENDPOINT="https://team-resource.openai.azure.com" \
+  --from-literal=AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini"
 ```
 
 ### (Optional) Git credentials for private DAG repos
@@ -132,8 +174,6 @@ oc create secret generic fugue-git-credentials \
 
 ## Deploy the Host
 
-Create the deployment manifest:
-
 ```yaml
 # fugue-host-deployment.yaml
 apiVersion: apps/v1
@@ -142,8 +182,9 @@ metadata:
   name: fugue-host
   labels:
     app: fugue-host
+    team: cx
 spec:
-  replicas: 1   # Single instance (see Scaling section)
+  replicas: 1
   selector:
     matchLabels:
       app: fugue-host
@@ -151,17 +192,16 @@ spec:
     metadata:
       labels:
         app: fugue-host
+        team: cx
     spec:
       containers:
         - name: fugue-host
           image: your-registry.example.com/fugue/host:1.0.0
           ports:
             - containerPort: 3000
-              protocol: TCP
           env:
-            # Required config
             - name: DAGS_REPO_URL
-              value: "https://github.com/your-org/fugue-dags.git"
+              value: "https://github.com/your-org/cx-dags.git"
             - name: DAGS_REPO_BRANCH
               value: "main"
             - name: DAGS_POLL_INTERVAL_MS
@@ -169,8 +209,7 @@ spec:
             - name: PORT
               value: "3000"
             - name: LLM_PROVIDER
-              value: "azure"
-            # Concurrency tuning
+              value: "openai"      # team's chosen provider
             - name: MAX_GLOBAL_CONCURRENCY
               value: "50"
             - name: DEFAULT_DAG_CONCURRENCY
@@ -179,9 +218,6 @@ spec:
               value: "60000"
             - name: DRAIN_TIMEOUT_MS
               value: "30000"
-            # Resilience tuning
-            - name: REDIS_PROBE_INTERVAL_MS
-              value: "10000"   # liveness probe interval; drives degraded/recovered transitions
           envFrom:
             - secretRef:
                 name: fugue-host-secrets
@@ -198,20 +234,17 @@ spec:
               port: 3000
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 3
           readinessProbe:
             httpGet:
               path: /readiness
               port: 3000
             initialDelaySeconds: 15
             periodSeconds: 5
-            timeoutSeconds: 3
-          # Graceful shutdown
           lifecycle:
             preStop:
               exec:
-                command: ["sleep", "5"]  # Allow LB to drain connections
-      terminationGracePeriodSeconds: 45  # DRAIN_TIMEOUT_MS + buffer
+                command: ["sleep", "5"]
+      terminationGracePeriodSeconds: 45
 ---
 apiVersion: v1
 kind: Service
@@ -223,10 +256,8 @@ spec:
   ports:
     - port: 3000
       targetPort: 3000
-      protocol: TCP
 ```
 
-Apply:
 ```bash
 oc apply -f fugue-host-deployment.yaml
 ```
@@ -241,9 +272,8 @@ oc create route edge fugue-host \
   --port=3000 \
   --insecure-policy=Redirect
 
-# Get the route URL
 FUGUE_URL=$(oc get route fugue-host -o jsonpath='{.spec.host}')
-echo "Fugue host available at: https://$FUGUE_URL"
+echo "Host available at: https://$FUGUE_URL"
 ```
 
 ---
@@ -251,31 +281,26 @@ echo "Fugue host available at: https://$FUGUE_URL"
 ## Verify the Deployment
 
 ```bash
-# Check pod is running
+# Pod running?
 oc get pods -l app=fugue-host
 
-# Check logs
+# Logs
 oc logs -l app=fugue-host --tail=20
 
-# Health check
+# Health
 curl https://$FUGUE_URL/health
-# → {"status":"ok","timestamp":"2026-05-26T..."}
+# → {"status":"ok","timestamp":"..."}
 
-# Readiness check
+# Readiness
 curl https://$FUGUE_URL/readiness
-# → {"ready":true,"dagCount":3,"phase":"ready"}
-
-# List DAGs (with admin token)
-curl -H "Authorization: Bearer $ADMIN_TOKEN" https://$FUGUE_URL/dags
+# → {"ready":true,"dagCount":2,"phase":"ready"}
 ```
 
 ---
 
-## Provision Teams
+## Provision the Team Token
 
-Teams are how you scope access. Each team gets a unique token that can only access DAGs owned by that team.
-
-### Create a team
+After the host is running, provision the team (one-time):
 
 ```bash
 curl -X POST https://$FUGUE_URL/admin/teams \
@@ -283,7 +308,7 @@ curl -X POST https://$FUGUE_URL/admin/teams \
   -H "Content-Type: application/json" \
   -d '{
     "team": "cx",
-    "label": "Customer Experience team"
+    "label": "CX team production"
   }'
 ```
 
@@ -291,70 +316,33 @@ Response:
 ```json
 {
   "ok": true,
-  "token": "fug_a3x8k9m2pL4vR8nT1wF6jH3cY5aD0gE-abc123xyz",
+  "token": "fug_a3x8k9m2pL4vR8nT1wF6jH3cY5aD0gEabc123xyzQ_dK-abcdef",
   "team": "cx",
-  "label": "Customer Experience team"
+  "label": "CX team production"
 }
 ```
 
-> ⚠️ **Save this token immediately.** It is shown only once. Only the SHA-256 hash is stored.
-
-### Store the team token as a secret
-
-Give this token to the team for their applications:
+> ⚠️ **Save the token immediately.** Shown once. Store it as a secret for the team's applications.
 
 ```bash
-# For the team's own OpenShift project/namespace:
+# Store for the team's apps
 oc create secret generic fugue-token \
-  --namespace=cx-team-project \
-  --from-literal=FUGUE_TOKEN="fug_a3x8k9m2pL4vR8nT1wF6jH3cY5aD0gE-abc123xyz"
-```
-
-### List teams
-
-```bash
-curl -H "Authorization: Bearer $ADMIN_TOKEN" https://$FUGUE_URL/admin/teams
-```
-
-### Revoke a team
-
-```bash
-curl -X DELETE https://$FUGUE_URL/admin/teams/cx \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-```
-
-Takes effect immediately — all in-flight requests with the old token will complete, but new ones are rejected.
-
-### Rotate a team token
-
-```bash
-# 1. Revoke old
-curl -X DELETE https://$FUGUE_URL/admin/teams/cx \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-
-# 2. Create new
-curl -X POST https://$FUGUE_URL/admin/teams \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"team": "cx", "label": "CX team (rotated 2026-05)"}'
-
-# 3. Distribute new token to the team
+  --namespace=cx-apps \
+  --from-literal=FUGUE_TOKEN="fug_a3x8k9m2pL4vR8nT1wF6jH3cY5aD0gEabc123xyzQ_dK-abcdef"
 ```
 
 ---
 
 ## Add a DAG
 
-### 1. Create the DAG in your DAGs repository
+### 1. Create the DAG in the team's repository
 
 ```bash
-cd your-fugue-dags-repo
-
-# Create directory structure
+cd team-dags-repo
 mkdir -p dags/cx/customer-summary/prompts
 ```
 
-### 2. Write `dag.ts`
+### 2. Write dag.ts
 
 ```typescript
 // dags/cx/customer-summary/dag.ts
@@ -362,32 +350,29 @@ import { z } from "zod";
 import type { DagRegistration } from "@fuguejs/host/contract";
 import { defineDag, createFetchNode, createLlmNode } from "@fuguejs/framework";
 
-const InputSchema = z.object({
-  customerId: z.string().min(1),
-});
+const InputSchema = z.object({ customerId: z.string().min(1) });
 
-const fetchNode = createFetchNode({
+const fetch = createFetchNode({
   id: "fetch-crm",
   inputSchema: z.object({ customerId: z.string() }),
   outputSchema: z.object({ customer: z.any() }),
-  fetch: async (input, ctx) => {
-    // Your data fetching logic here
-    return { ok: true, value: { customer: { name: "Alice", id: input.customerId } } };
-  },
+  fetch: async (input, ctx) => ({
+    ok: true, value: { customer: { name: "Alice", id: input.customerId } },
+  }),
 });
 
-const summarizeNode = createLlmNode({
+const summarize = createLlmNode({
   id: "summarize",
   inputSchema: z.any(),
   outputSchema: z.object({ summary: z.string() }),
-  promptName: "summary",    // loads from prompts/summary.txt
-  model: "gpt-4o-mini",    // overridden by host's Azure deployment
+  promptName: "summary",
+  model: "gpt-4o-mini",    // team chooses their model
   buildInput: (input) => ({ customerName: input.customer.name }),
 });
 
 const dag = defineDag({
   id: "customer-summary",
-  nodes: { "fetch-crm": fetchNode, "summarize": summarizeNode },
+  nodes: { "fetch-crm": fetch, "summarize": summarize },
   edges: [{ from: "fetch-crm", to: "summarize" }],
   outputNodeId: "summarize",
 });
@@ -402,7 +387,7 @@ const registration: DagRegistration = {
 export default registration;
 ```
 
-### 3. Add prompt templates (if using `createLlmNode`)
+### 3. Add prompt template
 
 ```text
 # dags/cx/customer-summary/prompts/summary.txt
@@ -411,64 +396,44 @@ Customer: {{customerName}}
 Summarize this customer's account status in 2-3 sentences.
 ```
 
-### 4. (Optional) Add `fugue.yaml`
-
-A sibling `fugue.yaml` provides deployment/ops config that **overrides** the `dag.ts`
-`config` defaults. See [writing-dags.md](./writing-dags.md#per-dag-config) for the full list
-and precedence rules.
+### 4. Add fugue.yaml
 
 ```yaml
 # dags/cx/customer-summary/fugue.yaml
 team: cx
 owner: platform-team
-route: /summarize
-maxConcurrent: 5
-timeoutMs: 90000
-env:                  # illustrative — host refuses to load the DAG unless these are set
-  - OPENAI_API_KEY    # (omit the `env:` block if the DAG declares no hard requirements)
 ```
 
-### 5. Commit and push
+### 5. Push
 
 ```bash
 git add dags/cx/customer-summary/
-git commit -m "feat(cx): add customer-summary DAG"
+git commit -m "feat: add customer-summary DAG"
 git push origin main
 ```
 
-### 6. Wait for sync
-
-The host polls every `DAGS_POLL_INTERVAL_MS` (default 30s). Watch the logs:
+### 6. Wait for sync (default 30s)
 
 ```bash
-oc logs -l app=fugue-host -f | grep -i "sync\|loaded\|customer-summary"
-```
-
-You'll see:
-```json
-{"level":"info","msg":"Sync complete: 4 DAGs loaded","sha":"abc1234","loaded":4,"errors":0}
+oc logs -l app=fugue-host -f | grep "sync\|loaded\|customer-summary"
 ```
 
 ### 7. Verify
 
 ```bash
-curl -H "Authorization: Bearer $ADMIN_TOKEN" https://$FUGUE_URL/dags | jq '.dags[] | select(.id == "customer-summary")'
+curl -H "Authorization: Bearer $ADMIN_TOKEN" https://$FUGUE_URL/dags | jq '.dags[]'
 ```
 
 ---
 
 ## Execute a DAG
 
-### From a team's application
-
 ```bash
 curl -X POST https://$FUGUE_URL/dags/customer-summary/run \
-  -H "Authorization: Bearer fug_<team-cx-token>" \
+  -H "Authorization: Bearer fug_<team-token>" \
   -H "Content-Type: application/json" \
   -d '{"customerId": "cust-001"}'
 ```
-
-### Response format
 
 **Success (200):**
 ```json
@@ -480,93 +445,93 @@ curl -X POST https://$FUGUE_URL/dags/customer-summary/run \
 }
 ```
 
-**Validation error (400):**
-```json
-{
-  "ok": false,
-  "error": "input-validation-failed",
-  "message": "input validation failed for DAG 'customer-summary': 1 issue(s)",
-  "dagId": "customer-summary",
-  "details": { "issues": [{ "path": ["customerId"], "message": "Required" }] }
-}
+---
+
+## Multiple Teams
+
+Deploy one host instance per team. They share nothing except the container image.
+
+```
+┌─────────────────────────────┐  ┌─────────────────────────────┐  ┌──────────────────────────────┐
+│ fugue-cx (OpenShift project)│  │ fugue-leads (OS project)    │  │ fugue-billing (OS project)   │
+│                             │  │                             │  │                              │
+│ LLM_PROVIDER=openai        │  │ LLM_PROVIDER=anthropic      │  │ LLM_PROVIDER=azure           │
+│ OPENAI_API_KEY=sk-cx-...   │  │ ANTHROPIC_API_KEY=sk-ant-.. │  │ AZURE_OPENAI_API_KEY=...     │
+│ DAGS_REPO=org/cx-dags      │  │ DAGS_REPO=org/leads-dags    │  │ DAGS_REPO=org/billing-dags   │
+│ Redis: fugue-redis-cx      │  │ Redis: fugue-redis-leads    │  │ Redis: fugue-redis-billing   │
+│                             │  │                             │  │                              │
+│ Team token: fug_cx-...     │  │ Team token: fug_leads-...   │  │ Team token: fug_billing-...  │
+└─────────────────────────────┘  └─────────────────────────────┘  └──────────────────────────────┘
 ```
 
-**Concurrency exceeded (429):**
-```json
-{
-  "ok": false,
-  "error": "dag-concurrency-exceeded",
-  "message": "concurrency limit exceeded for DAG 'customer-summary'",
-  "dagId": "customer-summary"
-}
-```
+**What each team controls:**
+- Their LLM provider and API key (and therefore billing)
+- Their model choices (per-node in dag.ts)
+- Their DAG repository
+- Their concurrency/timeout tuning
 
-The response includes a `Retry-After: 5` header.
+**What the platform team controls:**
+- The admin token (per instance or shared across instances)
+- The container image version (rolling upgrades)
+- Resource limits and scaling
+- Network policy (which services can reach each host)
+
+### Shared vs separate DAG repos
+
+**Separate repos** (recommended): Each team owns their repo. Clear ownership.
+
+**Shared repo**: All teams' DAGs in one repo (e.g., `dags/cx/...`, `dags/leads/...`). Each host instance syncs the full repo but only serves DAGs matching the provisioned team name. Works but team auth prevents accidental cross-team access.
 
 ---
 
 ## Monitoring & Troubleshooting
 
-### Structured logging
+### Structured JSON logging
 
-All logs are JSON lines:
 ```json
-{"level":"info","msg":"Sync complete: 3 DAGs loaded","sha":"abc123","loaded":3,"errors":0,"ts":"2026-05-26T..."}
-{"level":"warn","msg":"DAG load failed (isolated): /tmp/fugue-dags/dags/billing/broken/dag.ts","error":{...},"ts":"..."}
+{"level":"info","msg":"Sync complete: 3 DAGs loaded","sha":"abc123","loaded":3,"errors":0,"ts":"2026-06-09T..."}
+{"level":"warn","msg":"DAG load failed (isolated)","error":{"kind":"dag-validation-failed"},"ts":"..."}
 ```
 
-### Key log messages to watch for
+### Key log messages
 
 | Level | Message | Meaning |
 |-------|---------|---------|
 | `info` | `Host fully booted and ready` | Startup complete |
-| `info` | `Sync complete: N DAGs loaded` | Successful sync cycle |
-| `warn` | `DAG load failed (isolated)` | One DAG has errors but others are fine |
-| `warn` | `Git pull failed, existing DAGs remain active` | Git unreachable; continues with stale |
-| `warn` | `Redis liveness probe failed — host degraded (redis-disconnected)` | Redis lost after boot; host degrades, keeps serving from memory |
-| `info` | `Redis recovered — host returned to ready` | A later probe succeeded; host auto-recovers |
-| `error` | `Redis is unreachable — host cannot start` | Fatal — won't boot without Redis |
-
-### Health endpoints for monitoring
-
-```bash
-# Liveness (is the process alive?)
-curl https://$FUGUE_URL/health
-# → 200 always if process is running
-
-# Readiness (is it serving DAGs?)
-curl https://$FUGUE_URL/readiness
-# → 200 {"ready":true,"dagCount":3,"phase":"ready"}
-# → 503 {"ready":false,"dagCount":0,"phase":"booting"}
-```
+| `info` | `Sync complete: N DAGs loaded` | Successful sync |
+| `warn` | `DAG load failed (isolated)` | One DAG broken, others fine |
+| `warn` | `Git pull failed` | Git unreachable; serves stale |
+| `warn` | `Redis liveness probe failed` | Redis lost; host degrades |
+| `info` | `Redis recovered` | Redis back; host auto-recovers |
+| `error` | `Redis is unreachable — host cannot start` | Fatal at boot |
 
 ### Common issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Pod won't start | Missing `ADMIN_TOKEN` or `REDIS_URL` | Check secrets are mounted |
-| `readiness` returns 503 | DAGs repo clone failed | Check `DAGS_REPO_URL` and git credentials |
+| Won't start | Missing `ADMIN_TOKEN` or `REDIS_URL` | Check secrets |
+| Readiness 503 | DAG repo clone failed | Check `DAGS_REPO_URL`, git creds |
 | DAG not appearing | Path doesn't match `dags/{team}/{name}/dag.ts` | Fix directory structure |
-| 401 on DAG calls | Token invalid or revoked | Re-provision the team |
-| 403 on DAG calls | Token's team ≠ DAG's team | Check team ownership in path |
-| 503 `dag-disabled` | Circuit breaker is open | Wait 30s for half-open, or push a git fix |
-| `prompt-not-found` | Missing `.txt` file in `prompts/` dir | Add the file and push |
+| 401 on DAG calls | Token invalid or revoked | Re-provision team |
+| 429 | Concurrency limit hit | Increase `maxConcurrent` in fugue.yaml |
+| 503 `dag-disabled` | Circuit breaker open | Wait 30s or push fix |
 
 ---
 
-## Scaling Considerations
+## Scaling
 
-### Single-instance model (current)
+### Single instance (default)
 
-The host is designed as a **single-instance, in-memory state** system (ADR-0040):
-- Host state machine is in-memory (not distributed)
-- Circuit breaker state is in-memory
-- Concurrency counters are in-memory
+The host is designed as a single-instance, in-memory state system:
+- Circuit breakers, concurrency counters — all in-memory
+- Simple, no distributed coordination needed
 
-**For horizontal scaling:** Deploy multiple instances with a load balancer, but note:
-- Each instance independently syncs from git (no coordination needed)
-- Concurrency limits are per-instance (effective limit = `MAX_GLOBAL_CONCURRENCY × instances`)
-- Circuit breakers are per-instance (one instance tripping doesn't affect others)
+### Horizontal scaling (high traffic)
+
+Deploy multiple replicas. Each independently:
+- Syncs from git
+- Tracks its own circuit breakers (per-instance)
+- Enforces concurrency limits (per-instance, so effective limit = `MAX_GLOBAL_CONCURRENCY × replicas`)
 
 ### Resource sizing
 
@@ -576,59 +541,35 @@ The host is designed as a **single-instance, in-memory state** system (ADR-0040)
 | Medium (10-50 RPS) | 2 | 500m-1000m | 512Mi-1Gi |
 | Heavy (>50 RPS) | 3+ | 1000m+ | 1Gi+ |
 
-Memory is dominated by:
-- Node.js/Bun heap for concurrent DAG executions
-- In-memory prompt templates
-- LLM response buffers
-
-### Redis sizing
-
-- Token storage: negligible (<1KB per team)
-- Cache entries: depends on DAG cache usage
-- Checkpoints: depends on DAG complexity × concurrent runs
-
 ---
 
 ## Upgrading
 
-### Rolling update
+### Host upgrades (rolling)
 
 ```bash
-# Build and push new image
 podman build -f packages/host/Dockerfile -t your-registry.example.com/fugue/host:1.1.0 .
 podman push your-registry.example.com/fugue/host:1.1.0
 
-# Update the deployment
-oc set image deployment/fugue-host \
-  fugue-host=your-registry.example.com/fugue/host:1.1.0
-
-# Watch rollout
+oc set image deployment/fugue-host fugue-host=your-registry.example.com/fugue/host:1.1.0
 oc rollout status deployment/fugue-host
 ```
 
-The host handles graceful shutdown:
-1. Receives SIGTERM
-2. Stops accepting new requests
-3. Waits for in-flight requests to complete (up to `DRAIN_TIMEOUT_MS`)
-4. Closes Redis connections
-5. Exits cleanly
+Graceful shutdown: SIGTERM → stop accepting → drain in-flight → close Redis → exit.
 
-OpenShift's `terminationGracePeriodSeconds: 45` gives enough time for the drain.
+### DAG upgrades (no restart)
 
-### DAG updates (no host restart needed)
-
-DAGs are updated by pushing to the git repository. The host auto-syncs within `DAGS_POLL_INTERVAL_MS`. No restart required.
+Push to the DAG repo. Host auto-syncs within `DAGS_POLL_INTERVAL_MS`. No restart needed.
 
 ---
 
 ## Security Checklist
 
-- [ ] `ADMIN_TOKEN` is 32+ chars of random data
-- [ ] `ADMIN_TOKEN` is stored in an OpenShift secret, not in deployment YAML
-- [ ] Redis has a password set
-- [ ] Redis is not exposed outside the cluster
-- [ ] The OpenShift route uses TLS (edge termination)
-- [ ] Team tokens are distributed via secure channels (1Password, Vault)
-- [ ] DAGs repo uses branch protection (no force-push to main)
+- [ ] `ADMIN_TOKEN` is 32+ chars of random data, stored in OpenShift secret
+- [ ] Team token distributed via secure channel (Vault, 1Password, K8s secrets)
+- [ ] Redis has a password and is not exposed outside the cluster
+- [ ] Route uses TLS (edge termination)
+- [ ] DAGs repo has branch protection (no force-push to main)
 - [ ] Container runs as non-root (built into Dockerfile)
-- [ ] Resource limits are set to prevent noisy-neighbor issues
+- [ ] Resource limits set
+- [ ] Network policy restricts who can reach the host
