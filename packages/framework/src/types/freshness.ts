@@ -59,19 +59,83 @@ export type Witness = {
   readonly value: string;
 } & { readonly [__witnessBrand]: void };
 
-/** Smart constructor — validates non-empty resource and value. */
-export const witness = (
-  kind: WitnessKind,
-  resource: string,
-  value: string,
-): Witness => {
-  if (!resource) {
-    throw new Error("Witness resource must be non-empty");
-  }
+/**
+ * The resource-free part of a witness. Returned by the self-referential
+ * extractors (`extractWitness` on reads, `extractNewWitness` on writes): those
+ * always witness the node's *own* resource, so the author supplies only the
+ * domain-specific `(kind, value)` and the framework stamps `sideEffects.resource`
+ * at emission time (see `dag-runtime/freshness-emission.ts`). This makes a
+ * resource mismatch between the profile and its witness unrepresentable.
+ *
+ * `extractConditionedOn` still returns a full `Witness` — a write may be
+ * conditioned on a *different* resource it read upstream, so that resource is a
+ * genuine free variable the author must name.
+ *
+ * `resource?: never` makes the mismatch a *compile-time* error, not merely a
+ * runtime one: a full `Witness` (which carries `resource`) is not assignable to
+ * a self-referential extractor slot, so an author cannot even name a resource
+ * there.
+ *
+ * Deliberately *unbranded* (unlike `Witness`/`ResourceName`): a `WitnessValue`
+ * has no swap hazard (its two fields are a `WitnessKind` enum and an opaque
+ * `string`, not confusable), never crosses a serialization boundary or port,
+ * and its sole invariant (non-empty value) is re-validated at the only place it
+ * matters — `stampWitness`, which routes through `witness()`. Branding it would
+ * add ceremony for no bug-prevention gain.
+ */
+export type WitnessValue = {
+  readonly kind: WitnessKind;
+  /** Opaque to the framework — never parsed or compared beyond string equality. */
+  readonly value: string;
+  /** Always absent — the framework stamps the resource. Makes a full `Witness` unassignable here. */
+  readonly resource?: never;
+};
+
+/** Smart constructor for a resource-free witness value. Validates non-empty value. */
+export const witnessValue = (kind: WitnessKind, value: string): WitnessValue => {
   if (!value) {
     throw new Error("Witness value must be non-empty");
   }
-  return { kind, resource: resource as ResourceName, value } as Witness;
+  return { kind, value };
+};
+
+/**
+ * Smart constructor for a full `Witness`. Takes a branded `ResourceName`
+ * (mint one with `resourceName(...)`), not a raw string — so the resource
+ * cannot be silently swapped with `value` at the call site, and the
+ * non-empty-resource invariant is enforced once, at the `ResourceName`
+ * boundary. Validates non-empty value.
+ */
+export const witness = (
+  kind: WitnessKind,
+  resource: ResourceName,
+  value: string,
+): Witness => {
+  if (!value) {
+    throw new Error("Witness value must be non-empty");
+  }
+  return { kind, resource, value } as Witness;
+};
+
+/**
+ * Stamp a `WitnessValue` with a resource to produce a full `Witness`.
+ *
+ * @internal — framework-internal; the only caller is
+ * `dag-runtime/freshness-emission.ts`, which stamps the node's own
+ * `sideEffects.resource` at emission time. Not exported from the package barrel;
+ * DAG authors never stamp (they return a resource-free `witnessValue(...)`).
+ */
+export const stampWitness = (resource: ResourceName, wv: WitnessValue): Witness => {
+  // An author extractor whose body falls through to an implicit `return`
+  // (or returns a non-object) yields `undefined` here. Name the authoring
+  // mistake before the property access throws an opaque TypeError — the
+  // wave still fails closed, but with an actionable operator-facing message.
+  if (!wv || typeof wv !== "object") {
+    throw new Error("witness extractor returned no WitnessValue (expected { kind, value })");
+  }
+  // `resource` is stamped from the node's profile; any `resource` smuggled onto
+  // `wv` at runtime (the `?: never` field is compile-time only) is ignored.
+  return witness(wv.kind, resource, wv.value);
 };
 
 /**
@@ -102,7 +166,8 @@ export interface FreshnessConflict {
   /** The write node that is conditioned on a stale witness. */
   readonly writeNodeId: NodeId;
   readonly writeRunId: RunId;
-  readonly resource: string;
+  /** Branded — derived from `conditionedOnWitness.resource`, cannot drift from it. */
+  readonly resource: ResourceName;
   readonly conditionedOnWitness: Witness;
   /** The conflicting write that superseded the conditioned-on witness. */
   readonly conflictingWrite: {

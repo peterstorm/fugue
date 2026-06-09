@@ -21,6 +21,8 @@ version state of external resources at each handoff.
 
 The framework defines a `Witness` type:
 
+> **Superseded — see the [Amendment](#amendment--resource-free-self-referential-extractors-2026-06-08).** `resource` is now the branded `ResourceName`, and the self-referential extractors return a resource-free `WitnessValue` rather than a full `Witness`. The shape below is retained for historical context.
+
 ```ts
 type WitnessKind = "version" | "etag" | "timestamp" | "lsn" | "idempotency-key" | "custom";
 
@@ -39,6 +41,8 @@ write to the same resource, not to evaluate version ordering.
 ### Extractor placement on `NodeDef`
 
 Node authors declare extractors as optional fields on `NodeDef`:
+
+> **Superseded — see the [Amendment](#amendment--resource-free-self-referential-extractors-2026-06-08).** `extractWitness` and `extractNewWitness` now return a resource-free `WitnessValue`; `extractConditionedOn` still returns a full `Witness`.
 
 - **`reads` nodes:** `extractWitness: (output: O) => Witness` — called after
   successful execution, emits `WitnessCapturedEvent`.
@@ -77,6 +81,8 @@ do, one Map lookup per write.
 ZRANGEBYSCORE scan. Both operations are O(log N + M).
 
 Both implementations satisfy the `FreshnessIndex` interface:
+
+> **Superseded — signature drifted since acceptance.** `findConflict` now takes a single `Witness` (keeping `resource` ↔ `value` bonded) and both methods return `Promise<Result<…, FrameworkError>>`. See `packages/framework/src/types/freshness.ts` for the current contract.
 
 ```ts
 interface FreshnessIndex {
@@ -158,3 +164,52 @@ semantics can implement them in their extractors or predicate logic.
   any node code.
 - Property tests pin the invariant: for any sequence of read/write events,
   the framework's violation set equals the reference implementation's.
+
+## Amendment — resource-free self-referential extractors (2026-06-08)
+
+**Status:** Accepted. Refines "Extractor placement" and "Witness schema" above.
+
+The original contract had `extractWitness` and `extractNewWitness` each return a
+full `Witness`, including its `resource`. But those two extractors *always*
+witness the node's **own** resource (`sideEffects.resource`) — the `resource`
+field was a second, hand-typed copy of a value already declared on the profile.
+Nothing enforced that the two agreed: a typo (`witness("version",
+"crm:customer", …)` vs. a profile of `crm:customers`) silently pointed conflict
+detection at the wrong resource key, because detection compares by
+`(resource, value)` and the framework used the *witness's* resource, not the
+profile's. A lint rule couldn't catch this — the resource is computed inside a
+runtime closure.
+
+We removed the redundancy instead of policing it:
+
+- A new `WitnessValue = { kind, value }` type (resource-free) is the return type
+  of `extractWitness` (reads) and `extractNewWitness` (writes). The framework
+  **stamps** `sideEffects.resource` onto it at emission time (`stampWitness`),
+  so the witness can never name a different resource than its node. The mismatch
+  is now *unrepresentable*, not merely *validated*: `WitnessValue` declares
+  `resource?: never`, so a full `Witness` (which carries `resource: ResourceName`)
+  is not assignable to a self-referential extractor slot — the typo is a
+  compile error, not a runtime overwrite.
+- `extractConditionedOn` is **unchanged** — it still returns a full `Witness`.
+  Its resource is a genuine free variable: a write may be conditioned on a
+  different resource it read upstream. Forcing the node's own resource here
+  would be wrong.
+
+Public surface added to `@fuguejs/framework`: the `WitnessValue` type and the
+`witnessValue(kind, value)` smart constructor. The stamping itself is performed
+by an internal `stampWitness(resource: ResourceName, wv: WitnessValue)` helper
+that is **not** exported from the package barrel — only
+`dag-runtime/freshness-emission.ts` calls it; DAG authors never stamp.
+
+The `Witness` type is unchanged, but `witness(...)` is tightened to take a
+branded `ResourceName` (mint with `resourceName(...)`) rather than a raw
+`string`. `extractConditionedOn` is now the **only** authoring path that still
+hands a resource to a witness; taking a `ResourceName` there closes the residual
+swap hazard (resource ↔ value are no longer two interchangeable raw strings) and
+moves the non-empty-resource invariant to the single `ResourceName` boundary
+instead of duplicating it inside `witness()`.
+
+This is a breaking change to the two self-referential extractor signatures and
+to `witness(...)` (now `ResourceName`, not `string`), taken pre-1.0 while the
+only call sites were the `customer-summary` example app and the framework's own
+tests; no published DAG consumed them.

@@ -17,7 +17,7 @@
  */
 
 import { z } from "zod";
-import { createFetchNode, ok, err, witness, resourceName } from "@fuguejs/framework";
+import { createFetchNode, ok, witnessValue, resourceName } from "@fuguejs/framework";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 
@@ -49,9 +49,8 @@ export const createHttpFetchCustomerNode = (crmBaseUrl: string) =>
       resource: resourceName("crm:customers"),
       extractWitness: (output) => {
         const o = output as Output;
-        return witness(
+        return witnessValue(
           "version",
-          "crm:customers",
           o.customer
             ? `${o.customer.createdAt}:${o.customer.conversations.length}`
             : "not-found",

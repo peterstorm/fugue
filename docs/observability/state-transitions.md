@@ -148,13 +148,13 @@ const dag = defineDag({
   nodes: {
     "fetch-order": {
       kind: "fetch",
-      sideEffects: { kind: "reads", resource: "postgres:orders" },
+      sideEffects: {
+        kind: "reads",
+        resource: resourceName("postgres:orders"),
+        // resource-free: the framework stamps sideEffects.resource
+        extractWitness: (output) => witnessValue("version", String(output.xmin)),
+      },
       confidence: { mode: "none" },
-      extractWitness: (output) => ({
-        kind: "version",
-        resource: "postgres:orders",
-        value: String(output.xmin),
-      }),
       run: async (input, ctx) => { /* fetch order by ID */ },
     },
     "assess-risk": {
@@ -171,18 +171,15 @@ const dag = defineDag({
     },
     "execute-refund": {
       kind: "transform",
-      sideEffects: { kind: "writes", resource: "postgres:orders" },
+      sideEffects: {
+        kind: "writes",
+        resource: resourceName("postgres:orders"),
+        // conditionedOn keeps a full witness (its resource is a free variable);
+        // newWitness is this node's own resource, so it's resource-free.
+        extractConditionedOn: (input) => witness("version", resourceName("postgres:orders"), String(input.orderVersion)),
+        extractNewWitness: (output) => witnessValue("version", String(output.newXmin)),
+      },
       confidence: { mode: "none" },
-      extractConditionedOn: (input) => ({
-        kind: "version",
-        resource: "postgres:orders",
-        value: String(input.orderVersion),
-      }),
-      extractNewWitness: (output) => ({
-        kind: "version",
-        resource: "postgres:orders",
-        value: String(output.newXmin),
-      }),
       run: async (input, ctx) => { /* execute the refund */ },
     },
     "human-review": {
@@ -407,7 +404,7 @@ const transformNode = {
 
 // Reads from an external resource
 const fetchNode = {
-  sideEffects: { kind: "reads", resource: "postgres:customers" },
+  sideEffects: { kind: "reads", resource: resourceName("postgres:customers") },
   // ...
 };
 
@@ -415,7 +412,7 @@ const fetchNode = {
 const writeNode = {
   sideEffects: {
     kind: "writes",
-    resource: "postgres:orders",
+    resource: resourceName("postgres:orders"),
     idempotencyKey: (input) => `refund-${input.orderId}`,
   },
   // ...
@@ -425,7 +422,7 @@ const writeNode = {
 const apiNode = {
   sideEffects: {
     kind: "external-call",
-    resource: "stripe:charges",
+    resource: resourceName("stripe:charges"),
     idempotencyKey: (input) => input.chargeId,
   },
   // ...
@@ -499,13 +496,13 @@ Called after the node completes. Returns the version state observed.
 ```ts
 const fetchOrderNode = {
   kind: "fetch",
-  sideEffects: { kind: "reads", resource: "postgres:orders" },
+  sideEffects: {
+    kind: "reads",
+    resource: resourceName("postgres:orders"),
+    // Returns only (kind, value); the framework stamps sideEffects.resource.
+    extractWitness: (output) => witnessValue("version", String(output.xmin)), // Postgres xmin is a monotonic integer
+  },
   confidence: { mode: "none" },
-  extractWitness: (output) => ({
-    kind: "version",          // Postgres xmin is a monotonic integer
-    resource: "postgres:orders",
-    value: String(output.xmin),
-  }),
   run: async (input, ctx) => {
     const order = await db.query("SELECT *, xmin FROM orders WHERE id = $1", [input.orderId]);
     return ok(order);
@@ -521,18 +518,16 @@ const fetchOrderNode = {
 ```ts
 const executeRefundNode = {
   kind: "transform",
-  sideEffects: { kind: "writes", resource: "postgres:orders" },
+  sideEffects: {
+    kind: "writes",
+    resource: resourceName("postgres:orders"),
+    // conditionedOn returns a full witness — its resource is a free variable
+    // (a write may condition on a resource read upstream).
+    extractConditionedOn: (input) => witness("version", resourceName("postgres:orders"), String(input.orderVersion)), // version from upstream fetch
+    // newWitness is this node's own resource → resource-free, framework-stamped.
+    extractNewWitness: (output) => witnessValue("version", String(output.newXmin)), // version after our write
+  },
   confidence: { mode: "none" },
-  extractConditionedOn: (input) => ({
-    kind: "version",
-    resource: "postgres:orders",
-    value: String(input.orderVersion),  // version from upstream fetch
-  }),
-  extractNewWitness: (output) => ({
-    kind: "version",
-    resource: "postgres:orders",
-    value: String(output.newXmin),  // version after our write
-  }),
   run: async (input, ctx) => {
     const result = await db.query(
       "UPDATE orders SET status = 'refunded' WHERE id = $1 RETURNING xmin",

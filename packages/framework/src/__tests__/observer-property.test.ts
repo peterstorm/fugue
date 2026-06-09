@@ -36,18 +36,18 @@ const arbEventType: fc.Arbitrary<ObserverEvent> = fc.oneof(
   fc.constant<ObserverEvent>({ type: "node-pruned", runId: rid, dagId: did, nodeId: nid, reason: "branch-not-taken", timestamp: ts }),
   fc.constant<ObserverEvent>({
     type: "witness-captured", runId: rid, dagId: did, nodeId: nid,
-    witness: witness("version", "r", "1"), capturedAtMs: 0, timestamp: ts,
+    witness: witness("version", RN("r"), "1"), capturedAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({
     type: "write-attempted", runId: rid, dagId: did, nodeId: nid,
-    conditionedOn: witness("version", "r", "1"),
-    newWitness: witness("version", "r", "2"),
+    conditionedOn: witness("version", RN("r"), "1"),
+    newWitness: witness("version", RN("r"), "2"),
     succeededAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({
     type: "freshness-violation", runId: rid, dagId: did, nodeId: nid,
-    resource: RN("r"), conditionedOnWitness: witness("version", "r", "1"),
-    conflictingWrite: { runId: rid, nodeId: nid, newWitness: witness("version", "r", "2"), succeededAtMs: 0 },
+    resource: RN("r"), conditionedOnWitness: witness("version", RN("r"), "1"),
+    conflictingWrite: { runId: rid, nodeId: nid, newWitness: witness("version", RN("r"), "2"), succeededAtMs: 0 },
     detectedAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({

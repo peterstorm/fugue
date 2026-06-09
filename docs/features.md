@@ -415,11 +415,18 @@ Nodes declare their side-effect profile: `"none"`, `"reads"`, `"writes"`, `"exte
 // changes silently. Lost update — classic concurrency bug.
 
 // ✅ WITH FRESHNESS WITNESSES:
+// extractWitness / extractNewWitness return a resource-free `witnessValue` — the
+// framework stamps the profile's `resource`, so a witness can never name a
+// different resource than the node it lives on. This mismatch is unrepresentable
+// at *compile time* (WitnessValue declares `resource?: never`, so a full
+// `witness` is unassignable to these slots), not merely overwritten at runtime.
+// extractConditionedOn returns a full `witness` because a write may condition on
+// a resource it read upstream.
 const fetchCustomer: NodeDef = {
   sideEffects: {
     kind: "reads",
     resource: resourceName("postgres:customers:123"),
-    extractWitness: (output) => witness("version", "postgres:customers:123", String(output.xmin)),
+    extractWitness: (output) => witnessValue("version", String(output.xmin)),
   },
 };
 
@@ -427,8 +434,8 @@ const updateCustomer: NodeDef = {
   sideEffects: {
     kind: "writes",
     resource: resourceName("postgres:customers:123"),
-    extractConditionedOn: (input) => witness("version", "postgres:customers:123", String(input.customerVersion)),
-    extractNewWitness: (output) => witness("version", "postgres:customers:123", String(output.newXmin)),
+    extractConditionedOn: (input) => witness("version", resourceName("postgres:customers:123"), String(input.customerVersion)),
+    extractNewWitness: (output) => witnessValue("version", String(output.newXmin)),
   },
 };
 

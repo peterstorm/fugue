@@ -16,7 +16,7 @@
  * `DagMachineContextPersisted` shape excludes `NodeDef` entirely.
  */
 
-import type { Witness, ResourceName } from "./freshness.js";
+import type { Witness, WitnessValue, ResourceName } from "./freshness.js";
 
 export type SideEffectKind = "none" | "reads" | "writes" | "external-call";
 
@@ -26,27 +26,38 @@ export type SideEffectProfile<I = unknown, O = unknown> =
       readonly kind: "reads";
       readonly resource: ResourceName;
       /**
-       * Extract a freshness witness from the node's output after successful
-       * execution. When absent, freshness tracking is silently skipped.
+       * Extract a freshness witness value from the node's output after
+       * successful execution. Returns only `(kind, value)` — the framework
+       * stamps this node's `resource`, so the witness can never name a
+       * different resource than the profile. When absent, freshness tracking
+       * is silently skipped.
        *
-       * Example: `(output) => witness("version", "postgres:orders:123", String(output.xmin))`
+       * Example: `(output) => witnessValue("version", String(output.xmin))`
        */
-      readonly extractWitness?: (output: O) => Witness;
+      readonly extractWitness?: (output: O) => WitnessValue;
     }
   | {
       readonly kind: "writes";
       readonly resource: ResourceName;
       readonly idempotencyKey?: (input: I) => string;
       /**
-       * Declare which witness this write is conditioned on. Called with the
-       * node's assembled input before execution.
+       * Declare which witness this write is conditioned on. Called after the
+       * node completes, with its assembled input (which carries the upstream
+       * read's version this write assumed was still current). Returns a full
+       * `Witness`
+       * (including `resource`) because a write may be conditioned on a
+       * *different* resource it read upstream — that resource is a genuine
+       * free variable the author must name.
        */
       readonly extractConditionedOn?: (input: I) => Witness;
       /**
-       * Extract the new witness after a successful write. Captures the new
-       * resource version that resulted from the mutation.
+       * Extract the new witness value after a successful write. Returns only
+       * `(kind, value)`; the framework stamps this node's `resource` (a write
+       * always produces the new version of the resource it writes).
+       *
+       * Example: `(output) => witnessValue("version", String(output.newXmin))`
        */
-      readonly extractNewWitness?: (output: O) => Witness;
+      readonly extractNewWitness?: (output: O) => WitnessValue;
     }
   | {
       readonly kind: "external-call";

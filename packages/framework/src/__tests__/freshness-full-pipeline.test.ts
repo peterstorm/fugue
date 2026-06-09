@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Wave 6 — Test gap coverage for review remediation.
  *
@@ -51,7 +51,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("reader"),
-        witness: witness("version", "postgres:orders", "1"),
+        witness: witness("version", RN("postgres:orders"), "1"),
         capturedAtMs: 100,
         timestamp: new Date(100),
       },
@@ -60,7 +60,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("reader2"),
-        witness: witness("version", "postgres:orders", "2"),
+        witness: witness("version", RN("postgres:orders"), "2"),
         capturedAtMs: 300,
         timestamp: new Date(300),
       },
@@ -72,8 +72,8 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("writer1"),
-        conditionedOn: witness("version", "postgres:orders", "1"),
-        newWitness: witness("version", "postgres:orders", "2"),
+        conditionedOn: witness("version", RN("postgres:orders"), "1"),
+        newWitness: witness("version", RN("postgres:orders"), "2"),
         succeededAtMs: 200,
         timestamp: new Date(200),
       },
@@ -82,8 +82,8 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r2"),
         dagId: D("d"),
         nodeId: N("writer2"),
-        conditionedOn: witness("version", "postgres:orders", "2"),
-        newWitness: witness("version", "postgres:orders", "3"),
+        conditionedOn: witness("version", RN("postgres:orders"), "2"),
+        newWitness: witness("version", RN("postgres:orders"), "3"),
         succeededAtMs: 400,
         timestamp: new Date(400),
       },
@@ -101,7 +101,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("reader"),
-        witness: witness("version", "postgres:orders", "1"),
+        witness: witness("version", RN("postgres:orders"), "1"),
         capturedAtMs: 50,
         timestamp: new Date(50),
       },
@@ -113,8 +113,8 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("writer1"),
-        conditionedOn: witness("version", "postgres:orders", "1"),
-        newWitness: witness("version", "postgres:orders", "2"),
+        conditionedOn: witness("version", RN("postgres:orders"), "1"),
+        newWitness: witness("version", RN("postgres:orders"), "2"),
         succeededAtMs: 100,
         timestamp: new Date(100),
       },
@@ -124,8 +124,8 @@ describe("checkFreshness with witness events in timeline", () => {
         dagId: D("d"),
         nodeId: N("writer2"),
         // Stale! Conditioned on "1" but "2" already written
-        conditionedOn: witness("version", "postgres:orders", "1"),
-        newWitness: witness("version", "postgres:orders", "3"),
+        conditionedOn: witness("version", RN("postgres:orders"), "1"),
+        newWitness: witness("version", RN("postgres:orders"), "3"),
         succeededAtMs: 200,
         timestamp: new Date(200),
       },
@@ -152,8 +152,8 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       runId: R("other-run"),
       dagId: D("pipeline"),
       nodeId: N("other-writer"),
-      conditionedOn: witness("version", "postgres:orders", "42"),
-      newWitness: witness("version", "postgres:orders", "43"),
+      conditionedOn: witness("version", RN("postgres:orders"), "42"),
+      newWitness: witness("version", RN("postgres:orders"), "43"),
       succeededAtMs: 500,
       timestamp: new Date(500),
     });
@@ -162,11 +162,11 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       id: "pipeline",
       nodes: {
         reader: makeNode("reader", {
-          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witness("version", "postgres:orders", String((output as { version: number }).version)) },
+          sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
           run: async () => ok({ version: 42 }),
         }),
         writer: makeNode("writer", {
-          sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: (input: unknown) => witness("version", "postgres:orders", String((input as { version: number }).version)), extractNewWitness: (output: unknown) => witness("version", "postgres:orders", String((output as { newVersion: number }).newVersion)) },
+          sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: (input: unknown) => witness("version", RN("postgres:orders"), String((input as { version: number }).version)), extractNewWitness: (output: unknown) => witnessValue("version", String((output as { newVersion: number }).newVersion)) },
           run: async () => ok({ newVersion: 44 }),
         }),
         review: makeNode("review", {
@@ -205,7 +205,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       (e) => e.type === "freshness-violation",
     ) as FreshnessViolationEvent | undefined;
     expect(violation).toBeDefined();
-    expect(violation!.resource).toBe("postgres:orders");
+    expect(violation!.resource).toBe(RN("postgres:orders"));
     expect(violation!.conditionedOnWitness.value).toBe("42");
     expect(violation!.conflictingWrite.newWitness.value).toBe("43");
 
@@ -222,7 +222,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
     ) as HumanInterventionEvent | undefined;
     expect(intervention).toBeDefined();
     expect(intervention!.actor).toBe("alice");
-    expect(intervention!.context.priorWitnesses).toContainEqual(witness("version", "postgres:orders", "42"));
+    expect(intervention!.context.priorWitnesses).toContainEqual(witness("version", RN("postgres:orders"), "42"));
   });
 });
 
@@ -277,7 +277,7 @@ describe("Freshness extractor failure (fail-closed)", () => {
         writer: makeNode("writer", {
           sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: () => {
             throw new Error("conditionedOn boom");
-          }, extractNewWitness: () => witness("version", "postgres:orders", "99") },
+          }, extractNewWitness: () => witnessValue("version", "99") },
           run: async () => ok({ written: true }),
         }),
       },

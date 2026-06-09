@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr, makeNodeContext, witness } from "@fuguejs/framework";
+import { isOk, isErr, makeNodeContext, witnessValue } from "@fuguejs/framework";
 import { createFakeHttpCapability } from "@fuguejs/framework/testing";
 import { createHttpFetchCustomerNode } from "../dag/nodes/fetch-customer-http.js";
 import type { CrmRecord } from "../schemas/crm.js";
@@ -126,11 +126,12 @@ describe("fetch-customer-http (capability-based)", () => {
     const se = node.sideEffects;
     expect(se.kind).toBe("reads");
     if (se.kind !== "reads") return;
+    // Resource-free: the extractor yields (kind, value); the framework stamps
+    // se.resource ("crm:customers") at emission time.
     const w = se.extractWitness?.({ customer: sampleCustomer });
     expect(w).toEqual(
-      witness(
+      witnessValue(
         "version",
-        "crm:customers",
         `${sampleCustomer.createdAt}:${sampleCustomer.conversations.length}`,
       ),
     );
@@ -142,6 +143,6 @@ describe("fetch-customer-http (capability-based)", () => {
     expect(se.kind).toBe("reads");
     if (se.kind !== "reads") return;
     const w = se.extractWitness?.({ customer: null });
-    expect(w).toEqual(witness("version", "crm:customers", "not-found"));
+    expect(w).toEqual(witnessValue("version", "not-found"));
   });
 });

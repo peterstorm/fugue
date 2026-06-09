@@ -3,7 +3,7 @@ import type { FrameworkError } from "./errors.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
-import type { Witness } from "./freshness.js";
+import type { Witness, ResourceName } from "./freshness.js";
 import type { SideEffectKind } from "./side-effects.js";
 import type { JsonPatch } from "./json-patch.js";
 
@@ -167,7 +167,8 @@ export interface FreshnessViolationEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
-  readonly resource: string;
+  /** Branded — stamped from `conditionedOnWitness.resource`, cannot drift from it. */
+  readonly resource: ResourceName;
   readonly conditionedOnWitness: Witness;
   readonly conflictingWrite: {
     readonly runId: RunId;

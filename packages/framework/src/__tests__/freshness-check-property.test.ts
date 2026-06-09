@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, stampWitness, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 property test — freshness conflict detection.
  *
@@ -19,8 +19,17 @@ import type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
 } from "../types/events.js";
-import type { Witness } from "../types/freshness.js";
+import type { Witness, WitnessKind } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
+
+const arbWitnessKind = fc.constantFrom<WitnessKind>(
+  "version",
+  "etag",
+  "timestamp",
+  "lsn",
+  "idempotency-key",
+  "custom",
+);
 
 // ---------------------------------------------------------------------------
 // Arbitraries
@@ -60,8 +69,8 @@ const toWriteAttemptedEvent = (spec: WriteSpec): WriteAttemptedEvent => ({
   runId: spec.runId,
   dagId: D("d"),
   nodeId: spec.nodeId,
-  conditionedOn: witness("version", spec.resource, spec.conditionedOnValue),
-  newWitness: witness("version", spec.resource, spec.newWitnessValue),
+  conditionedOn: witness("version", RN(spec.resource), spec.conditionedOnValue),
+  newWitness: witness("version", RN(spec.resource), spec.newWitnessValue),
   succeededAtMs: spec.succeededAtMs,
   timestamp: new Date(spec.succeededAtMs),
 });
@@ -153,6 +162,29 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
     );
   });
 
+  it("stampWitness yields the stamped resource and preserves (kind, value) for any input", () => {
+    // Exercises the new resource-free → stamp path directly (the conflict
+    // properties above build full Witness events and never reach stampWitness).
+    // For any (resource, kind, non-empty value), the framework stamps exactly
+    // the given resource and leaves the author-supplied (kind, value) intact.
+    fc.assert(
+      fc.property(
+        arbResource,
+        arbWitnessKind,
+        fc.string({ minLength: 1 }),
+        (resource, kind, value) => {
+          const stamped = stampWitness(RN(resource), witnessValue(kind, value));
+          return (
+            stamped.resource === RN(resource) &&
+            stamped.kind === kind &&
+            stamped.value === value
+          );
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
   it("no conflicts when all writes to a resource are sequential and conditioned on latest", () => {
     fc.assert(
       fc.property(
@@ -172,8 +204,8 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
               runId: R(`r${i}`),
               dagId: D("d"),
               nodeId: N(`w${i}`),
-              conditionedOn: witness("version", resource, String(currentVersion)),
-              newWitness: witness("version", resource, String(nextVersion)),
+              conditionedOn: witness("version", RN(resource), String(currentVersion)),
+              newWitness: witness("version", RN(resource), String(nextVersion)),
               succeededAtMs: (i + 1) * 1000,
               timestamp: new Date((i + 1) * 1000),
             });

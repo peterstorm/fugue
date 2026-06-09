@@ -183,7 +183,7 @@ describe("emitHumanIntervention", () => {
     const obs = new RecordingObserver();
     const nodeMap = new Map([[NID, makeNodeDef()]]);
     const witnesses = [
-      witness("version", "pg:orders", "42"),
+      witness("version", RN("pg:orders"), "42"),
     ];
 
     emitHumanIntervention(

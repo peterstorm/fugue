@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness witness: no-conflict case.
  *
@@ -47,7 +47,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ version: z.number() }),
       requires: [],
-      sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: any) => witness("version", "postgres:orders", String(output.version)) },
+      sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
       confidence: { mode: "none" },
       run: async () => ok({ version: 42 }),
     };
@@ -59,7 +59,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     );
     expect(witnessCaptured).toHaveLength(1);
     expect(witnessCaptured[0]!.nodeId).toBe(N("reader"));
-    expect(witnessCaptured[0]!.witness).toEqual(witness("version", "postgres:orders", "42"));
+    expect(witnessCaptured[0]!.witness).toEqual(witness("version", RN("postgres:orders"), "42"));
     expect(witnessCaptured[0]!.capturedAtMs).toBeGreaterThan(0);
   });
 
@@ -72,7 +72,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ version: z.number(), data: z.string() }),
       requires: [],
-      sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: any) => witness("version", "postgres:orders", String(output.version)) },
+      sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
       confidence: { mode: "none" },
       run: async () => ok({ version: 42, data: "order-data" }),
     };
@@ -83,7 +83,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.object({ version: z.number(), data: z.string() }),
       outputSchema: z.object({ newVersion: z.number() }),
       requires: [],
-      sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: (input: any) => witness("version", "postgres:orders", String(input.version)), extractNewWitness: (output: any) => witness("version", "postgres:orders", String(output.newVersion)) },
+      sideEffects: { kind: "writes", resource: RN("postgres:orders"), extractConditionedOn: (input: unknown) => witness("version", RN("postgres:orders"), String((input as { version: number }).version)), extractNewWitness: (output: unknown) => witnessValue("version", String((output as { newVersion: number }).newVersion)) },
       confidence: { mode: "none" },
       run: async () => ok({ newVersion: 43 }),
     };
@@ -100,8 +100,8 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     );
     expect(writeAttempted).toHaveLength(1);
     expect(writeAttempted[0]!.nodeId).toBe(N("writer"));
-    expect(writeAttempted[0]!.conditionedOn).toEqual(witness("version", "postgres:orders", "42"));
-    expect(writeAttempted[0]!.newWitness).toEqual(witness("version", "postgres:orders", "43"));
+    expect(writeAttempted[0]!.conditionedOn).toEqual(witness("version", RN("postgres:orders"), "42"));
+    expect(writeAttempted[0]!.newWitness).toEqual(witness("version", RN("postgres:orders"), "43"));
 
     // No freshness violation expected
     const violations = observer.events.filter(
@@ -140,7 +140,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       inputSchema: z.unknown(),
       outputSchema: z.object({ version: z.number() }),
       requires: [],
-      sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: any) => witness("version", "postgres:orders", String(output.version)) },
+      sideEffects: { kind: "reads", resource: RN("postgres:orders"), extractWitness: (output: unknown) => witnessValue("version", String((output as { version: number }).version)) },
       confidence: { mode: "none" },
       run: async () => { throw new Error("should not be called"); },
     };

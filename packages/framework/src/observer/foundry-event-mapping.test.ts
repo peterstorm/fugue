@@ -18,7 +18,7 @@ import type { NodeSkippedEvent, ObserverEvent, RunEndEvent } from "../types/even
 import type { RunSummary } from "./buffered.js";
 import { runId, nodeId, dagId } from "../types/ids.js";
 import { confidence } from "../types/confidence.js";
-import { witness } from "../types/freshness.js";
+import { witness, resourceName } from "../types/freshness.js";
 
 const RID = runId("run-1");
 const DID = dagId("dag-1");
@@ -192,7 +192,7 @@ describe("mapEventToFoundry", () => {
     "human-intervention",
   ] as const)("ignored event type %s → []", (type) => {
     const base = { runId: RID, dagId: DID, nodeId: NID, timestamp: T };
-    const w = witness("version", "res", "v1");
+    const w = witness("version", resourceName("res"), "v1");
     const c = confidence("high", "heuristic", "x");
     const events: Record<string, ObserverEvent> = {
       "run-start": { type: "run-start", runId: RID, dagId: DID, timestamp: T },
@@ -214,7 +214,7 @@ describe("mapEventToFoundry", () => {
       "freshness-violation": {
         type: "freshness-violation",
         ...base,
-        resource: "res",
+        resource: resourceName("res"),
         conditionedOnWitness: w,
         conflictingWrite: { runId: RID, nodeId: NID, newWitness: w, succeededAtMs: 0 },
         detectedAtMs: 0,
@@ -338,7 +338,7 @@ const arbEvent: fc.Arbitrary<ObserverEvent> = fc
     const did = dagId(r.did);
     const nid = nodeId(r.nid);
     const ts = new Date(0);
-    const w = witness("version", "res", "v");
+    const w = witness("version", resourceName("res"), "v");
     const c = confidence("high", "heuristic", "x");
     switch (r.which) {
       case "run-start":
@@ -364,7 +364,7 @@ const arbEvent: fc.Arbitrary<ObserverEvent> = fc
       case "write-attempted":
         return { type: "write-attempted", runId: rid, dagId: did, nodeId: nid, conditionedOn: w, newWitness: w, succeededAtMs: 0, timestamp: ts };
       case "freshness-violation":
-        return { type: "freshness-violation", runId: rid, dagId: did, nodeId: nid, resource: "res", conditionedOnWitness: w, conflictingWrite: { runId: rid, nodeId: nid, newWitness: w, succeededAtMs: 0 }, detectedAtMs: 0, timestamp: ts };
+        return { type: "freshness-violation", runId: rid, dagId: did, nodeId: nid, resource: resourceName("res"), conditionedOnWitness: w, conflictingWrite: { runId: rid, nodeId: nid, newWitness: w, succeededAtMs: 0 }, detectedAtMs: 0, timestamp: ts };
       case "human-intervention":
         return { type: "human-intervention", runId: rid, dagId: did, nodeId: nid, action: { kind: "approve" }, actor: "a", elapsedMsSinceAwait: 0, context: { nodeConfidence: c, nodeSideEffects: "none", priorWitnesses: [] }, timestamp: ts };
     }
