@@ -63,6 +63,16 @@ apps, a host compromise yields all of their federation paths anyway. Per-agent
 Entra apps would buy almost nothing at the layer where compromise actually
 happens, while costing an app registration + admin-consent ceremony per agent.
 
+Stated precisely, the rule is **one Entra app per trust boundary (per deployed
+process/runtime)** — not "one Entra app for everything fugue-shaped." A
+*different* app embedding the framework is a different process, a different
+blast-radius unit, and must **not** federate into `fugue-agents`; it gets its
+own app with its own permission union (see
+[Framework-only embedders](#framework-only-embedders--bring-your-own-broker)).
+Letting a second process into `fugue-agents` would silently widen the blast
+radius of every host agent to include that app's compromise — exactly the
+collapse the per-agent-client decision prevents at the Keycloak layer.
+
 The honest trade-off accepted: **app-only tokens cannot be downscoped per
 request.** `client_credentials` against Entra is `scope=.default` — the token
 carries *all* granted app roles, every time, regardless of which agent asked.
@@ -179,6 +189,20 @@ them, `connectAll` runs once at boot, `extractClients` builds a single static
    per-request correlation point — the thing its own doc-comment currently
    forbids. That comment is correct *for today's design*; changing it is
    precisely why this lands as an ADR, not a patch.
+6. **Layering requirement (binding on the wave-2 ADR): the broker *port* lives
+   in `@fuguejs/framework`; only the Keycloak/Entra *implementation* lives in
+   the host.** The framework defines `CapabilityBroker` — "given an invocation
+   and a `requires` declaration, produce a scoped capability handle" — as a
+   port, the same layer `CapabilityHandle` already occupies. The framework also
+   ships a trivial **pass-through broker** that hands back statically-configured
+   clients — which is exactly today's behavior, so the default broker *is* the
+   migration path and existing embedders break nothing. If a second
+   Keycloak-using embedder ever appears, the host's implementation lifts into
+   an optional adapter package (`@fuguejs/keycloak-broker`) via the existing
+   dynamic-adapter pattern — Rule of Three, same as the lead-desk `core/` wall.
+   Letting `mintFor` machinery grow host-side instead would leave framework-only
+   consumers with a framework whose flagship security feature is inaccessible,
+   forcing an extraction under pressure later.
 
 For **user-initiated runs** (once the host accepts `fugue-platform` JWTs per
 the lead-desk plan's migration path), the broker's step 1 becomes Standard
@@ -218,13 +242,45 @@ splits into two deliberately different-sized pieces:
   invocation-scoped capability (budget + model allowlist instead of a token)
   and the low-risk dry run for the OIDC-backed waves.
 
+## Framework-only embedders — bring your own broker
+
+An app that embeds `@fuguejs/framework` directly without the host (an
+OpenClaw-style standalone agent app) brings its own imperative shell — and
+therefore its own identity substrate. Nothing in this plan obligates it to our
+infrastructure:
+
+- **What it inherits for free (structurally, via framework types):** nodes
+  declare `requires`, receive operation-narrowed typed capability handles, and
+  never see raw credentials. Those invariants are enforced by the type system
+  regardless of whose identity system sits behind the broker.
+- **What it brings itself:** a `CapabilityBroker` implementation backed by
+  whatever it has — its own OIDC provider, a secrets vault, plain API keys, or
+  the default pass-through broker for a local/personal use case with no IdP at
+  all.
+- **What it must NOT do:** federate into `fugue-agents` or otherwise reuse this
+  deployment's Entra surface. Different process → different trust boundary →
+  own Entra app (or own FIC into a tier-appropriate app of its own), own
+  permission union, own resource-scoping policies.
+
+| Embedder | Identity substrate | Uses `fugue-agents`? |
+|---|---|---|
+| Our fugue host | `fugue-platform` realm + `fugue-agents` app | Yes — it's this deployment's app |
+| Internal org app, framework-only | Own broker impl; *may* register as a `fugue-platform` client for SSO/governance | **No** — own Entra app/FIC, own union |
+| External/third-party app, framework-only | Entirely their own (any IdP or none); pass-through broker by default | No — never sees our infra |
+
+The `fugue-platform` realm, the `fugue-agents` app, the scope mirror, and the
+FIC entries are **deployment artifacts of our host instance** — the published
+`@fuguejs` packages never reference Keycloak or Entra. That principle (already
+load-bearing in the lead-desk plan's realm-naming note) is what makes this
+table possible.
+
 ## Wave plan
 
 | Wave | Deliverable | Touches | Depends on |
 |---|---|---|---|
 | 0 | LLM usage metering decorator (`dagId`/`runId`/`nodeId` stamped, aggregated) | host only | nothing — buildable now |
 | 1 | LLM budget enforcement (`llmBudgetTokens`, `llm-budget-exceeded` error, invocation-scoped LLM handle) | host + one framework error variant | wave 0 |
-| 2 | ADR amending ADR-0051: per-invocation capability axis (`mintFor`), token cache, `extractClients` boundary | framework + host | wave 1 (pattern proven) |
+| 2 | ADR amending ADR-0051: per-invocation capability axis (`mintFor`), token cache, `extractClients` boundary; **`CapabilityBroker` port + pass-through default in the framework, Keycloak impl in the host** | framework + host | wave 1 (pattern proven) |
 | 3 | Keycloak-backed capabilities: scope mirror in `ClientStep`, broker minting for internal downstreams; V2 exchange path for user-initiated runs | host + `keycloakConfigAsCode` | wave 2; host-accepts-realm-JWTs (lead-desk plan) for the user path |
 | 4 | Entra bridge: `fugue-agents` app + FICs + `entra-exchange` audience scope + Graph/Dynamics capabilities + resource-scoping policies | host + Entra + `keycloakConfigAsCode` | wave 3 |
 
@@ -251,7 +307,8 @@ milestone proper.
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Entra app unit | **One app `fugue-agents`** (union permissions) | Trust boundary is the host process; per-agent apps add ceremony, not containment |
+| Entra app unit | **One app per trust boundary** — `fugue-agents` for this host deployment (union permissions) | Trust boundary is the deployed process; per-agent apps add ceremony, not containment; a *different* embedding app gets its own app, never piggybacks |
+| Broker layering | `CapabilityBroker` port + pass-through default in `@fuguejs/framework`; Keycloak/Entra impl in the host | Framework-only embedders bring their own identity substrate; flagship security feature must not be host-exclusive |
 | Per-request Entra downscoping | **Accepted as impossible** (`.default` only for app-only tokens) | Enforced instead in Keycloak + broker; bounded at Entra by resource-scoping policies |
 | FIC wiring | One FIC per agent-type client (variant A) | Keeps per-agent attribution in Entra sign-in logs; 20-FIC cap fits agent *types* |
 | Entra escalation | Apps per permission *tier* (read/act), never per agent | Bounds worst case at the only layer Entra can enforce, stays at 2–3 apps |
