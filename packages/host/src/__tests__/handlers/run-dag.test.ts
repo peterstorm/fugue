@@ -63,7 +63,7 @@ const defaultDeps = (overrides?: Partial<RunDagDeps>): RunDagDeps => {
       set: (id, s) => { circuits.set(id, s); },
     },
     circuitConfig: { threshold: 5, windowMs: 60_000 },
-    createContext: () => ({ runId: "test-run-id" } as unknown as NodeContext),
+    createContext: () => Promise.resolve({ runId: "test-run-id" } as unknown as NodeContext),
     executeDag: successExecuteDag,
     clock: () => Date.now(),
     ...overrides,
@@ -157,6 +157,46 @@ describe("run-dag handler", () => {
     expect(body.error).toBe("forbidden");
   });
 
+  describe("identity threading into the run (FR-W3-007)", () => {
+    // The user `sub`/`azp` must reach `createContext` so T8 can build
+    // `Invocation.origin`. We capture the identity arg to prove the seam works,
+    // and confirm admin/team runs pass their identity through unchanged.
+    const runWith = async (identity: AuthIdentity) => {
+      const captured: AuthIdentity[] = [];
+      const deps = defaultDeps({
+        createContext: (async (_reg, _sig, id: AuthIdentity) => {
+          captured.push(id);
+          return { runId: "test-run-id" } as unknown as NodeContext;
+        }) as unknown as RunDagDeps["createContext"],
+      });
+      const app = createTestApp(deps, readyState, identity);
+      const res = await post(app, "test-dag", { query: "hi" });
+      return { res, captured };
+    };
+
+    it("threads the user sub/azp into createContext for a user-initiated run", async () => {
+      const identity: AuthIdentity = { kind: "user", sub: "user-abc", azp: "fugue-frontend" };
+      const { res, captured } = await runWith(identity);
+      expect(res.status).toBe(200);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toEqual(identity);
+    });
+
+    it("threads the admin identity through unchanged (no user sub)", async () => {
+      const identity: AuthIdentity = { kind: "admin" };
+      const { res, captured } = await runWith(identity);
+      expect(res.status).toBe(200);
+      expect(captured[0]).toEqual({ kind: "admin" });
+    });
+
+    it("threads the team identity through unchanged", async () => {
+      const identity: AuthIdentity = { kind: "team", team: "test-team", label: "Test" };
+      const { res, captured } = await runWith(identity);
+      expect(res.status).toBe(200);
+      expect(captured[0]).toEqual(identity);
+    });
+  });
+
   it("returns 400 for non-JSON body", async () => {
     const app = createTestApp(defaultDeps(), readyState);
     const res = await app.request("/dags/test-dag/run", {
@@ -242,6 +282,41 @@ describe("run-dag handler", () => {
     expect((await post(app, "ctx-throw-dag", { query: "x" })).status).toBe(500); // failure 1
     expect((await post(app, "ctx-throw-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "ctx-throw-dag", { query: "x" });
+    expect(r3.status).toBe(503);                                                  // circuit now open
+    expect((await r3.json()).error).toBe("dag-disabled");
+  });
+
+  it("returns 500 and releases the concurrency token when createContext rejects (async)", async () => {
+    // Async sibling of the sync-throw setup-guard test above. The async migration introduced
+    // a new failure mode: `await deps.createContext(...)` resolving to a REJECTED promise (how a
+    // failing broker surfaces in Wave 4). The setup-guard catch must handle it identically to a
+    // sync throw — clear the timer, mark the circuit, 500, and the outer finally releases the slot.
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (s) => { concurrency = s; },
+      createContext: () => Promise.reject(new Error("async context init failed")),
+    });
+    const app = createTestApp(deps, readyState);
+    const res = await post(app, "test-dag", { query: "hi" });
+
+    expect(res.status).toBe(500);
+    // The slot acquired before execution must be released — no leak on the async-reject path.
+    expect(concurrency.global.current).toBe(0);
+  });
+
+  it("records a circuit failure on the createContext-rejects (async) path (opens per-DAG breaker at threshold)", async () => {
+    // Async sibling of the sync-throw circuit-failure test. A rejected createContext promise must
+    // call markFailure exactly like a sync throw, so the breaker opens at the threshold.
+    const base = makeDag("ctx-reject-dag");
+    const cbDag: RegisteredDag = { ...base, config: { ...base.config, circuitBreaker: { failureThreshold: 1 } } };
+    const reg = freeze([cbDag], sha, Date.now());
+    const deps = defaultDeps({ createContext: () => Promise.reject(new Error("async ctx init failed")) });
+    const app = createTestApp(deps, makeReadyState(reg));
+
+    expect((await post(app, "ctx-reject-dag", { query: "x" })).status).toBe(500); // failure 1
+    expect((await post(app, "ctx-reject-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
+    const r3 = await post(app, "ctx-reject-dag", { query: "x" });
     expect(r3.status).toBe(503);                                                  // circuit now open
     expect((await r3.json()).error).toBe("dag-disabled");
   });

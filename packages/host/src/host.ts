@@ -20,6 +20,7 @@ import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
+import type { AuthIdentity } from "./domain/auth.js";
 import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit } from "./domain/circuit-breaker.js";
@@ -160,9 +161,20 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       get: (id) => circuitBreakers.get(id) ?? initCircuit(Date.now()),
       set: (id, s) => { circuitBreakers.set(id, s); },
     },
-    createContext: (registered: RegisteredDag, signal: AbortSignal): NodeContext => {
+    createContext: (
+      registered: RegisteredDag,
+      signal: AbortSignal,
+      // The resolved inbound identity is threaded through to the NodeContext
+      // factory (FR-W3-007), which builds `Invocation.origin` from it: an OIDC
+      // `user` carries its `sub` (and `azp` as the authorized agent client) so
+      // the run is correctly attributed to the user instead of being silently
+      // re-labelled `agent`. The broker remains a pass-through placeholder in
+      // this wave (it ignores origin), so admin/team runtime behaviour is
+      // unchanged — only attribution becomes honest.
+      identity: AuthIdentity,
+    ): Promise<NodeContext> => {
       const rid = makeRunId(crypto.randomUUID());
-      return createNodeContextForDag(sharedInfra, registered, rid, signal);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity);
     },
     executeDag: async <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions): Promise<Result<O, FrameworkError>> => {
       return runDag<I, O>(dag, input, ctx, opts);
@@ -175,6 +187,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     },
     adminToken: config.ADMIN_TOKEN,
     tokenStore,
+    // fugue-platform OIDC (`user`) inbound path (FR-W3-006/007). The iss/aud
+    // policy is wired from config; the JWKS-backed signature verifier
+    // (`verifyRealmJwt`) is injected in a later wave (T8). Until a verifier is
+    // wired, a JWT-shaped token fails closed (no signature can be verified → 401).
+    expectedIss: config.REALM_JWT_ISSUER,
+    expectedAud: config.REALM_JWT_AUDIENCE,
     adminHandlerDeps: {
       tokenStore,
       clock: Date.now,

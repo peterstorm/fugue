@@ -17,9 +17,16 @@ import {
   createNamespacedCache,
   createNamespacedCheckpointWriter,
   createNodeContextForDag,
+  invocationOriginForIdentity,
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
+import type { AuthIdentity } from "../domain/auth.js";
+
+// Existing pass-through / wiring tests are identity-agnostic — an admin identity
+// reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
+// their byte-identical assertions are unaffected.
+const adminIdentity: AuthIdentity = { kind: "admin" };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -286,9 +293,9 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // Regression guard: main.ts wires `createHttpCapability()` into
   // `sharedInfra.capabilities`. If that wiring is dropped, `ctx.http` is null
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
-  it("surfaces a usable http client when the handle is wired into capabilities", () => {
+  it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const ctx = createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal);
+    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -297,10 +304,112 @@ describe("createNodeContextForDag — built-in http capability", () => {
     expect(typeof ctx.http?.post).toBe("function");
   });
 
-  it("leaves http null when no http handle is wired (documents the gap the wiring closes)", () => {
+  it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const ctx = createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal);
+    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).toBeNull();
+  });
+});
+
+// ── Pass-through broker path (SC-005 zero-regression) ───────────────────────
+
+describe("createNodeContextForDag — pass-through broker path (SC-005)", () => {
+  const baseSharedInfra = (
+    capabilities: SharedInfra["capabilities"],
+  ): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities,
+  });
+
+  // Regression proof for the per-invocation broker seam (Phase 2): routing
+  // capability resolution through the pass-through broker must leave the client
+  // reachable on the NodeContext BYTE-IDENTICAL to what `extractClients` would
+  // have produced — the SAME reference, not a copy. If this drifts, the
+  // pass-through default is no longer a true migration path (FR-W2-003).
+  it("exposes the exact same capability client reference the handle wired in (byte-identical)", async () => {
+    const httpHandle = createHttpCapability();
+    const shared = baseSharedInfra([httpHandle]);
+
+    const ctx = await createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+    );
+
+    // `extractClients([httpHandle]).http === httpHandle.client` — and the broker
+    // hands that exact reference through to the NodeContext unchanged.
+    expect(ctx.http).toBe(httpHandle.client);
+  });
+});
+
+// ── Identity → Invocation.origin threading (FR-W3-007) ──────────────────────
+//
+// Before this fix the user identity dead-ended: every run built
+// `origin: { kind: "agent", agentClientId: dagId }`, so an OIDC user's `sub`
+// never reached the NodeContext and the run was mis-attributed as `agent`.
+// `invocationOriginForIdentity` is the seam the factory now uses to build the
+// origin; these tests prove the user `sub`/`azp` actually land and that the
+// admin/team placeholder is unchanged (byte-for-byte the prior behaviour).
+
+describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () => {
+  it("a user identity produces origin { kind: 'user', sub, agentClientId: azp } — the sub lands", () => {
+    const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend" };
+
+    const origin = invocationOriginForIdentity(userIdentity, testDagId);
+
+    expect(origin).toEqual({
+      kind: "user",
+      sub: "user-abc-123",
+      agentClientId: "fugue-frontend",
+    });
+  });
+
+  it("a team identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
+    const teamIdentity: AuthIdentity = { kind: "team", team: "eng", label: "ci" };
+
+    const origin = invocationOriginForIdentity(teamIdentity, testDagId);
+
+    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+  });
+
+  it("an admin identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
+    const origin = invocationOriginForIdentity(adminIdentity, testDagId);
+
+    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+  });
+
+  it("the factory accepts a user identity and produces a usable NodeContext (sub threaded, no throw)", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend" };
+
+    const ctx = await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      userIdentity,
+    );
+
+    // The run path no longer dead-ends the user identity: a NodeContext is
+    // produced (the broker mints over the user-keyed origin without error), and
+    // the origin the factory built from this identity carries the user's sub.
+    expect(ctx).toBeDefined();
+    expect(invocationOriginForIdentity(userIdentity, testDagId)).toMatchObject({ sub: "user-xyz" });
   });
 });

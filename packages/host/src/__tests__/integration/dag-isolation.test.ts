@@ -23,6 +23,11 @@ import {
   createNodeContextForDag,
 } from "../../adapters/node-context-factory.js";
 import type { RedisPort, SharedInfra, LogPort } from "../../ports.js";
+import type { AuthIdentity } from "../../domain/auth.js";
+
+// Existing isolation tests are identity-agnostic — an admin identity preserves
+// the prior `agent`-keyed origin behaviour (admin/team → agent placeholder).
+const adminIdentity: AuthIdentity = { kind: "admin" };
 
 // ───────────────────────────────────────────────────────────────────────────
 // Test helpers
@@ -220,7 +225,7 @@ describe("DAG checkpoint writer isolation (integration)", () => {
 // ---------------------------------------------------------------------------
 
 describe("createNodeContextForDag isolation", () => {
-  test("contexts for different DAGs use different cache namespaces", () => {
+  test("contexts for different DAGs use different cache namespaces", async () => {
     const { port: redis } = createMockRedis();
     const shared = createMockSharedInfra(redis);
     const signal = new AbortController().signal;
@@ -228,8 +233,8 @@ describe("createNodeContextForDag isolation", () => {
     const dagA = makeRegisteredDag("dag-alpha");
     const dagB = makeRegisteredDag("dag-beta");
 
-    const ctxA = createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal);
-    const ctxB = createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal);
+    const ctxA = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity);
+    const ctxB = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity);
 
     // Both contexts are created without error
     expect(ctxA).toBeDefined();
@@ -239,15 +244,15 @@ describe("createNodeContextForDag isolation", () => {
     expect(ctxA).not.toBe(ctxB);
   });
 
-  test("contexts for same DAG but different runIds produce different checkpoints", () => {
+  test("contexts for same DAG but different runIds produce different checkpoints", async () => {
     const { port: redis } = createMockRedis();
     const shared = createMockSharedInfra(redis);
     const signal = new AbortController().signal;
 
     const dag = makeRegisteredDag("dag-alpha");
 
-    const ctx1 = createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal);
-    const ctx2 = createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal);
+    const ctx1 = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity);
+    const ctx2 = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity);
 
     expect(ctx1).not.toBe(ctx2);
   });

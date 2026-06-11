@@ -36,7 +36,7 @@ const makeRouterDeps = (tokenStore: TokenStorePort): RouterDeps => {
       set: (id, s) => { circuits.set(id, s); },
     },
     circuitConfig: { threshold: 5, windowMs: 60_000 },
-    createContext: () => ({ runId: "r" } as unknown as NodeContext),
+    createContext: () => Promise.resolve({ runId: "r" } as unknown as NodeContext),
     executeDag: (async () => ({ ok: true, value: {} })) as RunDagDeps["executeDag"],
     clock: Date.now,
     adminToken: ADMIN_TOKEN,

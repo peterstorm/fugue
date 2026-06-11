@@ -27,10 +27,14 @@ import type {
   Result,
   FrameworkError,
 } from "@fuguejs/framework";
-import { makeNodeContext, ok } from "@fuguejs/framework";
+import type { Invocation, InvocationOrigin } from "@fuguejs/framework";
+import { makeNodeContext, ok, createPassthroughBroker, nodeId as makeNodeId } from "@fuguejs/framework";
+import { match } from "ts-pattern";
 import type { RegisteredDag } from "../domain/registry.js";
+import type { AuthIdentity } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";
+import { createMeteredLlm } from "./metered-llm.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -197,28 +201,75 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
 };
 
 /**
+ * Build the `Invocation.origin` for a run from its resolved inbound identity
+ * (FR-W3-007). PURE and exported so the sub-threading is directly assertable
+ * without standing up the whole context factory:
+ *
+ *  - `user`  → `{ kind: "user", sub, agentClientId: azp }`. The user's `sub`
+ *    lands on the origin verbatim; `azp` is the authorized agent client. This
+ *    is the case that was previously dead-ended (every user run mis-attributed
+ *    as `agent`).
+ *  - `team` / `admin` → `{ kind: "agent", agentClientId: dagId }`. There is no
+ *    user subject for these, so the agent placeholder keyed on the DAG id stands
+ *    in — identical to the pre-fix behaviour.
+ *
+ * Exhaustive over `AuthIdentity`; a new identity kind is a compile error here.
+ */
+export const invocationOriginForIdentity = (
+  identity: AuthIdentity,
+  dagId: DagId,
+): InvocationOrigin =>
+  match(identity)
+    .with({ kind: "user" }, (u) => ({ kind: "user" as const, sub: u.sub, agentClientId: u.azp }))
+    .with({ kind: "team" }, () => ({ kind: "agent" as const, agentClientId: dagId }))
+    .with({ kind: "admin" }, () => ({ kind: "agent" as const, agentClientId: dagId }))
+    .exhaustive();
+
+/**
  * Construct a NodeContext for a specific DAG execution.
  *
- * Pure factory: given inputs, constructs context deterministically.
+ * Given inputs, constructs context deterministically.
  * - Shared infra (LLM, tracer) -> passed through as singleton references
  * - Cache -> wrapped with DAG-namespaced key prefix
  * - Checkpoint -> wrapped with DAG + run namespaced key prefix
  * - runId, signal -> per-request unique values
+ * - capabilities -> resolved through a `CapabilityBroker` (pass-through default,
+ *   reproducing today's behavior byte-identically). `async` because brokers in
+ *   later waves reach a token endpoint; the pass-through default does no I/O.
  *
  * @satisfies FR-030 — Cache key isolation
  * @satisfies FR-031 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 — Cross-DAG cache isolation
+ * @satisfies FR-W2-003 — capabilities now flow through a broker; the pass-through
+ *   default preserves byte-identical client behavior with zero migration steps
+ * @satisfies FR-W2-005 — only authority resolution moved behind the broker;
+ *   pools (connect/close/healthCheck) remain boot-scoped and untouched
+ * @satisfies SC-005 — pass-through broker hands back the exact `extractClients`
+ *   client references
  */
-export const createNodeContextForDag = (
+export const createNodeContextForDag = async (
   shared: SharedInfra,
   dag: RegisteredDag,
   runId: RunId,
   signal: AbortSignal,
-): NodeContext => {
+  identity: AuthIdentity,
+): Promise<NodeContext> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
+
+  // Wrap the shared LLM client in a per-run metered decorator: every call is
+  // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
+  // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
+  // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
+  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 FR-W2-009
+  const llm = createMeteredLlm(shared.llm, {
+    dagId,
+    runId,
+    ...(dag.config.llmBudgetTokens !== undefined ? { budget: dag.config.llmBudgetTokens } : {}),
+    logger: shared.logger,
+  });
 
   const cache = createNamespacedCache(shared.redis, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
@@ -235,20 +286,53 @@ export const createNodeContextForDag = (
     ? { get: (name: string) => dagPrompts.get(name) ?? null }
     : shared.prompts ?? { get: () => null };
 
+  // ADR-0051 / per-invocation authority axis: custom capability clients from
+  // registered handles are resolved through a `CapabilityBroker`, not passed to
+  // `makeNodeContext` directly. The pass-through default reproduces today's
+  // behavior exactly — it hands back the SAME client references `extractClients`
+  // produced (the single trust-boundary cast; see capability-manager.ts). Later
+  // waves swap in a host broker that mints narrowly-scoped clients per
+  // invocation; the seam is the only thing that changes here, not the wiring.
+  //
+  // Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind
+  // the broker. `Invocation.origin` is now built FROM the resolved inbound
+  // identity (FR-W3-007): an OIDC `user` carries its `sub` (and `azp` as the
+  // authorized agent client) so attribution is correct; `team`/`admin` runs map
+  // to the agent placeholder keyed on `dagId`, preserving prior behaviour. The
+  // pass-through broker still ignores origin, so runtime behaviour is unchanged
+  // — only attribution becomes honest. `nodeId` is run-scoped context here (not
+  // per-node), so a stable sentinel stands in.
+  const origin: InvocationOrigin = invocationOriginForIdentity(identity, dagId);
+  const broker = createPassthroughBroker(extractClients(shared.capabilities));
+  const invocation: Invocation = {
+    origin,
+    runId,
+    dagId,
+    nodeId: makeNodeId("__run__"),
+  };
+  const minted = await broker.mintFor(invocation, []);
+  if (!minted.ok) {
+    // Impossible for the pass-through broker (it never returns Err). Fail loudly
+    // on this internal-invariant violation rather than silently falling back —
+    // a non-pass-through broker reaching here is a wiring bug, not a runtime
+    // condition to swallow.
+    throw new Error(
+      `createNodeContextForDag: capability broker returned Err for dag '${dagId}' run '${runId}' — ` +
+        `the pass-through broker never fails; this is an internal wiring invariant violation. ` +
+        `error.kind=${minted.error.kind}`,
+    );
+  }
+
   return makeNodeContext({
     runId,
     dagId,
     tracer: shared.tracer,
-    llm: shared.llm,
+    llm,
     cache,
     checkpointWriter,
     signal,
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
-    // ADR-0051: Custom capability clients from registered handles are passed
-    // via the capabilities record. The name↔client correlation is restored
-    // inside `extractClients` — the single trust-boundary cast (see
-    // capability-manager.ts). Do not add a second correlation point here.
-    capabilities: extractClients(shared.capabilities),
+    capabilities: minted.value,
   });
 };

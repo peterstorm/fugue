@@ -98,9 +98,9 @@ describe("toolUseLoop", () => {
     if (result.ok) expect(result.value.output).toEqual({ answer: "fenced" });
   });
 
-  test("iteration limit exhausted → non-retriable error", async () => {
+  test("iteration limit exhausted → non-retriable error, carrying accumulated usage", async () => {
     const result = await toolUseLoop(
-      infiniteToolProvider(),
+      infiniteToolProvider(), // 5 in / 5 out per turn
       { nodeId: N("n1"), model: "m", schema, tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("") }], maxIterations: 3 },
       makeCtx(),
     );
@@ -110,6 +110,8 @@ describe("toolUseLoop", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("iteration limit");
+        // FR-W0-001: tokens burned across all 3 turns are attributed on the Err.
+        expect(result.error.usage).toEqual({ tokensIn: 15, tokensOut: 15 });
       }
     }
   });
@@ -230,6 +232,88 @@ describe("toolUseLoop", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
+      // First-call error consumed no prior turns → usage is zeroed (still present).
+      if (result.error.kind === "transient") {
+        expect(result.error.usage).toEqual({ tokensIn: 0, tokensOut: 0 });
+      }
+    }
+  });
+
+  test("mid-loop provider error carries prior-turn accumulated usage (FR-W0-001)", async () => {
+    // Turn 1: a tool-call turn that burns 10/15. Turn 2: the provider errors,
+    // itself reporting 3/4 partial usage for the in-flight turn.
+    let callCount = 0;
+    const provider: ToolLoopProvider = {
+      call: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return ok({
+            toolCalls: [{ id: "c", name: "tool", input: {} }],
+            textContent: undefined,
+            tokensIn: 10,
+            tokensOut: 15,
+          });
+        }
+        return err({
+          kind: "transient",
+          nodeId: N("n1"),
+          message: "rate limit",
+          usage: { tokensIn: 3, tokensOut: 4 },
+        });
+      },
+      appendToolResults: () => {},
+    };
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 5,
+      },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "transient") {
+      // Prior turn (10/15) + the in-flight turn's own reported usage (3/4).
+      expect(result.error.usage).toEqual({ tokensIn: 13, tokensOut: 19 });
+    }
+  });
+
+  test("deadline-exceeded transient carries accumulated usage", async () => {
+    let time = 1000;
+    const nowFn = () => time;
+    const provider: ToolLoopProvider = {
+      call: async () => {
+        time += 500;
+        return ok({
+          toolCalls: [{ id: "c", name: "tool", input: {} }],
+          textContent: undefined,
+          tokensIn: 7,
+          tokensOut: 3,
+        });
+      },
+      appendToolResults: () => {},
+    };
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 10,
+        deadlineMs: 700,
+        now: nowFn,
+      },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "transient") {
+      // deadline=1700: turn0 (1000<1700) burns 7/3 →1500; turn1 (1500<1700)
+      // burns 7/3 →2000; turn2 check 2000>=1700 trips. Two turns completed.
+      expect(result.error.usage).toEqual({ tokensIn: 14, tokensOut: 6 });
     }
   });
 

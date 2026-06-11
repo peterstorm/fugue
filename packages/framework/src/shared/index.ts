@@ -13,3 +13,4 @@ export { validateCapabilities } from "./capabilities.js";
 export { consoleLogger, noopTracer, noopObserver } from "./defaults.js";
 export { makeNodeContext } from "./make-node-context.js";
 export { stableHash } from "./hash.js";
+export { createPassthroughBroker } from "./passthrough-broker.js";

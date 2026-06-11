@@ -46,6 +46,12 @@ export interface DagRegistrationConfig {
   /** Per-DAG checkpoint TTL override (ms). Falls back to host DEFAULT_CHECKPOINT_TTL_MS. (FR-041) */
   readonly checkpointTtlMs?: number;
   /**
+   * Per-run LLM token budget (FR-W1-001). When set, the metered-llm decorator
+   * refuses calls once a run's cumulative tokens reach this value (with a single
+   * accepted overshoot — FR-W1-004). Absent means no enforcement (FR-W1-006).
+   */
+  readonly llmBudgetTokens?: number;
+  /**
    * Per-DAG circuit-breaker override. Each subfield falls back INDEPENDENTLY to the host
    * config when omitted: `failureThreshold` → CIRCUIT_BREAKER_THRESHOLD, `resetTimeoutMs`
    * → the 30s half-open cooldown default. `windowMs` is host-only (not overridable per-DAG).
@@ -90,6 +96,8 @@ export interface ResolvedDagRegistration {
      */
     readonly cacheTtlMs?: number;
     readonly checkpointTtlMs?: number;
+    /** Per-run LLM token budget (FR-W1-001) — preserved untouched (no host default). */
+    readonly llmBudgetTokens?: number;
     readonly circuitBreaker?: {
       readonly failureThreshold?: number;
       readonly resetTimeoutMs?: number;
@@ -116,6 +124,7 @@ export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): 
     ...(yaml.maxConcurrent !== undefined ? { maxConcurrent: yaml.maxConcurrent } : {}),
     ...(yaml.cacheTtlMs !== undefined ? { cacheTtlMs: yaml.cacheTtlMs } : {}),
     ...(yaml.checkpointTtlMs !== undefined ? { checkpointTtlMs: yaml.checkpointTtlMs } : {}),
+    ...(yaml.llmBudgetTokens !== undefined ? { llmBudgetTokens: yaml.llmBudgetTokens } : {}),
   };
   return {
     ...registration,
@@ -146,6 +155,7 @@ export const resolveDefaults = (reg: DagRegistration): ResolvedDagRegistration =
     // Preserved untouched — host-level TTL defaulting happens in dag-factory.
     ...(reg.config?.cacheTtlMs !== undefined ? { cacheTtlMs: reg.config.cacheTtlMs } : {}),
     ...(reg.config?.checkpointTtlMs !== undefined ? { checkpointTtlMs: reg.config.checkpointTtlMs } : {}),
+    ...(reg.config?.llmBudgetTokens !== undefined ? { llmBudgetTokens: reg.config.llmBudgetTokens } : {}),
     ...(reg.config?.circuitBreaker !== undefined ? { circuitBreaker: reg.config.circuitBreaker } : {}),
   },
   meta: {
@@ -201,6 +211,7 @@ export const DagRegistrationSchema = z
         maxConcurrent: z.number().int().positive().optional(),
         cacheTtlMs: z.number().positive().optional(),
         checkpointTtlMs: z.number().positive().optional(),
+        llmBudgetTokens: z.number().int().positive().optional(),
         circuitBreaker: z
           .object({
             failureThreshold: z.number().int().positive().optional(),

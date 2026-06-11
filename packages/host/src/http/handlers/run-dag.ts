@@ -34,7 +34,18 @@ export interface RunDagDeps {
   readonly setConcurrency: (s: ConcurrencyState) => void;
   readonly circuit: CircuitPort;
   readonly circuitConfig: CircuitConfig;
-  readonly createContext: (registered: RegisteredDag, signal: AbortSignal) => NodeContext;
+  /**
+   * Build the NodeContext for a run. The resolved inbound `AuthIdentity` is
+   * threaded in (FR-W3-007) so a user-initiated run carries the user's `sub`
+   * down to where the `Invocation.origin` is built. For admin/team identities
+   * this is informational and does not change behaviour; the broker wiring
+   * (T8/Wave 4) branches on it later.
+   */
+  readonly createContext: (
+    registered: RegisteredDag,
+    signal: AbortSignal,
+    identity: AuthIdentity,
+  ) => Promise<NodeContext>;
   readonly executeDag: <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
 }
@@ -199,7 +210,12 @@ export const createRunDagHandler = (
       // Guard the createContext call so the timer is cleared if it throws (leak prevention).
       let ctx: import("@fuguejs/framework").NodeContext;
       try {
-        ctx = deps.createContext(registered, controller.signal);
+        // `await` preserves the setup-guard semantics: a synchronous throw or a
+        // rejected promise from `createContext` both land in this catch.
+        // Thread the resolved inbound identity (user `sub`/`azp`, or admin/team)
+        // into context creation so user-initiated runs are attributable and the
+        // broker (T8) can build `Invocation.origin = { kind: "user", sub, ... }`.
+        ctx = await deps.createContext(registered, controller.signal, identity);
       } catch (setupErr) {
         clearTimeout(timeoutId);
         markFailure(permit, deps.clock(), circuitConfig);

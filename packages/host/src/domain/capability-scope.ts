@@ -1,0 +1,161 @@
+/**
+ * Capability Scope — parse-don't-validate for downstream capability names and
+ * the TYPE of the operation-narrowed handle a node receives.
+ *
+ * A node declares `requires: ["msgraph:mail.send"]`. Before any token is
+ * minted, the broker must turn that raw string into a TYPED scope (so illegal /
+ * unknown scopes are rejected once, at the edge) and hand the node a handle
+ * that exposes ONLY the named operation — never a raw downstream client and
+ * never a token/key field. This module owns both halves PURELY: the parser
+ * (`parseScope`) and the narrowed-handle TYPES. The concrete Graph/Dynamics
+ * implementations are a later wave (T10) — here the handles are interfaces with
+ * operation methods and structurally no `client`/`token`/`apiKey` slot.
+ *
+ * @satisfies US4 — a node declaring `requires:["msgraph:mail.send"]` receives a
+ *   narrowed handle; the functional core can NEVER reach a raw downstream
+ *   client or token (the handle types below expose neither).
+ * @satisfies FR-W3-004 — operation narrowing: the handle exposes only the named
+ *   operation(s); the raw client is unreachable, enforced by the type with no
+ *   escape hatch (no `client` member exists to widen to).
+ * @satisfies FR-W3-005 — no raw token or vendor API key is reachable from
+ *   node-executed code: the handle interfaces declare no `token`/`apiKey` field.
+ * @satisfies SC-007 — 0 raw-client and 0 token/key fields reachable from a
+ *   node's capability handle (type-level test in capability-scope.test.ts).
+ */
+
+import { match } from "ts-pattern";
+import type { Result, FrameworkError } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
+
+// ───────────────────────────────────────────────────────────────────────────
+// Parsed scope ADT
+//
+// A `DownstreamScope` is a discriminated union on `provider`, with a
+// provider-specific `operation` literal union. This makes illegal states
+// unrepresentable: there is no `DownstreamScope` for an unknown provider and no
+// way to pair `msgraph` with a Dynamics operation — the parser is the only
+// constructor, so every value in the type came from a recognised name.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Microsoft Graph operations this layer recognises. Extend as capabilities grow. */
+export type MsGraphOperation = "mail.send" | "sites.read";
+
+/** Dynamics operations this layer recognises. */
+export type DynamicsOperation = "read";
+
+/**
+ * A parsed, typed downstream scope. Discriminated by `provider`; the
+ * `operation` field is narrowed to that provider's operation union, so an
+ * exhaustive `match` on `provider` always knows the operation's shape.
+ */
+export type DownstreamScope =
+  | { readonly provider: "msgraph"; readonly operation: MsGraphOperation }
+  | { readonly provider: "dynamics"; readonly operation: DynamicsOperation };
+
+// ───────────────────────────────────────────────────────────────────────────
+// Operation-narrowed handle types (FR-W3-004 / FR-W3-005 / SC-007)
+//
+// Each handle interface carries ONLY operation methods. There is deliberately
+// NO `client`, `token`, or `apiKey` member: a node holding one of these handles
+// has no field to reach a raw vendor client or credential through. The concrete
+// implementations (T10) supply the method bodies; they may close over a client
+// privately, but the TYPE the node sees exposes only the operations.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Handle for `msgraph:mail.send` — exposes only `sendMail`, nothing else. */
+export interface MailSendHandle {
+  readonly sendMail: (message: MailMessage) => Promise<Result<MailSendReceipt, FrameworkError>>;
+}
+
+/** Handle for `msgraph:sites.read` — exposes only `readSite`. */
+export interface SitesReadHandle {
+  readonly readSite: (siteId: string) => Promise<Result<SiteContent, FrameworkError>>;
+}
+
+/** Handle for `dynamics:read` — exposes only `read`. */
+export interface DynamicsReadHandle {
+  readonly read: (query: DynamicsQuery) => Promise<Result<DynamicsResult, FrameworkError>>;
+}
+
+/**
+ * The union of every operation-narrowed handle. A parsed scope maps to exactly
+ * one member of this union (see `handleKindForScope`); no member exposes a raw
+ * client or credential, so SC-007 holds for the whole union.
+ */
+export type OperationNarrowedHandle = MailSendHandle | SitesReadHandle | DynamicsReadHandle;
+
+// --- Operation payload placeholders (shapes firmed up when T10 wires impls) ---
+export type MailMessage = { readonly to: string; readonly subject: string; readonly body: string };
+export type MailSendReceipt = { readonly messageId: string };
+export type SiteContent = { readonly siteId: string; readonly title: string };
+export type DynamicsQuery = { readonly entity: string; readonly filter?: string };
+export type DynamicsResult = { readonly rows: readonly Readonly<Record<string, unknown>>[] };
+
+/**
+ * Type-level map from a parsed scope to its narrowed-handle type. Lets the
+ * (later) broker say "a `msgraph:mail.send` scope yields a `MailSendHandle`"
+ * in the types, so node code that requested mail.send is handed exactly the
+ * sendMail-only handle. Implemented as a conditional type over the scope ADT.
+ */
+export type HandleForScope<S extends DownstreamScope> =
+  S extends { readonly provider: "msgraph"; readonly operation: "mail.send" } ? MailSendHandle :
+  S extends { readonly provider: "msgraph"; readonly operation: "sites.read" } ? SitesReadHandle :
+  S extends { readonly provider: "dynamics"; readonly operation: "read" } ? DynamicsReadHandle :
+  never;
+
+// ───────────────────────────────────────────────────────────────────────────
+// Parser
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Provider → recognised operations, the single source of truth for parsing. */
+const KNOWN_SCOPES = {
+  msgraph: ["mail.send", "sites.read"] as const,
+  dynamics: ["read"] as const,
+} satisfies Record<DownstreamScope["provider"], readonly string[]>;
+
+/**
+ * Parse a capability `requires` name (`"<provider>:<operation>"`) into a typed
+ * `DownstreamScope`. Parse-don't-validate: the ONLY way to obtain a
+ * `DownstreamScope` is through this function, so every downstream scope in the
+ * system is one of the recognised names.
+ *
+ * An unparseable / unknown name is a CONFIG-or-AUTHORIZATION defect, not a
+ * transient fault, so it is reported as `policy-refusal` (fail-closed, never
+ * retried — same category as "scope not assigned"): a name nobody recognises is
+ * by definition not a scope the agent is allowed to use. `agentClientId` is
+ * unknown at parse time (it lives on the invocation, not the static name), so it
+ * is OMITTED here (the field is optional and ABSENT for a parse-time refusal) —
+ * the broker, which DOES know the client, supplies it on an assignment-time
+ * refusal. The discriminable `kind` is what callers branch on.
+ */
+export const parseScope = (name: string): Result<DownstreamScope, FrameworkError> => {
+  const sep = name.indexOf(":");
+  if (sep <= 0 || sep === name.length - 1) {
+    return err({ kind: "policy-refusal", scope: name });
+  }
+  const provider = name.slice(0, sep);
+  const operation = name.slice(sep + 1);
+
+  if (provider === "msgraph" && (KNOWN_SCOPES.msgraph as readonly string[]).includes(operation)) {
+    return ok({ provider: "msgraph", operation: operation as MsGraphOperation });
+  }
+  if (provider === "dynamics" && (KNOWN_SCOPES.dynamics as readonly string[]).includes(operation)) {
+    return ok({ provider: "dynamics", operation: operation as DynamicsOperation });
+  }
+  return err({ kind: "policy-refusal", scope: name });
+};
+
+/**
+ * The narrowed-handle KIND a parsed scope resolves to, as a stable string tag.
+ * Pure mapping used by the (later) broker to select which concrete handle to
+ * build; exposed here so the scope→handle correspondence is testable without
+ * any concrete implementation. Exhaustive over the scope ADT.
+ */
+export type HandleKind = "mail.send" | "sites.read" | "dynamics.read";
+
+export const handleKindForScope = (scope: DownstreamScope): HandleKind =>
+  match(scope)
+    .with({ provider: "msgraph", operation: "mail.send" }, () => "mail.send" as const)
+    .with({ provider: "msgraph", operation: "sites.read" }, () => "sites.read" as const)
+    .with({ provider: "dynamics" }, () => "dynamics.read" as const)
+    .exhaustive();

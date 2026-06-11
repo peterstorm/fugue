@@ -27,8 +27,8 @@ export {
 } from "./result.js";
 
 // ── Errors ────────────────────────────────────────────────────────────────
-export type { FrameworkError, FrameworkErrorKind, MissingCapability } from "./errors.js";
-export { formatFrameworkError, FrameworkAugmentedError } from "./errors.js";
+export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialTokenUsage } from "./errors.js";
+export { formatFrameworkError, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
 // ── Span kinds ────────────────────────────────────────────────────────────
@@ -102,6 +102,14 @@ export type {
 
 // ── Capability lifecycle ──────────────────────────────────────────────────
 export type { CapabilityHandle, AdapterFactory } from "./capability-handle.js";
+
+// ── Capability authority (per-invocation broker seam) ─────────────────────
+export type {
+  CapabilityBroker,
+  Invocation,
+  InvocationOrigin,
+  ScopedCapabilityHandle,
+} from "./capability-broker.js";
 
 // ── DAG shape ─────────────────────────────────────────────────────────────
 export type {

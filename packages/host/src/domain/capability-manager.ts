@@ -275,12 +275,22 @@ export const checkHealth = async (
 
 /**
  * Extract a capabilities record from a set of handles.
- * Used to pass into `makeNodeContext({ capabilities: ... })`.
  *
- * TRUST BOUNDARY — this is the single point where the per-handle
+ * This record is now the INPUT to the per-invocation `CapabilityBroker` (the
+ * pass-through default in `@fuguejs/framework`), which resolves it into the
+ * `NodeContext` capabilities — it is no longer passed to
+ * `makeNodeContext({ capabilities })` directly (see
+ * `adapters/node-context-factory.ts`). The pass-through broker hands these exact
+ * references back unchanged, so this remains byte-identical to the old behavior;
+ * later waves swap the broker for one that mints narrowly-scoped clients per
+ * invocation off this same configured set.
+ *
+ * TRUST BOUNDARY — this is STILL the single point where the per-handle
  * `name ↔ client` correlation (carried by `CapabilityHandle<K>` at
  * construction, erased when widened to `readonly CapabilityHandle[]`) is
- * restored via the cast below. Adapter authors are trusted to wire
+ * restored via the cast below. Moving consumption to the broker seam did not add
+ * a second correlation point: the cast happens here, once, and the broker
+ * receives the already-correlated record. Adapter authors are trusted to wire
  * `CapabilityHandle<K>.name` to a `CapabilityRegistry[K]` client; nothing
  * downstream re-verifies the client's shape (validation checks presence,
  * not structure). Keep every such cast here — do not introduce a second

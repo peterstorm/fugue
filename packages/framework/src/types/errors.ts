@@ -13,6 +13,19 @@ export type MissingCapability = {
   readonly capability: Capability;
 };
 
+/**
+ * Tokens consumed by a call that ultimately failed. Carried on the error
+ * variants emitted by the tool-use loop (`node-crash`, `transient`, `aborted`)
+ * so that the partial usage burned across already-completed turns is
+ * representable on the `Err` path and can be metered UNCONDITIONALLY (FR-W0-001:
+ * 100% attribution). Absent (`undefined`) means the failure consumed no
+ * attributable tokens (e.g. an upfront validation error before any turn ran).
+ */
+export type PartialTokenUsage = {
+  readonly tokensIn: number;
+  readonly tokensOut: number;
+};
+
 export type FrameworkError =
   | { readonly kind: "validation"; readonly nodeId: NodeId; readonly message: string; readonly path?: string }
   | {
@@ -71,9 +84,25 @@ export type FrameworkError =
        * and goes through the standard backoff path.
        */
       readonly retriability: "retriable" | "non-retriable";
+      /**
+       * Tokens already consumed by the failed call. The tool-use loop populates
+       * this from its accumulated cross-turn totals so a crash (iteration limit,
+       * schema mismatch, JSON parse failure) still attributes the burned tokens
+       * (FR-W0-001) and counts them toward the per-run budget. Absent when no
+       * tokens were consumed before the failure.
+       */
+      readonly usage?: PartialTokenUsage;
     }
   | { readonly kind: "cycle-detected"; readonly nodeIds: readonly NodeId[] }
-  | { readonly kind: "aborted"; readonly reason: string }
+  | {
+      readonly kind: "aborted";
+      readonly reason: string;
+      /**
+       * Tokens already consumed before the abort signal halted the loop. See
+       * `node-crash.usage`.
+       */
+      readonly usage?: PartialTokenUsage;
+    }
   | { readonly kind: "rejected"; readonly nodeId: NodeId; readonly reason: string }
   | { readonly kind: "invalid-reroute"; readonly targetNodeId: NodeId; readonly message: string }
   | {
@@ -86,6 +115,11 @@ export type FrameworkError =
        * on `httpStatus === 404` instead of string-matching the message.
        */
       readonly httpStatus?: number;
+      /**
+       * Tokens already consumed before a transient failure (e.g. a total
+       * deadline exceeded mid-loop). See `node-crash.usage`.
+       */
+      readonly usage?: PartialTokenUsage;
     }
   | { readonly kind: "missing-default-edge"; readonly nodeId: NodeId }
   | {
@@ -111,10 +145,114 @@ export type FrameworkError =
        */
       readonly kind: "missing-capability";
       readonly missing: readonly [MissingCapability, ...MissingCapability[]];
+    }
+  | {
+      /**
+       * Emitted by the host's metered LLM decorator (FR-W1-003) when a per-run
+       * token budget is reached. The check runs BEFORE the call against the
+       * cumulative-so-far counter, so `cumulative` is the token total already
+       * consumed by this run and `budget` is the configured `llmBudgetTokens`.
+       * An in-flight call may overshoot the budget by at most one call
+       * (FR-W1-004); this error refuses the *next* call once `cumulative`
+       * has reached `budget`.
+       */
+      readonly kind: "llm-budget-exceeded";
+      readonly runId: RunId;
+      readonly nodeId: NodeId;
+      /** Cumulative tokens already consumed by this run before the refused call. */
+      readonly cumulative: number;
+      /** Configured per-run budget (`llmBudgetTokens`) that was reached. */
+      readonly budget: number;
+    }
+  | {
+      /**
+       * The capability broker could not reach the identity provider / token
+       * endpoint to mint or exchange a token — a TRANSIENT infrastructure
+       * failure (Keycloak down, DNS/socket error, 5xx from the mint endpoint),
+       * NOT an authorization decision. Callers may retry. Kept deliberately
+       * DISTINCT from `downstream-denied` (FR-X-002): a denial is a settled
+       * authorization answer ("no"), whereas `infra-unreachable` is "we never
+       * got an answer". Conflating the two would make a retry loop hammer a
+       * provider that has already said no, or fail-closed on a blip that a
+       * retry would clear.
+       *
+       * `operation` names which broker step failed (e.g. `"mint"`,
+       * `"token-exchange"`, `"client-credentials"`) so the audit trail can
+       * pinpoint the failing hop; `message` carries the diagnostic detail
+       * (status line, socket error). (FR-X-001)
+       */
+      readonly kind: "infra-unreachable";
+      readonly operation: string;
+      readonly message: string;
+    }
+  | {
+      /**
+       * A required scope is not assigned to the agent's client in the identity
+       * provider's policy — an AUTHORIZATION refusal raised FAIL-CLOSED by the
+       * broker's local policy check BEFORE any downstream (Entra) call is made
+       * (FR-X-001). This is the cheap, deterministic gate: if the agent client
+       * was never granted `scope`, there is no point minting or exchanging a
+       * token, so the broker refuses up front. Because it precedes any network
+       * call it is never transient and must never be retried — distinct from
+       * `infra-unreachable`.
+       *
+       * `scope` is the unassigned scope that triggered the refusal.
+       *
+       * `agentClientId` is the agent client whose policy lacks the scope (the
+       * same id carried on `InvocationOrigin`), so an assignment-time refusal is
+       * attributable to a concrete client without re-deriving identity. It is
+       * OPTIONAL because a refusal has two origins:
+       *   - PARSE-TIME (an unrecognised `requires` name): the client id is not
+       *     yet known — the name is refused statically, before any invocation —
+       *     so the field is ABSENT.
+       *   - ASSIGNMENT-TIME (the broker, with a known client, finds the scope
+       *     unassigned): the field is PRESENT and names that client.
+       * Modelling absence as an absent field (not an empty string) keeps the
+       * "unknown client" state honest rather than representable-but-illegal.
+       * (FR-X-001)
+       */
+      readonly kind: "policy-refusal";
+      readonly scope: string;
+      readonly agentClientId?: string;
+    }
+  | {
+      /**
+       * A downstream identity decision rejected the invocation: an Entra
+       * Federated Identity Credential (FIC) subject/issuer mismatch, a Workload
+       * Identity Federation (WIF) rejection, or a resource-scoping denial.
+       * These are deliberately COLLAPSED into one authorization category
+       * (FR-X-002): from the node's perspective they are all "the downstream
+       * said no", and a settled "no" is handled identically (fail-closed, no
+       * retry) regardless of which mechanism produced it. Kept DISTINCT from
+       * `infra-unreachable` — a denial is an answer, not an outage — so retry
+       * policy can branch on the kind alone.
+       *
+       * `resource` is the downstream resource/audience that was refused (e.g. a
+       * Graph or Dynamics resource id); `reason` carries the provider's stated
+       * cause (FIC mismatch, audience not permitted) for the audit record.
+       * (FR-X-002)
+       */
+      readonly kind: "downstream-denied";
+      readonly resource: string;
+      readonly reason: string;
     };
 
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
 export type FrameworkErrorKind = FrameworkError["kind"];
+
+/**
+ * Extract the partial token usage carried by a failed call, if any. Only the
+ * tool-use-loop error variants (`node-crash`, `transient`, `aborted`) carry
+ * usage; every other kind reads as `undefined` (no attributable tokens). Lets
+ * the metering shell attribute consumed tokens on the `Err` path without
+ * widening every call site to know which variants carry usage (FR-W0-001).
+ */
+export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =>
+  match(e)
+    .with({ kind: "node-crash" }, (e) => e.usage)
+    .with({ kind: "transient" }, (e) => e.usage)
+    .with({ kind: "aborted" }, (e) => e.usage)
+    .otherwise(() => undefined);
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —
@@ -143,6 +281,13 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "checkpoint-version-mismatch" }, (e) => `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`)
     .with({ kind: "checkpoint-write-failed" }, (e) => `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`)
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
+    .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): cumulative ${e.cumulative} tokens reached budget ${e.budget}`)
+    .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}': ${e.message}`)
+    .with({ kind: "policy-refusal" }, (e) =>
+      e.agentClientId !== undefined
+        ? `policy refusal: scope '${e.scope}' not assigned to agent client '${e.agentClientId}'`
+        : `policy refusal: scope '${e.scope}' not recognised (agent client unknown)`)
+    .with({ kind: "downstream-denied" }, (e) => `downstream denied resource '${e.resource}': ${e.reason}`)
     .exhaustive();
 
 /**

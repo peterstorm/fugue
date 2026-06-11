@@ -9,6 +9,8 @@
  * The imperative shell (middleware, handlers) calls these for decisions.
  */
 
+import { match } from "ts-pattern";
+
 // ── Branded Types ──────────────────────────────────────────────────────────
 
 /** A raw team token as returned to the admin (shown once, never stored raw) */
@@ -34,10 +36,51 @@ export interface TokenGrant {
 /**
  * The identity resolved from a bearer token during a request.
  * Set on Hono context for downstream handlers.
+ *
+ * Variants:
+ * - `admin` — root of trust (ADMIN_TOKEN env var), full access.
+ * - `team`  — opaque `fug_` team token, scoped to the team's DAGs.
+ * - `user`  — a human authenticated via a fugue-platform realm OIDC JWT
+ *   (FR-W3-006/FR-W3-007). `sub` is the user's subject; `azp` is the
+ *   authorized party (the OIDC client that minted the token). This identity
+ *   is established at the inbound boundary so the user's subject can be threaded
+ *   through the run and, in a later wave (T8), exchanged per-hop by the broker
+ *   (sub stays the user, azp becomes the agent). No token exchange happens here.
  */
 export type AuthIdentity =
   | { readonly kind: "admin" }
-  | { readonly kind: "team"; readonly team: string; readonly label: string };
+  | { readonly kind: "team"; readonly team: string; readonly label: string }
+  | { readonly kind: "user"; readonly sub: string; readonly azp: string };
+
+// ── Realm JWT Claims (validated fugue-platform OIDC token) ─────────────────
+
+/**
+ * The audience claim of an OIDC token. Keycloak emits `aud` as either a single
+ * string or an array of strings depending on how many audiences are mapped, so
+ * both shapes are modelled and handled by the validator.
+ */
+export type JwtAudience = string | readonly string[];
+
+/**
+ * The subset of fugue-platform realm JWT claims this host validates.
+ *
+ * IMPORTANT: this type describes claims whose SIGNATURE HAS ALREADY BEEN
+ * VERIFIED by the injected verifier. It is NOT a trust assertion on its own —
+ * `validateRealmJwtClaims` still enforces iss/aud/exp before any claim is used.
+ *
+ * - `iss` — token issuer (must equal the fugue-platform realm issuer URL).
+ * - `aud` — intended audience(s) (must contain `fugue-host`).
+ * - `exp` — expiry as a UNIX timestamp in SECONDS (OIDC convention).
+ * - `sub` — the authenticated user's subject (stable user id).
+ * - `azp` — authorized party: the OIDC client id the token was minted for.
+ */
+export interface RealmJwtClaims {
+  readonly iss: string;
+  readonly aud: JwtAudience;
+  readonly exp: number;
+  readonly sub: string;
+  readonly azp: string;
+}
 
 // ── Authorization (pure) ───────────────────────────────────────────────────
 
@@ -45,11 +88,25 @@ export type AuthIdentity =
  * Can the given identity access a DAG owned by `dagTeam`?
  *
  * Rules:
- * - Admin can access anything
- * - Team identity can only access DAGs owned by that team
+ * - Admin can access anything.
+ * - Team identity can only access DAGs owned by that team.
+ * - User identity (fugue-platform JWT) may run DAGs in this wave. User-run
+ *   authorization is NOT team-scoped here: the user's downstream authorization
+ *   is enforced per-hop by the identity-scoped capability broker (T8/Wave 4)
+ *   via the V2 token exchange, where the realm/Keycloak policy gates what the
+ *   user-via-agent may actually reach. THIS predicate deliberately does NOT
+ *   grant admin-equivalent access — a `user` is not an `admin`; it only clears
+ *   the inbound run gate so the user's `sub` can be threaded into the run.
+ *   It returns `true` independent of `dagTeam` (a user is not bound to a single
+ *   host-side team), which is the minimal correct behaviour for threading-only
+ *   delivery; tightening this to a realm/role check is a later-wave concern.
  */
 export const canAccessDag = (identity: AuthIdentity, dagTeam: string): boolean =>
-  identity.kind === "admin" || identity.team === dagTeam;
+  match(identity)
+    .with({ kind: "admin" }, () => true)
+    .with({ kind: "team" }, (t) => t.team === dagTeam)
+    .with({ kind: "user" }, () => true)
+    .exhaustive();
 
 // ── Token Generation (pure computation, randomness injected) ───────────────
 
