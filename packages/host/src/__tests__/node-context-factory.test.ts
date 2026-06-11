@@ -6,8 +6,9 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fuguejs/framework";
-import type { Result, DagId, RunId, NodeId } from "@fuguejs/framework";
+import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, createPassthroughBroker } from "@fuguejs/framework";
+import type { Result, DagId, RunId, NodeId, CapabilityBroker } from "@fuguejs/framework";
+import { extractClients } from "../domain/capability-manager.js";
 import type { HostError } from "../domain/host-error.js";
 import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
@@ -27,6 +28,13 @@ import type { AuthIdentity } from "../domain/auth.js";
 // reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
 // their byte-identical assertions are unaffected.
 const adminIdentity: AuthIdentity = { kind: "admin" };
+
+// Pass-through broker over a SharedInfra's capabilities — the zero-regression
+// default these tests assert against. The factory now takes the broker as an
+// injected argument (T8); building it here from `extractClients` keeps the
+// byte-identical pass-through behaviour the assertions depend on.
+const passthroughFor = (shared: SharedInfra): CapabilityBroker =>
+  createPassthroughBroker(extractClients(shared.capabilities));
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -295,7 +303,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
   it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, passthroughFor(shared));
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -306,7 +314,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, passthroughFor(shared));
 
     expect(ctx.http).toBeNull();
   });
@@ -342,6 +350,7 @@ describe("createNodeContextForDag — pass-through broker path (SC-005)", () => 
       testRunId,
       new AbortController().signal,
       adminIdentity,
+      passthroughFor(shared),
     );
 
     // `extractClients([httpHandle]).http === httpHandle.client` — and the broker
@@ -397,13 +406,15 @@ describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () =>
       capabilities: [],
     });
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend" };
+    const shared = baseSharedInfra();
 
     const ctx = await createNodeContextForDag(
-      baseSharedInfra(),
+      shared,
       makeDag(),
       testRunId,
       new AbortController().signal,
       userIdentity,
+      passthroughFor(shared),
     );
 
     // The run path no longer dead-ends the user identity: a NodeContext is

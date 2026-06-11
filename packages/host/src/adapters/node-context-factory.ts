@@ -27,13 +27,12 @@ import type {
   Result,
   FrameworkError,
 } from "@fuguejs/framework";
-import type { Invocation, InvocationOrigin } from "@fuguejs/framework";
-import { makeNodeContext, ok, createPassthroughBroker, nodeId as makeNodeId } from "@fuguejs/framework";
+import type { Invocation, InvocationOrigin, CapabilityBroker } from "@fuguejs/framework";
+import { makeNodeContext, ok, nodeId as makeNodeId } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
-import { extractClients } from "../domain/capability-manager.js";
 import { createMeteredLlm } from "./metered-llm.js";
 
 
@@ -233,9 +232,10 @@ export const invocationOriginForIdentity = (
  * - Cache -> wrapped with DAG-namespaced key prefix
  * - Checkpoint -> wrapped with DAG + run namespaced key prefix
  * - runId, signal -> per-request unique values
- * - capabilities -> resolved through a `CapabilityBroker` (pass-through default,
- *   reproducing today's behavior byte-identically). `async` because brokers in
- *   later waves reach a token endpoint; the pass-through default does no I/O.
+ * - capabilities -> resolved through the INJECTED `CapabilityBroker` (pass-through
+ *   OR the live Keycloak broker, selected at boot). `async` because the live
+ *   Keycloak broker reaches a token endpoint (I/O); the pass-through default does
+ *   no I/O and hands back the exact `extractClients` references.
  *
  * @satisfies FR-030 — Cache key isolation
  * @satisfies FR-031 — Checkpoint key isolation
@@ -246,8 +246,9 @@ export const invocationOriginForIdentity = (
  *   default preserves byte-identical client behavior with zero migration steps
  * @satisfies FR-W2-005 — only authority resolution moved behind the broker;
  *   pools (connect/close/healthCheck) remain boot-scoped and untouched
- * @satisfies SC-005 — pass-through broker hands back the exact `extractClients`
- *   client references
+ * @satisfies SC-005 — on the pass-through path the broker hands back the exact
+ *   `extractClients` client references (byte-identical); the live Keycloak path
+ *   mints fresh narrowed handles and does NOT preserve those references
  */
 export const createNodeContextForDag = async (
   shared: SharedInfra,
@@ -255,6 +256,7 @@ export const createNodeContextForDag = async (
   runId: RunId,
   signal: AbortSignal,
   identity: AuthIdentity,
+  broker: CapabilityBroker,
 ): Promise<NodeContext> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
@@ -298,12 +300,14 @@ export const createNodeContextForDag = async (
   // the broker. `Invocation.origin` is now built FROM the resolved inbound
   // identity (FR-W3-007): an OIDC `user` carries its `sub` (and `azp` as the
   // authorized agent client) so attribution is correct; `team`/`admin` runs map
-  // to the agent placeholder keyed on `dagId`, preserving prior behaviour. The
-  // pass-through broker still ignores origin, so runtime behaviour is unchanged
-  // — only attribution becomes honest. `nodeId` is run-scoped context here (not
-  // per-node), so a stable sentinel stands in.
+  // to the agent placeholder keyed on `dagId`, preserving prior behaviour.
+  //
+  // The broker is INJECTED (T8): the host selects the live Keycloak-backed broker
+  // when realm config is present, else the pass-through default — so the
+  // pass-through path stays byte-identical (SC-005) while authority resolution
+  // can move behind a minting broker without churning this factory. `nodeId` is
+  // run-scoped context here (not per-node), so a stable sentinel stands in.
   const origin: InvocationOrigin = invocationOriginForIdentity(identity, dagId);
-  const broker = createPassthroughBroker(extractClients(shared.capabilities));
   const invocation: Invocation = {
     origin,
     runId,
@@ -312,14 +316,16 @@ export const createNodeContextForDag = async (
   };
   const minted = await broker.mintFor(invocation, []);
   if (!minted.ok) {
-    // Impossible for the pass-through broker (it never returns Err). Fail loudly
-    // on this internal-invariant violation rather than silently falling back —
-    // a non-pass-through broker reaching here is a wiring bug, not a runtime
-    // condition to swallow.
+    // Unreachable for EITHER broker as called here: `requires` is empty, so
+    // neither the pass-through nor the live Keycloak broker iterates a scope —
+    // there is nothing to parse, gate, or mint, so no Err can be produced. The
+    // guard stays as a fail-loud tripwire: if a future change passes a non-empty
+    // `requires` and a broker refuses, that is an internal wiring invariant
+    // violation worth surfacing rather than silently swallowing.
     throw new Error(
       `createNodeContextForDag: capability broker returned Err for dag '${dagId}' run '${runId}' — ` +
-        `the pass-through broker never fails; this is an internal wiring invariant violation. ` +
-        `error.kind=${minted.error.kind}`,
+        `mintFor is called with empty requires, so no broker can fail here; ` +
+        `this is an internal wiring invariant violation. error.kind=${minted.error.kind}`,
     );
   }
 

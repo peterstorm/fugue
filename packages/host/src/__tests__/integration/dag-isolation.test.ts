@@ -10,7 +10,8 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fuguejs/framework";
-import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, gitSha } from "@fuguejs/framework";
+import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, gitSha, createPassthroughBroker } from "@fuguejs/framework";
+import { extractClients } from "../../domain/capability-manager.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
 import {
@@ -233,8 +234,9 @@ describe("createNodeContextForDag isolation", () => {
     const dagA = makeRegisteredDag("dag-alpha");
     const dagB = makeRegisteredDag("dag-beta");
 
-    const ctxA = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity);
-    const ctxB = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity);
+    const broker = createPassthroughBroker(extractClients(shared.capabilities));
+    const ctxA = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity, broker);
+    const ctxB = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity, broker);
 
     // Both contexts are created without error
     expect(ctxA).toBeDefined();
@@ -251,8 +253,9 @@ describe("createNodeContextForDag isolation", () => {
 
     const dag = makeRegisteredDag("dag-alpha");
 
-    const ctx1 = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity);
-    const ctx2 = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity);
+    const broker = createPassthroughBroker(extractClients(shared.capabilities));
+    const ctx1 = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity, broker);
+    const ctx2 = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity, broker);
 
     expect(ctx1).not.toBe(ctx2);
   });

@@ -70,6 +70,36 @@ export const HostConfigSchema = z.object({
   REALM_JWT_ISSUER: z.string().optional(),
   /** Audience the host must appear in within an accepted realm JWT (FR-W3-006). */
   REALM_JWT_AUDIENCE: z.string().default("fugue-host"),
+  /**
+   * Keycloak realm policy: the scopes assigned to each agent client, as a JSON
+   * object mapping `agentClientId → ["<provider>:<operation>", …]`. This is the
+   * fail-closed gate the live broker consults BEFORE any Entra call (FR-W3-003):
+   * a scope absent from a client's list is refused with zero egress. A client
+   * with no entry has NO scopes (fail closed). Unset means an empty policy —
+   * every minting request fails closed — so the broker is inert until configured.
+   *
+   * Parsed/validated here (Zod) so a malformed policy fails at boot, never at
+   * runtime. The value is `Record<string, string[]>`; absent → `{}`.
+   */
+  AGENT_CLIENT_SCOPES: z
+    .string()
+    .optional()
+    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
+      if (raw === undefined || raw.trim() === "") return {};
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be valid JSON" });
+        return z.NEVER;
+      }
+      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
+      if (!shape.success) {
+        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be a JSON object of clientId → string[]" });
+        return z.NEVER;
+      }
+      return shape.data;
+    }),
   /** OpenTelemetry OTLP exporter endpoint */
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   /** MLflow tracking server URI */
