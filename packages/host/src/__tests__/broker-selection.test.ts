@@ -101,4 +101,17 @@ describe("selectCapabilityBroker (boot wiring, C7.5)", () => {
     expect(broker).toBeDefined();
     expect(logs.some((l) => l.level === "warn" && l.msg.includes("empty scope policy"))).toBe(true);
   });
+
+  it("warns when AGENT_CLIENT_SCOPES is configured while REALM_JWT_ISSUER is unset — the policy is inert", () => {
+    const { logger, logs } = collectLogs();
+    const config = configFrom({
+      AGENT_CLIENT_SCOPES: JSON.stringify({ "dag-mail": ["msgraph:mail.send"] }),
+    });
+    const broker = selectCapabilityBroker(config, { tracer: passTracer, logger }, logger);
+    // No broker is selected (static path) …
+    expect(broker).toBeUndefined();
+    // … but the operator configured a scope policy that nothing will enforce —
+    // surfaced once at boot rather than silently ignored.
+    expect(logs.some((l) => l.level === "warn" && l.msg.includes("inert"))).toBe(true);
+  });
 });

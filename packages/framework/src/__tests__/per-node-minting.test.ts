@@ -338,3 +338,76 @@ describe("per-node capability minting (C1)", () => {
     if (result.ok) expect(result.value.http).toBe(true);
   });
 });
+
+// ── Port-contract enforcement at the dispatch seam (pass-4) ─────────────────
+
+describe("per-node minting — broker port-contract enforcement", () => {
+  it("a broker that THROWS from mintFor is fenced to infra-unreachable — never reclassified as a retriable node-crash", async () => {
+    let mintCalls = 0;
+    const throwingBroker: CapabilityBroker = {
+      mintFor: async () => {
+        mintCalls++;
+        throw new Error("broker exploded across the port");
+      },
+      provides: (c: Capability) => (c as string).includes(":"),
+    };
+    const node = createFetchNode({
+      id: N("gated"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => ok({ ok: true }), // never reached
+    });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker: throwingBroker, origin: agentOrigin },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // The fence maps the contract violation onto the Result channel as the
+      // named reach-failure kind — NOT a generic node-crash, which would lose
+      // the 403/503 taxonomy and read as "unexpected executor error".
+      const root =
+        result.error.kind === "retry-exhausted" ? result.error.rootErrorKind : result.error.kind;
+      expect(root).toBe("infra-unreachable");
+    }
+    expect(mintCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a broker claiming provides(cap) but omitting it from ok() fails the node with missing-capability — run never sees an undefined handle", async () => {
+    // The seam contract: run-start validation exempted the scope on the strength
+    // of provides(); a broker that then fails to deliver would put `undefined`
+    // behind the validated-context cast and crash inside `run`. The post-merge
+    // presence check fails closed with the run-start error vocabulary instead.
+    let runReached = false;
+    const lyingBroker: CapabilityBroker = {
+      mintFor: async () => ok({} as ScopedCapabilityHandle), // claims below, delivers nothing
+      provides: (c: Capability) => (c as string).includes(":"),
+    };
+    const node = createFetchNode({
+      id: N("undelivered"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => {
+        runReached = true;
+        return ok({ ok: true });
+      },
+    });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker: lyingBroker, origin: agentOrigin },
+    });
+    expect(result.ok).toBe(false);
+    expect(runReached).toBe(false);
+    if (!result.ok) {
+      const root =
+        result.error.kind === "retry-exhausted" ? result.error.rootErrorKind : result.error.kind;
+      expect(root).toBe("missing-capability");
+      const bare = result.error.kind === "missing-capability" ? result.error : undefined;
+      if (bare) {
+        expect(bare.missing[0]).toEqual({ nodeId: N("undelivered"), capability: SCOPE });
+      }
+    }
+  });
+});

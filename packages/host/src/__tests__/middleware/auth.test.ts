@@ -229,7 +229,7 @@ describe("auth middleware", () => {
     ): AuthMiddlewareDeps => ({
       adminToken: ADMIN_TOKEN,
       tokenStore: createInMemoryTokenStore([]),
-      realmJwt: { verify, expectedIss: EXPECTED_ISS, expectedAud: EXPECTED_AUD },
+      realmJwt: { verify, expectedIss: EXPECTED_ISS, expectedAud: EXPECTED_AUD, authorizeUserRun: () => true },
       now: () => NOW_SECONDS,
       ...over,
     });
@@ -332,6 +332,7 @@ describe("auth middleware", () => {
         verify,
         expectedIss: "https://kc.example.com/realms/fugue-platform",
         expectedAud: "fugue-host",
+        authorizeUserRun: () => true,
       },
     });
 
@@ -378,6 +379,7 @@ describe("auth middleware", () => {
           verify: recordingVerify,
           expectedIss: "https://kc.example.com/realms/fugue-platform",
           expectedAud: "fugue-host",
+          authorizeUserRun: () => true,
         },
       });
       const res = await app.request("/protected", {

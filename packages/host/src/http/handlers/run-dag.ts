@@ -12,7 +12,7 @@ import type { DagId, Result, NodeContext, FrameworkError, InvocationOrigin } fro
 import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";
-import type { NodeContextForDag } from "../../adapters/node-context-factory.js";
+import type { NodeContextForDag } from "../../domain/run-context.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
@@ -122,7 +122,9 @@ export const createRunDagHandler = (
       return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
     }
     if (!canAccessDag(identity, registered.team)) {
-      const callerTeam = identity.kind === "team" ? identity.team : "admin";
+      // `user` identities are refusable too (canRunDag policy) — name the kind
+      // honestly rather than mislabelling a refused user as "admin".
+      const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
       return errorResponse(c, 403, "forbidden",
         `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
         { dagId, details: { callerTeam, dagTeam: registered.team } },

@@ -32,7 +32,7 @@
  */
 
 import type { Context, Next } from "hono";
-import type { AuthIdentity, SignatureVerifiedClaims } from "../../domain/auth.js";
+import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims } from "../../domain/auth.js";
 import { hashToken, isTeamTokenShape } from "../../domain/auth.js";
 import type { TokenGrant } from "../../domain/auth.js";
 import { validateRealmJwtClaims, describeAuthError } from "../../domain/jwt-validation.js";
@@ -103,6 +103,18 @@ export interface RealmJwtDeps {
   readonly expectedIss: string;
   /** The audience this host must appear in — `fugue-host` (FR-W3-006). */
   readonly expectedAud: string;
+  /**
+   * AUTHORIZATION policy for user-initiated runs: may `user` run/see DAGs
+   * owned by `dagTeam`? REQUIRED, not optional — wiring a verifier without
+   * deciding this policy would silently activate a latent any-user-runs-any-DAG
+   * grant (consuming the team's concurrency permits, LLM budget, and circuit
+   * headroom; the broker's scope gate only protects downstream Graph/Dynamics
+   * hops, not DAG execution). Making it a required member of the SAME group as
+   * the verifier forces the decision at the wiring site, in types. The
+   * middleware captures it onto the `user` identity's `canRunDag`, which
+   * `canAccessDag` delegates to.
+   */
+  readonly authorizeUserRun: (user: AuthenticatedUser, dagTeam: string) => boolean;
 }
 
 export interface AuthMiddlewareDeps {
@@ -261,10 +273,15 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
         });
       }
 
+      // Capture the wiring-site authorization policy onto the identity: the
+      // branded `AuthenticatedUser` is closed over, so the policy always judges
+      // the principal this very token authenticated.
+      const user = claimsResult.value;
       c.set("authIdentity", {
         kind: "user",
-        sub: claimsResult.value.sub,
-        azp: claimsResult.value.azp,
+        sub: user.sub,
+        azp: user.azp,
+        canRunDag: (dagTeam: string) => realmJwt.authorizeUserRun(user, dagTeam),
       } satisfies AuthIdentity);
       await next();
       return;
@@ -276,7 +293,13 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
       const hash = await hashToken(token);
       const resolveResult = await deps.tokenStore.resolve(hash);
       if (!resolveResult.ok) {
-        // Redis/infrastructure failure — surface as 503 not 401
+        // Redis/infrastructure failure — surface as 503 not 401. Log the typed
+        // error server-side first (mirrors the JWT `unavailable` branch above):
+        // without it, a token-store outage is a 503 storm with zero diagnostics.
+        deps.logger?.error("[auth-middleware] Token store unavailable", {
+          errorKind: resolveResult.error.kind,
+          error: JSON.stringify(resolveResult.error),
+        });
         return errorResponse(c, 503, "auth-service-unavailable",
           "Authentication service temporarily unavailable");
       }

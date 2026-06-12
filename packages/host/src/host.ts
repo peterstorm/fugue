@@ -29,7 +29,7 @@ import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
-import type { NodeContextForDag } from "./adapters/node-context-factory.js";
+import type { NodeContextForDag } from "./domain/run-context.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
 import type { CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { createKeycloakBroker } from "./adapters/keycloak-broker.js";
@@ -300,12 +300,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     // live in config (`REALM_JWT_ISSUER`/`REALM_JWT_AUDIENCE`) ready for that
     // wave.
     //
-    // SECURITY — read BEFORE wiring a verifier here: `canAccessDag`
-    // (domain/auth.ts) currently clears EVERY authenticated realm user to run
-    // ANY team's DAG (threading-only delivery). Wiring `realmJwt` activates
-    // that latent grant. Do not wire a verifier without first tightening that
-    // predicate (realm/role check or a config gate on user-run acceptance) —
-    // the mirror of this note sits on the predicate itself.
+    // SECURITY: `RealmJwtDeps.authorizeUserRun` is a REQUIRED member of the
+    // group — constructing `realmJwt` forces deciding which users may run
+    // which teams' DAGs at this wiring site (the compiler enforces it; see
+    // middleware/auth.ts). There is no half-wired "verifier without user-run
+    // policy" state to fall into. Do NOT wire `() => true` without the realm/
+    // role check that decision deserves.
     adminHandlerDeps: {
       tokenStore,
       clock: Date.now,

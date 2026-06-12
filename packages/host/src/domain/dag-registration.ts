@@ -47,8 +47,11 @@ export interface DagRegistrationConfig {
   readonly checkpointTtlMs?: number;
   /**
    * Per-run LLM token budget (FR-W1-001). When set, the metered-llm decorator
-   * refuses calls once a run's cumulative tokens reach this value (with a single
-   * accepted overshoot — FR-W1-004). Absent means no enforcement (FR-W1-006).
+   * refuses calls once a run's cumulative tokens reach this value. Overshoot is
+   * bounded (FR-W1-004 generalised): ~one call in steady state; an initial
+   * parallel burst (per-call estimate still unlearned) may exceed by its call
+   * count — see llm-meter.ts `ReservationState`. Absent means no enforcement
+   * (FR-W1-006).
    */
   readonly llmBudgetTokens?: number;
   /**

@@ -54,7 +54,11 @@ const recordingTracer = () => {
 
 describe("brokerAuditPayload — pure field set", () => {
   it("includes all five fields for a user hop (sub present)", () => {
-    const payload = brokerAuditPayload(userFields, { result: "mint", via: "token-exchange-v2" });
+    const payload = brokerAuditPayload(userFields, {
+      result: "mint",
+      via: "token-exchange-v2",
+      acquisition: "minted",
+    });
     expect(payload).toEqual({
       sub: "user-abc",
       azp: "fugue-frontend",
@@ -63,7 +67,17 @@ describe("brokerAuditPayload — pure field set", () => {
       scope: "msgraph:mail.send",
       result: "mint",
       via: "token-exchange-v2",
+      acquisition: "minted",
     });
+  });
+
+  it("carries the acquisition witness on a cache-reuse mint (SC-008 observability)", () => {
+    const payload = brokerAuditPayload(userFields, {
+      result: "mint",
+      via: "token-exchange-v2",
+      acquisition: "cache-reuse",
+    });
+    expect(payload.acquisition).toBe("cache-reuse");
   });
 
   it("OMITS sub entirely for an agent hop (no empty-string sentinel)", () => {
@@ -86,12 +100,13 @@ describe("createBrokerAudit — emits over tracer + logger spine", () => {
     const { tracer, spans } = recordingTracer();
     const audit = createBrokerAudit(tracer, logger);
 
-    await audit.mint(userFields, "client_credentials");
+    await audit.mint(userFields, "client_credentials", "minted");
 
     expect(logs.length).toBe(1);
     expect(logs[0]?.level).toBe("info");
     expect(logs[0]?.data?.result).toBe("mint");
     expect(logs[0]?.data?.via).toBe("client_credentials");
+    expect(logs[0]?.data?.acquisition).toBe("minted");
     expect(logs[0]?.data?.sub).toBe("user-abc");
     expect(spans).toEqual([{ name: "capability.broker.mint", type: "capability-broker" }]);
   });
@@ -122,7 +137,7 @@ describe("createBrokerAudit — emits over tracer + logger spine", () => {
     };
     const audit = createBrokerAudit(throwingTracer, logger);
     // Resolving (not rejecting) is the whole contract — expect.resolves proves it.
-    await expect(audit.mint(userFields, "client_credentials")).resolves.toBeUndefined();
+    await expect(audit.mint(userFields, "client_credentials", "minted")).resolves.toBeUndefined();
   });
 
   it("refusal() resolves and falls back to the error sink when the warn logger throws", async () => {

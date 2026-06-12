@@ -206,6 +206,20 @@ type ResolvedCapability = {
 };
 
 /**
+ * The result of one app-only-token acquisition. `acquisition` witnesses whether
+ * THIS resolution performed the token egress (`"minted"`) or reused existing
+ * authority (`"cache-reuse"` — a cache hit, or a waiter sharing another
+ * resolution's in-flight acquisition). Threaded into the audit record so the
+ * count of `acquisition: "minted"` audit mints equals the count of real token
+ * requests (SC-008 observable in production, not just against fakes).
+ */
+type AcquiredAppToken = {
+  readonly token: string;
+  readonly via: "client_credentials" | "token-exchange-v2";
+  readonly acquisition: "minted" | "cache-reuse";
+};
+
+/**
  * Build the audit correlation fields for one hop. `sub` is present only for a
  * user-initiated origin (an agent hop has no end-user subject).
  */
@@ -273,7 +287,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
   // concurrent resolution of the SAME triple AWAITS the first's promise instead
   // of firing its own SA mint + WIF exchange — so two parallel `mintFor`s for one
   // triple produce ONE egress pair, not two (SC-008 under concurrency).
-  const inFlight = new Map<string, Promise<Result<{ token: string; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>>>();
+  const inFlight = new Map<string, Promise<Result<AcquiredAppToken, FrameworkError>>>();
 
   /** Acquire the app-only token for one triple, doing the SA mint (or SA-cache
    * reuse) then the WIF exchange, storing BOTH caches by re-reading the live cell
@@ -284,7 +298,15 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     scope: DownstreamScope,
     audience: string,
     cacheK: string,
-  ): Promise<Result<{ token: string; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>> => {
+  ): Promise<Result<AcquiredAppToken, FrameworkError>> => {
+    // Names the port hop currently in flight so the catch fence below
+    // attributes a thrown (contract-violating) failure to the egress that
+    // actually threw — a thrown EntraWif failure is `federation`/`entra-wif`,
+    // not the SA hop the origin happens to mint by.
+    let hopInFlight: { readonly operation: "mint" | "exchange" | "federation"; readonly hop: string } =
+      inv.origin.kind === "user"
+        ? { operation: "exchange", hop: "token-exchange" }
+        : { operation: "mint", hop: "client-credentials" };
     // The whole body is fenced: an injected port that THROWS (instead of
     // returning `err(...)` per its contract) is mapped onto the Result channel,
     // so the shared in-flight promise below can NEVER reject — a rejection
@@ -296,7 +318,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       const cachedApp = lookup(appOnlyCache, cacheK, deps.now());
       if (cachedApp !== undefined) {
         const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
-        return ok({ token: cachedApp.token, via });
+        return ok({ token: cachedApp.token, via, acquisition: "cache-reuse" });
       }
 
       // SA token — reuse a fresh one (its lifetime is independent of the WIF token's)
@@ -323,6 +345,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       }
 
       // WIF exchange — present the SA token as the Entra `client_assertion`.
+      hopInFlight = { operation: "federation", hop: "entra-wif" };
       const wif = await deps.entraWif.exchange({ clientAssertion: saToken, scope, audience });
       if (!wif.ok) return err(wif.error);
 
@@ -333,14 +356,14 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         cacheToken(wif.value.accessToken, appStoredAt, effectiveTtlMs(wif.value.expiresInSec)),
         appStoredAt,
       );
-      return ok({ token: wif.value.accessToken, via: dispatch.via });
+      return ok({ token: wif.value.accessToken, via: dispatch.via, acquisition: "minted" });
     } catch (e) {
       // Port-contract violation (a throw across the port boundary) — surface as
-      // the retriable reach-failure kind, named for the hop this origin mints by.
+      // the retriable reach-failure kind, named for the hop that was in flight.
       return err({
         kind: "infra-unreachable",
-        operation: inv.origin.kind === "user" ? "exchange" : "mint",
-        hop: inv.origin.kind === "user" ? "token-exchange" : "client-credentials",
+        operation: hopInFlight.operation,
+        hop: hopInFlight.hop,
         message: `capability port threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
@@ -351,9 +374,16 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     scope: DownstreamScope,
     audience: string,
     cacheK: string,
-  ): Promise<Result<{ token: string; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>> => {
+  ): Promise<Result<AcquiredAppToken, FrameworkError>> => {
     const existing = inFlight.get(cacheK);
-    if (existing) return existing;
+    // A waiter sharing another resolution's in-flight acquisition did not
+    // perform the egress itself — re-witness its acquisition as reuse, so only
+    // the leader's audit record counts as a real token request (SC-008).
+    if (existing) {
+      return existing.then((r) =>
+        r.ok ? ok({ ...r.value, acquisition: "cache-reuse" as const }) : r,
+      );
+    }
     const p = doAcquireAppToken(inv, scope, audience, cacheK);
     inFlight.set(cacheK, p);
     // Observe BOTH settlement paths on `p` itself: `void p.finally(...)` would
@@ -368,7 +398,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     return p;
   };
 
-  const mintFor = async (
+  const doMintFor = async (
     inv: Invocation,
     requires: readonly Capability[],
   ): Promise<Result<ScopedCapabilityHandle, FrameworkError>> => {
@@ -420,8 +450,9 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       if (cachedApp !== undefined) {
         // The `via` is a function of origin alone here (no branch was forced this
         // resolution); witness it from the origin so the audit names the strategy.
+        // `acquisition: "cache-reuse"` witnesses that no egress happened.
         const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
-        await audit.mint(auditFields(inv, scopeStr), via);
+        await audit.mint(auditFields(inv, scopeStr), via, "cache-reuse");
         resolved.push({
           capability,
           handle: buildGraphHandle(scope, cachedApp.token, deps.graphHttp),
@@ -442,7 +473,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         return err(acquired.error);
       }
 
-      await audit.mint(auditFields(inv, scopeStr), acquired.value.via);
+      await audit.mint(auditFields(inv, scopeStr), acquired.value.via, acquired.value.acquisition);
       // Build the narrowed handle over the APP-ONLY token (not the SA token). The
       // operation method is the only reachable surface — the bearer is closed over.
       resolved.push({
@@ -454,8 +485,10 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     // Assemble the scoped handle record. Each capability name maps to its
     // operation-narrowed handle (no raw client/token reachable). The cast widens
     // the dynamically-keyed record to the registry-shaped `ScopedCapabilityHandle`;
-    // it is SOUND by construction (C6): `buildGraphHandle` is exhaustive over the
-    // scope ADT and returns exactly `HandleForScope<scope>`, and the per-scope
+    // it is SOUND by construction (C6): `buildGraphHandle` returns exactly
+    // `HandleForScope<scope>` — its `HANDLE_BUILDERS` mapped record pins each
+    // scope key's builder to that scope's handle type at compile time (a
+    // swapped builder fails compilation there) — and the per-scope
     // `_Equal` assertions in `capability-registry.ts` (witnessed by the
     // `CapabilityRegistryWired` marker imported above) pin each registry entry to
     // that same handle type — so a scope key can never be augmented with a
@@ -466,6 +499,37 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       handleRecord[r.capability] = r.handle;
     }
     return ok(handleRecord as ScopedCapabilityHandle);
+  };
+
+  /**
+   * The port contract is "errors flow on the Result channel, never thrown". The
+   * egress hops are already fenced inside `doAcquireAppToken`, but the injected
+   * `AssignedScopes` (called in the loop body) is equally a port — a throwing
+   * implementation would reject the promise, violating the contract AND exiting
+   * before any audit record fires (an SC-009 coverage gap). Fence the whole
+   * body: a throw becomes `infra-unreachable` WITH a correlated
+   * `mint-failed:…` refusal record. The audit emitter itself never throws
+   * (documented contract with a last-resort sink), so this fence cannot recurse.
+   */
+  const mintFor = async (
+    inv: Invocation,
+    requires: readonly Capability[],
+  ): Promise<Result<ScopedCapabilityHandle, FrameworkError>> => {
+    try {
+      return await doMintFor(inv, requires);
+    } catch (e) {
+      const infraErr: FrameworkError = {
+        kind: "infra-unreachable",
+        operation: "mint",
+        hop: "broker-internal",
+        message: `broker dependency threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
+      };
+      // The scope is unknown at this fence (the throw may precede scope
+      // parsing); `"*"` keeps the SC-009 record correlated without inventing
+      // a scope name the resolution never reached.
+      await audit.refusal(auditFields(inv, "*"), `mint-failed:${infraErr.kind}`);
+      return err(infraErr);
+    }
   };
 
   // `provides` tells run-start validation which capabilities the broker mints

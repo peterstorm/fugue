@@ -124,6 +124,11 @@ const withAccumulatedUsage = (
     }
     return e;
   }
+  // Nothing accumulated and the error carries no own usage: leave `usage`
+  // ABSENT. The errors.ts contract is "absent means the failure consumed no
+  // attributable tokens" — stamping `{0, 0}` here would make that state
+  // representable two ways.
+  if (own === undefined && priorIn === 0 && priorOut === 0) return e;
   const usage: PartialTokenUsage = {
     tokensIn: priorIn + (own?.tokensIn ?? 0),
     tokensOut: priorOut + (own?.tokensOut ?? 0),

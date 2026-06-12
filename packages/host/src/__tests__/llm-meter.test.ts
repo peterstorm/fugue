@@ -17,7 +17,12 @@ import {
   usageFor,
   runTotal,
   formatBudgetDecision,
+  emptyReservation,
+  admitWithReservation,
+  releaseReservation,
+  learnObservedCall,
   type LlmMeter,
+  type ReservationState,
 } from "../domain/llm-meter.js";
 
 const runA = makeRunId("run-a");
@@ -277,5 +282,81 @@ describe("llm-meter: formatBudgetDecision", () => {
   it("formats both branches without throwing", () => {
     expect(formatBudgetDecision({ kind: "allow", cumulative: 5 })).toContain("allow");
     expect(formatBudgetDecision({ kind: "refuse", cumulative: 10, budget: 8 })).toContain("refuse");
+  });
+});
+
+// ── Concurrency reservation transitions (pure core of I1 / SC-003) ──────────
+
+describe("reservation transitions (admitWithReservation / release / learn)", () => {
+  const meterAt = (total: number): LlmMeter =>
+    total === 0 ? emptyMeter() : accumulate(emptyMeter(), runA, { tokensIn: total, tokensOut: 0 });
+
+  it("admits with zero reservation when no estimate is learned (the documented first-burst allowance)", () => {
+    const d = admitWithReservation(meterAt(0), runA, emptyReservation, 100);
+    expect(d.kind).toBe("admit");
+    if (d.kind === "admit") {
+      expect(d.reserved).toBe(0);
+      expect(d.state.reservedInFlight).toBe(0);
+    }
+  });
+
+  it("reserves the learned estimate on admit and frees exactly it on release", () => {
+    const learned = learnObservedCall(emptyReservation, 40);
+    const d = admitWithReservation(meterAt(10), runA, learned, 100);
+    expect(d.kind).toBe("admit");
+    if (d.kind !== "admit") return;
+    expect(d.reserved).toBe(40);
+    expect(d.state.reservedInFlight).toBe(40);
+    const released = releaseReservation(d.state, d.reserved);
+    expect(released.reservedInFlight).toBe(0);
+    expect(released.maxObservedCall).toBe(40); // learning survives release
+  });
+
+  it("refuses when settled cumulative plus the in-flight reservation projects past the budget", () => {
+    const state: ReservationState = { reservedInFlight: 40, maxObservedCall: 40 };
+    const d = admitWithReservation(meterAt(70), runA, state, 100); // 70 + 40 ≥ 100
+    expect(d.kind).toBe("refuse");
+    if (d.kind === "refuse") {
+      expect(d.cumulative).toBe(70); // SETTLED only — the errors.ts contract
+      expect(d.reservedInFlight).toBe(40); // log-only figure
+      expect(d.budget).toBe(100);
+    }
+  });
+
+  it("refuses on settled cumulative alone (delegates to budgetDecision) regardless of reservation", () => {
+    const d = admitWithReservation(meterAt(100), runA, emptyReservation, 100);
+    expect(d.kind).toBe("refuse");
+  });
+
+  it("no budget never refuses, whatever the reservation", () => {
+    const state: ReservationState = { reservedInFlight: 10_000, maxObservedCall: 10_000 };
+    const d = admitWithReservation(meterAt(999_999), runA, state, undefined);
+    expect(d.kind).toBe("admit");
+  });
+
+  it("learnObservedCall is a monotone max", () => {
+    const s1 = learnObservedCall(emptyReservation, 30);
+    const s2 = learnObservedCall(s1, 10); // smaller call never lowers the estimate
+    expect(s2.maxObservedCall).toBe(30);
+    const s3 = learnObservedCall(s2, 55);
+    expect(s3.maxObservedCall).toBe(55);
+  });
+
+  it("property: interleaved admit/release sequences never strand reservation (balanced ops return to zero)", () => {
+    fc.assert(
+      fc.property(fc.array(fc.nat({ max: 500 }), { maxLength: 30 }), (callSizes) => {
+        let state = emptyReservation;
+        const reservedAmounts: number[] = [];
+        for (const size of callSizes) {
+          const d = admitWithReservation(emptyMeter(), runA, state, undefined);
+          if (d.kind !== "admit") throw new Error("unbudgeted admit refused");
+          state = d.state;
+          reservedAmounts.push(d.reserved);
+          state = learnObservedCall(state, size);
+        }
+        for (const r of reservedAmounts) state = releaseReservation(state, r);
+        expect(state.reservedInFlight).toBe(0);
+      }),
+    );
   });
 });

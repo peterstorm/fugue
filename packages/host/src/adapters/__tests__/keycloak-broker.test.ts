@@ -1135,3 +1135,168 @@ describe("keycloak-broker — a THROWING injected port surfaces as err, never an
     }
   });
 });
+
+// ── Pass-4: acquisition witness, hop attribution, mintFor fence ──────────────
+
+describe("keycloak-broker — audit acquisition witnesses real egress vs reuse (SC-008 observability)", () => {
+  it("first resolution audits acquisition 'minted'; an in-TTL repeat audits 'cache-reuse' — minted count === egress count", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { wif, wifCount } = recordingWif();
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+    const inv = invocationFor(agentOrigin("fugue-agent-mail"));
+
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]);
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]); // in-TTL → cache hit
+
+    const mints = logs.filter((l) => l.data?.result === "mint");
+    expect(mints.map((l) => l.data?.acquisition)).toEqual(["minted", "cache-reuse"]);
+    // The audit trail now reconciles against the real egress: exactly one SA
+    // mint and one WIF exchange, matching the single 'minted' record.
+    expect(egressCount()).toBe(1);
+    expect(wifCount()).toBe(1);
+    expect(mints.filter((l) => l.data?.acquisition === "minted").length).toBe(1);
+  });
+
+  it("CONCURRENT resolutions of one triple: the single-flight leader audits 'minted', waiters audit 'cache-reuse'", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { wif } = recordingWif();
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+    const inv = invocationFor(agentOrigin("fugue-agent-mail"));
+
+    await Promise.all([
+      broker.mintFor(inv, [cap("msgraph:mail.send")]),
+      broker.mintFor(inv, [cap("msgraph:mail.send")]),
+      broker.mintFor(inv, [cap("msgraph:mail.send")]),
+    ]);
+
+    const acquisitions = logs
+      .filter((l) => l.data?.result === "mint")
+      .map((l) => l.data?.acquisition)
+      .sort();
+    // One real egress pair shared by three resolutions: exactly ONE 'minted'.
+    expect(acquisitions).toEqual(["cache-reuse", "cache-reuse", "minted"]);
+    expect(egressCount()).toBe(1);
+  });
+});
+
+describe("keycloak-broker — throw fence attributes the hop actually in flight", () => {
+  it("a THROWING EntraWif port surfaces as infra-unreachable federation/entra-wif — not the SA hop", async () => {
+    const { endpoint } = recordingEndpoint();
+    const throwingWif: EntraWifExchange = {
+      exchange: async () => {
+        throw new Error("wif port exploded");
+      },
+    };
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: throwingWif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(agentOrigin("fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("infra-unreachable");
+      if (result.error.kind === "infra-unreachable") {
+        // The WIF hop threw — operators must be pointed at the federation
+        // egress, not the Keycloak hop the origin happens to mint by.
+        expect(result.error.operation).toBe("federation");
+        expect(result.error.hop).toBe("entra-wif");
+      }
+    }
+  });
+
+  it("a THROWING SA endpoint still attributes the origin's own hop (agent → mint/client-credentials)", async () => {
+    const throwingEndpoint: KeycloakTokenEndpoint = {
+      mintClientCredentials: async () => {
+        throw new Error("sa endpoint exploded");
+      },
+      exchangeV2: async () => {
+        throw new Error("sa endpoint exploded");
+      },
+    };
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint: throwingEndpoint,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(agentOrigin("fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "infra-unreachable") {
+      expect(result.error.operation).toBe("mint");
+      expect(result.error.hop).toBe("client-credentials");
+    }
+  });
+});
+
+describe("keycloak-broker — mintFor is fenced end-to-end (never rejects, SC-009 holds)", () => {
+  it("a THROWING AssignedScopes port resolves to infra-unreachable AND emits a mint-failed refusal audit", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      assignedScopes: () => {
+        throw new Error("realm policy store exploded");
+      },
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    // The never-throw port contract holds even for a throwing injected dep:
+    // mintFor RESOLVES to a typed err (a rejection would escape to the wave
+    // catch-all as a retriable node-crash).
+    const result = await broker.mintFor(
+      invocationFor(agentOrigin("fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("infra-unreachable");
+      if (result.error.kind === "infra-unreachable") {
+        expect(result.error.message).toContain("realm policy store exploded");
+      }
+    }
+    // No egress happened (the throw preceded the gate) …
+    expect(egressCount()).toBe(0);
+    // … and the failure still produced a correlated audit record (SC-009).
+    const refusals = logs.filter((l) => l.data?.result === "refusal");
+    expect(refusals.length).toBe(1);
+    expect(refusals[0]?.data?.reason).toBe("mint-failed:infra-unreachable");
+    expect(refusals[0]?.data?.azp).toBe("fugue-agent-mail");
+    expect(refusals[0]?.data?.runId).toBe(runId as string);
+  });
+});

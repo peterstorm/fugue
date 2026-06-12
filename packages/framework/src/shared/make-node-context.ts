@@ -16,6 +16,7 @@ import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/
 import { runId as brandRunId, dagId as brandDagId } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
 import { consoleLogger, noopObserver, noopTracer } from "./defaults.js";
+import { fwLogger } from "../logger.js";
 
 // `NodeContextInit.runId` / `.dagId` accept either a raw string (which we
 // validate + brand here) or an already-branded id (passed through). Branding
@@ -104,9 +105,28 @@ export const mergeScopedCapabilities = (
   base: NodeContext,
   scoped: ScopedCapabilityHandle,
 ): NodeContext => {
-  const entries = Object.entries(scoped).filter(
-    ([k, v]) => v != null && !RESERVED_CONTEXT_KEYS.has(k),
-  );
+  const entries: [string, unknown][] = [];
+  for (const [k, v] of Object.entries(scoped)) {
+    if (v == null) continue;
+    if (RESERVED_CONTEXT_KEYS.has(k)) {
+      // A NON-NULL broker-minted entry under a reserved/built-in key is being
+      // discarded. `validateCapabilities` rejects a broker that CLAIMS a
+      // built-in via `provides()`, but `provides` is optional — a broker
+      // without it (e.g. a passthrough constructed with a built-in key) reaches
+      // this guard unannounced, and the node would silently run against the
+      // static client while the embedder believes the broker's is in effect.
+      // Warn (mirrors the `llm.usage-unattributed` precedent) so the wiring
+      // mistake is debuggable instead of an invisible authority divergence.
+      fwLogger().warn("capability.merge.dropped", {
+        key: k,
+        runId: base.runId as string,
+        dagId: base.dagId as string,
+        reason: "broker-minted entry under a reserved/built-in context key is never merged",
+      });
+      continue;
+    }
+    entries.push([k, v]);
+  }
   if (entries.length === 0) return base;
   return Object.assign({}, base, Object.fromEntries(entries)) as NodeContext;
 };

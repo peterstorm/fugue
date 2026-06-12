@@ -233,9 +233,11 @@ describe("toolUseLoop", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
-      // First-call error consumed no prior turns → usage is zeroed (still present).
+      // First-call error consumed no prior turns and the provider reported no
+      // own usage → usage stays ABSENT (the errors.ts contract: absent means
+      // "no attributable tokens" — never a stamped {0,0} second representation).
       if (result.error.kind === "transient") {
-        expect(result.error.usage).toEqual({ tokensIn: 0, tokensOut: 0 });
+        expect(result.error.usage).toBeUndefined();
       }
     }
   });

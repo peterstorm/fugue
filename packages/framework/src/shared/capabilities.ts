@@ -39,8 +39,9 @@ import { type Result, ok, err } from "../types/result.js";
  * Uses dynamic property lookup (`ctx[cap]`) to support extensible capabilities
  * registered via `CapabilityRegistry` module augmentation (ADR-0051).
  *
- * `broker` — when a minting broker is wired (the host's per-invocation Keycloak
- * broker), a capability the broker `provides()` is resolved at NODE DISPATCH,
+ * `broker` — when a minting broker is wired (the host's per-invocation
+ * realm-backed broker), a capability the broker `provides()` is resolved at
+ * NODE DISPATCH,
  * not on the boot-scoped base context. Such a capability is therefore NOT
  * required to be present on `ctx` here: the run-start check skips it (it would
  * otherwise spuriously fail as `missing-capability`, since the static base

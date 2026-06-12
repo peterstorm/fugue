@@ -9,7 +9,7 @@ Accepted
 Identity-scoped capabilities (ADR-0051's registry, the `CapabilityBroker` port,
 the Keycloak service-account mint, and the Entra Workload Identity Federation
 exchange) introduced a new class of runtime failures along the path from a node
-declaring `requires: ["graph"]` to a usable downstream token. A single scoped
+declaring `requires: ["msgraph:mail.send"]` to a usable downstream token. A single scoped
 resolution can fail for four operationally distinct reasons:
 
 - the run hit its per-run LLM token budget before the call (a deliberate stop),
@@ -96,7 +96,9 @@ The variants are defined in
   allowance, generalised for concurrency). The error refuses the *next* call
   once `cumulative` plus the in-flight reservation has reached `budget`.
 
-- **`infra-unreachable`** `{ operation, message }` (FR-X-001). The broker could
+- **`infra-unreachable`** *(shape superseded — see the 2026-06-12 Amendment
+  below; current shape is `{ operation, hop, message }` with role-category
+  `operation`)* `{ operation, message }` (FR-X-001). The broker could
   not reach the IdP / token endpoint — a **transient** infrastructure failure
   (Keycloak down, DNS/socket error, 5xx or 429 from the mint endpoint), *not* an
   authorization decision. Callers may retry. `operation` names the failing hop

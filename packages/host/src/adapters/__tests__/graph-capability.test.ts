@@ -99,6 +99,33 @@ describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)"
     expect(requests[0]?.bearer).toBe("app-only-xyz"); // the WIF token, never a stored secret
   });
 
+  it("sendMail synthesises the receipt from a 202 body id when Graph supplies one", async () => {
+    const { http } = recordingHttp({ status: 202, json: { id: "req-abc-123" } });
+    const handle = buildMailSendHandle("tok", http);
+    const r = await handle.sendMail({ from: "agent@contoso.com", to: "a@b.c", subject: "hi", body: "body" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.value.messageId).toBe("req-abc-123");
+  });
+
+  it("sendMail falls back to the 'accepted' sentinel on an id-less 202 (A3 — Graph guarantees no message id)", async () => {
+    const { http } = recordingHttp({ status: 202, json: {} });
+    const handle = buildMailSendHandle("tok", http);
+    const r = await handle.sendMail({ from: "agent@contoso.com", to: "a@b.c", subject: "hi", body: "body" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.value.messageId).toBe("accepted");
+  });
+
+  it("sendMail ignores a non-string 202 body id (sentinel, not a coerced number)", async () => {
+    const { http } = recordingHttp({ status: 202, json: { id: 42 } });
+    const handle = buildMailSendHandle("tok", http);
+    const r = await handle.sendMail({ from: "agent@contoso.com", to: "a@b.c", subject: "hi", body: "body" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.value.messageId).toBe("accepted");
+  });
+
   it("readSite GETs the site resource with the app-only token bearer", async () => {
     const { http, requests } = recordingHttp({ status: 200, json: { displayName: "Contoso Team" } });
     const handle = buildSitesReadHandle("app-only-xyz", http);

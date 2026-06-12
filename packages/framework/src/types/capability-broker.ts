@@ -133,7 +133,7 @@ export interface CapabilityBroker {
    * Optional and defaulting to "provides nothing": the pass-through broker (and
    * any broker that only hands back the static set) omits it, so every required
    * capability is validated against the base context exactly as today — the
-   * zero-regression path is unchanged. A minting broker (the host's Keycloak
+   * zero-regression path is unchanged. A minting broker (the host's realm-backed
    * broker) implements it to claim the `"<provider>:<operation>"` scope names it
    * resolves at dispatch.
    */

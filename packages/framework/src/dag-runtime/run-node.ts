@@ -21,7 +21,7 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
-import type { Invocation, MintingAuthority } from "../types/capability-broker.js";
+import type { Invocation, MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { emit } from "./emit.js";
@@ -138,7 +138,23 @@ export const runNodeShared = async (
     let runCtx: NodeContext = ctx;
     if (opts.minting) {
       const inv: Invocation = { origin: opts.minting.origin, runId: ctx.runId, dagId, nodeId };
-      const minted = await opts.minting.broker.mintFor(inv, node.requires);
+      // The port contract says errors flow on the Result channel, never thrown
+      // — but the broker is a public extension seam, so the contract is
+      // enforced here rather than assumed. An unfenced throw would escape to
+      // the wave-level catch-all and be reclassified as a RETRIABLE
+      // `node-crash`, re-firing the broker (token-endpoint egress) on every
+      // retry and losing the 403/503 taxonomy.
+      let minted: Result<ScopedCapabilityHandle, FrameworkError>;
+      try {
+        minted = await opts.minting.broker.mintFor(inv, node.requires);
+      } catch (e) {
+        minted = err({
+          kind: "infra-unreachable" as const,
+          operation: "mint" as const,
+          hop: "capability-broker",
+          message: `broker.mintFor threw across the port boundary (contract violation): ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
       if (!minted.ok) {
         emit(ctx, {
           type: "node-error",
@@ -153,6 +169,40 @@ export const runNodeShared = async (
         return err(minted.error);
       }
       runCtx = mergeScopedCapabilities(ctx, minted.value);
+
+      // Seam-contract enforcement (claims-without-delivery): run-start
+      // validation exempted every `provides()`-claimed capability from the
+      // base-context check on the promise it would be minted here. A broker
+      // that claims a capability but omits it from its `ok()` record would
+      // otherwise put an `undefined` handle behind the validated-context cast
+      // below and crash inside `node.run`. Fail closed with the same error
+      // vocabulary run-start validation uses.
+      const undelivered = node.requires.filter(
+        (cap) =>
+          opts.minting?.broker.provides?.(cap) === true &&
+          (runCtx as unknown as Record<string, unknown>)[cap] == null,
+      );
+      const [firstUndelivered, ...restUndelivered] = undelivered;
+      if (firstUndelivered !== undefined) {
+        const missingErr: FrameworkError = {
+          kind: "missing-capability" as const,
+          missing: [
+            { nodeId, capability: firstUndelivered },
+            ...restUndelivered.map((capability) => ({ nodeId, capability })),
+          ],
+        };
+        emit(ctx, {
+          type: "node-error",
+          runId: ctx.runId,
+          dagId,
+          nodeId,
+          sideEffects: node.sideEffects,
+          timestamp: stamp(),
+          error: `broker claimed but did not deliver capabilities: ${JSON.stringify(missingErr)}`,
+          frameworkError: missingErr,
+        });
+        return err(missingErr);
+      }
     }
 
     let runResult: Result<unknown, FrameworkError>;

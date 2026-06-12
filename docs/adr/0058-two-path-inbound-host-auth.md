@@ -90,10 +90,15 @@ Concretely, four seams change:
    JWT shape. A
    JWT-shaped token with no verifier wired, or with a bad signature / wrong
    `iss`/`aud`/`exp`, **401s** — it never falls through to a weaker identity.
-   The signature verifier (`verifyRealmJwt`) is intentionally left unwired on
-   this branch (a later wave supplies the JWKS adapter), so the JWT path is
-   currently disabled-by-omission and fails closed; the `iss`/`aud` policy is
-   already threaded from config (`REALM_JWT_ISSUER` / `REALM_JWT_AUDIENCE`).
+   The JWT path's dependencies travel as ONE grouped, optional `realmJwt` dep
+   (`RealmJwtDeps`: the `verify` signature verifier + `expectedIss`/`expectedAud`
+   policy + the required `authorizeUserRun` user-run authorization policy,
+   inseparable — half-wired states are unrepresentable, the same pairing move as
+   the framework's `MintingAuthority`). The group is intentionally left wholly
+   absent on this branch (a later wave supplies the JWKS adapter), so the JWT
+   path is disabled-by-omission and fails closed; the `iss`/`aud` values are
+   parsed and validated in config (`REALM_JWT_ISSUER` / `REALM_JWT_AUDIENCE`),
+   ready to construct the group when the verifier lands.
 
 3. **`sub` threads into `Invocation.origin`** via the pure, exported
    `invocationOriginForIdentity` (`node-context-factory.ts`), exhaustive over

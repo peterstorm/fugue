@@ -22,8 +22,9 @@
 // @satisfies FR-W2-003 — every DAG/embedder compiling today keeps byte-identical
 //   capability behavior with zero migration steps (omitting the broker is that
 //   path; this broker reproduces it for embedders that want an explicit value)
-// @satisfies FR-W2-004 — neither the port nor this default references Keycloak/
-//   Entra (no imports, no type names, no string literals)
+// @satisfies FR-W2-004 — neither the port nor this default references any
+//   concrete identity provider by name (no imports, no type names, no string
+//   literals)
 // @satisfies SC-005 — byte-identical client resolution (same references)
 // @satisfies SC-008 — mints nothing; zero token requests
 

@@ -164,3 +164,101 @@ export const formatBudgetDecision = (d: BudgetDecision): string =>
     .with({ kind: "allow" }, (d) => `allow (cumulative ${d.cumulative})`)
     .with({ kind: "refuse" }, (d) => `refuse (cumulative ${d.cumulative} >= budget ${d.budget})`)
     .exhaustive();
+
+// ---------------------------------------------------------------------------
+// Concurrency reservation (pure) — the SC-003 bound under parallel calls
+// ---------------------------------------------------------------------------
+
+/**
+ * Reservation accounting for admitted-but-unsettled calls (review I1 / SC-003).
+ *
+ * `budgetDecision` refuses only once cumulative ≥ budget, but cumulative
+ * updates AFTER a call settles — so N calls fired in parallel all read the same
+ * pre-settle cumulative, all pass the gate, and overshoot by N rather than one.
+ * Treating ADMITTED-but-unsettled calls as already-spending closes that:
+ * `maxObservedCall` is the learned per-call estimate (the largest single call
+ * seen so far), `reservedInFlight` the sum of estimates currently reserved.
+ * Steady-state overshoot is bounded to ~one call; the very first parallel burst
+ * (estimate still 0) can overshoot by its call count — the documented FR-W1-004
+ * allowance, generalised.
+ *
+ * Pure value + pure transitions: the metered-llm shell holds one mutable cell
+ * and threads it through `admitWithReservation` / `releaseReservation` /
+ * `learnObservedCall`, the same shape as the broker's cells over `token-cache`.
+ */
+export interface ReservationState {
+  readonly reservedInFlight: number;
+  readonly maxObservedCall: number;
+}
+
+/** No calls admitted, no per-call estimate learned yet. */
+export const emptyReservation: ReservationState = { reservedInFlight: 0, maxObservedCall: 0 };
+
+/**
+ * Outcome of the reservation-aware pre-call gate. An `admit` carries the next
+ * reservation state AND the exact amount reserved (so the matching release
+ * frees precisely that, even if the estimate has since grown); a `refuse`
+ * carries the figures the shell logs. Illegal blends unrepresentable.
+ */
+export type AdmitDecision =
+  | { readonly kind: "admit"; readonly state: ReservationState; readonly reserved: number }
+  | {
+      readonly kind: "refuse";
+      /** SETTLED cumulative at decision time (the `llm-budget-exceeded` contract). */
+      readonly cumulative: number;
+      /** Reservation that contributed to the projection — log-only, never on the error. */
+      readonly reservedInFlight: number;
+      readonly budget: number;
+    };
+
+/**
+ * Reservation-aware budget gate: refuse when the settled cumulative has reached
+ * `budget` (`budgetDecision`), or when cumulative plus the in-flight reservation
+ * projects past it. On admit, reserve the learned per-call estimate.
+ *
+ * @satisfies FR-W1-004 SC-003 (the concurrency-bounded overshoot)
+ */
+export const admitWithReservation = (
+  meter: LlmMeter,
+  runId: RunId,
+  state: ReservationState,
+  budget?: number,
+): AdmitDecision => {
+  const decision = budgetDecision(meter, runId, budget);
+  const projected = decision.cumulative + state.reservedInFlight;
+  // The exceeded budget, when over: a `refuse` decision carries it; the
+  // projection branch requires a defined `budget` to fire. Reading it off the
+  // branches keeps this cast-free — `undefined` means "admit".
+  const exceededBudget =
+    decision.kind === "refuse"
+      ? decision.budget
+      : budget !== undefined && projected >= budget
+        ? budget
+        : undefined;
+  if (exceededBudget !== undefined) {
+    return {
+      kind: "refuse",
+      cumulative: decision.cumulative,
+      reservedInFlight: state.reservedInFlight,
+      budget: exceededBudget,
+    };
+  }
+  const reserved = state.maxObservedCall;
+  return {
+    kind: "admit",
+    reserved,
+    state: { ...state, reservedInFlight: state.reservedInFlight + reserved },
+  };
+};
+
+/** Free exactly the amount a matching `admit` reserved (call once, on settle). */
+export const releaseReservation = (state: ReservationState, reserved: number): ReservationState => ({
+  ...state,
+  reservedInFlight: state.reservedInFlight - reserved,
+});
+
+/** Learn the per-call estimate from a settled call's total (monotone max). */
+export const learnObservedCall = (state: ReservationState, callTotal: number): ReservationState => ({
+  ...state,
+  maxObservedCall: Math.max(state.maxObservedCall, callTotal),
+});

@@ -32,12 +32,12 @@ import type {
 } from "@fuguejs/framework";
 import type { InvocationOrigin } from "@fuguejs/framework";
 import { makeNodeContext, ok } from "@fuguejs/framework";
-import { match } from "ts-pattern";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity } from "../domain/auth.js";
-import { agentClientIdForDag } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";
+import { invocationOriginForIdentity } from "../domain/run-context.js";
+import type { NodeContextForDag } from "../domain/run-context.js";
 import { createMeteredLlm } from "./metered-llm.js";
 
 
@@ -204,57 +204,12 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   };
 };
 
-/**
- * Build the `Invocation.origin` for a run from its resolved inbound identity
- * (FR-W3-007). PURE and exported so the sub-threading is directly assertable
- * without standing up the whole context factory:
- *
- *  - `user`  → `{ kind: "user", sub, agentClientId: dagId }`. The user's `sub`
- *    lands on the origin verbatim. `agentClientId` is the AGENT the user acts
- *    THROUGH — the DAG's agent-type Keycloak client — NOT the inbound token's
- *    `azp` (the frontend SSO client that minted the user's login token). This
- *    distinction is security-relevant (ADR-0056, review I3): the broker gates a
- *    user hop with `assignedScopes(agentClientId)`, which must consult the
- *    AGENT's realm policy, not the frontend's. Using the frontend `azp` here
- *    would (a) gate against the wrong client and (b) let a future token exchange
- *    set `azp` to the frontend. We key on `agentClientIdForDag(dagId)` — the
- *    same agent-type-client placeholder the agent path uses — so user and agent
- *    runs of the SAME DAG resolve to the SAME agent client. (The branded
- *    `AgentClientId` constructor is the single migration point for the
- *    dagId→real-Keycloak-client-id mapping threaded later; the placeholder
- *    keeps the policy lookup pointed at the agent, never the frontend.)
- *  - `team` / `admin` → `{ kind: "agent", agentClientId: dagId }`. There is no
- *    user subject for these, so the agent placeholder keyed on the DAG id stands
- *    in — identical to the pre-fix behaviour.
- *
- * Exhaustive over `AuthIdentity`; a new identity kind is a compile error here.
- */
-export const invocationOriginForIdentity = (
-  identity: AuthIdentity,
-  dagId: DagId,
-): InvocationOrigin => {
-  // The branded constructor is the ONE migration point for the dagId→client
-  // mapping; the framework port carries it as a plain string (the brand is a
-  // host concern), so the assignment below needs no cast.
-  const agentClientId = agentClientIdForDag(dagId as string);
-  return match(identity)
-    .with({ kind: "user" }, (u) => ({ kind: "user" as const, sub: u.sub, agentClientId }))
-    .with({ kind: "team" }, () => ({ kind: "agent" as const, agentClientId }))
-    .with({ kind: "admin" }, () => ({ kind: "agent" as const, agentClientId }))
-    .exhaustive();
-};
-
-/** The base NodeContext for a run plus the `origin` the broker authorizes nodes against. */
-export interface NodeContextForDag {
-  readonly ctx: NodeContext;
-  /**
-   * Who initiated the run. Threaded into `runDag` alongside the broker so the
-   * framework builds a per-node `Invocation { origin, runId, dagId, nodeId }`
-   * and mints each node's declared scopes AT DISPATCH. Built from the inbound
-   * identity (FR-W3-007).
-   */
-  readonly origin: InvocationOrigin;
-}
+// `NodeContextForDag` and the pure `invocationOriginForIdentity` moved to
+// `domain/run-context.ts` — the contract of the `createContext` port belongs
+// to the domain, not this adapter (the HTTP layer names it without importing
+// adapter modules). Re-exported here for backward compatibility.
+export { invocationOriginForIdentity };
+export type { NodeContextForDag };
 
 /**
  * Construct the BASE NodeContext for a specific DAG execution, plus the run's
@@ -304,7 +259,9 @@ export const createNodeContextForDag = async (
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
   // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
   // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
-  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 FR-W2-009
+  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009
+  // groundwork only — LLM authority is run-scoped here, not yet on the
+  // broker's mintFor seam; see capability-broker.ts)
   const llm = createMeteredLlm(shared.llm, {
     dagId,
     runId,

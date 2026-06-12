@@ -16,7 +16,11 @@
  *
  * @satisfies FR-W0-001 FR-W0-002 FR-W0-004 FR-W1-002 FR-W1-003 FR-W1-004
  * @satisfies FR-W1-005 FR-W1-006 SC-001 SC-002 SC-003 SC-004
- * @satisfies FR-W2-009 — LLM is the first invocation-scoped capability
+ *
+ * FR-W2-009 groundwork — run-scoped LLM authority, NOT yet on the broker's
+ * `mintFor` seam: this decorator is per-run NodeContext wiring, and the runtime
+ * currently rejects a broker claiming `provides("llm")` (see
+ * capability-broker.ts). Migration onto the seam lifts both guards.
  */
 
 import type {
@@ -36,11 +40,14 @@ import type { LogPort } from "../ports.js";
 import {
   emptyMeter,
   accumulate,
-  budgetDecision,
   usageFor,
   runTotal,
+  emptyReservation,
+  admitWithReservation,
+  releaseReservation,
+  learnObservedCall,
   type LlmMeter,
-  type BudgetDecision,
+  type ReservationState,
 } from "../domain/llm-meter.js";
 
 // ---------------------------------------------------------------------------
@@ -77,18 +84,12 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   let meter: LlmMeter = emptyMeter();
   const { dagId, runId, budget, logger } = deps;
 
-  // Concurrency reservation (review I1 / SC-003). `budgetDecision` refuses only
-  // once cumulative ≥ budget, but cumulative updates AFTER a call settles — so N
-  // calls fired in parallel (e.g. several nodes in one wave) all read the same
-  // pre-settle cumulative, all pass the gate, and overshoot by N rather than one.
-  // We treat ADMITTED-but-unsettled calls as already-spending by reserving a
-  // learned per-call estimate (`maxObservedCall`, the largest single call seen so
-  // far) and refusing when `cumulative + reservedInFlight ≥ budget`. Steady-state
-  // overshoot is bounded to ~one call; the very first parallel burst (before any
-  // call has settled, so the estimate is still 0) can still overshoot, which is
-  // the documented FR-W1-004 "overshoot by at most one" allowance generalised.
-  let reservedInFlight = 0;
-  let maxObservedCall = 0;
+  // Concurrency reservation (review I1 / SC-003). The DECISION logic is pure —
+  // `admitWithReservation` / `releaseReservation` / `learnObservedCall` in
+  // llm-meter.ts (see its ReservationState doc for the overshoot bound) — and
+  // this shell holds the one mutable cell, the same shape as the broker's cells
+  // over the pure token-cache.
+  let reservation: ReservationState = emptyReservation;
 
   /**
    * Pre-call gate. Returns either a budget-refusal error, or a `release` thunk to
@@ -96,25 +97,15 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    * BEFORE the call and releasing AFTER is what makes the gate concurrency-safe.
    */
   const admit = (nodeId: NodeId): { readonly error: FrameworkError } | { readonly release: () => void } => {
-    const decision: BudgetDecision = budgetDecision(meter, runId, budget);
-    const projected = decision.cumulative + reservedInFlight;
-    // The exceeded budget, when over: a `refuse` decision carries it; the
-    // projection branch requires a defined `budget` to fire. Reading it off the
-    // branches keeps this cast-free — `undefined` means "admit".
-    const exceededBudget =
-      decision.kind === "refuse"
-        ? decision.budget
-        : budget !== undefined && projected >= budget
-          ? budget
-          : undefined;
-    if (exceededBudget !== undefined) {
+    const decision = admitWithReservation(meter, runId, reservation, budget);
+    if (decision.kind === "refuse") {
       logger.warn("LLM budget exceeded — refusing call", {
         dagId: dagId as string,
         runId: runId as string,
         nodeId: nodeId as string,
         cumulative: decision.cumulative,
-        reservedInFlight,
-        budget: exceededBudget,
+        reservedInFlight: decision.reservedInFlight,
+        budget: decision.budget,
       });
       return {
         error: {
@@ -126,15 +117,15 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
           // warn log above (`reservedInFlight`), never in the error figure, so
           // `cumulative` always reconciles against the `llm.metered` totals.
           cumulative: decision.cumulative,
-          budget: exceededBudget,
+          budget: decision.budget,
         },
       };
     }
-    // Admit: reserve this call's learned estimate; capture the exact amount so the
-    // release frees precisely what was reserved even if `maxObservedCall` grows.
-    const reserved = maxObservedCall;
-    reservedInFlight += reserved;
-    return { release: () => { reservedInFlight -= reserved; } };
+    // Admit: the pure transition already reserved this call's learned estimate;
+    // `decision.reserved` captures the exact amount so the release frees
+    // precisely what was reserved even if the estimate has since grown.
+    reservation = decision.state;
+    return { release: () => { reservation = releaseReservation(reservation, decision.reserved); } };
   };
 
   /** Post-call bookkeeping — accumulate the delta and emit the metering log. */
@@ -145,7 +136,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     tokensOut: number,
   ): void => {
     // Learn the per-call estimate the concurrency reservation uses (I1).
-    maxObservedCall = Math.max(maxObservedCall, tokensIn + tokensOut);
+    reservation = learnObservedCall(reservation, tokensIn + tokensOut);
     meter = accumulate(meter, runId, { tokensIn, tokensOut });
     const cumulative = runTotal(usageFor(meter, runId));
     logger.info("llm.metered", {
@@ -198,6 +189,26 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     return result;
   };
 
+  /**
+   * A THROWING inner client is a port-contract violation (the `LlmClient`
+   * contract is a settled `Result`) — the error itself still surfaces via
+   * run-node's catch as `node-crash`, but without this log the decorator's
+   * accounting contract would be skipped silently (no `llm.call-failed` line,
+   * nothing metered — tokens for a throwing call are unknowable). Log with
+   * `errorKind: "thrown"` and rethrow; the `finally` still releases the
+   * reservation either way.
+   */
+  const logThrown = (nodeId: NodeId, operation: "sendStructured" | "sendWithTools", e: unknown): void => {
+    logger.warn("llm.call-failed", {
+      dagId: dagId as string,
+      runId: runId as string,
+      nodeId: nodeId as string,
+      operation,
+      errorKind: "thrown",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  };
+
   return {
     sendStructured: async <O>(
       req: LlmRequest<O>,
@@ -206,6 +217,9 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       if ("error" in gate) return err(gate.error);
       try {
         return settle(req.nodeId, "sendStructured", await inner.sendStructured(req));
+      } catch (e) {
+        logThrown(req.nodeId, "sendStructured", e);
+        throw e;
       } finally {
         gate.release();
       }
@@ -219,6 +233,9 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       if ("error" in gate) return err(gate.error);
       try {
         return settle(req.nodeId, "sendWithTools", await inner.sendWithTools(req, ctx));
+      } catch (e) {
+        logThrown(req.nodeId, "sendWithTools", e);
+        throw e;
       } finally {
         gate.release();
       }

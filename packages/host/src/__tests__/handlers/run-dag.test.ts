@@ -182,7 +182,7 @@ describe("run-dag handler", () => {
     };
 
     it("threads the user sub/azp into createContext for a user-initiated run", async () => {
-      const identity: AuthIdentity = { kind: "user", sub: "user-abc", azp: "fugue-frontend" };
+      const identity: AuthIdentity = { kind: "user", sub: "user-abc", azp: "fugue-frontend", canRunDag: () => true };
       const { res, captured } = await runWith(identity);
       expect(res.status).toBe(200);
       expect(captured).toHaveLength(1);

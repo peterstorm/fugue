@@ -459,7 +459,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
 
 describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () => {
   it("a user identity produces origin { kind: 'user', sub, agentClientId: dagId } — sub lands, agent client is the DAG's, NOT the frontend azp (I3)", () => {
-    const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend" };
+    const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend", canRunDag: () => true };
 
     const origin = invocationOriginForIdentity(userIdentity, testDagId);
 
@@ -500,7 +500,7 @@ describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () =>
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       capabilities: [],
     });
-    const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend" };
+    const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => true };
     const shared = baseSharedInfra();
 
     const { ctx, origin } = await createNodeContextForDag(

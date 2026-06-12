@@ -28,13 +28,12 @@
 
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
-import { match } from "ts-pattern";
 import type {
   DownstreamScope,
+  HandleForScope,
   MailSendHandle,
   SitesReadHandle,
   DynamicsReadHandle,
-  OperationNarrowedHandle,
   MailMessage,
   MailSendReceipt,
   SiteContent,
@@ -270,18 +269,64 @@ export const buildDynamicsReadHandle = (token: string, http: GraphHttp): Dynamic
   },
 });
 
+/** Distribute one provider's operation union into singleton scope variants. */
+type SingletonScopesOf<P extends string, O extends string> = O extends unknown
+  ? { readonly provider: P; readonly operation: O }
+  : never;
+
+/**
+ * `DownstreamScope` distributed into one variant per legal `(provider,
+ * operation)` pair. The ADT's members carry a per-provider operation UNION
+ * (`{ provider: "msgraph"; operation: "mail.send" | "sites.read" }`), which
+ * `HandleForScope` deliberately maps to `never` — the singleton split below is
+ * what lets the builder record pin one handle type per concrete pair.
+ */
+type SingletonScope<S extends DownstreamScope = DownstreamScope> = S extends unknown
+  ? SingletonScopesOf<S["provider"], S["operation"]>
+  : never;
+
+/**
+ * Singleton scopes re-keyed by canonical `"<provider>:<operation>"` name.
+ * Derived from the ADT, so exactly the legal pairs become keys — there is no
+ * `"msgraph:read"` key to mis-dispatch through.
+ */
+type ScopeByName = {
+  readonly [S in SingletonScope as `${S["provider"]}:${S["operation"]}`]: S;
+};
+
+/**
+ * Builder dispatch, compile-pinned: each entry's return type is
+ * `HandleForScope` of exactly that key's scope, so swapping two builders (e.g.
+ * wiring `buildSitesReadHandle` under `"msgraph:mail.send"`) is a compile
+ * error, not a node crashing on an undefined method. This record is what makes
+ * the broker's `ScopedCapabilityHandle` cast sound by construction (C6) — the
+ * scope→handle correspondence is checked HERE, not asserted in a comment.
+ * Adding a scope to `KNOWN_SCOPES` without an entry here is also a compile
+ * error (missing key).
+ */
+const HANDLE_BUILDERS: {
+  readonly [K in keyof ScopeByName]: (token: string, http: GraphHttp) => HandleForScope<ScopeByName[K]>;
+} = {
+  "msgraph:mail.send": buildMailSendHandle,
+  "msgraph:sites.read": buildSitesReadHandle,
+  "dynamics:read": buildDynamicsReadHandle,
+};
+
 /**
  * Build the operation-narrowed handle for a parsed scope over the app-only WIF
- * token. Exhaustive over the scope ADT — a new operation is a compile error. The
+ * token. Returns exactly `HandleForScope<S>` — a `msgraph:mail.send` scope
+ * yields a `MailSendHandle` in the types, pinned by `HANDLE_BUILDERS`. The
  * returned handle exposes ONLY its operation method; the token is unreachable.
  */
-export const buildGraphHandle = (
-  scope: DownstreamScope,
+export const buildGraphHandle = <S extends DownstreamScope>(
+  scope: S,
   token: string,
   http: GraphHttp,
-): OperationNarrowedHandle =>
-  match(scope)
-    .with({ provider: "msgraph", operation: "mail.send" }, () => buildMailSendHandle(token, http))
-    .with({ provider: "msgraph", operation: "sites.read" }, () => buildSitesReadHandle(token, http))
-    .with({ provider: "dynamics", operation: "read" }, () => buildDynamicsReadHandle(token, http))
-    .exhaustive();
+): HandleForScope<S> => {
+  // The key cast is tautological: the parser is the scope ADT's only
+  // constructor, so `${provider}:${operation}` is always one of the three legal
+  // keys. The return cast cannot select a mismatched handle — the mapped record
+  // above pins each key's builder to that scope's handle type at compile time.
+  const key = `${scope.provider}:${scope.operation}` as keyof ScopeByName;
+  return HANDLE_BUILDERS[key](token, http) as HandleForScope<S>;
+};

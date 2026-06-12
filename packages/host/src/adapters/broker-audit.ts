@@ -47,7 +47,20 @@ export interface BrokerAuditFields {
  * with a "minted via" tag) are unrepresentable.
  */
 export type BrokerAuditOutcome =
-  | { readonly result: "mint"; readonly via: "client_credentials" | "token-exchange-v2" }
+  | {
+      readonly result: "mint";
+      readonly via: "client_credentials" | "token-exchange-v2";
+      /**
+       * Whether THIS resolution performed the token egress (`"minted"`) or
+       * reused existing authority (`"cache-reuse"` — a cache hit or a shared
+       * in-flight acquisition). Witnessed from the branch actually taken, so
+       * the count of `acquisition: "minted"` records equals the count of real
+       * token requests — making SC-008 (≤1 token request per triple per TTL)
+       * verifiable from the production audit trail, not just from
+       * call-recording fakes.
+       */
+      readonly acquisition: "minted" | "cache-reuse";
+    }
   | { readonly result: "refusal"; readonly reason: string };
 
 /**
@@ -66,7 +79,9 @@ export const brokerAuditPayload = (
   nodeId: fields.nodeId as string,
   scope: fields.scope,
   result: outcome.result,
-  ...(outcome.result === "mint" ? { via: outcome.via } : { reason: outcome.reason }),
+  ...(outcome.result === "mint"
+    ? { via: outcome.via, acquisition: outcome.acquisition }
+    : { reason: outcome.reason }),
 });
 
 /**
@@ -83,6 +98,7 @@ export interface BrokerAudit {
   readonly mint: (
     fields: BrokerAuditFields,
     via: "client_credentials" | "token-exchange-v2",
+    acquisition: "minted" | "cache-reuse",
   ) => Promise<void>;
   readonly refusal: (fields: BrokerAuditFields, reason: string) => Promise<void>;
 }
@@ -128,7 +144,7 @@ export const createBrokerAudit = (tracer: Tracer, logger: LogPort): BrokerAudit 
   };
 
   return {
-    mint: (fields, via) => emit(fields, { result: "mint", via }),
+    mint: (fields, via, acquisition) => emit(fields, { result: "mint", via, acquisition }),
     refusal: (fields, reason) => emit(fields, { result: "refusal", reason }),
   };
 };

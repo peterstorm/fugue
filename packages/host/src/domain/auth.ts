@@ -89,11 +89,25 @@ export interface TokenGrant {
  *   the user, azp becomes the agent — `adapters/keycloak-broker.ts`, wired at
  *   boot; the live exchange endpoint remains fail-closed-unwired pending the
  *   JWKS wave). No token exchange happens here.
+ *
+ *   `canRunDag` is the user-run AUTHORIZATION POLICY, captured at the single
+ *   construction site (the auth middleware) from the REQUIRED
+ *   `RealmJwtDeps.authorizeUserRun` member. Pairing the policy with the
+ *   verifier (and carrying it on the identity) makes "verifier wired but
+ *   user-run authorization undecided" UNREPRESENTABLE — the same move as
+ *   `MintingAuthority`/`RealmJwtDeps` themselves. `canAccessDag` delegates its
+ *   `user` branch here.
  */
 export type AuthIdentity =
   | { readonly kind: "admin" }
   | { readonly kind: "team"; readonly team: string; readonly label: string }
-  | { readonly kind: "user"; readonly sub: string; readonly azp: string };
+  | {
+      readonly kind: "user";
+      readonly sub: string;
+      readonly azp: string;
+      /** May this user run/see DAGs owned by `dagTeam`? Provided by `RealmJwtDeps.authorizeUserRun`. */
+      readonly canRunDag: (dagTeam: string) => boolean;
+    };
 
 // ── Realm JWT Claims (validated fugue-platform OIDC token) ─────────────────
 
@@ -180,34 +194,23 @@ export const markAuthenticatedUser = (user: { readonly sub: string; readonly azp
  * Rules:
  * - Admin can access anything.
  * - Team identity can only access DAGs owned by that team.
- * - User identity (fugue-platform JWT) may run DAGs in this wave. User-run
- *   authorization is NOT team-scoped here: the user's downstream authorization
- *   is enforced per-hop by the identity-scoped capability broker
- *   (`adapters/keycloak-broker.ts`, selected at boot when `REALM_JWT_ISSUER` is
- *   set) via the V2 token exchange, where the realm/Keycloak policy gates what
- *   the user-via-agent may actually reach. THIS predicate deliberately does NOT
- *   grant admin-equivalent access — a `user` is not an `admin`; it only clears
- *   the inbound run gate so the user's `sub` can be threaded into the run.
- *   It returns `true` independent of `dagTeam` (a user is not bound to a single
- *   host-side team), which is the minimal correct behaviour for threading-only
- *   delivery; tightening this to a realm/role check is a later-wave concern.
- *
- * SECURITY (latent until the JWKS wave): this `user → true` branch is
- * UNREACHABLE in production today only because no `realmJwt` verifier group is wired
- * (`host.ts` leaves the JWT path fail-closed). The moment a live JWKS verifier
- * is wired into the router deps, ANY authenticated realm user can execute ANY
- * team's DAG — consuming its concurrency permits, LLM budget, and circuit
- * headroom — because the broker's scope gate only protects downstream
- * Graph/Dynamics hops, not DAG execution or static capabilities. The verifier
- * wiring site (`buildHost` in `host.ts`) carries the mirror of this note: DO
- * NOT wire a verifier without revisiting this predicate (realm/role check or a
- * config gate on user-run acceptance).
+ * - User identity (fugue-platform JWT) delegates to the `canRunDag` policy the
+ *   identity carries — captured at the auth middleware from the REQUIRED
+ *   `RealmJwtDeps.authorizeUserRun` member. A user identity cannot exist
+ *   without a wired `realmJwt` group, and the group cannot be constructed
+ *   without deciding the policy, so "verifier wired but user-run authorization
+ *   undecided" is unrepresentable — wiring the future JWKS verifier FORCES the
+ *   authorization decision at the same construction site, in types rather than
+ *   mirrored SECURITY comments. The user's downstream authorization is
+ *   additionally enforced per-hop by the capability broker
+ *   (`adapters/keycloak-broker.ts`); this predicate gates DAG execution and
+ *   static capabilities, which the broker's scope gate does not cover.
  */
 export const canAccessDag = (identity: AuthIdentity, dagTeam: string): boolean =>
   match(identity)
     .with({ kind: "admin" }, () => true)
     .with({ kind: "team" }, (t) => t.team === dagTeam)
-    .with({ kind: "user" }, () => true)
+    .with({ kind: "user" }, (u) => u.canRunDag(dagTeam))
     .exhaustive();
 
 // ── Token Generation (pure computation, randomness injected) ───────────────

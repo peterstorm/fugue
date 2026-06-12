@@ -85,3 +85,56 @@ describe("mergeScopedCapabilities — reserved keys never clobbered (A11)", () =
     ).toBe(base);
   });
 });
+
+// ── Pass-4 A3: a dropped non-null reserved entry is WARNED, not silent ───────
+
+import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
+
+describe("mergeScopedCapabilities — dropped reserved entries are warned (capability.merge.dropped)", () => {
+  test("a non-null minted entry under a built-in key emits one warn with key + run/dag correlation", () => {
+    const warns: { msg: string; data: Record<string, unknown> }[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (msg, ...args) => warns.push({ msg, data: (args[0] ?? {}) as Record<string, unknown> }),
+      error: () => {},
+    });
+    try {
+      const base = makeBase();
+      // validateCapabilities' loud rejection only covers brokers implementing
+      // provides(); a passthrough-style broker built with a built-in key
+      // reaches the merge unannounced — the warn is its only trace.
+      const scoped = { http: { tag: "broker-http" } } as unknown as ScopedCapabilityHandle;
+      const merged = mergeScopedCapabilities(base, scoped);
+
+      // The entry was dropped (base unchanged) …
+      expect(merged).toBe(base);
+      // … and the drop was surfaced, not silent.
+      const w = warns.find((x) => x.msg === "capability.merge.dropped");
+      expect(w).toBeDefined();
+      expect(w?.data.key).toBe("http");
+      expect(w?.data.runId).toBe("run-merge");
+      expect(w?.data.dagId).toBe("dag-merge");
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  test("null/absent minted entries do NOT warn (a broker that resolved nothing is the documented no-op)", () => {
+    const warns: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (msg) => warns.push(msg),
+      error: () => {},
+    });
+    try {
+      const base = makeBase();
+      const merged = mergeScopedCapabilities(base, {} as ScopedCapabilityHandle);
+      expect(merged).toBe(base);
+      expect(warns).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+});

@@ -461,3 +461,55 @@ describe("metered-llm: concurrency reservation bounds overshoot (I1/SC-003)", ()
     }
   });
 });
+
+// ── Throwing inner client (port-contract violation) ─────────────────────────
+
+describe("metered-llm: a THROWING inner client releases its reservation and is logged", () => {
+  /** An inner client that throws (violating the settled-Result port contract). */
+  const throwingInner = (): LlmClient => ({
+    sendStructured: async () => {
+      throw new Error("inner client exploded");
+    },
+    sendWithTools: async () => {
+      throw new Error("inner client exploded");
+    },
+  });
+
+  it("rethrows, logs llm.call-failed with errorKind 'thrown', and frees the reservation so the next call is admitted", async () => {
+    // budget 30, per-call 15: warm up to learn the estimate, then a throwing
+    // call reserves 15. If the finally-release were lost, the leaked
+    // reservation would project 15+15 ≥ 30 and refuse every later call.
+    const { inner: good } = fakeInner(10, 5);
+    const { logger, logs } = collectLogs();
+
+    const throwing = throwingInner();
+    const composite: LlmClient = {
+      sendStructured: (req) =>
+        logs.some((l) => l.data?.errorKind === "thrown")
+          ? good.sendStructured(req)
+          : throwing.sendStructured(req),
+      sendWithTools: (req, ctx) => good.sendWithTools(req, ctx),
+    };
+
+    const metered = createMeteredLlm(composite, { dagId, runId, budget: 30, logger });
+
+    // Learn the estimate with a settled call (uses sendWithTools → good inner).
+    expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true); // cumulative 15
+
+    // The throwing call: rethrown to the caller (run-node's catch surfaces it).
+    await expect(metered.sendStructured(structuredReq(nodeA))).rejects.toThrow("inner client exploded");
+
+    // The decorator's accounting contract was not silently skipped: one
+    // llm.call-failed line with errorKind "thrown" and the correlation triple.
+    const thrown = logs.find((l) => l.msg === "llm.call-failed" && l.data?.errorKind === "thrown");
+    expect(thrown).toBeDefined();
+    expect(thrown?.data?.message).toContain("inner client exploded");
+    expect(thrown?.data?.runId).toBe(runId as string);
+    expect(thrown?.data?.nodeId).toBe(nodeA as string);
+
+    // The reservation was released in the finally: cumulative 15 + reserved 0
+    // projects under the 30 budget, so the next call is still admitted.
+    const after = await metered.sendStructured(structuredReq(nodeA));
+    expect(after.ok).toBe(true);
+  });
+});
