@@ -12,7 +12,7 @@ Each Fugue Host instance serves one team. Authentication uses bearer tokens with
 
 This separation ensures applications never hold the admin key. A leaked team token can be revoked without restarting the host.
 
-The user tier is **verifier-gated and fail-closed**: the JWT path is only entered when a JWKS signature verifier is injected alongside the `iss`/`aud` policy. The verifier is deliberately unwired today (pending the JWKS wave), so a JWT-shaped token currently 401s — it never degrades to a weaker identity. See ADR-0058 for the full design.
+The user tier is **verifier-gated and fail-closed**: the JWT path is only entered when a JWKS signature verifier is injected alongside the `iss`/`aud` policy and the `authorizeUserRun` user-run authorization policy — the three travel together as one required group (`RealmJwtDeps`), so a half-wired state (verifier without a run policy) is unrepresentable. The group is deliberately unwired today (pending the JWKS wave), so a JWT-shaped token currently 401s — it never degrades to a weaker identity. See ADR-0058 for the full design.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -31,7 +31,7 @@ The user tier is **verifier-gated and fail-closed**: the JWT path is only entere
 │  │  2. JWT-shaped (a.b.c, not fug_) AND verifier configured?            │   │
 │  │     → verify signature (injected JWKS verifier)                      │   │
 │  │     → validate claims (iss = realm, aud = fugue-host, exp)           │   │
-│  │     → identity = { user, sub, azp }                                  │   │
+│  │     → identity = { user, sub, azp, canRunDag }                       │   │
 │  │     FAIL CLOSED: any failure → 401/503, never falls through          │   │
 │  │     (verifier unwired today → JWT-shaped tokens 401)                 │   │
 │  │                                                                       │   │
@@ -46,8 +46,10 @@ The user tier is **verifier-gated and fail-closed**: the JWT path is only entere
 │  │ Authorization check (for DAG endpoints)                              │   │
 │  │  identity.team === dag.team → allowed                                │   │
 │  │  identity.kind === "admin" → always allowed                          │   │
-│  │  identity.kind === "user" → run gate cleared (not team-scoped;       │   │
-│  │    downstream authorization is per-hop in the capability broker)     │   │
+│  │  identity.kind === "user" → gated by the authorizeUserRun policy     │   │
+│  │    (required RealmJwtDeps member, decided at the verifier wiring     │   │
+│  │    site; may refuse → 403); downstream authorization is              │   │
+│  │    additionally enforced per-hop by the capability broker            │   │
 │  │  mismatch → 403 Forbidden                                           │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -273,7 +275,7 @@ Since you deploy one host per team, all DAGs in the repo typically belong to the
 team: cx
 ```
 
-Authorization check: `identity.team === dag.team` → allowed. Admin always allowed. A `user` identity clears the run gate regardless of team — a user is not bound to a single host-side team; their real authorization is enforced per-hop by the capability broker's realm policy (ADR-0058).
+Authorization check: `identity.team === dag.team` → allowed. Admin always allowed. A `user` identity is gated by the `authorizeUserRun` policy decided at the verifier wiring site (a required member of `RealmJwtDeps`, carried on the identity as `canRunDag`): the policy receives the DAG's team and may refuse — a refused user 403s. A user is not bound to a single host-side team the way a team token is; downstream authorization is additionally enforced per-hop by the capability broker's realm policy (ADR-0058).
 
 ---
 

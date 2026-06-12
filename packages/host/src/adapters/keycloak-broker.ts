@@ -62,6 +62,7 @@ import type { CapabilityRegistryWired } from "../domain/capability-registry.js";
 import {
   cacheKey,
   cacheToken,
+  compositeKey,
   lookup,
   store,
   emptyCache,
@@ -119,12 +120,12 @@ const effectiveTtlMs = (expiresInSec: number): number => {
  *     `(userA, agentX)` to `(userA, agentY)` while the audit claims Y minted it
  *     (review I3); including `agentClientId` makes the dedup unit
  *     `(sub, agentClientId)` so distinct agents never share a user's token.
- * The `\x1f` (UNIT SEPARATOR) joiner can appear in neither a `sub` nor a client
- * id (both printable), so the composite is injective — same property the cache
- * key relies on.
+ * The pair is joined via `compositeKey` (token-cache.ts), the single owner of
+ * the delimiter and its injectivity argument — this adapter carries no
+ * delimiter knowledge of its own.
  */
 const cacheIdentityFor = (origin: InvocationOrigin): string =>
-  origin.kind === "user" ? `${origin.sub}\x1f${origin.agentClientId}` : origin.agentClientId;
+  origin.kind === "user" ? compositeKey(origin.sub, origin.agentClientId) : origin.agentClientId;
 
 /**
  * Downstream resource/audience a scope's token is narrowed to. Graph operations
@@ -413,14 +414,13 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       //    boot-scoped base context already supplies: skip it so a mixed
       //    `requires` (static + minted) resolves both, with the framework
       //    merging the minted scope handles OVER the base (C1). Skipping
-      //    EXACTLY the `!parseScope(...).ok` set keeps `mintFor` and `provides`
-      //    in agreement: the broker mints precisely the names `provides()`
-      //    claims, and everything else stays run-start-validated against the
-      //    base context (`provides` is `false` for it), never policy-refused
-      //    here.
-      const parsed = parseScope(capability);
-      if (!parsed.ok) continue;
-      const scope = parsed.value;
+      //    EXACTLY the `parseScope(...) === undefined` set keeps `mintFor` and
+      //    `provides` in agreement: the broker mints precisely the names
+      //    `provides()` claims, and everything else stays run-start-validated
+      //    against the base context (`provides` is `false` for it), never
+      //    policy-refused here.
+      const scope = parseScope(capability);
+      if (scope === undefined) continue;
       const scopeStr = scopeName(scope);
       const audience = audienceForScope(scope);
 
@@ -538,7 +538,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
   // `false` → still validated against the base context; a malformed scope name
   // (`msgraph:bogus`) also parses to `false` → caught at run-start as
   // `missing-capability` rather than silently deferred to a dispatch refusal.
-  const provides = (cap: Capability): boolean => parseScope(cap).ok;
+  const provides = (cap: Capability): boolean => parseScope(cap) !== undefined;
 
   return { mintFor, provides };
 };

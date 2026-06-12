@@ -397,6 +397,51 @@ describe("toolUseLoop", () => {
     }
   });
 
+  test("tool dispatch throw (ctx without llm) → non-retriable node-crash carrying accumulated usage", async () => {
+    // `asToolContext` (tool-dispatch.ts) throws when ctx.llm is null — the node
+    // forgot `requires: ["llm"]`. The loop fences `dispatchToolCallsWithSpans`
+    // in try/catch: the throw must surface as a typed err (not an escaping
+    // exception), non-retriable (authoring errors are deterministic), and the
+    // tokens burned producing the tool calls must still ride the error's
+    // `usage` channel (FR-W0-001).
+    const provider: ToolLoopProvider = {
+      call: async () =>
+        ok({
+          toolCalls: [{ id: "c1", name: "tool", input: {} }],
+          textContent: undefined,
+          tokensIn: 10,
+          tokensOut: 15,
+        }),
+      appendToolResults: () => {},
+    };
+    // NodeContext WITHOUT llm — makeNodeContext defaults the capability to null.
+    const ctxWithoutLlm = makeNodeContext({ runId: "test-run", dagId: "test-dag" });
+
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 5,
+      },
+      ctxWithoutLlm,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("tool dispatch threw");
+        // The turn that produced the tool calls completed before the throw —
+        // its 10/15 are accumulated and attributed on the Err.
+        expect(result.error.usage).toEqual({ tokensIn: 10, tokensOut: 15 });
+      }
+    }
+  });
+
   test("thinking content from last turn is preserved", async () => {
     let callCount = 0;
     const provider: ToolLoopProvider = {

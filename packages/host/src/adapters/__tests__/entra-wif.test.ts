@@ -37,8 +37,8 @@ const cfg: EntraWifConfig = { tenantId: "tenant-123", clientId: "fugue-agents" }
 
 const mailScope = (): DownstreamScope => {
   const r = parseScope("msgraph:mail.send");
-  if (!r.ok) throw new Error("parse failed");
-  return r.value;
+  if (r === undefined) throw new Error("parse failed");
+  return r;
 };
 
 const req = (over?: Partial<WifExchangeRequest>): WifExchangeRequest => ({
@@ -231,6 +231,29 @@ describe("entra-wif — transient reach failures are infra-unreachable (distinct
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
+  });
+
+  it.each([429, 503])("HTTP %p names the THROTTLE in the message — operators read the rate-limit, not a generic 'unreachable'", (status) => {
+    const r = mapWifResponse("https://graph.microsoft.com", { status, json: {} });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.operation).toBe("federation");
+      expect(r.error.hop).toBe("entra-wif");
+      expect(r.error.message).toBe(`Entra WIF throttled (HTTP ${status})`);
+    }
+  });
+
+  it.each([500, 502])("a generic %p names the unexpected status — distinct message from the throttle branch", (status) => {
+    const r = mapWifResponse("https://graph.microsoft.com", { status, json: {} });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.message).toBe(`Entra WIF unreachable or unexpected status (HTTP ${status})`);
+      expect(r.error.message).not.toContain("throttled");
+    }
   });
 
   it("a transport-level rejection → infra-unreachable", async () => {

@@ -375,4 +375,26 @@ describe("FugueYamlSchema", () => {
     expect(parseFugueYaml({ team: "t", maxConcurrent: 2.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
     expect(parseFugueYaml({ team: "t", cacheTtlMs: 1.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
   });
+
+  // ── llmBudgetTokens (FR-W1-001) — the per-run budget the metered-llm decorator enforces ──
+  it("parses llmBudgetTokens when present (FR-W1-001)", () => {
+    const result = parseFugueYaml({ team: "t", llmBudgetTokens: 50_000 }, "/dags/x/fugue.yaml");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.llmBudgetTokens).toBe(50_000);
+  });
+
+  it("leaves llmBudgetTokens undefined when absent (FR-W1-006 — no budget, no enforcement)", () => {
+    const result = parseFugueYaml({ team: "t" }, "/dags/x/fugue.yaml");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.llmBudgetTokens).toBeUndefined();
+  });
+
+  it("rejects zero, negative, fractional, and non-number llmBudgetTokens (int + positive)", () => {
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: 0 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: -100 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: 1000.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: "50000" }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
 });

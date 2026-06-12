@@ -27,7 +27,6 @@
 
 import { match } from "ts-pattern";
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Parsed scope ADT
@@ -159,32 +158,31 @@ export type KnownScopesCoverProviders = [_ProvidersCovered];
  * `DownstreamScope` is through this function, so every downstream scope in the
  * system is one of the recognised names.
  *
- * An unparseable / unknown name RETURNS a `policy-refusal` on the Err branch
- * (`agentClientId` absent — the client lives on the invocation, not the static
- * name). NOTE the realised failure mode differs from the return value: every
- * production caller (the broker's `mintFor`/`provides`, the boot-time
- * `AGENT_CLIENT_SCOPES` validation) treats the Err branch purely as "not a
- * downstream scope" and discards the payload — so an unknown name in a node's
- * `requires` actually surfaces at run-start as `missing-capability` (no static
- * capability of that name exists), and a typo'd policy entry fails the boot.
- * The refusal payload exists for callers that DO choose to surface it; the
- * discriminable `kind` is what they branch on.
+ * A name that is not a recognised downstream scope reads as `undefined` —
+ * first-class ABSENCE, not an error (the same FR-X-003 shape as
+ * `token-cache.ts`'s `lookup`). Every caller (the broker's `mintFor` skip and
+ * `provides`, the boot-time `AGENT_CLIENT_SCOPES` validation) asks "is this a
+ * downstream scope?", a classification with a routine negative case: plain
+ * capability names (`http`, `llm`) and ADR-0051 custom names flow through here
+ * on every validation and are simply not scopes. An unknown name in a node's
+ * `requires` surfaces at run-start as `missing-capability` (no static
+ * capability of that name exists), and a typo'd policy entry fails the boot —
+ * neither path is an authorization refusal, so no `policy-refusal` is
+ * constructed here (that kind is reserved for a settled "no" to a real scope).
  */
-export const parseScope = (name: string): Result<DownstreamScope, FrameworkError> => {
+export const parseScope = (name: string): DownstreamScope | undefined => {
   const sep = name.indexOf(":");
-  if (sep <= 0 || sep === name.length - 1) {
-    return err({ kind: "policy-refusal", scope: name });
-  }
+  if (sep <= 0 || sep === name.length - 1) return undefined;
   const provider = name.slice(0, sep);
   const operation = name.slice(sep + 1);
 
   if (provider === "msgraph" && (KNOWN_SCOPES.msgraph as readonly string[]).includes(operation)) {
-    return ok({ provider: "msgraph", operation: operation as MsGraphOperation });
+    return { provider: "msgraph", operation: operation as MsGraphOperation };
   }
   if (provider === "dynamics" && (KNOWN_SCOPES.dynamics as readonly string[]).includes(operation)) {
-    return ok({ provider: "dynamics", operation: operation as DynamicsOperation });
+    return { provider: "dynamics", operation: operation as DynamicsOperation };
   }
-  return err({ kind: "policy-refusal", scope: name });
+  return undefined;
 };
 
 /**

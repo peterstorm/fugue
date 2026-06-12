@@ -342,6 +342,102 @@ describe("reservation transitions (admitWithReservation / release / learn)", () 
     expect(s3.maxObservedCall).toBe(55);
   });
 
+  // ── Regression: provider-sourced callTotal is sanitized (NaN/Infinity/negative → 0),
+  // and releaseReservation clamps at 0 — the SC-003 gate can never be poisoned
+  // or handed free headroom via a contract breach. ──────────────────────────
+
+  it("learnObservedCall sanitizes a NaN/Infinity/negative callTotal — maxObservedCall stays finite and never lowers", () => {
+    const learned = learnObservedCall(emptyReservation, 40);
+    for (const poison of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -123]) {
+      const after = learnObservedCall(learned, poison);
+      // The poison reads as 0 — it neither poisons the max nor lowers it.
+      expect(after.maxObservedCall).toBe(40);
+      expect(Number.isFinite(after.maxObservedCall)).toBe(true);
+    }
+    // From an empty state, a NaN callTotal reads as 0, not NaN.
+    const fromEmpty = learnObservedCall(emptyReservation, Number.NaN);
+    expect(fromEmpty.maxObservedCall).toBe(0);
+    expect(Number.isFinite(fromEmpty.maxObservedCall)).toBe(true);
+  });
+
+  it("after a NaN callTotal, the budgeted gate still refuses and admits correctly (SC-003 not disabled)", () => {
+    // Learn a real estimate, then feed the poison the provider contract breach
+    // would deliver. The gate's projected comparison must keep working.
+    let state = learnObservedCall(emptyReservation, 40);
+    state = learnObservedCall(state, Number.NaN);
+    expect(state.maxObservedCall).toBe(40); // not NaN — the estimate survives
+
+    // Refusal path: settled 70 + reserved 40 projects past budget 100.
+    const reserving = admitWithReservation(meterAt(10), runA, state, 100);
+    expect(reserving.kind).toBe("admit");
+    if (reserving.kind !== "admit") return;
+    expect(reserving.state.reservedInFlight).toBe(40);
+    const refused = admitWithReservation(meterAt(70), runA, reserving.state, 100);
+    expect(refused.kind).toBe("refuse"); // NaN would have read `projected >= budget` as false forever
+    if (refused.kind === "refuse") {
+      expect(refused.cumulative).toBe(70);
+      expect(refused.reservedInFlight).toBe(40);
+      expect(refused.budget).toBe(100);
+    }
+
+    // Admit path still works too: well under budget admits and reserves 40.
+    const admitted = admitWithReservation(meterAt(10), runA, state, 1000);
+    expect(admitted.kind).toBe("admit");
+    if (admitted.kind === "admit") expect(admitted.reserved).toBe(40);
+  });
+
+  it("releaseReservation clamps at 0 — a double release never drives reservedInFlight negative", () => {
+    const learned = learnObservedCall(emptyReservation, 40);
+    const d = admitWithReservation(meterAt(0), runA, learned, 1000);
+    expect(d.kind).toBe("admit");
+    if (d.kind !== "admit") return;
+    const once = releaseReservation(d.state, d.reserved);
+    expect(once.reservedInFlight).toBe(0);
+    // Contract breach: release the same reservation again.
+    const twice = releaseReservation(once, d.reserved);
+    expect(twice.reservedInFlight).toBe(0); // clamped — no free budget headroom
+    // And the negative state can never grant an over-budget admit it shouldn't:
+    // settled 999 >= budget 1000 - anything reserved must still refuse at 1000.
+    const gate = admitWithReservation(meterAt(1000), runA, twice, 1000);
+    expect(gate.kind).toBe("refuse");
+  });
+
+  it("property: reservedInFlight never goes below 0 under arbitrary interleaved release/learn sequences", () => {
+    const weirdAmount = fc.oneof(
+      fc.integer({ min: -1000, max: 1000 }),
+      fc.constant(Number.NaN),
+      fc.constant(Number.POSITIVE_INFINITY),
+    );
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.oneof(
+            fc.record({ op: fc.constant("admit" as const) }),
+            fc.record({ op: fc.constant("release" as const), amount: fc.nat({ max: 500 }) }),
+            fc.record({ op: fc.constant("learn" as const), amount: weirdAmount }),
+          ),
+          { maxLength: 50 },
+        ),
+        (ops) => {
+          let state = emptyReservation;
+          for (const o of ops) {
+            if (o.op === "admit") {
+              const d = admitWithReservation(emptyMeter(), runA, state, undefined);
+              if (d.kind !== "admit") throw new Error("unbudgeted admit refused");
+              state = d.state;
+            } else if (o.op === "release") {
+              state = releaseReservation(state, o.amount);
+            } else {
+              state = learnObservedCall(state, o.amount);
+            }
+            expect(state.reservedInFlight).toBeGreaterThanOrEqual(0);
+            expect(Number.isFinite(state.maxObservedCall)).toBe(true);
+          }
+        },
+      ),
+    );
+  });
+
   it("property: interleaved admit/release sequences never strand reservation (balanced ops return to zero)", () => {
     fc.assert(
       fc.property(fc.array(fc.nat({ max: 500 }), { maxLength: 30 }), (callSizes) => {

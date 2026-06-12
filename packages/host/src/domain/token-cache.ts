@@ -36,6 +36,17 @@
 const KEY_DELIMITER = "";
 
 /**
+ * Join identity/key parts into one composite key, injectively. This is the ONLY
+ * place the delimiter (and its injectivity argument) lives: every caller
+ * composing a security-relevant identity — `cacheKey` below, the broker's
+ * `(sub, agentClientId)` dedup identity — goes through here, so the "delimiter
+ * never appears in key material" invariant has a single owner. Injective for
+ * delimiter-free parts: part counts and boundaries are unambiguous, so distinct
+ * part lists never produce the same composite.
+ */
+export const compositeKey = (...parts: readonly string[]): string => parts.join(KEY_DELIMITER);
+
+/**
  * Deterministic composite cache key for one (identity, audience, scope) triple.
  *
  * The triple is exactly the SC-008 mint-deduplication unit: two invocations
@@ -45,7 +56,7 @@ const KEY_DELIMITER = "";
  * triples never produce the same key.
  */
 export const cacheKey = (identity: string, audience: string, scope: string): string =>
-  `${identity}${KEY_DELIMITER}${audience}${KEY_DELIMITER}${scope}`;
+  compositeKey(identity, audience, scope);
 
 /**
  * A minted token together with its absolute expiry. `expiresAt` is an absolute

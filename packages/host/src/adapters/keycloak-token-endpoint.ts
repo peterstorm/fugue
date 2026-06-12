@@ -49,6 +49,19 @@ export interface ClientCredentialsRequest {
 /**
  * Inputs for a Standard Token Exchange V2 — the user-initiated authority path.
  * The user's `sub` is preserved on the exchanged token; `azp` becomes the agent.
+ *
+ * KNOWN GAP (deliberate, decided — see ADR-0058 Amendment 2026-06-12): this
+ * request carries only `userSub`, but a REAL Token Exchange V2 (RFC 8693 /
+ * Keycloak Standard Token Exchange) must present the user's actual verified
+ * JWT as the `subject_token` proof — and no type in the current chain carries
+ * it (the auth middleware verifies the inbound JWT and keeps only `sub`/`azp`).
+ * When the JWKS wave wires the live exchange, the subject token threads in
+ * HOST-SIDE (a branded ref on the run context, injected into the broker deps);
+ * the framework's `InvocationOrigin` stays string-only. The live adapter MUST
+ * NOT be implemented as a proof-less impersonation-style grant ("mint a token
+ * claiming this sub") — that would silently discard the exact sub-preserving
+ * proof this port's contract documents. Currently fail-closed unwired, so the
+ * gap is unreachable.
  */
 export interface ExchangeV2Request {
   /** The end user's subject (`origin.sub`) — MUST be preserved on the exchanged token. */

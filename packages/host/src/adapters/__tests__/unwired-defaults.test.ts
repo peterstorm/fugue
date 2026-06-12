@@ -22,8 +22,8 @@ import { parseScope, type DownstreamScope } from "../../domain/capability-scope.
 
 const mailScope = (): DownstreamScope => {
   const r = parseScope("msgraph:mail.send");
-  if (!r.ok) throw new Error("parse failed");
-  return r.value;
+  if (r === undefined) throw new Error("parse failed");
+  return r;
 };
 
 describe("unwired-token-endpoint — every method fails closed with a hop-tagged infra-unreachable", () => {

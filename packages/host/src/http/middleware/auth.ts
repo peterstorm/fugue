@@ -7,8 +7,10 @@
  *    AND is JWT-shaped, with a verifier configured. Signature verified via the
  *    INJECTED JWKS verifier, then pure claim validation (iss=realm,
  *    aud=fugue-host, exp>now). On success the identity is
- *    `{ kind: "user", sub, azp }` (FR-W3-006/007). FAIL CLOSED — never falls
- *    through to the team path on failure.
+ *    `{ kind: "user", sub, azp, canRunDag }` (FR-W3-006/007) — `canRunDag`
+ *    carries the wiring site's REQUIRED `authorizeUserRun` policy
+ *    (`RealmJwtDeps`), the inbound run-gate decision for this user. FAIL
+ *    CLOSED — never falls through to the team path on failure.
  * 3. Team token (`fug_`-shaped) — hash → Redis lookup → scoped access.
  *
  * DISCRIMINATING JWT vs OPAQUE (fail-safe ordering):

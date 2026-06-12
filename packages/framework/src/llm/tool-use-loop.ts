@@ -229,8 +229,30 @@ export const toolUseLoop = async <O>(
       return parseFinalAnswer(t.textContent, config, totalTokensIn, totalTokensOut, lastThinking);
     }
 
-    // Dispatch tools and feed results back to provider
-    const results = await dispatchToolCallsWithSpans(t.toolCalls, config.tools, ctx, { model: config.model });
+    // Dispatch tools and feed results back to provider. Fenced: a throw here
+    // (e.g. `asToolContext` rejecting a node that omitted `requires: ["llm"]`)
+    // is an authoring error — deterministic, so non-retriable — and the tokens
+    // burned producing these tool calls must still ride the typed error channel
+    // (FR-W0-001); an escaping throw would surface as a usage-less retriable
+    // node-crash upstream.
+    let results: Awaited<ReturnType<typeof dispatchToolCallsWithSpans>>;
+    try {
+      results = await dispatchToolCallsWithSpans(t.toolCalls, config.tools, ctx, { model: config.model });
+    } catch (e) {
+      return err(
+        withAccumulatedUsage(
+          {
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: config.nodeId,
+            message: `tool dispatch threw: ${e instanceof Error ? e.message : String(e)}`,
+          },
+          totalTokensIn,
+          totalTokensOut,
+          corr,
+        ),
+      );
+    }
     provider.appendToolResults(results);
   }
 

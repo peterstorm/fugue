@@ -251,14 +251,29 @@ export const admitWithReservation = (
   };
 };
 
-/** Free exactly the amount a matching `admit` reserved (call once, on settle). */
+/**
+ * Free exactly the amount a matching `admit` reserved (call once, on settle).
+ * Clamped at 0 — `reservedInFlight` is a sum of admitted reservations, so a
+ * negative value is only reachable via a contract breach (double release);
+ * clamping keeps the projection gate sane rather than letting a negative
+ * reservation grant free budget headroom.
+ */
 export const releaseReservation = (state: ReservationState, reserved: number): ReservationState => ({
   ...state,
-  reservedInFlight: state.reservedInFlight - reserved,
+  reservedInFlight: Math.max(0, state.reservedInFlight - reserved),
 });
 
-/** Learn the per-call estimate from a settled call's total (monotone max). */
+/**
+ * Learn the per-call estimate from a settled call's total (monotone max).
+ *
+ * `callTotal` is provider-sourced (the shell feeds it the RAW response's
+ * `tokensIn + tokensOut`), so it gets the same sanitization as `accumulate`'s
+ * deltas: one NaN figure would otherwise make `maxObservedCall` — and every
+ * subsequent `reservedInFlight` sum — permanently NaN, silently disabling the
+ * SC-003 reservation gate (`projected >= budget` reads false forever: the
+ * exact fail-open poison `sanitizeDeltaComponent` exists to prevent).
+ */
 export const learnObservedCall = (state: ReservationState, callTotal: number): ReservationState => ({
   ...state,
-  maxObservedCall: Math.max(state.maxObservedCall, callTotal),
+  maxObservedCall: Math.max(state.maxObservedCall, sanitizeDeltaComponent(callTotal)),
 });

@@ -223,9 +223,10 @@ export type FrameworkError =
        * OPTIONAL because a refusal has two possible origins:
        *   - PARSE-TIME (an unrecognised scope name, no client known yet): the
        *     field is ABSENT. NOTE: this origin is currently unrealised in
-       *     production — no `parseScope` caller emits the refusal: the broker
-       *     treats a parse failure as "not a downstream scope" (deferring to
-       *     run-start `missing-capability`), and the boot-time
+       *     production — the host's scope parser models "not a downstream
+       *     scope" as first-class absence (`DownstreamScope | undefined`), not
+       *     a refusal: an unknown name in a node's `requires` defers to
+       *     run-start `missing-capability`, and the boot-time
        *     `AGENT_CLIENT_SCOPES` policy validator rejects a typo'd entry at
        *     startup instead. So all emitted refusals today are
        *     assignment-time. The variant keeps the absent-field shape for

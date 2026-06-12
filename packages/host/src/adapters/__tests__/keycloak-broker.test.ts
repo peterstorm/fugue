@@ -220,7 +220,8 @@ describe("keycloak-broker — fail closed before any Entra call (SC-006/FR-W3-00
     });
 
     // Scope-shaped (`<provider>:<operation>`) but not a name the broker
-    // `provides()`. mintFor skips EXACTLY the `!parseScope(...).ok` set, so the
+    // `provides()`. mintFor skips EXACTLY the `parseScope(...) === undefined`
+    // set, so the
     // two predicates agree: the broker mints precisely what `provides()` claims,
     // and an unparseable name is run-start-validated against the base context
     // (`missing-capability` there if unwired) — never policy-refused at dispatch.
@@ -931,18 +932,18 @@ describe("keycloak-broker — pure scope helpers", () => {
   it("scopeName round-trips parseScope for every recognised scope", () => {
     for (const name of ["msgraph:mail.send", "msgraph:sites.read", "dynamics:read"]) {
       const parsed = parseScope(name);
-      expect(parsed.ok).toBe(true);
-      if (!parsed.ok) continue;
-      expect(scopeName(parsed.value)).toBe(name);
+      expect(parsed).toBeDefined();
+      if (parsed === undefined) continue;
+      expect(scopeName(parsed)).toBe(name);
     }
   });
 
   it("audienceForScope maps each provider to its downstream resource", () => {
     const mail = parseScope("msgraph:mail.send");
     const dyn = parseScope("dynamics:read");
-    if (!mail.ok || !dyn.ok) throw new Error("parse failed");
-    expect(audienceForScope(mail.value)).toBe("https://graph.microsoft.com");
-    expect(audienceForScope(dyn.value)).toBe("https://dynamics.microsoft.com");
+    if (mail === undefined || dyn === undefined) throw new Error("parse failed");
+    expect(audienceForScope(mail)).toBe("https://graph.microsoft.com");
+    expect(audienceForScope(dyn)).toBe("https://dynamics.microsoft.com");
   });
 });
 

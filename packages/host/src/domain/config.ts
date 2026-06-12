@@ -118,7 +118,7 @@ export const HostConfigSchema = z.object({
       const badScopes: string[] = [];
       for (const [clientId, scopes] of Object.entries(shape.data)) {
         for (const scope of scopes) {
-          if (!parseScope(scope).ok) badScopes.push(`${clientId} → "${scope}"`);
+          if (parseScope(scope) === undefined) badScopes.push(`${clientId} → "${scope}"`);
         }
       }
       if (badScopes.length > 0) {

@@ -267,6 +267,33 @@ describe("auth middleware", () => {
       expect(res.status).toBe(401);
     });
 
+    it("uses the wall clock in SECONDS when no `now` is injected — a long-expired JWT is rejected, a future-exp one accepted (seconds-vs-ms pin)", async () => {
+      // No injected `now`: the default branch is Math.floor(Date.now() / 1000).
+      // An exp far in the past (UNIX SECONDS) must read as expired → 401.
+      const expiredVerify: VerifyRealmJwt = async () =>
+        ok(markSignatureVerified({ ...validClaims, exp: 1_000_000 })); // 1970-01-12, seconds
+      const { now: _dropped, ...withoutNow } = jwtDeps(expiredVerify);
+      void _dropped;
+      const expiredRes = await createApp(withoutNow).request("/protected", {
+        headers: { Authorization: `Bearer ${FAKE_JWT}` },
+      });
+      expect(expiredRes.status).toBe(401);
+
+      // The discriminating half: an exp one hour in the FUTURE (in seconds) must
+      // be accepted. If the default clock were milliseconds (Date.now() without
+      // /1000), `now` would dwarf any seconds-denominated exp and reject this too.
+      const futureExp = Math.floor(Date.now() / 1000) + 3600;
+      const validVerify: VerifyRealmJwt = async () =>
+        ok(markSignatureVerified({ ...validClaims, exp: futureExp }));
+      const { now: _dropped2, ...withoutNow2 } = jwtDeps(validVerify);
+      void _dropped2;
+      const okRes = await createApp(withoutNow2).request("/protected", {
+        headers: { Authorization: `Bearer ${FAKE_JWT}` },
+      });
+      expect(okRes.status).toBe(200);
+      expect((await okRes.json()).identity.kind).toBe("user");
+    });
+
     it("rejects a JWT with an invalid signature (verifier 'invalid') with 401", async () => {
       const verify: VerifyRealmJwt = async () =>
         err({ kind: "invalid", reason: "signature mismatch" });

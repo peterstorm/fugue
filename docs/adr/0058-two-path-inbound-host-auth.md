@@ -60,15 +60,23 @@ Concretely, four seams change:
    export type AuthIdentity =
      | { readonly kind: "admin" }
      | { readonly kind: "team"; readonly team: string; readonly label: string }
-     | { readonly kind: "user"; readonly sub: string; readonly azp: string };
+     | {
+         readonly kind: "user";
+         readonly sub: string;
+         readonly azp: string;
+         readonly canRunDag: (dagTeam: string) => boolean;
+       };
    ```
 
    `sub` is the authenticated user; `azp` is the OIDC client that minted the
    token (the fugue-platform frontend SSO client — *not* the agent client; see
-   item 3). `canAccessDag` is exhaustive over the
-   union — a `user` clears the inbound run gate (it is deliberately *not*
-   admin-equivalent); real downstream authorization is enforced per-hop by the
-   broker, not here.
+   item 3); `canRunDag` carries the user-run authorization decision made at the
+   verifier wiring site (the required `authorizeUserRun` member of
+   `RealmJwtDeps`, item 2). `canAccessDag` is exhaustive over the union — the
+   `user` branch delegates to `canRunDag(dagTeam)`, which may refuse (the run
+   handler 403s a refused user; a `user` is deliberately *not*
+   admin-equivalent); downstream authorization is additionally enforced per-hop
+   by the broker.
 
 2. **Two-path resolution in the middleware**
    (`packages/host/src/http/middleware/auth.ts`), in fail-safe order:
@@ -101,8 +109,9 @@ Concretely, four seams change:
    ready to construct the group when the verifier lands.
 
 3. **`sub` threads into `Invocation.origin`** via the pure, exported
-   `invocationOriginForIdentity` (`node-context-factory.ts`), exhaustive over
-   `AuthIdentity`:
+   `invocationOriginForIdentity` (`domain/run-context.ts` — the domain-owned
+   contract; `node-context-factory.ts` keeps a backward-compat re-export),
+   exhaustive over `AuthIdentity`:
    - `user`  → `{ kind: "user", sub, agentClientId: dagId }`. `agentClientId`
      is the AGENT the user acts THROUGH — the DAG's agent-type Keycloak client
      (the same `dagId` placeholder the agent path uses, until the
@@ -162,11 +171,13 @@ but unverifiable JWT is rejected, not downgraded.
   is inert.
 - Token-shape discrimination (admin → JWT-shape → `fug_`) is ordering-sensitive;
   the fail-safe ordering is load-bearing and must be preserved by future edits.
-- A `user` identity currently clears the inbound run gate without team scoping
-  (`canAccessDag` returns `true` for `user`); meaningful authorization for users
-  lives downstream in the broker's per-hop policy, so an inbound run-gate
-  tightening (realm/role check) is deferred to a later wave — accepted as the
-  minimal correct behaviour for threading-only delivery.
+- The inbound run-gate decision for a `user` is delegated to the wiring site:
+  `canAccessDag` calls the identity's carried `canRunDag(dagTeam)` policy, and
+  constructing `RealmJwtDeps` structurally forces an `authorizeUserRun` choice
+  (no policy, no JWT path). The mechanism is therefore in place; what remains
+  deferred to the JWKS wave is the live verifier and with it the *concrete*
+  policy choice (e.g. a realm/role check vs. allow-all) — the host cannot ship
+  a default because the right policy is a deployment decision.
 - Delegation is modelled as `sub` + `azp` + audit traces rather than an in-token
   `act` claim (see Rejected Alternatives), so the chain-of-custody is
   reconstructed from correlated audit records, not asserted inside one token.
@@ -206,3 +217,40 @@ but unverifiable JWT is rejected, not downgraded.
    - Cons: on the Keycloak roadmap, not available for v1. Rejected as out of
      scope; the `sub` + `azp` + correlated audit traces are the v1 substitute
      that delivers the same end-to-end attribution today.
+
+## Amendment — subject-token threading for the live V2 exchange (2026-06-12)
+
+**Status:** Accepted. Decides a gap the original decision left implicit.
+
+The decision above threads the user's `sub` into `InvocationOrigin`, and the
+`exchangeV2` port (`adapters/keycloak-token-endpoint.ts`) carries only
+`userSub: string`. But a *real* Standard Token Exchange (RFC 8693 / Keycloak
+Token Exchange V2) requires presenting the user's actual verified JWT as the
+`subject_token` proof — and no value in the current chain carries it: the auth
+middleware verifies the inbound bearer and then deliberately discards it,
+keeping only `sub`/`azp` on `AuthIdentity`. Today this is masked because the
+endpoint is the fail-closed unwired default; the live exchange cannot reach the
+gap.
+
+**Decision for the JWKS wave** (recorded now so it is not re-litigated, or
+"solved" with impersonation, under delivery pressure):
+
+- The verified subject token threads **host-side only**: the middleware retains
+  the raw verified bearer as a branded, opaque reference (e.g.
+  `VerifiedSubjectToken` — branded so it stays out of logs and audit payloads
+  by convention, mirroring how `canRunDag` carries a capability rather than
+  data) carried on the host's run context next to the identity, and injected
+  into the broker deps at the wiring site.
+- The framework seam (`InvocationOrigin`) stays exactly as shipped —
+  provider-agnostic strings, no bearer credential. Widening it would leak a
+  host auth concern through the framework port (FR-W2-004 tension) and is
+  rejected.
+- `ExchangeV2Request` gains the subject-token field in the same change that
+  wires the live endpoint; the unwired default keeps failing closed until then.
+- An impersonation-style fallback (minting a token that *claims* `sub` without
+  presenting the user's token as proof) is explicitly rejected: it would
+  silently weaken the sub-preserving invariant this ADR documents while leaving
+  every test green.
+
+Until that wave lands, the gap is documented at the port
+(`ExchangeV2Request` JSDoc) and is unreachable by construction.

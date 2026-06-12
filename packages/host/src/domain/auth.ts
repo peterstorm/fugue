@@ -45,10 +45,15 @@ export type TokenHash = string & { readonly __brand: "TokenHash" };
  * all keyed on. Branded with a SINGLE constructor (`agentClientIdForDag`)
  * because the value is currently a PLACEHOLDER: until the dagId→Keycloak-client
  * mapping lands (ADR-0056), the DAG id stands in for the agent client id at
- * every one of those sites. Funnelling construction through one function makes
- * that migration compiler-checked — swap the constructor body for the
- * config-mapped lookup and every consumer is already correct — instead of a
- * grep across a security-relevant correlation chain.
+ * every one of those sites. The migration safety this buys is CONVENTION, not
+ * compiler proof: the brand has no consuming positions yet (the framework seam
+ * `InvocationOrigin.agentClientId` is plain `string`, as are `AssignedScopes`
+ * keys and the `AGENT_CLIENT_SCOPES` config keys — which must migrate in the
+ * same change as this constructor's body). What the single construction site
+ * guarantees is one place to swap the mapping plus one grep target; making the
+ * brand load-bearing host-side (e.g. `AssignedScopes` demanding it, re-branding
+ * at the framework boundary) is the follow-up that would turn it into a
+ * compiler check.
  */
 export type AgentClientId = string & { readonly __brand: "AgentClientId" };
 

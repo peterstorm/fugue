@@ -21,23 +21,15 @@ import {
 
 describe("parseScope — parse-don't-validate", () => {
   it("round-trips msgraph:mail.send into a typed scope", () => {
-    const r = parseScope("msgraph:mail.send");
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.value).toEqual({ provider: "msgraph", operation: "mail.send" });
-    }
+    expect(parseScope("msgraph:mail.send")).toEqual({ provider: "msgraph", operation: "mail.send" });
   });
 
   it("round-trips msgraph:sites.read", () => {
-    const r = parseScope("msgraph:sites.read");
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value).toEqual({ provider: "msgraph", operation: "sites.read" });
+    expect(parseScope("msgraph:sites.read")).toEqual({ provider: "msgraph", operation: "sites.read" });
   });
 
   it("round-trips dynamics:read", () => {
-    const r = parseScope("dynamics:read");
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value).toEqual({ provider: "dynamics", operation: "read" });
+    expect(parseScope("dynamics:read")).toEqual({ provider: "dynamics", operation: "read" });
   });
 
   it.each([
@@ -49,23 +41,16 @@ describe("parseScope — parse-don't-validate", () => {
     ["dynamics:write", "operation not granted on this provider"],
     ["unknownprovider:read", "unknown provider"],
     ["msgraph:mail.send:extra", "extra segment — operation 'mail.send:extra' unknown"],
-  ])("rejects malformed/unknown name %p (%s) as a policy-refusal", (name) => {
-    const r = parseScope(name);
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      // An unparseable scope is a config/authorization defect — fail-closed.
-      expect(r.error.kind).toBe("policy-refusal");
-      if (r.error.kind === "policy-refusal") {
-        expect(r.error.scope).toBe(name);
-      }
-    }
+  ])("reads malformed/unknown name %p (%s) as first-class absence", (name) => {
+    // "Not a downstream scope" is classification, not failure (FR-X-003 shape):
+    // plain capability names flow through this parser routinely.
+    expect(parseScope(name)).toBeUndefined();
   });
 
   it("parse is the ONLY constructor — every produced scope is recognised", () => {
     const names = ["msgraph:mail.send", "msgraph:sites.read", "dynamics:read"];
     for (const n of names) {
-      const r = parseScope(n);
-      expect(r.ok).toBe(true);
+      expect(parseScope(n)).toBeDefined();
     }
   });
 });
@@ -84,8 +69,8 @@ describe("handleKindForScope — exhaustive scope→handle mapping", () => {
 
   it("composes with parseScope end-to-end", () => {
     const r = parseScope("msgraph:mail.send");
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(handleKindForScope(r.value)).toBe("mail.send");
+    expect(r).toBeDefined();
+    if (r !== undefined) expect(handleKindForScope(r)).toBe("mail.send");
   });
 });
 

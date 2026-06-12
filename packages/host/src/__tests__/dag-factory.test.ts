@@ -115,6 +115,24 @@ describe("loadResultToRegisteredDag", () => {
     expect(reg.config.checkpointTtlMs).toBe(2_000);
   });
 
+  test("llmBudgetTokens from registration config is carried onto RegisteredDag.config untouched (FR-W1-001)", () => {
+    const reg = loadResultToRegisteredDag(
+      makeLoadResult("d", "/repo/dags/t/d/dag.ts", { llmBudgetTokens: 50_000 }),
+      SHA,
+      NOW,
+      defaults,
+    );
+    expect(reg.config.llmBudgetTokens).toBe(50_000); // no host default applied, no clamp
+  });
+
+  test("absent llmBudgetTokens stays absent — no key materialised, no host default (FR-W1-006)", () => {
+    const reg = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/t/d/dag.ts"), SHA, NOW, defaults);
+    expect(reg.config.llmBudgetTokens).toBeUndefined();
+    // The key itself is absent, not present-with-undefined — "no budget" is
+    // unambiguously the absence the metered-llm decorator reads as no enforcement.
+    expect(Object.keys(reg.config)).not.toContain("llmBudgetTokens");
+  });
+
   test("circuitBreaker override is passed through only when declared", () => {
     const without = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/t/d/dag.ts"), SHA, NOW, defaults);
     expect(without.config.circuitBreaker).toBeUndefined();

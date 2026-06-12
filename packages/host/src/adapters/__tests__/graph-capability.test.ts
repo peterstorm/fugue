@@ -146,6 +146,26 @@ describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)"
     if (!r.ok) throw new Error("expected ok");
     expect(r.value.rows.length).toBe(2);
     expect(requests[0]?.bearer).toBe("app-only-xyz");
+    // No filter supplied → no query string at all (not an empty `?$filter=`).
+    expect(requests[0]?.url).not.toContain("?");
+  });
+
+  it("dynamics read WITH a filter encodes it as the $filter query parameter (URL-encoded, no raw OData chars)", async () => {
+    const { http, requests } = recordingHttp({ status: 200, json: { value: [{ id: 1 }] } });
+    const handle = buildDynamicsReadHandle("app-only-xyz", http);
+    const filter = "name eq 'Contoso & Sons' and revenue gt 1000";
+    const r = await handle.read({ entity: "accounts", filter });
+    expect(r.ok).toBe(true);
+    expect(requests.length).toBe(1);
+    const url = requests[0]?.url ?? "";
+    // The filter rides as $filter=, percent-encoded exactly once.
+    expect(url).toBe(
+      `https://dynamics.microsoft.com/api/data/v9.2/accounts?$filter=${encodeURIComponent(filter)}`,
+    );
+    expect(url).toContain("?$filter=name%20eq%20'Contoso%20%26%20Sons'%20and%20revenue%20gt%201000");
+    // Raw spaces / ampersands never reach the wire un-encoded.
+    expect(url).not.toContain(" ");
+    expect(url).not.toContain("& ");
   });
 });
 
@@ -172,6 +192,33 @@ describe("graph-capability — error mapping (FR-X-002)", () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
+  });
+
+  it("a Graph 429 → infra-unreachable NAMING the throttle — distinct message from the generic 5xx", async () => {
+    const { http } = recordingHttp({ status: 429, json: {} });
+    const handle = buildSitesReadHandle("tok", http);
+    const r = await handle.readSite("site-1");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.operation).toBe("downstream");
+      expect(r.error.hop).toBe("graph");
+      expect(r.error.message).toBe("Graph throttled (HTTP 429)");
+    }
+  });
+
+  it("a generic Graph 500 carries the unexpected-status message, NOT the throttle wording", async () => {
+    const { http } = recordingHttp({ status: 500, json: {} });
+    const handle = buildSitesReadHandle("tok", http);
+    const r = await handle.readSite("site-1");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.message).toBe("Graph unreachable or unexpected status (HTTP 500)");
+      expect(r.error.message).not.toContain("throttled");
+    }
   });
 
   it("a transport rejection → infra-unreachable", async () => {
@@ -258,11 +305,11 @@ describe("graph-capability — buildGraphHandle selects the handle per parsed sc
       ["dynamics:read", "read"],
     ] as const) {
       const parsed = parseScope(name);
-      if (!parsed.ok) throw new Error(`parse failed for ${name}`);
-      const handle = buildGraphHandle(parsed.value, "tok", http) as unknown as Record<string, unknown>;
+      if (parsed === undefined) throw new Error(`parse failed for ${name}`);
+      const handle = buildGraphHandle(parsed, "tok", http) as unknown as Record<string, unknown>;
       expect(Object.keys(handle)).toEqual([op]);
       // The dispatch is exhaustive — exercise the value to keep ts-pattern honest.
-      match(parsed.value)
+      match(parsed)
         .with({ provider: "msgraph", operation: "mail.send" }, () => expect(op).toBe("sendMail"))
         .with({ provider: "msgraph", operation: "sites.read" }, () => expect(op).toBe("readSite"))
         .with({ provider: "dynamics", operation: "read" }, () => expect(op).toBe("read"))

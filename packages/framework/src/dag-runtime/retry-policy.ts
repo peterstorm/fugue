@@ -65,6 +65,13 @@ export const handleNodeFailed = (
   //     retry-exhausted — hiding the 403-class signal the host classifier needs.
   //   - llm-budget-exceeded: deterministic within a run — the cumulative counter
   //     only grows, so a retry can never succeed.
+  //   - missing-capability: covers the dispatch-time claims-without-delivery
+  //     emission (run-node: broker `provides()` a capability but omits it from
+  //     its `ok()` record). A broker contract violation is deterministic — the
+  //     same `mintFor` produces the same undelivered record every attempt — and
+  //     each retry re-fires the mint (duplicate audit records, real egress once
+  //     the cache window lapses). The run-start variant aborts before the retry
+  //     machinery exists, so it never reaches this branch.
   // Transition straight to terminal failed with the original error preserved.
   if (
     error.kind === "predicate-malformed" ||
@@ -74,6 +81,7 @@ export const handleNodeFailed = (
     error.kind === "policy-refusal" ||
     error.kind === "downstream-denied" ||
     error.kind === "llm-budget-exceeded" ||
+    error.kind === "missing-capability" ||
     (error.kind === "node-crash" && error.retriability === "non-retriable")
   ) {
     return {
