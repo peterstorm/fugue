@@ -16,8 +16,13 @@ import type {
   Capability,
   ValidatedNodeContext,
 } from "../types/node.js";
-import { brandAsValidatedNodeContext, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
+import {
+  brandAsValidatedNodeContext,
+  BUILTIN_CAPABILITY_KEYS,
+  RESERVED_NON_CAPABILITY_KEYS,
+} from "../types/node.js";
 import type { FrameworkError, MissingCapability } from "../types/errors.js";
+import type { CapabilityBroker } from "../types/capability-broker.js";
 import { type Result, ok, err } from "../types/result.js";
 
 /**
@@ -33,10 +38,22 @@ import { type Result, ok, err } from "../types/result.js";
  *
  * Uses dynamic property lookup (`ctx[cap]`) to support extensible capabilities
  * registered via `CapabilityRegistry` module augmentation (ADR-0051).
+ *
+ * `broker` — when a minting broker is wired (the host's per-invocation
+ * realm-backed broker), a capability the broker `provides()` is resolved at
+ * NODE DISPATCH,
+ * not on the boot-scoped base context. Such a capability is therefore NOT
+ * required to be present on `ctx` here: the run-start check skips it (it would
+ * otherwise spuriously fail as `missing-capability`, since the static base
+ * context legitimately lacks the minted scope handles). Capabilities the broker
+ * does not provide — the static `http`/`db` clients, `llm`, etc. — are still
+ * validated against `ctx` exactly as before. Omitted (pass-through / no broker)
+ * ⇒ every required capability is validated against `ctx`, the unchanged path.
  */
 export const validateCapabilities = (
   dag: DagDef,
   ctx: BaseNodeContext,
+  broker?: CapabilityBroker,
 ): Result<ValidatedNodeContext, FrameworkError> => {
   const missing: MissingCapability[] = [];
   // Single widening cast: custom capabilities live as dynamic properties on
@@ -53,9 +70,41 @@ export const validateCapabilities = (
   // rather than the capability client. Treat such a requirement as missing —
   // fail closed rather than pass validation on a mistyped value.
   const reservedNonCapabilityKeys: ReadonlySet<string> = new Set(RESERVED_NON_CAPABILITY_KEYS);
+  const builtinCapabilityKeys: ReadonlySet<string> = new Set(BUILTIN_CAPABILITY_KEYS);
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
-      if (reservedNonCapabilityKeys.has(cap) || dynamicCtx[cap] == null) {
+      // A capability the broker mints per-invocation is satisfied at dispatch,
+      // not on the boot-scoped base context — skip it here (checking `ctx` would
+      // fail it as missing). Reserved-key collisions are still rejected even if
+      // a broker claims them: the runtime can never wire such a name as a field.
+      if (reservedNonCapabilityKeys.has(cap)) {
+        missing.push({ nodeId: node.id, capability: cap });
+        continue;
+      }
+      if (broker?.provides?.(cap)) {
+        // SEAM CONTRACT with `mergeScopedCapabilities`: every capability this
+        // skip exempts MUST survive the dispatch-time merge, or validation
+        // passes for a handle the node never receives. The merge refuses to
+        // overlay BUILT-IN capability keys (`llm`/`http`/…, part of its
+        // RESERVED_CONTEXT_KEYS clobber guard), so a broker claiming one is a
+        // WIRING ERROR today — its minted handle would be silently dropped and
+        // the node would run against the static client while the system
+        // believes the broker governs it (a silent authority widening). Fail
+        // the run loudly instead. When broker-minted built-ins land
+        // (FR-W2-009), the merge's guard must change in the same commit as
+        // this one.
+        if (builtinCapabilityKeys.has(cap)) {
+          return err({
+            kind: "validation" as const,
+            nodeId: node.id,
+            message:
+              `broker claims provides("${cap}") but "${cap}" is a built-in capability key the ` +
+              `dispatch-time merge never overlays — wire it statically or extend the merge first`,
+          });
+        }
+        continue;
+      }
+      if (dynamicCtx[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }
     }

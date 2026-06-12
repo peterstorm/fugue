@@ -16,6 +16,7 @@ import { z } from "zod";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
+import { parseScope } from "./capability-scope.js";
 
 // ---------------------------------------------------------------------------
 // Host Config — parsed from environment variables
@@ -62,6 +63,73 @@ export const HostConfigSchema = z.object({
   AZURE_OPENAI_API_VERSION: z.string().default("2025-03-01-preview"),
   /** Admin bearer token for provisioning teams and full access (required) */
   ADMIN_TOKEN: z.string().min(16),
+  /**
+   * Issuer URL of the fugue-platform realm whose OIDC JWTs the host accepts as a
+   * first-class inbound mode (FR-W3-006). When unset, the JWT (`user`) path stays
+   * disabled and only admin/`fug_` tokens are accepted (fail closed).
+   *
+   * Setting it ALSO selects the live Keycloak capability broker at boot
+   * (`host.ts`) for per-node downstream-scope minting — currently its main
+   * observable effect, since the inbound JWT verifier is deliberately
+   * fail-closed-unwired pending the JWKS wave. Leaving it unset wires NO broker:
+   * runs use the boot-scoped static capability set unchanged (the
+   * zero-regression path).
+   */
+  REALM_JWT_ISSUER: z.string().optional(),
+  /** Audience the host must appear in within an accepted realm JWT (FR-W3-006). */
+  REALM_JWT_AUDIENCE: z.string().default("fugue-host"),
+  /**
+   * Keycloak realm policy: the scopes assigned to each agent client, as a JSON
+   * object mapping `agentClientId → ["<provider>:<operation>", …]`. This is the
+   * fail-closed gate the live broker consults BEFORE any Entra call (FR-W3-003):
+   * a scope absent from a client's list is refused with zero egress. A client
+   * with no entry has NO scopes (fail closed). Unset means an empty policy —
+   * every minting request fails closed — so the broker is inert until configured.
+   *
+   * Parsed/validated here (Zod) so a malformed policy fails at boot, never at
+   * runtime. The value is `Record<string, string[]>`; absent → `{}`.
+   *
+   * NOTE: until the dagId→Keycloak-client mapping lands, the broker is handed
+   * the DAG id as `agentClientId` (see `invocationOriginForIdentity`), so the
+   * keys here are DAG ids — not real Keycloak client ids.
+   */
+  AGENT_CLIENT_SCOPES: z
+    .string()
+    .optional()
+    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
+      if (raw === undefined || raw.trim() === "") return {};
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be valid JSON" });
+        return z.NEVER;
+      }
+      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
+      if (!shape.success) {
+        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be a JSON object of clientId → string[]" });
+        return z.NEVER;
+      }
+      // Validate every scope NAME, not just the JSON shape: a typo'd scope
+      // (`msgrpah:mail.send`) otherwise passes boot and then fail-closes EVERY
+      // mint for that client at runtime — contradicting the "fails at boot, never
+      // at runtime" contract. Reject unparseable scope names here so the defect
+      // surfaces at startup (review suggestion).
+      const badScopes: string[] = [];
+      for (const [clientId, scopes] of Object.entries(shape.data)) {
+        for (const scope of scopes) {
+          if (parseScope(scope) === undefined) badScopes.push(`${clientId} → "${scope}"`);
+        }
+      }
+      if (badScopes.length > 0) {
+        ctx.addIssue({
+          code: "custom",
+          message: `AGENT_CLIENT_SCOPES contains unrecognised scope name(s): ${badScopes.join(", ")} (expected "<provider>:<operation>", e.g. "msgraph:mail.send")`,
+        });
+        return z.NEVER;
+      }
+      return shape.data;
+    }),
   /** OpenTelemetry OTLP exporter endpoint */
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   /** MLflow tracking server URI */
@@ -133,6 +201,8 @@ export const FugueYamlSchema = z.object({
   cacheTtlMs: z.number().int().positive().optional(),
   /** Per-DAG checkpoint TTL override (FR-041) */
   checkpointTtlMs: z.number().int().positive().optional(),
+  /** Per-run LLM token budget (FR-W1-001) — enforced per runId by the metered-llm decorator. */
+  llmBudgetTokens: z.number().int().positive().optional(),
 });
 
 export type FugueYaml = z.infer<typeof FugueYamlSchema>;

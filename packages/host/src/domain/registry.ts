@@ -29,6 +29,13 @@ export interface ResolvedDagConfig {
   readonly maxConcurrency: number;
   readonly cacheTtlMs: number;
   readonly checkpointTtlMs: number;
+  /**
+   * Per-run LLM token budget (FR-W1-001). Present only when the DAG (or a merged
+   * fugue.yaml) declares `llmBudgetTokens`; absent means no budget enforcement
+   * (FR-W1-006). Threaded into the metered-llm decorator at NodeContext
+   * construction.
+   */
+  readonly llmBudgetTokens?: number;
   readonly circuitBreaker?: {
     readonly failureThreshold?: number;
     readonly resetTimeoutMs?: number;

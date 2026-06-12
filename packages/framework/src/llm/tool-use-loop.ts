@@ -15,8 +15,10 @@
 import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
-import type { FrameworkError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
+import type { FrameworkError, PartialTokenUsage } from "../types/errors.js";
+import { usageOfError } from "../types/errors.js";
+import { fwLogger } from "../logger.js";
+import type { NodeId, RunId, DagId } from "../types/ids.js";
 import type { LlmResponse, ToolDef } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { ensureToolNames } from "./tools.js";
@@ -82,6 +84,59 @@ const stripCodeFences = (text: string): string =>
   text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
 
 /**
+ * Attach the loop's accumulated cross-turn token totals onto a usage-carrying
+ * `FrameworkError`, so a mid-loop failure still attributes the tokens burned by
+ * already-completed turns (FR-W0-001). Errors that do not carry a `usage` field
+ * (e.g. `validation`) cannot hold the totals — rather than DROP them silently
+ * (a budget under-count, review suggestion), the accumulated figure is emitted as
+ * a structured `llm.usage-unattributed` warning so the burned tokens remain
+ * observable even though they can't ride the typed error channel. The warning
+ * carries the `nodeId`/`runId`/`dagId` correlation triple so the burned tokens
+ * stay JOINABLE to the run that burned them — without the ids, the figure is a
+ * number nobody can reconcile against a run's budget.
+ *
+ * When the underlying error already carries its own `usage` (the provider
+ * reported partial tokens for the in-flight turn that just failed — these have
+ * NOT yet been added to `priorIn`/`priorOut`), the two are summed. Otherwise
+ * the accumulated totals stand alone.
+ */
+const withAccumulatedUsage = (
+  e: FrameworkError,
+  priorIn: number,
+  priorOut: number,
+  corr: { readonly nodeId: NodeId; readonly runId: RunId; readonly dagId: DagId },
+): FrameworkError => {
+  const own = usageOfError(e);
+  // `usageOfError` returning a value is exactly the set of variants that carry
+  // a `usage` field — guard so we never stamp usage onto a variant without one.
+  if (e.kind !== "node-crash" && e.kind !== "transient" && e.kind !== "aborted") {
+    // This error kind has nowhere to carry usage. If real tokens were burned
+    // before it, surface them so a budget reconciler isn't silently under-counted.
+    if (priorIn > 0 || priorOut > 0) {
+      fwLogger().warn("llm.usage-unattributed", {
+        errorKind: e.kind,
+        tokensIn: priorIn,
+        tokensOut: priorOut,
+        nodeId: corr.nodeId,
+        runId: corr.runId,
+        dagId: corr.dagId,
+      });
+    }
+    return e;
+  }
+  // Nothing accumulated and the error carries no own usage: leave `usage`
+  // ABSENT. The errors.ts contract is "absent means the failure consumed no
+  // attributable tokens" — stamping `{0, 0}` here would make that state
+  // representable two ways.
+  if (own === undefined && priorIn === 0 && priorOut === 0) return e;
+  const usage: PartialTokenUsage = {
+    tokensIn: priorIn + (own?.tokensIn ?? 0),
+    tokensOut: priorOut + (own?.tokensOut ?? 0),
+  };
+  return { ...e, usage };
+};
+
+/**
  * Run the tool-use loop until the model emits a final answer matching `schema`,
  * or a terminal condition (iteration limit, deadline, abort) is reached.
  *
@@ -114,24 +169,40 @@ export const toolUseLoop = async <O>(
   let lastThinking: string | undefined;
   const nowFn = config.now ?? Date.now;
   const deadline = config.deadlineMs ? nowFn() + config.deadlineMs : Infinity;
+  // Correlation triple for usage attribution: stamped onto every error and onto
+  // the `llm.usage-unattributed` warning, so burned tokens are joinable to a run.
+  const corr = { nodeId: config.nodeId, runId: ctx.runId, dagId: ctx.dagId } as const;
 
   for (let turn = 0; turn < config.maxIterations; turn++) {
     // Deadline check
     if (nowFn() >= deadline) {
-      return err({
-        kind: "transient",
-        nodeId: config.nodeId,
-        message: `Total deadline of ${config.deadlineMs}ms exceeded after ${turn} turns`,
-      });
+      return err(
+        withAccumulatedUsage(
+          {
+            kind: "transient",
+            nodeId: config.nodeId,
+            message: `Total deadline of ${config.deadlineMs}ms exceeded after ${turn} turns`,
+          },
+          totalTokensIn,
+          totalTokensOut,
+          corr,
+        ),
+      );
     }
     // Abort check
     if (config.signal?.aborted || ctx.signal?.aborted) {
-      return err({ kind: "aborted", reason: "signal" });
+      return err(
+        withAccumulatedUsage({ kind: "aborted", reason: "signal" }, totalTokensIn, totalTokensOut, corr),
+      );
     }
 
     // Call provider for one turn
     const turnResult = await provider.call(turn);
-    if (!turnResult.ok) return turnResult;
+    if (!turnResult.ok) {
+      // The provider's error is for the in-flight turn — its own `usage` (if
+      // any) covers that turn, and we add the prior-turn totals on top.
+      return err(withAccumulatedUsage(turnResult.error, totalTokensIn, totalTokensOut, corr));
+    }
 
     const t = turnResult.value;
     totalTokensIn += t.tokensIn;
@@ -141,28 +212,65 @@ export const toolUseLoop = async <O>(
     // No tool calls = final answer
     if (t.toolCalls.length === 0) {
       if (t.textContent === undefined) {
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: config.nodeId,
-          message: "Final turn had no text content to parse",
-        });
+        return err(
+          withAccumulatedUsage(
+            {
+              kind: "node-crash",
+              retriability: "retriable",
+              nodeId: config.nodeId,
+              message: "Final turn had no text content to parse",
+            },
+            totalTokensIn,
+            totalTokensOut,
+            corr,
+          ),
+        );
       }
       return parseFinalAnswer(t.textContent, config, totalTokensIn, totalTokensOut, lastThinking);
     }
 
-    // Dispatch tools and feed results back to provider
-    const results = await dispatchToolCallsWithSpans(t.toolCalls, config.tools, ctx, { model: config.model });
+    // Dispatch tools and feed results back to provider. Fenced: a throw here
+    // (e.g. `asToolContext` rejecting a node that omitted `requires: ["llm"]`)
+    // is an authoring error — deterministic, so non-retriable — and the tokens
+    // burned producing these tool calls must still ride the typed error channel
+    // (FR-W0-001); an escaping throw would surface as a usage-less retriable
+    // node-crash upstream.
+    let results: Awaited<ReturnType<typeof dispatchToolCallsWithSpans>>;
+    try {
+      results = await dispatchToolCallsWithSpans(t.toolCalls, config.tools, ctx, { model: config.model });
+    } catch (e) {
+      return err(
+        withAccumulatedUsage(
+          {
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: config.nodeId,
+            message: `tool dispatch threw: ${e instanceof Error ? e.message : String(e)}`,
+          },
+          totalTokensIn,
+          totalTokensOut,
+          corr,
+        ),
+      );
+    }
     provider.appendToolResults(results);
   }
 
-  // Iteration limit exhausted — non-retriable
-  return err({
-    kind: "node-crash",
-    nodeId: config.nodeId,
-    message: `Tool-call iteration limit (${config.maxIterations}) reached`,
-    retriability: "non-retriable",
-  });
+  // Iteration limit exhausted — non-retriable. Tokens burned across every turn
+  // of the (now-exhausted) loop must still be attributed (FR-W0-001).
+  return err(
+    withAccumulatedUsage(
+      {
+        kind: "node-crash",
+        nodeId: config.nodeId,
+        message: `Tool-call iteration limit (${config.maxIterations}) reached`,
+        retriability: "non-retriable",
+      },
+      totalTokensIn,
+      totalTokensOut,
+      corr,
+    ),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -187,6 +295,9 @@ const parseFinalAnswer = <O>(
       retriability: "retriable",
       nodeId: config.nodeId,
       message: `Not valid JSON (${msg}): ${text.slice(0, 200)}`,
+      // The whole loop's tokens were consumed to produce this final (unparseable)
+      // turn — attribute them even though parsing failed (FR-W0-001).
+      usage: { tokensIn, tokensOut },
     });
   }
   const validated = config.schema.safeParse(parsed);
@@ -196,6 +307,7 @@ const parseFinalAnswer = <O>(
       retriability: "retriable",
       nodeId: config.nodeId,
       message: `Schema validation failed: ${validated.error.message}`,
+      usage: { tokensIn, tokensOut },
     });
   }
   return ok({

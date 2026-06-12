@@ -7,7 +7,18 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fuguejs/framework";
-import type { Result, DagId, RunId, NodeId } from "@fuguejs/framework";
+import type {
+  Result,
+  DagId,
+  RunId,
+  NodeId,
+  LlmClient,
+  LlmRequest,
+  LlmResponse,
+  SendWithToolsRequest,
+  NodeContext,
+  FrameworkError,
+} from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
@@ -17,9 +28,16 @@ import {
   createNamespacedCache,
   createNamespacedCheckpointWriter,
   createNodeContextForDag,
+  invocationOriginForIdentity,
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
+import type { AuthIdentity } from "../domain/auth.js";
+
+// Existing pass-through / wiring tests are identity-agnostic — an admin identity
+// reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
+// their byte-identical assertions are unaffected.
+const adminIdentity: AuthIdentity = { kind: "admin" };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -286,9 +304,9 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // Regression guard: main.ts wires `createHttpCapability()` into
   // `sharedInfra.capabilities`. If that wiring is dropped, `ctx.http` is null
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
-  it("surfaces a usable http client when the handle is wired into capabilities", () => {
+  it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const ctx = createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -297,10 +315,206 @@ describe("createNodeContextForDag — built-in http capability", () => {
     expect(typeof ctx.http?.post).toBe("function");
   });
 
-  it("leaves http null when no http handle is wired (documents the gap the wiring closes)", () => {
+  it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const ctx = createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).toBeNull();
+  });
+});
+
+// ── Static client wiring (SC-005 zero-regression) ───────────────────────────
+
+describe("createNodeContextForDag — static client wiring (SC-005)", () => {
+  const baseSharedInfra = (
+    capabilities: SharedInfra["capabilities"],
+  ): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities,
+  });
+
+  // Regression proof for the base-context wiring: the boot-scoped static client
+  // must be reachable on the NodeContext BYTE-IDENTICAL to what `extractClients`
+  // produces — the SAME reference, not a copy. Per-node minting layers OVER this
+  // base; the static client itself is never copied (FR-W2-003 / SC-005).
+  it("exposes the exact same capability client reference the handle wired in (byte-identical)", async () => {
+    const httpHandle = createHttpCapability();
+    const shared = baseSharedInfra([httpHandle]);
+
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+    );
+
+    // `extractClients([httpHandle]).http === httpHandle.client` — the factory
+    // wires that exact reference onto the base NodeContext unchanged.
+    expect(ctx.http).toBe(httpHandle.client);
+  });
+});
+
+// ── Metered-LLM wiring (review gap: factory wraps shared.llm + threads budget) ─
+
+describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..006)", () => {
+  /** A fake inner LlmClient reporting fixed usage per call — call-recording, no mocks. */
+  const fakeLlm = (tokensIn: number, tokensOut: number) => {
+    const calls: NodeId[] = [];
+    const llm: LlmClient = {
+      sendStructured: async <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        calls.push(req.nodeId);
+        return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" });
+      },
+      sendWithTools: async <O>(req: SendWithToolsRequest<O>, _ctx: NodeContext): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        calls.push(req.nodeId);
+        return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" });
+      },
+    };
+    return { llm, calls };
+  };
+
+  const sharedWithLlm = (llm: LlmClient): SharedInfra => ({
+    llm,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  const structuredReq = (): LlmRequest<unknown> => ({
+    system: "s",
+    user: "u",
+    model: "m",
+    schema: z.unknown(),
+    nodeId: testNodeId,
+  });
+
+  it("wraps the shared LLM client — ctx.llm is the metered decorator, NOT the shared reference", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const shared = sharedWithLlm(llm);
+
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+
+    // If the factory ever stops wrapping (handing the shared client through
+    // unmetered), this reference check is the loudest possible regression guard.
+    expect(ctx.llm).not.toBe(shared.llm);
+    expect(ctx.llm).not.toBeNull();
+  });
+
+  it("threads dag.config.llmBudgetTokens into the decorator: a tiny budget refuses the SECOND call with llm-budget-exceeded", async () => {
+    const { llm, calls } = fakeLlm(10, 5); // 15 tokens/call
+    const shared = sharedWithLlm(llm);
+    const dag = makeDag({ llmBudgetTokens: 1 }); // budget 1: call 1 is the single overshoot
+
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    const r1 = await ctx.llm.sendStructured(structuredReq()); // 0 < 1 → allowed, settles 15
+    const r2 = await ctx.llm.sendStructured(structuredReq()); // 15 >= 1 → refused pre-call
+
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) {
+      expect(r2.error.kind).toBe("llm-budget-exceeded");
+      if (r2.error.kind === "llm-budget-exceeded") {
+        expect(r2.error.budget).toBe(1); // the dag.config value, threaded through
+        expect(r2.error.cumulative).toBe(15); // settled tokens from call 1
+        expect(r2.error.runId).toBe(testRunId);
+      }
+    }
+    // The refused call never reached the inner client (no network round trip).
+    expect(calls.length).toBe(1);
+  });
+
+  it("with llmBudgetTokens unset, the decorator meters but never refuses (FR-W1-006) — budget comes ONLY from dag.config", async () => {
+    const { llm, calls } = fakeLlm(1_000_000, 0);
+    const shared = sharedWithLlm(llm);
+
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    for (let i = 0; i < 3; i++) {
+      expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    }
+    expect(calls.length).toBe(3); // all delegated — no budget, no refusal
+  });
+});
+
+// ── Identity → Invocation.origin threading (FR-W3-007) ──────────────────────
+//
+// Before this fix the user identity dead-ended: every run built
+// `origin: { kind: "agent", agentClientId: dagId }`, so an OIDC user's `sub`
+// never reached the NodeContext and the run was mis-attributed as `agent`.
+// `invocationOriginForIdentity` is the seam the factory now uses to build the
+// origin; these tests prove the user `sub`/`azp` actually land and that the
+// admin/team placeholder is unchanged (byte-for-byte the prior behaviour).
+
+describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () => {
+  it("a user identity produces origin { kind: 'user', sub, agentClientId: dagId } — sub lands, agent client is the DAG's, NOT the frontend azp (I3)", () => {
+    const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend", canRunDag: () => true };
+
+    const origin = invocationOriginForIdentity(userIdentity, testDagId);
+
+    // agentClientId is the AGENT the user acts through (the DAG's agent-type
+    // client placeholder = dagId), NOT the inbound token's frontend `azp`. The
+    // broker gates the user hop with `assignedScopes(agentClientId)`, which must
+    // consult the AGENT's realm policy, never the frontend SSO client's (I3).
+    expect(origin).toEqual({
+      kind: "user",
+      sub: "user-abc-123",
+      agentClientId: testDagId,
+    });
+    // Guard the specific regression: the frontend azp must NOT leak into origin.
+    expect((origin as { agentClientId: string }).agentClientId).not.toBe("fugue-frontend");
+  });
+
+  it("a team identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
+    const teamIdentity: AuthIdentity = { kind: "team", team: "eng", label: "ci" };
+
+    const origin = invocationOriginForIdentity(teamIdentity, testDagId);
+
+    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+  });
+
+  it("an admin identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
+    const origin = invocationOriginForIdentity(adminIdentity, testDagId);
+
+    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+  });
+
+  it("the factory accepts a user identity and produces a usable NodeContext (sub threaded, no throw)", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => true };
+    const shared = baseSharedInfra();
+
+    const { ctx, origin } = await createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      userIdentity,
+    );
+
+    // The run path no longer dead-ends the user identity: a base NodeContext is
+    // produced and the origin the factory built from this identity carries the
+    // user's sub (threaded into per-node minting by the framework).
+    expect(ctx).toBeDefined();
+    expect(origin).toMatchObject({ kind: "user", sub: "user-xyz" });
   });
 });

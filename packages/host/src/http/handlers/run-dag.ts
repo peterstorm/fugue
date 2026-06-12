@@ -8,10 +8,11 @@
  */
 
 import type { Context } from "hono";
-import type { DagId, Result, NodeContext, FrameworkError } from "@fuguejs/framework";
+import type { DagId, Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
 import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
-import type { DagDef, RunOptions } from "@fuguejs/framework";
+import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";
+import type { NodeContextForDag } from "../../domain/run-context.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
@@ -24,6 +25,7 @@ import { acquire, release } from "../../domain/concurrency.js";
 import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-guard.js";
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
+import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
@@ -34,8 +36,28 @@ export interface RunDagDeps {
   readonly setConcurrency: (s: ConcurrencyState) => void;
   readonly circuit: CircuitPort;
   readonly circuitConfig: CircuitConfig;
-  readonly createContext: (registered: RegisteredDag, signal: AbortSignal) => NodeContext;
-  readonly executeDag: <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions) => Promise<Result<O, FrameworkError>>;
+  /**
+   * Build the base NodeContext for a run, plus the run `origin`. The resolved
+   * inbound `AuthIdentity` is threaded in (FR-W3-007) so a user-initiated run
+   * carries the user's `sub` into the `origin`, which is handed to `executeDag`
+   * so the broker can authorize each node's per-dispatch mint against it.
+   */
+  readonly createContext: (
+    registered: RegisteredDag,
+    signal: AbortSignal,
+    identity: AuthIdentity,
+  ) => Promise<NodeContextForDag>;
+  /**
+   * Execute the DAG. `origin` (from `createContext`) is threaded through to the
+   * framework's per-node minting broker so each node's declared scopes are
+   * authorized + minted at dispatch against the initiating identity.
+   */
+  readonly executeDag: <I, O>(
+    dag: DagDef,
+    input: I,
+    ctx: NodeContext,
+    origin: InvocationOrigin,
+  ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
 }
 
@@ -100,7 +122,9 @@ export const createRunDagHandler = (
       return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
     }
     if (!canAccessDag(identity, registered.team)) {
-      const callerTeam = identity.kind === "team" ? identity.team : "admin";
+      // `user` identities are refusable too (canRunDag policy) — name the kind
+      // honestly rather than mislabelling a refused user as "admin".
+      const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
       return errorResponse(c, 403, "forbidden",
         `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
         { dagId, details: { callerTeam, dagTeam: registered.team } },
@@ -197,9 +221,17 @@ export const createRunDagHandler = (
 
       // Declare ctx before the execution try so it's accessible in the catch block.
       // Guard the createContext call so the timer is cleared if it throws (leak prevention).
-      let ctx: import("@fuguejs/framework").NodeContext;
+      let ctx: NodeContext;
+      let origin: InvocationOrigin;
       try {
-        ctx = deps.createContext(registered, controller.signal);
+        // `await` preserves the setup-guard semantics: a synchronous throw or a
+        // rejected promise from `createContext` both land in this catch.
+        // Thread the resolved inbound identity (user `sub`/`azp`, or admin/team)
+        // into context creation so user-initiated runs are attributable and the
+        // broker builds a per-node `Invocation` carrying the run `origin`.
+        const built = await deps.createContext(registered, controller.signal, identity);
+        ctx = built.ctx;
+        origin = built.origin;
       } catch (setupErr) {
         clearTimeout(timeoutId);
         markFailure(permit, deps.clock(), circuitConfig);
@@ -212,21 +244,36 @@ export const createRunDagHandler = (
           registered.dag,
           parseResult.data,
           ctx,
+          origin,
         );
 
         clearTimeout(timeoutId);
         const durationMs = deps.clock() - startTime;
 
-        // 6. Map Result to HTTP response
+        // 6. Map Result to HTTP response (review I4). A settled authorization
+        // "no" (policy-refusal / downstream-denied → 403) and a per-run usage
+        // limit (llm-budget-exceeded → 429) are NOT host malfunctions: they map
+        // to client-facing statuses and do NOT trip the circuit breaker. Genuine
+        // execution failures (500) and transient infra-unreachable (503) do. The
+        // half-open probe is always resolved — markFailure on a real failure,
+        // markSuccess on a settled refusal — so it never wedges.
         if (result.ok) {
           markSuccess(permit, deps.clock());
           return successResponse(c, result.value, { runId: ctx.runId, durationMs });
         } else {
-          markFailure(permit, deps.clock(), circuitConfig);
+          const cls = classifyFrameworkError(result.error);
+          if (cls.countsAsCircuitFailure) {
+            markFailure(permit, deps.clock(), circuitConfig);
+          } else {
+            markSuccess(permit, deps.clock());
+          }
           const msg = formatFrameworkError(result.error);
-          return errorResponse(c, 500, result.error.kind, msg, {
+          return errorResponse(c, cls.status, result.error.kind, msg, {
             dagId,
             runId: ctx.runId,
+            ...(cls.retryAfterSeconds !== undefined
+              ? { headers: { "Retry-After": String(cls.retryAfterSeconds) } }
+              : {}),
           });
         }
       } catch (e: unknown) {

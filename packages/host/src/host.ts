@@ -14,12 +14,13 @@
  */
 
 import { ok, err, runId as makeRunId } from "@fuguejs/framework";
-import type { Result, DagId, GitSha, NodeContext, DagDef, RunOptions, FrameworkError, RunId } from "@fuguejs/framework";
+import type { Result, DagId, GitSha, NodeContext, DagDef, FrameworkError, RunId } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
+import type { AuthIdentity } from "./domain/auth.js";
 import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit } from "./domain/circuit-breaker.js";
@@ -28,7 +29,12 @@ import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
+import type { NodeContextForDag } from "./domain/run-context.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
+import type { CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
+import { createKeycloakBroker } from "./adapters/keycloak-broker.js";
+import { createUnwiredTokenEndpoint } from "./adapters/unwired-token-endpoint.js";
+import { createUnwiredEntraWifExchange, createUnwiredGraphHttp } from "./adapters/unwired-entra-wif.js";
 import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
@@ -70,6 +76,86 @@ export interface HostInstance {
   readonly triggerSync: () => Promise<void>;
   readonly server: { port: number; stop: () => void } | null;
 }
+
+// ── Capability Broker selection (T8 / per-node minting, review C1) ─────────
+
+/**
+ * Select the capability broker for this boot — the per-invocation AUTHORITY
+ * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
+ * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
+ * without booting a full host (review C7.5).
+ *
+ * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
+ * returns the live Keycloak-backed broker: it fails closed on an unassigned
+ * scope BEFORE any Entra call, mints narrowly-scoped operation handles PER
+ * NODE (the framework calls `mintFor` at dispatch with that node's real
+ * `requires`), and emits a correlated audit record for every mint and refusal.
+ * The minted handles are merged OVER the boot-scoped static client set.
+ *
+ * When realm config is ABSENT this returns `undefined` — no minting authority
+ * is wired into `runDag`, so the framework skips per-node minting entirely and
+ * every node runs against the boot-scoped static client set, byte-identical to
+ * today (SC-005), zero regression. Pools stay boot-scoped either way
+ * (FR-W2-005); only authority resolution moves behind the broker.
+ *
+ * The token endpoint is the unwired fail-closed default in this wave (the real
+ * JWKS/HTTP adapter is a later wave): an assigned-but-not-yet-wired scope
+ * surfaces `infra-unreachable` (retriable), never a silent success — mirroring
+ * how the `realmJwt` group is left undefined so the JWT inbound path fails closed.
+ */
+export const selectCapabilityBroker = (
+  config: HostConfig,
+  sharedInfra: Pick<SharedInfra, "tracer" | "logger">,
+  logger: SyncLogger,
+  now: () => number = Date.now,
+): CapabilityBroker | undefined => {
+  if (config.REALM_JWT_ISSUER === undefined) {
+    // Operability (mirror of the empty-policy warning below): a scope POLICY is
+    // configured but no broker is enabled, so the policy is silently inert —
+    // every `requires` resolves against the static base context, unguarded by
+    // the per-node gate the operator evidently intended. Surface it once.
+    // Defensive `?? {}`: hand-built test configs may bypass the zod default.
+    if (Object.keys(config.AGENT_CLIENT_SCOPES ?? {}).length > 0) {
+      logger.warn(
+        "AGENT_CLIENT_SCOPES is configured but REALM_JWT_ISSUER is unset — no capability broker " +
+          "is wired, so the scope policy is inert (set REALM_JWT_ISSUER to enable the broker)",
+      );
+    }
+    return undefined;
+  }
+
+  // Operability: an empty scope policy means every mint fails closed (safe but
+  // surprising). Surface it once at boot so a misconfigured realm policy is
+  // diagnosable from the logs rather than from a wall of per-mint refusals.
+  if (Object.keys(config.AGENT_CLIENT_SCOPES).length === 0) {
+    logger.warn(
+      "live capability broker selected with empty scope policy — all mints will fail closed",
+    );
+  }
+  // Operability: the realm issuer is set (broker enabled) but the inbound JWT
+  // verifier is NOT yet wired into the router (a later wave). Surface it once
+  // so the half-wired state is diagnosable — the user inbound path stays
+  // fail-closed (a JWT-shaped token 401s) until the verifier lands.
+  logger.warn(
+    "live capability broker selected (REALM_JWT_ISSUER set) while the inbound JWT verifier is not wired — " +
+      "user-initiated runs are not yet acceptable; agent runs mint per-node",
+  );
+  return createKeycloakBroker({
+    endpoint: createUnwiredTokenEndpoint(),
+    // The WIF exchange + Graph transport are the unwired fail-closed defaults
+    // in this wave too (awaiting the live `fugue-agents` federated credential):
+    // an assigned scope whose Keycloak mint would succeed still surfaces
+    // `infra-unreachable` at the WIF hop, never a silent success. No static
+    // Entra secret/cert is wired anywhere here (SC-011 holds trivially).
+    entraWif: createUnwiredEntraWifExchange(),
+    graphHttp: createUnwiredGraphHttp(),
+    assignedScopes: (agentClientId) =>
+      new Set(config.AGENT_CLIENT_SCOPES[agentClientId] ?? []),
+    tracer: sharedInfra.tracer,
+    logger: sharedInfra.logger,
+    now,
+  });
+};
 
 // ── Host Factory ───────────────────────────────────────────────────────────
 
@@ -149,6 +235,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     Array.from(registry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
   );
 
+  // ── Capability Broker selection (T8 / per-node minting, review C1) ──────────
+  // See `selectCapabilityBroker` above: live Keycloak broker when
+  // `REALM_JWT_ISSUER` is set (unwired fail-closed endpoints this wave),
+  // `undefined` otherwise (no minting authority wired — the zero-regression
+  // static path). A node declaring `requires: ["http", "msgraph:mail.send"]`
+  // keeps its static `http` client AND gets a freshly minted `mail.send` handle.
+  const broker: CapabilityBroker | undefined = selectCapabilityBroker(config, sharedInfra, logger);
+
   // ── Router Dependencies ──────────────────────────────────────────────────
   const tokenStore = createRedisTokenStore(sharedInfra.redis, sharedInfra.logger);
 
@@ -160,12 +254,35 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       get: (id) => circuitBreakers.get(id) ?? initCircuit(Date.now()),
       set: (id, s) => { circuitBreakers.set(id, s); },
     },
-    createContext: (registered: RegisteredDag, signal: AbortSignal): NodeContext => {
+    createContext: (
+      registered: RegisteredDag,
+      signal: AbortSignal,
+      // The resolved inbound identity is threaded through to the NodeContext
+      // factory (FR-W3-007), which derives `Invocation.origin` from it: an OIDC
+      // `user` carries its `sub` (with the DAG's agent-type client as
+      // `agentClientId`) so the run is correctly attributed to the user instead
+      // of being silently re-labelled `agent`. The origin is returned alongside
+      // the base context and threaded into `executeDag` so the broker (selected
+      // at boot) can authorize each node against it.
+      identity: AuthIdentity,
+    ): Promise<NodeContextForDag> => {
       const rid = makeRunId(crypto.randomUUID());
-      return createNodeContextForDag(sharedInfra, registered, rid, signal);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity);
     },
-    executeDag: async <I, O>(dag: DagDef, input: I, ctx: NodeContext, opts?: RunOptions): Promise<Result<O, FrameworkError>> => {
-      return runDag<I, O>(dag, input, ctx, opts);
+    executeDag: async <I, O>(
+      dag: DagDef,
+      input: I,
+      ctx: NodeContext,
+      origin: InvocationOrigin,
+    ): Promise<Result<O, FrameworkError>> => {
+      // Inject the boot-selected broker + run origin (as one MintingAuthority —
+      // the framework's option type makes broker-without-origin unrepresentable)
+      // so the framework mints each node's declared scopes PER NODE at dispatch.
+      // When `broker` is undefined (no realm config) no minting authority is
+      // wired and the framework skips minting — byte-identical to today.
+      return runDag<I, O>(dag, input, ctx, {
+        minting: broker !== undefined ? { broker, origin } : undefined,
+      });
     },
     clock: Date.now,
     circuitConfig: {
@@ -175,6 +292,20 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     },
     adminToken: config.ADMIN_TOKEN,
     tokenStore,
+    // fugue-platform OIDC (`user`) inbound path (FR-W3-006/007). The JWT path
+    // is wired as ONE grouped `realmJwt` dep (verifier + iss/aud policy,
+    // inseparable) — deliberately ABSENT here: T8 selected the broker but left
+    // the JWKS-backed verifier for a later wave, so a JWT-shaped token fails
+    // closed (no signature can be verified → 401). The iss/aud policy values
+    // live in config (`REALM_JWT_ISSUER`/`REALM_JWT_AUDIENCE`) ready for that
+    // wave.
+    //
+    // SECURITY: `RealmJwtDeps.authorizeUserRun` is a REQUIRED member of the
+    // group — constructing `realmJwt` forces deciding which users may run
+    // which teams' DAGs at this wiring site (the compiler enforces it; see
+    // middleware/auth.ts). There is no half-wired "verifier without user-run
+    // policy" state to fall into. Do NOT wire `() => true` without the realm/
+    // role check that decision deserves.
     adminHandlerDeps: {
       tokenStore,
       clock: Date.now,

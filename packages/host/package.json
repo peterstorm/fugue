@@ -14,7 +14,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test $(find src/__tests__ -name '*.test.ts' -not -name 'signals.test.ts' | sort) && bun test src/__tests__/lifecycle/signals.test.ts"
+    "test": "bun test $(find src -path '*__tests__*' -name '*.test.ts' -not -name 'signals.test.ts' | sort) && bun test src/__tests__/lifecycle/signals.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
@@ -34,6 +34,6 @@
   },
   "files": [
     "src",
-    "!src/__tests__"
+    "!src/**/__tests__"
   ]
 }

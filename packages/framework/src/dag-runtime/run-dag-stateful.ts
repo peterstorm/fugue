@@ -18,6 +18,7 @@ import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../types/dag.js";
 import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -97,6 +98,18 @@ export interface DagRunOpts
    * instance to enable cross-DAG freshness detection within a process.
    */
   readonly freshnessIndex?: FreshnessIndex;
+  /**
+   * Per-invocation minting authority (broker + origin as one value). When
+   * wired, each node's declared `requires` are resolved through
+   * `broker.mintFor` at dispatch and the minted narrowed handles are merged
+   * over the validated context for that node only. Run-start validation treats
+   * `broker.provides()` capabilities as satisfied (they are minted per node,
+   * not present on the base context) — pairing the broker with `origin` in one
+   * type guarantees the dispatch-time mint that exemption relies on can
+   * actually happen. Omitted ⇒ no per-node minting; the shared context is used
+   * unchanged.
+   */
+  readonly minting?: MintingAuthority;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +125,7 @@ interface PreparedRun {
 const prepareDagRun = (
   dag: DagDef,
   nodeCtx: NodeContext,
-  opts?: Pick<DagRunOpts, "retryLimits" | "now">,
+  opts?: Pick<DagRunOpts, "retryLimits" | "now" | "minting">,
 ): Result<PreparedRun, FrameworkError> => {
   const effectiveDag: DagDef =
     opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
@@ -122,7 +135,10 @@ const prepareDagRun = (
   const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
 
   // Capability validation. On success, hands back a phantom-branded token.
-  const capCheck = validateCapabilities(effectiveDag, nodeCtx);
+  // A minting broker's `provides()` capabilities are resolved at dispatch, so
+  // the run-start check treats them as satisfied rather than demanding them on
+  // the boot-scoped base context.
+  const capCheck = validateCapabilities(effectiveDag, nodeCtx, opts?.minting?.broker);
   if (!capCheck.ok) {
     emitRunEnd("error");
     return err(capCheck.error);
@@ -302,6 +318,7 @@ export const runDagStateful = async <I, O>(
       random: opts?.random,
       now: opts?.now,
       freshnessIndex: opts?.freshnessIndex,
+      minting: opts?.minting,
     });
 
     const errorEventOf = (classified: { retriable: boolean; message: string }): DagEvent => ({

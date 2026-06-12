@@ -11,7 +11,10 @@
  * @satisfies FR-031 — Checkpoint keys prefixed fugue:<dagId>:<runId>:<nodeId>
  * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
- * @satisfies SC-008 — Two DAGs using same cache key string are isolated
+ * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
+ *   same cache key string are isolated. NOT the identity-scoped-capabilities
+ *   spec's SC-008 (token-mint dedup), which lives in token-cache.ts /
+ *   keycloak-broker.ts — same tag, different spec namespace.
  */
 
 import type {
@@ -27,10 +30,15 @@ import type {
   Result,
   FrameworkError,
 } from "@fuguejs/framework";
+import type { InvocationOrigin } from "@fuguejs/framework";
 import { makeNodeContext, ok } from "@fuguejs/framework";
 import type { RegisteredDag } from "../domain/registry.js";
+import type { AuthIdentity } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";
+import { invocationOriginForIdentity } from "../domain/run-context.js";
+import type { NodeContextForDag } from "../domain/run-context.js";
+import { createMeteredLlm } from "./metered-llm.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -196,29 +204,70 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   };
 };
 
+// `NodeContextForDag` and the pure `invocationOriginForIdentity` moved to
+// `domain/run-context.ts` — the contract of the `createContext` port belongs
+// to the domain, not this adapter (the HTTP layer names it without importing
+// adapter modules). Re-exported here for backward compatibility.
+export { invocationOriginForIdentity };
+export type { NodeContextForDag };
+
 /**
- * Construct a NodeContext for a specific DAG execution.
+ * Construct the BASE NodeContext for a specific DAG execution, plus the run's
+ * `origin`.
  *
- * Pure factory: given inputs, constructs context deterministically.
- * - Shared infra (LLM, tracer) -> passed through as singleton references
- * - Cache -> wrapped with DAG-namespaced key prefix
- * - Checkpoint -> wrapped with DAG + run namespaced key prefix
- * - runId, signal -> per-request unique values
+ * The base context carries the BOOT-SCOPED static capability clients
+ * (`extractClients` over the registered handles — the single trust-boundary
+ * cast; see capability-manager.ts) exactly as before. Per-invocation AUTHORITY
+ * is layered on TOP of this base, per node, by the framework when a minting
+ * broker is wired into `runDag` (the host selects the live Keycloak broker when
+ * realm config is present): each node's declared `"<provider>:<operation>"`
+ * scopes are minted into narrowed handles AT DISPATCH and merged over this base,
+ * while plain capabilities (`http`/`db`/`llm`/…) keep their static client. When
+ * no broker is wired (no realm config) the base context is used unchanged —
+ * byte-identical to today (SC-005), zero regression.
+ *
+ * This is why the broker is NO LONGER consulted here: minting must happen
+ * per-node (the only place the real `nodeId` and that node's `requires` are
+ * known), so resolving it once at context-construction with empty `requires`
+ * (the prior T8 wiring) could never reach the minting machinery and silently
+ * dropped every statically-configured client on the realm path (review C1).
+ *
+ * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
+ * broker, and it now moves per node, in the framework.
  *
  * @satisfies FR-030 — Cache key isolation
  * @satisfies FR-031 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
- * @satisfies SC-008 — Cross-DAG cache isolation
+ * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the
+ *   identity-scoped-capabilities token-dedup SC-008)
+ * @satisfies FR-W2-005 — pools (connect/close/healthCheck) remain boot-scoped
+ * @satisfies FR-W3-007 — `origin` carries the user's `sub` so a user-initiated
+ *   run is attributable and per-hop-exchangeable by the broker
  */
-export const createNodeContextForDag = (
+export const createNodeContextForDag = async (
   shared: SharedInfra,
   dag: RegisteredDag,
   runId: RunId,
   signal: AbortSignal,
-): NodeContext => {
+  identity: AuthIdentity,
+): Promise<NodeContextForDag> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
+
+  // Wrap the shared LLM client in a per-run metered decorator: every call is
+  // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
+  // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
+  // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
+  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009
+  // groundwork only — LLM authority is run-scoped here, not yet on the
+  // broker's mintFor seam; see capability-broker.ts)
+  const llm = createMeteredLlm(shared.llm, {
+    dagId,
+    runId,
+    ...(dag.config.llmBudgetTokens !== undefined ? { budget: dag.config.llmBudgetTokens } : {}),
+    logger: shared.logger,
+  });
 
   const cache = createNamespacedCache(shared.redis, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
@@ -235,20 +284,22 @@ export const createNodeContextForDag = (
     ? { get: (name: string) => dagPrompts.get(name) ?? null }
     : shared.prompts ?? { get: () => null };
 
-  return makeNodeContext({
+  const origin: InvocationOrigin = invocationOriginForIdentity(identity, dagId);
+
+  const ctx = makeNodeContext({
     runId,
     dagId,
     tracer: shared.tracer,
-    llm: shared.llm,
+    llm,
     cache,
     checkpointWriter,
     signal,
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
-    // ADR-0051: Custom capability clients from registered handles are passed
-    // via the capabilities record. The name↔client correlation is restored
-    // inside `extractClients` — the single trust-boundary cast (see
-    // capability-manager.ts). Do not add a second correlation point here.
+    // The boot-scoped static client set. Per-node minted scope handles (when a
+    // broker is wired) are merged OVER this by the framework at dispatch.
     capabilities: extractClients(shared.capabilities),
   });
+
+  return { ctx, origin };
 };

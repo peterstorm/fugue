@@ -144,7 +144,9 @@ const assembleManifest = (
     return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
   }
   if (!canAccessDag(identity, registered.team)) {
-    const callerTeam = identity.kind === "team" ? identity.team : "admin";
+    // `user` identities are refusable too (canRunDag policy) — name the kind
+    // honestly rather than mislabelling a refused user as "admin".
+    const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
     return errorResponse(c, 403, "forbidden",
       `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
       { dagId, details: { callerTeam, dagTeam: registered.team } },

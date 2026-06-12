@@ -43,6 +43,7 @@ const FAST_FAIL_ERRORS: FrameworkError[] = [
   { kind: "validation", nodeId: N("n"), message: "schema mismatch" },
   { kind: "checkpoint-write-failed", runId: "r" as any, nodeId: N("n"), message: "write failed" },
   { kind: "aborted", reason: "user cancelled" },
+  { kind: "missing-capability", missing: [{ nodeId: N("n"), capability: "llm" }] },
   { kind: "node-crash", nodeId: N("n"), message: "permanent", retriability: "non-retriable" },
 ];
 
@@ -59,6 +60,35 @@ describe("handleNodeFailed — fast-fail kinds", () => {
       }
     });
   }
+});
+
+describe("handleNodeFailed — missing-capability fast-fail (claims-without-delivery)", () => {
+  // The dispatch-time claims-without-delivery emission from run-node is
+  // deterministic: the broker's `provides()` / `ok()` mismatch reproduces on
+  // every attempt, and each retry re-fires `mintFor` (duplicate audit records,
+  // real egress once the cache window lapses). It must transition straight to
+  // terminal `failed` with the ORIGINAL error — never `retrying`, never
+  // rewrapped as `retry-exhausted` — even when retry budget remains.
+  it("fast-fails to terminal failed with the original error, despite remaining budget", () => {
+    const ctx = mkCtx({
+      dag: { id: D("test"), nodes: [], edges: [], retryLimits: { [N("n")]: 5 }, defaultRetryLimit: 3 } as unknown as DagDef,
+    });
+    const error: FrameworkError = {
+      kind: "missing-capability",
+      missing: [{ nodeId: N("n"), capability: "llm" }],
+    };
+    const result = handleNodeFailed(0, N("n"), error, ctx);
+
+    expect(result.state.kind).toBe("failed");
+    expect(result.state.kind).not.toBe("retrying");
+    if (result.state.kind === "failed") {
+      // Exact same error object — not rewrapped as retry-exhausted.
+      expect(result.state.error).toBe(error);
+      expect(result.state.error.kind).toBe("missing-capability");
+    }
+    // No retry slot consumed — the budget map is untouched.
+    expect(result.context.retries.get(N("n"))).toBeUndefined();
+  });
 });
 
 describe("handleNodeFailed — retriable errors", () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { dagId, gitSha, ok, err } from "@fuguejs/framework";
-import type { NodeContext, FrameworkError, DagId } from "@fuguejs/framework";
+import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, makeNodeContext } from "@fuguejs/framework";
+import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
@@ -63,7 +63,11 @@ const defaultDeps = (overrides?: Partial<RunDagDeps>): RunDagDeps => {
       set: (id, s) => { circuits.set(id, s); },
     },
     circuitConfig: { threshold: 5, windowMs: 60_000 },
-    createContext: () => ({ runId: "test-run-id" } as unknown as NodeContext),
+    createContext: (() =>
+      Promise.resolve({
+        ctx: { runId: "test-run-id" } as unknown as NodeContext,
+        origin: { kind: "agent", agentClientId: "test-dag" },
+      })) as unknown as RunDagDeps["createContext"],
     executeDag: successExecuteDag,
     clock: () => Date.now(),
     ...overrides,
@@ -157,6 +161,49 @@ describe("run-dag handler", () => {
     expect(body.error).toBe("forbidden");
   });
 
+  describe("identity threading into the run (FR-W3-007)", () => {
+    // The user `sub`/`azp` must reach `createContext` so T8 can build
+    // `Invocation.origin`. We capture the identity arg to prove the seam works,
+    // and confirm admin/team runs pass their identity through unchanged.
+    const runWith = async (identity: AuthIdentity) => {
+      const captured: AuthIdentity[] = [];
+      const deps = defaultDeps({
+        createContext: (async (_reg, _sig, id: AuthIdentity) => {
+          captured.push(id);
+          return {
+            ctx: { runId: "test-run-id" } as unknown as NodeContext,
+            origin: { kind: "agent", agentClientId: "test-dag" },
+          };
+        }) as unknown as RunDagDeps["createContext"],
+      });
+      const app = createTestApp(deps, readyState, identity);
+      const res = await post(app, "test-dag", { query: "hi" });
+      return { res, captured };
+    };
+
+    it("threads the user sub/azp into createContext for a user-initiated run", async () => {
+      const identity: AuthIdentity = { kind: "user", sub: "user-abc", azp: "fugue-frontend", canRunDag: () => true };
+      const { res, captured } = await runWith(identity);
+      expect(res.status).toBe(200);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toEqual(identity);
+    });
+
+    it("threads the admin identity through unchanged (no user sub)", async () => {
+      const identity: AuthIdentity = { kind: "admin" };
+      const { res, captured } = await runWith(identity);
+      expect(res.status).toBe(200);
+      expect(captured[0]).toEqual({ kind: "admin" });
+    });
+
+    it("threads the team identity through unchanged", async () => {
+      const identity: AuthIdentity = { kind: "team", team: "test-team", label: "Test" };
+      const { res, captured } = await runWith(identity);
+      expect(res.status).toBe(200);
+      expect(captured[0]).toEqual(identity);
+    });
+  });
+
   it("returns 400 for non-JSON body", async () => {
     const app = createTestApp(defaultDeps(), readyState);
     const res = await app.request("/dags/test-dag/run", {
@@ -246,6 +293,41 @@ describe("run-dag handler", () => {
     expect((await r3.json()).error).toBe("dag-disabled");
   });
 
+  it("returns 500 and releases the concurrency token when createContext rejects (async)", async () => {
+    // Async sibling of the sync-throw setup-guard test above. The async migration introduced
+    // a new failure mode: `await deps.createContext(...)` resolving to a REJECTED promise (how a
+    // failing broker surfaces in Wave 4). The setup-guard catch must handle it identically to a
+    // sync throw — clear the timer, mark the circuit, 500, and the outer finally releases the slot.
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (s) => { concurrency = s; },
+      createContext: () => Promise.reject(new Error("async context init failed")),
+    });
+    const app = createTestApp(deps, readyState);
+    const res = await post(app, "test-dag", { query: "hi" });
+
+    expect(res.status).toBe(500);
+    // The slot acquired before execution must be released — no leak on the async-reject path.
+    expect(concurrency.global.current).toBe(0);
+  });
+
+  it("records a circuit failure on the createContext-rejects (async) path (opens per-DAG breaker at threshold)", async () => {
+    // Async sibling of the sync-throw circuit-failure test. A rejected createContext promise must
+    // call markFailure exactly like a sync throw, so the breaker opens at the threshold.
+    const base = makeDag("ctx-reject-dag");
+    const cbDag: RegisteredDag = { ...base, config: { ...base.config, circuitBreaker: { failureThreshold: 1 } } };
+    const reg = freeze([cbDag], sha, Date.now());
+    const deps = defaultDeps({ createContext: () => Promise.reject(new Error("async ctx init failed")) });
+    const app = createTestApp(deps, makeReadyState(reg));
+
+    expect((await post(app, "ctx-reject-dag", { query: "x" })).status).toBe(500); // failure 1
+    expect((await post(app, "ctx-reject-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
+    const r3 = await post(app, "ctx-reject-dag", { query: "x" });
+    expect(r3.status).toBe(503);                                                  // circuit now open
+    expect((await r3.json()).error).toBe("dag-disabled");
+  });
+
   it("does not consume the half-open circuit probe when concurrency rejects (no wedge)", async () => {
     // Circuit is half-open with a single probe available; global capacity is exhausted.
     const circuits = new Map<DagId, CircuitState>();
@@ -302,6 +384,118 @@ describe("run-dag handler", () => {
     const app = createTestApp(deps, readyState);
     const res = await post(app, "test-dag", { query: "hi" });
     expect(res.status).toBe(500);
+  });
+
+  // ── Framework-error → HTTP status mapping (review I4) ──────────────────────
+  const failWith = (error: FrameworkError) =>
+    (async () => err(error)) as RunDagDeps["executeDag"];
+
+  it("maps a policy-refusal to 403 (not 500) and does NOT open the circuit", async () => {
+    const circuits = new Map<DagId, CircuitState>();
+    const deps = defaultDeps({
+      executeDag: failWith({ kind: "policy-refusal", scope: "msgraph:mail.send", agentClientId: "agent-x" }),
+      circuit: { get: (id) => circuits.get(id) ?? initCircuit(Date.now()), set: (id, s) => { circuits.set(id, s); } },
+      circuitConfig: { threshold: 1, windowMs: 60_000 },
+    });
+    const app = createTestApp(deps, readyState);
+    // Fire several refusals — a settled "no" must never accumulate toward opening
+    // the breaker (which would deny the DAG to EVERY caller).
+    for (let i = 0; i < 5; i++) {
+      const res = await post(app, "test-dag", { query: "hi" });
+      expect(res.status).toBe(403);
+    }
+    const sixth = await post(app, "test-dag", { query: "hi" });
+    expect(sixth.status).toBe(403); // still 403 — circuit never opened (would be 503)
+  });
+
+  it("maps a downstream-denied to 403", async () => {
+    const deps = defaultDeps({
+      executeDag: failWith({ kind: "downstream-denied", resource: "https://graph.microsoft.com", reason: "FIC mismatch" }),
+    });
+    const res = await post(createTestApp(deps, readyState), "test-dag", { query: "hi" });
+    expect(res.status).toBe(403);
+  });
+
+  it("maps an llm-budget-exceeded to 429 with Retry-After", async () => {
+    const deps = defaultDeps({
+      executeDag: failWith({ kind: "llm-budget-exceeded", runId: "r" as never, nodeId: "n" as never, cumulative: 10, budget: 5 }),
+    });
+    const res = await post(createTestApp(deps, readyState), "test-dag", { query: "hi" });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+  });
+
+  it("maps an infra-unreachable to 503", async () => {
+    const deps = defaultDeps({
+      executeDag: failWith({ kind: "infra-unreachable", operation: "federation", hop: "entra-wif", message: "down" }),
+    });
+    const res = await post(createTestApp(deps, readyState), "test-dag", { query: "hi" });
+    expect(res.status).toBe(503);
+  });
+
+  it("maps a broker refusal through the REAL runDag to 403 and never opens the circuit (I4 end-to-end)", async () => {
+    // The handler-level I4 tests above inject bare error kinds via an executeDag
+    // fake. This test closes the seam they bypass: a refusing broker driven
+    // through the real framework executor (retry machinery included) must still
+    // surface 403 + breaker exemption. Before the retry-policy fast-fail fix,
+    // the refusal was retried and rewrapped as `retry-exhausted` → 500 + breaker
+    // trip, with this exact composition green-tested nowhere.
+    const SCOPE = "svc:opA" as Capability;
+    const mintCalls: string[] = [];
+    const refusingBroker: CapabilityBroker = {
+      mintFor: async (inv, requires) => {
+        mintCalls.push(inv.nodeId as string);
+        return err({ kind: "policy-refusal", scope: requires[0] as string, agentClientId: inv.origin.agentClientId });
+      },
+      provides: (c) => (c as string).includes(":"),
+    };
+
+    const gated = createFetchNode({
+      id: "gated" as never,
+      inputSchema: z.object({ query: z.string() }),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => ok({ ok: true }), // never reached
+    });
+    const realDag = defineDagFromArray({
+      id: "minting-dag",
+      nodes: [gated],
+      edges: [],
+      // Retry budget present — proves the settled refusal is NOT retried even
+      // when retries are available (one mintFor call per request, below).
+      defaultRetryLimit: 2,
+    });
+
+    const registered: RegisteredDag = {
+      ...makeDag("minting-dag"),
+      dag: realDag as unknown as RegisteredDag["dag"],
+    };
+    const reg = freeze([registered], sha, Date.now());
+
+    const deps = defaultDeps({
+      createContext: (async () => ({
+        ctx: makeNodeContext({ runId: "run-mint", dagId: "minting-dag" }),
+        origin: { kind: "agent", agentClientId: "minting-dag" },
+      })) as unknown as RunDagDeps["createContext"],
+      // Mirror host.ts executeDag exactly: real runDag with the boot-selected
+      // broker + per-run origin as one MintingAuthority.
+      executeDag: (async <I, O>(d: unknown, input: I, ctx: NodeContext, origin: InvocationOrigin) =>
+        runDag<I, O>(d as never, input, ctx, {
+          minting: { broker: refusingBroker, origin },
+          suppressRoutingWarnings: true,
+        })) as unknown as RunDagDeps["executeDag"],
+      circuitConfig: { threshold: 1, windowMs: 60_000 },
+    });
+    const app = createTestApp(deps, makeReadyState(reg));
+
+    // Repeated refusals: every one must be a 403 (a settled "no", not a host
+    // fault) and must never accumulate toward opening the breaker (would be 503).
+    for (let i = 0; i < 4; i++) {
+      const res = await post(app, "minting-dag", { query: "hi" });
+      expect(res.status).toBe(403);
+    }
+    // One mintFor call per request — the settled refusal consumed no retries.
+    expect(mintCalls).toHaveLength(4);
   });
 
   it("returns 408 when execution exceeds the host timeout (cooperative abort surfaces)", async () => {

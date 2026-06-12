@@ -2,6 +2,14 @@
  * Capability lifecycle handle — wraps a capability client with runtime
  * lifecycle hooks (connect/close) and optional health checking.
  *
+ * AXIS NOTE: `CapabilityHandle` is the BOOT-scoped *lifecycle* wrapper — it
+ * owns `connect`/`close`/`healthCheck` and the connection pool, opened once at
+ * boot and shared across every run. It is DISTINCT from `CapabilityBroker`
+ * (`./capability-broker.ts`), which resolves per-invocation *authority* over the
+ * same client set. Pools stay boot-scoped; only authority is invocation-scoped.
+ * The two axes do not overlap: a broker never touches connect/close, and a
+ * handle never varies authority per call.
+ *
  * Adapter packages produce `CapabilityHandle` instances via factory functions.
  * The runtime manages the lifecycle:
  *   - `connect()` is called once at startup (after config validation).
@@ -65,8 +73,9 @@ export interface CapabilityHandle<K extends Capability = Capability> {
    * topologically sorts `connect()` calls.
    *
    * Only *handle-backed* capabilities are valid targets — built-ins that are
-   * wired directly into `SharedInfra` without a handle (`llm`, `judgeLlm`,
-   * `prompts`, `cache`) are never registered with the lifecycle manager, so
+   * set directly as built-in `NodeContext` fields by `makeNodeContext`
+   * (`llm`, `judgeLlm`, `prompts`, `cache`), never registered as a
+   * `CapabilityHandle`, are never seen by the lifecycle manager, so
    * depending on them always fails the boot-time check. (`http`, by contrast,
    * is handle-backed via `createHttpCapability` and reaches the host through
    * the `capabilities` array — so it *is* a valid target when an HTTP handle

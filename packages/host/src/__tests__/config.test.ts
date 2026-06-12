@@ -134,6 +134,41 @@ describe("HostConfigSchema", () => {
     expect(result.value.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
   });
 
+  // ── AGENT_CLIENT_SCOPES validation (review suggestion #7) ──────────────────
+  it("parses a valid AGENT_CLIENT_SCOPES policy into a clientId → scopes map", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      AGENT_CLIENT_SCOPES: JSON.stringify({ "fugue-agent-mail": ["msgraph:mail.send"], "fugue-agent-sites": ["msgraph:sites.read", "dynamics:read"] }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.AGENT_CLIENT_SCOPES["fugue-agent-mail"]).toEqual(["msgraph:mail.send"]);
+  });
+
+  it("defaults AGENT_CLIENT_SCOPES to {} when unset", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.AGENT_CLIENT_SCOPES).toEqual({});
+  });
+
+  it("REJECTS at boot an AGENT_CLIENT_SCOPES with a typo'd/unrecognised scope name (fails at boot, never at runtime)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      // `msgrpah` is a typo — caught at boot rather than fail-closing every mint.
+      AGENT_CLIENT_SCOPES: JSON.stringify({ "fugue-agent-mail": ["msgrpah:mail.send"] }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    expect(result.error.message).toContain("unrecognised scope");
+  });
+
+  it("REJECTS malformed AGENT_CLIENT_SCOPES JSON", () => {
+    const result = parseHostConfig({ ...validEnv, AGENT_CLIENT_SCOPES: "{not json" });
+    expect(result.ok).toBe(false);
+  });
+
   it("parses global TTL defaults (FR-040)", () => {
     const result = parseHostConfig({
       ...validEnv,
@@ -339,5 +374,27 @@ describe("FugueYamlSchema", () => {
   it("rejects fractional maxConcurrent / TTLs (must be integers)", () => {
     expect(parseFugueYaml({ team: "t", maxConcurrent: 2.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
     expect(parseFugueYaml({ team: "t", cacheTtlMs: 1.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
+
+  // ── llmBudgetTokens (FR-W1-001) — the per-run budget the metered-llm decorator enforces ──
+  it("parses llmBudgetTokens when present (FR-W1-001)", () => {
+    const result = parseFugueYaml({ team: "t", llmBudgetTokens: 50_000 }, "/dags/x/fugue.yaml");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.llmBudgetTokens).toBe(50_000);
+  });
+
+  it("leaves llmBudgetTokens undefined when absent (FR-W1-006 — no budget, no enforcement)", () => {
+    const result = parseFugueYaml({ team: "t" }, "/dags/x/fugue.yaml");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.llmBudgetTokens).toBeUndefined();
+  });
+
+  it("rejects zero, negative, fractional, and non-number llmBudgetTokens (int + positive)", () => {
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: 0 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: -100 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: 1000.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
+    expect(parseFugueYaml({ team: "t", llmBudgetTokens: "50000" }, "/dags/x/fugue.yaml").ok).toBe(false);
   });
 });

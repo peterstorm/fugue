@@ -14,6 +14,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { stubLlmClient } from "./_llm-mocks.js";
+import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 
 const schema = z.object({ answer: z.string() });
 
@@ -98,9 +99,9 @@ describe("toolUseLoop", () => {
     if (result.ok) expect(result.value.output).toEqual({ answer: "fenced" });
   });
 
-  test("iteration limit exhausted → non-retriable error", async () => {
+  test("iteration limit exhausted → non-retriable error, carrying accumulated usage", async () => {
     const result = await toolUseLoop(
-      infiniteToolProvider(),
+      infiniteToolProvider(), // 5 in / 5 out per turn
       { nodeId: N("n1"), model: "m", schema, tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("") }], maxIterations: 3 },
       makeCtx(),
     );
@@ -110,6 +111,8 @@ describe("toolUseLoop", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("iteration limit");
+        // FR-W0-001: tokens burned across all 3 turns are attributed on the Err.
+        expect(result.error.usage).toEqual({ tokensIn: 15, tokensOut: 15 });
       }
     }
   });
@@ -230,6 +233,90 @@ describe("toolUseLoop", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
+      // First-call error consumed no prior turns and the provider reported no
+      // own usage → usage stays ABSENT (the errors.ts contract: absent means
+      // "no attributable tokens" — never a stamped {0,0} second representation).
+      if (result.error.kind === "transient") {
+        expect(result.error.usage).toBeUndefined();
+      }
+    }
+  });
+
+  test("mid-loop provider error carries prior-turn accumulated usage (FR-W0-001)", async () => {
+    // Turn 1: a tool-call turn that burns 10/15. Turn 2: the provider errors,
+    // itself reporting 3/4 partial usage for the in-flight turn.
+    let callCount = 0;
+    const provider: ToolLoopProvider = {
+      call: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return ok({
+            toolCalls: [{ id: "c", name: "tool", input: {} }],
+            textContent: undefined,
+            tokensIn: 10,
+            tokensOut: 15,
+          });
+        }
+        return err({
+          kind: "transient",
+          nodeId: N("n1"),
+          message: "rate limit",
+          usage: { tokensIn: 3, tokensOut: 4 },
+        });
+      },
+      appendToolResults: () => {},
+    };
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 5,
+      },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "transient") {
+      // Prior turn (10/15) + the in-flight turn's own reported usage (3/4).
+      expect(result.error.usage).toEqual({ tokensIn: 13, tokensOut: 19 });
+    }
+  });
+
+  test("deadline-exceeded transient carries accumulated usage", async () => {
+    let time = 1000;
+    const nowFn = () => time;
+    const provider: ToolLoopProvider = {
+      call: async () => {
+        time += 500;
+        return ok({
+          toolCalls: [{ id: "c", name: "tool", input: {} }],
+          textContent: undefined,
+          tokensIn: 7,
+          tokensOut: 3,
+        });
+      },
+      appendToolResults: () => {},
+    };
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 10,
+        deadlineMs: 700,
+        now: nowFn,
+      },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "transient") {
+      // deadline=1700: turn0 (1000<1700) burns 7/3 →1500; turn1 (1500<1700)
+      // burns 7/3 →2000; turn2 check 2000>=1700 trips. Two turns completed.
+      expect(result.error.usage).toEqual({ tokensIn: 14, tokensOut: 6 });
     }
   });
 
@@ -248,6 +335,109 @@ describe("toolUseLoop", () => {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
         expect(result.error.message).toContain("no text content");
+      }
+    }
+  });
+
+  test("llm.usage-unattributed warning carries nodeId/runId/dagId correlation (A6)", async () => {
+    // A `validation` error has no `usage` channel — tokens burned by prior
+    // turns surface via the structured warning instead, and the warning MUST
+    // carry the correlation triple so the burned tokens are joinable to a run.
+    const warns: { msg: string; data: Record<string, unknown> }[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (msg, ...args) => warns.push({ msg, data: (args[0] ?? {}) as Record<string, unknown> }),
+      error: () => {},
+    });
+    try {
+      let calls = 0;
+      const provider: ToolLoopProvider = {
+        call: async () => {
+          calls++;
+          if (calls === 1) {
+            // Turn 1 burns 10/15 across a tool-call turn.
+            return ok({
+              toolCalls: [{ id: "c", name: "tool", input: {} }],
+              textContent: undefined,
+              tokensIn: 10,
+              tokensOut: 15,
+            });
+          }
+          // Turn 2 fails with a kind that cannot carry usage.
+          return err({ kind: "validation", nodeId: N("n1"), message: "bad tool schema" });
+        },
+        appendToolResults: () => {},
+      };
+      const result = await toolUseLoop(
+        provider,
+        {
+          nodeId: N("n1"),
+          model: "m",
+          schema,
+          tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+          maxIterations: 5,
+        },
+        makeCtx(),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+
+      const w = warns.find((x) => x.msg === "llm.usage-unattributed");
+      expect(w).toBeDefined();
+      expect(w?.data.errorKind).toBe("validation");
+      expect(w?.data.tokensIn).toBe(10);
+      expect(w?.data.tokensOut).toBe(15);
+      // The correlation triple — without these the burned tokens are unjoinable.
+      expect(w?.data.nodeId).toBe("n1");
+      expect(w?.data.runId).toBe("test-run");
+      expect(w?.data.dagId).toBe("test-dag");
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  test("tool dispatch throw (ctx without llm) → non-retriable node-crash carrying accumulated usage", async () => {
+    // `asToolContext` (tool-dispatch.ts) throws when ctx.llm is null — the node
+    // forgot `requires: ["llm"]`. The loop fences `dispatchToolCallsWithSpans`
+    // in try/catch: the throw must surface as a typed err (not an escaping
+    // exception), non-retriable (authoring errors are deterministic), and the
+    // tokens burned producing the tool calls must still ride the error's
+    // `usage` channel (FR-W0-001).
+    const provider: ToolLoopProvider = {
+      call: async () =>
+        ok({
+          toolCalls: [{ id: "c1", name: "tool", input: {} }],
+          textContent: undefined,
+          tokensIn: 10,
+          tokensOut: 15,
+        }),
+      appendToolResults: () => {},
+    };
+    // NodeContext WITHOUT llm — makeNodeContext defaults the capability to null.
+    const ctxWithoutLlm = makeNodeContext({ runId: "test-run", dagId: "test-dag" });
+
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 5,
+      },
+      ctxWithoutLlm,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("tool dispatch threw");
+        // The turn that produced the tool calls completed before the throw —
+        // its 10/15 are accumulated and attributed on the Err.
+        expect(result.error.usage).toEqual({ tokensIn: 10, tokensOut: 15 });
       }
     }
   });
