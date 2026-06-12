@@ -1,11 +1,15 @@
 # DAG Authoring Reference (LLM-Optimized)
 
-Minimal, copy-paste-ready reference for generating Fugue DAGs.
-For deep dives: `library-ux.md`, `dag-type-system.md`, `packages/host/docs/writing-dags.md`.
-Reading files (Excel/CSV from disk, SharePoint, OneDrive): `llm-document-source.md`.
-Parsing `.xlsx` bytes → typed rows: `@fuguejs/xlsx` (`parseWorkbook`).
-Writing a capability adapter: `adapter-authoring.md`.
-Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
+Minimal, copy-paste-ready reference for generating Fugue DAGs. This file ships
+inside `@fuguejs/framework`; the relative links below resolve both in the
+monorepo and under `node_modules/@fuguejs/` (the packages are siblings either way).
+
+- Type-system deep dive: [`dag-type-system.md`](./dag-type-system.md).
+- The `DagRegistration` + `fugue.yaml` + discovery contract: [`writing-dags.md`](../../host/docs/writing-dags.md) (ships in `@fuguejs/host`).
+- Reading files (Excel/CSV from disk, SharePoint, OneDrive): [`llm-document-source.md`](../../document-source/docs/llm-document-source.md) (ships in `@fuguejs/document-source`).
+- Parsing `.xlsx` bytes → typed rows: `@fuguejs/xlsx` (`parseWorkbook`).
+- Writing a capability adapter: [`adapter-authoring.md`](./adapter-authoring.md).
+- Runnable, lint-tested examples (one per pattern): [`examples/`](./examples/).
 
 ---
 
@@ -48,7 +52,7 @@ const summarize = createLlmNode({
   inputSchema: UserSchema,
   outputSchema: SummarySchema,
   promptName: "user-summary",
-  model: "claude-sonnet-4-20250514",
+  model: "claude-sonnet-4-6",        // a current model id — see "Model ids" below
   buildInput: (input) => ({
     userName: input.name,
     userEmail: input.email,
@@ -130,7 +134,7 @@ createLlmNode<I, O>({
   inputSchema: z.ZodType<I>,
   outputSchema: z.ZodType<O>,
   promptName: string,              // loads template from ctx.prompts
-  model: string,                   // e.g. "claude-sonnet-4-20250514", "gpt-4o"
+  model: string,                   // a provider model id — see "Model ids" below
   buildInput: (input: I) => Record<string, unknown>,  // fills {{placeholders}}
   system?: string,                 // override system prompt
   thinking?: { type: "enabled"; budgetTokens: number },
@@ -194,6 +198,26 @@ createEvalJudgeNode({
 > (`["llm","prompts"]` and `["llm"]` respectively) — you don't pass `requires`
 > to them. Only fetch nodes (which do arbitrary I/O) take an author-set
 > `requires`.
+
+### Model ids
+
+`model` is a provider model-id string passed through to the configured LLM
+client — the framework does not validate it (`fugue capabilities` lists
+*capabilities*, not models). Use a **current** id; ids carrying an explicit
+release date (e.g. `claude-sonnet-4-5`) are usually the stale form and get
+retired. As of this writing the current Claude ids are `claude-opus-4-8`
+(most capable) and `claude-sonnet-4-6` (speed/intelligence balance); the
+authoritative list lives in the host's LLM-provider configuration, not in
+this doc.
+
+Two conventions:
+
+- **Pin a literal** id when the DAG always wants the same model — but surface
+  it as a factory option so tests and environments can override it (see *DAG
+  factory with injected seams*), rather than hardcoding it at module scope.
+- **`<MODEL>` placeholder** — the `fugue new` scaffold writes the current id
+  into generated `dag.ts`; when copying an example by hand, treat a literal
+  id as a value to confirm, not gospel.
 
 ### Emitting confidence from a node
 
@@ -274,8 +298,8 @@ createFetchNode({
 })
 ```
 
-- Reading files (Excel/CSV from disk, SharePoint, OneDrive): **`llm-document-source.md`**.
-- Writing your own adapter (`db`, S3, …): **`adapter-authoring.md`**.
+- Reading files (Excel/CSV from disk, SharePoint, OneDrive): [**`llm-document-source.md`**](../../document-source/docs/llm-document-source.md).
+- Writing your own adapter (`db`, S3, …): [**`adapter-authoring.md`**](./adapter-authoring.md).
 - `fugue describe <dag>` reports the capabilities a specific DAG requires; the
   set actually *available* is a deployment choice (which handles the host wired).
 
@@ -393,7 +417,8 @@ declare both, either, or neither. They solve different problems (dedupe one
 logical operation vs. detect a concurrent overwrite), and neither allocates work
 across callers; that's an application-level concern (e.g. a claims table).
 
-Deep dive + rationale: `features.md` §9, `docs/adr/0025-freshness-witness-contract.md`.
+Deep dive + rationale: the freshness-witness ADR (ADR-0025) and `features.md` §9
+in the `fugue` monorepo — the contract above is the shipped summary.
 
 ---
 
@@ -483,6 +508,29 @@ const registration: DagRegistration = {
 
 export default registration;
 ```
+
+### Configuration & environment
+
+Two kinds of configuration, two homes:
+
+- **Required env vars → `fugue.yaml` `env:`.** List the names a DAG cannot run
+  without (API keys, connection strings). The host checks them at load time and
+  **refuses to register the DAG** if any are unset — fail-closed, before a
+  single request. Read them inside the node (`ctx`/process env) knowing the host
+  already guaranteed their presence.
+- **Optional, defaulted config → a factory option.** A value with a safe default
+  (a model id, a brand string, a feature flag) may be read once at module scope
+  from `process.env` — but **surface it as a `create…Dag(opts)` option** so tests
+  and alternate environments can override it without mutating `process.env`:
+
+  ```ts
+  export const OPENER_MODEL = process.env.OPENER_MODEL ?? "claude-sonnet-4-6";
+  export const createOpenerDag = (opts: { model?: string } = {}) =>
+    defineDag({ /* … uses opts.model ?? OPENER_MODEL … */ });
+  ```
+
+  A bare module-scope `process.env` read with no factory seam is the smell: it
+  can't be overridden in a test and isn't declared anywhere a deployer can see.
 
 ---
 
@@ -732,32 +780,67 @@ bunx fugue prompts check dags/<team>/<name>
 
 ## Result Type
 
-All node functions return `Result<T, FrameworkError>`. The error kinds an
-author typically constructs are `transient`, `validation`, and `node-crash` —
-all three carry the (branded) `nodeId`; there is **no** `permanent` kind — a
-deterministic failure is `node-crash` with `retriability: "non-retriable"`:
+All node functions return `Result<T, FrameworkError>` — `ok(value)` on success,
+`err(...)` on failure. **Build errors with the `frameworkError.*` factories**,
+not raw object literals: the factories brand the `nodeId`, fill required fields,
+and keep call sites stable as the error types evolve. The kinds an author
+typically constructs are `validation`, `transient`, and `node-crash` — all
+carry the (branded) `nodeId`. There is **no** `permanent` kind: a deterministic
+failure is `node-crash` with `retriability: "non-retriable"`.
 
 ```ts
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err, frameworkError } from "@fuguejs/framework";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // Success
 return ok(value);
 
-// Retriable failure — the runtime applies the node's retry budget
-return err({ kind: "transient", nodeId: nodeId("fetch-user"), message: "API timeout" });
-
 // Bad input / bad upstream data — names the problem, optional path
-return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not found", path: "cvr" });
+return err(frameworkError.validation("score", "CVR not found", "cvr"));
+
+// Retriable failure — the runtime applies the node's retry budget
+return err(frameworkError.transient("fetch-user", "API timeout"));
 
 // Deterministic failure — fast-fails without consuming the retry budget
-return err({
-  kind: "node-crash",
-  nodeId: nodeId("fetch-config"),
-  message: "config sheet is missing required rows",
+return err(frameworkError.nodeCrash("fetch-config", "config sheet is missing required rows", {
   retriability: "non-retriable",
-});
+}));
 ```
+
+`frameworkError` also carries the structural factories the framework itself
+emits (`missingCapability`, `retryExhausted`, `duplicateEdge`, …) — you rarely
+construct those, but they're the same namespace.
+
+<details><summary>Desugared form (what a factory produces)</summary>
+
+A factory call is exactly a branded object literal — this is equivalent to the
+`validation` line above, kept only to show the shape. Prefer the factory:
+
+```ts
+import { err, nodeId } from "@fuguejs/framework";
+return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not found", path: "cvr" });
+```
+
+</details>
+
+### Framework entry points never throw
+
+Capabilities (`ctx.documents.getContent`, `ctx.http.get`, …), `parseWorkbook`
+from `@fuguejs/xlsx`, and every framework entry point return `Result` and signal
+failure with `err(...)` — including "expected" failures like a missing file or a
+missing worksheet. They do **not** throw. A defensive `try/catch` wrapped around
+one of them is a smell: it catches nothing and hides the real control flow.
+Branch on `.ok` instead:
+
+```ts
+const parsed = await parseWorkbook(bytes, RowSchema, { sheet: "Data" });
+if (!parsed.ok) return parsed;        // propagate — no try/catch
+// … use parsed.value
+```
+
+(Genuinely throwing third-party code at the very edge of a fetch node — a
+library with no Result contract — is the only place a `try/catch` belongs, and
+it should convert straight into an `err(frameworkError.*)`.)
 
 ---
 
@@ -770,6 +853,9 @@ return err({
 - [ ] If conditional edges leave a node, a `kind: "default"` edge exists (else-totality)
 - [ ] `inputSchema` of downstream nodes matches what upstream produces
 - [ ] Root nodes' `inputSchema` matches the DAG-level `inputSchema`
+- [ ] Errors are built with `frameworkError.*`, not raw `err({ kind, … })` literals
+- [ ] No defensive `try/catch` around capabilities / `parseWorkbook` / framework calls — they return `Result`, they don't throw
+- [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read
 - [ ] `export default` a `DagRegistration` object
 
 All structural rules are validated at module load by `defineDag()` — invalid
@@ -889,7 +975,7 @@ $ bunx fugue capabilities
     "mechanism": "Adapter packages augment CapabilityRegistry and ship a CapabilityHandle the host wires at boot.",
     "howToDeclare": "Add the name to a node's `requires: [...] as const`; ctx.<name> is then typed non-null.",
     "discover": "Run `fugue describe <dag>` to see what a specific DAG requires.",
-    "seeAlso": ["docs/llm-document-source.md", "docs/adapter-authoring.md", "..."]
+    "seeAlso": ["@fuguejs/document-source/docs/llm-document-source.md", "@fuguejs/framework/docs/adapter-authoring.md"]
   }
 }
 ```

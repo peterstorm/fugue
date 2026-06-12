@@ -5,6 +5,7 @@
   "scripts": {
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
+    "check:docs": "bun scripts/check-doc-links.ts",
     "infra:up": "bash scripts/infra-up.sh",
     "infra:down": "bash scripts/infra-down.sh",
     "eval": "podman-compose -f infra/compose.yaml --profile eval up --build eval",

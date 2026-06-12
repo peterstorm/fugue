@@ -4,7 +4,7 @@ How the library actually works from a caller's perspective, with and without
 the state-machine path, and a precise account of every place Redis touches
 the system.
 
-> **For LLM code generation:** see [`llm-dag-authoring.md`](./llm-dag-authoring.md) — a minimal,
+> **For LLM code generation:** see [`llm-dag-authoring.md`](../packages/framework/docs/llm-dag-authoring.md) — a minimal,
 > copy-paste-ready reference with all node factory signatures and common patterns.
 
 ---

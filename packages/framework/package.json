@@ -58,6 +58,7 @@
   "files": [
     "src",
     "bin",
+    "docs",
     "!src/**/__tests__"
   ]
 }

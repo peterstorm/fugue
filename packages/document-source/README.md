@@ -5,7 +5,7 @@ The provider-neutral **document-source capability port**. Defines the
 ADT, `FileMeta`, the test fake, and the shared `unsupportedRefError`. Backend
 adapters depend on this package and implement `DocumentSource` for one store.
 
-- **AI/usage guide:** [`docs/llm-document-source.md`](../../docs/llm-document-source.md)
+- **AI/usage guide:** [`docs/llm-document-source.md`](./docs/llm-document-source.md)
 - **Design:** [`docs/adr/0052-document-source-capability.md`](../../docs/adr/0052-document-source-capability.md)
 - **Adapters:** [`@fuguejs/fs`](../adapter-fs) (local disk), [`@fuguejs/ms-graph`](../adapter-ms-graph) (SharePoint/OneDrive)
 

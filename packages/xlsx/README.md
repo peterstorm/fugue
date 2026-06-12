@@ -6,7 +6,7 @@ the bytes is a [`documents`](../document-source) capability concern
 ([`@fuguejs/fs`](../adapter-fs), [`@fuguejs/ms-graph`](../adapter-ms-graph)); parsing
 stays here so it is fixture-testable and provider-agnostic (ADR-0052).
 
-- **AI/usage guide:** [`docs/llm-document-source.md`](../../docs/llm-document-source.md)
+- **AI/usage guide:** [`docs/llm-document-source.md`](../document-source/docs/llm-document-source.md)
 
 ## Usage
 

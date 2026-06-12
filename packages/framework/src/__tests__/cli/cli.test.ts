@@ -178,7 +178,7 @@ describe("runCapabilities", () => {
     const result = runCapabilities();
     expect(result.custom.mechanism).toContain("module augmentation");
     expect(result.custom.howToDeclare).toContain("requires");
-    expect(result.custom.seeAlso).toContain("docs/adapter-authoring.md");
+    expect(result.custom.seeAlso).toContain("@fuguejs/framework/docs/adapter-authoring.md");
   });
 });
 
@@ -214,7 +214,7 @@ describe("fugue bin (subprocess)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(true);
     expect(parsed.builtin.map((c: { name: string }) => c.name)).toContain("http");
-    expect(parsed.custom.seeAlso).toContain("docs/adapter-authoring.md");
+    expect(parsed.custom.seeAlso).toContain("@fuguejs/framework/docs/adapter-authoring.md");
   });
 
   it("capabilities exits 2 when given an argument", async () => {

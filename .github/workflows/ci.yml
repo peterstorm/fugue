@@ -26,6 +26,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Check shipped-doc links
+        run: bun run check:docs
+
       - name: Typecheck + test
         run: |
           for pkg in $PACKAGES; do

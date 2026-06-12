@@ -2,6 +2,16 @@
 
 DAG-shaped, durable runtime for LLM-bearing workflows. See [`docs/adr/`](../../docs/adr/) for the decision record; this file is a reference for the public surface exported from `src/index.ts`.
 
+## Docs
+
+Authoring guidance ships in this package, version-locked to the code — read it
+straight from `node_modules/@fuguejs/framework/docs/`:
+
+- [`docs/llm-dag-authoring.md`](./docs/llm-dag-authoring.md) — the primary authoring reference (node factories, constructors, `Result`, the `fugue` CLI). Start here.
+- [`docs/examples/`](./docs/examples/) — runnable, lint-tested golden DAGs, one per shape. The canonical copy-paste source.
+- [`docs/dag-type-system.md`](./docs/dag-type-system.md) — the type-system guarantees behind `defineDag`.
+- [`docs/adapter-authoring.md`](./docs/adapter-authoring.md) — writing a capability adapter.
+
 The barrel is deliberately narrow. Anything not listed below is an internal detail — import from the concrete file path if you have a documented need (tests do this routinely), but treat that as a private contract subject to change without a major bump.
 
 ## Adding to the public surface

@@ -34,10 +34,12 @@ export const runCapabilities = (): CapabilitiesResult => ({
     discover:
       "The built-ins above are always part of the registry. Whether an adapter-provided capability is available is a property of the deployment — it exists only if the host registered its CapabilityHandle. Run `fugue describe <dag>` to see which capabilities a specific DAG requires.",
     seeAlso: [
-      "docs/llm-document-source.md",
-      "docs/adapter-authoring.md",
-      "docs/adr/0051-extensible-capability-registry.md",
-      "docs/adr/0052-document-source-capability.md",
+      // Shipped in the installed packages — resolvable from a consumer repo.
+      "@fuguejs/document-source/docs/llm-document-source.md",
+      "@fuguejs/framework/docs/adapter-authoring.md",
+      // Design rationale (fugue monorepo only — not shipped):
+      "fugue: docs/adr/0051-extensible-capability-registry.md",
+      "fugue: docs/adr/0052-document-source-capability.md",
     ],
   },
 });

@@ -2,6 +2,16 @@
 
 The Fugue Host is a production-grade runtime that discovers, loads, and serves DAG-based AI workflows via HTTP. It polls a git repository for DAG definitions, validates them at load time, and exposes them as authenticated REST endpoints with concurrency limiting, circuit breaking, and graceful shutdown.
 
+## Docs
+
+Shipped in this package — read from `node_modules/@fuguejs/host/docs/`:
+
+- [`docs/writing-dags.md`](./docs/writing-dags.md) — the `DagRegistration` + `fugue.yaml` + discovery contract DAG authors deploy against.
+- [`docs/auth.md`](./docs/auth.md) — admin / team-token / OIDC auth and team isolation.
+- [`docs/deployment.md`](./docs/deployment.md) — container + Redis + OpenShift deployment.
+
+For authoring DAGs themselves, see [`@fuguejs/framework/docs/llm-dag-authoring.md`](../framework/docs/llm-dag-authoring.md).
+
 ## Deployment Model: One Host Per Team
 
 Each team gets their own host instance. This gives you:

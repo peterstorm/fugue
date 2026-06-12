@@ -34,6 +34,7 @@
   },
   "files": [
     "src",
+    "docs",
     "!src/**/__tests__"
   ]
 }
