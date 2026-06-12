@@ -54,11 +54,20 @@ import {
   type DownstreamScope,
   type OperationNarrowedHandle,
 } from "../domain/capability-scope.js";
+import { agentClientIdFromFrameworkOrigin, type AgentClientId } from "../domain/auth.js";
 // Side-channel: importing the registry augmentation keeps it in this module's
 // graph, so any consumer of the broker also sees the `"<provider>:<operation>"`
 // scope keys on `CapabilityRegistry` AND the C6 soundness assertions that make
 // the `handleRecord` cast below sound by construction.
 import type { CapabilityRegistryWired } from "../domain/capability-registry.js";
+// DO NOT REMOVE — referencing `CapabilityRegistryWired` in an exported type-level
+// position pins the side-channel import above into this module's compile graph.
+// Without a reference, a "remove unused import" cleanup could silently drop it,
+// taking the C6 `_Equal` soundness assertions out of the broker's compilation and
+// leaving the `handleRecord as ScopedCapabilityHandle` cast (below) unchecked —
+// a scope key augmented with the wrong handle type would then compile and crash a
+// node at runtime. The reference makes the guarantee un-droppable, not advisory.
+export type _BrokerHandleCastSoundness = CapabilityRegistryWired;
 import {
   cacheKey,
   cacheToken,
@@ -166,8 +175,15 @@ export const audienceForScope = (scope: DownstreamScope): string =>
  *
  * Returns the assigned scope names (canonical `"<provider>:<operation>"`). A
  * client with no entry is treated as having NO scopes (fail closed).
+ *
+ * The parameter demands a branded `AgentClientId`, not a bare `string`: the
+ * fail-closed gate is the most security-relevant consumer, and the brand makes
+ * it a COMPILE error to call it with some other identity string in scope (the
+ * user's `sub`, the frontend `azp`). The only `AgentClientId` the broker holds
+ * comes from re-narrowing the framework origin at the call site below
+ * (`agentClientIdFromFrameworkOrigin`).
  */
-export type AssignedScopes = (agentClientId: string) => ReadonlySet<string>;
+export type AssignedScopes = (agentClientId: AgentClientId) => ReadonlySet<string>;
 
 export interface KeycloakBrokerDeps {
   /** The injected Keycloak token endpoint — the FIRST egress (records calls in tests). */
@@ -274,6 +290,19 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
   // Two mutable cells threading the pure cache values across invocations, one per
   // egress: the Keycloak SA-token cache and the Entra app-only-token cache. The
   // freshness/lookup/store logic is pure (token-cache.ts); only the cells mutate.
+  //
+  // BOTH cells are keyed on the SAME `(identity, audience, scope)` triple, where
+  // `audience` is the DOWNSTREAM resource (Graph/Dynamics). For the app-only
+  // token that is its real audience. For the SA token it is NOT — the SA token's
+  // own audience is the Entra exchange (`api://AzureADTokenExchange`); the
+  // downstream `audience` is the right SA dedup key only by DELIBERATE
+  // COINCIDENCE: each downstream scope maps 1:1 to one downstream audience
+  // (`audienceForScope`), so "(identity, audience, scope)" and the SA token's
+  // true dedup unit "(identity, scope)" partition the cells identically today.
+  // If a future provider mapped several scopes onto one downstream audience while
+  // needing distinct SA tokens (or one SA token served several audiences), the SA
+  // cache would need its OWN key derivation — the two cells are separate cells
+  // precisely so that split can happen without touching the app-only path.
   // CRITICAL (review I1): every `… = store(thatCache, …)` reads the CURRENT cell
   // at assignment time (synchronously, after the await) — it NEVER assigns a
   // pre-await snapshot — so a mint of triple A cannot clobber a concurrent mint
@@ -385,13 +414,29 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         r.ok ? ok({ ...r.value, acquisition: "cache-reuse" as const }) : r,
       );
     }
-    const p = doAcquireAppToken(inv, scope, audience, cacheK);
+    // STRUCTURAL never-reject at the in-flight boundary: wrap the acquisition in
+    // an outer `.catch` so the promise STORED in the map (and shared with every
+    // waiter) can never reject — regardless of whether `doAcquireAppToken`'s
+    // inner fence still holds. The inner fence stays (it attributes a throw to
+    // the precise hop in flight); this backstop means a future `await` slipped
+    // outside that fence would degrade to a typed `infra-unreachable` here
+    // instead of poisoning every waiter and escaping as an unhandledRejection.
+    // The map invariant is now enforced at the one site that owns the map, not
+    // borrowed from a separate function's internal try/catch.
+    const p = doAcquireAppToken(inv, scope, audience, cacheK).catch(
+      (e): Result<AcquiredAppToken, FrameworkError> =>
+        err({
+          kind: "infra-unreachable",
+          operation: "mint",
+          hop: "broker-internal",
+          message: `app-token acquisition threw across the in-flight boundary: ${e instanceof Error ? e.message : String(e)}`,
+        }),
+    );
     inFlight.set(cacheK, p);
     // Observe BOTH settlement paths on `p` itself: `void p.finally(...)` would
-    // create an UNOBSERVED derived promise, so any rejection of `p` (a port
-    // contract violation) would surface as a process-level unhandledRejection.
-    // `doAcquireAppToken` is fenced to never reject, and this keeps the cleanup
-    // rejection-safe even if that invariant is ever broken.
+    // create an UNOBSERVED derived promise. `p` is now structurally rejection-free
+    // (the `.catch` above), so this only ever runs the resolve path; the dual
+    // handler keeps cleanup correct even if that ever changes.
     const cleanup = (): void => {
       if (inFlight.get(cacheK) === p) inFlight.delete(cacheK);
     };
@@ -404,7 +449,11 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     requires: readonly Capability[],
   ): Promise<Result<ScopedCapabilityHandle, FrameworkError>> => {
     const resolved: ResolvedCapability[] = [];
-    const assigned = deps.assignedScopes(inv.origin.agentClientId);
+    // Re-narrow the framework-erased brand at this single host re-entry point so
+    // the fail-closed gate is keyed on a typed `AgentClientId`, never an
+    // arbitrary identity string (the user `sub`, the frontend `azp`).
+    const agentClientId = agentClientIdFromFrameworkOrigin(inv.origin.agentClientId);
+    const assigned = deps.assignedScopes(agentClientId);
 
     for (const capability of requires) {
       // 1. Pass-through: a capability this broker does not `provides()` —

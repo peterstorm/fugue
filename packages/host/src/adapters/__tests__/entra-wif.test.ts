@@ -117,6 +117,10 @@ describe("entra-wif — tenantId is validated ONCE at construction, never per-ex
     ["a fragment", "tenant#frag"],
     ["an empty string", ""],
     ["whitespace", "tenant id"],
+    // Length upper bound: the `{1,128}` quantifier rejects 129 chars, so an
+    // over-long (likely hostile/garbage) value fails loudly instead of building
+    // a token URL from it.
+    ["a 129-char tenant (one over the max)", "a".repeat(129)],
   ])("wifTokenEndpoint rejects %s", (_label, tenantId) => {
     expect(() => wifTokenEndpoint({ tenantId, clientId: "c" })).toThrow(/invalid tenantId/);
   });
@@ -125,6 +129,10 @@ describe("entra-wif — tenantId is validated ONCE at construction, never per-ex
     ["a GUID", "0f8fad5b-d9cb-469f-a165-70867728950e"],
     ["a verified domain", "contoso.onmicrosoft.com"],
     ["a well-known alias", "organizations"],
+    // Length bounds of the `{1,128}` quantifier: a single char and exactly 128
+    // chars are both accepted (the boundary, not just a mid-range GUID).
+    ["a single-character tenant (min length)", "a"],
+    ["a 128-char tenant (max length)", "a".repeat(128)],
   ])("wifTokenEndpoint accepts %s and builds the v2.0 endpoint", (_label, tenantId) => {
     expect(wifTokenEndpoint({ tenantId, clientId: "c" })).toBe(
       `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,

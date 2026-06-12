@@ -99,7 +99,10 @@ export type { CapabilityHandle, AdapterFactory } from "./types/capability-handle
 // pass-through broker (`createPassthroughBroker`, above) is an optional
 // embedder convenience equivalent to omitting the broker; host-side brokers
 // (Keycloak/Entra) live in the host.
-export type { CapabilityBroker, Invocation, InvocationOrigin, MintingAuthority, ScopedCapabilityHandle } from "./types/capability-broker.js";
+export type { CapabilityBroker, Invocation, InvocationCorrelation, InvocationOrigin, MintingAuthority, ScopedCapabilityHandle } from "./types/capability-broker.js";
+// `invocationFor` — the sole `Invocation` constructor, deriving `origin` from the
+// `MintingAuthority` so a node's invocation can't disagree with the authority minting it.
+export { invocationFor } from "./types/capability-broker.js";
 // Built-in capability catalogue — runtime values consumed by `fugue capabilities`
 // and any tooling that needs the authoritative built-in set + its metadata.
 export { BUILTIN_CAPABILITY_KEYS, BUILTIN_CAPABILITY_INFO } from "./types/node.js";

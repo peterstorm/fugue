@@ -83,6 +83,12 @@ export interface MintingAuthority {
  *
  * `runId`/`dagId`/`nodeId` are the correlation triple every later mint/refusal
  * audit record is keyed on.
+ *
+ * `origin` MUST be the same origin the run's `MintingAuthority` authorizes
+ * against — the broker gates and mints AS that origin. The two are kept
+ * consistent by constructing every `Invocation` through `invocationFor` below
+ * (the sole construction site), so an `Invocation` whose `origin` disagrees
+ * with the authority that mints it is not produced by the runtime.
  */
 export interface Invocation {
   readonly origin: InvocationOrigin;
@@ -90,6 +96,35 @@ export interface Invocation {
   readonly dagId: DagId;
   readonly nodeId: NodeId;
 }
+
+/**
+ * The correlation triple for one node invocation — everything an `Invocation`
+ * needs beyond the origin (which the `MintingAuthority` already owns).
+ */
+export interface InvocationCorrelation {
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+}
+
+/**
+ * Build the per-node `Invocation` for a dispatch, DERIVING `origin` from the
+ * minting authority rather than re-supplying it. This is the single
+ * construction site (`dag-runtime/run-node.ts`): pulling `origin` straight off
+ * the `MintingAuthority` makes "the node was minted AS origin X but its
+ * `Invocation` claims origin Y" unrepresentable in the runtime — the same
+ * pairing discipline `MintingAuthority` itself uses. The broker then gates,
+ * mints, and audits against exactly the origin the authority was wired with.
+ */
+export const invocationFor = (
+  authority: MintingAuthority,
+  correlation: InvocationCorrelation,
+): Invocation => ({
+  origin: authority.origin,
+  runId: correlation.runId,
+  dagId: correlation.dagId,
+  nodeId: correlation.nodeId,
+});
 
 /**
  * The per-invocation authority seam.

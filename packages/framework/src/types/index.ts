@@ -107,10 +107,12 @@ export type { CapabilityHandle, AdapterFactory } from "./capability-handle.js";
 export type {
   CapabilityBroker,
   Invocation,
+  InvocationCorrelation,
   InvocationOrigin,
   MintingAuthority,
   ScopedCapabilityHandle,
 } from "./capability-broker.js";
+export { invocationFor } from "./capability-broker.js";
 
 // ── DAG shape ─────────────────────────────────────────────────────────────
 export type {

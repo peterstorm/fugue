@@ -21,7 +21,8 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
-import type { Invocation, MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
+import type { MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
+import { invocationFor } from "../types/capability-broker.js";
 import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { emit } from "./emit.js";
@@ -137,7 +138,11 @@ export const runNodeShared = async (
     // client. A refusal fails the node fail-closed before `run` is ever called.
     let runCtx: NodeContext = ctx;
     if (opts.minting) {
-      const inv: Invocation = { origin: opts.minting.origin, runId: ctx.runId, dagId, nodeId };
+      // Derive the Invocation's origin from the authority (single construction
+      // site) so the node is always minted AS the origin the authority gates
+      // against — the half-consistent "origin Y on an authority-X mint" state
+      // is unrepresentable here.
+      const inv = invocationFor(opts.minting, { runId: ctx.runId, dagId, nodeId });
       // The port contract says errors flow on the Result channel, never thrown
       // — but the broker is a public extension seam, so the contract is
       // enforced here rather than assumed. An unfenced throw would escape to

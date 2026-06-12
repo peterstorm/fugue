@@ -41,29 +41,47 @@ export type TokenHash = string & { readonly __brand: "TokenHash" };
 
 /**
  * The Keycloak client id an agent acts AS — the identity the broker's policy
- * gate (`assignedScopes`), the token-cache identity, and the audit `azp` are
- * all keyed on. Branded with a SINGLE constructor (`agentClientIdForDag`)
- * because the value is currently a PLACEHOLDER: until the dagId→Keycloak-client
- * mapping lands (ADR-0056), the DAG id stands in for the agent client id at
- * every one of those sites. The migration safety this buys is CONVENTION, not
- * compiler proof: the brand has no consuming positions yet (the framework seam
- * `InvocationOrigin.agentClientId` is plain `string`, as are `AssignedScopes`
- * keys and the `AGENT_CLIENT_SCOPES` config keys — which must migrate in the
- * same change as this constructor's body). What the single construction site
- * guarantees is one place to swap the mapping plus one grep target; making the
- * brand load-bearing host-side (e.g. `AssignedScopes` demanding it, re-branding
- * at the framework boundary) is the follow-up that would turn it into a
- * compiler check.
+ * gate (`AssignedScopes`), the token-cache identity, and the audit `azp` are
+ * all keyed on. The value is currently a PLACEHOLDER: until the
+ * dagId→Keycloak-client mapping lands (ADR-0056), the DAG id stands in for the
+ * agent client id, produced at the inbound boundary by `agentClientIdForDag`.
+ *
+ * The brand is LOAD-BEARING at the policy gate: `AssignedScopes` demands an
+ * `AgentClientId`, so the fail-closed scope lookup cannot be called with an
+ * arbitrary string (e.g. the user's `sub`, or the frontend `azp`) — only a
+ * value that came through one of the two branding boundaries below. It cannot
+ * be load-bearing at the FRAMEWORK seam (`InvocationOrigin.agentClientId` is a
+ * framework type and stays plain `string` — the framework port must not depend
+ * on this host-only Keycloak-client brand), so the brand is erased crossing
+ * into the framework and RESTORED at the single host re-entry point by
+ * `agentClientIdFromFrameworkOrigin` below. `AGENT_CLIENT_SCOPES` config keys
+ * stay plain strings (JSON object keys); they are consulted only behind the
+ * branded `AssignedScopes` boundary.
  */
 export type AgentClientId = string & { readonly __brand: "AgentClientId" };
 
 /**
- * THE single producer of `AgentClientId`. Today: the dagId-as-client
- * placeholder (one Keycloak client per agent type / per DAG, ADR-0056 — the
- * mapping is the identity function until the config-mapped registry lands).
- * When the real mapping arrives, change ONLY this body.
+ * THE source producer of `AgentClientId` (the inbound boundary). Today: the
+ * dagId-as-client placeholder (one Keycloak client per agent type / per DAG,
+ * ADR-0056 — the mapping is the identity function until the config-mapped
+ * registry lands). When the real mapping arrives, change ONLY this body.
  */
 export const agentClientIdForDag = (dagId: string): AgentClientId => dagId as AgentClientId;
+
+/**
+ * RESTORE the `AgentClientId` brand at the single host re-entry point — the
+ * capability broker, where the value re-enters host code off the framework
+ * `InvocationOrigin.agentClientId` (a plain `string`, because the framework
+ * port must not depend on this host brand). The value was already minted by
+ * `agentClientIdForDag` at the inbound boundary (`invocationOriginForIdentity`)
+ * and merely WIDENED crossing the framework seam; this re-narrows it so the
+ * broker's `AssignedScopes` gate demands the brand rather than any string.
+ * Brand-boundary idiom — a documented re-narrow at one seam, like
+ * `markSignatureVerified` for verified claims (NOT a third name↔client
+ * correlation cast; ADR-0053's two-point rule is about those).
+ */
+export const agentClientIdFromFrameworkOrigin = (agentClientId: string): AgentClientId =>
+  agentClientId as AgentClientId;
 
 // ── Token Grant (stored in Redis) ──────────────────────────────────────────
 
