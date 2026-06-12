@@ -123,6 +123,25 @@ describe("entra-wif — success maps to an app-only token", () => {
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
   });
+
+  // A14: `expires_in` must parse to POSITIVE FINITE seconds — NaN/Infinity/
+  // negative/string would mint a born-stale or never-expiring cache entry
+  // downstream, so each is a malformed 2xx → infra-unreachable, never ok.
+  it.each([
+    ["NaN", Number.NaN],
+    ["negative", -3600],
+    ["zero", 0],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["a string", "3600"],
+  ])("200 with %s expires_in → infra-unreachable (no born-stale/never-expiring token)", (_label, expiresIn) => {
+    const r = mapWifResponse("https://graph.microsoft.com", {
+      status: 200,
+      json: { access_token: "app-only-tok", expires_in: expiresIn },
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+  });
 });
 
 // ── Denial mapping (FR-X-002): FIC mismatch / WIF rejection / resource denial ─

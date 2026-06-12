@@ -11,6 +11,7 @@
 // exclusively via the `capabilities` record.
 
 import type { NodeContext, NodeContextInit } from "../types/node.js";
+import type { ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import { runId as brandRunId, dagId as brandDagId } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
@@ -71,4 +72,33 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
   if (customEntries.length === 0) return base;
 
   return Object.assign({}, base, Object.fromEntries(customEntries)) as NodeContext;
+};
+
+/**
+ * Merge per-node minted capability handles over a base NodeContext, producing a
+ * NEW context the node's `run` is invoked with. Used by the runtime when a
+ * minting `CapabilityBroker` is wired: the broker resolves a node's declared
+ * scopes into narrowed handles at dispatch, and those handles are layered over
+ * the boot-scoped static client set (`http`/`db`/`llm`/…) the base context
+ * already carries — broker-resolvable `"<provider>:<operation>"` names get their
+ * minted handle, every plain capability keeps its static client.
+ *
+ * Minted handles take precedence on collision. Reserved infrastructure keys
+ * (`logger`/`tracer`/…) and built-in capability keys are never overwritten — a
+ * broker could only mint a key colliding with those by augmenting the registry
+ * with a reserved name, which the runtime forbids elsewhere; guarding here keeps
+ * the merge total and framework infrastructure intact. `null`/absent minted
+ * entries are dropped (a broker that resolved nothing leaves the base untouched),
+ * so an empty mint result returns the base context by reference — preserving the
+ * byte-identical no-op when a node declares no broker-resolvable scopes.
+ */
+export const mergeScopedCapabilities = (
+  base: NodeContext,
+  scoped: ScopedCapabilityHandle,
+): NodeContext => {
+  const entries = Object.entries(scoped).filter(
+    ([k, v]) => v != null && !RESERVED_CONTEXT_KEYS.has(k),
+  );
+  if (entries.length === 0) return base;
+  return Object.assign({}, base, Object.fromEntries(entries)) as NodeContext;
 };

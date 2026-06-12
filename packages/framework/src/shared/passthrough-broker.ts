@@ -1,12 +1,14 @@
-// Pass-through CapabilityBroker — the zero-regression default.
+// Pass-through CapabilityBroker — an optional embedder convenience.
 //
 // It ignores the invocation `origin` and the `requires` declaration and hands
 // back the statically-configured clients BYTE-IDENTICALLY — the same client
-// references it was constructed with, never copies. This reproduces today's
-// behavior exactly (the host's `extractClients` output was previously passed
-// straight to `makeNodeContext`); routing it through this broker changes
-// nothing observable. That is the whole point: the default broker IS the
-// migration path.
+// references it was constructed with, never copies. Routing a run through it
+// is observably equivalent to omitting the broker altogether: NOTHING defaults
+// to this broker — `runDag` without a `minting` option skips per-node minting
+// entirely, and that omission is the zero-regression path the host uses when
+// no realm config is present. Use this broker when an embedder wants a
+// `CapabilityBroker`-shaped value (e.g. to satisfy a seam in its own wiring)
+// with exactly today's static-client behavior.
 //
 // It mints NOTHING and makes ZERO token requests, so SC-008 (≤1 token request
 // per (identity,audience,scope)/TTL) is satisfied trivially. It references no
@@ -18,7 +20,8 @@
 // @satisfies FR-W2-002 — framework ships a pass-through broker handing back
 //   statically-configured clients, reproducing today's behavior exactly
 // @satisfies FR-W2-003 — every DAG/embedder compiling today keeps byte-identical
-//   capability behavior with zero migration steps (this broker is that path)
+//   capability behavior with zero migration steps (omitting the broker is that
+//   path; this broker reproduces it for embedders that want an explicit value)
 // @satisfies FR-W2-004 — neither the port nor this default references Keycloak/
 //   Entra (no imports, no type names, no string literals)
 // @satisfies SC-005 — byte-identical client resolution (same references)

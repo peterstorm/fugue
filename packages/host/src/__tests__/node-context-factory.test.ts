@@ -6,9 +6,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, createPassthroughBroker } from "@fuguejs/framework";
-import type { Result, DagId, RunId, NodeId, CapabilityBroker } from "@fuguejs/framework";
-import { extractClients } from "../domain/capability-manager.js";
+import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fuguejs/framework";
+import type { Result, DagId, RunId, NodeId } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
@@ -28,13 +27,6 @@ import type { AuthIdentity } from "../domain/auth.js";
 // reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
 // their byte-identical assertions are unaffected.
 const adminIdentity: AuthIdentity = { kind: "admin" };
-
-// Pass-through broker over a SharedInfra's capabilities — the zero-regression
-// default these tests assert against. The factory now takes the broker as an
-// injected argument (T8); building it here from `extractClients` keeps the
-// byte-identical pass-through behaviour the assertions depend on.
-const passthroughFor = (shared: SharedInfra): CapabilityBroker =>
-  createPassthroughBroker(extractClients(shared.capabilities));
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -303,7 +295,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
   it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, passthroughFor(shared));
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -314,15 +306,15 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const ctx = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, passthroughFor(shared));
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).toBeNull();
   });
 });
 
-// ── Pass-through broker path (SC-005 zero-regression) ───────────────────────
+// ── Static client wiring (SC-005 zero-regression) ───────────────────────────
 
-describe("createNodeContextForDag — pass-through broker path (SC-005)", () => {
+describe("createNodeContextForDag — static client wiring (SC-005)", () => {
   const baseSharedInfra = (
     capabilities: SharedInfra["capabilities"],
   ): SharedInfra => ({
@@ -335,26 +327,24 @@ describe("createNodeContextForDag — pass-through broker path (SC-005)", () => 
     capabilities,
   });
 
-  // Regression proof for the per-invocation broker seam (Phase 2): routing
-  // capability resolution through the pass-through broker must leave the client
-  // reachable on the NodeContext BYTE-IDENTICAL to what `extractClients` would
-  // have produced — the SAME reference, not a copy. If this drifts, the
-  // pass-through default is no longer a true migration path (FR-W2-003).
+  // Regression proof for the base-context wiring: the boot-scoped static client
+  // must be reachable on the NodeContext BYTE-IDENTICAL to what `extractClients`
+  // produces — the SAME reference, not a copy. Per-node minting layers OVER this
+  // base; the static client itself is never copied (FR-W2-003 / SC-005).
   it("exposes the exact same capability client reference the handle wired in (byte-identical)", async () => {
     const httpHandle = createHttpCapability();
     const shared = baseSharedInfra([httpHandle]);
 
-    const ctx = await createNodeContextForDag(
+    const { ctx } = await createNodeContextForDag(
       shared,
       makeDag(),
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      passthroughFor(shared),
     );
 
-    // `extractClients([httpHandle]).http === httpHandle.client` — and the broker
-    // hands that exact reference through to the NodeContext unchanged.
+    // `extractClients([httpHandle]).http === httpHandle.client` — the factory
+    // wires that exact reference onto the base NodeContext unchanged.
     expect(ctx.http).toBe(httpHandle.client);
   });
 });
@@ -369,16 +359,22 @@ describe("createNodeContextForDag — pass-through broker path (SC-005)", () => 
 // admin/team placeholder is unchanged (byte-for-byte the prior behaviour).
 
 describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () => {
-  it("a user identity produces origin { kind: 'user', sub, agentClientId: azp } — the sub lands", () => {
+  it("a user identity produces origin { kind: 'user', sub, agentClientId: dagId } — sub lands, agent client is the DAG's, NOT the frontend azp (I3)", () => {
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend" };
 
     const origin = invocationOriginForIdentity(userIdentity, testDagId);
 
+    // agentClientId is the AGENT the user acts through (the DAG's agent-type
+    // client placeholder = dagId), NOT the inbound token's frontend `azp`. The
+    // broker gates the user hop with `assignedScopes(agentClientId)`, which must
+    // consult the AGENT's realm policy, never the frontend SSO client's (I3).
     expect(origin).toEqual({
       kind: "user",
       sub: "user-abc-123",
-      agentClientId: "fugue-frontend",
+      agentClientId: testDagId,
     });
+    // Guard the specific regression: the frontend azp must NOT leak into origin.
+    expect((origin as { agentClientId: string }).agentClientId).not.toBe("fugue-frontend");
   });
 
   it("a team identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
@@ -408,19 +404,18 @@ describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () =>
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend" };
     const shared = baseSharedInfra();
 
-    const ctx = await createNodeContextForDag(
+    const { ctx, origin } = await createNodeContextForDag(
       shared,
       makeDag(),
       testRunId,
       new AbortController().signal,
       userIdentity,
-      passthroughFor(shared),
     );
 
-    // The run path no longer dead-ends the user identity: a NodeContext is
-    // produced (the broker mints over the user-keyed origin without error), and
-    // the origin the factory built from this identity carries the user's sub.
+    // The run path no longer dead-ends the user identity: a base NodeContext is
+    // produced and the origin the factory built from this identity carries the
+    // user's sub (threaded into per-node minting by the framework).
     expect(ctx).toBeDefined();
-    expect(invocationOriginForIdentity(userIdentity, testDagId)).toMatchObject({ sub: "user-xyz" });
+    expect(origin).toMatchObject({ kind: "user", sub: "user-xyz" });
   });
 });

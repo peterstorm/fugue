@@ -19,6 +19,7 @@ import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -223,6 +224,14 @@ export const buildDagExecutor = (
      * instance to enable cross-DAG freshness detection within a process.
      */
     freshnessIndex?: FreshnessIndex;
+    /**
+     * Per-invocation minting authority (broker + origin as one value). When
+     * wired, every node's declared `requires` are resolved through
+     * `broker.mintFor` at dispatch and the minted handles are merged over
+     * `nodeCtx` for that node. Omitted ⇒ the shared validated context is used
+     * unchanged (the zero-regression path).
+     */
+    minting?: MintingAuthority;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
   const nodeMap = new Map<NodeId, NodeDef<unknown, unknown>>(
@@ -250,6 +259,7 @@ export const buildDagExecutor = (
   const waveConfig: WaveConfig = {
     dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
     witnessAccumulator: capturedWitnesses,
+    minting: hooks?.minting,
   };
 
   // ---------------------------------------------------------------------------

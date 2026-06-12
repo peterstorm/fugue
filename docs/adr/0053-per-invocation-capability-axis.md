@@ -60,7 +60,7 @@ The capability system now has three orthogonal axes, and no axis touches another
 - **`ScopedCapabilityHandle`** — `Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }>`, deliberately mirroring `extractClients`'s output shape so a broker drops in wherever a static client record was consumed.
 - **`CapabilityBroker.mintFor(inv, requires): Promise<Result<ScopedCapabilityHandle, FrameworkError>>`** — resolves the scoped client set an invocation is *authorized* to use. `async` because real brokers reach a token endpoint; errors flow on the `Result` channel, never thrown across the boundary.
 
-The port lives in the framework (the same layer as `CapabilityHandle`); the Keycloak/Entra *implementation* lives only in the host (FR-W2-006). Neither the port nor the default references any identity provider (FR-W2-004). The framework ships a **pass-through broker** (`shared/passthrough-broker.ts`) that ignores `origin` and hands back the statically-configured clients byte-identically — that default **is** the migration path (US3, FR-W2-003, SC-005): every DAG/embedder that compiles and runs today does so unchanged, zero migration steps, no feature flag. (Broker layering and the pass-through default are detailed in ADR-0054; this ADR covers the *axis* and the trust-boundary shift.)
+The port lives in the framework (the same layer as `CapabilityHandle`); the Keycloak/Entra *implementation* lives only in the host (FR-W2-006). Neither the port nor the default references any identity provider (FR-W2-004). The framework ships a **pass-through broker** (`shared/passthrough-broker.ts`) that ignores `origin` and hands back the statically-configured clients byte-identically. As wired today the zero-regression path is simpler still: when **no broker** is passed to `runDag`, minting is skipped entirely and the boot-scoped static set is used unchanged (US3, FR-W2-003, SC-005) — every DAG/embedder that compiles and runs today does so unchanged, zero migration steps, no feature flag; `createPassthroughBroker` is retained as an embedder convenience, not production wiring. (Broker layering and the pass-through default are detailed in ADR-0054; this ADR covers the *axis* and the trust-boundary shift.)
 
 ### The host shell — minting + token cache
 
@@ -86,7 +86,7 @@ This change is recorded here, in an ADR amending ADR-0051, as FR-W2-008 and SC-0
 
 - The proven ADR-0051 boot lifecycle is preserved exactly: pools open once at boot and are shared across every run; `connect`/`close`/`healthCheck` are untouched (FR-W2-005).
 - Authority is now a first-class, per-invocation concern, varying per node / run / identity without churning connections.
-- Zero-regression migration: the pass-through default makes existing DAGs/embedders run byte-identically with no migration steps and no flag (US3, SC-005).
+- Zero-regression migration: existing DAGs/embedders run byte-identically with no migration steps and no flag — with no broker wired into `runDag`, minting is skipped and the static set is used unchanged (US3, SC-005).
 - Minting is cheap and bounded: the `(identity, audience, scope)` token cache holds to ≤ 1 token request per triple per TTL window (FR-W2-007, SC-008); a miss is not an error (FR-X-003).
 - The trust-boundary change is auditable: recorded in an ADR amending ADR-0051 rather than buried in a comment diff (FR-W2-008, SC-005).
 

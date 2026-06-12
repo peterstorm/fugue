@@ -1,23 +1,27 @@
 /**
  * Bearer token authentication middleware — team-scoped + user (OIDC) inbound.
  *
- * Three-path resolution (order is regression-critical — see below):
+ * Three-path resolution, in the ACTUAL code order (admin → JWT → team):
  * 1. Admin token (env var) — constant-time check, no Redis, full access.
- * 2. Team token (`fug_`-shaped) — hash → Redis lookup → scoped access.
- * 3. fugue-platform OIDC JWT — signature verified via an INJECTED verifier,
- *    then pure claim validation (iss=realm, aud=fugue-host, exp>now). On
- *    success the identity is `{ kind: "user", sub, azp }` (FR-W3-006/007).
+ * 2. fugue-platform OIDC JWT — entered only for a token that is NOT `fug_`-shaped
+ *    AND is JWT-shaped, with a verifier configured. Signature verified via the
+ *    INJECTED JWKS verifier, then pure claim validation (iss=realm,
+ *    aud=fugue-host, exp>now). On success the identity is
+ *    `{ kind: "user", sub, azp }` (FR-W3-006/007). FAIL CLOSED — never falls
+ *    through to the team path on failure.
+ * 3. Team token (`fug_`-shaped) — hash → Redis lookup → scoped access.
  *
  * DISCRIMINATING JWT vs OPAQUE (fail-safe ordering):
- *   - The admin and `fug_` opaque paths are tried FIRST and are byte-unchanged,
- *     so they pass exactly as before (regression-critical). The admin token is
- *     an arbitrary high-entropy string and `fug_` tokens carry the `fug_`
- *     prefix; neither is a JWT.
+ *   - The admin path is tried FIRST and is byte-unchanged. The admin token is an
+ *     arbitrary high-entropy string, never JWT-shaped.
  *   - A token is treated as a JWT only if it is NOT the admin token, does NOT
- *     have the `fug_` shape, AND matches the JWT compact-serialization shape:
- *     three non-empty base64url segments separated by dots (`a.b.c`). This is a
- *     structural pre-filter only — the signature verifier remains authoritative;
- *     a structurally-JWT token still 401s unless the signature AND claims pass.
+ *     have the `fug_` team-token shape (`isTeamTokenShape`), AND matches the JWT
+ *     compact-serialization shape: three non-empty base64url segments separated
+ *     by dots (`a.b.c`). The `fug_` exclusion is enforced in code (not merely
+ *     implied by today's token alphabet), so a `fug_` token is ALWAYS resolved by
+ *     the team store, never the JWT path (review I5). This is a structural
+ *     pre-filter only — the signature verifier remains authoritative; a
+ *     structurally-JWT token still 401s unless the signature AND claims pass.
  *
  * Health/readiness probes are excluded (registered before this middleware in the router).
  * Sets `authIdentity` on Hono context for downstream authorization checks.
@@ -28,7 +32,7 @@
  */
 
 import type { Context, Next } from "hono";
-import type { AuthIdentity, RealmJwtClaims } from "../../domain/auth.js";
+import type { AuthIdentity, SignatureVerifiedClaims } from "../../domain/auth.js";
 import { hashToken, isTeamTokenShape } from "../../domain/auth.js";
 import type { TokenGrant } from "../../domain/auth.js";
 import { validateRealmJwtClaims, describeAuthError } from "../../domain/jwt-validation.js";
@@ -51,12 +55,15 @@ export type JwtVerifyError =
   | { readonly kind: "unavailable"; readonly reason: string };
 
 /**
- * Port for verifying a JWT's SIGNATURE and returning its raw claims. The real
- * implementation is JWKS-backed (keys fetched from the realm, never hardcoded);
- * tests inject a fake. This port is the ONLY place signatures are checked — the
- * pure `validateRealmJwtClaims` trusts that this ran first.
+ * Port for verifying a JWT's SIGNATURE and returning its (now branded) claims.
+ * The real implementation is JWKS-backed (keys fetched from the realm, never
+ * hardcoded); tests inject a fake. This port is the ONLY producer of
+ * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
+ * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
+ * "signature first" ordering is enforced by the type system, not convention
+ * (review C5).
  */
-export type VerifyRealmJwt = (token: string) => Promise<Result<RealmJwtClaims, JwtVerifyError>>;
+export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
 
 // ---------------------------------------------------------------------------
 // Constant-time string comparison (timing-attack resistant)
@@ -176,13 +183,18 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
     }
 
     // Path 2: fugue-platform OIDC JWT — first-class inbound mode (FR-W3-006).
-    // Only entered for JWT-shaped tokens when a verifier is configured. A `fug_`
-    // opaque token is never JWT-shaped, so the team path below is untouched.
-    // FAIL CLOSED: a JWT-shaped token that reaches here must be fully verified
-    // and validated; it never falls through to the team path on failure.
-    if (deps.verifyRealmJwt && isJwtShape(token)) {
+    // Only entered for a token that (a) a verifier is configured for, (b) does
+    // NOT have the `fug_` team-token shape, and (c) matches the JWT compact
+    // serialization. The `!isTeamTokenShape` guard makes the documented contract
+    // load-bearing rather than incidental (review I5): generated `fug_` tokens
+    // are base64url + dot-free so are never JWT-shaped today, but a future `fug_`
+    // token containing two dots would otherwise route to the JWT path and 401
+    // instead of the team store. FAIL CLOSED: a JWT-shaped token that reaches
+    // here must be fully verified and validated; it never falls through to the
+    // team path on failure.
+    if (deps.verifyRealmJwt && !isTeamTokenShape(token) && isJwtShape(token)) {
       const verifier = deps.verifyRealmJwt;
-      let verified: Result<RealmJwtClaims, JwtVerifyError>;
+      let verified: Result<SignatureVerifiedClaims, JwtVerifyError>;
       try {
         verified = await verifier(token);
       } catch (e) {

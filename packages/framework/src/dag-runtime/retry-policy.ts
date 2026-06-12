@@ -58,12 +58,22 @@ export const handleNodeFailed = (
   //   - node-crash with retriability="non-retriable": caller signalled permanent
   //     (tool-loop exhaustion, prompt-defect failures); preserve the retry budget
   //     for genuinely transient kinds.
+  //   - policy-refusal / downstream-denied: a SETTLED authorization "no" (ADR-0059).
+  //     Retrying re-fires the mint/exchange against a provider that has already
+  //     refused, emits a duplicate refusal audit record per attempt (breaking the
+  //     SC-009 one-correlated-record invariant), and rewraps the terminal kind as
+  //     retry-exhausted — hiding the 403-class signal the host classifier needs.
+  //   - llm-budget-exceeded: deterministic within a run — the cumulative counter
+  //     only grows, so a retry can never succeed.
   // Transition straight to terminal failed with the original error preserved.
   if (
     error.kind === "predicate-malformed" ||
     error.kind === "validation" ||
     error.kind === "checkpoint-write-failed" ||
     error.kind === "aborted" ||
+    error.kind === "policy-refusal" ||
+    error.kind === "downstream-denied" ||
+    error.kind === "llm-budget-exceeded" ||
     (error.kind === "node-crash" && error.retriability === "non-retriable")
   ) {
     return {

@@ -64,7 +64,8 @@ Concretely, four seams change:
    ```
 
    `sub` is the authenticated user; `azp` is the OIDC client that minted the
-   token (the authorized agent client). `canAccessDag` is exhaustive over the
+   token (the fugue-platform frontend SSO client — *not* the agent client; see
+   item 3). `canAccessDag` is exhaustive over the
    union — a `user` clears the inbound run gate (it is deliberately *not*
    admin-equivalent); real downstream authorization is enforced per-hop by the
    broker, not here.
@@ -91,7 +92,15 @@ Concretely, four seams change:
 3. **`sub` threads into `Invocation.origin`** via the pure, exported
    `invocationOriginForIdentity` (`node-context-factory.ts`), exhaustive over
    `AuthIdentity`:
-   - `user`  → `{ kind: "user", sub, agentClientId: azp }`;
+   - `user`  → `{ kind: "user", sub, agentClientId: dagId }`. `agentClientId`
+     is the AGENT the user acts THROUGH — the DAG's agent-type Keycloak client
+     (the same `dagId` placeholder the agent path uses, until the
+     dagId→real-client-id mapping lands) — **never** the inbound token's `azp`
+     (the frontend SSO client that minted the user's login token). The broker
+     gates a user hop with `assignedScopes(agentClientId)`, which must consult
+     the *agent's* realm policy, not the frontend's: keying on `azp` would
+     (a) gate against the wrong client and (b) let a future token exchange set
+     `azp` to the frontend (ADR-0056, review I3);
    - `team` / `admin` → `{ kind: "agent", agentClientId: dagId }` (the
      pre-existing agent placeholder; no user subject exists for these).
 
@@ -105,9 +114,11 @@ Concretely, four seams change:
    - `agent` → direct `client_credentials` (`mintClientCredentials`), **no
      exchange** (FR-W3-009 / SC-010).
 
-   The cache-dedup identity follows the origin (`sub` for a user hop, the agent
-   client otherwise), and the audited `via` tag witnesses the branch actually
-   taken — it is not a parallel re-derivation off `origin.kind`.
+   The cache-dedup identity follows the origin — the pair
+   `(sub, agentClientId)` for a user hop (so distinct agents never share a
+   user's token; `sub` alone would alias them — review I3), the agent client
+   alone otherwise — and the audited `via` tag witnesses the branch actually
+   taken; it is not a parallel re-derivation off `origin.kind`.
 
 **Invariant:** an authenticated identity enters the host *only* as either a
 locally-resolvable opaque token (admin/team) or a fully signature-and-claims

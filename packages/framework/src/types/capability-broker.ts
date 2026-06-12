@@ -12,16 +12,17 @@
 //     is allowed to use. Authority varies per node / run / identity; pools
 //     must not.
 //
-// The framework ships a zero-regression PASS-THROUGH broker (see
-// `../shared/passthrough-broker.ts`) that hands back the statically-configured
-// clients byte-identically — today's behavior exactly. That default IS the
-// migration path: every DAG/embedder that compiles and runs today continues to
-// do so with no migration step (US3, FR-W2-002/003, SC-005).
+// The zero-regression path is to wire NO broker at all: `runDag` without a
+// `minting` option skips per-node minting entirely, so every DAG/embedder that
+// compiles and runs today continues to do so with no migration step (US3,
+// FR-W2-002/003, SC-005). The framework also ships a PASS-THROUGH broker (see
+// `../shared/passthrough-broker.ts`) — an optional embedder convenience that
+// hands back the statically-configured clients byte-identically, equivalent to
+// omitting the broker.
 //
-// Later waves add a host-side broker that mints narrowly-scoped tokens per
-// invocation. That implementation lives in the host, NOT here (FR-W2-006) — the
-// port and the pass-through default never reference any concrete identity
-// provider (FR-W2-004).
+// The host-side broker that mints narrowly-scoped tokens per invocation lives
+// in the host, NOT here (FR-W2-006) — the port and the pass-through convenience
+// never reference any concrete identity provider (FR-W2-004).
 //
 // @satisfies US3 — zero-regression per-invocation capability layer (the port +
 //   pass-through default add the authority axis without breaking any DAG/embedder)
@@ -61,6 +62,23 @@ export type InvocationOrigin =
   | { readonly kind: "user"; readonly sub: string; readonly agentClientId: string };
 
 /**
+ * The per-node minting authority — a broker AND the origin it authorizes
+ * against, as ONE value.
+ *
+ * The two are useless apart: run-start validation exempts `broker.provides()`
+ * scopes from the base-context check *because* they will be minted at dispatch,
+ * and dispatch minting needs `origin` to build each node's `Invocation`. When
+ * they were two independent optionals, `broker`-without-`origin` was
+ * representable — validation waved scope capabilities through, minting silently
+ * never ran, and the node crashed on an `undefined` handle. Pairing them in one
+ * type makes that half-wired state unrepresentable.
+ */
+export interface MintingAuthority {
+  readonly broker: CapabilityBroker;
+  readonly origin: InvocationOrigin;
+}
+
+/**
  * Identity + correlation for one node invocation.
  *
  * `runId`/`dagId`/`nodeId` are the correlation triple every later mint/refusal
@@ -95,4 +113,24 @@ export interface CapabilityBroker {
     inv: Invocation,
     requires: readonly Capability[],
   ): Promise<Result<ScopedCapabilityHandle, FrameworkError>>;
+
+  /**
+   * Does this broker resolve `cap` per-invocation (minting it at node dispatch)
+   * rather than expecting it on the boot-scoped base context?
+   *
+   * Consulted by run-start capability validation (`validateCapabilities`): a
+   * capability the broker provides is NOT required to be present on the wired
+   * NodeContext — it is minted per node when the node actually runs, so the
+   * run-start check must not fail it as `missing-capability`. A capability the
+   * broker does NOT provide (e.g. the static `http`/`db` clients, or `llm`) is
+   * still validated against the base context as before.
+   *
+   * Optional and defaulting to "provides nothing": the pass-through broker (and
+   * any broker that only hands back the static set) omits it, so every required
+   * capability is validated against the base context exactly as today — the
+   * zero-regression path is unchanged. A minting broker (the host's Keycloak
+   * broker) implements it to claim the `"<provider>:<operation>"` scope names it
+   * resolves at dispatch.
+   */
+  provides?(cap: Capability): boolean;
 }

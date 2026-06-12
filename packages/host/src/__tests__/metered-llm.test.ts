@@ -348,3 +348,54 @@ describe("metered-llm: metering log budget field (advisory)", () => {
     expect(l2?.data).not.toHaveProperty("budget");
   });
 });
+
+// ── Concurrency reservation (review I1 / SC-003) ────────────────────────────
+
+/** An inner client whose calls take a tick to settle, so a burst genuinely
+ * overlaps before any call updates the meter. */
+const delayedInner = (tokensIn: number, tokensOut: number, delayMs: number) => {
+  const calls: NodeId[] = [];
+  const inner: LlmClient = {
+    sendStructured: async <O>(req: LlmRequest<O>) => {
+      calls.push(req.nodeId);
+      await new Promise((r) => setTimeout(r, delayMs));
+      return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" }) as Result<LlmResponse<O>, FrameworkError>;
+    },
+    sendWithTools: async <O>(req: SendWithToolsRequest<O>, _ctx: NodeContext) => {
+      calls.push(req.nodeId);
+      await new Promise((r) => setTimeout(r, delayMs));
+      return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" }) as Result<LlmResponse<O>, FrameworkError>;
+    },
+  };
+  return { inner, calls };
+};
+
+describe("metered-llm: concurrency reservation bounds overshoot (I1/SC-003)", () => {
+  it("a parallel burst does NOT all pass a stale pre-settle cumulative — admissions are bounded by the in-flight reservation", async () => {
+    // budget 250, each call 100 tokens. After one settled call the per-call
+    // estimate is learned (100), so a following burst reserves it and only admits
+    // until cumulative+reserved reaches budget — overshoot ≈ one call, not N.
+    const { inner, calls } = delayedInner(100, 0, 10);
+    const { logger } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, budget: 250, logger });
+
+    // Warm up: one settled call so the reservation estimate is learned.
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // cumulative 100
+
+    // Fire 5 in parallel. Admit is synchronous and runs in order before any inner
+    // call settles: cumulative 100 → admit (reserve 100, proj 100) → admit (proj
+    // 200) → refuse (proj 300 ≥ 250) ×3. So 2 admitted, 3 refused.
+    const results = await Promise.all(Array.from({ length: 5 }, () => metered.sendStructured(structuredReq(nodeA))));
+    const admitted = results.filter((r) => r.ok).length;
+    const refused = results.filter((r) => !r.ok).length;
+
+    expect(admitted).toBe(2);
+    expect(refused).toBe(3);
+    // Without the reservation all 5 would have been delegated (1 warm-up + 5 = 6).
+    expect(calls.length).toBe(1 + admitted);
+    // Every refusal is the typed budget error.
+    for (const r of results) {
+      if (!r.ok) expect(r.error.kind).toBe("llm-budget-exceeded");
+    }
+  });
+});

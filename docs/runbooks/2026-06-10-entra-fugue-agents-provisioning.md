@@ -89,7 +89,7 @@ ceremony without buying containment. Per-agent least privilege is enforced
    |---|---|---|---|
    | `msgraph:mail.send` | **`Mail.Send`** | Microsoft Graph | `fugue-agent-mail` |
    | `msgraph:sites.read` | **`Sites.Selected`** | Microsoft Graph | `fugue-agent-sites` |
-   | `dynamics:read` | **Dynamics 365 app permission** — `Dynamics CRM` → `user_impersonation` is delegated; for app-only use the **`https://<org>.crm.dynamics.com/.default`** app role / **`Dataverse` application user** grant (the app-only Dynamics access, see Step 1 note below) | Dynamics 365 / Dataverse | the dynamics-read agent |
+   | `dynamics:read` | **Dynamics 365 app permission** — `Dynamics CRM` → `user_impersonation` is delegated; for app-only use the **`https://<org>.crm.dynamics.com/.default`** app role / **`Dataverse` application user** grant (the app-only Dynamics access, see Step 1 note below) | Dynamics 365 / Dataverse | unassigned — no Keycloak agent client holds `dynamics:read` yet, and the host's Dynamics path is unwired (see the KNOWN LIMITATION in `packages/host/src/adapters/graph-capability.ts`) |
 
    > **Dynamics note:** Dynamics 365 / Dataverse does not expose a classic Graph
    > `*.All` application permission; app-only access is granted by registering

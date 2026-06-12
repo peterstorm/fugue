@@ -78,7 +78,8 @@ the same layer as `CapabilityHandle`. The two axes are deliberately orthogonal:
   does not touch it (FR-W2-005).
 - `CapabilityBroker` owns **authority** — per node / run / identity.
 
-The port is a single method over named types:
+The port is two methods over named types — a required `mintFor` and an
+optional `provides?`:
 
 ```ts
 interface CapabilityBroker {
@@ -86,13 +87,16 @@ interface CapabilityBroker {
     inv: Invocation,
     requires: readonly Capability[],
   ): Promise<Result<ScopedCapabilityHandle, FrameworkError>>;
+
+  provides?(cap: Capability): boolean;
 }
 ```
 
 - `Invocation` carries the correlation triple (`runId`/`dagId`/`nodeId`) and an
   `InvocationOrigin` discriminated union — `{ kind: "agent" }` or
   `{ kind: "user" }`, never an ambiguous blend. The pass-through default ignores
-  `origin` entirely; later brokers use it to select the authority strategy.
+  `origin` entirely; the live Keycloak broker dispatches on it to select the
+  authority strategy.
 - `ScopedCapabilityHandle = Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }>`
   mirrors `extractClients`' output shape, so a broker drops in wherever a static
   client record was consumed.
@@ -100,6 +104,15 @@ interface CapabilityBroker {
   the boundary.
 - `mintFor` is `async` because real brokers reach a token endpoint; the default
   resolves synchronously-wrapped (no I/O).
+- `provides?(cap)` answers "does this broker mint `cap` per-invocation rather
+  than expecting it on the boot-scoped base context?" Run-start capability
+  validation (`validateCapabilities`) consults it: a broker-provided capability
+  is minted per node at dispatch, so the run-start check must not fail it as
+  `missing-capability`; everything else is still validated against the base
+  context. It is optional and defaults to "provides nothing" — the pass-through
+  broker omits it, so the zero-regression path validates exactly as before; the
+  host's Keycloak broker implements it to claim the well-formed
+  `"<provider>:<operation>"` scope names it resolves at dispatch.
 
 **Invariant — provider-agnostic boundary (FR-W2-004):** neither the port nor the
 pass-through default references Keycloak or Entra — no import, no type name, no
@@ -121,12 +134,16 @@ export const createPassthroughBroker = (
 });
 ```
 
-This reproduces today's behavior exactly: the host's `extractClients` output was
-previously passed straight to `makeNodeContext`; routing it through this broker
-changes nothing observable (byte-identical client references — SC-005). It mints
-nothing and makes zero token requests (SC-008 satisfied trivially). **The default
-broker IS the migration path** — every DAG/embedder compiling today keeps working
-with no migration step (FR-W2-002/003, US3).
+This reproduces the static behavior exactly: it mints nothing and makes zero
+token requests (SC-008 satisfied trivially), handing back byte-identical client
+references (SC-005). As wired today, though, the production zero-regression path
+is **no broker at all**: the host passes `extractClients`' output straight to
+`makeNodeContext` as the boot-scoped base context, and when no broker is wired
+into `runDag` (no `REALM_JWT_ISSUER`), minting is skipped entirely — the host
+never constructs a pass-through broker. `createPassthroughBroker` is retained as
+an embedder convenience (a drop-in `CapabilityBroker` over a fixed client set),
+not production wiring; every DAG/embedder compiling today keeps working with no
+migration step because the unbrokered path is unchanged (FR-W2-002/003, US3).
 
 ### The live broker (host only — FR-W2-006)
 
@@ -154,9 +171,10 @@ speculative generality maintained on faith.
 - The flagship security feature is available to every framework consumer, not
   just the host: any embedder supplies its own `CapabilityBroker` over the same
   port (US3, FR-W2-006).
-- Zero-regression is guaranteed *by construction*, not by test diligence — the
-  default broker hands back byte-identical references, so the unchanged path is
-  literally unchanged (FR-W2-002/003, SC-005).
+- Zero-regression is guaranteed *by construction*, not by test diligence — with
+  no broker wired, `runDag` skips minting and the unchanged path is literally
+  unchanged; the pass-through default offers the same byte-identical guarantee
+  to embedders that do wire the broker seam (FR-W2-002/003, SC-005).
 - The framework stays substrate-agnostic: no Keycloak/Entra coupling crosses the
   boundary (FR-W2-004), so non-Keycloak embedders are first-class.
 - Lifecycle and authority are cleanly separated — pools stay boot-scoped and

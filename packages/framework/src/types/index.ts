@@ -108,6 +108,7 @@ export type {
   CapabilityBroker,
   Invocation,
   InvocationOrigin,
+  MintingAuthority,
   ScopedCapabilityHandle,
 } from "./capability-broker.js";
 

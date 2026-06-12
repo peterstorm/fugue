@@ -13,11 +13,12 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
 import { ok, err } from "@fuguejs/framework";
-import { createAuthMiddleware } from "../../http/middleware/auth.js";
+import { createAuthMiddleware, isJwtShape } from "../../http/middleware/auth.js";
 import type { AuthMiddlewareDeps, VerifyRealmJwt } from "../../http/middleware/auth.js";
 import { createInMemoryTokenStore } from "../../adapters/token-store.js";
-import { hashToken, formatToken } from "../../domain/auth.js";
+import { hashToken, formatToken, isTeamTokenShape } from "../../domain/auth.js";
 import type { AuthIdentity, TokenHash, RealmJwtClaims } from "../../domain/auth.js";
+import { markSignatureVerified } from "../../domain/auth.js";
 import type { AuthEnv } from "../../http/middleware/auth.js";
 import type { TokenStorePort } from "../../ports.js";
 
@@ -236,7 +237,7 @@ describe("auth middleware", () => {
     });
 
     it("accepts a valid fugue-platform JWT and sets a user identity", async () => {
-      const verify: VerifyRealmJwt = async () => ok(validClaims);
+      const verify: VerifyRealmJwt = async () => ok(markSignatureVerified(validClaims));
       const app = createApp(jwtDeps(verify));
       const res = await app.request("/protected", {
         headers: { Authorization: `Bearer ${FAKE_JWT}` },
@@ -248,7 +249,7 @@ describe("auth middleware", () => {
 
     it("rejects a wrong-aud JWT with 401 (does not fall through to team path)", async () => {
       const verify: VerifyRealmJwt = async () =>
-        ok({ ...validClaims, aud: "some-other-service" });
+        ok(markSignatureVerified({ ...validClaims, aud: "some-other-service" }));
       const app = createApp(jwtDeps(verify));
       const res = await app.request("/protected", {
         headers: { Authorization: `Bearer ${FAKE_JWT}` },
@@ -260,7 +261,7 @@ describe("auth middleware", () => {
 
     it("rejects an expired JWT with 401", async () => {
       const verify: VerifyRealmJwt = async () =>
-        ok({ ...validClaims, exp: NOW_SECONDS - 1 });
+        ok(markSignatureVerified({ ...validClaims, exp: NOW_SECONDS - 1 }));
       const app = createApp(jwtDeps(verify));
       const res = await app.request("/protected", {
         headers: { Authorization: `Bearer ${FAKE_JWT}` },
@@ -315,7 +316,7 @@ describe("auth middleware", () => {
     });
 
     it("returns 503 when a verifier is wired without iss/aud policy (misconfig, fail closed)", async () => {
-      const verify: VerifyRealmJwt = async () => ok(validClaims);
+      const verify: VerifyRealmJwt = async () => ok(markSignatureVerified(validClaims));
       const app = createApp(jwtDeps(verify, { expectedIss: undefined, expectedAud: undefined }));
       const res = await app.request("/protected", {
         headers: { Authorization: `Bearer ${FAKE_JWT}` },
@@ -357,6 +358,41 @@ describe("auth middleware", () => {
       });
       expect(res.status).toBe(200);
       expect((await res.json()).identity).toEqual({ kind: "team", team: "team-a", label: "Team A" });
+    });
+
+    it("a token that is BOTH fug_-shaped AND JWT-shaped resolves via the TEAM path; the verifier records ZERO calls (review I5/A9)", async () => {
+      // base64url admits 'f','u','g','_', so a `fug_` token CAN be JWT-shaped:
+      // three dot-separated base64url segments whose first segment starts with
+      // the team prefix. The `!isTeamTokenShape` guard must route it to the team
+      // store — never the JWT path.
+      const ambiguous = `fug_${"A".repeat(50)}.eyJzdWIiOiJ4In0.c2lnbmF0dXJl`;
+      // Premise: the token genuinely satisfies BOTH structural predicates.
+      expect(isTeamTokenShape(ambiguous)).toBe(true);
+      expect(isJwtShape(ambiguous)).toBe(true);
+
+      const verifierCalls: string[] = [];
+      const recordingVerify: VerifyRealmJwt = async (t) => {
+        verifierCalls.push(t);
+        return err({ kind: "invalid", reason: "must never be called" });
+      };
+      const app = createApp({
+        adminToken: ADMIN_TOKEN,
+        tokenStore: createInMemoryTokenStore([]),
+        verifyRealmJwt: recordingVerify,
+        expectedIss: "https://kc.example.com/realms/fugue-platform",
+        expectedAud: "fugue-host",
+      });
+      const res = await app.request("/protected", {
+        headers: { Authorization: `Bearer ${ambiguous}` },
+      });
+
+      // TEAM-path outcome: no grant exists for it → 401 invalid_token …
+      expect(res.status).toBe(401);
+      expect(res.headers.get("WWW-Authenticate")).toContain("invalid_token");
+      const body = await res.json();
+      expect(body.message).toContain("Invalid");
+      // … and the JWT verifier was NEVER consulted.
+      expect(verifierCalls).toEqual([]);
     });
   });
 

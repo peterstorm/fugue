@@ -208,9 +208,9 @@ describe("keycloak-broker — fail closed before any Entra call (SC-006/FR-W3-00
     expect(wifCount()).toBe(0);
   });
 
-  it("refuses an UNRECOGNISED scope name with policy-refusal and ZERO egress (no agentClientId at parse)", async () => {
+  it("PASSES THROUGH an unrecognised scope-shaped name — provides() is false, so run-start validation owns it (A1)", async () => {
     const { endpoint, egressCount } = recordingEndpoint();
-    const { logger } = collectLogs();
+    const { logger, logs } = collectLogs();
     const broker = mkBroker({
       endpoint,
       assignedScopes: () => new Set<string>(["whatever:thing"]),
@@ -219,16 +219,82 @@ describe("keycloak-broker — fail closed before any Entra call (SC-006/FR-W3-00
       now: () => 0,
     });
 
-    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-mail")), [cap("not-a-scope")]);
+    // Scope-shaped (`<provider>:<operation>`) but not a name the broker
+    // `provides()`. mintFor skips EXACTLY the `!parseScope(...).ok` set, so the
+    // two predicates agree: the broker mints precisely what `provides()` claims,
+    // and an unparseable name is run-start-validated against the base context
+    // (`missing-capability` there if unwired) — never policy-refused at dispatch.
+    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-mail")), [cap("msgraph:nonexistent")]);
 
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected refusal");
-    expect(result.error.kind).toBe("policy-refusal");
-    if (result.error.kind === "policy-refusal") {
-      // Parse-time refusal: client id is unknown at parse, so the field is absent.
-      expect(result.error.agentClientId).toBeUndefined();
-    }
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected pass-through, got refusal");
+    expect(Object.keys(result.value)).toEqual([]);
     expect(egressCount()).toBe(0);
+    expect(broker.provides?.("msgraph:nonexistent" as Capability)).toBe(false);
+    // No refusal record either — a pass-through is not a policy decision.
+    expect(logs.filter((l) => l.data?.result === "refusal").length).toBe(0);
+  });
+
+  it("PASSES THROUGH a colon-named CUSTOM capability wired statically (ADR-0051) — the static client survives a live broker", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { wif, wifCount } = recordingWif();
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    // A consumer-augmented custom capability with a colon in its name (legal per
+    // ADR-0051) is NOT a scope this broker provides: `provides()` is false, so
+    // run-start validation demanded it on the boot-scoped base context, and
+    // mintFor must pass it through so that static client survives — never refuse
+    // it at dispatch (the old `name.includes(":")` ownership test would have).
+    const result = await broker.mintFor(
+      invocationFor(agentOrigin("fugue-agent-mail")),
+      [cap("mycorp:widget"), cap("msgraph:mail.send")],
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected mixed requires to resolve");
+    // Only the broker-provided scope is minted; the custom name is skipped so
+    // the framework merge keeps the base context's static client for it.
+    expect(Object.keys(result.value)).toEqual(["msgraph:mail.send"]);
+    expect(broker.provides?.("mycorp:widget" as Capability)).toBe(false);
+    expect(broker.provides?.("msgraph:mail.send" as Capability)).toBe(true);
+    // Exactly one egress pair — for the recognised scope, none for the custom name.
+    expect(egressCount()).toBe(1);
+    expect(wifCount()).toBe(1);
+    expect(logs.filter((l) => l.data?.result === "refusal").length).toBe(0);
+  });
+
+  it("PASSES THROUGH a plain (non-scope-shaped) capability name — it is a base-context client, not a scope the broker mints (C1)", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    // A name without a `:` (e.g. the static `http`/`db` clients) is NOT a
+    // downstream scope: the broker skips it (the base context supplies it and
+    // the framework merges minted handles over that base). No refusal, no egress,
+    // no handle minted for it — and `provides("http")` is false so run-start
+    // validation still gates it against the base context.
+    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-mail")), [cap("http")]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected pass-through, got refusal");
+    expect(Object.keys(result.value)).toEqual([]);
+    expect(egressCount()).toBe(0);
+    expect(broker.provides?.("http" as Capability)).toBe(false);
+    expect(broker.provides?.("msgraph:mail.send" as Capability)).toBe(true);
   });
 });
 
@@ -365,6 +431,44 @@ describe("keycloak-broker — token cache TTL dedup (US4/SC-008)", () => {
     clock = 1000; // at the app-only expiry → stale (half-open window)
     await broker.mintFor(inv, [cap("msgraph:mail.send")]);
 
+    expect(wifCount()).toBe(2);
+  });
+});
+
+// ── Early-refresh skew margin (review I2 / A10) ─────────────────────────────
+
+describe("keycloak-broker — early-refresh skew margin re-mints BEFORE real expiry (I2)", () => {
+  it("a lookup inside the margin window (mint + lifetime − margin + ε) MISSES and re-mints; well inside the window it hits", async () => {
+    // ttlSec 3600 → lifetime 3_600_000ms, margin 60_000ms → effective expiry at
+    // 3_540_000ms. The margin exists so a token is never presented downstream
+    // microseconds before it lapses (which would 401 → `downstream-denied`, the
+    // never-retried category). Removing the margin would keep the second lookup
+    // a cache HIT — this test pins the margin itself.
+    const { endpoint, egressCount } = recordingEndpoint({ ttlSec: 3600 });
+    const { wif, wifCount } = recordingWif({ ttlSec: 3600 });
+    const { logger } = collectLogs();
+    let clock = 0;
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => clock,
+    });
+    const inv = invocationFor(agentOrigin("fugue-agent-mail"));
+
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]); // mint at t=0
+
+    clock = 3_500_000; // well inside the margin-adjusted window → HIT, no egress
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]);
+    expect(egressCount()).toBe(1);
+    expect(wifCount()).toBe(1);
+
+    clock = 3_540_001; // inside the RAW lifetime (< 3_600_000) but past the
+    // margin-adjusted expiry → MISS → re-mint. Without the margin this would hit.
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]);
+    expect(egressCount()).toBe(2);
     expect(wifCount()).toBe(2);
   });
 });
@@ -802,5 +906,195 @@ describe("keycloak-broker — pure scope helpers", () => {
     if (!mail.ok || !dyn.ok) throw new Error("parse failed");
     expect(audienceForScope(mail.value)).toBe("https://graph.microsoft.com");
     expect(audienceForScope(dyn.value)).toBe("https://dynamics.microsoft.com");
+  });
+});
+
+// ── Cross-identity cache isolation + single-flight (review C7 / SC-008) ──────
+
+describe("keycloak-broker — cache keyed by IDENTITY, not just scope (C7.2)", () => {
+  it("two user hops with DIFFERENT subs (same agent+scope, same TTL window) each mint their OWN token — no cross-identity reuse", async () => {
+    const { endpoint, exCalls, egressCount } = recordingEndpoint({ ttlSec: 3600 });
+    const { wif, wifCount } = recordingWif({ ttlSec: 3600 });
+    const { graphHttp, requests } = recordingGraphHttp();
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      graphHttp,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 1_000, // fixed clock → both calls inside the same freshness window
+    });
+
+    const a = await broker.mintFor(invocationFor(userOrigin("user-A", "fugue-agent-mail")), [cap("msgraph:mail.send")]);
+    const b = await broker.mintFor(invocationFor(userOrigin("user-B", "fugue-agent-mail")), [cap("msgraph:mail.send")]);
+    expect(a.ok && b.ok).toBe(true);
+    if (!a.ok || !b.ok) throw new Error("expected both to resolve");
+
+    // Distinct subjects ⇒ distinct cache identities ⇒ TWO exchanges + TWO WIF
+    // hops. If the cache keyed on scope alone (or omitted the sub), user-B would
+    // be served user-A's token and egress would be 1.
+    expect(egressCount()).toBe(2);
+    expect(wifCount()).toBe(2);
+    expect(exCalls.map((c) => c.userSub).sort()).toEqual(["user-A", "user-B"]);
+
+    // And the bearer each user's handle presents downstream is DISTINCT.
+    await (a.value["msgraph:mail.send" as Capability] as { sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown> }).sendMail({ from: "a@x", to: "t@x", subject: "s", body: "b" });
+    await (b.value["msgraph:mail.send" as Capability] as { sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown> }).sendMail({ from: "b@x", to: "t@x", subject: "s", body: "b" });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.bearer).not.toBe(requests[1]?.bearer);
+  });
+
+  it("the SAME user hop reused within the TTL window mints ONCE (SC-008) — cache HIT, no second egress", async () => {
+    const { endpoint, egressCount } = recordingEndpoint({ ttlSec: 3600 });
+    const { wif, wifCount } = recordingWif({ ttlSec: 3600 });
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 1_000,
+    });
+
+    const inv = invocationFor(userOrigin("user-A", "fugue-agent-mail"));
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]);
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]); // second, within TTL
+
+    expect(egressCount()).toBe(1);
+    expect(wifCount()).toBe(1);
+  });
+});
+
+describe("keycloak-broker — single-flight under concurrency (review I1/SC-008)", () => {
+  it("two CONCURRENT resolutions of the SAME triple share ONE acquisition — one SA mint, one WIF (not two)", async () => {
+    // Make both egresses await a tick so the two mintFor calls genuinely overlap
+    // before either populates the cache — the exact window the single-flight closes.
+    let cc = 0;
+    const endpoint: KeycloakTokenEndpoint = {
+      mintClientCredentials: async (_req) => {
+        cc += 1;
+        await new Promise((r) => setTimeout(r, 5));
+        return { ok: true, value: { accessToken: `cc-${cc}`, expiresInSec: 3600 } };
+      },
+      exchangeV2: async () => ({ ok: true, value: { accessToken: "ex", expiresInSec: 3600 } }),
+    };
+    let wifN = 0;
+    const wif: EntraWifExchange = {
+      exchange: async (req) => {
+        wifN += 1;
+        await new Promise((r) => setTimeout(r, 5));
+        return { ok: true, value: { accessToken: `app-${wifN}-from(${req.clientAssertion})`, expiresInSec: 3600 } };
+      },
+    };
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 1_000,
+    });
+
+    const inv = invocationFor(agentOrigin("fugue-agent-mail"));
+    const [a, b] = await Promise.all([
+      broker.mintFor(inv, [cap("msgraph:mail.send")]),
+      broker.mintFor(inv, [cap("msgraph:mail.send")]),
+    ]);
+    expect(a.ok && b.ok).toBe(true);
+
+    // Single-flight: the second concurrent call awaited the first's promise rather
+    // than firing its own egress. Without it, both would miss and mint → 2 each.
+    expect(cc).toBe(1);
+    expect(wifN).toBe(1);
+  });
+
+  it("different triples minting concurrently do not clobber each other's SA cache entry (no lost update)", async () => {
+    // Two DISTINCT scopes minted in parallel; both entries must survive so a
+    // follow-up resolution of each is a cache hit (egress does not grow).
+    const { endpoint, egressCount } = recordingEndpoint({ ttlSec: 3600 });
+    const { wif } = recordingWif({ ttlSec: 3600 });
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send", "msgraph:sites.read"]),
+      tracer: passTracer,
+      logger,
+      now: () => 1_000,
+    });
+    const inv = invocationFor(agentOrigin("fugue-agent-both"));
+    await Promise.all([
+      broker.mintFor(inv, [cap("msgraph:mail.send")]),
+      broker.mintFor(inv, [cap("msgraph:sites.read")]),
+    ]);
+    const egressAfterFirst = egressCount();
+    // Re-resolve BOTH — if a lost update had dropped one SA entry, this would
+    // re-mint it and egress would grow. Both should be cache hits.
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]);
+    await broker.mintFor(inv, [cap("msgraph:sites.read")]);
+    expect(egressCount()).toBe(egressAfterFirst);
+  });
+});
+
+// ── Throwing port → err on the Result channel, never a rejection (A5) ───────
+
+describe("keycloak-broker — a THROWING injected port surfaces as err, never an unhandledRejection (A5)", () => {
+  it("both concurrent waiters of one triple receive err(infra-unreachable) when the endpoint THROWS (port-contract violation)", async () => {
+    // The port contract is `Result`-only — but if a buggy adapter throws anyway,
+    // the shared in-flight promise must NOT reject: a rejection would poison the
+    // second waiter AND (via the unobserved cleanup promise) escape as a
+    // process-level unhandledRejection.
+    let calls = 0;
+    const endpoint: KeycloakTokenEndpoint = {
+      mintClientCredentials: async () => {
+        calls += 1;
+        await new Promise((r) => setTimeout(r, 5)); // let the two waiters overlap
+        throw new Error("port contract violated");
+      },
+      exchangeV2: async () => {
+        throw new Error("port contract violated");
+      },
+    };
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+    const inv = invocationFor(agentOrigin("fugue-agent-mail"));
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const [a, b] = await Promise.all([
+        broker.mintFor(inv, [cap("msgraph:mail.send")]),
+        broker.mintFor(inv, [cap("msgraph:mail.send")]),
+      ]);
+
+      // Both waiters got a TYPED err — neither saw a rejection.
+      expect(a.ok).toBe(false);
+      expect(b.ok).toBe(false);
+      if (!a.ok) expect(a.error.kind).toBe("infra-unreachable");
+      if (!b.ok) expect(b.error.kind).toBe("infra-unreachable");
+      // Single-flight still held: ONE throwing acquisition shared by both.
+      expect(calls).toBe(1);
+      // Both resolutions audited the failure as a mint-failed refusal (SC-009).
+      expect(logs.filter((l) => l.data?.reason === "mint-failed:infra-unreachable").length).toBe(2);
+
+      // Give any escaped rejection a macrotask to reach the process handler.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

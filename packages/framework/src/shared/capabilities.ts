@@ -18,6 +18,7 @@ import type {
 } from "../types/node.js";
 import { brandAsValidatedNodeContext, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import type { FrameworkError, MissingCapability } from "../types/errors.js";
+import type { CapabilityBroker } from "../types/capability-broker.js";
 import { type Result, ok, err } from "../types/result.js";
 
 /**
@@ -33,10 +34,21 @@ import { type Result, ok, err } from "../types/result.js";
  *
  * Uses dynamic property lookup (`ctx[cap]`) to support extensible capabilities
  * registered via `CapabilityRegistry` module augmentation (ADR-0051).
+ *
+ * `broker` — when a minting broker is wired (the host's per-invocation Keycloak
+ * broker), a capability the broker `provides()` is resolved at NODE DISPATCH,
+ * not on the boot-scoped base context. Such a capability is therefore NOT
+ * required to be present on `ctx` here: the run-start check skips it (it would
+ * otherwise spuriously fail as `missing-capability`, since the static base
+ * context legitimately lacks the minted scope handles). Capabilities the broker
+ * does not provide — the static `http`/`db` clients, `llm`, etc. — are still
+ * validated against `ctx` exactly as before. Omitted (pass-through / no broker)
+ * ⇒ every required capability is validated against `ctx`, the unchanged path.
  */
 export const validateCapabilities = (
   dag: DagDef,
   ctx: BaseNodeContext,
+  broker?: CapabilityBroker,
 ): Result<ValidatedNodeContext, FrameworkError> => {
   const missing: MissingCapability[] = [];
   // Single widening cast: custom capabilities live as dynamic properties on
@@ -55,7 +67,16 @@ export const validateCapabilities = (
   const reservedNonCapabilityKeys: ReadonlySet<string> = new Set(RESERVED_NON_CAPABILITY_KEYS);
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
-      if (reservedNonCapabilityKeys.has(cap) || dynamicCtx[cap] == null) {
+      // A capability the broker mints per-invocation is satisfied at dispatch,
+      // not on the boot-scoped base context — skip it here (checking `ctx` would
+      // fail it as missing). Reserved-key collisions are still rejected even if
+      // a broker claims them: the runtime can never wire such a name as a field.
+      if (reservedNonCapabilityKeys.has(cap)) {
+        missing.push({ nodeId: node.id, capability: cap });
+        continue;
+      }
+      if (broker?.provides?.(cap)) continue;
+      if (dynamicCtx[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }
     }

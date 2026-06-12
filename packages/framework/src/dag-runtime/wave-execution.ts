@@ -17,6 +17,7 @@
 
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
+import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
@@ -47,6 +48,8 @@ export interface WaveConfig {
   readonly nowFn: () => number;
   readonly freshnessIndex: FreshnessIndex;
   readonly witnessAccumulator?: Map<string, Witness>;
+  /** Per-invocation minting authority (broker + origin) — resolves each node's `requires` at dispatch. */
+  readonly minting?: MintingAuthority;
 }
 
 /**
@@ -91,7 +94,7 @@ export const executeWave = async (
   machineCtx: DagMachineContext,
   config: WaveConfig,
 ): Promise<WaveResult> => {
-  const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator } = config;
+  const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator, minting } = config;
   const stamp = (): Date => new Date(nowFn());
 
   // An out-of-bounds waveIndex is an invariant violation.
@@ -158,7 +161,7 @@ export const executeWave = async (
           dag.id,
           priorOutputs,
           incoming,
-          { checkpoint: resumeCheckpoint, now: nowFn },
+          { checkpoint: resumeCheckpoint, now: nowFn, minting },
         );
         return { nodeId, result, outcome };
       } catch (e) {

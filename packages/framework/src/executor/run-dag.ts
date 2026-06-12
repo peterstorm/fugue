@@ -12,6 +12,7 @@
 import type { DagDef } from "../types/dag.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
+import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "../dag-runtime/types.js";
@@ -82,6 +83,22 @@ export interface RunOptions {
    * @see ADR-0024 — freshness witness contract design
    */
   readonly freshnessIndex?: FreshnessIndex;
+  /**
+   * Per-invocation minting authority (ADR-0053): the broker AND the origin it
+   * authorizes against, as one value — `broker`-without-`origin` is not
+   * representable. When supplied, each node's declared `requires` are resolved
+   * through `broker.mintFor` AT DISPATCH (against an `Invocation` built from
+   * `origin` + the real `nodeId`), and the minted narrowly-scoped handles are
+   * merged over the node context for that node only — broker-resolvable
+   * `"<provider>:<operation>"` scopes get their narrowed handle, plain
+   * capabilities keep their static client. A mint refusal fails the node
+   * fail-closed. Omitted ⇒ the node context is used as-is (zero-regression).
+   *
+   * The broker must remain host-agnostic at this seam: the framework never
+   * inspects scope names; it forwards `node.requires` verbatim and merges
+   * whatever the broker returns.
+   */
+  readonly minting?: MintingAuthority;
 
   // ─── Advanced kernel hooks (rarely needed outside tests) ───────────────
 
@@ -147,6 +164,7 @@ export const runDag = async <I, O>(
     now: opts?.now,
     random: opts?.random,
     freshnessIndex: opts?.freshnessIndex,
+    minting: opts?.minting,
     beforeExecute: opts?.beforeExecute,
     classifyError: opts?.classifyError,
     onTrace: opts?.onTrace,

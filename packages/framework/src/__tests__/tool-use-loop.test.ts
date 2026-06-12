@@ -14,6 +14,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { stubLlmClient } from "./_llm-mocks.js";
+import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 
 const schema = z.object({ answer: z.string() });
 
@@ -333,6 +334,64 @@ describe("toolUseLoop", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.message).toContain("no text content");
       }
+    }
+  });
+
+  test("llm.usage-unattributed warning carries nodeId/runId/dagId correlation (A6)", async () => {
+    // A `validation` error has no `usage` channel — tokens burned by prior
+    // turns surface via the structured warning instead, and the warning MUST
+    // carry the correlation triple so the burned tokens are joinable to a run.
+    const warns: { msg: string; data: Record<string, unknown> }[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (msg, ...args) => warns.push({ msg, data: (args[0] ?? {}) as Record<string, unknown> }),
+      error: () => {},
+    });
+    try {
+      let calls = 0;
+      const provider: ToolLoopProvider = {
+        call: async () => {
+          calls++;
+          if (calls === 1) {
+            // Turn 1 burns 10/15 across a tool-call turn.
+            return ok({
+              toolCalls: [{ id: "c", name: "tool", input: {} }],
+              textContent: undefined,
+              tokensIn: 10,
+              tokensOut: 15,
+            });
+          }
+          // Turn 2 fails with a kind that cannot carry usage.
+          return err({ kind: "validation", nodeId: N("n1"), message: "bad tool schema" });
+        },
+        appendToolResults: () => {},
+      };
+      const result = await toolUseLoop(
+        provider,
+        {
+          nodeId: N("n1"),
+          model: "m",
+          schema,
+          tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+          maxIterations: 5,
+        },
+        makeCtx(),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+
+      const w = warns.find((x) => x.msg === "llm.usage-unattributed");
+      expect(w).toBeDefined();
+      expect(w?.data.errorKind).toBe("validation");
+      expect(w?.data.tokensIn).toBe(10);
+      expect(w?.data.tokensOut).toBe(15);
+      // The correlation triple — without these the burned tokens are unjoinable.
+      expect(w?.data.nodeId).toBe("n1");
+      expect(w?.data.runId).toBe("test-run");
+      expect(w?.data.dagId).toBe("test-dag");
+    } finally {
+      __resetFrameworkLogger();
     }
   });
 

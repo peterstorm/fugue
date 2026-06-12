@@ -140,11 +140,30 @@ export interface EntraWifConfig {
 }
 
 /**
- * Build the v2.0 token endpoint URL for the configured tenant. Exported for the
- * live round-trip test's assertion; pure.
+ * A tenant id Entra accepts AND that is safe to interpolate into the token URL:
+ * a GUID, a verified domain (`contoso.onmicrosoft.com`), or a well-known alias
+ * (`common`/`organizations`/`consumers`). The charset `[A-Za-z0-9.-]` admits all
+ * three and ADMITS NO path separator, query, or fragment — so a typo'd or hostile
+ * value cannot inject extra URL segments rather than failing loudly (review
+ * suggestion).
  */
-export const wifTokenEndpoint = (cfg: EntraWifConfig): string =>
-  `https://login.microsoftonline.com/${cfg.tenantId}/oauth2/v2.0/token`;
+const TENANT_ID_RE = /^[A-Za-z0-9.-]{1,128}$/;
+
+/**
+ * Build the v2.0 token endpoint URL for the configured tenant. Exported for the
+ * live round-trip test's assertion; pure. Throws on a structurally-invalid tenant
+ * id (a boot-wiring defect — `EntraWifConfig` comes from host config), so a bad
+ * value can never be interpolated into the endpoint URL unchecked.
+ */
+export const wifTokenEndpoint = (cfg: EntraWifConfig): string => {
+  if (!TENANT_ID_RE.test(cfg.tenantId)) {
+    throw new Error(
+      `wifTokenEndpoint: invalid tenantId '${cfg.tenantId}' — must be a GUID, a verified domain, ` +
+        `or a well-known alias (charset [A-Za-z0-9.-]); refusing to build a token URL from it`,
+    );
+  }
+  return `https://login.microsoftonline.com/${cfg.tenantId}/oauth2/v2.0/token`;
+};
 
 /**
  * Build the URL-encoded `client_credentials` form body for a WIF exchange. PURE
@@ -200,7 +219,15 @@ export const mapWifResponse = (
   if (res.status === 200) {
     const accessToken = res.json.access_token;
     const expiresIn = res.json.expires_in;
-    if (typeof accessToken === "string" && typeof expiresIn === "number") {
+    // `expires_in` must parse to POSITIVE FINITE seconds at this boundary: a
+    // NaN/Infinity/non-positive lifetime would mint a born-stale or
+    // never-expiring cache entry downstream, so it is malformed, not usable.
+    if (
+      typeof accessToken === "string" &&
+      typeof expiresIn === "number" &&
+      Number.isFinite(expiresIn) &&
+      expiresIn > 0
+    ) {
       return ok({ accessToken, expiresInSec: expiresIn });
     }
     // 200 but a malformed body — treat as a reach failure, not a denial: we did

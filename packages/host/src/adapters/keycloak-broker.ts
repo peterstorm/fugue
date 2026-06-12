@@ -44,6 +44,7 @@ import { ok, err } from "@fuguejs/framework";
 import type {
   CapabilityBroker,
   Invocation,
+  InvocationOrigin,
   ScopedCapabilityHandle,
 } from "@fuguejs/framework";
 import type { Tracer } from "@fuguejs/framework";
@@ -53,6 +54,11 @@ import {
   type DownstreamScope,
   type OperationNarrowedHandle,
 } from "../domain/capability-scope.js";
+// Side-channel: importing the registry augmentation keeps it in this module's
+// graph, so any consumer of the broker also sees the `"<provider>:<operation>"`
+// scope keys on `CapabilityRegistry` AND the C6 soundness assertions that make
+// the `handleRecord` cast below sound by construction.
+import type { CapabilityRegistryWired } from "../domain/capability-registry.js";
 import {
   cacheKey,
   cacheToken,
@@ -80,6 +86,44 @@ import { createBrokerAudit, type BrokerAudit, type BrokerAuditFields } from "./b
 
 /** Canonical `"<provider>:<operation>"` name for a parsed scope (round-trips `parseScope`). */
 export const scopeName = (scope: DownstreamScope): string => `${scope.provider}:${scope.operation}`;
+
+/**
+ * Early-refresh skew margin (epoch millis). A cached token is treated as stale
+ * this many millis BEFORE its real `expires_in`, so a token looked up just
+ * before expiry is re-minted rather than presented downstream microseconds
+ * before it lapses — which would 401 and (mis)map to `downstream-denied`, the
+ * never-retried category (review I2, ADR-0059). The margin is capped at a
+ * fraction of the token's own lifetime in `marginFor` so a short-lived token is
+ * never pinned permanently stale.
+ */
+const TOKEN_REFRESH_SKEW_MS = 60_000;
+
+/**
+ * Effective cache TTL for a freshly minted token: its lifetime minus the
+ * early-refresh skew, but never less than half its lifetime (so a token whose
+ * own `expires_in` is below `2 × skew` still caches for a useful window instead
+ * of being born stale). Pure.
+ */
+const effectiveTtlMs = (expiresInSec: number): number => {
+  const lifetimeMs = expiresInSec * 1000;
+  const margin = Math.min(TOKEN_REFRESH_SKEW_MS, Math.floor(lifetimeMs / 2));
+  return lifetimeMs - margin;
+};
+
+/**
+ * The SC-008 token-dedup identity for a hop — "who the minted token is FOR".
+ *   - agent hop → the agent client (`client_credentials` mints AS that client).
+ *   - user hop  → the user subject AND the agent client it acts THROUGH. Keying
+ *     on `sub` ALONE (the prior behaviour) would serve a token exchanged for
+ *     `(userA, agentX)` to `(userA, agentY)` while the audit claims Y minted it
+ *     (review I3); including `agentClientId` makes the dedup unit
+ *     `(sub, agentClientId)` so distinct agents never share a user's token.
+ * The `\x1f` (UNIT SEPARATOR) joiner can appear in neither a `sub` nor a client
+ * id (both printable), so the composite is injective — same property the cache
+ * key relies on.
+ */
+const cacheIdentityFor = (origin: InvocationOrigin): string =>
+  origin.kind === "user" ? `${origin.sub}\x1f${origin.agentClientId}` : origin.agentClientId;
 
 /**
  * Downstream resource/audience a scope's token is narrowed to. Graph operations
@@ -177,38 +221,20 @@ const auditFields = (
   return inv.origin.kind === "user" ? { ...base, sub: inv.origin.sub } : base;
 };
 
-/**
- * Mint (or reuse a cached) downstream token for one parsed scope, dispatching on
- * origin: agent → `client_credentials`, user → Token Exchange V2. The cache is
- * consulted first (keyed on identity+audience+scope) so a fresh token is reused
- * without a second endpoint call (SC-008). Returns the token plus the next cache
- * state. NEVER reaches the endpoint for an unassigned scope — that gate fires in
- * `mintFor` BEFORE this is called.
- */
-const mintToken = async (
+/** The downstream-mint strategy for an origin: the `via` audit witness + the
+ * (lazy) endpoint thunk. Returning both as one value keeps the audited strategy a
+ * WITNESS of the branch actually taken (audit integrity A1), not a parallel
+ * derivation off `origin.kind` that merely happens to agree. */
+const saDispatch = (
   deps: KeycloakBrokerDeps,
   inv: Invocation,
   scope: DownstreamScope,
-  cache: TokenCache,
-): Promise<Result<{ token: string; cache: TokenCache; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>> => {
-  const audience = audienceForScope(scope);
-  const scopeStr = scopeName(scope);
-  // Cache identity is the user `sub` for a user hop, else the agent client — the
-  // SC-008 dedup unit ("who the token is for") differs per origin.
-  const identity = inv.origin.kind === "user" ? inv.origin.sub : inv.origin.agentClientId;
-  const key = cacheKey(identity, audience, scopeStr);
-  const now = deps.now();
-
-  // Dispatch returns BOTH the `via` tag AND the (LAZY) mint thunk as one value,
-  // so the audited strategy is a WITNESS of the branch actually taken — not a
-  // parallel derivation off `origin.kind` that merely happens to agree (audit
-  // integrity for the security feature: A1). The thunk stays unforced on a cache
-  // hit, preserving the SC-008 dedup (and the no-egress guarantee on refusals,
-  // which fire earlier in `mintFor` before this is ever reached).
-  const dispatch: {
-    readonly via: "client_credentials" | "token-exchange-v2";
-    readonly mint: () => Promise<Result<MintedToken, FrameworkError>>;
-  } = match(inv.origin)
+  audience: string,
+): {
+  readonly via: "client_credentials" | "token-exchange-v2";
+  readonly mint: () => Promise<Result<MintedToken, FrameworkError>>;
+} =>
+  match(inv.origin)
     .with({ kind: "agent" }, (o) => ({
       via: "client_credentials" as const,
       mint: () => deps.endpoint.mintClientCredentials({ agentClientId: o.agentClientId, scope, audience }),
@@ -218,20 +244,6 @@ const mintToken = async (
       mint: () => deps.endpoint.exchangeV2({ userSub: o.sub, agentClientId: o.agentClientId, scope, audience }),
     }))
     .exhaustive();
-  const via = dispatch.via;
-
-  const cached = lookup(cache, key, now);
-  if (cached !== undefined) {
-    return ok({ token: cached.token, cache, via });
-  }
-
-  const mintResult = await dispatch.mint();
-  if (!mintResult.ok) return err(mintResult.error);
-
-  const minted = mintResult.value;
-  const entry = cacheToken(minted.accessToken, now, minted.expiresInSec * 1000);
-  return ok({ token: minted.accessToken, cache: store(cache, key, entry), via });
-};
 
 /**
  * Create the live Keycloak-backed broker. The returned `mintFor` resolves the
@@ -246,8 +258,113 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
   // Two mutable cells threading the pure cache values across invocations, one per
   // egress: the Keycloak SA-token cache and the Entra app-only-token cache. The
   // freshness/lookup/store logic is pure (token-cache.ts); only the cells mutate.
+  // CRITICAL (review I1): every `… = store(thatCache, …)` reads the CURRENT cell
+  // at assignment time (synchronously, after the await) — it NEVER assigns a
+  // pre-await snapshot — so a mint of triple A cannot clobber a concurrent mint
+  // of triple B (lost update). And concurrent mints of the SAME triple are
+  // single-flighted below, so SC-008's "≤1 token request per triple per TTL"
+  // holds under concurrency, not just single-threaded.
   let saCache: TokenCache = emptyCache;
   let appOnlyCache: TokenCache = emptyCache;
+
+  // Single-flight: in-flight app-only-token acquisitions keyed on the same
+  // `(identity, audience, scope)` cache key the tokens are stored under. A second
+  // concurrent resolution of the SAME triple AWAITS the first's promise instead
+  // of firing its own SA mint + WIF exchange — so two parallel `mintFor`s for one
+  // triple produce ONE egress pair, not two (SC-008 under concurrency).
+  const inFlight = new Map<string, Promise<Result<{ token: string; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>>>();
+
+  /** Acquire the app-only token for one triple, doing the SA mint (or SA-cache
+   * reuse) then the WIF exchange, storing BOTH caches by re-reading the live cell
+   * at store time. Reached only on an app-only-cache MISS, AFTER the fail-closed
+   * gate, so it never runs for an unassigned scope (no-egress guarantee holds). */
+  const doAcquireAppToken = async (
+    inv: Invocation,
+    scope: DownstreamScope,
+    audience: string,
+    cacheK: string,
+  ): Promise<Result<{ token: string; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>> => {
+    // The whole body is fenced: an injected port that THROWS (instead of
+    // returning `err(...)` per its contract) is mapped onto the Result channel,
+    // so the shared in-flight promise below can NEVER reject — a rejection
+    // would poison every concurrent waiter and escape as a process-level
+    // unhandledRejection.
+    try {
+      // Re-check the app-only cache inside the critical section: a just-settled
+      // concurrent acquisition of this same triple may have populated it.
+      const cachedApp = lookup(appOnlyCache, cacheK, deps.now());
+      if (cachedApp !== undefined) {
+        const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
+        return ok({ token: cachedApp.token, via });
+      }
+
+      // SA token — reuse a fresh one (its lifetime is independent of the WIF token's)
+      // or mint a new one and cache it, re-reading the live `saCache` cell on store.
+      const dispatch = saDispatch(deps, inv, scope, audience);
+      let saToken: string;
+      const saCached = lookup(saCache, cacheK, deps.now());
+      if (saCached !== undefined) {
+        saToken = saCached.token;
+      } else {
+        const mintResult = await dispatch.mint();
+        if (!mintResult.ok) return err(mintResult.error);
+        saToken = mintResult.value.accessToken;
+        // Early-refresh margin (I2); re-read the live cell so a concurrent mint of a
+        // DIFFERENT triple isn't clobbered (no lost update). The store-time sweep
+        // (token-cache.ts) drops already-stale entries, bounding the cell.
+        const saStoredAt = deps.now();
+        saCache = store(
+          saCache,
+          cacheK,
+          cacheToken(saToken, saStoredAt, effectiveTtlMs(mintResult.value.expiresInSec)),
+          saStoredAt,
+        );
+      }
+
+      // WIF exchange — present the SA token as the Entra `client_assertion`.
+      const wif = await deps.entraWif.exchange({ clientAssertion: saToken, scope, audience });
+      if (!wif.ok) return err(wif.error);
+
+      const appStoredAt = deps.now();
+      appOnlyCache = store(
+        appOnlyCache,
+        cacheK,
+        cacheToken(wif.value.accessToken, appStoredAt, effectiveTtlMs(wif.value.expiresInSec)),
+        appStoredAt,
+      );
+      return ok({ token: wif.value.accessToken, via: dispatch.via });
+    } catch (e) {
+      // Port-contract violation (a throw across the port boundary) — surface as
+      // the retriable reach-failure kind, named for the hop this origin mints by.
+      return err({
+        kind: "infra-unreachable",
+        operation: inv.origin.kind === "user" ? "token-exchange" : "client-credentials",
+        message: `capability port threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  };
+
+  const acquireAppToken = (
+    inv: Invocation,
+    scope: DownstreamScope,
+    audience: string,
+    cacheK: string,
+  ): Promise<Result<{ token: string; via: "client_credentials" | "token-exchange-v2" }, FrameworkError>> => {
+    const existing = inFlight.get(cacheK);
+    if (existing) return existing;
+    const p = doAcquireAppToken(inv, scope, audience, cacheK);
+    inFlight.set(cacheK, p);
+    // Observe BOTH settlement paths on `p` itself: `void p.finally(...)` would
+    // create an UNOBSERVED derived promise, so any rejection of `p` (a port
+    // contract violation) would surface as a process-level unhandledRejection.
+    // `doAcquireAppToken` is fenced to never reject, and this keeps the cleanup
+    // rejection-safe even if that invariant is ever broken.
+    const cleanup = (): void => {
+      if (inFlight.get(cacheK) === p) inFlight.delete(cacheK);
+    };
+    p.then(cleanup, cleanup);
+    return p;
+  };
 
   const mintFor = async (
     inv: Invocation,
@@ -257,13 +374,20 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     const assigned = deps.assignedScopes(inv.origin.agentClientId);
 
     for (const capability of requires) {
-      // 1. Parse-don't-validate: an unknown/unparseable name is a policy refusal
-      //    (no client id at parse time — the field stays absent).
+      // 0. Pass-through: a capability this broker does not `provides()` —
+      //    whether a plain name (`http`/`db`/`llm`) or a colon-named CUSTOM
+      //    capability registered via ADR-0051 augmentation (`mycorp:widget`) —
+      //    is NOT a downstream scope it mints. It is a static client the
+      //    boot-scoped base context already supplies: skip it so a mixed
+      //    `requires` (static + minted) resolves both, with the framework
+      //    merging the minted scope handles OVER the base (C1). Skipping
+      //    EXACTLY the `!parseScope(...).ok` set keeps `mintFor` and `provides`
+      //    in agreement: the broker mints precisely the names `provides()`
+      //    claims, and everything else stays run-start-validated against the
+      //    base context (`provides` is `false` for it), never policy-refused
+      //    here.
       const parsed = parseScope(capability);
-      if (!parsed.ok) {
-        await audit.refusal(auditFields(inv, capability), "scope-unrecognised");
-        return err(parsed.error);
-      }
+      if (!parsed.ok) continue;
       const scope = parsed.value;
       const scopeStr = scopeName(scope);
       const audience = audienceForScope(scope);
@@ -278,10 +402,10 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         return err({ kind: "policy-refusal", scope: scopeStr, agentClientId: inv.origin.agentClientId });
       }
 
-      // Cache identity is the user `sub` for a user hop, else the agent client —
-      // the SC-008 dedup unit ("who the token is for") differs per origin. The
-      // app-only token the node USES is keyed on the SAME triple as the SA token.
-      const identity = inv.origin.kind === "user" ? inv.origin.sub : inv.origin.agentClientId;
+      // Cache identity is the SC-008 dedup unit ("who the token is for"): the
+      // agent client, or `(sub, agentClientId)` for a user hop (I3). The app-only
+      // token the node USES is keyed on the SAME triple as the SA token.
+      const identity = cacheIdentityFor(inv.origin);
       const appKey = cacheKey(identity, audience, scopeStr);
       const now = deps.now();
 
@@ -303,57 +427,38 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         continue;
       }
 
-      // 4. Mint (or reuse) the Keycloak service-account token — the FIRST egress,
-      //    and only ever reached for an assigned scope with no fresh app-only token.
-      const minted = await mintToken(deps, inv, scope, saCache);
-      if (!minted.ok) {
-        // Transient/denied are surfaced verbatim on the Result channel; audit the
-        // refusal so even endpoint-side denials are 100% covered.
-        await audit.refusal(auditFields(inv, scopeStr), `mint-failed:${minted.error.kind}`);
-        return err(minted.error);
-      }
-      saCache = minted.value.cache;
-
-      // 5. WIF EXCHANGE — the SECOND egress (FR-W4-004). Present the Keycloak SA
-      //    token as the Entra `client_assertion` to obtain an app-only Graph/
-      //    Dynamics token. There is NO static Entra secret/cert: the SA token IS
-      //    the credential (SC-011). A WIF denial (FIC mismatch / WIF rejection /
-      //    resource-scoping denial → `downstream-denied`) or transient reach
-      //    failure (`infra-unreachable`) is surfaced verbatim AND audited as a
-      //    `mint-failed:<kind>` refusal, keeping SC-009 at 100% across BOTH hops.
-      const wif = await deps.entraWif.exchange({
-        clientAssertion: minted.value.token,
-        scope,
-        audience,
-      });
-      if (!wif.ok) {
-        await audit.refusal(auditFields(inv, scopeStr), `mint-failed:${wif.error.kind}`);
-        return err(wif.error);
+      // 4. MISS → acquire (single-flighted) the app-only token: the SA mint (FIRST
+      //    egress) then the WIF exchange (SECOND egress, FR-W4-004 — the SA token
+      //    is the `client_assertion`; no static Entra secret, SC-011). Concurrent
+      //    resolutions of the SAME triple share one acquisition (SC-008). A WIF/SA
+      //    denial (`downstream-denied`) or reach failure (`infra-unreachable`) is
+      //    surfaced verbatim AND audited as a `mint-failed:<kind>` refusal, keeping
+      //    SC-009 at 100% across BOTH hops.
+      const acquired = await acquireAppToken(inv, scope, audience, appKey);
+      if (!acquired.ok) {
+        await audit.refusal(auditFields(inv, scopeStr), `mint-failed:${acquired.error.kind}`);
+        return err(acquired.error);
       }
 
-      // 6. Cache the app-only token on its own `(identity, audience, scope)` cell so
-      //    the next resolution of this triple reuses it and fires NEITHER egress
-      //    (SC-008). The app-only token carries its own `expiresInSec` (Entra
-      //    `expires_in`); convert to absolute expiry via the pure cache arithmetic.
-      appOnlyCache = store(
-        appOnlyCache,
-        appKey,
-        cacheToken(wif.value.accessToken, now, wif.value.expiresInSec * 1000),
-      );
-
-      await audit.mint(auditFields(inv, scopeStr), minted.value.via);
+      await audit.mint(auditFields(inv, scopeStr), acquired.value.via);
       // Build the narrowed handle over the APP-ONLY token (not the SA token). The
       // operation method is the only reachable surface — the bearer is closed over.
       resolved.push({
         capability,
-        handle: buildGraphHandle(scope, wif.value.accessToken, deps.graphHttp),
+        handle: buildGraphHandle(scope, acquired.value.token, deps.graphHttp),
       });
     }
 
     // Assemble the scoped handle record. Each capability name maps to its
-    // operation-narrowed handle (no raw client/token reachable). The single
-    // trust-boundary cast mirrors `extractClients` — the narrowed handles are the
-    // values a node sees for the capabilities it declared.
+    // operation-narrowed handle (no raw client/token reachable). The cast widens
+    // the dynamically-keyed record to the registry-shaped `ScopedCapabilityHandle`;
+    // it is SOUND by construction (C6): `buildGraphHandle` is exhaustive over the
+    // scope ADT and returns exactly `HandleForScope<scope>`, and the per-scope
+    // `_Equal` assertions in `capability-registry.ts` (witnessed by the
+    // `CapabilityRegistryWired` marker imported above) pin each registry entry to
+    // that same handle type — so a scope key can never be augmented with a
+    // mismatched client without failing compilation there. This stays the SINGLE
+    // broker-side trust-boundary cast (the other is `extractClients`).
     const handleRecord: Record<string, OperationNarrowedHandle> = {};
     for (const r of resolved) {
       handleRecord[r.capability] = r.handle;
@@ -361,5 +466,13 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     return ok(handleRecord as ScopedCapabilityHandle);
   };
 
-  return { mintFor };
+  // `provides` tells run-start validation which capabilities the broker mints
+  // per-node (so they are NOT demanded on the boot-scoped base context). Exactly
+  // the well-formed downstream scope names: a plain capability (`http`) parses to
+  // `false` → still validated against the base context; a malformed scope name
+  // (`msgraph:bogus`) also parses to `false` → caught at run-start as
+  // `missing-capability` rather than silently deferred to a dispatch refusal.
+  const provides = (cap: Capability): boolean => parseScope(cap).ok;
+
+  return { mintFor, provides };
 };

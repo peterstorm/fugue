@@ -1,12 +1,17 @@
 /**
- * Auth domain — pure types and functions for team-scoped token auth.
+ * Auth domain — pure types and functions for the host's inbound auth.
  *
- * The auth model:
- * - ADMIN_TOKEN (env var) = root of trust, full access, used to provision teams
- * - Team tokens = generated per-team, stored hashed in Redis, scoped to team's DAGs
+ * The auth model has THREE inbound identities (see `AuthIdentity`):
+ * - ADMIN_TOKEN (env var) = root of trust, full access, used to provision teams.
+ * - Team tokens = generated per-team, stored hashed in Redis, scoped to team's DAGs.
+ * - User (OIDC) = a human authenticated via a fugue-platform realm JWT, verified
+ *   by the injected JWKS verifier then claim-validated here (`SignatureVerifiedClaims`
+ *   → `AuthenticatedUser`). The user's `sub` is threaded into the run `origin` for
+ *   per-hop capability minting by the broker.
  *
- * All functions here are pure — no I/O, no Redis, no crypto side effects.
- * The imperative shell (middleware, handlers) calls these for decisions.
+ * All functions here are pure — no I/O, no Redis, no crypto side effects (the
+ * branding constructors only stamp a phantom type). The imperative shell
+ * (middleware, handlers) calls these for decisions.
  */
 
 import { match } from "ts-pattern";
@@ -44,8 +49,10 @@ export interface TokenGrant {
  *   (FR-W3-006/FR-W3-007). `sub` is the user's subject; `azp` is the
  *   authorized party (the OIDC client that minted the token). This identity
  *   is established at the inbound boundary so the user's subject can be threaded
- *   through the run and, in a later wave (T8), exchanged per-hop by the broker
- *   (sub stays the user, azp becomes the agent). No token exchange happens here.
+ *   through the run and exchanged per-hop by the capability broker (sub stays
+ *   the user, azp becomes the agent — `adapters/keycloak-broker.ts`, wired at
+ *   boot; the live exchange endpoint remains fail-closed-unwired pending the
+ *   JWKS wave). No token exchange happens here.
  */
 export type AuthIdentity =
   | { readonly kind: "admin" }
@@ -82,6 +89,53 @@ export interface RealmJwtClaims {
   readonly azp: string;
 }
 
+// ── Signature-verified claims & authenticated user (branded — review C5) ────
+
+declare const __sigVerifiedBrand: unique symbol;
+declare const __authUserBrand: unique symbol;
+
+/**
+ * `RealmJwtClaims` whose JWT SIGNATURE HAS BEEN VERIFIED by the JWKS-backed
+ * verifier port. Hard-branded (a `unique symbol`, like `RunId`): a plain claims
+ * object — e.g. `JSON.parse(atob(token.split(".")[1]))` from an UNVERIFIED token
+ * — does NOT inhabit this type, so it cannot be passed where verified claims are
+ * required. The brand encodes the fact the comment used to assert: that signature
+ * verification happened FIRST. The ONLY producer is `markSignatureVerified`,
+ * which the verifier port (and test fakes standing in for it) call — making every
+ * "trust this token" decision a single, greppable, reviewable site rather than an
+ * implicit convention spread across endpoint authors.
+ */
+export type SignatureVerifiedClaims = RealmJwtClaims & { readonly [__sigVerifiedBrand]: void };
+
+/**
+ * The result of fully authenticating a realm JWT: signature verified AND
+ * iss/aud/exp policy satisfied. Hard-branded and produced ONLY by
+ * `validateRealmJwtClaims`, so a bare `{ sub, azp }` (indistinguishable from
+ * unvalidated strings) can never be mistaken for an authenticated principal. The
+ * `sub`/`azp` are read off it at the one trusted construction site (the auth
+ * middleware) to build the `user` `AuthIdentity`.
+ */
+export type AuthenticatedUser = { readonly sub: string; readonly azp: string } & {
+  readonly [__authUserBrand]: void;
+};
+
+/**
+ * Brand raw claims as signature-verified. This is the trust boundary's single
+ * entry point: ONLY the JWKS signature verifier (and the fakes that substitute
+ * for it in tests) may call it, and only AFTER cryptographically verifying the
+ * token's signature against the realm's keys. Calling it on unverified claims is
+ * a deliberate forgery of the brand — visible in review, never accidental.
+ */
+export const markSignatureVerified = (claims: RealmJwtClaims): SignatureVerifiedClaims =>
+  claims as SignatureVerifiedClaims;
+
+/**
+ * Brand a validated principal. @internal — only `validateRealmJwtClaims`
+ * constructs an `AuthenticatedUser`, AFTER the iss/aud/exp checks pass.
+ */
+export const markAuthenticatedUser = (user: { readonly sub: string; readonly azp: string }): AuthenticatedUser =>
+  user as AuthenticatedUser;
+
 // ── Authorization (pure) ───────────────────────────────────────────────────
 
 /**
@@ -92,9 +146,10 @@ export interface RealmJwtClaims {
  * - Team identity can only access DAGs owned by that team.
  * - User identity (fugue-platform JWT) may run DAGs in this wave. User-run
  *   authorization is NOT team-scoped here: the user's downstream authorization
- *   is enforced per-hop by the identity-scoped capability broker (T8/Wave 4)
- *   via the V2 token exchange, where the realm/Keycloak policy gates what the
- *   user-via-agent may actually reach. THIS predicate deliberately does NOT
+ *   is enforced per-hop by the identity-scoped capability broker
+ *   (`adapters/keycloak-broker.ts`, selected at boot when `REALM_JWT_ISSUER` is
+ *   set) via the V2 token exchange, where the realm/Keycloak policy gates what
+ *   the user-via-agent may actually reach. THIS predicate deliberately does NOT
  *   grant admin-equivalent access — a `user` is not an `admin`; it only clears
  *   the inbound run gate so the user's `sub` can be threaded into the run.
  *   It returns `true` independent of `dagTeam` (a user is not bound to a single
@@ -116,13 +171,27 @@ export const TOKEN_PREFIX = "fug_";
 /** Minimum token length (prefix + 43 chars of base64url from 32 bytes) */
 export const TOKEN_MIN_LENGTH = TOKEN_PREFIX.length + 43;
 
+/** Required entropy for a team token — 32 bytes → 43 base64url chars. */
+export const TOKEN_RANDOM_BYTES = 32;
+
 /**
  * Construct a TeamToken from a prefix + random bytes (base64url encoded).
  * The randomness is injected — this function just formats.
  *
- * @param randomBytes - 32 bytes of cryptographic randomness
+ * Enforces the 32-byte input: the `TeamToken` brand encodes "carries full
+ * entropy", so producing one from short input would forge the brand at its
+ * origin. A wrong length throws (a wiring bug, not a runtime input) rather than
+ * silently minting a weak token (review suggestion).
+ *
+ * @param randomBytes - exactly 32 bytes of cryptographic randomness
  */
 export const formatToken = (randomBytes: Uint8Array): TeamToken => {
+  if (randomBytes.length !== TOKEN_RANDOM_BYTES) {
+    throw new Error(
+      `formatToken: expected ${TOKEN_RANDOM_BYTES} random bytes, got ${randomBytes.length} — ` +
+        `the TeamToken brand requires full entropy`,
+    );
+  }
   const encoded = base64url(randomBytes);
   return `${TOKEN_PREFIX}${encoded}` as TeamToken;
 };

@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { validateRealmJwtClaims, describeAuthError } from "../jwt-validation.js";
-import type { RealmJwtClaims } from "../jwt-validation.js";
+import type { RealmJwtClaims, SignatureVerifiedClaims } from "../jwt-validation.js";
 
 const EXPECTED_ISS = "https://kc.example.com/realms/fugue-platform";
 const EXPECTED_AUD = "fugue-host";
@@ -26,15 +26,27 @@ const baseClaims = (over: Partial<RealmJwtClaims> = {}): RealmJwtClaims => ({
   ...over,
 });
 
+// These tests probe the DEFENSIVE value-level parse, so they deliberately feed
+// malformed inputs. The `validateRealmJwtClaims` signature now requires
+// `SignatureVerifiedClaims` (C5) — the brand attests SIGNATURE verification, not
+// value sanity — so the test casts past the brand to exercise the runtime checks
+// that still guard the claim VALUES.
 const validate = (claims: unknown) =>
-  validateRealmJwtClaims(claims, { expectedIss: EXPECTED_ISS, expectedAud: EXPECTED_AUD, now: NOW });
+  validateRealmJwtClaims(claims as unknown as SignatureVerifiedClaims, {
+    expectedIss: EXPECTED_ISS,
+    expectedAud: EXPECTED_AUD,
+    now: NOW,
+  });
 
 describe("validateRealmJwtClaims", () => {
   describe("valid", () => {
     it("returns ok({sub, azp}) for valid claims (aud as string)", () => {
       const res = validate(baseClaims());
       expect(res.ok).toBe(true);
-      if (res.ok) expect(res.value).toEqual({ sub: "user-123", azp: "fugue-frontend" });
+      if (res.ok) {
+        expect(res.value.sub).toBe("user-123");
+        expect(res.value.azp).toBe("fugue-frontend");
+      }
     });
 
     it("accepts aud as an array containing the expected audience", () => {
@@ -140,7 +152,7 @@ describe("validateRealmJwtClaims", () => {
     // The guard rejects the bad clock as `malformed` BEFORE the expiry check, so
     // an expired token can never read as valid no matter the injected clock.
     const validateAt = (claims: unknown, now: number) =>
-      validateRealmJwtClaims(claims, { expectedIss: EXPECTED_ISS, expectedAud: EXPECTED_AUD, now });
+      validateRealmJwtClaims(claims as unknown as SignatureVerifiedClaims, { expectedIss: EXPECTED_ISS, expectedAud: EXPECTED_AUD, now });
 
     it("rejects a NaN now on an otherwise-valid-but-expired claim set (not ok)", () => {
       const expired = baseClaims({ exp: NOW - 1 });
@@ -163,12 +175,42 @@ describe("validateRealmJwtClaims", () => {
     });
   });
 
+  describe("nbf (not-before) — optional, fail-closed when present (review suggestion)", () => {
+    it("rejects a token whose nbf is strictly after now as not-yet-valid", () => {
+      const res = validate(baseClaims({ nbf: NOW + 60 } as never));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("not-yet-valid");
+    });
+
+    it("accepts a token whose nbf is at or before now", () => {
+      expect(validate(baseClaims({ nbf: NOW } as never)).ok).toBe(true);
+      expect(validate(baseClaims({ nbf: NOW - 60 } as never)).ok).toBe(true);
+    });
+
+    it("ignores an ABSENT nbf (nbf is optional)", () => {
+      expect(validate(baseClaims()).ok).toBe(true);
+    });
+
+    it("rejects a PRESENT but non-numeric nbf as malformed (fail closed, matching exp's strict parse — A7)", () => {
+      const res = validate(baseClaims({ nbf: "soon" } as never));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("malformed");
+    });
+
+    it("rejects a PRESENT but non-finite nbf (NaN) as malformed", () => {
+      const res = validate(baseClaims({ nbf: Number.NaN } as never));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("malformed");
+    });
+  });
+
   describe("describeAuthError", () => {
     it("never leaks token internals and covers every kind", () => {
       expect(describeAuthError({ kind: "malformed", reason: "x" })).toContain("malformed");
       expect(describeAuthError({ kind: "wrong-issuer", expected: "a", actual: "b" })).toContain("issuer");
       expect(describeAuthError({ kind: "wrong-audience", expected: "a", actual: "b" })).toContain("audience");
       expect(describeAuthError({ kind: "expired", exp: 1, now: 2 })).toContain("expired");
+      expect(describeAuthError({ kind: "not-yet-valid", nbf: 2, now: 1 })).toContain("not yet valid");
     });
   });
 });

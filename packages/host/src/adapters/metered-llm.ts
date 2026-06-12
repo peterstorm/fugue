@@ -77,26 +77,53 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   let meter: LlmMeter = emptyMeter();
   const { dagId, runId, budget, logger } = deps;
 
-  /** Pre-call gate — returns the budget refusal error, or `null` to proceed. */
-  const refuseIfOverBudget = (nodeId: NodeId): FrameworkError | null => {
+  // Concurrency reservation (review I1 / SC-003). `budgetDecision` refuses only
+  // once cumulative ≥ budget, but cumulative updates AFTER a call settles — so N
+  // calls fired in parallel (e.g. several nodes in one wave) all read the same
+  // pre-settle cumulative, all pass the gate, and overshoot by N rather than one.
+  // We treat ADMITTED-but-unsettled calls as already-spending by reserving a
+  // learned per-call estimate (`maxObservedCall`, the largest single call seen so
+  // far) and refusing when `cumulative + reservedInFlight ≥ budget`. Steady-state
+  // overshoot is bounded to ~one call; the very first parallel burst (before any
+  // call has settled, so the estimate is still 0) can still overshoot, which is
+  // the documented FR-W1-004 "overshoot by at most one" allowance generalised.
+  let reservedInFlight = 0;
+  let maxObservedCall = 0;
+
+  /**
+   * Pre-call gate. Returns either a budget-refusal error, or a `release` thunk to
+   * call once the admitted call settles (which frees its reservation). Reserving
+   * BEFORE the call and releasing AFTER is what makes the gate concurrency-safe.
+   */
+  const admit = (nodeId: NodeId): { readonly error: FrameworkError } | { readonly release: () => void } => {
     const decision: BudgetDecision = budgetDecision(meter, runId, budget);
-    if (decision.kind === "refuse") {
+    const projected = decision.cumulative + reservedInFlight;
+    const overBudget =
+      decision.kind === "refuse" || (budget !== undefined && projected >= budget);
+    if (overBudget) {
       logger.warn("LLM budget exceeded — refusing call", {
         dagId: dagId as string,
         runId: runId as string,
         nodeId: nodeId as string,
         cumulative: decision.cumulative,
-        budget: decision.budget,
+        reservedInFlight,
+        budget: budget as number,
       });
       return {
-        kind: "llm-budget-exceeded",
-        runId,
-        nodeId,
-        cumulative: decision.cumulative,
-        budget: decision.budget,
+        error: {
+          kind: "llm-budget-exceeded",
+          runId,
+          nodeId,
+          cumulative: projected,
+          budget: budget as number,
+        },
       };
     }
-    return null;
+    // Admit: reserve this call's learned estimate; capture the exact amount so the
+    // release frees precisely what was reserved even if `maxObservedCall` grows.
+    const reserved = maxObservedCall;
+    reservedInFlight += reserved;
+    return { release: () => { reservedInFlight -= reserved; } };
   };
 
   /** Post-call bookkeeping — accumulate the delta and emit the metering log. */
@@ -106,6 +133,8 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     tokensIn: number,
     tokensOut: number,
   ): void => {
+    // Learn the per-call estimate the concurrency reservation uses (I1).
+    maxObservedCall = Math.max(maxObservedCall, tokensIn + tokensOut);
     meter = accumulate(meter, runId, { tokensIn, tokensOut });
     const cumulative = runTotal(usageFor(meter, runId));
     logger.info("llm.metered", {
@@ -162,20 +191,26 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     sendStructured: async <O>(
       req: LlmRequest<O>,
     ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-      const refusal = refuseIfOverBudget(req.nodeId);
-      if (refusal !== null) return err(refusal);
-
-      return settle(req.nodeId, "sendStructured", await inner.sendStructured(req));
+      const gate = admit(req.nodeId);
+      if ("error" in gate) return err(gate.error);
+      try {
+        return settle(req.nodeId, "sendStructured", await inner.sendStructured(req));
+      } finally {
+        gate.release();
+      }
     },
 
     sendWithTools: async <O>(
       req: SendWithToolsRequest<O>,
       ctx: NodeContext,
     ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-      const refusal = refuseIfOverBudget(req.nodeId);
-      if (refusal !== null) return err(refusal);
-
-      return settle(req.nodeId, "sendWithTools", await inner.sendWithTools(req, ctx));
+      const gate = admit(req.nodeId);
+      if ("error" in gate) return err(gate.error);
+      try {
+        return settle(req.nodeId, "sendWithTools", await inner.sendWithTools(req, ctx));
+      } finally {
+        gate.release();
+      }
     },
   };
 };

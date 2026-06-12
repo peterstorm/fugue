@@ -27,12 +27,13 @@ import type {
   Result,
   FrameworkError,
 } from "@fuguejs/framework";
-import type { Invocation, InvocationOrigin, CapabilityBroker } from "@fuguejs/framework";
-import { makeNodeContext, ok, nodeId as makeNodeId } from "@fuguejs/framework";
+import type { InvocationOrigin } from "@fuguejs/framework";
+import { makeNodeContext, ok } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
+import { extractClients } from "../domain/capability-manager.js";
 import { createMeteredLlm } from "./metered-llm.js";
 
 
@@ -204,10 +205,19 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
  * (FR-W3-007). PURE and exported so the sub-threading is directly assertable
  * without standing up the whole context factory:
  *
- *  - `user`  → `{ kind: "user", sub, agentClientId: azp }`. The user's `sub`
- *    lands on the origin verbatim; `azp` is the authorized agent client. This
- *    is the case that was previously dead-ended (every user run mis-attributed
- *    as `agent`).
+ *  - `user`  → `{ kind: "user", sub, agentClientId: dagId }`. The user's `sub`
+ *    lands on the origin verbatim. `agentClientId` is the AGENT the user acts
+ *    THROUGH — the DAG's agent-type Keycloak client — NOT the inbound token's
+ *    `azp` (the frontend SSO client that minted the user's login token). This
+ *    distinction is security-relevant (ADR-0056, review I3): the broker gates a
+ *    user hop with `assignedScopes(agentClientId)`, which must consult the
+ *    AGENT's realm policy, not the frontend's. Using the frontend `azp` here
+ *    would (a) gate against the wrong client and (b) let a future token exchange
+ *    set `azp` to the frontend. We key on `dagId` — the same agent-type-client
+ *    placeholder the agent path uses — so user and agent runs of the SAME DAG
+ *    resolve to the SAME agent client. (A dagId→real-Keycloak-client-id mapping
+ *    is a config concern threaded later; the placeholder keeps the policy lookup
+ *    pointed at the agent, never the frontend.)
  *  - `team` / `admin` → `{ kind: "agent", agentClientId: dagId }`. There is no
  *    user subject for these, so the agent placeholder keyed on the DAG id stands
  *    in — identical to the pre-fix behaviour.
@@ -219,36 +229,55 @@ export const invocationOriginForIdentity = (
   dagId: DagId,
 ): InvocationOrigin =>
   match(identity)
-    .with({ kind: "user" }, (u) => ({ kind: "user" as const, sub: u.sub, agentClientId: u.azp }))
-    .with({ kind: "team" }, () => ({ kind: "agent" as const, agentClientId: dagId }))
-    .with({ kind: "admin" }, () => ({ kind: "agent" as const, agentClientId: dagId }))
+    .with({ kind: "user" }, (u) => ({ kind: "user" as const, sub: u.sub, agentClientId: dagId as string }))
+    .with({ kind: "team" }, () => ({ kind: "agent" as const, agentClientId: dagId as string }))
+    .with({ kind: "admin" }, () => ({ kind: "agent" as const, agentClientId: dagId as string }))
     .exhaustive();
 
+/** The base NodeContext for a run plus the `origin` the broker authorizes nodes against. */
+export interface NodeContextForDag {
+  readonly ctx: NodeContext;
+  /**
+   * Who initiated the run. Threaded into `runDag` alongside the broker so the
+   * framework builds a per-node `Invocation { origin, runId, dagId, nodeId }`
+   * and mints each node's declared scopes AT DISPATCH. Built from the inbound
+   * identity (FR-W3-007).
+   */
+  readonly origin: InvocationOrigin;
+}
+
 /**
- * Construct a NodeContext for a specific DAG execution.
+ * Construct the BASE NodeContext for a specific DAG execution, plus the run's
+ * `origin`.
  *
- * Given inputs, constructs context deterministically.
- * - Shared infra (LLM, tracer) -> passed through as singleton references
- * - Cache -> wrapped with DAG-namespaced key prefix
- * - Checkpoint -> wrapped with DAG + run namespaced key prefix
- * - runId, signal -> per-request unique values
- * - capabilities -> resolved through the INJECTED `CapabilityBroker` (pass-through
- *   OR the live Keycloak broker, selected at boot). `async` because the live
- *   Keycloak broker reaches a token endpoint (I/O); the pass-through default does
- *   no I/O and hands back the exact `extractClients` references.
+ * The base context carries the BOOT-SCOPED static capability clients
+ * (`extractClients` over the registered handles — the single trust-boundary
+ * cast; see capability-manager.ts) exactly as before. Per-invocation AUTHORITY
+ * is layered on TOP of this base, per node, by the framework when a minting
+ * broker is wired into `runDag` (the host selects the live Keycloak broker when
+ * realm config is present): each node's declared `"<provider>:<operation>"`
+ * scopes are minted into narrowed handles AT DISPATCH and merged over this base,
+ * while plain capabilities (`http`/`db`/`llm`/…) keep their static client. When
+ * no broker is wired (no realm config) the base context is used unchanged —
+ * byte-identical to today (SC-005), zero regression.
+ *
+ * This is why the broker is NO LONGER consulted here: minting must happen
+ * per-node (the only place the real `nodeId` and that node's `requires` are
+ * known), so resolving it once at context-construction with empty `requires`
+ * (the prior T8 wiring) could never reach the minting machinery and silently
+ * dropped every statically-configured client on the realm path (review C1).
+ *
+ * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
+ * broker, and it now moves per node, in the framework.
  *
  * @satisfies FR-030 — Cache key isolation
  * @satisfies FR-031 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 — Cross-DAG cache isolation
- * @satisfies FR-W2-003 — capabilities now flow through a broker; the pass-through
- *   default preserves byte-identical client behavior with zero migration steps
- * @satisfies FR-W2-005 — only authority resolution moved behind the broker;
- *   pools (connect/close/healthCheck) remain boot-scoped and untouched
- * @satisfies SC-005 — on the pass-through path the broker hands back the exact
- *   `extractClients` client references (byte-identical); the live Keycloak path
- *   mints fresh narrowed handles and does NOT preserve those references
+ * @satisfies FR-W2-005 — pools (connect/close/healthCheck) remain boot-scoped
+ * @satisfies FR-W3-007 — `origin` carries the user's `sub` so a user-initiated
+ *   run is attributable and per-hop-exchangeable by the broker
  */
 export const createNodeContextForDag = async (
   shared: SharedInfra,
@@ -256,8 +285,7 @@ export const createNodeContextForDag = async (
   runId: RunId,
   signal: AbortSignal,
   identity: AuthIdentity,
-  broker: CapabilityBroker,
-): Promise<NodeContext> => {
+): Promise<NodeContextForDag> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
@@ -288,48 +316,9 @@ export const createNodeContextForDag = async (
     ? { get: (name: string) => dagPrompts.get(name) ?? null }
     : shared.prompts ?? { get: () => null };
 
-  // ADR-0051 / per-invocation authority axis: custom capability clients from
-  // registered handles are resolved through a `CapabilityBroker`, not passed to
-  // `makeNodeContext` directly. The pass-through default reproduces today's
-  // behavior exactly — it hands back the SAME client references `extractClients`
-  // produced (the single trust-boundary cast; see capability-manager.ts). Later
-  // waves swap in a host broker that mints narrowly-scoped clients per
-  // invocation; the seam is the only thing that changes here, not the wiring.
-  //
-  // Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind
-  // the broker. `Invocation.origin` is now built FROM the resolved inbound
-  // identity (FR-W3-007): an OIDC `user` carries its `sub` (and `azp` as the
-  // authorized agent client) so attribution is correct; `team`/`admin` runs map
-  // to the agent placeholder keyed on `dagId`, preserving prior behaviour.
-  //
-  // The broker is INJECTED (T8): the host selects the live Keycloak-backed broker
-  // when realm config is present, else the pass-through default — so the
-  // pass-through path stays byte-identical (SC-005) while authority resolution
-  // can move behind a minting broker without churning this factory. `nodeId` is
-  // run-scoped context here (not per-node), so a stable sentinel stands in.
   const origin: InvocationOrigin = invocationOriginForIdentity(identity, dagId);
-  const invocation: Invocation = {
-    origin,
-    runId,
-    dagId,
-    nodeId: makeNodeId("__run__"),
-  };
-  const minted = await broker.mintFor(invocation, []);
-  if (!minted.ok) {
-    // Unreachable for EITHER broker as called here: `requires` is empty, so
-    // neither the pass-through nor the live Keycloak broker iterates a scope —
-    // there is nothing to parse, gate, or mint, so no Err can be produced. The
-    // guard stays as a fail-loud tripwire: if a future change passes a non-empty
-    // `requires` and a broker refuses, that is an internal wiring invariant
-    // violation worth surfacing rather than silently swallowing.
-    throw new Error(
-      `createNodeContextForDag: capability broker returned Err for dag '${dagId}' run '${runId}' — ` +
-        `mintFor is called with empty requires, so no broker can fail here; ` +
-        `this is an internal wiring invariant violation. error.kind=${minted.error.kind}`,
-    );
-  }
 
-  return makeNodeContext({
+  const ctx = makeNodeContext({
     runId,
     dagId,
     tracer: shared.tracer,
@@ -339,6 +328,10 @@ export const createNodeContextForDag = async (
     signal,
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
-    capabilities: minted.value,
+    // The boot-scoped static client set. Per-node minted scope handles (when a
+    // broker is wired) are merged OVER this by the framework at dispatch.
+    capabilities: extractClients(shared.capabilities),
   });
+
+  return { ctx, origin };
 };

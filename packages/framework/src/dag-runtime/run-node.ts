@@ -21,6 +21,8 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
+import type { Invocation, MintingAuthority } from "../types/capability-broker.js";
+import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { emit } from "./emit.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
@@ -44,6 +46,18 @@ export interface RunNodeOpts {
    * event ordering deterministic.
    */
   readonly now?: () => number;
+  /**
+   * Per-invocation minting authority (broker + origin as one value — the
+   * half-wired broker-without-origin state is unrepresentable). When wired,
+   * the node's declared `requires` are resolved through `broker.mintFor` AT
+   * DISPATCH — after `node-start`, only when the node actually runs (a
+   * checkpoint-skipped node mints nothing) — and the minted narrowed handles
+   * are merged over the base context for THIS node only. A mint refusal fails
+   * the node fail-closed with the broker's error (no `run` is called).
+   * Omitted ⇒ no per-node minting: the node runs against the shared base
+   * context exactly as before.
+   */
+  readonly minting?: MintingAuthority;
 }
 
 export const runNodeShared = async (
@@ -114,6 +128,33 @@ export const runNodeShared = async (
     const nodeStart = nowFn();
     emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, sideEffects: node.sideEffects, timestamp: stamp() });
 
+    // Per-invocation authority resolution (the per-node minting seam). When a
+    // broker is wired, the node's declared `requires` are resolved into narrowly
+    // scoped handles for THIS node only, minted against an `Invocation` carrying
+    // the real `nodeId` (so each mint/refusal audit is per-node, not run-global).
+    // The minted handles are merged over the base context; broker-resolvable
+    // scope names get their narrowed handle, plain capabilities keep their static
+    // client. A refusal fails the node fail-closed before `run` is ever called.
+    let runCtx: NodeContext = ctx;
+    if (opts.minting) {
+      const inv: Invocation = { origin: opts.minting.origin, runId: ctx.runId, dagId, nodeId };
+      const minted = await opts.minting.broker.mintFor(inv, node.requires);
+      if (!minted.ok) {
+        emit(ctx, {
+          type: "node-error",
+          runId: ctx.runId,
+          dagId,
+          nodeId,
+          sideEffects: node.sideEffects,
+          timestamp: stamp(),
+          error: `capability minting refused: ${JSON.stringify(minted.error)}`,
+          frameworkError: minted.error,
+        });
+        return err(minted.error);
+      }
+      runCtx = mergeScopedCapabilities(ctx, minted.value);
+    }
+
     let runResult: Result<unknown, FrameworkError>;
     try {
       // Capability erasure boundary: the node's `run` is typed against the
@@ -125,7 +166,7 @@ export const runNodeShared = async (
         input: unknown,
         ctx: NodeContext,
       ) => Promise<Result<unknown, FrameworkError>>;
-      runResult = await runFn(inputResult.value, ctx);
+      runResult = await runFn(inputResult.value, runCtx);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const stack = e instanceof Error ? e.stack : undefined;

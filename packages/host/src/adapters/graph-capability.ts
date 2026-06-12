@@ -158,10 +158,18 @@ const runGraph = async (
 // and never exposed — `Object.keys(handle)` is exactly `[operation]` (SC-007).
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Build the `sendMail`-only handle for `msgraph:mail.send`, over the WIF token. */
+/**
+ * Build the `sendMail`-only handle for `msgraph:mail.send`, over the app-only WIF
+ * token. Targets `/users/{message.from}/sendMail` — NOT `/me/sendMail`: the token
+ * is application-permission (client-credentials), for which Graph rejects `/me`
+ * unconditionally ("/me request is only valid with delegated authentication
+ * flow"). The sender mailbox is the caller-supplied `message.from`; Graph gates
+ * which mailboxes the agent app may send as (ApplicationAccessPolicy), so a
+ * disallowed mailbox surfaces as `downstream-denied` (review C2).
+ */
 export const buildMailSendHandle = (token: string, http: GraphHttp): MailSendHandle => ({
   sendMail: async (message: MailMessage): Promise<Result<MailSendReceipt, FrameworkError>> => {
-    const url = `${GRAPH_BASE}/me/sendMail`;
+    const url = `${GRAPH_BASE}/users/${encodeURIComponent(message.from)}/sendMail`;
     const ran = await runGraph(
       http,
       {
@@ -200,7 +208,17 @@ export const buildSitesReadHandle = (token: string, http: GraphHttp): SitesReadH
         ? ran.value.json.displayName
         : typeof ran.value.json.name === "string"
           ? ran.value.json.name
-          : "";
+          : undefined;
+    // A 2xx whose body carries NO usable title is a malformed success — mirror
+    // entra-wif's A4 mapping (200-without-usable-body → infra-unreachable) rather
+    // than silently returning an empty title that reads as a real (blank) site.
+    if (title === undefined) {
+      return err({
+        kind: "infra-unreachable",
+        operation: "graph",
+        message: `Graph returned 2xx for site '${siteId}' with no displayName/name`,
+      });
+    }
     return ok({ siteId, title });
   },
 });
@@ -219,9 +237,30 @@ export const buildDynamicsReadHandle = (token: string, http: GraphHttp): Dynamic
     const ran = await runGraph(http, { method: "GET", url, bearer: token }, url);
     if (!ran.ok) return err(ran.error);
     const value = ran.value.json.value;
-    const rows = Array.isArray(value)
-      ? value.filter((r): r is Record<string, unknown> => r !== null && typeof r === "object")
-      : [];
+    // A Dataverse collection response always carries a `value` array (possibly
+    // empty). Its ABSENCE on a 2xx is a malformed success, not an empty result —
+    // map it to infra-unreachable (entra-wif A4) instead of silently returning
+    // zero rows, which a caller would read as "the query legitimately matched
+    // nothing".
+    if (!Array.isArray(value)) {
+      return err({
+        kind: "infra-unreachable",
+        operation: "graph",
+        message: `Dynamics returned 2xx for entity '${query.entity}' with no 'value' array`,
+      });
+    }
+    const rows = value.filter((r): r is Record<string, unknown> => r !== null && typeof r === "object");
+    // A non-object row inside an otherwise-2xx `value` array is a PARTIALLY
+    // malformed success — same A4 precedent as the absent `value` above. Map it
+    // to infra-unreachable rather than silently filtering: a quietly smaller row
+    // set would read as "the query legitimately matched fewer records".
+    if (rows.length !== value.length) {
+      return err({
+        kind: "infra-unreachable",
+        operation: "graph",
+        message: `Dynamics returned 2xx for entity '${query.entity}' with ${value.length - rows.length} non-object row(s) in 'value'`,
+      });
+    }
     return ok({ rows });
   },
 });

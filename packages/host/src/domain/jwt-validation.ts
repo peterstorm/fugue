@@ -20,7 +20,8 @@
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { match } from "ts-pattern";
-import type { JwtAudience, RealmJwtClaims } from "./auth.js";
+import type { JwtAudience, RealmJwtClaims, SignatureVerifiedClaims, AuthenticatedUser } from "./auth.js";
+import { markAuthenticatedUser } from "./auth.js";
 
 // ── AuthError ADT ──────────────────────────────────────────────────────────
 
@@ -38,7 +39,9 @@ export type AuthError =
   /** `aud` did not contain/equal the expected audience (`fugue-host`). */
   | { readonly kind: "wrong-audience"; readonly expected: string; readonly actual: JwtAudience }
   /** `exp` is at or before `now` (token expired or expiring exactly now). */
-  | { readonly kind: "expired"; readonly exp: number; readonly now: number };
+  | { readonly kind: "expired"; readonly exp: number; readonly now: number }
+  /** `nbf` (not-before) is strictly after `now` — the token is not yet valid. */
+  | { readonly kind: "not-yet-valid"; readonly nbf: number; readonly now: number };
 
 /**
  * A human-readable, NON-SENSITIVE summary of an AuthError. Safe to log: it never
@@ -51,6 +54,7 @@ export const describeAuthError = (e: AuthError): string =>
     .with({ kind: "wrong-issuer" }, () => "token issuer not accepted")
     .with({ kind: "wrong-audience" }, () => "token audience not accepted")
     .with({ kind: "expired" }, () => "token expired")
+    .with({ kind: "not-yet-valid" }, () => "token not yet valid (nbf)")
     .exhaustive();
 
 // ── Validation options ─────────────────────────────────────────────────────
@@ -83,15 +87,25 @@ const audienceMatches = (aud: JwtAudience, expected: string): boolean =>
  *     `sub`, `azp` present and correctly typed) → `malformed`;
  *  2. `iss === expectedIss` → `wrong-issuer`;
  *  3. `aud` contains/equals `expectedAud` → `wrong-audience`;
- *  4. `exp > now` (strictly; `exp === now` is expired) → `expired`.
+ *  4. `nbf <= now` when `nbf` is present (a present-but-non-numeric `nbf` is
+ *     `malformed`; an absent `nbf` skips the check) → `not-yet-valid`;
+ *  5. `exp > now` (strictly; `exp === now` is expired) → `expired`.
  *
- * On success returns `{ sub, azp }` — the only claims the run path needs. Never
+ * On success returns a branded `AuthenticatedUser` carrying `{ sub, azp }` — the
+ * only claims the run path needs, and the ONLY way to obtain that brand (so a
+ * bare `{ sub, azp }` can never masquerade as an authenticated principal). Never
  * throws; all failures are `err(AuthError)`.
+ *
+ * Input is `SignatureVerifiedClaims` (brand from the JWKS verifier) — the type
+ * makes it impossible to call this on a decoded-but-unverified payload (review
+ * C5). The brand attests SIGNATURE verification; the claim VALUES are still
+ * parsed here defensively (a realm-signed token should be well-formed, but
+ * value-level checks stay as defense in depth).
  */
 export const validateRealmJwtClaims = (
-  claims: unknown,
+  claims: SignatureVerifiedClaims,
   opts: ValidateRealmJwtOptions,
-): Result<{ readonly sub: string; readonly azp: string }, AuthError> => {
+): Result<AuthenticatedUser, AuthError> => {
   // Reject a non-finite clock UP FRONT: a `NaN`/`Infinity` `now` would poison
   // the `exp <= now` comparison (`exp <= NaN` is always `false`), letting an
   // expired token read as valid — a fail-OPEN bug. Fail closed instead so no
@@ -100,10 +114,14 @@ export const validateRealmJwtClaims = (
     return err({ kind: "malformed", reason: "non-finite now" });
   }
 
-  if (typeof claims !== "object" || claims === null) {
+  // The brand attests signature verification; inspect the claim VALUES through a
+  // widened view for the defensive parse below. The object/null guard stays as
+  // defense in depth — a verifier bug returning a non-object must fail closed,
+  // never throw on a `.iss` access.
+  const c = claims as unknown as Record<string, unknown>;
+  if (typeof c !== "object" || c === null) {
     return err({ kind: "malformed", reason: "claims is not an object" });
   }
-  const c = claims as Record<string, unknown>;
 
   // ── 1. Structural validation (parse, don't trust) ────────────────────────
   if (!isNonEmptyString(c.iss)) {
@@ -141,13 +159,28 @@ export const validateRealmJwtClaims = (
     return err({ kind: "wrong-audience", expected: opts.expectedAud, actual: aud });
   }
 
-  // ── 4. Expiry (fail-closed: exp must be strictly in the future) ──────────
+  // ── 4. Not-before (optional; reject a token whose validity hasn't begun) ──
+  // `nbf` is optional in a JWT: ABSENT → no check. PRESENT → it must be a
+  // finite number (the same strict parse `exp` gets) — a present-but-non-numeric
+  // `nbf` is a malformed token and FAILS CLOSED, never a skippable hint. A valid
+  // `nbf` strictly after `now` rejects the token (minted for future use / a
+  // skewed issuer).
+  if (c.nbf !== undefined) {
+    if (typeof c.nbf !== "number" || !Number.isFinite(c.nbf)) {
+      return err({ kind: "malformed", reason: "non-numeric 'nbf'" });
+    }
+    if (opts.now < c.nbf) {
+      return err({ kind: "not-yet-valid", nbf: c.nbf, now: opts.now });
+    }
+  }
+
+  // ── 5. Expiry (fail-closed: exp must be strictly in the future) ──────────
   if (exp <= opts.now) {
     return err({ kind: "expired", exp, now: opts.now });
   }
 
-  return ok({ sub, azp } satisfies { sub: string; azp: string });
+  return ok(markAuthenticatedUser({ sub, azp }));
 };
 
-/** Re-export for callers that want the validated claims shape by name. */
-export type { RealmJwtClaims };
+/** Re-export for callers that want the claim shapes by name. */
+export type { RealmJwtClaims, SignatureVerifiedClaims, AuthenticatedUser };

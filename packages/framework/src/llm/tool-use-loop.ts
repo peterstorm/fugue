@@ -17,7 +17,8 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError, PartialTokenUsage } from "../types/errors.js";
 import { usageOfError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
+import { fwLogger } from "../logger.js";
+import type { NodeId, RunId, DagId } from "../types/ids.js";
 import type { LlmResponse, ToolDef } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { ensureToolNames } from "./tools.js";
@@ -86,7 +87,13 @@ const stripCodeFences = (text: string): string =>
  * Attach the loop's accumulated cross-turn token totals onto a usage-carrying
  * `FrameworkError`, so a mid-loop failure still attributes the tokens burned by
  * already-completed turns (FR-W0-001). Errors that do not carry a `usage` field
- * (e.g. `validation`) pass through untouched.
+ * (e.g. `validation`) cannot hold the totals — rather than DROP them silently
+ * (a budget under-count, review suggestion), the accumulated figure is emitted as
+ * a structured `llm.usage-unattributed` warning so the burned tokens remain
+ * observable even though they can't ride the typed error channel. The warning
+ * carries the `nodeId`/`runId`/`dagId` correlation triple so the burned tokens
+ * stay JOINABLE to the run that burned them — without the ids, the figure is a
+ * number nobody can reconcile against a run's budget.
  *
  * When the underlying error already carries its own `usage` (the provider
  * reported partial tokens for the in-flight turn that just failed — these have
@@ -97,11 +104,24 @@ const withAccumulatedUsage = (
   e: FrameworkError,
   priorIn: number,
   priorOut: number,
+  corr: { readonly nodeId: NodeId; readonly runId: RunId; readonly dagId: DagId },
 ): FrameworkError => {
   const own = usageOfError(e);
   // `usageOfError` returning a value is exactly the set of variants that carry
   // a `usage` field — guard so we never stamp usage onto a variant without one.
   if (e.kind !== "node-crash" && e.kind !== "transient" && e.kind !== "aborted") {
+    // This error kind has nowhere to carry usage. If real tokens were burned
+    // before it, surface them so a budget reconciler isn't silently under-counted.
+    if (priorIn > 0 || priorOut > 0) {
+      fwLogger().warn("llm.usage-unattributed", {
+        errorKind: e.kind,
+        tokensIn: priorIn,
+        tokensOut: priorOut,
+        nodeId: corr.nodeId,
+        runId: corr.runId,
+        dagId: corr.dagId,
+      });
+    }
     return e;
   }
   const usage: PartialTokenUsage = {
@@ -144,6 +164,9 @@ export const toolUseLoop = async <O>(
   let lastThinking: string | undefined;
   const nowFn = config.now ?? Date.now;
   const deadline = config.deadlineMs ? nowFn() + config.deadlineMs : Infinity;
+  // Correlation triple for usage attribution: stamped onto every error and onto
+  // the `llm.usage-unattributed` warning, so burned tokens are joinable to a run.
+  const corr = { nodeId: config.nodeId, runId: ctx.runId, dagId: ctx.dagId } as const;
 
   for (let turn = 0; turn < config.maxIterations; turn++) {
     // Deadline check
@@ -157,13 +180,14 @@ export const toolUseLoop = async <O>(
           },
           totalTokensIn,
           totalTokensOut,
+          corr,
         ),
       );
     }
     // Abort check
     if (config.signal?.aborted || ctx.signal?.aborted) {
       return err(
-        withAccumulatedUsage({ kind: "aborted", reason: "signal" }, totalTokensIn, totalTokensOut),
+        withAccumulatedUsage({ kind: "aborted", reason: "signal" }, totalTokensIn, totalTokensOut, corr),
       );
     }
 
@@ -172,7 +196,7 @@ export const toolUseLoop = async <O>(
     if (!turnResult.ok) {
       // The provider's error is for the in-flight turn — its own `usage` (if
       // any) covers that turn, and we add the prior-turn totals on top.
-      return err(withAccumulatedUsage(turnResult.error, totalTokensIn, totalTokensOut));
+      return err(withAccumulatedUsage(turnResult.error, totalTokensIn, totalTokensOut, corr));
     }
 
     const t = turnResult.value;
@@ -193,6 +217,7 @@ export const toolUseLoop = async <O>(
             },
             totalTokensIn,
             totalTokensOut,
+            corr,
           ),
         );
       }
@@ -216,6 +241,7 @@ export const toolUseLoop = async <O>(
       },
       totalTokensIn,
       totalTokensOut,
+      corr,
     ),
   );
 };

@@ -7,9 +7,11 @@
  * unknown scopes are rejected once, at the edge) and hand the node a handle
  * that exposes ONLY the named operation — never a raw downstream client and
  * never a token/key field. This module owns both halves PURELY: the parser
- * (`parseScope`) and the narrowed-handle TYPES. The concrete Graph/Dynamics
- * implementations are a later wave (T10) — here the handles are interfaces with
- * operation methods and structurally no `client`/`token`/`apiKey` slot.
+ * (`parseScope`) and the narrowed-handle TYPES. The concrete implementations
+ * live in `adapters/graph-capability.ts` (`buildGraphHandle`, wired by the
+ * Keycloak broker; the Dynamics path is unwired — see its KNOWN LIMITATION) —
+ * here the handles are interfaces with operation methods and structurally no
+ * `client`/`token`/`apiKey` slot.
  *
  * @satisfies US4 — a node declaring `requires:["msgraph:mail.send"]` receives a
  *   narrowed handle; the functional core can NEVER reach a raw downstream
@@ -58,8 +60,9 @@ export type DownstreamScope =
 // Each handle interface carries ONLY operation methods. There is deliberately
 // NO `client`, `token`, or `apiKey` member: a node holding one of these handles
 // has no field to reach a raw vendor client or credential through. The concrete
-// implementations (T10) supply the method bodies; they may close over a client
-// privately, but the TYPE the node sees exposes only the operations.
+// implementations (`adapters/graph-capability.ts`) supply the method bodies;
+// they close over the app-only token privately, but the TYPE the node sees
+// exposes only the operations.
 // ───────────────────────────────────────────────────────────────────────────
 
 /** Handle for `msgraph:mail.send` — exposes only `sendMail`, nothing else. */
@@ -84,8 +87,27 @@ export interface DynamicsReadHandle {
  */
 export type OperationNarrowedHandle = MailSendHandle | SitesReadHandle | DynamicsReadHandle;
 
-// --- Operation payload placeholders (shapes firmed up when T10 wires impls) ---
-export type MailMessage = { readonly to: string; readonly subject: string; readonly body: string };
+// --- Operation payloads ---
+/**
+ * A mail to send through the `msgraph:mail.send` handle.
+ *
+ * `from` is the SENDER MAILBOX (an id or UPN, e.g. `agent@contoso.com`) the
+ * message is sent AS — it is REQUIRED and load-bearing (review C2): the handle is
+ * built over an APP-ONLY (client-credentials / WIF) token, and Microsoft Graph
+ * rejects `/me/sendMail` unconditionally for application-permission tokens
+ * ("/me request is only valid with delegated authentication flow"). An app-only
+ * send MUST target `/users/{mailbox}/sendMail`, so the mailbox cannot be implicit
+ * — modelling it as a required field makes "send with no sender mailbox"
+ * unrepresentable rather than a guaranteed runtime Graph rejection. Graph still
+ * gates which mailboxes the agent's app registration may send as
+ * (ApplicationAccessPolicy), so naming a mailbox here is not itself authority.
+ */
+export type MailMessage = {
+  readonly from: string;
+  readonly to: string;
+  readonly subject: string;
+  readonly body: string;
+};
 export type MailSendReceipt = { readonly messageId: string };
 export type SiteContent = { readonly siteId: string; readonly title: string };
 export type DynamicsQuery = { readonly entity: string; readonly filter?: string };
@@ -93,9 +115,10 @@ export type DynamicsResult = { readonly rows: readonly Readonly<Record<string, u
 
 /**
  * Type-level map from a parsed scope to its narrowed-handle type. Lets the
- * (later) broker say "a `msgraph:mail.send` scope yields a `MailSendHandle`"
- * in the types, so node code that requested mail.send is handed exactly the
- * sendMail-only handle. Implemented as a conditional type over the scope ADT.
+ * broker side (`buildGraphHandle` in `adapters/graph-capability.ts`) say "a
+ * `msgraph:mail.send` scope yields a `MailSendHandle`" in the types, so node
+ * code that requested mail.send is handed exactly the sendMail-only handle.
+ * Implemented as a conditional type over the scope ADT.
  */
 export type HandleForScope<S extends DownstreamScope> =
   S extends { readonly provider: "msgraph"; readonly operation: "mail.send" } ? MailSendHandle :
@@ -147,9 +170,11 @@ export const parseScope = (name: string): Result<DownstreamScope, FrameworkError
 
 /**
  * The narrowed-handle KIND a parsed scope resolves to, as a stable string tag.
- * Pure mapping used by the (later) broker to select which concrete handle to
- * build; exposed here so the scope→handle correspondence is testable without
- * any concrete implementation. Exhaustive over the scope ADT.
+ * Pure mapping naming which concrete handle a scope yields — the same
+ * scope→handle selection `buildGraphHandle` (`adapters/graph-capability.ts`)
+ * performs when the broker builds the real handle; exposed here so the
+ * correspondence is testable without any concrete implementation. Exhaustive
+ * over the scope ADT.
  */
 export type HandleKind = "mail.send" | "sites.read" | "dynamics.read";
 

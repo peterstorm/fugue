@@ -2,14 +2,17 @@
 
 ## Overview
 
-Each Fugue Host instance serves one team. Authentication uses bearer tokens with two tiers:
+Each Fugue Host instance serves one team. Authentication uses bearer tokens with three tiers:
 
 | Tier | Source | Purpose |
 |------|--------|---------|
 | **Admin** | `ADMIN_TOKEN` env var | Platform ops: team provisioning, monitoring, full access |
+| **User (OIDC)** | `fugue-platform` realm JWT (`REALM_JWT_ISSUER` / `REALM_JWT_AUDIENCE`) | Human-initiated runs: the verified user `sub` is threaded into the run so the capability broker can mint downstream authority per hop *as the user* (ADR-0058) |
 | **Team** | Generated via `POST /admin/teams` | Application credential: what services use to call DAGs |
 
 This separation ensures applications never hold the admin key. A leaked team token can be revoked without restarting the host.
+
+The user tier is **verifier-gated and fail-closed**: the JWT path is only entered when a JWKS signature verifier is injected alongside the `iss`/`aud` policy. The verifier is deliberately unwired today (pending the JWKS wave), so a JWT-shaped token currently 401s — it never degrades to a weaker identity. See ADR-0058 for the full design.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -20,15 +23,22 @@ This separation ensures applications never hold the admin key. A leaked team tok
 │       │                                                                     │
 │       ▼                                                                     │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Auth Middleware                                                       │   │
+│  │ Auth Middleware  (order admin → JWT → team is load-bearing)          │   │
 │  │                                                                       │   │
 │  │  1. Is it ADMIN_TOKEN?  (constant-time comparison)                   │   │
 │  │     → identity = admin  → full access                                │   │
 │  │                                                                       │   │
-│  │  2. SHA-256(token) → Redis lookup                                    │   │
+│  │  2. JWT-shaped (a.b.c, not fug_) AND verifier configured?            │   │
+│  │     → verify signature (injected JWKS verifier)                      │   │
+│  │     → validate claims (iss = realm, aud = fugue-host, exp)           │   │
+│  │     → identity = { user, sub, azp }                                  │   │
+│  │     FAIL CLOSED: any failure → 401/503, never falls through          │   │
+│  │     (verifier unwired today → JWT-shaped tokens 401)                 │   │
+│  │                                                                       │   │
+│  │  3. SHA-256(token) → Redis lookup                                    │   │
 │  │     → identity = { team, label }  → team-scoped access              │   │
 │  │                                                                       │   │
-│  │  3. Not found → 401 Unauthorized                                     │   │
+│  │  4. Not found → 401 Unauthorized                                     │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │       │                                                                     │
 │       ▼                                                                     │
@@ -36,6 +46,8 @@ This separation ensures applications never hold the admin key. A leaked team tok
 │  │ Authorization check (for DAG endpoints)                              │   │
 │  │  identity.team === dag.team → allowed                                │   │
 │  │  identity.kind === "admin" → always allowed                          │   │
+│  │  identity.kind === "user" → run gate cleared (not team-scoped;       │   │
+│  │    downstream authorization is per-hop in the capability broker)     │   │
 │  │  mismatch → 403 Forbidden                                           │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -261,7 +273,7 @@ Since you deploy one host per team, all DAGs in the repo typically belong to the
 team: cx
 ```
 
-Authorization check: `identity.team === dag.team` → allowed. Admin always allowed.
+Authorization check: `identity.team === dag.team` → allowed. Admin always allowed. A `user` identity clears the run gate regardless of team — a user is not bound to a single host-side team; their real authorization is enforced per-hop by the capability broker's realm policy (ADR-0058).
 
 ---
 

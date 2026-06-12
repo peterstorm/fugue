@@ -1,8 +1,9 @@
 /**
  * Token Cache — pure, time-injected freshness logic for minted downstream
- * tokens. The functional core of the (later) Keycloak-backed broker (the token
- * cache itself is mandated by FR-W2-007; Keycloak-backed minting is wired in a
- * later wave): this
+ * tokens. The functional core of the Keycloak-backed broker
+ * (`adapters/keycloak-broker.ts`, which holds two cache cells over this module
+ * and is selected at boot when `REALM_JWT_ISSUER` is set; the cache itself is
+ * mandated by FR-W2-007): this
  * module decides WHETHER a cached token may be reused and HOW its lookup key is
  * built, with zero I/O and zero ambient clock — `now` is always injected so the
  * decision is a deterministic function of its inputs (Constraint: functional
@@ -106,10 +107,28 @@ export const lookup = (cache: TokenCache, key: string, now: number): CachedToken
 };
 
 /**
- * Return a new cache with `key` bound to `entry`. Pure — the input cache is
- * unchanged (immutability). Overwrites any existing entry for the key, which is
- * exactly the post-mint refresh path.
+ * Return a new cache with `key` bound to `entry`, SWEEPING every entry already
+ * stale at `now`. Pure — the input cache is unchanged (immutability).
+ * Overwrites any existing entry for the key, which is exactly the post-mint
+ * refresh path.
+ *
+ * The sweep bounds the cache: without it, every distinct (identity, audience,
+ * scope) triple ever minted is retained forever — unbounded growth AND
+ * retention of expired bearer strings long past their useful (and safe)
+ * lifetime. A store is the only mutation point, so sweeping here keeps the
+ * cache's live size proportional to the FRESH triples, with `now` injected
+ * like everywhere else in this module (no ambient clock).
  */
-export const store = (cache: TokenCache, key: string, entry: CachedToken): TokenCache => ({
-  entries: { ...cache.entries, [key]: entry },
-});
+export const store = (
+  cache: TokenCache,
+  key: string,
+  entry: CachedToken,
+  now: number,
+): TokenCache => {
+  const entries: Record<string, CachedToken> = {};
+  for (const [k, e] of Object.entries(cache.entries)) {
+    if (isFresh(e, now)) entries[k] = e;
+  }
+  entries[key] = entry;
+  return { entries };
+};

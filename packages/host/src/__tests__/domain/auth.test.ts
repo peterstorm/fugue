@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { Hono } from "hono";
 import {
   canAccessDag,
   formatToken,
@@ -18,6 +19,8 @@ import {
   TOKEN_MIN_LENGTH,
 } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
+import { createListTeamsHandler } from "../../http/handlers/admin/teams.js";
+import { createInMemoryTokenStore } from "../../adapters/token-store.js";
 
 describe("canAccessDag", () => {
   it("admin can access any team's DAGs", () => {
@@ -41,6 +44,46 @@ describe("canAccessDag", () => {
     const identity: AuthIdentity = { kind: "team", team: "team-a", label: "Team A" };
     expect(canAccessDag(identity, "Team-A")).toBe(false);
     expect(canAccessDag(identity, "TEAM-A")).toBe(false);
+  });
+
+  // PINNING TEST for the deliberate user policy (review C7.1). The "any
+  // authenticated user may run any team's DAG, gated per-hop downstream by the
+  // broker" decision is intentional but security-relevant — pin it so a refactor
+  // can't silently widen OR narrow it with a green suite.
+  it("a user identity may run ANY team's DAG (inbound gate only; downstream authz is per-hop)", () => {
+    const user: AuthIdentity = { kind: "user", sub: "user-123", azp: "fugue-frontend" };
+    expect(canAccessDag(user, "team-a")).toBe(true);
+    expect(canAccessDag(user, "team-b")).toBe(true);
+    expect(canAccessDag(user, "any-team")).toBe(true);
+  });
+
+  it("a user identity is NOT admin-equivalent — the real admin guard rejects it with 403", async () => {
+    // The user branch returning true for run-access must not be read as admin
+    // power: `canAccessDag` is only the RUN gate. Pin the distinction by driving
+    // the ACTUAL handler-level admin guard (`requireAdmin` inside the admin team
+    // handlers — the same `kind === "admin"` predicate the router's /admin/*
+    // middleware applies as defense-in-depth) with a user identity.
+    const user: AuthIdentity = { kind: "user", sub: "u", azp: "fugue-frontend" };
+    expect(canAccessDag(user, "team-a")).toBe(true); // run gate clears…
+
+    const app = new Hono<{ Variables: { authIdentity: AuthIdentity } }>();
+    app.use("*", async (c, next) => {
+      c.set("authIdentity", user);
+      await next();
+    });
+    app.get(
+      "/admin/teams",
+      createListTeamsHandler({
+        tokenStore: createInMemoryTokenStore([]),
+        clock: () => 0,
+        generateRandomBytes: () => new Uint8Array(32),
+      }),
+    );
+
+    const res = await app.request("/admin/teams");
+    expect(res.status).toBe(403); // …but admin scope is refused
+    const body = await res.json();
+    expect(body.error).toBe("forbidden");
   });
 });
 

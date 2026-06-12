@@ -86,14 +86,16 @@ describe("graph-capability — SC-007: only the operation is reachable, no raw c
 // ── FR-W4-005: the app-only token is presented as the bearer at egress ────────
 
 describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)", () => {
-  it("sendMail POSTs to /me/sendMail with the app-only token as Authorization bearer", async () => {
+  it("sendMail POSTs to /users/{from}/sendMail (app-only — NOT /me) with the WIF token as Authorization bearer", async () => {
     const { http, requests } = recordingHttp({ status: 202, json: {} });
     const handle = buildMailSendHandle("app-only-xyz", http);
-    const r = await handle.sendMail({ to: "a@b.c", subject: "hi", body: "body" });
+    const r = await handle.sendMail({ from: "agent@contoso.com", to: "a@b.c", subject: "hi", body: "body" });
     expect(r.ok).toBe(true);
     expect(requests.length).toBe(1);
     expect(requests[0]?.method).toBe("POST");
-    expect(requests[0]?.url).toContain("/me/sendMail");
+    // App-only tokens cannot use /me; the sender mailbox is in the path (C2).
+    expect(requests[0]?.url).toContain("/users/agent%40contoso.com/sendMail");
+    expect(requests[0]?.url).not.toContain("/me/sendMail");
     expect(requests[0]?.bearer).toBe("app-only-xyz"); // the WIF token, never a stored secret
   });
 
@@ -126,12 +128,12 @@ describe("graph-capability — error mapping (FR-X-002)", () => {
   it.each([400, 401, 403, 404])("a Graph %p → downstream-denied with the resource + Graph reason", async (status) => {
     const { http } = recordingHttp({ status, json: { error: { code: "denied", message: "insufficient privileges" } } });
     const handle = buildMailSendHandle("tok", http);
-    const r = await handle.sendMail({ to: "a@b.c", subject: "s", body: "b" });
+    const r = await handle.sendMail({ from: "agent@contoso.com", to: "a@b.c", subject: "s", body: "b" });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected denial");
     expect(r.error.kind).toBe("downstream-denied");
     if (r.error.kind === "downstream-denied") {
-      expect(r.error.resource).toContain("/me/sendMail");
+      expect(r.error.resource).toContain("/users/agent%40contoso.com/sendMail");
       expect(r.error.reason).toBe("insufficient privileges");
     }
   });
@@ -158,6 +160,60 @@ describe("graph-capability — error mapping (FR-X-002)", () => {
       expect(r.error.operation).toBe("graph");
       expect(r.error.message).toContain("ECONNRESET");
     }
+  });
+});
+
+// ── Malformed 2xx bodies map to infra-unreachable (A4 precedent / A12 / A8) ───
+
+describe("graph-capability — malformed 2xx bodies are infra-unreachable, never a silent success", () => {
+  it("readSite 2xx with no displayName/name → infra-unreachable, not a blank site", async () => {
+    const { http } = recordingHttp({ status: 200, json: { unexpected: "shape" } });
+    const handle = buildSitesReadHandle("tok", http);
+    const r = await handle.readSite("site-42");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.operation).toBe("graph");
+      expect(r.error.message).toContain("site-42");
+    }
+  });
+
+  it("dynamics 2xx WITHOUT a 'value' array → infra-unreachable, not zero rows", async () => {
+    const { http } = recordingHttp({ status: 200, json: { notValue: [] } });
+    const handle = buildDynamicsReadHandle("tok", http);
+    const r = await handle.read({ entity: "accounts" });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.message).toContain("accounts");
+    }
+  });
+
+  it("dynamics 2xx with a NON-OBJECT row in 'value' → infra-unreachable, not a silently smaller result (A8)", async () => {
+    const { http } = recordingHttp({
+      status: 200,
+      json: { value: [{ id: 1 }, "not-a-row", null, { id: 2 }] },
+    });
+    const handle = buildDynamicsReadHandle("tok", http);
+    const r = await handle.read({ entity: "accounts" });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected err");
+    expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.operation).toBe("graph");
+      expect(r.error.message).toContain("2 non-object row(s)");
+    }
+  });
+
+  it("dynamics 2xx with an EMPTY 'value' array stays a legitimate zero-row success", async () => {
+    const { http } = recordingHttp({ status: 200, json: { value: [] } });
+    const handle = buildDynamicsReadHandle("tok", http);
+    const r = await handle.read({ entity: "accounts" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.value.rows).toEqual([]);
   });
 });
 

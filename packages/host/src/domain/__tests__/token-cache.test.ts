@@ -73,7 +73,7 @@ describe("lookup — miss is NOT an error (FR-X-003)", () => {
 
   it("an expired-but-present key also reads as undefined (treated as a miss)", () => {
     const key = cacheKey("a", "b", "c");
-    const cache = store(emptyCache, key, cacheToken("tok", 0, 100));
+    const cache = store(emptyCache, key, cacheToken("tok", 0, 100), 0);
     // now == expiresAt → stale → miss
     expect(lookup(cache, key, 100)).toBeUndefined();
     // well past expiry → miss
@@ -83,7 +83,7 @@ describe("lookup — miss is NOT an error (FR-X-003)", () => {
   it("a fresh present key returns the cached token", () => {
     const key = cacheKey("a", "b", "c");
     const entry = cacheToken("tok-xyz", 0, 100);
-    const cache = store(emptyCache, key, entry);
+    const cache = store(emptyCache, key, entry, 0);
     expect(lookup(cache, key, 50)).toEqual(entry);
   });
 });
@@ -91,16 +91,54 @@ describe("lookup — miss is NOT an error (FR-X-003)", () => {
 describe("store — immutable, pure", () => {
   it("does not mutate the input cache", () => {
     const key = cacheKey("a", "b", "c");
-    const next = store(emptyCache, key, cacheToken("t", 0, 10));
+    const next = store(emptyCache, key, cacheToken("t", 0, 10), 0);
     expect(emptyCache.entries[key]).toBeUndefined();
     expect(next.entries[key]).toBeDefined();
   });
 
   it("overwrites an existing key (post-mint refresh path)", () => {
     const key = cacheKey("a", "b", "c");
-    const c1 = store(emptyCache, key, cacheToken("old", 0, 100));
-    const c2 = store(c1, key, cacheToken("new", 200, 100));
+    const c1 = store(emptyCache, key, cacheToken("old", 0, 100), 0);
+    const c2 = store(c1, key, cacheToken("new", 200, 100), 200);
     expect(lookup(c2, key, 250)?.token).toBe("new");
+  });
+});
+
+describe("store — sweeps stale entries at store time (A2: bounded growth, no expired bearers retained)", () => {
+  it("drops entries already stale at store time and keeps fresh ones", () => {
+    const staleKey = cacheKey("a", "b", "c");
+    const freshKey = cacheKey("d", "e", "f");
+    const newKey = cacheKey("g", "h", "i");
+    let cache = store(emptyCache, staleKey, cacheToken("stale-bearer", 0, 100), 0); // expires at 100
+    cache = store(cache, freshKey, cacheToken("fresh-bearer", 0, 10_000), 0); // expires at 10_000
+
+    // Store a new entry at t=100: `staleKey` is stale (half-open boundary) and
+    // must be SWEPT — the expired bearer string is gone, not just unreadable.
+    const swept = store(cache, newKey, cacheToken("new-bearer", 100, 100), 100);
+
+    expect(swept.entries[staleKey]).toBeUndefined();
+    expect(swept.entries[freshKey]?.token).toBe("fresh-bearer");
+    expect(swept.entries[newKey]?.token).toBe("new-bearer");
+    expect(Object.keys(swept.entries).length).toBe(2);
+  });
+
+  it("the sweep is pure — the input cache keeps its (stale) entries", () => {
+    const staleKey = cacheKey("a", "b", "c");
+    const cache = store(emptyCache, staleKey, cacheToken("stale", 0, 100), 0);
+    store(cache, cacheKey("x", "y", "z"), cacheToken("t", 500, 100), 500);
+    expect(cache.entries[staleKey]).toBeDefined();
+  });
+
+  it("repeated stores of distinct expired triples never grow the cache past the fresh set", () => {
+    // The unbounded-growth shape: many distinct triples, each expiring before
+    // the next store. Without the sweep the cache would hold all N entries.
+    let cache = emptyCache;
+    for (let i = 0; i < 50; i++) {
+      const t = i * 1_000;
+      cache = store(cache, cacheKey(`id-${i}`, "aud", "scope"), cacheToken(`tok-${i}`, t, 500), t);
+    }
+    // Every prior entry was stale at each subsequent store → only the last survives.
+    expect(Object.keys(cache.entries)).toEqual([cacheKey("id-49", "aud", "scope")]);
   });
 });
 
@@ -129,7 +167,7 @@ describe("SC-008 property: a key is reused (not re-minted) within its TTL window
         (identity, audience, scope, token, storedAt, ttl, o1, o2) => {
           const key = cacheKey(identity, audience, scope);
           const entry = cacheToken(token, storedAt, ttl);
-          const cache = store(emptyCache, key, entry);
+          const cache = store(emptyCache, key, entry, storedAt);
 
           // Two arbitrary instants STRICTLY inside the freshness window.
           const t1 = storedAt + (o1 % ttl);
@@ -159,7 +197,7 @@ describe("SC-008 property: a key is reused (not re-minted) within its TTL window
         fc.nat({ max: 1_000_000 }), // extra time at/after the boundary
         (identity, audience, scope, token, storedAt, ttl, extra) => {
           const key = cacheKey(identity, audience, scope);
-          const cache = store(emptyCache, key, cacheToken(token, storedAt, ttl));
+          const cache = store(emptyCache, key, cacheToken(token, storedAt, ttl), storedAt);
           // now = expiresAt + extra  ⇒  now >= expiresAt ⇒ stale ⇒ miss.
           const now = storedAt + ttl + extra;
           expect(lookup(cache, key, now)).toBeUndefined();

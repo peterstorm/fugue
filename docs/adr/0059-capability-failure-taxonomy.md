@@ -94,8 +94,8 @@ The variants are defined in
   not reach the IdP / token endpoint — a **transient** infrastructure failure
   (Keycloak down, DNS/socket error, 5xx or 429 from the mint endpoint), *not* an
   authorization decision. Callers may retry. `operation` names the failing hop
-  (`"mint"`, `"token-exchange"`, `"graph"`, `"entra-wif"`); `message` carries the
-  diagnostic (status line, socket error).
+  (`"client-credentials"`, `"token-exchange"`, `"entra-wif"`, `"graph"`);
+  `message` carries the diagnostic (status line, socket error).
 
 - **`policy-refusal`** `{ scope, agentClientId? }` (FR-X-001). A required scope is
   not assigned to the agent's client in the IdP policy — an **authorization**
@@ -125,12 +125,12 @@ mapper. The invariant is: **transport rejection or an unhandled status →
 429/503 throttling → `infra-unreachable` (named as a throttle).**
 
 - **`packages/host/src/adapters/keycloak-broker.ts`** is the ordering authority.
-  The local policy gate runs first (`keycloak-broker.ts:276–278`): an unassigned
-  scope returns `policy-refusal` with **zero egress and without reading any
-  cache** (SC-006 / FR-W3-003). Only an assigned scope proceeds to the app-only
-  cache check, the SA mint (first egress), and the WIF exchange (second egress);
-  mint/exchange failures are surfaced verbatim on the `Result` channel and
-  audited as `mint-failed:<kind>`.
+  The local policy gate in `mintFor` runs first: an unassigned scope returns
+  `policy-refusal` with **zero egress and without reading any cache** (SC-006 /
+  FR-W3-003). Only an assigned scope proceeds to the app-only cache check, the
+  SA mint (first egress), and the WIF exchange (second egress); mint/exchange
+  failures are surfaced verbatim on the `Result` channel and audited as
+  `mint-failed:<kind>`.
 
 - **`packages/host/src/adapters/entra-wif.ts`** maps the WIF token response:
   `400`/`401`/`403` → `downstream-denied` (FIC mismatch / WIF rejection /
@@ -146,11 +146,11 @@ mapper. The invariant is: **transport rejection or an unhandled status →
 ### Invariants
 
 - Every variant is reachable from `match(e)` and is a case in
-  `formatFrameworkError`'s `.exhaustive()` (`errors.ts:262–291`). Adding a kind
+  `formatFrameworkError`'s `.exhaustive()` (`errors.ts`). Adding a kind
   without a case is a compile error.
 - A **token-cache miss is not an error** (FR-X-003): in the broker it is the
-  normal path that triggers a mint/exchange (`keycloak-broker.ts:293–308`), never
-  a `FrameworkError`.
+  normal path that triggers a mint/exchange (the miss/acquire path in
+  `doAcquireAppToken`, `keycloak-broker.ts`), never a `FrameworkError`.
 - `policy-refusal` is raised strictly before any egress; `infra-unreachable` and
   `downstream-denied` only after a real reach attempt.
 - The four variants serialize cleanly through `FrameworkAugmentedError`

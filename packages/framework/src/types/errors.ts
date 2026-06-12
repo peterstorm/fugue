@@ -176,13 +176,18 @@ export type FrameworkError =
        * provider that has already said no, or fail-closed on a blip that a
        * retry would clear.
        *
-       * `operation` names which broker step failed (e.g. `"mint"`,
-       * `"token-exchange"`, `"client-credentials"`) so the audit trail can
-       * pinpoint the failing hop; `message` carries the diagnostic detail
-       * (status line, socket error). (FR-X-001)
+       * `operation` names which broker hop failed, as a closed literal union so
+       * a consumer can branch on it exhaustively and an emitter cannot invent an
+       * untracked value:
+       *   - `client-credentials` — the Keycloak agent-token mint (agent origin),
+       *   - `token-exchange`      — the Keycloak Token Exchange V2 hop (user origin),
+       *   - `entra-wif`           — the Entra Workload-Identity-Federation exchange,
+       *   - `graph`               — the downstream Graph/Dynamics request.
+       * `message` carries the diagnostic detail (status line, socket error).
+       * (FR-X-001)
        */
       readonly kind: "infra-unreachable";
-      readonly operation: string;
+      readonly operation: "client-credentials" | "token-exchange" | "entra-wif" | "graph";
       readonly message: string;
     }
   | {
