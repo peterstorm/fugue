@@ -59,5 +59,6 @@ export const defineLinearDag = (config: LinearDagConfig): DagDef => {
     evalJudges: config.evalJudges,
     defaultRetryLimit: config.defaultRetryLimit,
     retryLimits: config.retryLimits,
+    provenance: "linear",
   });
 };

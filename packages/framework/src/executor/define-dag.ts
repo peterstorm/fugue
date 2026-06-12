@@ -77,6 +77,8 @@ export const defineDagFromArray = (input: {
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly retryLimits?: Readonly<Record<string, number>>;
   readonly defaultRetryLimit?: number;
+  /** Stamped by shape helpers (defineLinearDag, …); absent for raw array use. */
+  readonly provenance?: DagDef["provenance"];
 }): DagDef => {
   const nodesRecord: NodesRecord = Object.fromEntries(
     input.nodes.map((n) => [n.id, n]),
@@ -89,7 +91,7 @@ export const defineDagFromArray = (input: {
     evalJudges: input.evalJudges,
     retryLimits: input.retryLimits,
     defaultRetryLimit: input.defaultRetryLimit,
-  });
+  }, input.provenance);
   if (!result.ok) {
     throw new DagDefinitionError(input.id, result.error);
   }

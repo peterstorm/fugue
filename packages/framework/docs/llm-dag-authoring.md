@@ -915,6 +915,13 @@ Possible `errors[].kind` values:
 | `missing-dag-field` | Default export exists but doesn't have a `.dag` field. |
 | `dag-definition-error` | `defineDag()` rejected the DAG. The typed `FrameworkError` is on `errors[].detail`. |
 | `describe-failed` | `defineDag` accepted the DAG but the describe step failed to assemble — usually a framework invariant bug. The `FrameworkError` is on `errors[].detail`. |
+| `fan-in-key-mismatch` | A fan-in node (≥2 incoming edges) has a `z.object` input schema whose keys don't equal the set of incoming node ids. Carries `nodeId`, `missingKeys`, `extraKeys`. This compiles but fails at runtime — the single most likely wiring mistake. |
+
+**Advisories.** Lint may also attach a non-fatal `advisories` array (it never
+flips `ok` to `false`). Today the only kind is `shape-helper-hint` — emitted
+when a manual `defineDag` is edge-for-edge isomorphic to a shape helper
+(`defineLinearDag`/`defineFanOut`/`defineDiamond`), naming the helper to adopt.
+A DAG already built with a helper never triggers it.
 
 ### `fugue describe <path>`
 

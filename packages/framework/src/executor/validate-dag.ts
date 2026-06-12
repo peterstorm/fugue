@@ -66,6 +66,7 @@ const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
  */
 export const validateDagShape = (
   input: DagDefInput,
+  provenance?: DagDef["provenance"],
 ): Result<DagDef, FrameworkError> => {
   const entries = Object.entries(input.nodes) as [
     string,
@@ -329,6 +330,7 @@ export const validateDagShape = (
     ...(input.defaultRetryLimit !== undefined
       ? { defaultRetryLimit: input.defaultRetryLimit }
       : {}),
+    ...(provenance !== undefined ? { provenance } : {}),
   };
   return ok(brandAsDagDef(unbranded));
 };

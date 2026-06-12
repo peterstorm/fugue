@@ -20,7 +20,7 @@ const exampleFiles = readdirSync(dagsDir)
 describe("golden DAG examples", () => {
   it("ships at least the documented set of examples", () => {
     // Guards against an empty glob silently passing the suite.
-    expect(exampleFiles.length).toBeGreaterThanOrEqual(7);
+    expect(exampleFiles.length).toBeGreaterThanOrEqual(9);
   });
 
   for (const file of exampleFiles) {

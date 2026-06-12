@@ -168,6 +168,14 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
 
 declare const __dagValidated: unique symbol;
 
+/**
+ * Which constructor produced a `DagDef`. Shape helpers stamp their own name;
+ * raw `defineDag` / `defineDagFromArray` leave it absent (treated as "manual").
+ * Used by `fugue lint`'s shape-helper hint to avoid suggesting a helper for a
+ * DAG that already used one.
+ */
+export type DagProvenance = "linear" | "fan-out" | "diamond" | "router";
+
 export interface DagDef {
   readonly id: DagId;
   readonly nodes: readonly NodeDef<unknown, unknown>[];
@@ -176,6 +184,8 @@ export interface DagDef {
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly retryLimits?: Readonly<Record<string, number>>;
   readonly defaultRetryLimit?: number;
+  /** The shape helper that built this DAG, if any. Absent ⇒ raw `defineDag`. */
+  readonly provenance?: DagProvenance;
   /** Brand — present only on values that have passed `validateDagShape`. */
   readonly [__dagValidated]: true;
 }

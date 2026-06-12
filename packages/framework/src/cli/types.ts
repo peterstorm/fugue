@@ -21,12 +21,29 @@ export type { DescribedDag, DescribedNode, DescribedEdge };
  * exactly one error fires, so consumers don't branch on cardinality.
  */
 export type LintResult =
-  | { readonly ok: true; readonly path: string }
+  | {
+      readonly ok: true;
+      readonly path: string;
+      /** Non-fatal hints (e.g. a manual DAG that matches a shape helper). */
+      readonly advisories?: readonly LintAdvisory[];
+    }
   | {
       readonly ok: false;
       readonly path: string;
       readonly errors: readonly LintError[];
+      readonly advisories?: readonly LintAdvisory[];
     };
+
+/**
+ * Non-fatal lint hint. Advisories never set `ok: false` — they nudge the author
+ * toward a better shape without blocking. Stable JSON shape for LLM tooling.
+ */
+export type LintAdvisory = {
+  readonly kind: "shape-helper-hint";
+  readonly message: string;
+  /** The constructor the manual DAG is isomorphic to. */
+  readonly helper: "defineLinearDag" | "defineFanOut" | "defineDiamond" | "defineRouter";
+};
 
 /**
  * Discriminated lint error. `kind` is a stable string that machine consumers
@@ -63,6 +80,22 @@ export type LintError =
       readonly kind: "describe-failed";
       readonly message: string;
       readonly detail: FrameworkError;
+    }
+  | {
+      /**
+       * A fan-in node (≥2 incoming edges, or a conditional/default source) has
+       * a `z.object` input schema whose keys don't equal the set of incoming
+       * node ids. The runtime builds that node's input as an object keyed by
+       * source id, so a missing or typo'd key fails at runtime — this catches
+       * it at lint time, the single most likely DAG wiring mistake.
+       */
+      readonly kind: "fan-in-key-mismatch";
+      readonly nodeId: string;
+      readonly message: string;
+      /** Incoming source ids with no matching schema key. */
+      readonly missingKeys: readonly string[];
+      /** Schema keys with no matching incoming source. */
+      readonly extraKeys: readonly string[];
     };
 
 /**

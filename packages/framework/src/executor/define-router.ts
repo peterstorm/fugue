@@ -163,5 +163,6 @@ export const defineRouter = (config: RouterDagConfig): DagDef => {
     evalJudges: config.evalJudges,
     defaultRetryLimit: config.defaultRetryLimit,
     retryLimits: config.retryLimits,
+    provenance: "router",
   });
 };

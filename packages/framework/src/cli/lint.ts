@@ -11,7 +11,9 @@
 import { resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DagDefinitionError } from "../executor/define-dag.js";
-import type { LintError, LintResult } from "./types.js";
+import type { DagDef } from "../types/dag.js";
+import { analyzeDag } from "./lint-checks.js";
+import type { LintAdvisory, LintError, LintResult } from "./types.js";
 
 const toAbsolute = (path: string): string =>
   isAbsolute(path) ? path : resolve(process.cwd(), path);
@@ -124,5 +126,32 @@ export const runLint = async (path: string): Promise<LintResult> => {
   if (!imported.ok) {
     return { ok: false, path: imported.path, errors: imported.errors };
   }
-  return { ok: true, path: imported.path };
+
+  // `.dag` is present and object-shaped (importDagFile guaranteed it). Run the
+  // structural checks the topology validator can't (schema-aware fan-in keys,
+  // shape-helper advisories). Defensive: a bug in the analyzer must not break
+  // lint — fall back to "no findings" rather than throwing.
+  let errors: readonly LintError[] = [];
+  let advisories: readonly LintAdvisory[] = [];
+  try {
+    const analysis = analyzeDag(imported.defaultExport.dag as DagDef);
+    errors = analysis.errors;
+    advisories = analysis.advisories;
+  } catch {
+    // analyzer failure — surface nothing rather than fail the lint
+  }
+
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      path: imported.path,
+      errors,
+      ...(advisories.length > 0 ? { advisories } : {}),
+    };
+  }
+  return {
+    ok: true,
+    path: imported.path,
+    ...(advisories.length > 0 ? { advisories } : {}),
+  };
 };

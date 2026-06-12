@@ -42,12 +42,15 @@ export interface DiamondDagConfig {
  * `join.inputSchema` to accept `{ [branchId]: branchOutput }`.
  */
 export const defineDiamond = (config: DiamondDagConfig): DagDef =>
-  defineFanOut({
-    id: config.id,
-    source: config.source,
-    branches: config.branches,
-    join: config.join,
-    evalJudges: config.evalJudges,
-    defaultRetryLimit: config.defaultRetryLimit,
-    retryLimits: config.retryLimits,
-  });
+  defineFanOut(
+    {
+      id: config.id,
+      source: config.source,
+      branches: config.branches,
+      join: config.join,
+      evalJudges: config.evalJudges,
+      defaultRetryLimit: config.defaultRetryLimit,
+      retryLimits: config.retryLimits,
+    },
+    "diamond",
+  );

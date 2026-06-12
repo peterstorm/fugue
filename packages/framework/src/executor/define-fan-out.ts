@@ -12,7 +12,7 @@
 //
 // Sugar over `defineDagFromArray`. Same module-load validation, same brand.
 
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, DagProvenance } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { defineDagFromArray } from "./define-dag.js";
@@ -61,7 +61,11 @@ export interface FanOutDagConfig {
  * id: `{ "fetch-crm": ..., "fetch-billing": ..., "fetch-support": ... }`.
  * Design `join.inputSchema` accordingly.
  */
-export const defineFanOut = (config: FanOutDagConfig): DagDef => {
+export const defineFanOut = (
+  config: FanOutDagConfig,
+  // Internal: defineDiamond delegates here but stamps its own provenance.
+  provenance: DagProvenance = "fan-out",
+): DagDef => {
   const sourceId = config.source.id as string;
   const joinNode = config.join;
 
@@ -95,5 +99,6 @@ export const defineFanOut = (config: FanOutDagConfig): DagDef => {
     evalJudges: config.evalJudges,
     defaultRetryLimit: config.defaultRetryLimit,
     retryLimits: config.retryLimits,
+    provenance,
   });
 };
