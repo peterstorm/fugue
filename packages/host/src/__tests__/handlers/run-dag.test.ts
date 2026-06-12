@@ -427,7 +427,7 @@ describe("run-dag handler", () => {
 
   it("maps an infra-unreachable to 503", async () => {
     const deps = defaultDeps({
-      executeDag: failWith({ kind: "infra-unreachable", operation: "entra-wif", message: "down" }),
+      executeDag: failWith({ kind: "infra-unreachable", operation: "federation", hop: "entra-wif", message: "down" }),
     });
     const res = await post(createTestApp(deps, readyState), "test-dag", { query: "hi" });
     expect(res.status).toBe(503);

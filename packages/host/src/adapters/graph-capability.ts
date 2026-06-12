@@ -117,11 +117,12 @@ const mapGraphError = (
   // Throttling (429) / service-unavailable (503): a retriable reach failure named
   // so operators read the throttle, not a generic "unreachable". Retry unchanged.
   if (res.status === 429 || res.status === 503) {
-    return { kind: "infra-unreachable", operation: "graph", message: `Graph throttled (HTTP ${res.status})` };
+    return { kind: "infra-unreachable", operation: "downstream", hop: "graph", message: `Graph throttled (HTTP ${res.status})` };
   }
   return {
     kind: "infra-unreachable",
-    operation: "graph",
+    operation: "downstream",
+    hop: "graph",
     message: `Graph unreachable or unexpected status (HTTP ${res.status})`,
   };
 };
@@ -142,7 +143,8 @@ const runGraph = async (
   } catch (e) {
     return err({
       kind: "infra-unreachable",
-      operation: "graph",
+      operation: "downstream",
+      hop: "graph",
       message: `Graph transport failure: ${e instanceof Error ? e.message : String(e)}`,
     });
   }
@@ -215,7 +217,8 @@ export const buildSitesReadHandle = (token: string, http: GraphHttp): SitesReadH
     if (title === undefined) {
       return err({
         kind: "infra-unreachable",
-        operation: "graph",
+        operation: "downstream",
+        hop: "graph",
         message: `Graph returned 2xx for site '${siteId}' with no displayName/name`,
       });
     }
@@ -245,7 +248,8 @@ export const buildDynamicsReadHandle = (token: string, http: GraphHttp): Dynamic
     if (!Array.isArray(value)) {
       return err({
         kind: "infra-unreachable",
-        operation: "graph",
+        operation: "downstream",
+        hop: "graph",
         message: `Dynamics returned 2xx for entity '${query.entity}' with no 'value' array`,
       });
     }
@@ -257,7 +261,8 @@ export const buildDynamicsReadHandle = (token: string, http: GraphHttp): Dynamic
     if (rows.length !== value.length) {
       return err({
         kind: "infra-unreachable",
-        operation: "graph",
+        operation: "downstream",
+        hop: "graph",
         message: `Dynamics returned 2xx for entity '${query.entity}' with ${value.length - rows.length} non-object row(s) in 'value'`,
       });
     }

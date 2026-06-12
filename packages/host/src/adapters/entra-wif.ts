@@ -237,7 +237,8 @@ export const mapWifResponse = (
     // deliberately NOT attempted here.
     return err({
       kind: "infra-unreachable",
-      operation: "entra-wif",
+      operation: "federation",
+      hop: "entra-wif",
       message: "Entra WIF returned 200 without a usable access_token/expires_in",
     });
   }
@@ -262,7 +263,8 @@ export const mapWifResponse = (
   if (res.status === 429 || res.status === 503) {
     return err({
       kind: "infra-unreachable",
-      operation: "entra-wif",
+      operation: "federation",
+      hop: "entra-wif",
       message: `Entra WIF throttled (HTTP ${res.status})`,
     });
   }
@@ -270,35 +272,46 @@ export const mapWifResponse = (
   // Anything else (other 5xx, surprising status) is a reach failure — retriable.
   return err({
     kind: "infra-unreachable",
-    operation: "entra-wif",
+    operation: "federation",
+    hop: "entra-wif",
     message: `Entra WIF unreachable or unexpected status (HTTP ${res.status})`,
   });
 };
 
 /**
  * Construct the live WIF exchange over an injected HTTP transport + static
- * config. A transport-level rejection (the `post` promise rejecting) is a reach
- * failure → `infra-unreachable`; a settled HTTP response is mapped by
- * `mapWifResponse`. NEVER throws across the boundary.
+ * config. THROWS at construction on a structurally-invalid `tenantId` (a
+ * genuine boot-wiring defect, surfaced at boot — never per-exchange), so the
+ * returned port keeps its contract: a transport-level rejection (the `post`
+ * promise rejecting) is a reach failure → `infra-unreachable`; a settled HTTP
+ * response is mapped by `mapWifResponse`. The `exchange` method itself NEVER
+ * throws across the boundary.
  */
 export const createEntraWifExchange = (
   cfg: EntraWifConfig,
   http: HttpPost,
-): EntraWifExchange => ({
-  exchange: async (req) => {
-    const url = wifTokenEndpoint(cfg);
-    const body = buildWifFormBody(cfg, req);
-    let res: HttpPostResponse;
-    try {
-      res = await http.post(url, body);
-    } catch (e) {
-      // Transport-level failure (DNS/socket) — we never reached an answer.
-      return err({
-        kind: "infra-unreachable",
-        operation: "entra-wif",
-        message: `Entra WIF transport failure: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
-    return mapWifResponse(req.audience, res);
-  },
-});
+): EntraWifExchange => {
+  // Validate ONCE at construction: a deterministic config typo must fail the
+  // boot loudly, not surface per-exchange as a retriable `infra-unreachable`
+  // through the broker's port fence (it would be retried, counted against the
+  // circuit, and reported as a transient outage).
+  const url = wifTokenEndpoint(cfg);
+  return {
+    exchange: async (req) => {
+      const body = buildWifFormBody(cfg, req);
+      let res: HttpPostResponse;
+      try {
+        res = await http.post(url, body);
+      } catch (e) {
+        // Transport-level failure (DNS/socket) — we never reached an answer.
+        return err({
+          kind: "infra-unreachable",
+          operation: "federation",
+          hop: "entra-wif",
+          message: `Entra WIF transport failure: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+      return mapWifResponse(req.audience, res);
+    },
+  };
+};

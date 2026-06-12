@@ -87,8 +87,14 @@ The variants are defined in
 - **`llm-budget-exceeded`** `{ runId, nodeId, cumulative, budget }` (FR-W1-003).
   Emitted by the host's metered LLM decorator when a per-run token budget is
   reached. The check runs *before* the call against the cumulative-so-far
-  counter; an in-flight call may overshoot by at most one call (FR-W1-004), and
-  this error refuses the *next* call once `cumulative` has reached `budget`.
+  counter plus a concurrency reservation (`metered-llm.ts` reserves a learned
+  per-call estimate, the largest single call observed so far, for every
+  admitted-but-unsettled call). Overshoot is bounded accordingly: the very
+  first parallel burst — while the estimate is still 0, before any call has
+  settled — can overshoot by N concurrent calls; thereafter the learned
+  reservation bounds overshoot to ~one call (the FR-W1-004 "at most one call"
+  allowance, generalised for concurrency). The error refuses the *next* call
+  once `cumulative` plus the in-flight reservation has reached `budget`.
 
 - **`infra-unreachable`** `{ operation, message }` (FR-X-001). The broker could
   not reach the IdP / token endpoint — a **transient** infrastructure failure
@@ -101,11 +107,14 @@ The variants are defined in
   not assigned to the agent's client in the IdP policy — an **authorization**
   refusal raised **fail-closed by the broker's local policy gate BEFORE any
   downstream (Entra) call, and before any cache read**. Because it precedes every
-  network call it is never transient and must never be retried. `agentClientId`
-  is optional by design: a parse-time refusal (an unrecognised `requires` name)
-  has no known client yet (field absent); an assignment-time refusal (a known
-  client whose policy lacks the scope) names that client (field present).
-  Absence is an absent field, not an empty string.
+  network call it is never transient and must never be retried. An unrecognised
+  `requires` name is *not* policy-refused: the broker skips it as a static
+  (non-downstream) capability, and if no static capability of that name exists
+  it surfaces at run-start validation as `missing-capability` — so every
+  `policy-refusal` the broker actually emits is an assignment-time refusal (a
+  known client whose policy lacks the scope) and carries `agentClientId`. The
+  field stays optional in the type for brokers without a resolved client id;
+  absence is an absent field, not an empty string.
 
 - **`downstream-denied`** `{ resource, reason }` (FR-X-002). A downstream identity
   decision rejected the invocation: an Entra FIC subject/issuer mismatch, a WIF
@@ -211,3 +220,17 @@ preserved in the type, not the message).
   (fail-closed, no retry), so the extra discriminants add no branching value
   while forcing every consumer to enumerate three equivalent cases. FR-X-002
   permits the collapse; the provider's stated cause is retained in `reason`.
+
+## Amendment — `infra-unreachable.operation` generalised to role categories (2026-06-12)
+
+**Status:** Accepted. Refines the `infra-unreachable` variant above.
+
+`infra-unreachable.operation` is being generalised from vendor hop names
+(`"client-credentials" | "token-exchange" | "entra-wif" | "graph"`) to role
+categories (`"mint" | "exchange" | "federation" | "downstream"`), with a new
+free-form `hop: string` field carrying the host-specific hop name for
+diagnostics. The mapping is: `client-credentials` → `mint`, `token-exchange` →
+`exchange`, `entra-wif` → `federation`, `graph` → `downstream`. This reconciles
+this ADR with ADR-0054's provider-agnostic boundary (FR-W2-004 — no vendor
+literal crosses into the framework): the framework union carries only role
+categories, and vendor hop names travel in the free-form `hop` field.

@@ -195,3 +195,17 @@ speculative generality maintained on faith.
   supply its own broker; the framework ships only the pass-through default. This
   is the deliberate trade for substrate-agnosticism, and the Rule-of-Three note
   records when (and only when) a reusable adapter gets extracted.
+
+## Amendment — residual vendor-literal leak removed (2026-06-12)
+
+**Status:** Accepted. Refines the provider-agnostic-boundary invariant
+(FR-W2-004) above.
+
+One residual vendor-literal leak remained in the framework: the
+`infra-unreachable.operation` union in the framework error taxonomy named
+vendor hops (`"client-credentials" | "token-exchange" | "entra-wif" |
+"graph"`). Per the ADR-0059 amendment of the same date, it has been removed:
+the union is now the role categories
+`"mint" | "exchange" | "federation" | "downstream"`, and vendor hop names
+travel in the free-form `hop: string` field for diagnostics. The framework now
+carries only role categories — no vendor literal crosses the boundary.

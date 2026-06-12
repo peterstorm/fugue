@@ -7,7 +7,18 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fuguejs/framework";
-import type { Result, DagId, RunId, NodeId } from "@fuguejs/framework";
+import type {
+  Result,
+  DagId,
+  RunId,
+  NodeId,
+  LlmClient,
+  LlmRequest,
+  LlmResponse,
+  SendWithToolsRequest,
+  NodeContext,
+  FrameworkError,
+} from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
@@ -346,6 +357,94 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
     // `extractClients([httpHandle]).http === httpHandle.client` — the factory
     // wires that exact reference onto the base NodeContext unchanged.
     expect(ctx.http).toBe(httpHandle.client);
+  });
+});
+
+// ── Metered-LLM wiring (review gap: factory wraps shared.llm + threads budget) ─
+
+describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..006)", () => {
+  /** A fake inner LlmClient reporting fixed usage per call — call-recording, no mocks. */
+  const fakeLlm = (tokensIn: number, tokensOut: number) => {
+    const calls: NodeId[] = [];
+    const llm: LlmClient = {
+      sendStructured: async <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        calls.push(req.nodeId);
+        return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" });
+      },
+      sendWithTools: async <O>(req: SendWithToolsRequest<O>, _ctx: NodeContext): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        calls.push(req.nodeId);
+        return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" });
+      },
+    };
+    return { llm, calls };
+  };
+
+  const sharedWithLlm = (llm: LlmClient): SharedInfra => ({
+    llm,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  const structuredReq = (): LlmRequest<unknown> => ({
+    system: "s",
+    user: "u",
+    model: "m",
+    schema: z.unknown(),
+    nodeId: testNodeId,
+  });
+
+  it("wraps the shared LLM client — ctx.llm is the metered decorator, NOT the shared reference", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const shared = sharedWithLlm(llm);
+
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+
+    // If the factory ever stops wrapping (handing the shared client through
+    // unmetered), this reference check is the loudest possible regression guard.
+    expect(ctx.llm).not.toBe(shared.llm);
+    expect(ctx.llm).not.toBeNull();
+  });
+
+  it("threads dag.config.llmBudgetTokens into the decorator: a tiny budget refuses the SECOND call with llm-budget-exceeded", async () => {
+    const { llm, calls } = fakeLlm(10, 5); // 15 tokens/call
+    const shared = sharedWithLlm(llm);
+    const dag = makeDag({ llmBudgetTokens: 1 }); // budget 1: call 1 is the single overshoot
+
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    const r1 = await ctx.llm.sendStructured(structuredReq()); // 0 < 1 → allowed, settles 15
+    const r2 = await ctx.llm.sendStructured(structuredReq()); // 15 >= 1 → refused pre-call
+
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) {
+      expect(r2.error.kind).toBe("llm-budget-exceeded");
+      if (r2.error.kind === "llm-budget-exceeded") {
+        expect(r2.error.budget).toBe(1); // the dag.config value, threaded through
+        expect(r2.error.cumulative).toBe(15); // settled tokens from call 1
+        expect(r2.error.runId).toBe(testRunId);
+      }
+    }
+    // The refused call never reached the inner client (no network round trip).
+    expect(calls.length).toBe(1);
+  });
+
+  it("with llmBudgetTokens unset, the decorator meters but never refuses (FR-W1-006) — budget comes ONLY from dag.config", async () => {
+    const { llm, calls } = fakeLlm(1_000_000, 0);
+    const shared = sharedWithLlm(llm);
+
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    for (let i = 0; i < 3; i++) {
+      expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    }
+    expect(calls.length).toBe(3); // all delegated — no budget, no refusal
   });
 });
 

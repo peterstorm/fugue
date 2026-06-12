@@ -73,15 +73,21 @@ Concretely, four seams change:
 2. **Two-path resolution in the middleware**
    (`packages/host/src/http/middleware/auth.ts`), in fail-safe order:
    1. constant-time compare against `adminToken` → `{ kind: "admin" }`;
-   2. JWT path — *only* entered when a `verifyRealmJwt` verifier is configured
-      **and** the token matches the JWT compact-serialization shape
+   2. JWT path — *only* entered when a `verifyRealmJwt` verifier is configured,
+      the token does **not** have the `fug_` team-token shape (the explicit
+      `!isTeamTokenShape(token)` guard in `auth.ts`), **and** the token matches
+      the JWT compact-serialization shape
       (`isJwtShape`). Signature is verified by the **injected** `verifyRealmJwt`
       port (JWKS-backed in prod, fake in tests); claims are then checked by the
       pure `validateRealmJwtClaims` against `expectedIss` / `expectedAud`. Only
       on full success does it resolve `{ kind: "user", sub, azp }`;
    3. opaque `fug_` team path — hashed Redis lookup, unchanged.
 
-   A `fug_` token is never JWT-shaped, so the team path is untouched. A
+   The explicit `!isTeamTokenShape` guard — an enforced precondition, not an
+   incidental shape property — keeps the team path untouched: generated `fug_`
+   tokens happen to be dot-free (never JWT-shaped) today, but the guard enforces
+   the routing even for a future `fug_` token that would otherwise match the
+   JWT shape. A
    JWT-shaped token with no verifier wired, or with a bad signature / wrong
    `iss`/`aud`/`exp`, **401s** — it never falls through to a weaker identity.
    The signature verifier (`verifyRealmJwt`) is intentionally left unwired on

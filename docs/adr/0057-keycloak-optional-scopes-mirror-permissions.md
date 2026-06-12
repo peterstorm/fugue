@@ -95,11 +95,17 @@ Concretely:
   (`packages/host/src/adapters/keycloak-broker.ts`) holds an injected
   `assignedScopes(agentClientId): ReadonlySet<string>` resolved from the realm
   policy. For each declared capability it (1) `parseScope`s the name into a typed
-  `DownstreamScope` (`packages/host/src/domain/capability-scope.ts`) — an
-  unrecognized name is a `policy-refusal` at the edge — then (2) checks
-  `assigned.has(scopeStr)` **before any cache read or endpoint call**. A scope the
-  client was never assigned returns
-  `{ kind: "policy-refusal", scope, agentClientId }` with zero egress; the
+  `DownstreamScope` (`packages/host/src/domain/capability-scope.ts`) — a name
+  `parseScope` rejects is **not** policy-refused: the broker skips it, treating
+  it as a static (non-downstream) capability the boot-scoped base context
+  supplies, and if no static capability of that name exists it surfaces at
+  run-start validation as `missing-capability` (mapped to HTTP 500); a typo'd
+  scope name in the *policy* itself is caught earlier still, by boot-time
+  `AGENT_CLIENT_SCOPES` validation in `packages/host/src/domain/config.ts` —
+  then (2) for a parseable downstream scope, checks `assigned.has(scopeStr)`
+  **before any cache read or endpoint call**. Only a parseable scope that is not
+  in the agent's `AGENT_CLIENT_SCOPES` assignment returns
+  `{ kind: "policy-refusal", scope, agentClientId }` (403) with zero egress; the
   Keycloak mint, the WIF exchange, and therefore Entra are never reached
   (FR-W3-003, SC-006). The token request the broker does send names *exactly* the
   parsed scope, so Keycloak itself also refuses an unassigned scope at the
@@ -112,8 +118,10 @@ Concretely:
 
 `parseScope`'s parse-don't-validate construction (the only constructor of a
 `DownstreamScope`) plus the `assignedScopes` set are the two halves of the policy:
-the first bounds the *vocabulary* to recognized operations, the second bounds the
-*grant* to assigned ones. Both refuse with the same non-retryable `policy-refusal`
+the first bounds the *vocabulary* to recognized operations (an out-of-vocabulary
+name is deferred to run-start `missing-capability`, and rejected at boot when it
+appears in `AGENT_CLIENT_SCOPES`), the second bounds the *grant* to assigned
+ones — and only the grant half refuses with the non-retryable `policy-refusal`
 category, distinct from `infra-unreachable` and `downstream-denied`.
 
 ## Consequences

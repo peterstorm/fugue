@@ -39,11 +39,24 @@ import { ok, err } from "@fuguejs/framework";
 // constructor, so every value in the type came from a recognised name.
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Microsoft Graph operations this layer recognises. Extend as capabilities grow. */
-export type MsGraphOperation = "mail.send" | "sites.read";
+/**
+ * Provider → recognised operations: the single source of truth, from which the
+ * operation unions below are DERIVED (not asserted to agree). Adding an
+ * operation here without extending the handle machinery is therefore a COMPILE
+ * error at the exhaustive `match` sites (`handleKindForScope`,
+ * `buildGraphHandle`) — not a runtime `.exhaustive()` throw — and the
+ * membership casts in `parseScope` are tautological, never forging.
+ */
+const KNOWN_SCOPES = {
+  msgraph: ["mail.send", "sites.read"],
+  dynamics: ["read"],
+} as const;
 
-/** Dynamics operations this layer recognises. */
-export type DynamicsOperation = "read";
+/** Microsoft Graph operations this layer recognises — derived from `KNOWN_SCOPES`. */
+export type MsGraphOperation = (typeof KNOWN_SCOPES)["msgraph"][number];
+
+/** Dynamics operations this layer recognises — derived from `KNOWN_SCOPES`. */
+export type DynamicsOperation = (typeof KNOWN_SCOPES)["dynamics"][number];
 
 /**
  * A parsed, typed downstream scope. Discriminated by `provider`; the
@@ -130,11 +143,15 @@ export type HandleForScope<S extends DownstreamScope> =
 // Parser
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Provider → recognised operations, the single source of truth for parsing. */
-const KNOWN_SCOPES = {
-  msgraph: ["mail.send", "sites.read"] as const,
-  dynamics: ["read"] as const,
-} satisfies Record<DownstreamScope["provider"], readonly string[]>;
+// Compile-time pin (same `_StaticAssert` idiom as capability-registry.ts):
+// every provider in the scope ADT has a `KNOWN_SCOPES` entry. The operations
+// themselves are derived from the const above, so they cannot drift.
+type _StaticAssert<T extends true> = T;
+type _ProvidersCovered = _StaticAssert<
+  [DownstreamScope["provider"]] extends [keyof typeof KNOWN_SCOPES] ? true : false
+>;
+// Reference the assertion so `noUnusedLocals`-style tooling keeps it.
+export type KnownScopesCoverProviders = [_ProvidersCovered];
 
 /**
  * Parse a capability `requires` name (`"<provider>:<operation>"`) into a typed
@@ -142,14 +159,16 @@ const KNOWN_SCOPES = {
  * `DownstreamScope` is through this function, so every downstream scope in the
  * system is one of the recognised names.
  *
- * An unparseable / unknown name is a CONFIG-or-AUTHORIZATION defect, not a
- * transient fault, so it is reported as `policy-refusal` (fail-closed, never
- * retried — same category as "scope not assigned"): a name nobody recognises is
- * by definition not a scope the agent is allowed to use. `agentClientId` is
- * unknown at parse time (it lives on the invocation, not the static name), so it
- * is OMITTED here (the field is optional and ABSENT for a parse-time refusal) —
- * the broker, which DOES know the client, supplies it on an assignment-time
- * refusal. The discriminable `kind` is what callers branch on.
+ * An unparseable / unknown name RETURNS a `policy-refusal` on the Err branch
+ * (`agentClientId` absent — the client lives on the invocation, not the static
+ * name). NOTE the realised failure mode differs from the return value: every
+ * production caller (the broker's `mintFor`/`provides`, the boot-time
+ * `AGENT_CLIENT_SCOPES` validation) treats the Err branch purely as "not a
+ * downstream scope" and discards the payload — so an unknown name in a node's
+ * `requires` actually surfaces at run-start as `missing-capability` (no static
+ * capability of that name exists), and a typo'd policy entry fails the boot.
+ * The refusal payload exists for callers that DO choose to surface it; the
+ * discriminable `kind` is what they branch on.
  */
 export const parseScope = (name: string): Result<DownstreamScope, FrameworkError> => {
   const sep = name.indexOf(":");

@@ -229,9 +229,7 @@ describe("auth middleware", () => {
     ): AuthMiddlewareDeps => ({
       adminToken: ADMIN_TOKEN,
       tokenStore: createInMemoryTokenStore([]),
-      verifyRealmJwt: verify,
-      expectedIss: EXPECTED_ISS,
-      expectedAud: EXPECTED_AUD,
+      realmJwt: { verify, expectedIss: EXPECTED_ISS, expectedAud: EXPECTED_AUD },
       now: () => NOW_SECONDS,
       ...over,
     });
@@ -315,14 +313,10 @@ describe("auth middleware", () => {
       expect(res.status).toBe(401);
     });
 
-    it("returns 503 when a verifier is wired without iss/aud policy (misconfig, fail closed)", async () => {
-      const verify: VerifyRealmJwt = async () => ok(markSignatureVerified(validClaims));
-      const app = createApp(jwtDeps(verify, { expectedIss: undefined, expectedAud: undefined }));
-      const res = await app.request("/protected", {
-        headers: { Authorization: `Bearer ${FAKE_JWT}` },
-      });
-      expect(res.status).toBe(503);
-    });
+    // NOTE: there is deliberately NO "verifier wired without iss/aud policy"
+    // test any more — `RealmJwtDeps` groups verifier + policy as one optional
+    // unit, so that half-wired state is unrepresentable at the type level (the
+    // former runtime 503 misconfig branch deleted itself with it).
   });
 
   describe("regression: admin + fug_ paths unchanged when JWT verifier is present", () => {
@@ -334,9 +328,11 @@ describe("auth middleware", () => {
     ): AuthMiddlewareDeps => ({
       adminToken: ADMIN_TOKEN,
       tokenStore: createInMemoryTokenStore(seed),
-      verifyRealmJwt: verify,
-      expectedIss: "https://kc.example.com/realms/fugue-platform",
-      expectedAud: "fugue-host",
+      realmJwt: {
+        verify,
+        expectedIss: "https://kc.example.com/realms/fugue-platform",
+        expectedAud: "fugue-host",
+      },
     });
 
     it("admin token still yields admin identity", async () => {
@@ -378,9 +374,11 @@ describe("auth middleware", () => {
       const app = createApp({
         adminToken: ADMIN_TOKEN,
         tokenStore: createInMemoryTokenStore([]),
-        verifyRealmJwt: recordingVerify,
-        expectedIss: "https://kc.example.com/realms/fugue-platform",
-        expectedAud: "fugue-host",
+        realmJwt: {
+          verify: recordingVerify,
+          expectedIss: "https://kc.example.com/realms/fugue-platform",
+          expectedAud: "fugue-host",
+        },
       });
       const res = await app.request("/protected", {
         headers: { Authorization: `Bearer ${ambiguous}` },

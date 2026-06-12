@@ -1,7 +1,7 @@
 /**
  * Unwired KeycloakTokenEndpoint — the fail-closed default used until the real
  * JWKS/HTTP-backed token endpoint is stood up (a later wave). Mirrors how the
- * host leaves `verifyRealmJwt` undefined so the JWT inbound path fails closed:
+ * host leaves the `realmJwt` group undefined so the JWT inbound path fails closed:
  * here, the broker's minting path fails closed too, but DISTINGUISHABLY from a
  * policy refusal — every call returns `infra-unreachable` (a transient "we never
  * reached an answer"), never `policy-refusal` (a settled "no") and never a token.
@@ -25,13 +25,15 @@ export const createUnwiredTokenEndpoint = (): KeycloakTokenEndpoint => ({
   mintClientCredentials: async () =>
     err({
       kind: "infra-unreachable",
-      operation: "client-credentials",
+      operation: "mint",
+      hop: "client-credentials",
       message: "Keycloak token endpoint is not wired (awaiting JWKS/token HTTP adapter)",
     }),
   exchangeV2: async () =>
     err({
       kind: "infra-unreachable",
-      operation: "token-exchange",
+      operation: "exchange",
+      hop: "token-exchange",
       message: "Keycloak token endpoint is not wired (awaiting JWKS/token HTTP adapter)",
     }),
 });

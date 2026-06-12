@@ -91,17 +91,29 @@ export const usageFor = (meter: LlmMeter, runId: RunId): RunUsage =>
 // ---------------------------------------------------------------------------
 
 /**
+ * A delta component a provider may only ADD with: non-finite (NaN/±Infinity)
+ * and negative figures both read as 0. Negative would be a budget refund;
+ * non-finite would POISON the cumulative (`NaN` propagates through every later
+ * sum and `NaN >= budget` is false — the budget would fail OPEN permanently).
+ * Both are upstream-contract breaches (a missing/malformed provider `usage`
+ * field), treated as "no attributable tokens", never as arithmetic input.
+ */
+const sanitizeDeltaComponent = (n: number): number =>
+  Number.isFinite(n) ? Math.max(0, n) : 0;
+
+/**
  * Add a single call's token delta to a run's running total, returning a NEW
  * meter. The input meter is never mutated. Negative deltas are clamped to zero
  * — a provider can only ever add usage, never subtract it, so a negative figure
- * is treated as an absent/malformed count rather than a budget refund.
+ * is treated as an absent/malformed count rather than a budget refund. Non-
+ * finite deltas read as zero for the same reason (see `sanitizeDeltaComponent`).
  *
  * @satisfies FR-W0-004
  */
 export const accumulate = (meter: LlmMeter, runId: RunId, delta: TokenDelta): LlmMeter => {
   const prev = usageFor(meter, runId);
-  const addIn = Math.max(0, delta.tokensIn);
-  const addOut = Math.max(0, delta.tokensOut);
+  const addIn = sanitizeDeltaComponent(delta.tokensIn);
+  const addOut = sanitizeDeltaComponent(delta.tokensOut);
   const next: RunUsage = {
     tokensIn: prev.tokensIn + addIn,
     tokensOut: prev.tokensOut + addOut,
@@ -125,6 +137,12 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: TokenDelta): Ll
  * enforcement. A non-positive budget refuses the first call (a zero/negative
  * budget grants nothing).
  *
+ * Fail closed on a non-finite cumulative: `accumulate` sanitizes its inputs so
+ * the stored figures stay finite, but if a non-finite value ever reaches this
+ * check anyway (defense in depth — same class as the non-finite-`now` guard in
+ * jwt-validation), a budgeted run REFUSES rather than letting `NaN >= budget`
+ * read as false forever (fail open).
+ *
  * @satisfies FR-W1-002 FR-W1-004 FR-W1-006 SC-003
  */
 export const budgetDecision = (
@@ -134,6 +152,7 @@ export const budgetDecision = (
 ): BudgetDecision => {
   const cumulative = runTotal(usageFor(meter, runId));
   if (budget === undefined) return { kind: "allow", cumulative };
+  if (!Number.isFinite(cumulative)) return { kind: "refuse", cumulative, budget };
   return cumulative >= budget
     ? { kind: "refuse", cumulative, budget }
     : { kind: "allow", cumulative };

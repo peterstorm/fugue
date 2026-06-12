@@ -11,7 +11,10 @@
  * @satisfies FR-031 — Checkpoint keys prefixed fugue:<dagId>:<runId>:<nodeId>
  * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
- * @satisfies SC-008 — Two DAGs using same cache key string are isolated
+ * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
+ *   same cache key string are isolated. NOT the identity-scoped-capabilities
+ *   spec's SC-008 (token-mint dedup), which lives in token-cache.ts /
+ *   keycloak-broker.ts — same tag, different spec namespace.
  */
 
 import type {
@@ -32,6 +35,7 @@ import { makeNodeContext, ok } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity } from "../domain/auth.js";
+import { agentClientIdForDag } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";
 import { createMeteredLlm } from "./metered-llm.js";
@@ -213,11 +217,12 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
  *    user hop with `assignedScopes(agentClientId)`, which must consult the
  *    AGENT's realm policy, not the frontend's. Using the frontend `azp` here
  *    would (a) gate against the wrong client and (b) let a future token exchange
- *    set `azp` to the frontend. We key on `dagId` — the same agent-type-client
- *    placeholder the agent path uses — so user and agent runs of the SAME DAG
- *    resolve to the SAME agent client. (A dagId→real-Keycloak-client-id mapping
- *    is a config concern threaded later; the placeholder keeps the policy lookup
- *    pointed at the agent, never the frontend.)
+ *    set `azp` to the frontend. We key on `agentClientIdForDag(dagId)` — the
+ *    same agent-type-client placeholder the agent path uses — so user and agent
+ *    runs of the SAME DAG resolve to the SAME agent client. (The branded
+ *    `AgentClientId` constructor is the single migration point for the
+ *    dagId→real-Keycloak-client-id mapping threaded later; the placeholder
+ *    keeps the policy lookup pointed at the agent, never the frontend.)
  *  - `team` / `admin` → `{ kind: "agent", agentClientId: dagId }`. There is no
  *    user subject for these, so the agent placeholder keyed on the DAG id stands
  *    in — identical to the pre-fix behaviour.
@@ -227,12 +232,17 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
 export const invocationOriginForIdentity = (
   identity: AuthIdentity,
   dagId: DagId,
-): InvocationOrigin =>
-  match(identity)
-    .with({ kind: "user" }, (u) => ({ kind: "user" as const, sub: u.sub, agentClientId: dagId as string }))
-    .with({ kind: "team" }, () => ({ kind: "agent" as const, agentClientId: dagId as string }))
-    .with({ kind: "admin" }, () => ({ kind: "agent" as const, agentClientId: dagId as string }))
+): InvocationOrigin => {
+  // The branded constructor is the ONE migration point for the dagId→client
+  // mapping; the framework port carries it as a plain string (the brand is a
+  // host concern), so the assignment below needs no cast.
+  const agentClientId = agentClientIdForDag(dagId as string);
+  return match(identity)
+    .with({ kind: "user" }, (u) => ({ kind: "user" as const, sub: u.sub, agentClientId }))
+    .with({ kind: "team" }, () => ({ kind: "agent" as const, agentClientId }))
+    .with({ kind: "admin" }, () => ({ kind: "agent" as const, agentClientId }))
     .exhaustive();
+};
 
 /** The base NodeContext for a run plus the `origin` the broker authorizes nodes against. */
 export interface NodeContextForDag {
@@ -274,7 +284,8 @@ export interface NodeContextForDag {
  * @satisfies FR-031 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
- * @satisfies SC-008 — Cross-DAG cache isolation
+ * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the
+ *   identity-scoped-capabilities token-dedup SC-008)
  * @satisfies FR-W2-005 — pools (connect/close/healthCheck) remain boot-scoped
  * @satisfies FR-W3-007 — `origin` carries the user's `sub` so a user-initiated
  *   run is attributable and per-hop-exchangeable by the broker

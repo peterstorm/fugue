@@ -98,24 +98,35 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   const admit = (nodeId: NodeId): { readonly error: FrameworkError } | { readonly release: () => void } => {
     const decision: BudgetDecision = budgetDecision(meter, runId, budget);
     const projected = decision.cumulative + reservedInFlight;
-    const overBudget =
-      decision.kind === "refuse" || (budget !== undefined && projected >= budget);
-    if (overBudget) {
+    // The exceeded budget, when over: a `refuse` decision carries it; the
+    // projection branch requires a defined `budget` to fire. Reading it off the
+    // branches keeps this cast-free — `undefined` means "admit".
+    const exceededBudget =
+      decision.kind === "refuse"
+        ? decision.budget
+        : budget !== undefined && projected >= budget
+          ? budget
+          : undefined;
+    if (exceededBudget !== undefined) {
       logger.warn("LLM budget exceeded — refusing call", {
         dagId: dagId as string,
         runId: runId as string,
         nodeId: nodeId as string,
         cumulative: decision.cumulative,
         reservedInFlight,
-        budget: budget as number,
+        budget: exceededBudget,
       });
       return {
         error: {
           kind: "llm-budget-exceeded",
           runId,
           nodeId,
-          cumulative: projected,
-          budget: budget as number,
+          // SETTLED cumulative only (the errors.ts contract): the in-flight
+          // reservation that may have triggered this refusal is reported in the
+          // warn log above (`reservedInFlight`), never in the error figure, so
+          // `cumulative` always reconciles against the `llm.metered` totals.
+          cumulative: decision.cumulative,
+          budget: exceededBudget,
         },
       };
     }

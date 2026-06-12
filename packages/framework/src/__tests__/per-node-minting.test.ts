@@ -194,6 +194,132 @@ describe("per-node capability minting (C1)", () => {
     expect(calls.length).toBe(1);
   });
 
+  it("never retries a settled downstream-denied: with retry budget, mintFor fires exactly once and the bare kind survives", async () => {
+    // Mirrors the policy-refusal fast-fail test for the OTHER settled mint-path
+    // kind (ADR-0059): a downstream "no" (FIC mismatch / WIF rejection / resource
+    // denial) is an ANSWER, not an outage — retrying would re-fire the exchange
+    // against a provider that already refused and emit duplicate refusal audits.
+    const calls: { nodeId: string }[] = [];
+    const broker: CapabilityBroker = {
+      mintFor: async (inv: Invocation): Promise<Result<ScopedCapabilityHandle, FrameworkError>> => {
+        calls.push({ nodeId: inv.nodeId as string });
+        return err({ kind: "downstream-denied", resource: "https://graph.microsoft.com", reason: "FIC subject mismatch" });
+      },
+      provides: (c: Capability) => (c as string).includes(":"),
+    };
+    const node = createFetchNode({
+      id: N("gated"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => ok({ ok: true }), // never reached
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [],
+      defaultRetryLimit: 2, // budget present — a retriable error would mint 3 times
+    });
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker, origin: agentOrigin },
+      suppressRoutingWarnings: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // Bare kind survives — never rewrapped as retry-exhausted.
+      expect(result.error.kind).toBe("downstream-denied");
+      if (result.error.kind === "downstream-denied") {
+        expect(result.error.resource).toBe("https://graph.microsoft.com");
+        expect(result.error.reason).toBe("FIC subject mismatch");
+      }
+    }
+    expect(calls.length).toBe(1); // exactly one mint attempt — no retry
+  });
+
+  it("never retries llm-budget-exceeded: the node fails once (one mint, one run) and the bare kind survives", async () => {
+    // The budget error is deterministic WITHIN a run — the cumulative counter
+    // only grows, so a retry can never succeed (retry-policy.ts fast-fail set).
+    // Retrying would also re-fire mintFor per attempt.
+    const { broker, calls } = recordingBroker();
+    let fetchRuns = 0;
+    const node = createFetchNode({
+      id: N("budgeted"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async (_in, ctx) => {
+        fetchRuns += 1;
+        return err({
+          kind: "llm-budget-exceeded",
+          runId: ctx.runId,
+          nodeId: N("budgeted"),
+          cumulative: 1200,
+          budget: 1000,
+        });
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [],
+      defaultRetryLimit: 2, // budget present — a retriable error would run 3 times
+    });
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker, origin: agentOrigin },
+      suppressRoutingWarnings: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("llm-budget-exceeded");
+      if (result.error.kind === "llm-budget-exceeded") {
+        expect(result.error.cumulative).toBe(1200);
+        expect(result.error.budget).toBe(1000);
+      }
+    }
+    expect(fetchRuns).toBe(1); // the node ran exactly once — fast-fail, no retry
+    expect(calls.length).toBe(1); // and minted exactly once
+  });
+
+  it("a checkpoint-skipped node mints NOTHING — mintFor is never called for a replayed node (review gap 4/10)", async () => {
+    // run-node.ts orders the checkpoint-skip check BEFORE the minting seam: a
+    // replayed node returns its cached output without dispatching, so no
+    // authority is minted (and no mint audit emitted) for work that never runs.
+    const { broker, calls } = recordingBroker();
+
+    const nodeA = createFetchNode({
+      id: N("nodeA"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => ok({ ok: true }), // never reached — checkpointed
+    });
+    const nodeB = createFetchNode({
+      id: N("nodeB"),
+      inputSchema: z.object({ ok: z.boolean() }),
+      outputSchema: z.object({ done: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => ok({ done: true }),
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [nodeA, nodeB],
+      edges: [{ from: "nodeA", to: "nodeB" }],
+    });
+
+    // Resume with nodeA's output already checkpointed → nodeA is skipped/replayed.
+    const checkpoint = new Map<string, unknown>([["nodeA", { ok: true }]]);
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker, origin: agentOrigin },
+      resume: { runId: "run-1", checkpoint },
+    });
+
+    expect(result.ok).toBe(true);
+    // ZERO mintFor calls for the skipped node; exactly one for the node that ran.
+    expect(calls.filter((c) => c.nodeId === "nodeA").length).toBe(0);
+    expect(calls.filter((c) => c.nodeId === "nodeB").length).toBe(1);
+    expect(calls.length).toBe(1);
+  });
+
   it("without a broker, the base context is used unchanged (byte-identical, no minting)", async () => {
     const calls: number[] = [];
     const node = createFetchNode({

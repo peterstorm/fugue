@@ -76,7 +76,8 @@ describe("FrameworkError: llm-budget-exceeded", () => {
 
 const infraError: FrameworkError = {
   kind: "infra-unreachable",
-  operation: "client-credentials",
+  operation: "mint",
+  hop: "client-credentials",
   message: "ECONNREFUSED keycloak:8443",
 };
 
@@ -103,7 +104,8 @@ describe("FrameworkError: infra-unreachable (FR-X-001)", () => {
   it("is constructible and discriminable on kind, carrying its payload", () => {
     expect(infraError.kind).toBe("infra-unreachable");
     if (infraError.kind === "infra-unreachable") {
-      expect(infraError.operation).toBe("client-credentials");
+      expect(infraError.operation).toBe("mint");
+      expect(infraError.hop).toBe("client-credentials");
       expect(infraError.message).toBe("ECONNREFUSED keycloak:8443");
     }
   });

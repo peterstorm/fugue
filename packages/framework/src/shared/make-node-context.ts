@@ -91,6 +91,14 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
  * entries are dropped (a broker that resolved nothing leaves the base untouched),
  * so an empty mint result returns the base context by reference — preserving the
  * byte-identical no-op when a node declares no broker-resolvable scopes.
+ *
+ * SEAM CONTRACT with `validateCapabilities`: everything `provides()` exempts
+ * from run-start validation must survive this merge. Because the guard below
+ * silently drops BUILT-IN capability keys, `validateCapabilities` REJECTS a
+ * broker that claims `provides()` for one (a loud wiring error instead of a
+ * silently-dropped handle). If broker-minted built-ins ever land (FR-W2-009),
+ * change this guard to filter only `RESERVED_NON_CAPABILITY_KEYS` in the same
+ * commit that lifts that rejection.
  */
 export const mergeScopedCapabilities = (
   base: NodeContext,

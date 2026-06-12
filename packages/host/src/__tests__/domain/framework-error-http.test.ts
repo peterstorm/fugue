@@ -34,7 +34,7 @@ describe("classifyFrameworkError", () => {
   });
 
   it("infra-unreachable → 503 with Retry-After, DOES trip the circuit (real infra signal)", () => {
-    const e: FrameworkError = { kind: "infra-unreachable", operation: "entra-wif", message: "ECONNREFUSED" };
+    const e: FrameworkError = { kind: "infra-unreachable", operation: "federation", hop: "entra-wif", message: "ECONNREFUSED" };
     const c = classifyFrameworkError(e);
     expect(c.status).toBe(503);
     expect(c.countsAsCircuitFailure).toBe(true);

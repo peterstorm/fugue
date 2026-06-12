@@ -78,7 +78,7 @@ carries the expected PASS criteria each step asserts):
   Variant B collapses to host logs + `traceparent`, and the A-vs-B choice must be re-weighed.
 - **Spike #2** (`docs/spikes/2026-06-10-spike-2-subclaim-fic-matching.md`) — expected PASS:
   the minted `sub` is byte-for-byte `service-account-<client_id>`, survives Entra's case-
-  sensitive match (negative control: a single case-flip fails with `AADSTS700213`), and is
+  sensitive match (negative control: a single case-flip fails with `AADSTS70021`), and is
   reproducible across client recreation — so FIC subjects are config-as-code with no read-
   then-pin. If PARTIAL, fall back to read-then-pin; Variant A still holds.
 
@@ -108,7 +108,7 @@ default and is committed here; the runbook Step 3 is gated on the live spike run
 - More Entra provisioning surface than the single-FIC alternative: one FIC entry to create,
   name, and keep in sync per agent type. Each addition is a manual/portal step captured in the
   runbook (FR-W4-006), and each must match `issuer`/`subject`/`audience` exactly — a case or
-  trailing-slash drift is a silent `AADSTS700213` reject.
+  trailing-slash drift is a silent `AADSTS70021` reject.
 - The 20-FIC cap is a hard ceiling on agent *types* under one app. Exceeding it forces either a
   second trust-boundary app (AD-3) or a fallback to Variant B's single funnel FIC.
 - The attribution benefit is contingent on spike #1 landing PASS against a live tenant. Until the

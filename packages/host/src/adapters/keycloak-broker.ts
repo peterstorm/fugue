@@ -88,7 +88,8 @@ import { createBrokerAudit, type BrokerAudit, type BrokerAuditFields } from "./b
 export const scopeName = (scope: DownstreamScope): string => `${scope.provider}:${scope.operation}`;
 
 /**
- * Early-refresh skew margin (epoch millis). A cached token is treated as stale
+ * Early-refresh skew margin — a DURATION in milliseconds (not an instant). A
+ * cached token is treated as stale
  * this many millis BEFORE its real `expires_in`, so a token looked up just
  * before expiry is re-minted rather than presented downstream microseconds
  * before it lapses — which would 401 and (mis)map to `downstream-denied`, the
@@ -338,7 +339,8 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       // the retriable reach-failure kind, named for the hop this origin mints by.
       return err({
         kind: "infra-unreachable",
-        operation: inv.origin.kind === "user" ? "token-exchange" : "client-credentials",
+        operation: inv.origin.kind === "user" ? "exchange" : "mint",
+        hop: inv.origin.kind === "user" ? "token-exchange" : "client-credentials",
         message: `capability port threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
@@ -374,7 +376,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     const assigned = deps.assignedScopes(inv.origin.agentClientId);
 
     for (const capability of requires) {
-      // 0. Pass-through: a capability this broker does not `provides()` —
+      // 1. Pass-through: a capability this broker does not `provides()` —
       //    whether a plain name (`http`/`db`/`llm`) or a colon-named CUSTOM
       //    capability registered via ADR-0051 augmentation (`mycorp:widget`) —
       //    is NOT a downstream scope it mints. It is a static client the

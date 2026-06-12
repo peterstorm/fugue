@@ -86,6 +86,25 @@ export const constantTimeEqual = (a: string, b: string): boolean => {
 // Middleware deps
 // ---------------------------------------------------------------------------
 
+/**
+ * Everything the JWT inbound path needs, grouped as ONE optional unit so a
+ * verifier-without-policy (or policy-without-verifier) is UNREPRESENTABLE —
+ * the same pairing move as the framework's `MintingAuthority`. The previous
+ * shape (three independent optionals) admitted a half-wired state that had to
+ * be caught at request time with a 503; grouping deletes that branch.
+ */
+export interface RealmJwtDeps {
+  /**
+   * Realm JWT signature verifier (INJECTED — JWKS-backed in production, fake in
+   * tests). The ONLY producer of `SignatureVerifiedClaims`.
+   */
+  readonly verify: VerifyRealmJwt;
+  /** The fugue-platform realm issuer the JWT must declare (FR-W3-006). */
+  readonly expectedIss: string;
+  /** The audience this host must appear in — `fugue-host` (FR-W3-006). */
+  readonly expectedAud: string;
+}
+
 export interface AuthMiddlewareDeps {
   /** The admin token from ADMIN_TOKEN env var */
   readonly adminToken: string;
@@ -94,16 +113,11 @@ export interface AuthMiddlewareDeps {
   /** Optional logger for diagnosing auth failures */
   readonly logger?: import("../../ports.js").LogPort;
   /**
-   * Realm JWT signature verifier (INJECTED — JWKS-backed in production, fake in
-   * tests). When omitted, the JWT path is disabled and a JWT-shaped token simply
-   * falls through to a 401 (no signature can be verified → fail closed). Provide
-   * this together with `expectedIss`/`expectedAud` to enable the user path.
+   * The JWT inbound path: verifier + iss/aud policy as one inseparable group.
+   * When omitted, the JWT path is disabled and a JWT-shaped token simply falls
+   * through to a 401 (no signature can be verified → fail closed).
    */
-  readonly verifyRealmJwt?: VerifyRealmJwt;
-  /** The fugue-platform realm issuer the JWT must declare (FR-W3-006). */
-  readonly expectedIss?: string;
-  /** The audience this host must appear in — `fugue-host` (FR-W3-006). */
-  readonly expectedAud?: string;
+  readonly realmJwt?: RealmJwtDeps;
   /**
    * Injected clock returning UNIX SECONDS, for `exp` checks (purity/testability).
    * When omitted, the wall clock (`Date.now()/1000`) is used.
@@ -192,11 +206,11 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
     // instead of the team store. FAIL CLOSED: a JWT-shaped token that reaches
     // here must be fully verified and validated; it never falls through to the
     // team path on failure.
-    if (deps.verifyRealmJwt && !isTeamTokenShape(token) && isJwtShape(token)) {
-      const verifier = deps.verifyRealmJwt;
+    if (deps.realmJwt && !isTeamTokenShape(token) && isJwtShape(token)) {
+      const realmJwt = deps.realmJwt;
       let verified: Result<SignatureVerifiedClaims, JwtVerifyError>;
       try {
-        verified = await verifier(token);
+        verified = await realmJwt.verify(token);
       } catch (e) {
         deps.logger?.error("[auth-middleware] JWT verifier threw unexpectedly", {
           error: e instanceof Error ? e.message : String(e),
@@ -208,30 +222,31 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
 
       if (!verified.ok) {
         if (verified.error.kind === "unavailable") {
-          // JWKS/network failure — infra, not the client's fault → 503.
+          // JWKS/network failure — infra, not the client's fault → 503. The
+          // reason is logged server-side (it never reaches the client): without
+          // it, a JWKS outage is a 503 storm with zero diagnostics.
+          deps.logger?.error("[auth-middleware] JWT signature verification unavailable", {
+            reason: verified.error.reason,
+          });
           return errorResponse(c, 503, "auth-service-unavailable",
             "Authentication service temporarily unavailable");
         }
-        // Bad signature / unparsable token → 401 (never leak the reason).
+        // Bad signature / unparsable token → 401 (never leak the reason to the
+        // client; log it server-side, mirroring the claim-validation path).
+        deps.logger?.warn("[auth-middleware] JWT signature verification rejected token", {
+          reason: verified.error.reason,
+        });
         return errorResponse(c, 401, "unauthorized", "Invalid bearer token", {
           headers: { "WWW-Authenticate": "Bearer error=\"invalid_token\"" },
         });
-      }
-
-      if (deps.expectedIss === undefined || deps.expectedAud === undefined) {
-        // Misconfiguration: a verifier was wired without iss/aud policy. Fail
-        // closed rather than accept an unscoped token.
-        deps.logger?.error("[auth-middleware] JWT verifier configured without expectedIss/expectedAud");
-        return errorResponse(c, 503, "auth-service-unavailable",
-          "Authentication service temporarily unavailable");
       }
 
       // `exp` is UNIX seconds (OIDC). Injected `now` is expected to already be
       // in seconds (pure/testable); the default wall clock is ms → convert.
       const nowSeconds = deps.now ? deps.now() : Math.floor(Date.now() / 1000);
       const claimsResult = validateRealmJwtClaims(verified.value, {
-        expectedIss: deps.expectedIss,
-        expectedAud: deps.expectedAud,
+        expectedIss: realmJwt.expectedIss,
+        expectedAud: realmJwt.expectedAud,
         now: nowSeconds,
       });
 

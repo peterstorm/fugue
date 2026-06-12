@@ -149,17 +149,25 @@ export type FrameworkError =
   | {
       /**
        * Emitted by the host's metered LLM decorator (FR-W1-003) when a per-run
-       * token budget is reached. The check runs BEFORE the call against the
-       * cumulative-so-far counter, so `cumulative` is the token total already
-       * consumed by this run and `budget` is the configured `llmBudgetTokens`.
-       * An in-flight call may overshoot the budget by at most one call
-       * (FR-W1-004); this error refuses the *next* call once `cumulative`
-       * has reached `budget`.
+       * token budget is reached. The admission check runs BEFORE the call:
+       * it refuses when the SETTLED cumulative has reached `budget`, or when
+       * settled cumulative plus the learned reservation for admitted-but-
+       * unsettled concurrent calls projects past it — so a refusal can fire
+       * while `cumulative` is still below `budget`. Concurrent overshoot is
+       * bounded (FR-W1-004): the first parallel burst (reservation estimate
+       * still unlearned) may overshoot by up to that burst's call count;
+       * thereafter the per-call reservation bounds it.
        */
       readonly kind: "llm-budget-exceeded";
       readonly runId: RunId;
       readonly nodeId: NodeId;
-      /** Cumulative tokens already consumed by this run before the refused call. */
+      /**
+       * Cumulative tokens already SETTLED (consumed) by this run before the
+       * refused call. Excludes the in-flight reservation estimate that may
+       * have triggered the refusal — that projection lives in the host's
+       * `llm.metered` warn log, not here, so this figure always reconciles
+       * against the metered totals.
+       */
       readonly cumulative: number;
       /** Configured per-run budget (`llmBudgetTokens`) that was reached. */
       readonly budget: number;
@@ -176,18 +184,24 @@ export type FrameworkError =
        * provider that has already said no, or fail-closed on a blip that a
        * retry would clear.
        *
-       * `operation` names which broker hop failed, as a closed literal union so
-       * a consumer can branch on it exhaustively and an emitter cannot invent an
-       * untracked value:
-       *   - `client-credentials` — the Keycloak agent-token mint (agent origin),
-       *   - `token-exchange`      — the Keycloak Token Exchange V2 hop (user origin),
-       *   - `entra-wif`           — the Entra Workload-Identity-Federation exchange,
-       *   - `graph`               — the downstream Graph/Dynamics request.
-       * `message` carries the diagnostic detail (status line, socket error).
-       * (FR-X-001)
+       * `operation` names the ROLE of the broker hop that failed, as a closed
+       * literal union so a consumer can branch on it exhaustively. The roles
+       * are provider-agnostic on purpose (ADR-0054: no vendor literal crosses
+       * the framework boundary; ADR-0059 amendment 2026-06-12):
+       *   - `mint`       — acquiring a fresh token from the local IdP
+       *                    (e.g. a client-credentials grant),
+       *   - `exchange`   — exchanging one local token for another
+       *                    (e.g. Token Exchange V2),
+       *   - `federation` — crossing a trust boundary into an external IdP
+       *                    (e.g. an Entra WIF exchange),
+       *   - `downstream` — the final resource request (e.g. Graph/Dynamics).
+       * `hop` carries the host-specific hop name for audit/diagnostics
+       * (free-form: each embedder names its own topology), and `message` the
+       * diagnostic detail (status line, socket error). (FR-X-001)
        */
       readonly kind: "infra-unreachable";
-      readonly operation: "client-credentials" | "token-exchange" | "entra-wif" | "graph";
+      readonly operation: "mint" | "exchange" | "federation" | "downstream";
+      readonly hop: string;
       readonly message: string;
     }
   | {
@@ -206,10 +220,14 @@ export type FrameworkError =
        * `agentClientId` is the agent client whose policy lacks the scope (the
        * same id carried on `InvocationOrigin`), so an assignment-time refusal is
        * attributable to a concrete client without re-deriving identity. It is
-       * OPTIONAL because a refusal has two origins:
-       *   - PARSE-TIME (an unrecognised `requires` name): the client id is not
-       *     yet known — the name is refused statically, before any invocation —
-       *     so the field is ABSENT.
+       * OPTIONAL because a refusal has two possible origins:
+       *   - PARSE-TIME (an unrecognised scope name, no client known yet): the
+       *     field is ABSENT. NOTE: this origin is currently unrealised in
+       *     production — every `parseScope` caller treats a parse failure as
+       *     "not a downstream scope" (deferring to run-start
+       *     `missing-capability`) rather than emitting the refusal, so all
+       *     emitted refusals today are assignment-time. The variant keeps the
+       *     absent-field shape for parsers that DO choose to surface it.
        *   - ASSIGNMENT-TIME (the broker, with a known client, finds the scope
        *     unassigned): the field is PRESENT and names that client.
        * Modelling absence as an absent field (not an empty string) keeps the
@@ -287,7 +305,7 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "checkpoint-write-failed" }, (e) => `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`)
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
     .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): cumulative ${e.cumulative} tokens reached budget ${e.budget}`)
-    .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}': ${e.message}`)
+    .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}' (hop '${e.hop}'): ${e.message}`)
     .with({ kind: "policy-refusal" }, (e) =>
       e.agentClientId !== undefined
         ? `policy refusal: scope '${e.scope}' not assigned to agent client '${e.agentClientId}'`

@@ -18,11 +18,47 @@ import { match } from "ts-pattern";
 
 // ── Branded Types ──────────────────────────────────────────────────────────
 
-/** A raw team token as returned to the admin (shown once, never stored raw) */
-export type TeamToken = string & { readonly __brand: "TeamToken" };
+/**
+ * An inbound string matching the team-token SHAPE (`fug_` prefix + minimum
+ * length). Shape is ALL this brand asserts — an attacker-supplied
+ * `fug_aaaa…` inhabits it. Produced by the `isTeamTokenShape` guard; safe to
+ * use only for routing + hash-lookup (resolution is hash-based, so a forged
+ * shape resolves to nothing).
+ */
+export type TeamTokenShaped = string & { readonly __shapeBrand: "TeamTokenShaped" };
+
+/**
+ * A raw team token as returned to the admin (shown once, never stored raw).
+ * Subtype of `TeamTokenShaped` that ADDITIONALLY encodes "carries full
+ * entropy" — its only producer is `formatToken`, which enforces the 32-byte
+ * input. Keeping the two brands distinct stops an inbound shape-checked string
+ * from being passed where a generated, full-entropy token is required.
+ */
+export type TeamToken = TeamTokenShaped & { readonly __brand: "TeamToken" };
 
 /** SHA-256 hash of a token — this is what's stored in Redis */
 export type TokenHash = string & { readonly __brand: "TokenHash" };
+
+/**
+ * The Keycloak client id an agent acts AS — the identity the broker's policy
+ * gate (`assignedScopes`), the token-cache identity, and the audit `azp` are
+ * all keyed on. Branded with a SINGLE constructor (`agentClientIdForDag`)
+ * because the value is currently a PLACEHOLDER: until the dagId→Keycloak-client
+ * mapping lands (ADR-0056), the DAG id stands in for the agent client id at
+ * every one of those sites. Funnelling construction through one function makes
+ * that migration compiler-checked — swap the constructor body for the
+ * config-mapped lookup and every consumer is already correct — instead of a
+ * grep across a security-relevant correlation chain.
+ */
+export type AgentClientId = string & { readonly __brand: "AgentClientId" };
+
+/**
+ * THE single producer of `AgentClientId`. Today: the dagId-as-client
+ * placeholder (one Keycloak client per agent type / per DAG, ADR-0056 — the
+ * mapping is the identity function until the config-mapped registry lands).
+ * When the real mapping arrives, change ONLY this body.
+ */
+export const agentClientIdForDag = (dagId: string): AgentClientId => dagId as AgentClientId;
 
 // ── Token Grant (stored in Redis) ──────────────────────────────────────────
 
@@ -155,6 +191,17 @@ export const markAuthenticatedUser = (user: { readonly sub: string; readonly azp
  *   It returns `true` independent of `dagTeam` (a user is not bound to a single
  *   host-side team), which is the minimal correct behaviour for threading-only
  *   delivery; tightening this to a realm/role check is a later-wave concern.
+ *
+ * SECURITY (latent until the JWKS wave): this `user → true` branch is
+ * UNREACHABLE in production today only because no `realmJwt` verifier group is wired
+ * (`host.ts` leaves the JWT path fail-closed). The moment a live JWKS verifier
+ * is wired into the router deps, ANY authenticated realm user can execute ANY
+ * team's DAG — consuming its concurrency permits, LLM budget, and circuit
+ * headroom — because the broker's scope gate only protects downstream
+ * Graph/Dynamics hops, not DAG execution or static capabilities. The verifier
+ * wiring site (`buildHost` in `host.ts`) carries the mirror of this note: DO
+ * NOT wire a verifier without revisiting this predicate (realm/role check or a
+ * config gate on user-run acceptance).
  */
 export const canAccessDag = (identity: AuthIdentity, dagTeam: string): boolean =>
   match(identity)
@@ -198,10 +245,11 @@ export const formatToken = (randomBytes: Uint8Array): TeamToken => {
 
 /**
  * Type guard: validates that a string has the team token shape (prefix + minimum length).
- * Does NOT check if the token exists — that's the store's job.
- * Narrows the type to `TeamToken` for downstream use.
+ * Does NOT check if the token exists — that's the store's job — and does NOT
+ * assert entropy: it narrows to `TeamTokenShaped`, never to `TeamToken` (whose
+ * brand means "generated with full entropy" and is minted only by `formatToken`).
  */
-export const isTeamTokenShape = (s: string): s is TeamToken =>
+export const isTeamTokenShape = (s: string): s is TeamTokenShaped =>
   s.startsWith(TOKEN_PREFIX) && s.length >= TOKEN_MIN_LENGTH;
 
 // ── Hashing (pure — crypto.subtle is deterministic for same input) ─────────

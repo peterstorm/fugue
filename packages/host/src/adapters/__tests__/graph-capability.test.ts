@@ -157,7 +157,8 @@ describe("graph-capability — error mapping (FR-X-002)", () => {
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
     if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("graph");
+      expect(r.error.operation).toBe("downstream");
+      expect(r.error.hop).toBe("graph");
       expect(r.error.message).toContain("ECONNRESET");
     }
   });
@@ -174,7 +175,8 @@ describe("graph-capability — malformed 2xx bodies are infra-unreachable, never
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
     if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("graph");
+      expect(r.error.operation).toBe("downstream");
+      expect(r.error.hop).toBe("graph");
       expect(r.error.message).toContain("site-42");
     }
   });
@@ -202,7 +204,8 @@ describe("graph-capability — malformed 2xx bodies are infra-unreachable, never
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
     if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("graph");
+      expect(r.error.operation).toBe("downstream");
+      expect(r.error.hop).toBe("graph");
       expect(r.error.message).toContain("2 non-object row(s)");
     }
   });

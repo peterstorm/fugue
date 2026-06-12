@@ -127,7 +127,7 @@ const transientWif = (message: string) => {
   const wif: EntraWifExchange = {
     exchange: async (req) => {
       calls.push(req);
-      return err({ kind: "infra-unreachable" as const, operation: "entra-wif" as const, message });
+      return err({ kind: "infra-unreachable" as const, operation: "federation" as const, hop: "entra-wif", message });
     },
   };
   return { wif, calls, wifCount: () => calls.length };
@@ -371,8 +371,10 @@ describe("keycloak-broker — token cache TTL dedup (US4/SC-008)", () => {
     });
     const inv = invocationFor(agentOrigin("fugue-agent-mail"));
 
-    await broker.mintFor(inv, [cap("msgraph:mail.send")]); // expiresAt = 1000ms
-    clock = 1000; // at expiry → stale (half-open window)
+    // ttlSec 1 → lifetime 1000ms, margin min(60_000, 500) = 500 → effective
+    // expiry at 500ms (the half-lifetime floor), well before clock = 1000.
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]); // effective expiresAt = 500ms
+    clock = 1000; // past the 500ms effective expiry → stale
     await broker.mintFor(inv, [cap("msgraph:mail.send")]);
 
     expect(egressCount()).toBe(2);
@@ -470,6 +472,40 @@ describe("keycloak-broker — early-refresh skew margin re-mints BEFORE real exp
     await broker.mintFor(inv, [cap("msgraph:mail.send")]);
     expect(egressCount()).toBe(2);
     expect(wifCount()).toBe(2);
+  });
+});
+
+// ── Half-lifetime floor on the effective TTL (review gap, 5/10) ──────────────
+
+describe("keycloak-broker — half-lifetime floor keeps a short-lived token usable (review: effectiveTtlMs)", () => {
+  it("a ttlSec:1 token minted at t=0 is still a cache HIT at t=400ms — the margin is floored at lifetime/2, so the token is not born stale", async () => {
+    // ttlSec 1 → lifetime 1000ms. Without the `Math.min(skew, lifetime/2)` floor
+    // the 60_000ms skew margin would swallow the whole lifetime (effective TTL
+    // −59_000ms): EVERY lookup would miss and re-mint — the token born stale.
+    // With the floor, margin = 500ms → effective expiry 500ms, so t=400ms HITS.
+    const { endpoint, egressCount } = recordingEndpoint({ ttlSec: 1 });
+    const { wif, wifCount } = recordingWif({ ttlSec: 1 });
+    const { logger } = collectLogs();
+    let clock = 0;
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      tracer: passTracer,
+      logger,
+      now: () => clock,
+    });
+    const inv = invocationFor(agentOrigin("fugue-agent-mail"));
+
+    await broker.mintFor(inv, [cap("msgraph:mail.send")]); // mint at t=0, effective expiry 500ms
+    clock = 400; // inside the floored window (400 < 500)
+    const second = await broker.mintFor(inv, [cap("msgraph:mail.send")]);
+
+    expect(second.ok).toBe(true);
+    // Cache HIT on BOTH hops: one SA mint, one WIF exchange — the second
+    // resolution added zero egress.
+    expect(egressCount()).toBe(1);
+    expect(wifCount()).toBe(1);
   });
 });
 
@@ -788,7 +824,8 @@ describe("keycloak-broker — Entra WIF second egress after the Keycloak mint (T
     if (result.ok) throw new Error("expected WIF transient failure");
     expect(result.error.kind).toBe("infra-unreachable");
     if (result.error.kind === "infra-unreachable") {
-      expect(result.error.operation).toBe("entra-wif");
+      expect(result.error.operation).toBe("federation");
+      expect(result.error.hop).toBe("entra-wif");
       expect(result.error.message).toBe("Entra WIF exchange is not wired");
     }
 

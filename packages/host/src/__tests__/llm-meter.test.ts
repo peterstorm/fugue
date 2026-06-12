@@ -68,6 +68,68 @@ describe("llm-meter: accumulate + usageFor", () => {
   });
 });
 
+describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () => {
+  it("treats a NaN delta component as 0 — cumulative stays finite (10, not NaN)", () => {
+    let m = emptyMeter();
+    m = accumulate(m, runA, { tokensIn: Number.NaN, tokensOut: 10 });
+    const u = usageFor(m, runA);
+    expect(u).toEqual({ tokensIn: 0, tokensOut: 10 });
+    expect(runTotal(u)).toBe(10);
+    expect(Number.isFinite(runTotal(u))).toBe(true);
+  });
+
+  it("treats an Infinity delta component as 0 — no never-refusing poisoned cumulative", () => {
+    let m = emptyMeter();
+    m = accumulate(m, runA, { tokensIn: Number.POSITIVE_INFINITY, tokensOut: 5 });
+    m = accumulate(m, runA, { tokensIn: 5, tokensOut: Number.NEGATIVE_INFINITY });
+    const u = usageFor(m, runA);
+    expect(u).toEqual({ tokensIn: 5, tokensOut: 5 });
+    expect(runTotal(u)).toBe(10);
+  });
+
+  it("cumulative can never go non-finite through accumulate, for any delta sequence (property)", () => {
+    const weirdNumber = fc.oneof(
+      fc.integer({ min: -10_000, max: 10_000 }),
+      fc.constant(Number.NaN),
+      fc.constant(Number.POSITIVE_INFINITY),
+      fc.constant(Number.NEGATIVE_INFINITY),
+    );
+    fc.assert(
+      fc.property(
+        fc.array(fc.record({ tokensIn: weirdNumber, tokensOut: weirdNumber }), { maxLength: 50 }),
+        (deltas) => {
+          let m: LlmMeter = emptyMeter();
+          for (const d of deltas) {
+            m = accumulate(m, runA, d);
+            const total = runTotal(usageFor(m, runA));
+            expect(Number.isFinite(total)).toBe(true);
+            expect(total).toBeGreaterThanOrEqual(0);
+          }
+        },
+      ),
+    );
+  });
+
+  it("budgetDecision FAILS CLOSED on a non-finite cumulative (defense in depth): a hand-built poisoned meter REFUSES, never `NaN >= budget` → allow", () => {
+    // `accumulate` sanitizes its inputs, so a poisoned meter is only reachable by
+    // hand-building one — exactly the defense-in-depth scenario the refusal guards.
+    for (const poison of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const poisoned: LlmMeter = {
+        usageByRun: new Map([[runA, { tokensIn: poison, tokensOut: 0 }]]),
+      };
+      const d = budgetDecision(poisoned, runA, 1000);
+      expect(d.kind).toBe("refuse"); // fail closed, not fail open forever
+      if (d.kind === "refuse") expect(d.budget).toBe(1000);
+    }
+    // An ABSENT budget still allows (FR-W1-006 outranks the guard — no budget,
+    // no enforcement, even on a poisoned meter).
+    const poisoned: LlmMeter = {
+      usageByRun: new Map([[runA, { tokensIn: Number.NaN, tokensOut: 0 }]]),
+    };
+    expect(budgetDecision(poisoned, runA, undefined).kind).toBe("allow");
+  });
+});
+
 describe("llm-meter: budgetDecision", () => {
   it("allows every call when budget is undefined (FR-W1-006)", () => {
     let m = emptyMeter();

@@ -16,7 +16,11 @@ import type {
   Capability,
   ValidatedNodeContext,
 } from "../types/node.js";
-import { brandAsValidatedNodeContext, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
+import {
+  brandAsValidatedNodeContext,
+  BUILTIN_CAPABILITY_KEYS,
+  RESERVED_NON_CAPABILITY_KEYS,
+} from "../types/node.js";
 import type { FrameworkError, MissingCapability } from "../types/errors.js";
 import type { CapabilityBroker } from "../types/capability-broker.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -65,6 +69,7 @@ export const validateCapabilities = (
   // rather than the capability client. Treat such a requirement as missing —
   // fail closed rather than pass validation on a mistyped value.
   const reservedNonCapabilityKeys: ReadonlySet<string> = new Set(RESERVED_NON_CAPABILITY_KEYS);
+  const builtinCapabilityKeys: ReadonlySet<string> = new Set(BUILTIN_CAPABILITY_KEYS);
   for (const node of dag.nodes) {
     for (const cap of node.requires) {
       // A capability the broker mints per-invocation is satisfied at dispatch,
@@ -75,7 +80,29 @@ export const validateCapabilities = (
         missing.push({ nodeId: node.id, capability: cap });
         continue;
       }
-      if (broker?.provides?.(cap)) continue;
+      if (broker?.provides?.(cap)) {
+        // SEAM CONTRACT with `mergeScopedCapabilities`: every capability this
+        // skip exempts MUST survive the dispatch-time merge, or validation
+        // passes for a handle the node never receives. The merge refuses to
+        // overlay BUILT-IN capability keys (`llm`/`http`/…, part of its
+        // RESERVED_CONTEXT_KEYS clobber guard), so a broker claiming one is a
+        // WIRING ERROR today — its minted handle would be silently dropped and
+        // the node would run against the static client while the system
+        // believes the broker governs it (a silent authority widening). Fail
+        // the run loudly instead. When broker-minted built-ins land
+        // (FR-W2-009), the merge's guard must change in the same commit as
+        // this one.
+        if (builtinCapabilityKeys.has(cap)) {
+          return err({
+            kind: "validation" as const,
+            nodeId: node.id,
+            message:
+              `broker claims provides("${cap}") but "${cap}" is a built-in capability key the ` +
+              `dispatch-time merge never overlays — wire it statically or extend the merge first`,
+          });
+        }
+        continue;
+      }
       if (dynamicCtx[cap] == null) {
         missing.push({ nodeId: node.id, capability: cap });
       }

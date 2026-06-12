@@ -82,13 +82,13 @@ into the FIC.
 
 4. **Exchange** the assertion (same `curl` as Spike 1, step 4). A **200 with an
    app-only Graph token** proves all three matched; a **400/401**
-   (`AADSTS700213` "No matching federated identity record found for presented
+   (`AADSTS70021` "No matching federated identity record found for presented
    assertion …", or `AADSTS700024`/`AADSTS50027` for audience/format issues)
    pinpoints which field diverged.
 
 5. **Negative control — prove case-sensitivity bites.** Edit the FIC `subject`
    to flip one character's case (`service-account-Agent-alpha`), re-exchange,
-   and confirm it now **fails** with `AADSTS700213`. This proves the match is
+   and confirm it now **fails** with `AADSTS70021`. This proves the match is
    genuinely case-sensitive and the PASS in step 4 was not coincidental.
 
 6. **Reproducibility — prove predictability.** Delete and recreate `agent-alpha`
@@ -143,4 +143,4 @@ necessary but not sufficient to call this PASS.
 - [Entra federated identity credential — subject/issuer/audience match](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust)
   (case-sensitive exact match semantics)
 - [client credentials with a federated credential](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#third-case-access-token-request-with-a-federated-credential)
-  (`AADSTS700213` no-matching-FIC error)
+  (`AADSTS70021` no-matching-FIC error)

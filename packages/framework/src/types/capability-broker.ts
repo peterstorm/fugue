@@ -105,8 +105,13 @@ export interface Invocation {
  * @satisfies FR-W2-009 — the LLM handle is expressible as the first
  *   invocation-scoped capability over this same `mintFor` seam (no OIDC
  *   required): `"llm"` is a `Capability`, so a future broker can resolve it here
- *   without any change to this port. (Not migrated in this wave — the
- *   metered-llm wiring stays.)
+ *   without any change to THIS PORT. (Not migrated in this wave — the
+ *   metered-llm wiring stays.) NOTE the RUNTIME is not yet ready for that
+ *   future: `mergeScopedCapabilities` deliberately refuses to overlay built-in
+ *   capability keys (`llm`/`http`/…), and `validateCapabilities` therefore
+ *   REJECTS a broker claiming `provides()` for one as a wiring error. Migrating
+ *   a built-in onto this seam means lifting both guards in the same commit —
+ *   the port itself needs no change.
  */
 export interface CapabilityBroker {
   mintFor(

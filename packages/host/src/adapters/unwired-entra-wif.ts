@@ -22,14 +22,15 @@ import type { GraphHttp } from "./graph-capability.js";
 
 /**
  * Build the unwired WIF exchange. The single `exchange` method returns
- * `infra-unreachable` tagged with the `entra-wif` operation, so the audit trail
+ * `infra-unreachable` tagged with the `entra-wif` hop, so the audit trail
  * pinpoints the unwired hop.
  */
 export const createUnwiredEntraWifExchange = (): EntraWifExchange => ({
   exchange: async () =>
     err({
       kind: "infra-unreachable",
-      operation: "entra-wif",
+      operation: "federation",
+      hop: "entra-wif",
       message: "Entra WIF exchange is not wired (awaiting live fugue-agents federated credential)",
     }),
 });

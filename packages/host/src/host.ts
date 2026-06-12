@@ -101,7 +101,7 @@ export interface HostInstance {
  * The token endpoint is the unwired fail-closed default in this wave (the real
  * JWKS/HTTP adapter is a later wave): an assigned-but-not-yet-wired scope
  * surfaces `infra-unreachable` (retriable), never a silent success — mirroring
- * how `verifyRealmJwt` is left undefined so the JWT inbound path fails closed.
+ * how the `realmJwt` group is left undefined so the JWT inbound path fails closed.
  */
 export const selectCapabilityBroker = (
   config: HostConfig,
@@ -109,7 +109,20 @@ export const selectCapabilityBroker = (
   logger: SyncLogger,
   now: () => number = Date.now,
 ): CapabilityBroker | undefined => {
-  if (config.REALM_JWT_ISSUER === undefined) return undefined;
+  if (config.REALM_JWT_ISSUER === undefined) {
+    // Operability (mirror of the empty-policy warning below): a scope POLICY is
+    // configured but no broker is enabled, so the policy is silently inert —
+    // every `requires` resolves against the static base context, unguarded by
+    // the per-node gate the operator evidently intended. Surface it once.
+    // Defensive `?? {}`: hand-built test configs may bypass the zod default.
+    if (Object.keys(config.AGENT_CLIENT_SCOPES ?? {}).length > 0) {
+      logger.warn(
+        "AGENT_CLIENT_SCOPES is configured but REALM_JWT_ISSUER is unset — no capability broker " +
+          "is wired, so the scope policy is inert (set REALM_JWT_ISSUER to enable the broker)",
+      );
+    }
+    return undefined;
+  }
 
   // Operability: an empty scope policy means every mint fails closed (safe but
   // surprising). Surface it once at boot so a misconfigured realm policy is
@@ -279,14 +292,20 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     },
     adminToken: config.ADMIN_TOKEN,
     tokenStore,
-    // fugue-platform OIDC (`user`) inbound path (FR-W3-006/007). The iss/aud
-    // policy is wired from config; the JWKS-backed signature verifier
-    // (`verifyRealmJwt`) is NOT wired here — T8 selected the broker but left the
-    // inbound verifier for a later wave (it is still absent from routerDeps).
-    // Until a verifier is wired, a JWT-shaped token fails closed (no signature
-    // can be verified → 401).
-    expectedIss: config.REALM_JWT_ISSUER,
-    expectedAud: config.REALM_JWT_AUDIENCE,
+    // fugue-platform OIDC (`user`) inbound path (FR-W3-006/007). The JWT path
+    // is wired as ONE grouped `realmJwt` dep (verifier + iss/aud policy,
+    // inseparable) — deliberately ABSENT here: T8 selected the broker but left
+    // the JWKS-backed verifier for a later wave, so a JWT-shaped token fails
+    // closed (no signature can be verified → 401). The iss/aud policy values
+    // live in config (`REALM_JWT_ISSUER`/`REALM_JWT_AUDIENCE`) ready for that
+    // wave.
+    //
+    // SECURITY — read BEFORE wiring a verifier here: `canAccessDag`
+    // (domain/auth.ts) currently clears EVERY authenticated realm user to run
+    // ANY team's DAG (threading-only delivery). Wiring `realmJwt` activates
+    // that latent grant. Do not wire a verifier without first tightening that
+    // predicate (realm/role check or a config gate on user-run acceptance) —
+    // the mirror of this note sits on the predicate itself.
     adminHandlerDeps: {
       tokenStore,
       clock: Date.now,

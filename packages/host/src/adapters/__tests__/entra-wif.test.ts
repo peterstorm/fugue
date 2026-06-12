@@ -104,6 +104,56 @@ describe("entra-wif — request shape pins the WIF assertion (SC-011/FR-W4-004)"
   });
 });
 
+// ── Construction-time tenant validation (URL-injection defense) ──────────────
+
+describe("entra-wif — tenantId is validated ONCE at construction, never per-exchange", () => {
+  it("wifTokenEndpoint THROWS on a path-traversal tenantId — a hostile value can never be interpolated into the token URL", () => {
+    expect(() => wifTokenEndpoint({ tenantId: "x/../evil", clientId: "c" })).toThrow(/invalid tenantId/);
+  });
+
+  it.each([
+    ["a path separator", "tenant/extra"],
+    ["a query string", "tenant?x=1"],
+    ["a fragment", "tenant#frag"],
+    ["an empty string", ""],
+    ["whitespace", "tenant id"],
+  ])("wifTokenEndpoint rejects %s", (_label, tenantId) => {
+    expect(() => wifTokenEndpoint({ tenantId, clientId: "c" })).toThrow(/invalid tenantId/);
+  });
+
+  it.each([
+    ["a GUID", "0f8fad5b-d9cb-469f-a165-70867728950e"],
+    ["a verified domain", "contoso.onmicrosoft.com"],
+    ["a well-known alias", "organizations"],
+  ])("wifTokenEndpoint accepts %s and builds the v2.0 endpoint", (_label, tenantId) => {
+    expect(wifTokenEndpoint({ tenantId, clientId: "c" })).toBe(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    );
+  });
+
+  it("createEntraWifExchange THROWS AT CONSTRUCTION on an invalid tenantId — a boot-wiring defect fails the boot loudly, not per-exchange as a retriable infra-unreachable", () => {
+    const { http, calls } = recordingHttp({ status: 200, json: {} });
+    expect(() =>
+      createEntraWifExchange({ tenantId: "x/../evil", clientId: "c" }, http),
+    ).toThrow(/invalid tenantId/);
+    // Nothing was ever posted — the defect never reached the transport.
+    expect(calls.length).toBe(0);
+  });
+
+  it("a valid tenantId constructs fine and `exchange` works (Result channel, never a throw)", async () => {
+    const { http, calls } = recordingHttp({ status: 200, json: { access_token: "app-only", expires_in: 3600 } });
+    const exchange = createEntraWifExchange({ tenantId: "contoso.onmicrosoft.com", clientId: "fugue-agents" }, http);
+
+    const r = await exchange.exchange(req());
+
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("expected ok");
+    expect(r.value.accessToken).toBe("app-only");
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.url).toBe("https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token");
+  });
+});
+
 // ── Success mapping ──────────────────────────────────────────────────────────
 
 describe("entra-wif — success maps to an app-only token", () => {
@@ -193,7 +243,8 @@ describe("entra-wif — transient reach failures are infra-unreachable (distinct
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
     if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("entra-wif");
+      expect(r.error.operation).toBe("federation");
+      expect(r.error.hop).toBe("entra-wif");
       expect(r.error.message).toContain("socket hang up");
     }
   });

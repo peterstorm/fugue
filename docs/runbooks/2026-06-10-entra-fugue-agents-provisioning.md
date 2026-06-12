@@ -32,7 +32,7 @@ token/log evidence) before the gated step is executed against a real tenant.
 | Spike | File | Gates | Required outcome |
 |---|---|---|---|
 | #1 — FIC sign-in attribution | [`spike-1`](../spikes/2026-06-10-spike-1-fic-signin-attribution.md) | Step 3 (variant A choice), Step 6 (attribution check) | PASS — sign-in log names the matched FIC (`federatedCredentialId`) |
-| #2 — sub-claim × FIC matching | [`spike-2`](../spikes/2026-06-10-spike-2-subclaim-fic-matching.md) | Step 3 (FIC subject/issuer/aud exact match + case-sensitivity negative control) | PASS — minted `sub` matches FIC verbatim; case-flip fails with `AADSTS700213` |
+| #2 — sub-claim × FIC matching | [`spike-2`](../spikes/2026-06-10-spike-2-subclaim-fic-matching.md) | Step 3 (FIC subject/issuer/aud exact match + case-sensitivity negative control) | PASS — minted `sub` matches FIC verbatim; case-flip fails with `AADSTS70021` |
 | #3 — resource-scoping coverage | [`spike-3`](../spikes/2026-06-10-spike-3-resource-scoping-coverage.md) | Step 4 (`Sites.Selected` + Exchange app access policy coverage AND denial) | PASS — in-scope site/mailbox granted, out-of-scope denied |
 | #4 — identity-chaining e2e | [`spike-4`](../spikes/2026-06-10-spike-4-identity-chaining-e2e.md) | the user-initiated chain feeding the WIF assertion (H1–H4) | PASS / PARTIAL (Keycloak segment) — chain composes, `aud: api://AzureADTokenExchange` pinned |
 
@@ -191,7 +191,7 @@ read-then-pin the `sub` after the Keycloak client is created.
 - [ ] **Negative (case-sensitivity) check — mandatory:** temporarily flip one
   character's case in a FIC `subject` (e.g.
   `service-account-fugue-agent-Mail`), re-exchange, and confirm it now **fails**
-  with **`AADSTS700213`** ("No matching federated identity record found"). Revert
+  with **`AADSTS70021`** ("No matching federated identity record found"). Revert
   the FIC. This proves the match is genuinely case-sensitive and the positive
   pass above was not coincidental (spike #2 step 5).
 
@@ -330,7 +330,7 @@ Before declaring `fugue-agents` provisioned, confirm all of:
   `Sites.Selected`, Dynamics read), admin-consented once. No per-agent app.
 - [ ] **Step 3:** exactly two FICs (variant A), each matching issuer/subject/
   audience byte-for-byte; positive exchange returns app-only tokens; the
-  case-mismatch negative check fails with `AADSTS700213`.
+  case-mismatch negative check fails with `AADSTS70021`.
 - [ ] **Step 4:** in-scope site/mailbox act successfully; out-of-scope site
   (403 `accessDenied`) and control mailbox (403 `ErrorAccessDenied`) are denied.
 - [ ] **Step 5:** zero secrets, zero certificates — WIF is the only credential.

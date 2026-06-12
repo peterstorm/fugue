@@ -370,6 +370,68 @@ const delayedInner = (tokensIn: number, tokensOut: number, delayMs: number) => {
   return { inner, calls };
 };
 
+describe("metered-llm: budget-refusal error reports SETTLED cumulative only (errors.ts contract)", () => {
+  it("a sequential refusal's `cumulative` equals the settled total from the llm.metered log, and `budget` is the configured budget", async () => {
+    // budget 200; each call costs 150. Call 1 settles at 150; call 2 is the
+    // single overshoot settling at 300; call 3 is refused. The error's
+    // `cumulative` must reconcile EXACTLY against the last `llm.metered` line.
+    const { inner } = fakeInner(100, 50);
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, budget: 200, logger });
+
+    await metered.sendStructured(structuredReq(nodeA));
+    await metered.sendStructured(structuredReq(nodeA));
+    const refused = await metered.sendStructured(structuredReq(nodeA));
+
+    const settledCumulatives = logs
+      .filter((l) => l.msg === "llm.metered")
+      .map((l) => l.data?.cumulative);
+    expect(settledCumulatives).toEqual([150, 300]);
+
+    expect(refused.ok).toBe(false);
+    if (!refused.ok && refused.error.kind === "llm-budget-exceeded") {
+      expect(refused.error.cumulative).toBe(300); // the SETTLED total — reconciles with the log
+      expect(refused.error.budget).toBe(200); // the configured budget, from the refuse branch
+    } else {
+      throw new Error("expected llm-budget-exceeded");
+    }
+  });
+
+  it("a RESERVATION-triggered refusal still reports settled-only cumulative — the in-flight reservation never leaks into the error figure", async () => {
+    // budget 250, each call 100 tokens, calls take a tick to settle. Warm-up
+    // settles 100 and teaches the reservation estimate. A burst of 5 then admits
+    // 2 (cumulative 100 + reserved 0/100 < 250) and refuses 3 with the settled
+    // cumulative still 100 — NOT 100 + the 200 reserved in flight. Reporting
+    // settled + reservation here would make `cumulative` irreconcilable against
+    // the `llm.metered` totals (the errors.ts contract).
+    const { inner } = delayedInner(100, 0, 10);
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, budget: 250, logger });
+
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // settled 100
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => metered.sendStructured(structuredReq(nodeA))),
+    );
+    const refusals = results.filter((r) => !r.ok);
+    expect(refusals.length).toBe(3);
+    for (const r of refusals) {
+      if (r.ok) continue;
+      expect(r.error.kind).toBe("llm-budget-exceeded");
+      if (r.error.kind === "llm-budget-exceeded") {
+        // Settled at refusal time was exactly the warm-up call: 100. The 200
+        // reserved by the two admitted-but-unsettled calls is excluded.
+        expect(r.error.cumulative).toBe(100);
+        expect(r.error.budget).toBe(250);
+      }
+    }
+    // The reservation IS reported — but in the warn log, never the error figure.
+    const warn = logs.find((l) => l.level === "warn" && l.msg.includes("budget exceeded"));
+    expect(warn?.data?.cumulative).toBe(100);
+    expect(warn?.data?.reservedInFlight).toBe(200);
+  });
+});
+
 describe("metered-llm: concurrency reservation bounds overshoot (I1/SC-003)", () => {
   it("a parallel burst does NOT all pass a stale pre-settle cumulative — admissions are bounded by the in-flight reservation", async () => {
     // budget 250, each call 100 tokens. After one settled call the per-call
