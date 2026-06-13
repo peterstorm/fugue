@@ -16,6 +16,36 @@ export const zodToJsonSchema = (schema: z.ZodType<any>): Record<string, unknown>
 };
 
 /**
+ * Top-level property names of a Zod **object** schema, or `null` when the schema
+ * isn't an introspectable object — `z.unknown()`, a union, an effect, a value
+ * that isn't a Zod schema at all, or one `zodToJsonSchema` can't render. Callers
+ * treat `null` as "can't verify the keys" and skip key-equality checks rather
+ * than risk a false positive (an introspection failure and a deliberately
+ * non-object schema are indistinguishable here, and both mean "no keys to
+ * compare"). Centralised so the fan-in lint check and `defineSources` share one
+ * introspection path instead of two copies that could drift.
+ */
+export const objectSchemaKeys = (schema: unknown): readonly string[] | null => {
+  if (
+    schema === null ||
+    typeof schema !== "object" ||
+    typeof (schema as { parse?: unknown }).parse !== "function"
+  ) {
+    return null;
+  }
+  let json: Record<string, unknown>;
+  try {
+    json = zodToJsonSchema(schema as z.ZodType<unknown>);
+  } catch {
+    return null;
+  }
+  if (json.type !== "object") return null;
+  const props = json.properties;
+  if (props === null || typeof props !== "object") return null;
+  return Object.keys(props as Record<string, unknown>);
+};
+
+/**
  * Pure recursive transform: adds `additionalProperties: false` to all
  * object-type schemas. Required by Azure OpenAI structured output (strict
  * mode). Returns a new object — the input is never mutated.

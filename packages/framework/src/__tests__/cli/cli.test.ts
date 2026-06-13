@@ -74,6 +74,33 @@ describe("runLint", () => {
       expect(result.errors[0]!.kind).toBe("import-failed");
     }
   });
+
+  it("propagates a B1 fan-in-key-mismatch from the analyzer (ok: false)", async () => {
+    // The DAG imports/defineDag-validates fine; the structural analyzer must
+    // surface the key mismatch and flip the lint result to ok: false.
+    const result = await runLint(fixturePath("manual-fan-in-mismatch.ts"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const e = result.errors.find((x) => x.kind === "fan-in-key-mismatch");
+      expect(e).toBeDefined();
+      if (e && e.kind === "fan-in-key-mismatch") {
+        expect(e.nodeId).toBe("join");
+        expect(e.missingKeys).toContain("right");
+        expect(e.extraKeys).toContain("WRONG");
+      }
+    }
+  });
+
+  it("propagates a B3 shape-helper-hint advisory alongside ok: true", async () => {
+    const result = await runLint(fixturePath("manual-linear-advisory.ts"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const hints = (result.advisories ?? []).flatMap((a) =>
+        a.kind === "shape-helper-hint" ? [a.helper] : [],
+      );
+      expect(hints).toContain("defineLinearDag");
+    }
+  });
 });
 
 describe("runDescribe", () => {

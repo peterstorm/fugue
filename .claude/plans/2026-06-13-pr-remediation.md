@@ -62,19 +62,35 @@
 - packages/framework/src/executor/define-sources.ts:1-2 — unverifiable cross-repo
   claim prone to rot. Describe the shape without naming the external repo.
 
-## Deferred (larger design changes — out of scope for minimal remediation)
+## Deferred — second pass (2026-06-13, follow-up commit)
 
-- `isSource?: boolean` → discriminated node variant (type-design). Backstopped by
-  runtime `validateDagShape`; requires NodeDef redesign + broad test impact.
-- `NodeDef<any,any,any>` variance leak on join/assemble → generic over source-id
-  map (type-design + architecture). Needs type-level design work.
-- Extract shared `objectSchemaKeys` helper + definition-time fan-in validation in
-  `defineSources` (architecture issue 1+2). Enhancement, not a bug; deferred to
-  keep this commit focused on correctness/doc fixes.
-- `provenance` unvalidated public field; `*Unchecked` brand fence. Justified by
-  docs; low impact.
-- Test-coverage gaps (runLint integration, defineFanOut B3 hint, declaresInputKey
-  guards, topoSort unknown-target). Additive; follow-up.
+Fixed the deferred items worth fixing:
+
+- **DONE** Extract shared `objectSchemaKeys` → `llm/zod-schema.ts`; both
+  `defineSources.declaresInputKey` and the lint B1 check now share one
+  introspection path (architecture issue 2 — dedup).
+- **DONE** Definition-time fan-in key validation in `defineSources` via a new
+  pure `executor/fan-in-keys.ts` (`fanInKeyCheck`/`describeFanInKeyMismatch`),
+  shared with cli lint (cli imports *down* into core — no core→cli inversion).
+  The constructor now rejects a key/source mismatch instead of deferring to
+  `fugue lint` (architecture issue 1 — strongest improvement).
+- **DONE** Tests: `define-sources-fan-in.test.ts` (definition-time validation),
+  `defineFanOut` B3 shape-helper-hint positive test, `runLint` integration tests
+  (B1 error → `ok:false`, B3 advisory → `ok:true` with advisories) + two new CLI
+  fixtures.
+
+Remaining deferred (genuinely not worth the risk/scope):
+
+- `isSource?: boolean` → discriminated node variant. Core `NodeDef` redesign,
+  broad blast radius, fully backstopped by runtime `validateDagShape` + the
+  `createSourceNode` factory; the definition-time fan-in check above closes the
+  practical safety gap.
+- `NodeDef<any,any,any>` → generic over the source-id→output map. A type-level
+  research project with uncertain inference; runtime validation covers the risk.
+- `provenance` unvalidated public field; `*Unchecked` brand fence. Low impact,
+  doc-justified.
+- `topoSort` "$input edge to unknown target" defensive branch test — unreachable
+  through validated DAGs; very low value.
 
 ## Validation Commands
 ```bash

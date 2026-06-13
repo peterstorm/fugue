@@ -139,6 +139,27 @@ describe("B3 — shape-helper-hint", () => {
     ).toEqual(["defineDiamond"]);
   });
 
+  it("suggests defineFanOut for a manual fan-out with no join", () => {
+    const dag = defineDag({
+      id: "manual-fan-out",
+      nodes: {
+        src: n("src", z.unknown(), A),
+        b1: n("b1", A, A),
+        b2: n("b2", A, A),
+      },
+      edges: [
+        { from: DAG_INPUT, to: "src" },
+        { from: "src", to: "b1" },
+        { from: "src", to: "b2" },
+      ],
+      outputNodeId: "b1",
+    });
+    const { advisories } = analyzeDag(dag);
+    expect(
+      advisories.flatMap((a) => (a.kind === "shape-helper-hint" ? [a.helper] : [])),
+    ).toEqual(["defineFanOut"]);
+  });
+
   it("stays silent on a DAG already built with a helper (provenance)", () => {
     const dag = defineLinearDag({
       id: "helper-chain",

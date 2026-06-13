@@ -24,7 +24,8 @@ import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId, DAG_INPUT } from "../types/ids.js";
-import { zodToJsonSchema } from "../llm/zod-schema.js";
+import { objectSchemaKeys } from "../llm/zod-schema.js";
+import { fanInKeyCheck, describeFanInKeyMismatch } from "./fan-in-keys.js";
 import type { NonEmptyNodeList } from "./define-fan-out.js";
 
 export interface SourcesDagConfig {
@@ -47,26 +48,34 @@ export interface SourcesDagConfig {
  * property — the signal that the node wants the DAG request as a fan-in slot.
  * Non-object schemas (`z.unknown()`, unions, …) return `false`: a node that
  * consumes the request as its *sole* input belongs in a single-edge shape
- * helper, not as a `defineSources` fan-in.
+ * helper, not as a `defineSources` fan-in. Shares `objectSchemaKeys` with the
+ * `fugue lint` B1 check so the two never drift.
  */
-const declaresInputKey = (schema: unknown): boolean => {
-  if (
-    schema === null ||
-    typeof schema !== "object" ||
-    typeof (schema as { parse?: unknown }).parse !== "function"
-  ) {
-    return false;
-  }
-  let json: Record<string, unknown>;
-  try {
-    json = zodToJsonSchema(schema as Parameters<typeof zodToJsonSchema>[0]);
-  } catch {
-    return false;
-  }
-  if (json.type !== "object") return false;
-  const props = json.properties;
-  if (props === null || typeof props !== "object") return false;
-  return Object.prototype.hasOwnProperty.call(props, DAG_INPUT as string);
+const declaresInputKey = (schema: unknown): boolean =>
+  objectSchemaKeys(schema)?.includes(DAG_INPUT as string) ?? false;
+
+/**
+ * Reject a fan-in node whose object-schema keys don't equal the set of ids
+ * feeding it — at definition time, not deferred to `fugue lint`. The runtime
+ * builds a keyed object only for ≥2 incoming sources, so single-source nodes are
+ * skipped (their input is the bare upstream value, no keys to match). A schema
+ * the framework can't introspect (`unverifiable`) is left for the runtime Zod
+ * parse rather than rejected here.
+ */
+const assertFanInKeys = (
+  dagId: string,
+  fanInId: string,
+  schema: unknown,
+  incomingIds: readonly string[],
+): void => {
+  if (incomingIds.length < 2) return;
+  const check = fanInKeyCheck(schema, incomingIds);
+  if (check.kind !== "mismatch") return;
+  throw new DagDefinitionError(dagId, {
+    kind: "validation",
+    nodeId: nodeId(fanInId),
+    message: describeFanInKeyMismatch(fanInId, incomingIds, check),
+  });
 };
 
 /**
@@ -110,6 +119,7 @@ export const defineSources = (config: SourcesDagConfig): DagDef => {
   }
 
   const joinId = config.join.id as string;
+  const sourceIds = config.sources.map((s) => s.id as string);
 
   // source → join
   const sourceEdges = config.sources.map((s) => ({
@@ -124,12 +134,30 @@ export const defineSources = (config: SourcesDagConfig): DagDef => {
     : [];
 
   // $input → {join, assemble} when (and only when) that node declares "$input".
+  const joinWantsInput = declaresInputKey(config.join.inputSchema);
+  const assembleWantsInput =
+    assembleNode !== undefined && declaresInputKey(assembleNode.inputSchema);
   const requestEdges: { from: string; to: string }[] = [];
-  if (declaresInputKey(config.join.inputSchema)) {
+  if (joinWantsInput) {
     requestEdges.push({ from: DAG_INPUT as string, to: joinId });
   }
-  if (assembleNode && declaresInputKey(assembleNode.inputSchema)) {
+  if (assembleNode && assembleWantsInput) {
     requestEdges.push({ from: DAG_INPUT as string, to: assembleNode.id as string });
+  }
+
+  // Definition-time fan-in key validation. The join receives an object keyed by
+  // its incoming ids (source ids, plus "$input" when the request edge is wired);
+  // assemble receives the join (plus "$input" when wired). Catch a key/source
+  // mismatch here instead of leaving it for `fugue lint` or a runtime parse.
+  assertFanInKeys(config.id, joinId, config.join.inputSchema, [
+    ...sourceIds,
+    ...(joinWantsInput ? [DAG_INPUT as string] : []),
+  ]);
+  if (assembleNode) {
+    assertFanInKeys(config.id, assembleNode.id as string, assembleNode.inputSchema, [
+      joinId,
+      ...(assembleWantsInput ? [DAG_INPUT as string] : []),
+    ]);
   }
 
   const nodes = assembleNode
