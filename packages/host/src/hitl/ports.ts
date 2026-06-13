@@ -1,0 +1,124 @@
+/**
+ * HITL ports (ADR-0060) — the boundary contracts the durable-requeue run engine
+ * is built against. Every port returns `Result<T, HostError>` so failure is
+ * explicit at the type level; each has a Redis/BullMQ production adapter and an
+ * in-memory fake for tests. Keeping the engine port-driven is what lets the
+ * full park → notify → approve → resume → complete loop be unit-tested with no
+ * Redis, no BullMQ, and no real Teams.
+ */
+
+import type {
+  DagId,
+  RunId,
+  NodeId,
+  HumanAction,
+  HumanReviewOutcome,
+  FrameworkError,
+  JobLike,
+  DagPhase,
+  DagMachineContextPersisted,
+} from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import type { HostError } from "../domain/host-error.js";
+import type { AuthIdentity } from "../domain/auth.js";
+import type { RunRecord, RunStatus } from "./types.js";
+
+/**
+ * Durable persistence for runs. `checkpoint` is updated on every state-machine
+ * transition (via the run-store-backed `JobLike`), so a worker crash resumes
+ * from the last persisted state.
+ */
+export interface RunStorePort {
+  /** Create a fresh run record. Errs if the run id already exists. */
+  create(record: RunRecord): Promise<Result<void, HostError>>;
+  /** Fetch a run, or `ok(null)` if unknown. */
+  get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
+  /** Persist the serialized `{state, context}` checkpoint (per-transition). */
+  saveCheckpoint(runId: RunId, checkpoint: string): Promise<Result<void, HostError>>;
+  /** Update the run's lifecycle status. */
+  setStatus(runId: RunId, status: RunStatus): Promise<Result<void, HostError>>;
+}
+
+/**
+ * The wake-up trigger. `enqueue` schedules a worker to (re)process a run; it is
+ * idempotent on `runId` within a short window so a double-approval doesn't run
+ * the same parked run twice concurrently. The durable state lives in the
+ * `RunStorePort`, NOT in the queue payload — the queue only carries the id.
+ */
+export interface RunQueuePort {
+  enqueue(runId: RunId): Promise<Result<void, HostError>>;
+}
+
+/**
+ * Delivers a "please review" notification when a run parks at a human gate. The
+ * Teams adapters (webhook smoke-test transport, then Bot Framework cards)
+ * implement this; the engine never imports a concrete transport.
+ */
+export interface HumanReviewNotifierPort {
+  notify(notification: import("./types.js").ReviewNotification): Promise<Result<void, HostError>>;
+}
+
+/**
+ * Records and resolves the human's decision for a parked review, keyed by
+ * `(runId, nodeId)`. The `onHumanReview` hook reads it on each (re)dispatch:
+ * a decision present resolves the gate; its absence parks the run. `markPending`
+ * returns `true` only on the FIRST park for a gate, so a resume-then-re-park
+ * loop never re-sends the notification.
+ */
+export interface DecisionStorePort {
+  /** Mark a gate as pending review. Returns `true` if newly created (dedups notifications). */
+  markPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
+  /** Record the human's decision for a parked gate. */
+  putDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
+  /** Fetch a recorded decision, or `ok(null)` if none yet. */
+  getDecision(runId: RunId, nodeId: NodeId): Promise<Result<HumanAction | null, HostError>>;
+  /** Remove the pending marker and any decision for a gate (after it resolves). */
+  clear(runId: RunId, nodeId: NodeId): Promise<Result<void, HostError>>;
+}
+
+/**
+ * The outcome of executing (or resuming) a run: a settled result the service
+ * folds into a `RunStatus`. `failed` carries the framework error so a status
+ * poll surfaces the real cause; a transient infra failure to even start
+ * executing is the `err` channel of the enclosing `Result`.
+ */
+export type RunExecOutcome =
+  | { readonly kind: "completed"; readonly output: unknown }
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string }
+  | { readonly kind: "failed"; readonly error: FrameworkError };
+
+/** Inputs the executor needs to run/resume one run. */
+export interface RunExecutionRequest {
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly input: unknown;
+  readonly identity: AuthIdentity;
+  /** Run-store-backed durable job handle (carries + persists the checkpoint). */
+  readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
+  /** The host's review hook (decision-store + notifier closure). */
+  readonly onHumanReview: (req: {
+    nodeId: NodeId;
+    output: unknown;
+    prompt: string;
+  }) => Promise<HumanReviewOutcome>;
+}
+
+/**
+ * Bridges the HITL service to the framework runtime + host NodeContext. Kept a
+ * port so the service is testable against the REAL `runResumableDagJob` with a
+ * lightweight test context, while production wires `createNodeContextForDag` +
+ * the registry + the capability broker.
+ */
+export interface RunExecutorPort {
+  /**
+   * Compile a DAG and serialize its initial `{state, context}` envelope — the
+   * checkpoint a fresh run starts from. Errs if the DAG is unknown/invalid.
+   */
+  seedCheckpoint(dagId: DagId, input: unknown): Promise<Result<string, HostError>>;
+  /**
+   * Run or resume a DAG through the framework's resumable kernel. Never throws:
+   * a framework run-failure is mapped onto the `failed` outcome; only a host
+   * infra failure (unknown DAG, context build) uses the `err` channel.
+   */
+  run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>>;
+}

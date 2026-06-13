@@ -25,6 +25,17 @@ export type HumanAction =
   | { readonly kind: "reject"; readonly reason: string; readonly actor?: string }
   | { readonly kind: "reroute"; readonly targetNodeId: NodeId; readonly reason?: string; readonly actor?: string };
 
+/**
+ * What an `onHumanReview` hook returns (ADR-0060). Either a settled decision
+ * (`HumanAction`) that resolves the gate, or `{ kind: "pending" }` — "no
+ * decision yet, suspend this run". `pending` is deliberately NOT a `HumanAction`
+ * so the exhaustive resolution layer (`handleHumanResponse`) stays closed over
+ * genuine decisions; the suspend path is a separate, earlier branch. A hook
+ * returning `pending` is expected to have already recorded the pending review
+ * and emitted its notification (e.g. posted a Teams card) before returning.
+ */
+export type HumanReviewOutcome = HumanAction | { readonly kind: "pending" };
+
 // ---------------------------------------------------------------------------
 // DagPhase — state of the DAG machine
 // ---------------------------------------------------------------------------
@@ -34,6 +45,26 @@ export type DagPhase =
   | { readonly kind: "running"; readonly wave: number }
   | {
       readonly kind: "awaiting-human";
+      readonly nodeId: NodeId;
+      readonly output: unknown;
+      readonly prompt: string;
+      /** Remaining review queue: node ids to review after the current one (ascending order). */
+      readonly pendingReviews: readonly NodeId[];
+      /** Wave index we paused on. */
+      readonly wave: number;
+    }
+  | {
+      /**
+       * Durably-parked human gate (ADR-0060). Reached when the `onHumanReview`
+       * hook returns `{ kind: "pending" }` — no decision yet. Carries the
+       * IDENTICAL payload to `awaiting-human`: on resume the executor treats it
+       * exactly like `awaiting-human` (re-dispatches the hook), so a resumed run
+       * either proceeds (decision now present) or re-parks (still `pending`).
+       *
+       * NOT terminal and NOT failed — the kernel checkpoints it (durability) and
+       * `isHalted` breaks the run loop so the worker is freed while parked.
+       */
+      readonly kind: "suspended";
       readonly nodeId: NodeId;
       readonly output: unknown;
       readonly prompt: string;
@@ -137,6 +168,17 @@ export type DagEvent =
        * the executor from ever emitting a reroute event without it.
        */
       readonly rerouteActiveSet: ReadonlySet<NodeId>;
+    }
+  | {
+      /**
+       * The `onHumanReview` hook returned `{ kind: "pending" }` (ADR-0060): no
+       * decision yet, park the run. Drives `awaiting-human → suspended` (and
+       * `suspended → suspended` on a resume that re-parks). All payload the
+       * suspend needs is already in the current `awaiting-human`/`suspended`
+       * phase, so this event only carries the node id for the guard.
+       */
+      readonly type: "human-suspend";
+      readonly nodeId: NodeId;
     }
   | { readonly type: "abort"; readonly reason: string }
   | { readonly type: "executor-error"; readonly retriable: boolean; readonly error: string };

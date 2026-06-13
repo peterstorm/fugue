@@ -83,7 +83,7 @@ const validateApproveEdit = (
  * a sleep — that lives at the call site.
  */
 const callHumanReviewHook = async (
-  phaseKind: "awaiting-human" | "retrying-hook",
+  phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
   nodeId: NodeId,
   output: unknown,
   prompt: string,
@@ -92,7 +92,7 @@ const callHumanReviewHook = async (
       nodeId: NodeId;
       output: unknown;
       prompt: string;
-    }) => Promise<import("./types.js").HumanAction>;
+    }) => Promise<import("./types.js").HumanReviewOutcome>;
   } | undefined,
   nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
@@ -113,9 +113,9 @@ const callHumanReviewHook = async (
     } satisfies DagEvent;
   }
 
-  let action: import("./types.js").HumanAction;
+  let outcome: import("./types.js").HumanReviewOutcome;
   try {
-    action = await hooks.onHumanReview({ nodeId, output, prompt });
+    outcome = await hooks.onHumanReview({ nodeId, output, prompt });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;
@@ -137,6 +137,14 @@ const callHumanReviewHook = async (
       error: crash,
     } satisfies DagEvent;
   }
+
+  // ADR-0060: hook declined to decide → park the run. `human-suspend` drives
+  // `awaiting-human/suspended/retrying-hook → suspended` in the transition
+  // layer. No telemetry is emitted (no decision was made).
+  if (outcome.kind === "pending") {
+    return { type: "human-suspend", nodeId } satisfies DagEvent;
+  }
+  const action = outcome;
 
   // approve-with-edit goes through the live Zod schema here in the shell —
   // the pure transition can't validate (deserialized schemas are inert).
@@ -196,7 +204,7 @@ export const buildDagExecutor = (
       nodeId: NodeId;
       output: unknown;
       prompt: string;
-    }) => Promise<import("./types.js").HumanAction>;
+    }) => Promise<import("./types.js").HumanReviewOutcome>;
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
     recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
     /**
@@ -283,7 +291,7 @@ export const buildDagExecutor = (
   // ---------------------------------------------------------------------------
 
   const handleHumanGate = async (
-    phaseKind: "awaiting-human" | "retrying-hook",
+    phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
     nodeId: NodeId,
     output: unknown,
     prompt: string,
@@ -359,6 +367,15 @@ export const buildDagExecutor = (
       // -----------------------------------------------------------------------
       .with({ kind: "awaiting-human" }, (p) =>
         handleHumanGate("awaiting-human", p.nodeId, p.output, p.prompt, machineCtx))
+
+      // -----------------------------------------------------------------------
+      // suspended (ADR-0060): a resumed parked gate. Re-dispatch the hook — it
+      // either finds a decision now (→ human-responded → proceed) or returns
+      // `pending` again (→ human-suspend → re-park). Identical handling to
+      // awaiting-human; the kernel's `isHalted` break is what parked it.
+      // -----------------------------------------------------------------------
+      .with({ kind: "suspended" }, (p) =>
+        handleHumanGate("suspended", p.nodeId, p.output, p.prompt, machineCtx))
 
       // -----------------------------------------------------------------------
       // retrying-hook: sleep with jitter then re-call the onHumanReview hook.

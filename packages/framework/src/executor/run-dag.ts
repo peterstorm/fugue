@@ -15,14 +15,15 @@ import type { NodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
-import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "../dag-runtime/types.js";
+import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanReviewOutcome } from "../dag-runtime/types.js";
 import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
-import { type Result, err } from "../types/result.js";
+import type { NodeId } from "../types/ids.js";
+import { type Result, ok, err } from "../types/result.js";
 import { FrameworkAugmentedError } from "../types/errors.js";
-import { runDagStateful as runDagStatefulInternal, type BackgroundResult } from "../dag-runtime/run-dag-stateful.js";
+import { runDagStatefulOutcome as runDagStatefulInternal, type BackgroundResult, type StatefulOutcome } from "../dag-runtime/run-dag-stateful.js";
 import type { FreshnessIndex } from "../dag-runtime/freshness-check.js";
 
-export type { BackgroundResult } from "../dag-runtime/run-dag-stateful.js";
+export type { BackgroundResult, StatefulOutcome } from "../dag-runtime/run-dag-stateful.js";
 
 export interface RunOptions {
   /**
@@ -51,7 +52,7 @@ export interface RunOptions {
    *
    * @see ADR-0025 — HumanInterventionEvent telemetry design
    */
-  readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: string }) => Promise<HumanAction>;
+  readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: string }) => Promise<HumanReviewOutcome>;
   /**
    * Per-call retry limit overrides, merged with (and taking precedence over)
    * `DagDef.retryLimits`.
@@ -119,12 +120,19 @@ export interface RunOptions {
   readonly onTrace?: KernelRunOpts<DagPhase, DagEvent, DagMachineContext>["onTrace"];
 }
 
-export const runDag = async <I, O>(
+/**
+ * Shared pre-flight + kernel invocation, returning the full `StatefulOutcome`
+ * (completed | suspended) on the `ok` channel. Both the synchronous `runDag` and
+ * the resumable `runResumableDagJob` delegate here so the HITL contract and
+ * durability advisory live in one place; they differ only in how they surface a
+ * `suspended` outcome (ADR-0060).
+ */
+const runDagToOutcome = async <I, O>(
   dag: DagDef,
   input: I,
   ctx: NodeContext,
   opts?: RunOptions,
-): Promise<Result<O, FrameworkError>> => {
+): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
   const hitlNodes = dag.nodes.filter((n) => n.humanReview !== undefined);
   const dagDeclaresHITL = hitlNodes.length > 0;
 
@@ -169,6 +177,72 @@ export const runDag = async <I, O>(
     classifyError: opts?.classifyError,
     onTrace: opts?.onTrace,
   });
+};
+
+export const runDag = async <I, O>(
+  dag: DagDef,
+  input: I,
+  ctx: NodeContext,
+  opts?: RunOptions,
+): Promise<Result<O, FrameworkError>> => {
+  const outcome = await runDagToOutcome<I, O>(dag, input, ctx, opts);
+  if (!outcome.ok) return outcome;
+  // ADR-0060: a synchronous `runDag` cannot pause. A `suspended` outcome means
+  // the caller supplied a `pending`-returning hook to a synchronous run — a
+  // misuse. Surface it as an invariant error rather than silently swallowing a
+  // paused run; durable HITL runs must use `runResumableDagJob`.
+  if (outcome.value.kind === "suspended") {
+    return err({
+      kind: "node-crash",
+      retriability: "non-retriable",
+      nodeId: EXECUTOR_NODE_ID,
+      message: `[runDag] DAG '${dag.id}' suspended at human gate '${outcome.value.nodeId}' — a synchronous runDag cannot pause; use runResumableDagJob with a durable jobLike for HITL runs.`,
+    });
+  }
+  return ok(outcome.value.output);
+};
+
+/**
+ * Outcome of a resumable worker run (ADR-0060): the DAG either `completed` with
+ * its output, or `suspended` at a human gate. Unlike `runDagAsWorkerJob`, a
+ * suspend is NOT an error — the worker should ack the job and let an out-of-band
+ * approval re-enqueue it to resume from the durably-persisted state.
+ */
+export type WorkerJobOutcome<O> =
+  | { readonly kind: "completed"; readonly output: O }
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string };
+
+/**
+ * Worker entry for DURABLE, suspendable DAG runs (ADR-0060). Like
+ * `runDagAsWorkerJob` it re-throws on a genuine `Err` so the queue (BullMQ) sees
+ * the failure and applies its retry / DLQ policy — but it returns a `suspended`
+ * outcome WITHOUT throwing, so a run parked at a human gate cleanly completes the
+ * job (ack) and stays parked in its durable `jobLike` until an approval
+ * re-enqueues it. Requires a durable `opts.jobLike` for resume to survive a
+ * worker restart; with an in-memory job the suspend is still returned but the
+ * parked state is lost on process exit.
+ */
+export const runResumableDagJob = async <I, O>(
+  dag: DagDef,
+  input: I,
+  ctx: NodeContext,
+  opts?: RunOptions,
+): Promise<WorkerJobOutcome<O>> => {
+  const result = await runDagToOutcome<I, O>(dag, input, ctx, opts);
+  if (!result.ok) {
+    const detail =
+      result.error.kind === "node-crash"
+        ? result.error.message
+        : JSON.stringify(result.error);
+    throw new FrameworkAugmentedError(
+      `runResumableDagJob: DAG '${dag.id}' failed: ${detail}`,
+      result.error,
+    );
+  }
+  if (result.value.kind === "suspended") {
+    return { kind: "suspended", nodeId: result.value.nodeId, prompt: result.value.prompt };
+  }
+  return { kind: "completed", output: result.value.output };
 };
 
 /**

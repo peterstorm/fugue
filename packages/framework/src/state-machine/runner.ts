@@ -193,6 +193,14 @@ export const runStateMachine = async <S, E, C>(
       );
     }
 
+    // ADR-0060: durable HALT. A halted state (e.g. `suspended` at a human gate)
+    // is non-terminal and non-failed, so it was checkpointed above — a later
+    // re-enqueue resumes from it. Break and return the paused state so the
+    // worker is freed. The check is post-transition only: a loop that STARTS in
+    // a halted state (a resumed job) re-enters via `!isTerminal` and re-runs the
+    // executor; the break fires only when a transition PRODUCES the halt here.
+    if (machine.isHalted?.(state)) break;
+
     // If terminal-succeeded, fall through to return below
     if (isTerminal) break;
   }

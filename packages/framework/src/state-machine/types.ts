@@ -12,6 +12,15 @@ export interface Machine<S, E, C> {
   readonly isTerminal: (state: S) => boolean;
   /** Distinct from isTerminal — needed for don't-checkpoint-failed invariant (FR-005) */
   readonly isFailed: (state: S) => boolean;
+  /**
+   * Optional HALT predicate (ADR-0060). A halted state is non-terminal and
+   * non-failed but the runner breaks the loop after checkpointing it, returning
+   * the (paused) state to the caller. Used for durable suspend/resume: the run
+   * parks at a human gate, the worker is freed, and a later re-enqueue resumes
+   * from the persisted state. When omitted, the runner only stops on terminal
+   * states (unchanged behaviour).
+   */
+  readonly isHalted?: (state: S) => boolean;
   readonly stateProgress: (state: S) => number; // 0..100
   /**
    * Classify a transition as a retry attempt. Used by the runner only for

@@ -45,7 +45,7 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // Keeping them off the main barrel signals that reaching for them is a
 // deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
-export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
+export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer
