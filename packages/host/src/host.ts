@@ -37,6 +37,16 @@ import { createUnwiredTokenEndpoint } from "./adapters/unwired-token-endpoint.js
 import { createUnwiredEntraWifExchange, createUnwiredGraphHttp } from "./adapters/unwired-entra-wif.js";
 import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
+import { getRegistry } from "./domain/host-state.js";
+import { lookupDag } from "./domain/registry.js";
+import type { QueueBackend, WorkerHandle } from "@fuguejs/framework";
+import { createHitlRunService } from "./hitl/service.js";
+import type { HitlRunService } from "./hitl/service.js";
+import { createRedisRunStore } from "./hitl/adapters/run-store.js";
+import { createRedisDecisionStore } from "./hitl/adapters/decision-store.js";
+import { createRunExecutor } from "./hitl/adapters/run-executor.js";
+import { createRunQueue } from "./hitl/adapters/run-queue.js";
+import { createWebhookNotifier, fetchWebhookHttp } from "./hitl/adapters/webhook-notifier.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
 import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
 import { createSyncCallbacks } from "./sync/sync-callbacks.js";
@@ -61,6 +71,13 @@ export interface HostDeps {
   readonly redis: RedisConnectivityPort;
   readonly sharedInfra: SharedInfra;
   readonly logger: SyncLogger;
+  /**
+   * Queue backend for the durable HITL run engine (ADR-0060). Constructed by
+   * the binary (BullMQ over Redis) and injected so the host stays testable with
+   * an in-memory backend. When omitted (or TEAMS_WEBHOOK_URL unset), HITL is
+   * off and a `humanReview` DAG is refused with 501.
+   */
+  readonly queueBackend?: QueueBackend;
   /** Called during graceful shutdown to clean up infrastructure (e.g., close Redis). */
   readonly onShutdown?: () => Promise<void>;
 }
@@ -243,10 +260,58 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // keeps its static `http` client AND gets a freshly minted `mail.send` handle.
   const broker: CapabilityBroker | undefined = selectCapabilityBroker(config, sharedInfra, logger);
 
+  // ── HITL durable run engine (ADR-0060) ──────────────────────────────────
+  // Enabled when a Teams webhook is configured AND a queue backend is wired.
+  // HITL DAGs (those declaring `humanReview`) run on this durable queue and
+  // park for human review; non-HITL DAGs keep the synchronous inline path.
+  let hitlService: HitlRunService | undefined;
+  let hitlWorker: WorkerHandle | undefined;
+  if (config.TEAMS_WEBHOOK_URL !== undefined && deps.queueBackend !== undefined) {
+    const runStore = createRedisRunStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const decisions = createRedisDecisionStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const notifier = createWebhookNotifier(
+      {
+        webhookUrl: config.TEAMS_WEBHOOK_URL,
+        approvalBaseUrl: config.HITL_APPROVAL_BASE_URL ?? `http://localhost:${config.PORT}`,
+      },
+      fetchWebhookHttp(),
+    );
+    const executor = createRunExecutor({
+      sharedInfra,
+      getRegisteredDag: (id) => {
+        const reg = getRegistry(hostState);
+        return reg ? lookupDag(reg, id as DagId) : undefined;
+      },
+      broker,
+      logger: sharedInfra.logger,
+    });
+    const runQueue = createRunQueue({
+      backend: deps.queueBackend,
+      redis: sharedInfra.redis,
+      lockTtlSec: config.HITL_LOCK_TTL_SEC,
+      logger: sharedInfra.logger,
+    });
+    hitlService = createHitlRunService({
+      runStore,
+      runQueue: runQueue.queue,
+      decisions,
+      notifier,
+      executor,
+      clock: Date.now,
+      newRunId: () => makeRunId(crypto.randomUUID()),
+      logger: sharedInfra.logger,
+    });
+    hitlWorker = runQueue.startWorker(hitlService.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });
+    logger.info("HITL durable run engine enabled (Teams webhook configured)");
+  } else if (config.TEAMS_WEBHOOK_URL !== undefined && deps.queueBackend === undefined) {
+    logger.warn("TEAMS_WEBHOOK_URL is set but no queue backend was wired — HITL is disabled");
+  }
+
   // ── Router Dependencies ──────────────────────────────────────────────────
   const tokenStore = createRedisTokenStore(sharedInfra.redis, sharedInfra.logger);
 
   const routerDeps: RouterDeps = {
+    hitl: hitlService,
     getHostState: () => hostState,
     getConcurrency: () => concurrency,
     setConcurrency: (s) => { concurrency = s; },
@@ -453,6 +518,18 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     if (server) {
       server.stop();
       server = null;
+    }
+
+    // Stop the HITL worker (ADR-0060) — drains its in-flight job, then no more
+    // run slices are processed. The queue backend itself is closed by the
+    // binary via `onShutdown` (it owns the BullMQ/Redis connection).
+    if (hitlWorker) {
+      try {
+        await hitlWorker.close();
+      } catch (e) {
+        logger.error("Error closing HITL worker", { error: e instanceof Error ? e.message : String(e) });
+      }
+      hitlWorker = undefined;
     }
 
     // Clean up external capabilities (ADR-0051) — close in reverse topological order

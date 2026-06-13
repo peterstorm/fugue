@@ -11,7 +11,19 @@
  */
 
 import type { DagId, RunId, NodeId, FrameworkError } from "@fuguejs/framework";
-import type { AuthIdentity } from "../domain/auth.js";
+
+/**
+ * The serializable projection of an `AuthIdentity` persisted on a run. The live
+ * `user` identity carries a `canRunDag` CLOSURE (the authorization policy) that
+ * cannot survive JSON — and the worker never authorizes (a run is authorized
+ * once, at submission/approval, at the HTTP boundary). So we persist only the
+ * execution-relevant fields; the worker reconstructs the `AuthIdentity` it needs
+ * to derive the run `origin` (which uses `sub`/`kind`, never `canRunDag`).
+ */
+export type PersistedIdentity =
+  | { readonly kind: "admin" }
+  | { readonly kind: "team"; readonly team: string; readonly label: string }
+  | { readonly kind: "user"; readonly sub: string; readonly azp: string };
 
 /**
  * A run's lifecycle status (an ADT — illegal combinations are unrepresentable).
@@ -36,7 +48,7 @@ export interface RunRecord {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly input: unknown;
-  readonly identity: AuthIdentity;
+  readonly identity: PersistedIdentity;
   readonly status: RunStatus;
   /** Serialized `{state, context}` checkpoint (framework `toJson`). */
   readonly checkpoint: string;

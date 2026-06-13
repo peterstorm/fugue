@@ -21,6 +21,7 @@ import { listDagsHandler } from "./handlers/list-dags.js";
 import { createManifestHandler } from "./handlers/manifest.js";
 import { createRunDagHandler } from "./handlers/run-dag.js";
 import type { RunDagDeps } from "./handlers/run-dag.js";
+import { createGetRunHandler, createApproveRunHandler } from "./handlers/runs.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
 import type { LogPort } from "../ports.js";
@@ -101,6 +102,12 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   // POST /dags/:id/run
   const runDagHandler = createRunDagHandler(deps);
   app.post("/dags/:id/run", runDagHandler);
+
+  // ── HITL run routes (ADR-0060) — async status + approval ─────────────────
+  // Registered BEFORE the custom-route POST catch-all so the approval route
+  // binds rather than being swallowed as a custom DAG route.
+  app.get("/runs/:runId", createGetRunHandler(deps));
+  app.post("/runs/:runId/approve", createApproveRunHandler(deps));
 
   // ── Custom route overrides (DagRegistration.route / fugue.yaml route) ────
   // Registered as a POST fallback so hot-reloaded DAGs (whose routes change

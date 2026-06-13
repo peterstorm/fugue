@@ -132,6 +132,26 @@ export const HostConfigSchema = z.object({
     }),
   /** OpenTelemetry OTLP exporter endpoint */
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  // ── Human-in-the-loop (ADR-0060) ───────────────────────────────────────
+  /**
+   * Microsoft Teams Incoming Webhook (Workflows) URL for human-review
+   * notifications. Setting this ENABLES HITL: DAGs declaring a `humanReview`
+   * gate run on the durable queue (202 + runId) and post a review card here.
+   * Unset → HITL is off and a `humanReview` DAG is refused with 501.
+   */
+  TEAMS_WEBHOOK_URL: z.string().url().optional(),
+  /**
+   * Public base URL of this host, used to build the approval deep-link in the
+   * Teams card (`<base>/runs/<runId>`). Required in practice when
+   * TEAMS_WEBHOOK_URL is set; falls back to `http://localhost:<PORT>`.
+   */
+  HITL_APPROVAL_BASE_URL: z.string().url().optional(),
+  /** TTL (seconds) for persisted HITL runs + decisions. Default 7 days. */
+  HITL_RUN_TTL_SEC: z.coerce.number().int().min(60).default(604_800),
+  /** Single-flight lock TTL (seconds) per run execution slice. Default 5 min. */
+  HITL_LOCK_TTL_SEC: z.coerce.number().int().min(1).default(300),
+  /** Max concurrent HITL run slices the worker processes. Default 4. */
+  HITL_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(4),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */

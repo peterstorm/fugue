@@ -20,8 +20,7 @@ import type {
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { AuthIdentity } from "../domain/auth.js";
-import type { RunRecord, RunStatus } from "./types.js";
+import type { RunRecord, RunStatus, PersistedIdentity } from "./types.js";
 
 /**
  * Durable persistence for runs. `checkpoint` is updated on every state-machine
@@ -92,7 +91,7 @@ export interface RunExecutionRequest {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly input: unknown;
-  readonly identity: AuthIdentity;
+  readonly identity: PersistedIdentity;
   /** Run-store-backed durable job handle (carries + persists the checkpoint). */
   readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
   /** The host's review hook (decision-store + notifier closure). */

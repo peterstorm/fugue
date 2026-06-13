@@ -30,6 +30,7 @@ import type {
 import type { RunRecord } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview } from "./human-review-hook.js";
+import { toPersistedIdentity } from "./identity.js";
 
 export interface HitlRunServiceDeps {
   readonly runStore: RunStorePort;
@@ -78,7 +79,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       runId,
       dagId,
       input,
-      identity,
+      identity: toPersistedIdentity(identity),
       status: { kind: "queued" },
       checkpoint: seeded.value,
       createdAtMs: now,
