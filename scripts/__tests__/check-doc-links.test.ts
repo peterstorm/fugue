@@ -54,6 +54,34 @@ describe("findDocLinkProblems", () => {
     expect(problems).toEqual([]);
   });
 
+  it("strips a trailing #anchor and validates the file target (existing file → ok)", () => {
+    // A relative-file link carrying a section anchor: only the file part is
+    // validated. `exists` is asserted to receive the anchor-stripped path.
+    let checked = "";
+    const problems = findDocLinkProblems(
+      docFile,
+      "See [the section](./adapter-authoring.md#configuration).",
+      env((p) => {
+        checked = p;
+        return true;
+      }),
+    );
+    expect(problems).toEqual([]);
+    expect(checked).toBe(resolve(packagesRoot, "framework/docs/adapter-authoring.md"));
+  });
+
+  it("flags a relative-file link with a #anchor as dangling when the file is missing", () => {
+    // The anchor must not mask a dangling file target.
+    const problems = findDocLinkProblems(
+      docFile,
+      "See [the section](./gone.md#configuration).",
+      env(() => false),
+    );
+    expect(problems).toHaveLength(1);
+    expect(problems[0]!.reason).toContain("dangling");
+    expect(problems[0]!.target).toBe("./gone.md#configuration");
+  });
+
   it("does not apply the escape rule to a README outside the strict docs roots", () => {
     // A package README may link into the monorepo docs/ root; only files under a
     // shipped `docs/` dir carry the strict shipped→shipped rule.
