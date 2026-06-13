@@ -114,7 +114,17 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       return ok(undefined);
     }
 
-    await runStore.setStatus(runId, { kind: "running" });
+    // Best-effort transition to `running`. A failed write here does not stop
+    // execution (the run is already being processed and the eventual settle
+    // write is checked); we surface it so a status poll reporting a stale
+    // `queued`/`suspended` during the slice is explainable, rather than silent.
+    const marked = await runStore.setStatus(runId, { kind: "running" });
+    if (!marked.ok) {
+      logger?.warn?.("hitl: failed to mark run running — proceeding best-effort", {
+        runId,
+        error: marked.error.kind,
+      });
+    }
 
     const jobLike = makeRunStoreJobLike(runStore, runId, record.checkpoint);
     const onHumanReview = makeOnHumanReview({
@@ -137,8 +147,17 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     if (!result.ok) {
       // Host infra failure (unknown DAG, context build) — settle the run failed
       // so a status poll surfaces it rather than leaving it stuck "running".
-      await runStore.setStatus(runId, { kind: "failed", error: asRunFailure(result.error) });
-      return result;
+      // The run has reached a durable terminal state, so the worker job is DONE:
+      // return `ok` (no queue retry — a retry would only no-op on the terminal
+      // guard above). Pre-settle transient failures (e.g. the `runStore.get`
+      // above) return `err` and ARE retried by the worker.
+      const settled = await runStore.setStatus(runId, { kind: "failed", error: asRunFailure(result.error) });
+      if (!settled.ok) {
+        // Could not even record the failure — leave it to the queue to retry.
+        logger?.error?.("hitl: failed to settle run failed", { runId, error: settled.error.kind });
+        return settled;
+      }
+      return ok(undefined);
     }
 
     return match(result.value)

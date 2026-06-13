@@ -4,15 +4,21 @@
 
 import { describe, it, expect, mock } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
-import type { DagId, RunId, NodeId } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, Result } from "@fuguejs/framework";
 import type { ReviewNotification } from "../../../types.js";
 import type { RunRecord } from "../../../types.js";
 import type { HitlRunService } from "../../../service.js";
 import { buildReviewCard, buildReviewActivity, REVIEW_VERB } from "../card.js";
 import { createBotFrameworkNotifier } from "../notifier.js";
-import { createInMemoryConversationStore } from "../conversation-store.js";
+import { createInMemoryConversationStore, createRedisConversationStore } from "../conversation-store.js";
 import type { BotConnectorPort, VerifyBotToken } from "../ports.js";
 import { handleBotActivity } from "../messages-handler.js";
+import { isTrustedBotServiceUrl } from "../trusted-host.js";
+import type { RedisPort } from "../../../../ports.js";
+import type { HostError } from "../../../../domain/host-error.js";
+
+/** A trusted Teams channel serviceUrl (matches the Bot Framework allowlist). */
+const TRUSTED_SERVICE_URL = "https://smba.trafficmanager.net/amer/";
 
 const notification: ReviewNotification = {
   runId: "run-1" as RunId,
@@ -57,7 +63,7 @@ describe("bot notifier", () => {
     const sent: { ref: unknown; activity: unknown }[] = [];
     const connector: BotConnectorPort = { sendToConversation: async (ref, activity) => { sent.push({ ref, activity }); return ok(undefined); } };
     const conversations = createInMemoryConversationStore();
-    await conversations.saveDefaultReference({ serviceUrl: "https://smba.example/", conversationId: "19:abc" });
+    await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:abc" });
 
     const res = await createBotFrameworkNotifier({ connector, conversations }).notify(notification);
     expect(res.ok).toBe(true);
@@ -127,11 +133,44 @@ describe("bot messages handler", () => {
     const conversations = createInMemoryConversationStore();
     const res = await handleBotActivity(
       { verify: okVerify, hitl: fakeHitl(), conversations },
-      { authHeader: "Bearer x", activity: { type: "conversationUpdate", serviceUrl: "https://smba/", conversation: { id: "19:team" }, channelId: "msteams" } },
+      { authHeader: "Bearer x", activity: { type: "conversationUpdate", serviceUrl: TRUSTED_SERVICE_URL, conversation: { id: "19:team" }, channelId: "msteams" } },
     );
     expect(res.status).toBe(200);
     const ref = await conversations.getDefaultReference();
     expect(ref.ok && ref.value?.conversationId).toBe("19:team");
+  });
+
+  it("refuses to persist a conversation reference with an untrusted serviceUrl (SSRF guard)", async () => {
+    const conversations = createInMemoryConversationStore();
+    const res = await handleBotActivity(
+      { verify: okVerify, hitl: fakeHitl(), conversations },
+      { authHeader: "Bearer x", activity: { type: "conversationUpdate", serviceUrl: "https://attacker.example.com/", conversation: { id: "19:evil" }, channelId: "msteams" } },
+    );
+    expect(res.status).toBe(200);
+    // Nothing persisted — the connector must never POST its bearer token there.
+    const ref = await conversations.getDefaultReference();
+    expect(ref.ok && ref.value).toBe(null);
+  });
+
+  it("records the reject-with-no-reason default ('(no reason provided)')", async () => {
+    const hitl = fakeHitl();
+    await handleBotActivity(
+      { verify: okVerify, hitl, conversations: createInMemoryConversationStore() },
+      { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, runId: "run-1", nodeId: "review", decision: "reject" }) },
+    );
+    const call = (hitl.recordDecision as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[2]).toEqual({ kind: "reject", reason: "(no reason provided)", actor: "Alice" });
+  });
+
+  it("returns a 'Malformed review action.' message when runId/nodeId are missing", async () => {
+    const hitl = fakeHitl();
+    const res = await handleBotActivity(
+      { verify: okVerify, hitl, conversations: createInMemoryConversationStore() },
+      { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, decision: "approve" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { type: string; value: string }).value).toBe("Malformed review action.");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
   });
 
   it("records an approve decision and refreshes the card", async () => {
@@ -175,5 +214,69 @@ describe("bot messages handler", () => {
     );
     expect(res.status).toBe(200);
     expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+  });
+});
+
+// ── serviceUrl allowlist ───────────────────────────────────────────────────
+
+describe("isTrustedBotServiceUrl", () => {
+  it("accepts the Microsoft Bot Framework / Teams service hosts over https", () => {
+    expect(isTrustedBotServiceUrl("https://smba.trafficmanager.net/amer/")).toBe(true);
+    expect(isTrustedBotServiceUrl("https://smba.trafficmanager.net/emea/")).toBe(true);
+    expect(isTrustedBotServiceUrl("https://uksouth.smba.trafficmanager.net/uk/")).toBe(true);
+    expect(isTrustedBotServiceUrl("https://api.botframework.com")).toBe(true);
+    expect(isTrustedBotServiceUrl("https://x.skype.com/")).toBe(true);
+  });
+
+  it("rejects http, foreign hosts, look-alikes, and unparseable values", () => {
+    expect(isTrustedBotServiceUrl("http://smba.trafficmanager.net/amer/")).toBe(false); // not https
+    expect(isTrustedBotServiceUrl("https://attacker.example.com/")).toBe(false);
+    expect(isTrustedBotServiceUrl("https://smba.trafficmanager.net.evil.com/")).toBe(false); // suffix look-alike
+    expect(isTrustedBotServiceUrl("https://evilbotframework.com/")).toBe(false); // not a dot-suffix
+    expect(isTrustedBotServiceUrl("not a url")).toBe(false);
+    expect(isTrustedBotServiceUrl("")).toBe(false);
+  });
+});
+
+// ── Redis ConversationStore ─────────────────────────────────────────────────
+
+const fakeRedis = (): RedisPort & { _set: (k: string, v: string) => void } => {
+  const m = new Map<string, string>();
+  return {
+    _set: (k, v) => m.set(k, v),
+    async get(k) { return ok(m.get(k) ?? null); },
+    async set(k, v) { m.set(k, v); return ok("OK" as string | null); },
+    async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
+    async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
+    async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+  } as RedisPort & { _set: (k: string, v: string) => void };
+};
+
+describe("createRedisConversationStore", () => {
+  const REF_KEY = "fugue:hitl:bot:convref:default";
+
+  it("round-trips the default reference and returns null when unset", async () => {
+    const store = createRedisConversationStore(fakeRedis());
+    expect((await store.getDefaultReference())).toEqual(ok(null));
+    await store.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:abc" });
+    const got = await store.getDefaultReference();
+    expect(got.ok && got.value?.conversationId).toBe("19:abc");
+  });
+
+  it("errs internal-invariant-violated on a corrupt (non-JSON) stored reference", async () => {
+    const redis = fakeRedis();
+    redis._set(REF_KEY, "{not json");
+    const store = createRedisConversationStore(redis);
+    const got = await store.getDefaultReference();
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("propagates a Redis get failure", async () => {
+    const broken: RedisPort = { ...fakeRedis(), async get(): Promise<Result<string | null, HostError>> { return err({ kind: "redis-unavailable", operation: "GET" }); } };
+    const store = createRedisConversationStore(broken);
+    const got = await store.getDefaultReference();
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.error.kind).toBe("redis-unavailable");
   });
 });

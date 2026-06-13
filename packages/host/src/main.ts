@@ -101,8 +101,14 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
           return err({ kind: "redis-unavailable" as const, operation: `SCAN ${pattern}: ${e instanceof Error ? e.message : String(e)}` });
         }
       },
-      setNx: async (key, value) => {
+      setNx: async (key, value, opts) => {
         try {
+          if (opts?.expiresInSec !== undefined) {
+            // Atomic acquire-with-TTL: the key can never exist without an expiry,
+            // so a crash after acquisition still self-heals after the TTL.
+            const result = await client.set(key, value, "EX", opts.expiresInSec, "NX");
+            return ok(result === "OK");
+          }
           const result = await client.setnx(key, value);
           return ok(result === 1);
         } catch (e) {

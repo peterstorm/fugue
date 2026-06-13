@@ -94,8 +94,27 @@ constructs a BullMQ queue backend over `REDIS_URL`.
 
 - The inbound `/teams/messages` endpoint is **not** behind the fugue team-token
   middleware; it authenticates the Bot Framework JWT itself and fails closed
-  (401 on a bad token, 503 if the JWKS is briefly unreachable).
+  (401 on a bad token, 503 if the JWKS is briefly unreachable). The JWT is
+  verified against the BF JWKS with an explicit `RS256` algorithm allowlist and a
+  60s clock tolerance.
+- The captured `serviceUrl` (where proactive cards are POSTed, with an app-only
+  bearer token attached) is **allowlisted** to Microsoft Bot Framework / Teams
+  hosts (`*.botframework.com`, `*.skype.com`, `smba.trafficmanager.net`). A
+  forged `serviceUrl` is refused at capture and again before send, so the
+  connector credential can never leak to an attacker host.
 - A decision is only ever consumed once, at the gate it targets; a click on an
   already-resolved run refreshes the card without recording anything.
 - A double-click / double-approval cannot double-run side-effecting nodes — a
   single-flight Redis lock serialises processing per run.
+
+> **⚠ v1 authorization constraint (in-Teams buttons).** Unlike the HTTP approval
+> path (`POST /runs/:runId/approve`), which authorizes the caller against the
+> run's **owning DAG team**, the Teams **button** path does *not* yet bind the
+> clicking user to the run's team: v1 keeps a single default conversation
+> reference and there is no AAD→fugue-identity→team mapping. **Anyone who can
+> click a card in the channel the bot was added to can approve/reject any run.**
+> Install the bot **only** in a channel whose members are authorised approvers
+> for *every* team whose runs gate through it. Per-team conversation routing and
+> click-time authorization are tracked as a follow-up (ADR-0060 Consequences).
+> For stricter isolation today, use the webhook transport + the authorized HTTP
+> approval endpoint instead.

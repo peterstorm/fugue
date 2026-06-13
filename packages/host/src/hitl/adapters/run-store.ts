@@ -101,15 +101,14 @@ export const createRedisRunStore = (
   return {
     async create(record) {
       const { checkpoint, ...meta } = record;
-      // setNx enforces create-once: a duplicate run id is a caller bug.
-      const set = await redis.setNx(runKey(record.runId), JSON.stringify(meta));
+      // Atomic create-once WITH TTL (SET NX EX): enforces create-once (a
+      // duplicate run id is a caller bug) and never leaves a TTL-less meta key
+      // if the process crashes between acquisition and expiry.
+      const set = await redis.setNx(runKey(record.runId), JSON.stringify(meta), expiry);
       if (!set.ok) return err(set.error);
       if (!set.value) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
-      // setNx cannot set a TTL atomically; re-set with expiry (value unchanged).
-      const ttl = await redis.set(runKey(record.runId), JSON.stringify(meta), expiry);
-      if (!ttl.ok) return err(ttl.error);
       const ckpt = await redis.set(ckptKey(record.runId), checkpoint, expiry);
       if (!ckpt.ok) return err(ckpt.error);
       return ok(undefined);

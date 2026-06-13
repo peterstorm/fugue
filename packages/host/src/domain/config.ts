@@ -205,6 +205,12 @@ export const HostConfigSchema = z.object({
   if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
     ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });
   }
+  // The review card embeds the output-under-review and an approval deep-link;
+  // posting it over http would exfiltrate that in cleartext. Fail boot loudly
+  // rather than send HITL review content unencrypted.
+  if (c.TEAMS_WEBHOOK_URL !== undefined && !c.TEAMS_WEBHOOK_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["TEAMS_WEBHOOK_URL"], message: "must be an https:// URL (HITL review content must not be sent over cleartext http)" });
+  }
 });
 
 export type HostConfig = z.infer<typeof HostConfigSchema>;

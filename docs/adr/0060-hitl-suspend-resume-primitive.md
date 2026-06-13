@@ -88,8 +88,10 @@ work with one predicate and no extra bookkeeping.
 
 ### 4. A resumable run outcome distinct from the synchronous `Result<O>`
 
-`runDagStateful` returns `Result<StatefulOutcome<O>, FrameworkError>` where
+`runDagStatefulOutcome` returns `Result<StatefulOutcome<O>, FrameworkError>` where
 `StatefulOutcome<O> = { kind: "completed"; output: O } | { kind: "suspended"; nodeId; prompt; output }`.
+(`runDagStateful` is the back-compat flat-`Result<O>` entry — it unwraps
+`completed` and maps `suspended` to an invariant `err`; see below.)
 
 - `runDag` (the synchronous public entry, ADR-0021) is **unchanged** for callers:
   it unwraps `completed → ok(output)`. A `suspended` outcome under plain `runDag`
@@ -136,6 +138,14 @@ work with one predicate and no extra bookkeeping.
   (decision-present) hook dispatch, not the wall-clock park duration across
   re-enqueues. Durable wait-time telemetry is left to the host's pending-review
   store, which has the enqueue/approve timestamps.
+- The **in-Teams (Bot Framework) approval path does not yet authorize the
+  clicking user against the run's owning team** — v1 keeps a single default
+  conversation reference and has no AAD→identity→team mapping, so any member of
+  the channel the bot was added to can approve/reject any run. (The HTTP approval
+  path *does* enforce team access.) Until per-team conversation routing +
+  click-time authorization land, the bot must only be installed in a channel
+  whose members are authorised approvers for every team whose runs gate through
+  it. Tracked as a follow-up; documented in `packages/host/docs/hitl-teams.md`.
 
 ## References
 

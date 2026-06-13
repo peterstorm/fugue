@@ -5,13 +5,26 @@
  * returns `{ status, body }`, so it is fully unit-testable without Hono and with
  * a fake token verifier.
  *
- * Security: EVERY activity is verified via `VerifyBotToken` first (fail closed).
+ * Security: EVERY activity is verified via `VerifyBotToken` first (fail closed),
+ * and the captured `serviceUrl` is allowlisted (`isTrustedBotServiceUrl`) so the
+ * connector never sends its bearer token to a forged host.
  * Behaviour by activity type:
  *   - conversationUpdate (bot added) → capture + persist the conversation
  *     reference so proactive review cards can be posted there later.
  *   - invoke `adaptiveCard/action` with our verb → map the button to a
  *     HumanAction, record the decision (resuming the run), refresh the card.
  *   - anything else → 200 no-op.
+ *
+ * SECURITY CONSTRAINT (v1, ADR-0060): unlike the HTTP approval path
+ * (`runs.ts#authorizeRunAccess`, which authorizes the caller against the run's
+ * owning DAG team), the in-Teams button path does NOT yet bind the clicking user
+ * to the run's team — v1 keeps a single default conversation reference and there
+ * is no AAD→fugue-identity→team mapping. Therefore ANYONE who can click a card
+ * in the channel the bot was added to can approve/reject ANY run. The bot MUST
+ * only be installed in a channel whose members are all authorised approvers for
+ * every team whose runs gate through it. Per-team conversation routing +
+ * click-time authorization is tracked as a follow-up (see docs/hitl-teams.md and
+ * ADR-0060 Consequences).
  */
 
 import { match } from "ts-pattern";
@@ -20,6 +33,7 @@ import type { HitlRunService } from "../../service.js";
 import type { LogPort } from "../../../ports.js";
 import type { ConversationStorePort, VerifyBotToken, ConversationReference } from "./ports.js";
 import { REVIEW_VERB, buildResolvedCard } from "./card.js";
+import { isTrustedBotServiceUrl } from "./trusted-host.js";
 
 export interface BotMessagesDeps {
   readonly verify: VerifyBotToken;
@@ -84,6 +98,12 @@ export const handleBotActivity = async (
   // 2. Bot added to a channel → remember where to post reviews.
   if (type === "conversationUpdate") {
     const ref = captureReference(activity);
+    if (ref && !isTrustedBotServiceUrl(ref.serviceUrl)) {
+      // Reject an untrusted serviceUrl: persisting it would later send an
+      // app-only bearer token there (SSRF / credential leak).
+      deps.logger?.warn?.("hitl/bot: refusing untrusted serviceUrl on conversationUpdate", { serviceUrl: ref.serviceUrl });
+      return { status: 200 };
+    }
     if (ref) {
       const saved = await deps.conversations.saveDefaultReference(ref);
       if (!saved.ok) deps.logger?.error?.("hitl/bot: failed to persist conversation reference", { error: saved.error.kind });

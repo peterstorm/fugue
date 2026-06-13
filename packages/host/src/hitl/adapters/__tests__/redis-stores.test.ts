@@ -22,6 +22,20 @@ const fakeRedis = (): RedisPort => {
   };
 };
 
+// A seedable RedisPort fake for the torn/corrupt-state branches: `seed` writes a
+// raw value at an exact key, bypassing the adapter's own serialization.
+const seedableRedis = (): { redis: RedisPort; seed: (k: string, v: string) => void } => {
+  const m = new Map<string, string>();
+  const redis: RedisPort = {
+    async get(k) { return ok(m.get(k) ?? null); },
+    async set(k, v) { m.set(k, v); return ok("OK"); },
+    async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
+    async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
+    async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+  };
+  return { redis, seed: (k, v) => m.set(k, v) };
+};
+
 const record = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   runId: "run-1" as RunId,
   dagId: "dag-1" as DagId,
@@ -91,6 +105,25 @@ describe("RedisRunStore", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
   });
+
+  it("errs internal-invariant-violated on a torn record (metadata but no checkpoint)", async () => {
+    const { redis, seed } = seedableRedis();
+    // Seed only the meta key (e.g. the checkpoint key TTL-expired first).
+    seed("fugue:hitl:run:run-1", JSON.stringify({ runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" }, status: { kind: "queued" }, createdAtMs: 1, updatedAtMs: 1 }));
+    const store = createRedisRunStore(redis, cfg);
+    const res = await store.get("run-1" as RunId);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("errs internal-invariant-violated on corrupt (non-JSON) metadata", async () => {
+    const { redis, seed } = seedableRedis();
+    seed("fugue:hitl:run:run-1", "{not json");
+    const store = createRedisRunStore(redis, cfg);
+    const res = await store.get("run-1" as RunId);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
+  });
 });
 
 describe("RedisDecisionStore", () => {
@@ -139,5 +172,30 @@ describe("RedisDecisionStore", () => {
     await store.putDecision(runId, nodeId, reroute);
     const got = await store.getDecision(runId, nodeId);
     expect(got.ok && got.value).toEqual(reroute);
+  });
+
+  it("errs internal-invariant-violated on a corrupt (non-JSON) stored decision", async () => {
+    const { redis, seed } = seedableRedis();
+    // decision key = fugue:hitl:decision:<runId>␟<nodeId> (US separator).
+    seed(`fugue:hitl:decision:${runId}\x1f${nodeId}`, "{not json");
+    const store = createRedisDecisionStore(redis, cfg);
+    const got = await store.getDecision(runId, nodeId);
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("composite keys are injective — `:` in an id cannot alias a different gate", async () => {
+    // With a `:` separator these two gates would collide (both → "...a:b:c");
+    // the unit-separator key keeps them distinct.
+    const store = createRedisDecisionStore(fakeRedis(), cfg);
+    const gateA = { runId: "a:b" as RunId, nodeId: "c" as NodeId };
+    const gateB = { runId: "a" as RunId, nodeId: "b:c" as NodeId };
+    await store.putDecision(gateA.runId, gateA.nodeId, { kind: "approve" });
+    await store.putDecision(gateB.runId, gateB.nodeId, { kind: "reject", reason: "no" });
+
+    const a = await store.getDecision(gateA.runId, gateA.nodeId);
+    const b = await store.getDecision(gateB.runId, gateB.nodeId);
+    expect(a.ok && a.value).toEqual({ kind: "approve" });
+    expect(b.ok && b.value).toEqual({ kind: "reject", reason: "no" });
   });
 });

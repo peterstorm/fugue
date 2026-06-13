@@ -31,6 +31,20 @@ export interface RunQueueDeps {
    * expected execution slice (a resume-to-next-gate run), not the human wait.
    */
   readonly lockTtlSec: number;
+  /**
+   * Delay (ms) before a wakeup that lost the single-flight lock is re-enqueued.
+   * A held lock means another worker is mid-slice for the same run; we defer
+   * rather than drop the wakeup (which would strand a decided run). The delay
+   * avoids a hot re-enqueue loop while the slice runs. Default 1000ms.
+   */
+  readonly lockContentionDelayMs?: number;
+  /**
+   * Max queue attempts per wakeup job (the outer crash-fallback loop). A worker
+   * that throws on a transient infra failure is retried up to this many times
+   * before the job is exhausted/dead-lettered, instead of silently acked.
+   * Default 5.
+   */
+  readonly maxAttempts?: number;
   readonly logger?: LogPort;
 }
 
@@ -51,20 +65,28 @@ const lockKey = (runId: RunId): string => `fugue:hitl:lock:${runId}`;
 export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
   const { backend, redis, lockTtlSec, logger } = deps;
   const name = deps.queueName ?? "fugue-hitl-runs";
-  const handle = backend.createQueue<RunId, null>(name);
+  const contentionDelayMs = deps.lockContentionDelayMs ?? 1000;
+  const maxAttempts = deps.maxAttempts ?? 5;
+  // `defaultAttempts` makes a worker that THROWS on a transient infra failure
+  // actually retried (the outer crash-fallback loop) instead of acked once.
+  const handle = backend.createQueue<RunId, null>(name, { defaultAttempts: maxAttempts });
 
-  const queue: RunQueuePort = {
-    async enqueue(runId): Promise<Result<void, HostError>> {
-      try {
-        // No `jobId` → a fresh job every time → resume re-enqueue is never
-        // rejected as a duplicate.
-        await handle.enqueue(runId, { state: runId, context: null } satisfies RunTrigger);
-        return ok(undefined);
-      } catch (e) {
-        return err({ kind: "redis-unavailable", operation: `HITL enqueue: ${e instanceof Error ? e.message : String(e)}` });
-      }
-    },
+  const enqueue = async (runId: RunId, opts?: { delayMs?: number }): Promise<Result<void, HostError>> => {
+    try {
+      // No `jobId` → a fresh job every time → resume re-enqueue is never
+      // rejected as a duplicate.
+      await handle.enqueue(
+        runId,
+        { state: runId, context: null } satisfies RunTrigger,
+        opts?.delayMs !== undefined ? { delayMs: opts.delayMs } : undefined,
+      );
+      return ok(undefined);
+    } catch (e) {
+      return err({ kind: "redis-unavailable", operation: `HITL enqueue: ${e instanceof Error ? e.message : String(e)}` });
+    }
   };
+
+  const queue: RunQueuePort = { enqueue: (runId) => enqueue(runId) };
 
   const startWorker = (
     processRun: (runId: RunId) => Promise<Result<void, HostError>>,
@@ -75,26 +97,40 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
       async (job) => {
         const runId = job.data.state;
 
-        // Single-flight: only one worker processes a given run at a time. A
-        // failed lock acquisition means another worker holds it — skip; that
-        // worker will process the latest decision (decisions are persisted).
-        const acquired = await redis.setNx(lockKey(runId), "1");
+        // Single-flight: only one worker processes a given run at a time.
+        // Acquire the lock AND its TTL atomically (SET NX EX) so a worker crash
+        // mid-slice self-heals after `lockTtlSec` rather than wedging the run
+        // behind a lock that never expires.
+        const acquired = await redis.setNx(lockKey(runId), "1", { expiresInSec: lockTtlSec });
         if (!acquired.ok) {
-          logger?.error?.("hitl: lock acquire failed — skipping slice", { runId, error: acquired.error.kind });
-          return;
+          // The lock store is unavailable — throw so the queue retries this
+          // wakeup rather than silently acking and dropping it.
+          throw new Error(`hitl: lock acquire failed for ${runId}: ${acquired.error.kind}`, { cause: acquired.error });
         }
         if (!acquired.value) {
-          logger?.warn?.("hitl: run already in flight — skipping duplicate slice", { runId });
+          // Another worker holds the lock (mid-slice for this run). Do NOT drop
+          // this wakeup — the decision that triggered it is durable in Redis but
+          // the holding worker may have already read "no decision" and parked,
+          // so re-enqueue (deferred) to guarantee the decision is acted on once
+          // the lock frees. A bare drop here is the lost-wakeup that strands a
+          // decided run.
+          logger?.warn?.("hitl: run already in flight — deferring wakeup", { runId });
+          const requeued = await enqueue(runId, { delayMs: contentionDelayMs });
+          if (!requeued.ok) {
+            throw new Error(`hitl: failed to defer wakeup for ${runId}: ${requeued.error.kind}`, { cause: requeued.error });
+          }
           return;
         }
-        // Best-effort TTL so a crashed worker's lock self-heals.
-        const ttl = await redis.set(lockKey(runId), "1", { expiresInSec: lockTtlSec });
-        if (!ttl.ok) logger?.warn?.("hitl: failed to set lock TTL", { runId });
 
         try {
           const result = await processRun(runId);
           if (!result.ok) {
-            logger?.error?.("hitl: processRun returned error", { runId, error: result.error.kind });
+            // A host-infra failure BEFORE the run settled (e.g. a transient
+            // run-store read). Throw so the queue retries; the `finally` below
+            // releases the lock first. (A run that settled `failed` returns
+            // `ok` from processRun — it is durably recorded, not retried.)
+            logger?.error?.("hitl: processRun returned error — retrying", { runId, error: result.error.kind });
+            throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
           }
         } finally {
           const released = await redis.del(lockKey(runId));

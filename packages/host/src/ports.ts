@@ -119,8 +119,14 @@ export type RedisPort = {
   /**
    * Set key only if it does not already exist (atomic check-and-set).
    * Returns `true` if the key was set, `false` if it already existed.
+   *
+   * Pass `{ expiresInSec }` to acquire the key AND its TTL atomically
+   * (`SET key val NX EX ttl`). This is the ONLY crash-safe way to take a lock:
+   * a `setNx` followed by a separate `set …EX` leaves the key with no expiry if
+   * the process dies in the gap, so the key (e.g. a single-flight lock) is held
+   * forever and never self-heals.
    */
-  readonly setNx: (key: string, value: string) => Promise<Result<boolean, HostError>>;
+  readonly setNx: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<boolean, HostError>>;
 }
 
 /**

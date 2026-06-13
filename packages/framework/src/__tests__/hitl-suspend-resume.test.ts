@@ -9,7 +9,8 @@
 //   - the gated node does NOT re-run on resume (its output is preserved)
 //   - synchronous runDag treats a pending hook as a misuse (invariant err)
 
-import { NoopObserver } from "../observer/observer.js";
+import { NoopObserver, RecordingObserver } from "../observer/observer.js";
+import type { HumanInterventionEvent } from "../types/events.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect, mock } from "bun:test";
@@ -211,6 +212,46 @@ describe("HITL re-park (ADR-0060) — resume that finds no decision parks again"
     expect(first.kind).toBe("suspended");
     expect(second.kind).toBe("suspended");
     expect(job.data.state.kind).toBe("suspended");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. elapsed-time semantics (ADR-0060 documented trade-off)
+// ---------------------------------------------------------------------------
+
+describe("HITL telemetry (ADR-0060) — elapsedMsSinceAwait excludes park duration", () => {
+  it("measures only the final decision-present dispatch, not the durable wait across re-enqueues", async () => {
+    const dag = makeDag(
+      [makeNode("a", { humanReview: { prompt: "Approve?" }, run: async () => ok("a-out") })],
+      [{ from: DAG_INPUT, to: "a" }],
+      "a",
+    );
+    const job = durableJob(dag, null);
+    const observer = new RecordingObserver();
+    const ctx: NodeContext = { ...makeCtx(), observer };
+    let nowMs = 1_000;
+    const now = () => nowMs;
+
+    // Park at base time — no decision yet (no human-intervention event on park).
+    const parked = await runResumableDagJob(dag, null, ctx, { jobLike: job, onHumanReview: async () => PENDING, now });
+    expect(parked.kind).toBe("suspended");
+
+    // Simulate a long durable wait across re-enqueues (a full day parked).
+    const PARK_MS = 86_400_000;
+    nowMs += PARK_MS;
+
+    // Resume: decision present -> completes and emits the human-intervention event.
+    const resumed = await runResumableDagJob<unknown, string>(dag, null, ctx, { jobLike: job, onHumanReview: async () => ({ kind: "approve" }), now });
+    expect(resumed.kind).toBe("completed");
+
+    const evt = observer.events.find(
+      (e): e is HumanInterventionEvent => (e as { type?: string }).type === "human-intervention",
+    );
+    expect(evt).toBeDefined();
+    // The day-long park MUST NOT be counted — awaitStartMs is captured fresh on
+    // each dispatch, so elapsed reflects only the final (resuming) hook call.
+    expect(evt!.elapsedMsSinceAwait).toBeGreaterThanOrEqual(0);
+    expect(evt!.elapsedMsSinceAwait).toBeLessThan(PARK_MS);
   });
 });
 

@@ -289,8 +289,12 @@ const handleKernelError = <O>(
  * checkpointing. Falls back to an in-memory `JobLike` when `opts.jobLike` is
  * not supplied.
  *
- * Returns `ok(output)` when the DAG reaches `succeeded`, `err(error)` when
- * the machine ends in a `failed` terminal state.
+ * Returns `ok(StatefulOutcome<O>)` — `{ kind: "completed"; output }` when the
+ * DAG reaches `succeeded`, or `{ kind: "suspended"; nodeId; prompt; output }`
+ * when it halts at a human gate (ADR-0060) — and `err(error)` when the machine
+ * ends in a `failed` terminal state. (The flat-`Result<O>` back-compat entry is
+ * `runDagStateful` below, which unwraps `completed` and maps `suspended` to an
+ * invariant `err`.)
  *
  * Pipeline:
  *   1. prepareDagRun — merge retries, emit run-start, validate capabilities
@@ -298,7 +302,7 @@ const handleKernelError = <O>(
  *   3. compile       — topo sort, build initial context
  *   4. resolveJob    — caller-supplied or in-memory JobLike
  *   5. execute       — build executor, run state machine kernel
- *   6. terminal      — handle succeeded/failed/unexpected
+ *   6. terminal      — handle completed/suspended/failed/unexpected
  */
 export const runDagStatefulOutcome = async <I, O>(
   dag: DagDef,

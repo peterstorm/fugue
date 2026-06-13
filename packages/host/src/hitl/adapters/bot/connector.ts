@@ -15,6 +15,7 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../../domain/host-error.js";
 import type { LogPort } from "../../../ports.js";
 import type { BotConnectorPort, ConversationReference } from "./ports.js";
+import { isTrustedBotServiceUrl } from "./trusted-host.js";
 
 export interface BotConnectorConfig {
   readonly appId: string;
@@ -70,6 +71,13 @@ export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort)
 
   return {
     async sendToConversation(ref: ConversationReference, activity): Promise<Result<void, HostError>> {
+      // Defence-in-depth: never attach the app-only bearer token to a request
+      // for an untrusted host, even if a bad serviceUrl somehow reached the
+      // store (the inbound capture path also allowlists it).
+      if (!isTrustedBotServiceUrl(ref.serviceUrl)) {
+        logger?.error?.("hitl/bot: refusing proactive send to untrusted serviceUrl", { serviceUrl: ref.serviceUrl });
+        return err({ kind: "notification-failed", operation: `bot send: untrusted serviceUrl '${ref.serviceUrl}'` });
+      }
       const tokenRes = await getToken();
       if (!tokenRes.ok) return err(tokenRes.error);
 
