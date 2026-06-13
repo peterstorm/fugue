@@ -47,6 +47,14 @@ import { createRedisDecisionStore } from "./hitl/adapters/decision-store.js";
 import { createRunExecutor } from "./hitl/adapters/run-executor.js";
 import { createRunQueue } from "./hitl/adapters/run-queue.js";
 import { createWebhookNotifier, fetchWebhookHttp } from "./hitl/adapters/webhook-notifier.js";
+import type { HumanReviewNotifierPort } from "./hitl/ports.js";
+import { createBotFrameworkNotifier } from "./hitl/adapters/bot/notifier.js";
+import { createBotConnector } from "./hitl/adapters/bot/connector.js";
+import { createBotTokenVerifier } from "./hitl/adapters/bot/verify.js";
+import { createRedisConversationStore } from "./hitl/adapters/bot/conversation-store.js";
+import type { ConversationStorePort } from "./hitl/adapters/bot/ports.js";
+import { handleBotActivity } from "./hitl/adapters/bot/messages-handler.js";
+import type { BotResponse } from "./hitl/adapters/bot/messages-handler.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
 import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
 import { createSyncCallbacks } from "./sync/sync-callbacks.js";
@@ -261,21 +269,45 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   const broker: CapabilityBroker | undefined = selectCapabilityBroker(config, sharedInfra, logger);
 
   // ── HITL durable run engine (ADR-0060) ──────────────────────────────────
-  // Enabled when a Teams webhook is configured AND a queue backend is wired.
-  // HITL DAGs (those declaring `humanReview`) run on this durable queue and
-  // park for human review; non-HITL DAGs keep the synchronous inline path.
+  // Enabled when a notifier transport is configured (Bot Framework cards, or
+  // the webhook smoke-test) AND a queue backend is wired. HITL DAGs (those
+  // declaring `humanReview`) run on this durable queue and park for human
+  // review; non-HITL DAGs keep the synchronous inline path.
   let hitlService: HitlRunService | undefined;
   let hitlWorker: WorkerHandle | undefined;
-  if (config.TEAMS_WEBHOOK_URL !== undefined && deps.queueBackend !== undefined) {
-    const runStore = createRedisRunStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
-    const decisions = createRedisDecisionStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
-    const notifier = createWebhookNotifier(
+  let teamsBotHandle: ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>) | undefined;
+
+  // Select the notifier transport. Bot Framework (in-Teams buttons) takes
+  // precedence over the webhook (link-out) when both are configured.
+  const botConfigured = config.BOT_APP_ID !== undefined && config.BOT_APP_PASSWORD !== undefined;
+  let notifier: HumanReviewNotifierPort | undefined;
+  let conversations: ConversationStorePort | undefined;
+  if (botConfigured) {
+    conversations = createRedisConversationStore(sharedInfra.redis, sharedInfra.logger);
+    const connector = createBotConnector(
+      {
+        appId: config.BOT_APP_ID!,
+        appPassword: config.BOT_APP_PASSWORD!,
+        ...(config.BOT_TOKEN_URL !== undefined ? { tokenUrl: config.BOT_TOKEN_URL } : {}),
+      },
+      sharedInfra.logger,
+    );
+    notifier = createBotFrameworkNotifier({ connector, conversations });
+  } else if (config.TEAMS_WEBHOOK_URL !== undefined) {
+    notifier = createWebhookNotifier(
       {
         webhookUrl: config.TEAMS_WEBHOOK_URL,
         approvalBaseUrl: config.HITL_APPROVAL_BASE_URL ?? `http://localhost:${config.PORT}`,
       },
       fetchWebhookHttp(),
     );
+  } else if (config.BOT_APP_ID !== undefined) {
+    logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
+  }
+
+  if (notifier !== undefined && deps.queueBackend !== undefined) {
+    const runStore = createRedisRunStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const decisions = createRedisDecisionStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
     const executor = createRunExecutor({
       sharedInfra,
       getRegisteredDag: (id) => {
@@ -302,9 +334,21 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       logger: sharedInfra.logger,
     });
     hitlWorker = runQueue.startWorker(hitlService.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });
-    logger.info("HITL durable run engine enabled (Teams webhook configured)");
-  } else if (config.TEAMS_WEBHOOK_URL !== undefined && deps.queueBackend === undefined) {
-    logger.warn("TEAMS_WEBHOOK_URL is set but no queue backend was wired — HITL is disabled");
+
+    // The in-Teams transport also needs its inbound endpoint: verify the Bot
+    // Framework token, then dispatch button clicks to the run service.
+    if (botConfigured && conversations !== undefined) {
+      const verify = createBotTokenVerifier({ appId: config.BOT_APP_ID! });
+      const svc = hitlService;
+      const convs = conversations;
+      teamsBotHandle = (input) =>
+        handleBotActivity({ verify, hitl: svc, conversations: convs, logger: sharedInfra.logger }, input);
+      logger.info("HITL durable run engine enabled (Bot Framework in-Teams transport)");
+    } else {
+      logger.info("HITL durable run engine enabled (Teams webhook transport)");
+    }
+  } else if (notifier !== undefined && deps.queueBackend === undefined) {
+    logger.warn("A HITL notifier is configured but no queue backend was wired — HITL is disabled");
   }
 
   // ── Router Dependencies ──────────────────────────────────────────────────
@@ -312,6 +356,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
 
   const routerDeps: RouterDeps = {
     hitl: hitlService,
+    teamsBot: teamsBotHandle,
     getHostState: () => hostState,
     getConcurrency: () => concurrency,
     setConcurrency: (s) => { concurrency = s; },

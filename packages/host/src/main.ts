@@ -235,7 +235,8 @@ const main = async () => {
     // the framework's backend owns it. Dynamic import mirrors the ioredis/SDK
     // pattern — bullmq loads only when HITL is enabled.
     let queueBackend: import("@fuguejs/framework").QueueBackend | undefined;
-    if (config.TEAMS_WEBHOOK_URL !== undefined) {
+    const hitlConfigured = config.TEAMS_WEBHOOK_URL !== undefined || config.BOT_APP_ID !== undefined;
+    if (hitlConfigured) {
       const { createBullMQBackend } = await import("@fuguejs/framework/bullmq");
       queueBackend = createBullMQBackend(config.REDIS_URL);
       logger.info("HITL queue backend (BullMQ) constructed");

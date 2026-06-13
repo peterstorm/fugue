@@ -46,6 +46,13 @@ export interface RouterDeps extends RunDagDeps, AuthMiddlewareDeps {
   readonly getHostState: () => HostState;
   readonly logger: LogPort;
   readonly adminHandlerDeps: AdminHandlerDeps;
+  /**
+   * Inbound Bot Framework activity handler (ADR-0060). When wired, mounts
+   * `POST /teams/messages` BEFORE the team-token auth middleware — Teams
+   * authenticates with a Bot Framework JWT (verified inside the handler), not a
+   * fugue team token. Undefined when the in-Teams transport isn't configured.
+   */
+  readonly teamsBot?: (input: { authHeader: string | undefined; activity: unknown }) => Promise<{ status: number; body?: unknown }>;
 }
 
 /**
@@ -70,6 +77,23 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   // ── Health routes (no auth, no concurrency guard) ────────────────────────
   app.get("/health", healthHandler);
   app.get("/readiness", readinessHandler);
+
+  // ── Bot Framework inbound endpoint (ADR-0060) ────────────────────────────
+  // Registered BEFORE the team-token auth middleware: Teams authenticates with
+  // a Bot Framework JWT (verified inside the handler), not a fugue team token.
+  if (deps.teamsBot) {
+    const teamsBot = deps.teamsBot;
+    app.post("/teams/messages", async (c) => {
+      let activity: unknown;
+      try {
+        activity = await c.req.json();
+      } catch {
+        return errorResponse(c, 400, "body-parse-failed", "Bot activity is not valid JSON");
+      }
+      const result = await teamsBot({ authHeader: c.req.header("authorization"), activity });
+      return result.body !== undefined ? c.json(result.body as object, result.status as 200) : c.body(null, result.status as 200);
+    });
+  }
 
   // ── Auth middleware (applied to all routes below) ────────────────────────
   app.use("*", createAuthMiddleware(deps));

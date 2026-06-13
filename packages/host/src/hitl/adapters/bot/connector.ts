@@ -1,0 +1,94 @@
+/**
+ * Production BotConnector (ADR-0060) — posts a proactive activity to the Bot
+ * Framework connector service over `fetch`, authenticating with an app-only
+ * token (client_credentials against the Bot Framework login). The token is
+ * cached until shortly before expiry.
+ *
+ * The HTTP form/JSON shaping is INJECTED-free here (direct `fetch`), so this is
+ * the production wiring; the notifier + handler logic is tested against the
+ * `BotConnectorPort` with fakes. SC: the app password is the only credential and
+ * is read from config, never logged.
+ */
+
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import type { HostError } from "../../../domain/host-error.js";
+import type { LogPort } from "../../../ports.js";
+import type { BotConnectorPort, ConversationReference } from "./ports.js";
+
+export interface BotConnectorConfig {
+  readonly appId: string;
+  readonly appPassword: string;
+  /**
+   * Token endpoint. Default is the multi-tenant Bot Framework login. For a
+   * single-tenant bot, pass `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`.
+   */
+  readonly tokenUrl?: string;
+  /** OAuth scope for the connector token. Default `https://api.botframework.com/.default`. */
+  readonly scope?: string;
+  /** Wall-clock source (injected for tests). Defaults to `Date.now`. */
+  readonly now?: () => number;
+}
+
+const DEFAULT_TOKEN_URL = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
+const DEFAULT_SCOPE = "https://api.botframework.com/.default";
+
+export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort): BotConnectorPort => {
+  const tokenUrl = config.tokenUrl ?? DEFAULT_TOKEN_URL;
+  const scope = config.scope ?? DEFAULT_SCOPE;
+  const now = config.now ?? Date.now;
+
+  let cached: { token: string; expiresAtMs: number } | null = null;
+
+  const getToken = async (): Promise<Result<string, HostError>> => {
+    if (cached !== null && now() < cached.expiresAtMs) return ok(cached.token);
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: config.appId,
+      client_secret: config.appPassword,
+      scope,
+    });
+    let res: Response;
+    try {
+      res = await fetch(tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      });
+    } catch (e) {
+      return err({ kind: "notification-failed", operation: `bot token fetch: ${e instanceof Error ? e.message : String(e)}` });
+    }
+    if (!res.ok) return err({ kind: "notification-failed", operation: `bot token endpoint HTTP ${res.status}` });
+    const json = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+    if (typeof json.access_token !== "string" || typeof json.expires_in !== "number") {
+      return err({ kind: "notification-failed", operation: "bot token response missing access_token/expires_in" });
+    }
+    // Refresh 60s early to avoid edge-of-expiry failures.
+    cached = { token: json.access_token, expiresAtMs: now() + (json.expires_in - 60) * 1000 };
+    return ok(cached.token);
+  };
+
+  return {
+    async sendToConversation(ref: ConversationReference, activity): Promise<Result<void, HostError>> {
+      const tokenRes = await getToken();
+      if (!tokenRes.ok) return err(tokenRes.error);
+
+      const url = `${ref.serviceUrl.replace(/\/$/, "")}/v3/conversations/${encodeURIComponent(ref.conversationId)}/activities`;
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${tokenRes.value}` },
+          body: JSON.stringify(activity),
+        });
+      } catch (e) {
+        return err({ kind: "notification-failed", operation: `bot send: ${e instanceof Error ? e.message : String(e)}` });
+      }
+      if (res.status < 200 || res.status >= 300) {
+        logger?.error?.("hitl/bot: proactive send failed", { status: res.status, conversationId: ref.conversationId });
+        return err({ kind: "notification-failed", operation: `bot send HTTP ${res.status}` });
+      }
+      return ok(undefined);
+    },
+  };
+};

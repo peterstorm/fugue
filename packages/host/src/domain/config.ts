@@ -152,6 +152,19 @@ export const HostConfigSchema = z.object({
   HITL_LOCK_TTL_SEC: z.coerce.number().int().min(1).default(300),
   /** Max concurrent HITL run slices the worker processes. Default 4. */
   HITL_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(4),
+  /**
+   * Microsoft Bot Framework app id. Setting this (with BOT_APP_PASSWORD)
+   * selects the IN-Teams transport: reviews post interactive Approve/Reject
+   * cards and the bot endpoint (`POST /teams/messages`) records decisions
+   * in-place — no link-out. Takes precedence over TEAMS_WEBHOOK_URL when both
+   * are set. Requires an Azure Bot resource + Teams app manifest (see
+   * docs/hitl-teams.md).
+   */
+  BOT_APP_ID: z.string().optional(),
+  /** Bot Framework app password (client secret). Required when BOT_APP_ID is set. */
+  BOT_APP_PASSWORD: z.string().optional(),
+  /** Override the Bot Framework token endpoint (single-tenant bots). Optional. */
+  BOT_TOKEN_URL: z.string().url().optional(),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */
