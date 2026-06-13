@@ -468,8 +468,8 @@ export type NodeContextInit = {
    * Extensible capabilities record. Keys correspond to `CapabilityRegistry`
    * entries. Values are the capability client instances.
    *
-   * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`) can
-   * also be passed here instead of as top-level fields.
+   * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`,
+   * `clock`) can also be passed here instead of as top-level fields.
    */
   readonly capabilities?: Partial<{ readonly [K in Capability]: CapabilityRegistry[K] | null }>;
 };

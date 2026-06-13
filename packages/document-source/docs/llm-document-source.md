@@ -4,7 +4,7 @@ Minimal, copy-paste-ready reference for reading files (Excel, CSV, anything)
 inside a Fugue DAG via the generic `documents` capability.
 
 For the design rationale see `docs/adr/0052-document-source-capability.md`.
-For DAG structure see `docs/llm-dag-authoring.md`.
+For DAG structure see `@fuguejs/framework/docs/llm-dag-authoring.md`.
 
 ---
 

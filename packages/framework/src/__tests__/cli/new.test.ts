@@ -182,6 +182,19 @@ describe("runNew overwrite guard", () => {
     const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root });
     expect(result.ok).toBe(true);
   });
+
+  it("propagates a non-ENOENT stat error rather than treating the target as safe-to-write", async () => {
+    // `dags` is a regular file, so readdir(dags/t/x) fails with ENOTDIR — we
+    // *cannot verify* emptiness, so isDirNonEmpty must rethrow (not report
+    // safe-to-write) and runNew must surface it rather than scaffold over it.
+    const root = join(tmpRoot, "guard-notdir");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "dags"), "i am a file, not a directory", "utf-8");
+
+    await expect(
+      runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root }),
+    ).rejects.toThrow();
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -220,6 +233,14 @@ describe("parseNewArgs", () => {
     const parsed = parseNewArgs(["leads/x", "--shape", "spaghetti"]);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.join()).toContain("spaghetti");
+  });
+
+  it("reports a value-taking flag followed by another flag as missing its value", () => {
+    // `--shape --llm`: the next token is itself a flag, so --shape consumed no
+    // value. The parser must not silently swallow `--llm` as the shape value.
+    const parsed = parseNewArgs(["leads/x", "--shape", "--llm"]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join()).toContain("--shape requires a value");
   });
 
   it("rejects a non <team>/<name> path", () => {

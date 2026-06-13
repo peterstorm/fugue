@@ -116,7 +116,7 @@ export const validateDagShape = (
     if (isDagInput(e.to)) {
       return err(
         frameworkError.invalidDagInputEdge(
-          nodeId(e.from === e.to ? "__dag__" : (isDagInput(e.from) ? "__dag__" : e.from)),
+          { from: e.from, to: e.to },
           `DAG_INPUT ('$input') cannot be an edge target — it is the virtual request source, never a node`,
         ),
       );
@@ -127,7 +127,7 @@ export const validateDagShape = (
       if (conditionalOrDefault) {
         return err(
           frameworkError.invalidDagInputEdge(
-            nodeId(e.to),
+            { from: e.from, to: e.to },
             `DAG_INPUT ('$input') edge to '${e.to}' must be unconditional — it carries no routing semantics (no \`when\`, no \`default\`)`,
           ),
         );

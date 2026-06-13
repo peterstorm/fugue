@@ -1242,7 +1242,7 @@ const enrichSummaryNode = createLlmNode({
   outputSchema: Summary,
   deps: ["fetch-customer"],
   promptName: "enrich-summary",
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-4-6",
   buildInput: (i) => i,
   // Custom run override — uses the framework's tool surface directly.
   run: async (input, ctx) => {
@@ -1251,7 +1251,7 @@ const enrichSummaryNode = createLlmNode({
       {
         system: "You are a CRM analyst. Use tools to gather facts before summarizing.",
         user: `Summarize customer ${input.customerId}.`,
-        model: "claude-sonnet-4-5",
+        model: "claude-sonnet-4-6",
         tools: [lookupDealsByCustomer],
         schema: Summary,
         maxIterations: 5,
@@ -1277,7 +1277,7 @@ The trace tree under the parent node span looks like:
 
 ```
 node:enrich-summary [CHAIN]
-├── chat claude-sonnet-4-5 [CHAT_MODEL]
+├── chat claude-sonnet-4-6 [CHAT_MODEL]
 │       gen_ai.system="anthropic"
 │       gen_ai.usage.input_tokens=412
 │       gen_ai.usage.output_tokens=87
@@ -1285,7 +1285,7 @@ node:enrich-summary [CHAIN]
 │       gen_ai.tool.name="lookup_deals_by_customer"
 │       gen_ai.tool.call.id="toolu_01..."
 │       gen_ai.tool.is_error=false
-├── chat claude-sonnet-4-5 [CHAT_MODEL]
+├── chat claude-sonnet-4-6 [CHAT_MODEL]
 │       gen_ai.usage.input_tokens=520
 │       gen_ai.usage.output_tokens=140
 └── (final answer parsed against schema)

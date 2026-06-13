@@ -157,10 +157,12 @@ export type FrameworkError =
       /**
        * A `DAG_INPUT` edge is malformed: `$input` appears as a `to` target, or
        * carries conditional/default routing semantics. The virtual request
-       * source can only be an unconditional `from`.
+       * source can only be an unconditional `from`. The offending edge endpoints
+       * are carried verbatim as raw strings — one end is `$input`, which is the
+       * virtual request source, not a real (brandable) node id.
        */
       readonly kind: "invalid-dag-input-edge";
-      readonly toNodeId: NodeId;
+      readonly edge: { readonly from: string; readonly to: string };
       readonly message: string;
     }
   | {
@@ -327,7 +329,7 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "duplicate-edge" }, (e) => `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`)
     .with({ kind: "root-expects-input" }, (e) => `${e.message} (node '${e.nodeId}')`)
     .with({ kind: "source-has-incoming" }, (e) => `${e.message} (node '${e.nodeId}')`)
-    .with({ kind: "invalid-dag-input-edge" }, (e) => `${e.message} (-> '${e.toNodeId}')`)
+    .with({ kind: "invalid-dag-input-edge" }, (e) => `${e.message} ('${e.edge.from}' -> '${e.edge.to}')`)
     .with({ kind: "predicate-malformed" }, (e) => `${e.message} (node '${e.nodeId}')`)
     .with({ kind: "cycle-detected" }, (e) => `cycle detected: ${e.nodeIds.join(" -> ")}`)
     .with({ kind: "retry-exhausted" }, (e) => `node '${e.nodeId}' exhausted ${e.attempts} retries (root: ${e.rootErrorKind}): ${e.lastError}`)

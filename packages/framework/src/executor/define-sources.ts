@@ -85,7 +85,7 @@ const assertFanInKeys = (
  * ```ts
  * const dag = defineSources({
  *   id: "lead-scoring",
- *   sources: [fetchWeights, fetchBrancheliste, fetchGamleKunder],
+ *   sources: [fetchWeights, fetchBranches, fetchPastCustomers],
  *   join: scoreLeads,      // inputSchema keyed by the three source ids
  *   assemble: assembleLeads, // inputSchema: { "score-leads": …, "$input": Request }
  * });

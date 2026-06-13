@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fwLogger } from "../logger.js";
 
 /**
  * Convert a Zod schema to a JSON Schema object suitable for LLM API calls.
@@ -36,7 +37,15 @@ export const objectSchemaKeys = (schema: unknown): readonly string[] | null => {
   let json: Record<string, unknown>;
   try {
     json = zodToJsonSchema(schema as z.ZodType<unknown>);
-  } catch {
+  } catch (e) {
+    // A throw here is indistinguishable from a deliberately non-object schema
+    // (both → null → "can't verify, skip"). That bias is intentional (no false
+    // positives), but a render failure on a *real* object schema would silently
+    // defer a genuine fan-in-key-mismatch to the runtime Zod parse. Log at debug
+    // so a future zodToJsonSchema regression is diagnosable instead of invisible.
+    fwLogger().debug("objectSchemaKeys: schema introspection threw, treating as unverifiable", {
+      error: e instanceof Error ? e.message : String(e),
+    });
     return null;
   }
   if (json.type !== "object") return null;

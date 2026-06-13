@@ -1164,7 +1164,8 @@ $ bunx fugue capabilities
     { "name": "cache",    "clientType": "ContextCacheAdapter",  "description": "...", "reference": "computeCacheKey on createLlmNode" },
     { "name": "prompts",  "clientType": "PromptAccess",         "description": "...", "reference": "promptName on createLlmNode" },
     { "name": "judgeLlm", "clientType": "LlmClient",            "description": "...", "reference": "createEvalJudgeNode (DagDef.evalJudges)" },
-    { "name": "http",     "clientType": "HttpCapability",       "description": "...", "reference": "createFetchNode with requires: ['http']" }
+    { "name": "http",     "clientType": "HttpCapability",       "description": "...", "reference": "createFetchNode with requires: ['http']" },
+    { "name": "clock",    "clientType": "ClockCapability",      "description": "...", "reference": "createFetchNode with requires: ['clock']" }
   ],
   "custom": {
     "mechanism": "Adapter packages augment CapabilityRegistry and ship a CapabilityHandle the host wires at boot.",

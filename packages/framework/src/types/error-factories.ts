@@ -59,8 +59,8 @@ export const frameworkError = {
   sourceHasIncoming: (nid: string | NodeId, message: string): FrameworkError =>
     ({ kind: "source-has-incoming", nodeId: toNodeId(nid), message }),
 
-  invalidDagInputEdge: (toNodeId_: string | NodeId, message: string): FrameworkError =>
-    ({ kind: "invalid-dag-input-edge", toNodeId: toNodeId(toNodeId_), message }),
+  invalidDagInputEdge: (edge: { readonly from: string; readonly to: string }, message: string): FrameworkError =>
+    ({ kind: "invalid-dag-input-edge", edge: { from: edge.from, to: edge.to }, message }),
 
   outputUnreachable: (outputNodeId: string | NodeId, missedFromNode: string | NodeId): FrameworkError =>
     ({ kind: "output-unreachable-under-routing", outputNodeId: toNodeId(outputNodeId), missedFromNode: toNodeId(missedFromNode) }),

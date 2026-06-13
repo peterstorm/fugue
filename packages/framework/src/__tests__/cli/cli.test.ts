@@ -91,6 +91,21 @@ describe("runLint", () => {
     }
   });
 
+  it("surfaces an analyzer crash as analyzer-failed (ok: false), not a silent pass", async () => {
+    // `.dag` clears importDagFile's shape gate (non-null object) but has no
+    // `nodes`, so analyzeDag throws. runLint must convert that into ok: false
+    // with an `analyzer-failed` error rather than letting lint pass.
+    const result = await runLint(fixturePath("analyzer-throws.ts"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]!.kind).toBe("analyzer-failed");
+      const e = result.errors[0]!;
+      if (e.kind === "analyzer-failed") {
+        expect(e.message).toContain("analyzer threw");
+      }
+    }
+  });
+
   it("propagates a B3 shape-helper-hint advisory alongside ok: true", async () => {
     const result = await runLint(fixturePath("manual-linear-advisory.ts"));
     expect(result.ok).toBe(true);

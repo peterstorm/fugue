@@ -216,6 +216,27 @@ describe("C1 — defineSources", () => {
     expect(res).toEqual({ ok: true, value: { region: "dk", score: 10 } });
   });
 
+  it("wires the $input edge to the JOIN itself when the join declares '$input', and delivers the request", async () => {
+    const JoinWithReq = z.object({ "fetch-w": W, "fetch-c": C, $input: Req });
+    const scoreWithReq = createTransformNode({
+      id: "score",
+      inputSchema: JoinWithReq,
+      outputSchema: z.object({ score: z.number(), region: z.string() }),
+      transform: (i) => ok({ score: i["fetch-w"].w * i["fetch-c"].c, region: i.$input.region }),
+    });
+    const dag = defineSources({ id: "join-wants-request", sources: [fetchW, fetchC], join: scoreWithReq });
+    // request edge targets the join (no assemble), and the join is the output node.
+    expect(dag.edges.filter((e) => isDagInput(e.from)).map((e) => e.to as string)).toEqual(["score"]);
+    expect(dag.outputNodeId as string).toBe("score");
+
+    const res = await runDag<z.infer<typeof Req>, { score: number; region: string }>(
+      dag,
+      { region: "no", minScore: 0 },
+      ctx(),
+    );
+    expect(res).toEqual({ ok: true, value: { score: 10, region: "no" } });
+  });
+
   it("rejects a non-source passed as a source with a teaching error", () => {
     const notASource = createTransformNode({
       id: "fetch-w",
@@ -249,6 +270,19 @@ describe("C2 — clock capability", () => {
     const c = makeNodeContext({ runId: "r", dagId: "clock-dag", clock: fixedClock(at) });
     const res = await runDag<unknown, { at: string }>(dag, undefined, c);
     expect(res).toEqual({ ok: true, value: { at: "2026-06-12T08:00:00.000Z" } });
+  });
+
+  it("fixedClock mints a fresh Date per call — neither a mutated read nor a mutated source poisons the fixture", () => {
+    const at = new Date("2026-06-12T08:00:00.000Z");
+    const c = fixedClock(at);
+    // distinct instances each call
+    expect(c.now()).not.toBe(c.now());
+    // mutating a returned Date in place must not affect later reads
+    c.now().setTime(0);
+    expect(c.now().getTime()).toBe(at.getTime());
+    // mutating the original `at` after construction must not shift the fixture
+    at.setTime(0);
+    expect(c.now().toISOString()).toBe("2026-06-12T08:00:00.000Z");
   });
 
   it("fails closed with missing-capability when no clock is wired", async () => {
