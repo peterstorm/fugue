@@ -179,6 +179,35 @@ describe("B3 — shape-helper-hint", () => {
     expect(analyzeDag(dag).advisories).toEqual([]);
   });
 
+  it("stays silent on a manual router-shaped DAG (conditional + default edges)", () => {
+    // detectShapeHelper's guard bails on any non-unconditional edge, so a
+    // router (which has no single-source shape helper) must never be hinted as
+    // a linear/fan-out/diamond. Pin the guard directly.
+    const dag = defineDag({
+      id: "manual-router",
+      nodes: {
+        classifier: n("classifier", z.unknown(), A),
+        simple: n("simple", A, Out),
+        complex: n("complex", A, Out),
+      },
+      edges: [
+        { from: DAG_INPUT, to: "classifier" },
+        {
+          from: "classifier",
+          to: "simple",
+          when: { label: "a-is-small", version: 1, check: (v) => (v as { a: number }).a < 10 },
+        },
+        { from: "classifier", to: "complex", kind: "default" },
+      ],
+      // The default edge is the unconditional-reachable path, so the output
+      // must sit on it for the DAG to be sound.
+      outputNodeId: "complex",
+    });
+    expect(
+      analyzeDag(dag).advisories.filter((a) => a.kind === "shape-helper-hint"),
+    ).toEqual([]);
+  });
+
   it("stays silent on the no-helper multi-root shape", () => {
     // Two independent roots → one join: matches no single-source helper.
     const join = makeJoin(z.object({ "fetch-a": A, "fetch-b": B }));

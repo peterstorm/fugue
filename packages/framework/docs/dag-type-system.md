@@ -38,7 +38,7 @@ declare const __dagValidated: unique symbol;
 
 export interface DagDef {
   readonly id: string;
-  readonly nodes: readonly NodeDef<unknown, unknown, unknown>[];
+  readonly nodes: readonly NodeDef<unknown, unknown>[];
   readonly edges: readonly EdgeDef[];
   // ...
   readonly [__dagValidated]: true;
@@ -155,7 +155,7 @@ Two notes:
 - `NodeDef<any, any, any>` is a **deliberate variance leak**. Each node's
   generic parameters (input/output/error types) are typically
   heterogeneous within one DAG. The strict bound
-  `NodeDef<unknown, unknown, unknown>` would reject nodes that have more
+  `NodeDef<unknown, unknown>` would reject nodes that have more
   specific I/O types — co/contravariance bites in both directions. `any`
   on the parameters is the simplest escape; we recover safety at the
   call boundary because every node is invoked through `runNode`, which

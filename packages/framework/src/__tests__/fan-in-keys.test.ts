@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { objectSchemaKeys } from "../llm/zod-schema.js";
+import { objectSchemaKeys, objectSchemaRequiredKeys } from "../llm/zod-schema.js";
 import { fanInKeyCheck, describeFanInKeyMismatch } from "../executor/fan-in-keys.js";
 
 describe("objectSchemaKeys", () => {
@@ -51,6 +51,51 @@ describe("objectSchemaKeys", () => {
     // caught and reported as `null`, not propagated.
     const hostile = { parse: () => undefined } as unknown;
     expect(objectSchemaKeys(hostile)).toBeNull();
+  });
+});
+
+describe("objectSchemaRequiredKeys", () => {
+  it("returns only the JSON-Schema-required top-level keys", () => {
+    const keys = objectSchemaRequiredKeys(
+      z.object({ a: z.number(), b: z.string().optional() }),
+    );
+    expect(keys).not.toBeNull();
+    expect([...(keys ?? [])].sort()).toEqual(["a"]);
+  });
+
+  it("returns [] for an object whose keys are all optional", () => {
+    // No `required` array is emitted → the distinct empty-required branch, as
+    // opposed to `null` (not an introspectable object).
+    expect(objectSchemaRequiredKeys(z.object({ a: z.number().optional() }))).toEqual([]);
+  });
+
+  it("returns [] for an empty object schema", () => {
+    expect(objectSchemaRequiredKeys(z.object({}))).toEqual([]);
+  });
+
+  it("counts a nullable-but-present key as required", () => {
+    // `.nullable()` keeps the key required (presence guaranteed); only
+    // `.optional()`/`.nullish()` drops it from `required`.
+    const keys = objectSchemaRequiredKeys(z.object({ a: z.number().nullable() }));
+    expect([...(keys ?? [])]).toEqual(["a"]);
+  });
+
+  it("returns null for schemas that aren't introspectable objects", () => {
+    expect(objectSchemaRequiredKeys(z.unknown())).toBeNull();
+    expect(objectSchemaRequiredKeys(z.string())).toBeNull();
+    expect(objectSchemaRequiredKeys(z.union([z.object({ a: z.number() }), z.object({ b: z.number() })]))).toBeNull();
+  });
+
+  it("returns null for a value that isn't a Zod schema at all", () => {
+    expect(objectSchemaRequiredKeys(null)).toBeNull();
+    expect(objectSchemaRequiredKeys(undefined)).toBeNull();
+    expect(objectSchemaRequiredKeys(42)).toBeNull();
+    expect(objectSchemaRequiredKeys({ parse: "not a function" })).toBeNull();
+  });
+
+  it("returns null (not throw) when introspection blows up", () => {
+    const hostile = { parse: () => undefined } as unknown;
+    expect(objectSchemaRequiredKeys(hostile)).toBeNull();
   });
 });
 
