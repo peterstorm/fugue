@@ -176,12 +176,20 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
 declare const __dagValidated: unique symbol;
 
 /**
+ * The closed set of DAG shapes the framework knows about — the single source of
+ * truth. Both `DagProvenance` (below) and the CLI's `SHAPES` / scaffold-helper
+ * union derive from this tuple, so a new shape is added in exactly one place and
+ * the projections cannot drift apart.
+ */
+export const DAG_SHAPES = ["linear", "fan-out", "diamond", "router", "sources"] as const;
+
+/**
  * Which constructor produced a `DagDef`. Shape helpers stamp their own name;
  * raw `defineDag` / `defineDagFromArray` leave it absent (treated as "manual").
  * Used by `fugue lint`'s shape-helper hint to avoid suggesting a helper for a
  * DAG that already used one.
  */
-export type DagProvenance = "linear" | "fan-out" | "diamond" | "router" | "sources";
+export type DagProvenance = (typeof DAG_SHAPES)[number];
 
 export interface DagDef {
   readonly id: DagId;

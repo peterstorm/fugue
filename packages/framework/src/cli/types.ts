@@ -36,6 +36,24 @@ export type LintResult =
     };
 
 /**
+ * The shape-helper constructor each scaffold `Shape` corresponds to. `satisfies
+ * Record<Shape, string>` makes this exhaustive over `Shape` (and therefore over
+ * `DagProvenance`, its single source) — adding a shape without a helper name, or
+ * naming one that isn't a shape, is a compile error. `ShapeHelper` is the union
+ * of constructor names, derived rather than re-listed.
+ */
+export const SHAPE_HELPER = {
+  linear: "defineLinearDag",
+  "fan-out": "defineFanOut",
+  diamond: "defineDiamond",
+  router: "defineRouter",
+  sources: "defineSources",
+} as const satisfies Record<Shape, string>;
+
+/** A DAG shape-helper constructor name (`defineLinearDag` … `defineSources`). */
+export type ShapeHelper = (typeof SHAPE_HELPER)[Shape];
+
+/**
  * Non-fatal lint hint. Advisories never set `ok: false` — they nudge the author
  * toward a better shape without blocking. Stable JSON shape for LLM tooling.
  */
@@ -44,12 +62,7 @@ export type LintAdvisory =
       readonly kind: "shape-helper-hint";
       readonly message: string;
       /** The constructor the manual DAG is isomorphic to. */
-      readonly helper:
-        | "defineLinearDag"
-        | "defineFanOut"
-        | "defineDiamond"
-        | "defineRouter"
-        | "defineSources";
+      readonly helper: ShapeHelper;
     }
   | {
       /**

@@ -104,4 +104,20 @@ describe("defineSources — definition-time fan-in key validation", () => {
       defineSources({ id: "single-source", sources: [srcA], join }),
     ).not.toThrow();
   });
+
+  it("accepts an unverifiable (non-object) join schema with ≥2 sources, deferring to the runtime parse", () => {
+    // `z.unknown()` isn't an introspectable object schema, so `fanInKeyCheck`
+    // returns `unverifiable` and defineSources must NOT throw — the keyed fan-in
+    // object is left to the runtime Zod parse rather than rejected at definition
+    // time (mirrors `fugue lint` B1's "skips non-object input schemas").
+    const join = createTransformNode({
+      id: "join",
+      inputSchema: z.unknown(),
+      outputSchema: z.object({ total: z.number() }),
+      transform: () => ok({ total: 0 }),
+    });
+    expect(() =>
+      defineSources({ id: "unverifiable-sources", sources: [srcA, srcB], join }),
+    ).not.toThrow();
+  });
 });

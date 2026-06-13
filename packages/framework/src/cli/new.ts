@@ -17,6 +17,7 @@
 
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { match } from "ts-pattern";
 import {
   SHAPES,
   buildScaffold,
@@ -86,31 +87,31 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParseNewE
       i++;
       return value;
     };
-    switch (arg) {
-      case "--shape":
+    match(arg)
+      .with("--shape", () => {
         shape = takeValue("--shape");
-        break;
-      case "--owner":
+      })
+      .with("--owner", () => {
         owner = takeValue("--owner");
-        break;
-      case "--dir":
+      })
+      .with("--dir", () => {
         root = takeValue("--dir");
-        break;
-      case "--llm":
+      })
+      .with("--llm", () => {
         llm = true;
-        break;
-      case "--force":
+      })
+      .with("--force", () => {
         force = true;
-        break;
-      default:
-        if (arg.startsWith("--")) {
-          problems.push(`unknown flag: ${arg}`);
+      })
+      .otherwise((other) => {
+        if (other.startsWith("--")) {
+          problems.push(`unknown flag: ${other}`);
         } else if (target === undefined) {
-          target = arg;
+          target = other;
         } else {
-          problems.push(`unexpected argument: ${arg}`);
+          problems.push(`unexpected argument: ${other}`);
         }
-    }
+      });
   }
 
   if (target === undefined) {
@@ -146,8 +147,12 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
   try {
     const entries = await readdir(dir);
     return entries.length > 0;
-  } catch {
-    return false; // ENOENT → does not exist → not "non-empty"
+  } catch (e) {
+    // ENOENT → does not exist → genuinely not "non-empty". Any other error
+    // (EACCES, ENOTDIR, …) means we *could not verify* emptiness, so we must
+    // not report the target as safe-to-write — rethrow rather than swallow.
+    if ((e as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+    throw e;
   }
 };
 

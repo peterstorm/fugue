@@ -9,9 +9,13 @@
 // promise honest — a template that stops linting fails the build.
 
 import { match } from "ts-pattern";
+import { DAG_SHAPES } from "../types/dag.js";
 
-/** The topologies `fugue new --shape` can scaffold. */
-export const SHAPES = ["linear", "fan-out", "diamond", "router", "sources"] as const;
+/**
+ * The topologies `fugue new --shape` can scaffold — one per DAG shape. Sourced
+ * from the canonical `DAG_SHAPES` tuple so it cannot drift from `DagProvenance`.
+ */
+export const SHAPES = DAG_SHAPES;
 export type Shape = (typeof SHAPES)[number];
 
 export interface TemplateCtx {

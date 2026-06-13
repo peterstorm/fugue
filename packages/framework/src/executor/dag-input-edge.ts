@@ -4,8 +4,8 @@
 // only over `DAG_INPUT` edges. Each single-entry shape helper (linear, fan-out,
 // diamond, router) therefore wires the request to its entry node automatically,
 // preserving the pre-0.2.0 behaviour where the first/source/classifier node saw
-// the request. A *source* entry node (built via `createFetchNode` without
-// `inputSchema`) consumes no input, so it gets no `$input` edge.
+// the request. A *source* entry node (built via `createSourceNode`, which sets
+// `isSource: true`) consumes no input, so it gets no `$input` edge.
 
 import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";

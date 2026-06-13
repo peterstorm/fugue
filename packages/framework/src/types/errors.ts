@@ -133,8 +133,8 @@ export type FrameworkError =
       /**
        * A node has zero incoming edges but is not a source node (C0 / 0.2.0).
        * Under 0.2.0 semantics no node implicitly receives the DAG input: a root
-       * is by definition a *source* (build it with `createFetchNode` and no
-       * `inputSchema`), and any other consumption of the request must flow over
+       * is by definition a *source* (build it with `createSourceNode`, which
+       * sets `isSource: true`), and any other consumption of the request must flow over
        * an explicit `DAG_INPUT` edge. This replaces the old "root inputSchema
        * matches the DAG inputSchema" rule with a structural one.
        */

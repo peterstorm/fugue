@@ -11,6 +11,14 @@
 // *declares* `["clock"]` can read time, so a transform that secretly depends on
 // the wall clock is a compile error at its use site, not a hidden runtime
 // nondeterminism.
+//
+// Scope: `ClockCapability` governs only *node-visible* wall-clock reads. It is a
+// distinct seam from the runtime's infrastructure timestamp source (`now:
+// () => number`, defaulting to `Date.now`, threaded through `run-node`, the
+// scheduler, cache, checkpointer, and observers). Wiring `fixedClock` pins what
+// a node reads via `ctx.clock`; it does NOT pin event/observer timestamps —
+// those follow the separate `now` injection. A test that needs both pinned must
+// wire both seams.
 
 /**
  * Wall-clock capability. `now()` returns the current instant as a `Date`.
@@ -31,14 +39,19 @@ export const systemClock: ClockCapability = {
 };
 
 /**
- * Test clock pinned to a fixed instant. Every `now()` returns the same `Date`,
- * making any DAG that reads `ctx.clock` reproducible. Pass to `makeNodeContext`
- * as `clock` (or in the `capabilities` record).
+ * Test clock pinned to a fixed instant. Every `now()` returns a *fresh* `Date`
+ * for the same instant, making any DAG that reads `ctx.clock` reproducible. Pass
+ * to `makeNodeContext` as `clock` (or in the `capabilities` record).
+ *
+ * A new `Date` is minted per call (rather than handing back the captured `at`)
+ * so a node that mutates the returned `Date` in place cannot poison the fixture
+ * for later readers — matching `systemClock`'s fresh-instance semantics.
  *
  * ```ts
  * const ctx = makeNodeContext({ runId, dagId, clock: fixedClock(new Date("2026-06-12T00:00:00Z")) });
  * ```
  */
-export const fixedClock = (at: Date): ClockCapability => ({
-  now: () => at,
-});
+export const fixedClock = (at: Date): ClockCapability => {
+  const ms = at.getTime();
+  return { now: () => new Date(ms) };
+};
