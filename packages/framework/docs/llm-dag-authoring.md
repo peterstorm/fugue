@@ -1101,6 +1101,7 @@ Possible `errors[].kind` values:
 | `dag-definition-error` | `defineDag()` rejected the DAG. The typed `FrameworkError` is on `errors[].detail`. |
 | `describe-failed` | `defineDag` accepted the DAG but the describe step failed to assemble — usually a framework invariant bug. The `FrameworkError` is on `errors[].detail`. |
 | `fan-in-key-mismatch` | A fan-in node (≥2 incoming edges) has a `z.object` input schema whose keys don't equal the set of incoming node ids. Carries `nodeId`, `missingKeys`, `extraKeys`. This compiles but fails at runtime — the single most likely wiring mistake. |
+| `analyzer-failed` | `defineDag` accepted the DAG but a structural lint check (`analyzeDag`) threw while inspecting it — a framework/analyzer bug, not an authoring error. Surfaced (never swallowed) so a real `fan-in-key-mismatch` can't silently pass behind a crashed analyzer. |
 
 **Advisories.** Lint may also attach a non-fatal `advisories` array (it never
 flips `ok` to `false`). Two kinds today:

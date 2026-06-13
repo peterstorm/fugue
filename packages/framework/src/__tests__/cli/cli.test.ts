@@ -110,11 +110,31 @@ describe("runLint", () => {
     const result = await runLint(fixturePath("manual-linear-advisory.ts"));
     expect(result.ok).toBe(true);
     if (result.ok) {
-      const hints = (result.advisories ?? []).flatMap((a) =>
+      const hints = result.advisories.flatMap((a) =>
         a.kind === "shape-helper-hint" ? [a.helper] : [],
       );
       expect(hints).toContain("defineLinearDag");
     }
+  });
+
+  it("propagates a B2 redundant-passthrough advisory through runLint (ok: true)", async () => {
+    const result = await runLint(fixturePath("manual-redundant-passthrough.ts"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const carriers = result.advisories.flatMap((a) =>
+        a.kind === "redundant-passthrough" ? [a.nodeId] : [],
+      );
+      expect(carriers).toContain("read-request");
+    }
+  });
+
+  it("always exposes advisories as an array, even when there are none", async () => {
+    // `advisories` is non-optional on both LintResult variants — consumers never
+    // branch on present-vs-absent. A clean DAG yields an empty array, not undefined.
+    const clean = await runLint(fixturePath("valid-dag.ts"));
+    expect(Array.isArray(clean.advisories)).toBe(true);
+    const broken = await runLint(fixturePath("invalid-edge-typo.ts"));
+    expect(Array.isArray(broken.advisories)).toBe(true);
   });
 });
 

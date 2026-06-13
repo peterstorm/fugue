@@ -240,6 +240,20 @@ export const validateDagShape = (
         ),
       );
     }
+    // A source consumes no DAG input, so its run always receives `undefined`.
+    // The `isSource` flag and the input schema are correlated but not coupled in
+    // the `NodeDef` type — `createSourceNode` sets `inputSchema: z.void()`, but a
+    // hand- or dynamically-built node could pair `isSource: true` with a non-unit
+    // schema that rejects `undefined`. Reject that here so the illegal state
+    // fails at definition time instead of surfacing as a confusing runtime parse.
+    if (node.isSource === true && !node.inputSchema.safeParse(undefined).success) {
+      return err(
+        validationErr(
+          node.id,
+          `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
+        ),
+      );
+    }
     if (node.isSource !== true && inDeg === 0) {
       return err(
         frameworkError.rootExpectsInput(

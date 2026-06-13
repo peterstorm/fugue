@@ -12,7 +12,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { objectSchemaKeys } from "../llm/zod-schema.js";
-import { fanInKeyCheck } from "../executor/fan-in-keys.js";
+import { fanInKeyCheck, describeFanInKeyMismatch } from "../executor/fan-in-keys.js";
 
 describe("objectSchemaKeys", () => {
   it("returns the top-level property names of a Zod object schema", () => {
@@ -79,5 +79,32 @@ describe("fanInKeyCheck", () => {
     expect(fanInKeyCheck(z.unknown(), ["src-a", "src-b"])).toEqual({ kind: "unverifiable" });
     expect(fanInKeyCheck(z.union([A, B]), ["src-a", "src-b"])).toEqual({ kind: "unverifiable" });
     expect(fanInKeyCheck("not a schema", ["src-a", "src-b"])).toEqual({ kind: "unverifiable" });
+  });
+});
+
+describe("describeFanInKeyMismatch", () => {
+  // The both-clauses path is covered transitively by the B1 lint tests; pin the
+  // two single-clause branches directly so neither the missing-only nor the
+  // extra-only diagnostic regresses to an empty/garbled string.
+  it("renders only the missing-keys clause when nothing is extra", () => {
+    const msg = describeFanInKeyMismatch("join", ["src-a", "src-b"], {
+      kind: "mismatch",
+      missing: ["src-b"],
+      extra: [],
+      schemaKeys: ["src-a"],
+    });
+    expect(msg).toContain("missing key(s) for incoming source(s): src-b");
+    expect(msg).not.toContain("extra key(s)");
+  });
+
+  it("renders only the extra-keys clause when nothing is missing", () => {
+    const msg = describeFanInKeyMismatch("join", ["src-a"], {
+      kind: "mismatch",
+      missing: [],
+      extra: ["WRONG"],
+      schemaKeys: ["src-a", "WRONG"],
+    });
+    expect(msg).toContain("extra key(s) with no incoming source: WRONG");
+    expect(msg).not.toContain("missing key(s)");
   });
 });

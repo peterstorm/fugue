@@ -22,6 +22,70 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, relative, join } from "node:path";
 
+export type Problem = { file: string; target: string; reason: string };
+
+/** Environment the pure checker needs — the `exists` predicate is the I/O seam. */
+export interface DocLinkEnv {
+  readonly packagesRoot: string;
+  readonly shippedDocRoots: readonly string[];
+  readonly exists: (absPath: string) => boolean;
+}
+
+// [text](target) — capture the target. Images are treated the same.
+const LINK_RE = /\[[^\]]*\]\(([^)]+)\)/g;
+
+const isExternal = (target: string): boolean =>
+  /^(https?:|mailto:|#|<|\$\{)/.test(target);
+
+// Strip fenced and inline code so regexes/tokens like `foo](bar)` inside code
+// spans aren't mistaken for markdown links.
+const stripCode = (md: string): string =>
+  md.replace(/```[\s\S]*?```/g, "").replace(/`[^`]*`/g, "");
+
+/**
+ * Pure: find broken shipped-doc links in one already-read markdown file. Two
+ * classes: a dangling relative target, and (for files under a shipped `docs/`
+ * dir) a target that escapes the `packages/` tree and so would 404 from an
+ * installed package. The `env.exists` seam keeps this testable without disk.
+ */
+export const findDocLinkProblems = (file: string, rawText: string, env: DocLinkEnv): Problem[] => {
+  const text = stripCode(rawText);
+  const fileDir = dirname(file);
+  const problems: Problem[] = [];
+  for (const match of text.matchAll(LINK_RE)) {
+    const raw = match[1]!.trim();
+    if (isExternal(raw)) continue;
+    // Strip a trailing #anchor (we only validate the file/dir target).
+    const targetPath = raw.split("#")[0]!;
+    if (targetPath === "") continue; // pure anchor
+    const resolved = resolve(fileDir, targetPath);
+
+    if (!env.exists(resolved)) {
+      problems.push({ file, target: raw, reason: "dangling — target does not exist" });
+      continue;
+    }
+    // A shipped doc must not link outside the packages/ tree, or it 404s once
+    // installed. (READMEs may link into the monorepo `docs/adr/` etc.; only the
+    // package `docs/` dirs carry the strict "shipped → shipped" rule.)
+    const underShippedDocsDir = env.shippedDocRoots.some(
+      (root) => file.startsWith(root + "/") || file === root,
+    );
+    if (underShippedDocsDir) {
+      const rel = relative(env.packagesRoot, resolved);
+      if (rel.startsWith("..")) {
+        problems.push({
+          file,
+          target: raw,
+          reason: "escapes packages/ — not shipped; would 404 from node_modules",
+        });
+      }
+    }
+    // Directory link targets are fine (e.g. ./examples/) — existence was
+    // already verified above, so nothing more to check here.
+  }
+  return problems;
+};
+
 const repoRoot = resolve(import.meta.dir, "..");
 const packagesRoot = resolve(repoRoot, "packages");
 
@@ -32,10 +96,6 @@ const shippedDocRoots = [
   "host/docs",
   "document-source/docs",
 ].map((p) => resolve(packagesRoot, p));
-
-const shippedReadmes = readdirSync(packagesRoot)
-  .map((pkg) => resolve(packagesRoot, pkg, "README.md"))
-  .filter((p) => existsSync(p));
 
 const walkMarkdown = (dir: string): string[] => {
   if (!existsSync(dir)) return [];
@@ -48,65 +108,32 @@ const walkMarkdown = (dir: string): string[] => {
   return out;
 };
 
-const docFiles = [...shippedDocRoots.flatMap(walkMarkdown), ...shippedReadmes];
+// `import.meta.main` is false when this module is imported by a test — only the
+// real CLI run (bun scripts/check-doc-links.ts) executes the I/O shell below.
+const runCli = (): void => {
+  const shippedReadmes = readdirSync(packagesRoot)
+    .map((pkg) => resolve(packagesRoot, pkg, "README.md"))
+    .filter((p) => existsSync(p));
+  const docFiles = [...shippedDocRoots.flatMap(walkMarkdown), ...shippedReadmes];
+  const env: DocLinkEnv = { packagesRoot, shippedDocRoots, exists: existsSync };
+  const problems: Problem[] = docFiles.flatMap((file) =>
+    findDocLinkProblems(file, readFileSync(file, "utf8"), env),
+  );
+  report(problems, docFiles.length);
+};
 
-// [text](target) — capture the target. Ignore images? Treat them the same.
-const LINK_RE = /\[[^\]]*\]\(([^)]+)\)/g;
-
-const isExternal = (target: string): boolean =>
-  /^(https?:|mailto:|#|<|\$\{)/.test(target);
-
-type Problem = { file: string; target: string; reason: string };
-const problems: Problem[] = [];
-
-// Strip fenced and inline code so regexes/tokens like `foo](bar)` inside code
-// spans aren't mistaken for markdown links.
-const stripCode = (md: string): string =>
-  md.replace(/```[\s\S]*?```/g, "").replace(/`[^`]*`/g, "");
-
-for (const file of docFiles) {
-  const text = stripCode(readFileSync(file, "utf8"));
-  const fileDir = dirname(file);
-  for (const match of text.matchAll(LINK_RE)) {
-    const raw = match[1]!.trim();
-    if (isExternal(raw)) continue;
-    // Strip a trailing #anchor (we only validate the file/dir target).
-    const targetPath = raw.split("#")[0]!;
-    if (targetPath === "") continue; // pure anchor
-    const resolved = resolve(fileDir, targetPath);
-
-    if (!existsSync(resolved)) {
-      problems.push({ file, target: raw, reason: "dangling — target does not exist" });
-      continue;
+const report = (problems: readonly Problem[], checkedCount: number): void => {
+  if (problems.length > 0) {
+    console.error(`✗ ${problems.length} broken shipped-doc link(s):\n`);
+    for (const p of problems) {
+      console.error(`  ${relative(repoRoot, p.file)}`);
+      console.error(`    → ${p.target}  (${p.reason})\n`);
     }
-    // A shipped doc must not link outside the packages/ tree, or it 404s once
-    // installed. (READMEs may link into the monorepo `docs/adr/` etc.; only the
-    // package `docs/` dirs carry the strict "shipped → shipped" rule.)
-    const underShippedDocsDir = shippedDocRoots.some((root) => file.startsWith(root + "/") || file === root);
-    if (underShippedDocsDir) {
-      const rel = relative(packagesRoot, resolved);
-      if (rel.startsWith("..")) {
-        problems.push({
-          file,
-          target: raw,
-          reason: "escapes packages/ — not shipped; would 404 from node_modules",
-        });
-      }
-    }
-    // Directory link targets are fine (e.g. ./examples/) — existence was
-    // already verified above, so nothing more to check here.
+    process.exit(1);
   }
-}
+  process.stdout.write(
+    `✓ checked ${checkedCount} shipped doc file(s); all relative links resolve and stay shipped.\n`,
+  );
+};
 
-if (problems.length > 0) {
-  console.error(`✗ ${problems.length} broken shipped-doc link(s):\n`);
-  for (const p of problems) {
-    console.error(`  ${relative(repoRoot, p.file)}`);
-    console.error(`    → ${p.target}  (${p.reason})\n`);
-  }
-  process.exit(1);
-}
-
-process.stdout.write(
-  `✓ checked ${docFiles.length} shipped doc file(s); all relative links resolve and stay shipped.\n`,
-);
+if (import.meta.main) runCli();

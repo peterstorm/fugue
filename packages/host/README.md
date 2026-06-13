@@ -251,7 +251,7 @@ Different nodes in the same DAG can use different models. The `model` string is 
 | Provider | Model routing |
 |----------|--------------|
 | **OpenAI** | Per-node `model` sent directly. Teams use any model their key has access to: `gpt-4o`, `gpt-4o-mini`, `o4-mini`, etc. |
-| **Anthropic** | Per-node `model` sent directly: `claude-sonnet-4-20250514`, `claude-haiku-4-20250514`, etc. |
+| **Anthropic** | Per-node `model` sent directly: `claude-sonnet-4-6`, `claude-haiku-4-5`, etc. (use current ids, not the dated form). |
 | **Azure** | `AZURE_OPENAI_DEPLOYMENT` overrides per-node model. All calls route through one deployment. Deploy multiple host instances for multiple Azure models. |
 
 ---

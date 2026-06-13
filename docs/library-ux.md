@@ -1240,7 +1240,6 @@ const enrichSummaryNode = createLlmNode({
   id: "enrich-summary",
   inputSchema: z.object({ customerId: z.string() }),
   outputSchema: Summary,
-  deps: ["fetch-customer"],
   promptName: "enrich-summary",
   model: "claude-sonnet-4-6",
   buildInput: (i) => i,

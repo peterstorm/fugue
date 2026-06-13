@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { runLint } from "../../cli/lint.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
-import { SHAPES } from "../../cli/new-templates.js";
+import { SHAPES, buildScaffold } from "../../cli/new-templates.js";
 
 // NB: this package can't import `@fuguejs/host/contract` (host depends on
 // framework, not the reverse). The generated dag.ts references DagRegistration
@@ -83,6 +83,42 @@ describe("generated scaffolds lint clean", () => {
       });
     }
   }
+});
+
+// --------------------------------------------------------------------------
+// Generated-content guarantees.
+//
+// The matrix above proves scaffolds *lint clean*; these pin the specific
+// promises the template header makes that linting can't see — a current
+// (non-dated) model id, and error returns routed through `frameworkError.*`
+// rather than raw `err({ kind })` literals. A future template edit that
+// reintroduced a retired id or a hand-rolled error would stay lint-clean but
+// fail here.
+// --------------------------------------------------------------------------
+
+describe("generated content guarantees", () => {
+  const ctx = (llm: boolean) => ({ name: "x", team: "t", pascal: "X", llm });
+
+  for (const shape of SHAPES) {
+    it(`${shape} --llm pins a current, non-dated model id`, () => {
+      const { dagTs } = buildScaffold(shape, ctx(true));
+      const m = dagTs.match(/DEFAULT_MODEL = "([^"]+)"/);
+      expect(m).not.toBeNull();
+      const id = m![1]!;
+      expect(id).toMatch(/^claude-/);
+      // The dated `claude-…-YYYYMMDD` form is the "stale" id the authoring
+      // guide warns against — current ids carry no 8-digit date suffix.
+      expect(id).not.toMatch(/-\d{8}$/);
+    });
+  }
+
+  it("routes errors through frameworkError.*, never raw err({ kind }) literals", () => {
+    // The linear (non-llm) scaffold is the one with an error path; it must use
+    // the typed factory, not a stringly-typed error object.
+    const { dagTs } = buildScaffold("linear", ctx(false));
+    expect(dagTs).toContain("frameworkError.");
+    expect(dagTs).not.toMatch(/\berr\(\s*\{\s*kind:/);
+  });
 });
 
 // --------------------------------------------------------------------------

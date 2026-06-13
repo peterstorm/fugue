@@ -29,6 +29,9 @@ jobs:
       - name: Check shipped-doc links
         run: bun run check:docs
 
+      - name: Test repo scripts
+        run: bun test scripts/
+
       - name: Typecheck + test
         run: |
           for pkg in $PACKAGES; do

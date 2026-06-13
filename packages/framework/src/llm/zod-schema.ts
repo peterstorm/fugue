@@ -17,16 +17,17 @@ export const zodToJsonSchema = (schema: z.ZodType<any>): Record<string, unknown>
 };
 
 /**
- * Top-level property names of a Zod **object** schema, or `null` when the schema
- * isn't an introspectable object — `z.unknown()`, a union, an effect, a value
- * that isn't a Zod schema at all, or one `zodToJsonSchema` can't render. Callers
- * treat `null` as "can't verify the keys" and skip key-equality checks rather
- * than risk a false positive (an introspection failure and a deliberately
- * non-object schema are indistinguishable here, and both mean "no keys to
- * compare"). Centralised so the fan-in lint check and `defineSources` share one
- * introspection path instead of two copies that could drift.
+ * Render a value to its JSON Schema **iff** it is an introspectable Zod *object*
+ * schema; `null` otherwise — `z.unknown()`, a union, an effect, a value that
+ * isn't a Zod schema at all, or one `zodToJsonSchema` can't render. The single
+ * introspection path shared by `objectSchemaKeys` and `objectSchemaRequiredKeys`
+ * so they can never disagree on what counts as an object schema.
+ *
+ * The `null`-on-failure bias is intentional: callers treat it as "can't verify,
+ * skip" rather than risk a false positive (an introspection failure and a
+ * deliberately non-object schema are indistinguishable here).
  */
-export const objectSchemaKeys = (schema: unknown): readonly string[] | null => {
+const renderObjectSchema = (schema: unknown): Record<string, unknown> | null => {
   if (
     schema === null ||
     typeof schema !== "object" ||
@@ -43,15 +44,45 @@ export const objectSchemaKeys = (schema: unknown): readonly string[] | null => {
     // positives), but a render failure on a *real* object schema would silently
     // defer a genuine fan-in-key-mismatch to the runtime Zod parse. Log at debug
     // so a future zodToJsonSchema regression is diagnosable instead of invisible.
-    fwLogger().debug("objectSchemaKeys: schema introspection threw, treating as unverifiable", {
+    fwLogger().debug("renderObjectSchema: schema introspection threw, treating as unverifiable", {
       error: e instanceof Error ? e.message : String(e),
     });
     return null;
   }
   if (json.type !== "object") return null;
+  return json;
+};
+
+/**
+ * Top-level property names of a Zod **object** schema (required *and* optional),
+ * or `null` when the schema isn't an introspectable object. Callers treat `null`
+ * as "can't verify the keys" and skip key-equality checks. Centralised so the
+ * fan-in lint check and `defineSources` share one introspection path instead of
+ * two copies that could drift.
+ */
+export const objectSchemaKeys = (schema: unknown): readonly string[] | null => {
+  const json = renderObjectSchema(schema);
+  if (json === null) return null;
   const props = json.properties;
   if (props === null || typeof props !== "object") return null;
   return Object.keys(props as Record<string, unknown>);
+};
+
+/**
+ * The **required** top-level property names of a Zod object schema — the subset
+ * of `objectSchemaKeys` that JSON Schema marks `required`. `[]` for an object
+ * with no required keys; `null` when the schema isn't an introspectable object
+ * (same unverifiable bias as `objectSchemaKeys`). Used to enforce that a
+ * `"$input"` fan-in key is *required* (the DAG request is always delivered, so
+ * an optional `$input` has no defined meaning) rather than optional.
+ */
+export const objectSchemaRequiredKeys = (schema: unknown): readonly string[] | null => {
+  const json = renderObjectSchema(schema);
+  if (json === null) return null;
+  const required = json.required;
+  if (required === undefined) return []; // object schema, no required keys
+  if (!Array.isArray(required)) return null;
+  return required.filter((k): k is string => typeof k === "string");
 };
 
 /**

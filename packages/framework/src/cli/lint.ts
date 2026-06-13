@@ -124,7 +124,7 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
 export const runLint = async (path: string): Promise<LintResult> => {
   const imported = await importDagFile(path);
   if (!imported.ok) {
-    return { ok: false, path: imported.path, errors: imported.errors };
+    return { ok: false, path: imported.path, errors: imported.errors, advisories: [] };
   }
 
   // `.dag` is present and object-shaped (importDagFile guaranteed it). Run the
@@ -149,20 +149,12 @@ export const runLint = async (path: string): Promise<LintResult> => {
           message: `Structural lint analyzer threw: ${e instanceof Error ? e.message : String(e)}`,
         },
       ],
+      advisories: [],
     };
   }
 
   if (errors.length > 0) {
-    return {
-      ok: false,
-      path: imported.path,
-      errors,
-      ...(advisories.length > 0 ? { advisories } : {}),
-    };
+    return { ok: false, path: imported.path, errors, advisories };
   }
-  return {
-    ok: true,
-    path: imported.path,
-    ...(advisories.length > 0 ? { advisories } : {}),
-  };
+  return { ok: true, path: imported.path, advisories };
 };

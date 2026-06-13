@@ -24,6 +24,7 @@ import {
   ok,
 } from "../index.js";
 import { dagInputEdgeFor } from "../executor/dag-input-edge.js";
+import { resourceName } from "../types/freshness.js";
 
 const V = z.object({ v: z.number() });
 const B = z.object({ b: z.boolean() });
@@ -83,5 +84,28 @@ describe("single-entry shape helpers with a source entry node wire no $input edg
       default: targetB,
     });
     expect(hasInputEdge(dag)).toBe(false);
+  });
+});
+
+describe("createSourceNode field defaults", () => {
+  it("marks isSource and uses a unit (undefined-accepting) inputSchema", () => {
+    expect(src.isSource).toBe(true);
+    // A source consumes no DAG input — its schema accepts the always-`undefined`
+    // input value (the invariant validate-dag enforces for sources).
+    expect(src.inputSchema.safeParse(undefined).success).toBe(true);
+  });
+
+  it("defaults sideEffects to { kind: 'reads', resource: id } when omitted", () => {
+    expect(src.sideEffects).toEqual({ kind: "reads", resource: resourceName("src") });
+  });
+
+  it("honours an explicit sideEffects override", () => {
+    const writer = createSourceNode({
+      id: "writer",
+      outputSchema: V,
+      sideEffects: { kind: "writes", resource: resourceName("postgres:audit") },
+      fetch: async () => ok({ v: 1 }),
+    });
+    expect(writer.sideEffects).toEqual({ kind: "writes", resource: resourceName("postgres:audit") });
   });
 });

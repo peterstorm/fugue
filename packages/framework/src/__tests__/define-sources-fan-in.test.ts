@@ -71,6 +71,29 @@ describe("defineSources — definition-time fan-in key validation", () => {
     ).not.toThrow();
   });
 
+  it("rejects a join that declares $input as an OPTIONAL key", () => {
+    // The DAG request is always delivered over the wired DAG_INPUT edge, so an
+    // optional "$input" slot has no defined meaning. defineSources must reject it
+    // at definition time rather than silently treating it as required.
+    const join = createTransformNode({
+      id: "join",
+      inputSchema: z.object({ "src-a": A, "src-b": B, [DAG_INPUT as string]: Req.optional() }),
+      outputSchema: z.object({ total: z.number() }),
+      transform: () => ok({ total: 0 }),
+    });
+    let thrown: unknown;
+    try {
+      defineSources({ id: "optional-input-sources", sources: [srcA, srcB], join });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DagDefinitionError);
+    const err = thrown as DagDefinitionError;
+    expect(err.detail.kind).toBe("validation");
+    expect(err.message).toContain("$input");
+    expect(err.message).toContain("required");
+  });
+
   it("throws when the assemble fan-in keys don't match (join + $input)", () => {
     const join = createTransformNode({
       id: "join",

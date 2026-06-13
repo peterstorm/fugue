@@ -18,21 +18,23 @@ export type { DescribedDag, DescribedNode, DescribedEdge };
 
 /**
  * Lint outcome: either the DAG file imports cleanly and validates, or one or
- * more errors were captured. The error payload is always an array even when
- * exactly one error fires, so consumers don't branch on cardinality.
+ * more errors were captured. Both `errors` and `advisories` are always arrays
+ * even when empty or singleton, so consumers never branch on cardinality or on
+ * present-vs-absent.
  */
 export type LintResult =
   | {
       readonly ok: true;
       readonly path: string;
-      /** Non-fatal hints (e.g. a manual DAG that matches a shape helper). */
-      readonly advisories?: readonly LintAdvisory[];
+      /** Non-fatal hints (e.g. a manual DAG that matches a shape helper). Empty when none. */
+      readonly advisories: readonly LintAdvisory[];
     }
   | {
       readonly ok: false;
       readonly path: string;
       readonly errors: readonly LintError[];
-      readonly advisories?: readonly LintAdvisory[];
+      /** Non-fatal hints that rode alongside the errors. Empty when none. */
+      readonly advisories: readonly LintAdvisory[];
     };
 
 /**

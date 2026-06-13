@@ -24,7 +24,7 @@ import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId, DAG_INPUT } from "../types/ids.js";
-import { objectSchemaKeys } from "../llm/zod-schema.js";
+import { objectSchemaKeys, objectSchemaRequiredKeys } from "../llm/zod-schema.js";
 import { fanInKeyCheck, describeFanInKeyMismatch } from "./fan-in-keys.js";
 import type { NonEmptyNodeList } from "./define-fan-out.js";
 
@@ -53,6 +53,32 @@ export interface SourcesDagConfig {
  */
 const declaresInputKey = (schema: unknown): boolean =>
   objectSchemaKeys(schema)?.includes(DAG_INPUT as string) ?? false;
+
+/**
+ * Reject a node that declares `"$input"` as an *optional* key. The DAG request
+ * is always delivered over the wired `DAG_INPUT` edge, so an optional `$input`
+ * slot has no defined meaning — the framework would force it present anyway. Fail
+ * at definition time with a clear message rather than silently treating it as
+ * required. A schema the framework can't introspect (`null`) is left to the
+ * runtime, matching the rest of `defineSources`' unverifiable bias.
+ */
+const assertInputKeyRequired = (
+  dagId: string,
+  fanInId: string,
+  schema: unknown,
+): void => {
+  const required = objectSchemaRequiredKeys(schema);
+  if (required === null) return; // unverifiable — leave to the runtime Zod parse
+  if (required.includes(DAG_INPUT as string)) return;
+  throw new DagDefinitionError(dagId, {
+    kind: "validation",
+    nodeId: nodeId(fanInId),
+    message:
+      `Fan-in node '${fanInId}' declares "$input" as an optional key — the DAG request is ` +
+      `always delivered, so "$input" must be a required property. Drop the .optional()/.nullish() ` +
+      `on the "$input" field of its inputSchema.`,
+  });
+};
 
 /**
  * Reject a fan-in node whose object-schema keys don't equal the set of ids
@@ -134,9 +160,14 @@ export const defineSources = (config: SourcesDagConfig): DagDef => {
     : [];
 
   // $input → {join, assemble} when (and only when) that node declares "$input".
+  // A declared "$input" must be required — reject the optional form up front.
   const joinWantsInput = declaresInputKey(config.join.inputSchema);
+  if (joinWantsInput) assertInputKeyRequired(config.id, joinId, config.join.inputSchema);
   const assembleWantsInput =
     assembleNode !== undefined && declaresInputKey(assembleNode.inputSchema);
+  if (assembleNode && assembleWantsInput) {
+    assertInputKeyRequired(config.id, assembleNode.id as string, assembleNode.inputSchema);
+  }
   const requestEdges: { from: string; to: string }[] = [];
   if (joinWantsInput) {
     requestEdges.push({ from: DAG_INPUT as string, to: joinId });
