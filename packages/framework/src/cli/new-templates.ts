@@ -8,6 +8,8 @@
 // request. `new.test.ts` lints every (shape × llm) combination to keep that
 // promise honest — a template that stops linting fails the build.
 
+import { match } from "ts-pattern";
+
 /** The topologies `fugue new --shape` can scaffold. */
 export const SHAPES = ["linear", "fan-out", "diamond", "router", "sources"] as const;
 export type Shape = (typeof SHAPES)[number];
@@ -746,25 +748,35 @@ Choose confidence by how consistent the sources are — never use a number.
 };
 
 /** Build the `dag.ts` (and prompt, for `--llm`) for a shape. Pure. */
-export const buildScaffold = (shape: Shape, ctx: TemplateCtx): Scaffold => {
-  switch (shape) {
-    case "linear":
-      return linear(ctx);
-    case "fan-out":
-      return fanShape(ctx, "defineFanOut");
-    case "diamond":
-      return fanShape(ctx, "defineDiamond");
-    case "router":
-      return router(ctx);
-    case "sources":
-      return sources(ctx);
-  }
-};
+export const buildScaffold = (shape: Shape, ctx: TemplateCtx): Scaffold =>
+  match(shape)
+    .with("linear", () => linear(ctx))
+    .with("fan-out", () => fanShape(ctx, "defineFanOut"))
+    .with("diamond", () => fanShape(ctx, "defineDiamond"))
+    .with("router", () => router(ctx))
+    .with("sources", () => sources(ctx))
+    .exhaustive();
+
+// A plain (unquoted) YAML scalar is only safe for a conservative shape: it must
+// start alphanumeric and contain no character that changes YAML meaning (`:`,
+// `#`, newlines, leading/trailing space, indicators). `team` is path-derived and
+// kebab-constrained so it is always safe; `owner` is freeform author input.
+const SAFE_YAML_SCALAR = /^[A-Za-z0-9][\w .@+-]*$/;
+
+/**
+ * Render a string as a YAML scalar that round-trips to the original value.
+ * Safe values stay plain (`owner: peter.hansen`); anything else is emitted as a
+ * double-quoted scalar via `JSON.stringify` — JSON's escape grammar is a subset
+ * of YAML's double-quoted grammar, so `owner: foo: bar` / a newline / a leading
+ * `#` produce valid `fugue.yaml` by construction instead of malformed output.
+ */
+const yamlScalar = (value: string): string =>
+  SAFE_YAML_SCALAR.test(value) && !value.endsWith(" ") ? value : JSON.stringify(value);
 
 /** `fugue.yaml` — team from the `<team>/<name>` path; owner optional. */
 export const fugueYaml = (ctx: TemplateCtx, owner?: string): string =>
   owner !== undefined
-    ? `team: ${ctx.team}\nowner: ${owner}\n`
+    ? `team: ${ctx.team}\nowner: ${yamlScalar(owner)}\n`
     : `team: ${ctx.team}\n# owner: your.name   # optional — individual owner within the team\n`;
 
 /** Per-DAG README stub: what it does, route, and the verification loop. */

@@ -126,6 +126,19 @@ describe("runNew file layout", () => {
     expect(yaml).toContain("owner: peter.hansen");
   });
 
+  it("emits a YAML-hostile owner as a quoted scalar (no injected keys)", async () => {
+    // A `:`/newline in the owner must not break out of the scalar into new YAML
+    // keys. The value is emitted double-quoted (JSON-escaped) by construction.
+    const root = join(tmpRoot, "owner-hostile");
+    const owner = "evil: true\ninjected: pwned";
+    await runNew({ team: "leads", name: "h", shape: "linear", llm: false, owner, force: false, root });
+    const yaml = await readFile(join(root, "dags", "leads", "h", "fugue.yaml"), "utf-8");
+    // The whole owner sits inside one quoted scalar; the newline is escaped, so
+    // `injected:` never appears as its own top-level mapping line.
+    expect(yaml).toContain(`owner: ${JSON.stringify(owner)}`);
+    expect(yaml).not.toMatch(/^injected: pwned$/m);
+  });
+
   it("the LLM factory shape exports create<Pascal>Dag", async () => {
     const root = join(tmpRoot, "factory");
     await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, force: false, root });

@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability } from "@fuguejs/framework";
+import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -320,6 +320,29 @@ describe("createNodeContextForDag — built-in http capability", () => {
     const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
 
     expect(ctx.http).toBeNull();
+  });
+
+  // Regression guard: main.ts wires `{ name: "clock", client: systemClock }`
+  // into `sharedInfra.capabilities`. If that wiring is dropped, `ctx.clock` is
+  // null and any `requires: ["clock"]` DAG (e.g. golden example 09) fails the
+  // boot-time capability check — exactly the gap the prior pass left when it
+  // migrated the clock from a factory seam to a capability without host wiring.
+  it("surfaces a usable clock when the handle is wired into capabilities", async () => {
+    const shared = baseSharedInfra([{ name: "clock", client: systemClock }]);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+
+    expect(ctx.clock).not.toBeNull();
+    // The presence check `ctx.clock != null` is what `validateCapabilities`
+    // gates a `requires: ["clock"]` node on.
+    expect(typeof ctx.clock?.now).toBe("function");
+    expect(ctx.clock?.now()).toBeInstanceOf(Date);
+  });
+
+  it("leaves clock null when no clock handle is wired (documents the gap the wiring closes)", async () => {
+    const shared = baseSharedInfra([]);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+
+    expect(ctx.clock).toBeNull();
   });
 });
 

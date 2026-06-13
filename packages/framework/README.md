@@ -45,6 +45,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 ### `executor/`
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
+- `defineSources`, `SourcesDagConfig` — constructor for source-rooted DAGs; validates fan-in keys against source-node ids at definition time.
 - `validateDagShape`, `recordFromNodeArray` — pure validation utilities.
 - `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is available on `RunOptions`.)
 
@@ -53,6 +54,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 Built-in node factories (each declares its capability `requires`):
 
 - `createFetchNode`, `FetchNodeConfig`
+- `createSourceNode`, `SourceNodeConfig` — a root node that takes no DAG input (`z.void()`), for DAGs that begin from sources rather than `$input`
 - `createTransformNode`, `TransformNodeConfig`
 - `createLlmNode`, `LlmNodeConfig`
 - `createLlmWithToolsNode`, `LlmWithToolsNodeConfig`
