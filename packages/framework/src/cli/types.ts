@@ -9,6 +9,7 @@ import type {
   DescribedNode,
   DescribedEdge,
 } from "../describe/index.js";
+import type { Shape } from "./new-templates.js";
 
 // Re-export the shared describe shapes so existing CLI consumers keep their
 // import path. The canonical home is `@fuguejs/framework`'s `describe` module —
@@ -152,6 +153,30 @@ export interface CapabilitiesResult {
     readonly seeAlso: readonly string[];
   };
 }
+
+/**
+ * `fugue new` outcome: either the scaffold was written (with the file list and
+ * next steps), or the request was rejected (bad args, or a non-empty target dir
+ * without --force). Stable JSON shape for LLM tooling.
+ */
+export type NewResult =
+  | {
+      readonly ok: true;
+      /** Absolute path of the generated DAG directory. */
+      readonly dir: string;
+      readonly shape: Shape;
+      readonly team: string;
+      readonly name: string;
+      readonly llm: boolean;
+      /** Files written, relative to the root that contains `dags/`. */
+      readonly files: readonly string[];
+      /** Ordered, copy-pasteable follow-up commands for the author. */
+      readonly nextSteps: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly problems: readonly string[];
+    };
 
 /**
  * Describe outcome: a structured summary of a valid DAG file. Always wraps

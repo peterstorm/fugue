@@ -1011,6 +1011,55 @@ on stdout**, designed for machine consumption.
 > lockfile while failing. Equivalent direct form:
 > `bun node_modules/@fuguejs/framework/bin/fugue.ts lint <path>`.
 
+### `fugue new <team>/<name> --shape <shape>`
+
+Scaffolds a **compliant DAG directory** so you start from a lint-clean file
+rather than a blank one. The generated `dag.ts` is a parameterized copy of the
+golden example for the shape — current model id, `frameworkError.*`, correctly
+keyed fan-in schemas, `$input` edges — so it passes `fugue lint` immediately;
+you replace the placeholder schemas and node bodies. Exits `0` on success, `1`
+on bad arguments or a non-empty target dir.
+
+```bash
+$ bunx fugue new leads/lead-opener --shape sources --llm
+{
+  "ok": true,
+  "dir": "/abs/path/dags/leads/lead-opener",
+  "shape": "sources",
+  "team": "leads",
+  "name": "lead-opener",
+  "llm": true,
+  "files": [
+    "dags/leads/lead-opener/dag.ts",
+    "dags/leads/lead-opener/fugue.yaml",
+    "dags/leads/lead-opener/README.md",
+    "dags/leads/lead-opener/prompts/lead-opener.txt",
+    "dags/leads/lead-opener/prompts/registry.json"
+  ],
+  "nextSteps": ["...", "bun ...fugue.ts lint ...", "bun test", "..."]
+}
+```
+
+Writes under `dags/<team>/<name>/` (relative to the cwd, or `--dir <root>`):
+`dag.ts`, `fugue.yaml` (team taken from the path), `README.md`, and — with
+`--llm` — a `prompts/<name>.txt` plus a synced `prompts/registry.json`.
+
+| Flag | Effect |
+|---|---|
+| `--shape <shape>` | **Required.** One of `linear`, `fan-out`, `diamond`, `router`, `sources`. |
+| `--llm` | Add an LLM node (bucketed confidence) + `prompts/` + synced `registry.json`. The DAG becomes a factory (`create<Name>Dag({ model })`) so a test can pin the model seam. |
+| `--owner <owner>` | Set `fugue.yaml`'s `owner`. |
+| `--dir <root>` | Root that contains `dags/`. Defaults to the current directory. |
+| `--force` | Overwrite a non-empty target directory. |
+
+`--shape sources` (and source nodes / `$input` edges generally) is the **0.2.0
+shape**; scaffolding it requires `@fuguejs/framework` ≥ 0.2.0. The other shapes
+emit only pre-0.2.0 APIs.
+
+On bad input the command returns `{ ok: false, problems: [...] }` listing
+*every* problem at once (missing `--shape`, a non-kebab name, an unknown flag),
+so you fix them in one pass.
+
 ### `fugue lint <path>`
 
 Imports a `dag.ts`, runs `defineDag()`'s validator, and prints a structured
