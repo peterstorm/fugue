@@ -3,6 +3,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
@@ -37,7 +38,7 @@ const ctx = (observer?: RecordingObserver): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -65,6 +66,7 @@ describe("conditional edges — 2-way routing", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no-branch", kind: "default" },
         { from: "yes-branch", to: "merge" },
@@ -122,6 +124,7 @@ describe("conditional edges — 2-way routing", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no-branch", kind: "default" },
         { from: "yes-branch", to: "merge" },
@@ -179,6 +182,7 @@ describe("conditional edges — 3-way routing", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (v: any) => v?.kind === "a" } as any },
         { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (v: any) => v?.kind === "b" } as any },
         { from: "router", to: "c", when: { label: "kind-is-c", version: 1, check: (v: any) => v?.kind === "c" } as any },
@@ -212,6 +216,7 @@ describe("conditional edges — 3-way routing", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "match",
@@ -248,6 +253,7 @@ describe("conditional edges — 3-way routing", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "gold",
@@ -299,6 +305,7 @@ describe("conditional edges — branch-then-rejoin via optionalDeps", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
         { from: "yes", to: "merge" },

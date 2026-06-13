@@ -7,6 +7,7 @@
 
 import { NoopObserver } from "../observer/observer.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { DAG_INPUT } from "../types/ids.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
@@ -35,7 +36,7 @@ const makeNode = (
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
-  run: noop as any,
+  run: noop as unknown as NodeDef<unknown, unknown>["run"],
   requires: [],
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
@@ -51,6 +52,7 @@ const makeCtx = (): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -63,17 +65,21 @@ const makeDag = (kind: "yes" | "no"): DagDef =>
         inputSchema: z.object({ router: z.any().optional() }),
         run: async () => ok("Y"),
       }),
-      no: makeNode("no", { inputSchema: z.any(), run: async () => ok("N") }),
+      no: makeNode("no", { inputSchema: z.unknown(), run: async () => ok("N") }),
       merge: makeNode("merge", {
         inputSchema: z.object({
           yes: z.string().optional(),
           no: z.string().optional(),
         }),
-        run: async (input: any) => ok(input.yes ?? input.no ?? "neither"),
+        run: async (input: unknown) => {
+          const i = input as { yes?: string; no?: string };
+          return ok(i.yes ?? i.no ?? "neither");
+        },
       }),
     },
     edges: [
-      { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+      { from: DAG_INPUT, to: "router" },
+      { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: unknown) => (v as { kind?: string })?.kind === "yes" } as unknown as import("../types/dag.js").Predicate<unknown> },
       { from: "router", to: "no", kind: "default" },
       { from: "yes", to: "merge" },
       { from: "no", to: "merge" },
@@ -143,12 +149,13 @@ describe("conditional edges — replay determinism", () => {
             run: async () => ok("A"),
           }),
           b: makeNode("b", {
-            inputSchema: z.any(),
+            inputSchema: z.unknown(),
             run: async () => ok("B"),
           }),
         },
         edges: [
-          { from: "router", to: "a", when: { label: `kind-is-${predicateKind}`, version: 1, check: (v: any) => v?.kind === predicateKind } as any },
+          { from: DAG_INPUT, to: "router" },
+          { from: "router", to: "a", when: { label: `kind-is-${predicateKind}`, version: 1, check: (v: unknown) => (v as { kind?: string })?.kind === predicateKind } as unknown as import("../types/dag.js").Predicate<unknown> },
           { from: "router", to: "b", kind: "default" },
         ],
         defaultRetryLimit: 0,

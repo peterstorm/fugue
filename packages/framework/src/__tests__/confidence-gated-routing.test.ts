@@ -15,7 +15,7 @@ import { confidence } from "../types/confidence.js";
 import { resourceName } from "../types/freshness.js";
 import type { NodeDef } from "../types/node.js";
 import type { Confidence } from "../types/confidence.js";
-import { runId, dagId, nodeId } from "../types/ids.js";
+import { runId, dagId, nodeId, DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 
@@ -48,6 +48,7 @@ describe("confidence-gated routing — end-to-end", () => {
         makeNode("fallback-path", "fallback"),
       ],
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "high-confidence-path",
@@ -110,6 +111,7 @@ describe("confidence-gated routing — end-to-end", () => {
         makeNode("fallback-path", "fallback"),
       ],
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "confident-path",

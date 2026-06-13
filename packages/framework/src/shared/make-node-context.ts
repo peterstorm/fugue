@@ -55,6 +55,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
     prompts: init.prompts ?? (caps.prompts as NodeContext["prompts"]) ?? null,
     judgeLlm: init.judgeLlm ?? (caps.judgeLlm as NodeContext["judgeLlm"]) ?? null,
     http: init.http ?? (caps.http as NodeContext["http"]) ?? null,
+    clock: init.clock ?? (caps.clock as NodeContext["clock"]) ?? null,
     ...(init.signal !== undefined ? { signal: init.signal } : {}),
     ...(init.contentFilter !== undefined ? { contentFilter: init.contentFilter } : {}),
   };

@@ -19,7 +19,7 @@ monorepo and under `node_modules/@fuguejs/` (the packages are siblings either wa
 // dags/my-team/my-dag/dag.ts
 import { z } from "zod";
 import type { DagRegistration } from "@fuguejs/host/contract";
-import { defineDag, createFetchNode, createLlmNode, createTransformNode, ok } from "@fuguejs/framework";
+import { defineDag, createFetchNode, createLlmNode, createTransformNode, DAG_INPUT, ok } from "@fuguejs/framework";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // --- Schemas ---
@@ -67,6 +67,10 @@ const dag = defineDag({
     "summarize": summarize,
   },
   edges: [
+    // The request flows in over an explicit DAG_INPUT edge — no node receives
+    // the DAG input implicitly (see "Input Wiring Rules"). `fetch-user` gets the
+    // validated request as its bare input.
+    { from: DAG_INPUT, to: "fetch-user" },
     { from: "fetch-user", to: "summarize" },
   ],
   outputNodeId: "summarize",
@@ -114,6 +118,36 @@ createFetchNode({
     ctx.http.get(`https://api.example.com/users/${input.id}`, { schema: UserSchema }),
 })
 ```
+
+### `createSourceNode` — a root fetch that consumes no DAG input
+
+A **source node** is a root that produces its output from the context alone —
+it takes no input, so its `fetch` receives only `ctx`. Use it for the parallel
+root fetches of a multi-source DAG (see `defineSources`). No node receives the
+DAG input implicitly; a source consumes nothing, and the request reaches
+downstream nodes over `DAG_INPUT` edges.
+
+```ts
+createSourceNode<O>({
+  id: string,
+  outputSchema: z.ZodType<O>,
+  fetch: (ctx: NodeContext) => Promise<Result<O, FrameworkError>>,  // no input arg
+  requires?: readonly Capability[],
+  sideEffects?: SideEffectProfile,   // default: { kind: "reads", resource: id }
+})
+
+// Parallel root fetch — produces from a capability, takes no request:
+createSourceNode({
+  id: "fetch-weights",
+  outputSchema: WeightsSchema,
+  requires: ["documents"] as const,
+  fetch: async (ctx) => readWeights(ctx.documents),
+})
+```
+
+A source node is marked `isSource: true` and MUST be a root (zero incoming
+edges). `defineDag` rejects a non-source root with `root-expects-input`, and a
+source with an incoming edge with `source-has-incoming`.
 
 ### `createTransformNode` — pure data transformation (no I/O)
 
@@ -274,6 +308,7 @@ Run `fugue capabilities` for the authoritative, machine-readable list. As of now
 | `judgeLlm` | `LlmClient` | Used by `createEvalJudgeNode`; separate from `llm`. |
 | `cache` | `ContextCacheAdapter` | Result/context cache. |
 | `http` | `HttpCapability` | Schema-validated JSON HTTP. Declare `requires: ["http"]` on a fetch node. |
+| `clock` | `ClockCapability` | Injectable wall clock — `ctx.clock.now(): Date`. Declare `requires: ["clock"]` instead of calling `new Date()`/`Date.now()` directly, so a time-dependent node is deterministic in tests (`fixedClock(at)`) without monkey-patching globals. Only fetch/source nodes may require it; pure transforms stay clock-free. |
 
 ### Custom capabilities (adapter-provided)
 
@@ -424,12 +459,17 @@ in the `fugue` monorepo — the contract above is the shipped summary.
 
 ## DAG constructors
 
-Five constructors, in order of preference. Each delegates to the same
-module-load validator and produces the same branded `DagDef`.
+Six constructors, in order of preference. Each delegates to the same
+module-load validator and produces the same branded `DagDef`. Every single-entry
+helper (`defineLinearDag`, `defineFanOut`, `defineDiamond`, `defineRouter`) wires
+the request to its entry node automatically with a `DAG_INPUT` edge — you don't
+add it. `defineSources` adds a `DAG_INPUT` edge to a join/assemble node only when
+that node's fan-in schema declares a `"$input"` key.
 
 | Constructor | Use when |
 |---|---|
 | `defineLinearDag` | Sequential pipeline A→B→C. Edges inferred from array order. |
+| `defineSources` | **N parallel source roots → keyed fan-in join → optional assemble.** The most common real shape; the entry roots are source nodes. |
 | `defineFanOut` | One source, N parallel branches, optional join. |
 | `defineDiamond` | One source, N parallel branches, **required** join. |
 | `defineRouter` | Classifier with predicate-driven cases plus a **required** default. |
@@ -446,6 +486,7 @@ defineDag({
     [nodeId]: NodeDef,           // key MUST match node.id
   },
   edges: [                       // array of edge objects
+    { from: DAG_INPUT, to: "nodeA" },                         // request → entry node
     { from: "nodeA", to: "nodeB" },                           // unconditional
     { from: "nodeA", to: "nodeC", when: predicate },          // conditional
     { from: "nodeA", to: "nodeD", kind: "default" },          // else/fallback
@@ -460,6 +501,9 @@ defineDag({
 ### Edge rules
 
 - `from`/`to` must reference keys in `nodes` — TypeScript catches typos at edit time
+- Wire the request in with `{ from: DAG_INPUT, to: "<entry>" }` — every non-source
+  node that needs the DAG input gets it over an explicit `DAG_INPUT` edge.
+  `DAG_INPUT` is never a `to`, and a `DAG_INPUT` edge is always unconditional.
 - Simple DAGs only need `{ from, to }` (unconditional)
 - Conditional edges need a `when: Predicate<T>` object
 - If any conditional edges leave a node, a `kind: "default"` edge is required (else-totality)
@@ -552,6 +596,43 @@ const dag = defineLinearDag({
   id: "pipeline",
   nodes: [nodeA, nodeB, nodeC],
   // Edges inferred: A→B→C. outputNodeId: nodeC.
+  // The request is wired to nodeA automatically via a DAG_INPUT edge.
+});
+```
+
+### Multi-source join (N roots → fan-in → assemble) — `defineSources`
+
+The most common real-world shape: several independent **source nodes** fetched
+in parallel, a `join` that fans them in (an object keyed by source id), and an
+optional `assemble` stage. The request reaches `join`/`assemble` *only* when that
+node declares a `"$input"` key in its fan-in schema — then `defineSources` adds
+the `DAG_INPUT` edge for you. No pass-through "read-request" node, no
+`inputSchema: z.unknown()` roots.
+
+```ts
+import { defineSources, createSourceNode, createTransformNode, ok } from "@fuguejs/framework";
+
+// Parallel roots are SOURCE nodes — no inputSchema; fetch is (ctx) => …
+const fetchWeights = createSourceNode({ id: "fetch-weights", outputSchema: WeightsSchema,
+  requires: ["documents"] as const, fetch: async (ctx) => readWeights(ctx.documents) });
+const fetchBranches = createSourceNode({ id: "fetch-branches", outputSchema: BranchesSchema,
+  requires: ["documents"] as const, fetch: async (ctx) => readBranches(ctx.documents) });
+
+// join: fan-in keyed EXACTLY by the source node ids (fugue lint checks this).
+const ScoreFanIn = z.object({ "fetch-weights": WeightsSchema, "fetch-branches": BranchesSchema });
+const score = createTransformNode({ id: "score", inputSchema: ScoreFanIn, outputSchema: ScoredSchema,
+  transform: (i) => ok(scoreLeads(i["fetch-weights"], i["fetch-branches"])) });
+
+// assemble: declares "$input" → defineSources wires { from: DAG_INPUT, to: "assemble" }.
+const AssembleFanIn = z.object({ score: ScoredSchema, $input: RequestSchema });
+const assemble = createTransformNode({ id: "assemble", inputSchema: AssembleFanIn, outputSchema: ScoredSchema,
+  transform: (i) => ok(applyRequest(i.score, i.$input)) });
+
+const dag = defineSources({
+  id: "lead-scoring",
+  sources: [fetchWeights, fetchBranches],   // run concurrently in wave 0
+  join: score,                              // fan-in keyed by source ids
+  assemble,                                 // optional second stage = output node
 });
 ```
 
@@ -709,19 +790,73 @@ const dag = defineDag({
 });
 ```
 
+### DAG factory with injected seams (testability)
+
+A module-scope `const dag = defineDag(...)` is untestable the moment a node
+depends on a non-deterministic seam — a model id, a brand, anything a test needs
+to pin. The fix is a **factory** that takes the seams as options and threads them
+into the nodes; production calls it with no args, tests pass fakes.
+
+```ts
+export const createOpenerDag = (opts: { model?: string; brand?: string } = {}) =>
+  defineSources({
+    id: "lead-opener",
+    sources: [fetchWeights, fetchBranches],
+    join: scoreLead,
+    assemble: createDraftOpener(opts.model ?? DEFAULT_MODEL, opts.brand ?? DEFAULT_BRAND),
+  });
+
+// prod:  createOpenerDag()
+// test:  createOpenerDag({ model: "fake-model" })  // wired to a FakeLlmClient
+```
+
+The **clock** is no longer a factory seam: a node that needs the time declares
+`requires: ["clock"]` and reads `ctx.clock.now()`; tests inject `fixedClock(at)`
+via `makeNodeContext`, so the run is deterministic without a `now` option. Use a
+factory for the seams that remain capability-shaped (model, brand). Module-scope
+`defineDag` is fine for a DAG with no seams.
+
+### Sharing nodes across DAGs
+
+When several DAGs read the same sources, define the shared **source nodes**, row
+schemas, and the fan-in schema fragment ONCE in a shared module (e.g. `lib/`) and
+import them — don't duplicate per `dag.ts`. Source nodes (no `inputSchema`) are
+inherently reusable because they carry no per-DAG request shape. Export the
+fan-in fragment next to the nodes so each DAG's join schema spreads it:
+
+```ts
+// lib/sources.ts
+export const fetchWeights = createSourceNode({ id: "fetch-weights", /* … */ });
+export const fetchBranches = createSourceNode({ id: "fetch-branches", /* … */ });
+export const SourceFanInSchemas = {
+  "fetch-weights": WeightsSchema,
+  "fetch-branches": BranchesSchema,
+} as const;
+
+// dags/leads/lead-scoring/dag.ts
+const ScoreFanIn = z.object(SourceFanInSchemas);   // keys = the shared source ids
+```
+
 ---
 
 ## Input Wiring Rules
 
-How a node receives its input depends on incoming edges:
+No node receives the DAG input implicitly. The request enters the graph only over
+edges from the reserved virtual source `DAG_INPUT` (spelled `"$input"`); it is
+seeded at run start and then behaves like any other source. How a node receives
+its input depends on its incoming edges:
 
 | Incoming edges | Node receives as input |
 |---|---|
-| 0 edges (root node) | The DAG's initial input (validated by `inputSchema`) |
-| 1 edge | The upstream node's output directly |
-| 2+ edges | Object keyed by source node id: `{ "node-a": outputA, "node-b": outputB }` |
+| 0 edges | **Nothing** — the node must be a *source* (`createSourceNode`); `fetch` takes only `ctx`. A non-source root is a `root-expects-input` error. |
+| 1 edge | The upstream node's output directly. A single `{ from: DAG_INPUT, to: n }` edge delivers the validated request to `n` as its bare input. |
+| 2+ edges | Object keyed by source node id: `{ "node-a": outputA, "node-b": outputB }`. `DAG_INPUT` participates as the `"$input"` key: a fan-in that also wants the request declares `$input` in its `z.object({...})` schema. |
 
-Design your node's `inputSchema` accordingly.
+`DAG_INPUT` is a source like any other: a bare value on a single edge, the
+`"$input"` slot in a fan-in. It is never an edge *target*, and a `DAG_INPUT` edge
+is always unconditional (no `when`, no `kind: "default"`). Design your node's
+`inputSchema` accordingly — and remember `fugue lint` checks that a fan-in's
+object keys equal its incoming source ids (including `"$input"`).
 
 ---
 
@@ -852,7 +987,8 @@ it should convert straight into an `err(frameworkError.*)`.)
 - [ ] Output node is reachable via unconditional/default edges from roots
 - [ ] If conditional edges leave a node, a `kind: "default"` edge exists (else-totality)
 - [ ] `inputSchema` of downstream nodes matches what upstream produces
-- [ ] Root nodes' `inputSchema` matches the DAG-level `inputSchema`
+- [ ] Roots are **source nodes** (`createSourceNode`, no `inputSchema`); the request is consumed only via `DAG_INPUT` edges (a single `$input` edge for a bare consumer, the `"$input"` key for a fan-in)
+- [ ] A fan-in node's `z.object` keys equal its incoming source ids (including `"$input"` when it has a `DAG_INPUT` edge)
 - [ ] Errors are built with `frameworkError.*`, not raw `err({ kind, … })` literals
 - [ ] No defensive `try/catch` around capabilities / `parseWorkbook` / framework calls — they return `Result`, they don't throw
 - [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read

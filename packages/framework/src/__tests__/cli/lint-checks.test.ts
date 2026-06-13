@@ -4,25 +4,25 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { ok } from "../../types/result.js";
-import { createFetchNode } from "../../nodes/fetch.js";
+import { createSourceNode } from "../../nodes/fetch.js";
 import { createTransformNode } from "../../nodes/transform.js";
 import { defineDag } from "../../executor/define-dag.js";
 import { defineLinearDag } from "../../executor/define-linear-dag.js";
 import { defineDiamond } from "../../executor/define-diamond.js";
 import { analyzeDag } from "../../cli/lint-checks.js";
+import { DAG_INPUT } from "../../types/ids.js";
 
 const A = z.object({ a: z.number() });
 const B = z.object({ b: z.number() });
 
-const fetchA = createFetchNode({
+// Parallel roots are source nodes (C0): no inputSchema, fetch: (ctx) => …
+const fetchA = createSourceNode({
   id: "fetch-a",
-  inputSchema: z.unknown(),
   outputSchema: A,
   fetch: async () => ok({ a: 1 }),
 });
-const fetchB = createFetchNode({
+const fetchB = createSourceNode({
   id: "fetch-b",
-  inputSchema: z.unknown(),
   outputSchema: B,
   fetch: async () => ok({ b: 2 }),
 });
@@ -102,13 +102,16 @@ describe("B3 — shape-helper-hint", () => {
         e: n("e", B, Out),
       },
       edges: [
+        { from: DAG_INPUT, to: "s" },
         { from: "s", to: "m" },
         { from: "m", to: "e" },
       ],
       outputNodeId: "e",
     });
     const { advisories } = analyzeDag(dag);
-    expect(advisories.map((a) => a.helper)).toEqual(["defineLinearDag"]);
+    expect(
+      advisories.flatMap((a) => (a.kind === "shape-helper-hint" ? [a.helper] : [])),
+    ).toEqual(["defineLinearDag"]);
   });
 
   it("suggests defineDiamond for a manual fan-out + join", () => {
@@ -122,6 +125,7 @@ describe("B3 — shape-helper-hint", () => {
         join,
       },
       edges: [
+        { from: DAG_INPUT, to: "src" },
         { from: "src", to: "b1" },
         { from: "src", to: "b2" },
         { from: "b1", to: "join" },
@@ -130,7 +134,9 @@ describe("B3 — shape-helper-hint", () => {
       outputNodeId: "join",
     });
     const { advisories } = analyzeDag(dag);
-    expect(advisories.map((a) => a.helper)).toEqual(["defineDiamond"]);
+    expect(
+      advisories.flatMap((a) => (a.kind === "shape-helper-hint" ? [a.helper] : [])),
+    ).toEqual(["defineDiamond"]);
   });
 
   it("stays silent on a DAG already built with a helper (provenance)", () => {
@@ -165,5 +171,66 @@ describe("B3 — shape-helper-hint", () => {
       outputNodeId: "join",
     });
     expect(analyzeDag(dag).advisories).toEqual([]);
+  });
+});
+
+describe("B2 — redundant-passthrough", () => {
+  const Req = z.object({ region: z.string() });
+  const passthrough = createTransformNode({
+    id: "read-request",
+    inputSchema: Req,
+    outputSchema: Req, // SAME reference — forwards its input unchanged
+    transform: (req) => ok(req),
+  });
+  const consumer = createTransformNode({
+    id: "consume",
+    inputSchema: Req,
+    outputSchema: A,
+    transform: () => ok({ a: 1 }),
+  });
+
+  it("flags a transform fed solely by DAG_INPUT with identical in/out schemas", () => {
+    const dag = defineDag({
+      id: "legacy-passthrough",
+      nodes: { "read-request": passthrough, consume: consumer },
+      edges: [
+        { from: DAG_INPUT, to: "read-request" },
+        { from: "read-request", to: "consume" },
+      ],
+      outputNodeId: "consume",
+    });
+    const advisories = analyzeDag(dag).advisories.filter(
+      (a) => a.kind === "redundant-passthrough",
+    );
+    expect(advisories.length).toBe(1);
+    const a = advisories[0]!;
+    if (a.kind === "redundant-passthrough") {
+      expect(a.nodeId).toBe("read-request");
+      expect(a.message).toContain("DAG_INPUT");
+    }
+  });
+
+  it("does NOT flag an ordinary A→A transform that reuses a schema mid-graph", () => {
+    // Same-reference in/out schema, but fed by a real node — not the request
+    // carrier. The sole-source-is-$input conjunct keeps this quiet.
+    const mid = createTransformNode({
+      id: "mid",
+      inputSchema: A,
+      outputSchema: A, // same reference, but not a request carrier
+      transform: (x) => ok(x),
+    });
+    const dag = defineDag({
+      id: "mid-AtoA",
+      nodes: { "fetch-a": fetchA, mid, consume: consumer },
+      edges: [
+        { from: "fetch-a", to: "mid" },
+        { from: "mid", to: "consume" },
+      ],
+      outputNodeId: "consume",
+    });
+    const advisories = analyzeDag(dag).advisories.filter(
+      (a) => a.kind === "redundant-passthrough",
+    );
+    expect(advisories).toEqual([]);
   });
 });

@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import type { NodeContext, NodeDef } from "../types/node.js";
 import type { ObserverEvent } from "../types/events.js";
@@ -54,7 +55,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -130,7 +131,10 @@ const buildDag = (shape: Shape, state: { calls: Record<string, number> }) => {
     }
     return mkNode(id, "ok", state);
   });
-  const edges = ids.slice(1).map((to, i) => ({ from: ids[i]!, to }));
+  const edges = [
+    { from: DAG_INPUT as string, to: ids[0]! },
+    ...ids.slice(1).map((to, i) => ({ from: ids[i]!, to })),
+  ];
   return defineDagFromArray({
     id: `shape-${shape.nodeCount}-${shape.failNodeIdx}`,
     nodes,

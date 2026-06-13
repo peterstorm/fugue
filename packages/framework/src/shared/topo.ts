@@ -1,6 +1,7 @@
 import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
+import { isDagInput } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 
 /**
@@ -18,6 +19,19 @@ export const topoSort = (dag: DagDef): Result<NodeId[][], FrameworkError> => {
   }
 
   for (const edge of dag.edges) {
+    // `DAG_INPUT` is the virtual request source (wave -1): always satisfied, so
+    // it contributes no in-degree and no successor edge. A node fed only by
+    // `$input` therefore sorts into wave 0, consistent with `seedInitialActiveSet`.
+    if (isDagInput(edge.from)) {
+      if (!nodeIds.has(edge.to)) {
+        return err({
+          kind: "validation" as const,
+          nodeId: edge.to,
+          message: `Edge references unknown target node '${edge.to}'`,
+        });
+      }
+      continue;
+    }
     if (!nodeIds.has(edge.from)) {
       return err({
         kind: "validation" as const,

@@ -7,6 +7,7 @@ import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { validateDagShape } from "../executor/validate-dag.js";
 import type { DagDefInput } from "../types/dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { ok } from "../types/result.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
@@ -22,14 +23,14 @@ const mkNode = (id: string) =>
 // Well-formed predicate used wherever the test just needs *some* conditional
 // edge. Cast through `any` to build edge arrays in the simple `DagDefInput`
 // shape without threading per-edge type inference.
-const SOME = { label: "some-pred", version: 1, check: () => true } as any;
+const SOME = { label: "some-pred", version: 1, check: () => true } as unknown as import("../types/dag.js").Predicate<unknown>;
 
 describe("validateDagShape — conditional edges", () => {
   it("rejects missing default edge when conditionals exist", () => {
     const dag: DagDefInput = {
       id: "no-default",
       nodes: { a: mkNode("a"), b: mkNode("b") },
-      edges: [{ from: "a", to: "b", when: SOME }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b", when: SOME }],
     };
     const r = validateDagShape(dag);
     expect(r.ok).toBe(false);
@@ -96,6 +97,7 @@ describe("validateDagShape — conditional edges", () => {
         b: mkNode("b"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "a", when: SOME },
         { from: "router", to: "b", kind: "default" },
       ],
@@ -130,7 +132,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "", version: 1, check: () => true } as any },
+        { from: "a", to: "b", when: { label: "", version: 1, check: () => true } as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -150,7 +152,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "foo", check: () => true } as any },
+        { from: "a", to: "b", when: { label: "foo", check: () => true } as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -170,7 +172,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "foo", version: 1 } as any },
+        { from: "a", to: "b", when: { label: "foo", version: 1 } as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -190,7 +192,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: "yes" as any },
+        { from: "a", to: "b", when: "yes" as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -210,7 +212,7 @@ describe("validateDagShape — conditional edges", () => {
         c: mkNode("c"),
       },
       edges: [
-        { from: "a", to: "b", when: { label: "test", version: 1, check: () => true, minConfidence: "super-high" } as any },
+        { from: "a", to: "b", when: { label: "test", version: 1, check: () => true, minConfidence: "super-high" } as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "a", to: "c", kind: "default" },
       ],
     };
@@ -231,7 +233,8 @@ describe("validateDagShape — conditional edges", () => {
         merge: mkNode("merge"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+        { from: DAG_INPUT, to: "router" },
+        { from: "router", to: "a", when: { label: "kind-is-yes", version: 1, check: (v: unknown) => (v as { kind?: string })?.kind === "yes" } as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "router", to: "b", kind: "default" },
         { from: "a", to: "merge" },
         { from: "b", to: "merge" },
@@ -251,7 +254,8 @@ describe("validateDagShape — conditional edges", () => {
         b: mkNode("b"),
       },
       edges: [
-        { from: "router", to: "a", when: { label: "high-conf-route", version: 1, check: () => true, minConfidence: "medium" } as any },
+        { from: DAG_INPUT, to: "router" },
+        { from: "router", to: "a", when: { label: "high-conf-route", version: 1, check: () => true, minConfidence: "medium" } as unknown as import("../types/dag.js").Predicate<unknown> },
         { from: "router", to: "b", kind: "default" },
       ],
     };

@@ -15,6 +15,7 @@ import { z } from "zod";
 import { N, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { runDag } from "../executor/run-dag.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
@@ -71,6 +72,7 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
   prompts: null,
   judgeLlm: null,
   http: null,
+  clock: null,
   ...overrides,
 });
 
@@ -84,7 +86,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const dag = defineDagFromArray({
         id: "d",
         nodes: [makeNode("fetch-users", ["db"] as const)],
-        edges: [],
+        edges: [{ from: DAG_INPUT, to: "fetch-users" }],
       });
       const result = validateCapabilities(dag, makeCtx());
       expect(isErr(result)).toBe(true);
@@ -102,7 +104,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const dag = defineDagFromArray({
         id: "d",
         nodes: [makeNode("fetch-users", ["db"] as const)],
-        edges: [],
+        edges: [{ from: DAG_INPUT, to: "fetch-users" }],
       });
       // Custom capabilities set as dynamic properties on the context
       const ctx = Object.assign(makeCtx(), { db: fakeDb });
@@ -114,7 +116,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const dag = defineDagFromArray({
         id: "d",
         nodes: [makeNode("a", ["llm", "db"] as const)],
-        edges: [],
+        edges: [{ from: DAG_INPUT, to: "a" }],
       });
       // Only db present, llm missing
       const fakeDb: TestDbCapability = {
@@ -189,7 +191,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const dag = defineDagFromArray({
         id: "d",
         nodes: [makeNode("needs-db", ["db"] as const)],
-        edges: [],
+        edges: [{ from: DAG_INPUT, to: "needs-db" }],
       });
       const result = validateCapabilities(dag, ctx);
       expect(isErr(result)).toBe(true);
@@ -270,7 +272,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const dag = defineDagFromArray({
         id: "d",
         nodes: [makeNode("a", ["http"])],
-        edges: [],
+        edges: [{ from: DAG_INPUT, to: "a" }],
       });
       const result = validateCapabilities(dag, makeCtx({ http: null }));
       expect(isErr(result)).toBe(true);
@@ -371,7 +373,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       const dag = defineDagFromArray({
         id: "user-greeting",
         nodes: [fetchUser, greet],
-        edges: [{ from: "fetch-user", to: "greet" }],
+        edges: [{ from: DAG_INPUT, to: "fetch-user" }, { from: "fetch-user", to: "greet" }],
         outputNodeId: "greet",
       });
 

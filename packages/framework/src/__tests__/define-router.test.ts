@@ -61,8 +61,8 @@ describe("defineRouter", () => {
     expect(dag.id).toBe(dagId("router-test"));
     // 4 nodes: classifier + 2 case targets + default
     expect(dag.nodes).toHaveLength(4);
-    // 3 edges: 2 conditional + 1 default
-    expect(dag.edges).toHaveLength(3);
+    // 4 edges: $input→classifier + 2 conditional + 1 default
+    expect(dag.edges).toHaveLength(4);
 
     const conditionals = dag.edges.filter(isConditionalEdge);
     const defaults = dag.edges.filter(isDefaultEdge);

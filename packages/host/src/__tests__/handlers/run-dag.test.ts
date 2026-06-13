@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, makeNodeContext } from "@fuguejs/framework";
+import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, makeNodeContext, DAG_INPUT } from "@fuguejs/framework";
 import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
@@ -460,7 +460,7 @@ describe("run-dag handler", () => {
     const realDag = defineDagFromArray({
       id: "minting-dag",
       nodes: [gated],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "gated" }],
       // Retry budget present — proves the settled refusal is NOT retried even
       // when retries are available (one mintFor call per request, below).
       defaultRetryLimit: 2,

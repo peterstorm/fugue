@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   defineDag,
   createFetchNode,
+  DAG_INPUT,
   ok,
 } from "../../../index.js";
 
@@ -19,7 +20,9 @@ const fetchUser = createFetchNode({
 const dag = defineDag({
   id: "no-explicit-output",
   nodes: { "fetch-user": fetchUser },
-  edges: [],
+  // The request reaches the (only) node via a DAG_INPUT edge (C0); roots no
+  // longer receive input implicitly.
+  edges: [{ from: DAG_INPUT, to: "fetch-user" }],
   // outputNodeId deliberately omitted — describe should surface null.
 });
 

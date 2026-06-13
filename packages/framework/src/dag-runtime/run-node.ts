@@ -63,7 +63,6 @@ export interface RunNodeOpts {
 
 export const runNodeShared = async (
   node: NodeDef<unknown, unknown>,
-  dagInput: unknown,
   ctx: ValidatedNodeContext,
   dagId: DagId,
   outputs: ReadonlyMap<NodeId, unknown>,
@@ -102,7 +101,7 @@ export const runNodeShared = async (
     return { result: ok(validated.value), outcome: EMPTY_OUTCOME };
   }
 
-  const nodeInputResult = buildNodeInput(dagInput, outputs, incoming, nodeId);
+  const nodeInputResult = buildNodeInput(outputs, incoming, nodeId);
   if (!nodeInputResult.ok) {
     return { result: nodeInputResult, outcome: EMPTY_OUTCOME };
   }

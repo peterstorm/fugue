@@ -37,6 +37,7 @@ import { runDag } from "../executor/run-dag.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
+import { DAG_INPUT } from "../types/ids.js";
 
 // A scope-shaped capability the broker mints, and a plain static one it doesn't.
 const SCOPE = "svc:opA" as Capability;
@@ -108,7 +109,7 @@ describe("per-node capability minting (C1)", () => {
     const dag = defineDagFromArray({
       id: "dag-1",
       nodes: [nodeA, nodeB],
-      edges: [{ from: "nodeA", to: "nodeB" }],
+      edges: [{ from: DAG_INPUT, to: "nodeA" }, { from: "nodeA", to: "nodeB" }],
     });
 
     const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
@@ -140,7 +141,7 @@ describe("per-node capability minting (C1)", () => {
       requires: [SCOPE] as unknown as readonly Capability[],
       fetch: async () => ok({ ok: true }),
     });
-    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "only" }] });
     // Base context has NO `svc:opA` — only the broker can supply it at dispatch.
     const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
     expect(result.ok).toBe(true);
@@ -155,7 +156,7 @@ describe("per-node capability minting (C1)", () => {
       requires: [SCOPE] as unknown as readonly Capability[],
       fetch: async () => ok({ ok: true }), // never reached
     });
-    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "gated" }] });
     const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -178,7 +179,7 @@ describe("per-node capability minting (C1)", () => {
     const dag = defineDagFromArray({
       id: "dag-1",
       nodes: [node],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "gated" }],
       // Retry budget present — a retriable error here would mint 3 times. A
       // settled policy-refusal must fast-fail on the FIRST attempt: retrying
       // re-fires the mint against a policy that already said no and emits a
@@ -217,7 +218,7 @@ describe("per-node capability minting (C1)", () => {
     const dag = defineDagFromArray({
       id: "dag-1",
       nodes: [node],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "gated" }],
       defaultRetryLimit: 2, // budget present — a retriable error would mint 3 times
     });
     const result = await runDag(dag, {}, baseCtx(), {
@@ -261,7 +262,7 @@ describe("per-node capability minting (C1)", () => {
     const dag = defineDagFromArray({
       id: "dag-1",
       nodes: [node],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "budgeted" }],
       defaultRetryLimit: 2, // budget present — a retriable error would run 3 times
     });
     const result = await runDag(dag, {}, baseCtx(), {
@@ -303,7 +304,7 @@ describe("per-node capability minting (C1)", () => {
     const dag = defineDagFromArray({
       id: "dag-1",
       nodes: [nodeA, nodeB],
-      edges: [{ from: "nodeA", to: "nodeB" }],
+      edges: [{ from: DAG_INPUT, to: "nodeA" }, { from: "nodeA", to: "nodeB" }],
     });
 
     // Resume with nodeA's output already checkpointed → nodeA is skipped/replayed.
@@ -332,7 +333,7 @@ describe("per-node capability minting (C1)", () => {
         return ok({ http: (ctx as unknown as Record<string, unknown>).http === staticHttp });
       },
     });
-    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "plain" }] });
     const result = await runDag<unknown, { http: boolean }>(dag, {}, baseCtx());
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.http).toBe(true);
@@ -358,7 +359,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
       requires: [SCOPE] as unknown as readonly Capability[],
       fetch: async () => ok({ ok: true }), // never reached
     });
-    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "gated" }] });
     const result = await runDag(dag, {}, baseCtx(), {
       minting: { broker: throwingBroker, origin: agentOrigin },
     });
@@ -394,7 +395,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
         return ok({ ok: true });
       },
     });
-    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "undelivered" }] });
     const result = await runDag(dag, {}, baseCtx(), {
       minting: { broker: lyingBroker, origin: agentOrigin },
     });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import type { DagDefInput } from "../types/dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { validateDagShape } from "../executor/validate-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
@@ -19,7 +20,7 @@ describe("validateDagShape", () => {
     const dag: DagDefInput = {
       id: "ok",
       nodes: { A: mkNode("A"), B: mkNode("B") },
-      edges: [{ from: "A", to: "B" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     };
     expect(validateDagShape(dag).ok).toBe(true);
   });
@@ -113,6 +114,7 @@ describe("validateDagShape", () => {
         D: mkNode("D"),
       },
       edges: [
+        { from: DAG_INPUT, to: "A" },
         { from: "A", to: "B" },
         { from: "A", to: "C" },
         { from: "B", to: "D" },

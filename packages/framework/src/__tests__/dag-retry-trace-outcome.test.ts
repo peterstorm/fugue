@@ -11,6 +11,7 @@
 
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -29,7 +30,7 @@ const mkCtx = (): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -57,7 +58,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
     const dag = defineDagFromArray({
       id: "retry-trace",
       nodes: [flaky],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "flaky" }],
       defaultRetryLimit: 2,
     });
 
@@ -95,7 +96,7 @@ describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", ()
     const dag = defineDagFromArray({
       id: "no-retry",
       nodes: [happy],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "happy" }],
       defaultRetryLimit: 2,
     });
 

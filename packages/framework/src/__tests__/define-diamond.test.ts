@@ -52,10 +52,11 @@ describe("defineDiamond", () => {
 
     expect(dag.id).toBe(dagId("diamond-test"));
     expect(dag.nodes).toHaveLength(4);
-    // 4 edges: source→a, source→b, a→join, b→join
-    expect(dag.edges).toHaveLength(4);
+    // 5 edges: $input→source, source→a, source→b, a→join, b→join
+    expect(dag.edges).toHaveLength(5);
     expect(dag.edges).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ from: "$input", to: nodeId("source"), kind: "unconditional" }),
         expect.objectContaining({ from: nodeId("source"), to: nodeId("branch-a") }),
         expect.objectContaining({ from: nodeId("source"), to: nodeId("branch-b") }),
         expect.objectContaining({ from: nodeId("branch-a"), to: nodeId("join") }),
@@ -91,7 +92,8 @@ describe("defineDiamond", () => {
     });
 
     expect(dag.nodes).toHaveLength(3);
-    expect(dag.edges).toHaveLength(2);
+    // 3 edges: $input→source, source→branch-a, branch-a→join
+    expect(dag.edges).toHaveLength(3);
     expect(dag.outputNodeId).toBe(nodeId("join"));
   });
 

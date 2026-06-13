@@ -26,6 +26,7 @@ import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   logger: { warn: () => {}, error: () => {} },
   cache: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   prompts: null,
   judgeLlm: null,
   ...overrides,
@@ -91,7 +92,7 @@ describe("Wave 1.1 — aborted FrameworkError fast-fails without consuming retry
           },
         }),
       ],
-      [],
+      [{ from: DAG_INPUT, to: "a" }],
       { defaultRetryLimit: 5 }, // generous budget; the fix must skip it for aborted
     );
 
@@ -107,7 +108,7 @@ describe("Wave 1.1 — aborted FrameworkError fast-fails without consuming retry
   });
 
   it("handleNodeFailed transitions straight to failed for aborted regardless of budget", () => {
-    const dag = makeDag([makeNode("a")], [], { defaultRetryLimit: 10 });
+    const dag = makeDag([makeNode("a")], [{ from: DAG_INPUT, to: "a" }], { defaultRetryLimit: 10 });
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compileDagToMachine failed");
 
@@ -267,7 +268,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
           },
         }),
       ],
-      [],
+      [{ from: DAG_INPUT, to: "a" }],
       // attempt 1 + 2 retries = 3 executions = 3 node-failed events; the
       // third resolves into terminal `failed` so it is NOT appended (FR-005).
       // The audit log therefore holds exactly the two non-terminal failures.
@@ -381,7 +382,7 @@ describe("Wave 1.4 — eval-judge orchestrator exception flips passed to false",
 
     const dag = makeDag(
       [makeNode("a", { run: async () => ok("a-out") })],
-      [],
+      [{ from: DAG_INPUT, to: "a" }],
       { evalJudges: [throwingJudge] as DagDef["evalJudges"] },
     );
 
@@ -443,7 +444,7 @@ describe("Wave 2.1 — retry-exhausted preserves the underlying error kind", () 
           },
         }),
       ],
-      [],
+      [{ from: DAG_INPUT, to: "a" }],
       { defaultRetryLimit: 1 },
     );
 
@@ -465,7 +466,7 @@ describe("Wave 2.1 — retry-exhausted preserves the underlying error kind", () 
             err({ kind: "node-crash" as const, nodeId: "a" as NodeId, retriability: "retriable" as const, message: "kaboom" }),
         }),
       ],
-      [],
+      [{ from: DAG_INPUT, to: "a" }],
       { defaultRetryLimit: 0 },
     );
 
@@ -579,7 +580,7 @@ describe("Wave 6.8 — advanceToNextWave multi-wave fallback traversal", () => {
     const { advanceToNextWave } = await import("../dag-runtime/wave-resolution.js");
     const dag = makeDag(
       [makeNode("a"), makeNode("b"), makeNode("c")],
-      [{ from: "a", to: "b" }, { from: "b", to: "c" }],
+      [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }, { from: "b", to: "c" }],
     );
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed");
@@ -612,7 +613,7 @@ describe("Wave 6.9 — handleNodeFailed merges partialOutputs into retry ctx", (
     const { handleNodeFailed } = await import("../dag-runtime/retry-policy.js");
     const dag = makeDag(
       [makeNode("a"), makeNode("b")],
-      [],
+      [{ from: DAG_INPUT, to: "a" }, { from: DAG_INPUT, to: "b" }],
       { defaultRetryLimit: 2 },
     );
     const compiled = compileDagToMachine(dag, null);
@@ -653,7 +654,7 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
         (backoffMs, attempt) => {
           const dag = makeDag([
             makeNode("n", { retry: { backoffMs, jitterRatio: 0 } } as any),
-          ]);
+          ], [{ from: DAG_INPUT, to: "n" }]);
           const compiled = compileDagToMachine(dag, null);
           if (!compiled.ok) return false;
           const d0 = computeBackoffMs(N("n"), attempt, compiled.value.initialContext.retryConfigs);
@@ -669,7 +670,7 @@ describe("Wave 6.10 — computeBackoffMs clamping + monotonicity-when-array-mono
     const { computeBackoffMs } = await import("../dag-runtime/retry-policy.js");
     const dag = makeDag([
       makeNode("n", { retry: { backoffMs: [100, 200, 400] as const, jitterRatio: 0 } } as any),
-    ]);
+    ], [{ from: DAG_INPUT, to: "n" }]);
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed");
 
@@ -694,7 +695,7 @@ describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
           humanReview: { prompt: "approve?" } as any,
         }),
       ],
-      [],
+      [{ from: DAG_INPUT, to: "a" }],
       { defaultRetryLimit: 0 },
     );
     const compiled = compileDagToMachine(dag, null);
@@ -806,7 +807,7 @@ describe("Wave 4.10 — DeadLetterOpts.formatMessage receives raw err", () => {
 describe("Wave 3.5 — withRetryLimits sanctioned DagDef derivation", () => {
   it("merges call-time limits on top of dag.retryLimits with call-time taking precedence", async () => {
     const { withRetryLimits } = await import("../types/dag.js");
-    const dag = makeDag([makeNode("a"), makeNode("b")], [{ from: "a", to: "b" }], {
+    const dag = makeDag([makeNode("a"), makeNode("b")], [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }], {
       retryLimits: { a: 2, b: 3 },
     });
     const out = withRetryLimits(dag, { b: 99, c: 7 });
@@ -818,7 +819,7 @@ describe("Wave 3.5 — withRetryLimits sanctioned DagDef derivation", () => {
 
   it("works when the original dag has no retryLimits set", async () => {
     const { withRetryLimits } = await import("../types/dag.js");
-    const dag = makeDag([makeNode("a")], []);
+    const dag = makeDag([makeNode("a")], [{ from: DAG_INPUT, to: "a" }]);
     const out = withRetryLimits(dag, { a: 5 });
     expect(out.retryLimits).toEqual({ a: 5 });
   });

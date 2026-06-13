@@ -1,5 +1,6 @@
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import type { NodeContext } from "../types/node.js";
@@ -22,7 +23,7 @@ const mkLlmCtx = (outputs: unknown[]): NodeContext => {
     dagId: "test" as DagId,
     observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null, http: null,
+  judgeLlm: null, http: null, clock: null,
     cache: null,
     logger: { warn: () => {}, error: () => {} },
     prompts: { get: (_name: string) => "prompt template" },
@@ -106,7 +107,7 @@ const mkAlwaysTransientLlmCtx = (counter: { calls: number }): NodeContext => ({
   dagId: "test" as DagId,
   observer: new NoopObserver(),
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null, http: null,
+  judgeLlm: null, http: null, clock: null,
   cache: null,
   logger: { warn: () => {}, error: () => {} },
   prompts: { get: (_name: string) => "prompt template" },
@@ -146,7 +147,7 @@ describe("LLM rate-limit → DAG retry-exhausted (W5.6)", () => {
     const dag = defineDag({
       id: "rate-limited-dag" as DagId,
       nodes: { "llm-rate-limited": fastLlmNode as any },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "llm-rate-limited" }],
       defaultRetryLimit: 2,
     });
 

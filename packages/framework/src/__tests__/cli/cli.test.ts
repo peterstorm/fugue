@@ -95,15 +95,17 @@ describe("runDescribe", () => {
     expect(result.dag.nodes[0]!.kind).toBe("fetch");
     expect(result.dag.nodes[1]!.kind).toBe("transform");
 
-    // 1 edge
-    expect(result.dag.edges).toHaveLength(1);
-    expect(result.dag.edges[0]).toMatchObject({
-      from: "fetch-user",
-      to: "summarize",
-      kind: "unconditional",
-    });
+    // 2 edges: the chain edge + the DAG_INPUT edge defineLinearDag injects to
+    // the entry node (C0 — the request flows in over an explicit edge).
+    expect(result.dag.edges).toHaveLength(2);
+    expect(result.dag.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "fetch-user", to: "summarize", kind: "unconditional" }),
+        expect.objectContaining({ from: "$input", to: "fetch-user", kind: "unconditional" }),
+      ]),
+    );
 
-    // Two waves: [[fetch-user], [summarize]]
+    // Two waves: [[fetch-user], [summarize]] — $input adds no wave.
     expect(result.dag.waves).toEqual([["fetch-user"], ["summarize"]]);
 
     // JSON Schemas should be present (zod renders an object schema)

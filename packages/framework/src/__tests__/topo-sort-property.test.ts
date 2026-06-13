@@ -11,6 +11,7 @@ import { z } from "zod";
 import { ok } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { createTransformNode } from "../nodes/transform.js";
 
 // ---------------------------------------------------------------------------
@@ -71,10 +72,15 @@ const buildDagDef = (shape: RandomDag) => {
       transform: (i) => ok(i),
     }),
   );
+  // Add DAG_INPUT edges for root nodes (nodes with no incoming edge).
+  const toSet = new Set(shape.edges.map((e) => e.to));
+  const dagInputEdges = shape.nodeIds
+    .filter((id) => !toSet.has(id))
+    .map((id) => ({ from: DAG_INPUT as string, to: id }));
   return defineDagFromArray({
     id: `gen-${shape.nodeIds.length}`,
     nodes,
-    edges: shape.edges.map((e) => ({ from: e.from, to: e.to })),
+    edges: [...dagInputEdges, ...shape.edges.map((e) => ({ from: e.from, to: e.to }))],
   });
 };
 
@@ -156,7 +162,10 @@ describe("§6.9 — topoSort ordering property", () => {
         createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
         createTransformNode({ id: N("B"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
-      edges: [],
+      edges: [
+        { from: DAG_INPUT, to: N("A") },
+        { from: DAG_INPUT, to: N("B") },
+      ],
     });
     const result = topoSort(dag);
     expect(result.ok).toBe(true);
@@ -173,6 +182,7 @@ describe("§6.9 — topoSort ordering property", () => {
         createTransformNode({ id, inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ),
       edges: [
+        { from: DAG_INPUT, to: "A" },
         { from: "A", to: "B" },
         { from: "A", to: "C" },
         { from: "B", to: "D" },

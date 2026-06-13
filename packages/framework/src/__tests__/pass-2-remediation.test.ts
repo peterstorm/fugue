@@ -36,6 +36,7 @@ import type { TaskRegistry } from "../scheduler/types.js";
 import { ok, err } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
 import type { NodeContext } from "../types/node.js";
+import { DAG_INPUT } from "../types/ids.js";
 
 import fc from "fast-check";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
@@ -47,7 +48,7 @@ const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   logger: { warn: () => {}, error: () => {} },
   cache: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   prompts: null,
   judgeLlm: null,
   ...overrides,
@@ -181,7 +182,7 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
           transform: () => ok(null),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
       defaultRetryLimit: 5,
     });
@@ -242,7 +243,7 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
           transform: () => ok(null),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
     return {
@@ -375,7 +376,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
           transform: () => ok(null),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "n" }],
       outputNodeId: "n",
     });
     const b = defineDag({
@@ -388,7 +389,7 @@ describe("Wave 2.4 — InMemoryCheckpointer rejects mismatched dagFingerprint at
           transform: () => ok(null),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "n" }],
       outputNodeId: "n",
     });
     expect(dagFingerprint(a)).toBe(dagFingerprint(b));
@@ -472,7 +473,7 @@ describe("Wave 7 — resumeCheckpoint on the stateful executor", () => {
           transform: () => ok({ shape: "new" } as const),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
 
@@ -504,7 +505,7 @@ describe("Wave 7 — resumeCheckpoint on the stateful executor", () => {
           },
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
 
@@ -540,7 +541,7 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
           transform: () => ok(null),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: DAG_INPUT, to: "b" }],
       outputNodeId: "a",
       defaultRetryLimit: 2,
     });
@@ -649,10 +650,11 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
   it("a node with a strict input schema and bad upstream value emits node-error", async () => {
     const events: string[] = [];
     const observer = {
-      observe(e: any) {
-        if (e.type === "node-start") events.push("node-start");
-        else if (e.type === "node-end") events.push("node-end");
-        else if (e.type === "node-error") events.push(`node-error:${e.error.slice(0, 30)}`);
+      observe(e: unknown) {
+        const ev = e as { type?: string; error?: string };
+        if (ev.type === "node-start") events.push("node-start");
+        else if (ev.type === "node-end") events.push("node-end");
+        else if (ev.type === "node-error") events.push(`node-error:${(ev.error ?? "").slice(0, 30)}`);
       },
     };
 
@@ -666,7 +668,7 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
           transform: () => ok(null),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
 

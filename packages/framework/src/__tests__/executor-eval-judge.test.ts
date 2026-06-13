@@ -13,6 +13,7 @@ import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { DAG_INPUT } from "../types/ids.js";
 
 // --- Helpers ---
 
@@ -25,6 +26,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
@@ -47,7 +49,7 @@ const makeDag = (evalJudges: DagDef["evalJudges"] = undefined): DagDef =>
   defineDagFromArray({
     id: "test-dag",
     nodes: [uppercaseNode],
-    edges: [],
+    edges: [{ from: DAG_INPUT, to: "uppercase" }],
     outputNodeId: "uppercase",
     evalJudges,
   });
@@ -158,7 +160,7 @@ describe("executor + eval-judge integration", () => {
     const dag = defineDagFromArray({
       id: "fail-dag",
       nodes: [failingNode],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "failing" }],
       outputNodeId: "failing",
       evalJudges: [judge],
     });

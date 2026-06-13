@@ -24,6 +24,7 @@ import { ok } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
@@ -35,6 +36,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -51,7 +53,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       confidence: { mode: "none" },
       run: async () => ok({ version: 42 }),
     };
-    const dag = defineDagFromArray({ id: "fw-read", nodes: [readNode], edges: [] });
+    const dag = defineDagFromArray({ id: "fw-read", nodes: [readNode], edges: [{ from: DAG_INPUT, to: "reader" }] });
     await runDagStateful(dag, null, mkCtx(observer));
 
     const witnessCaptured = observer.events.filter(
@@ -91,7 +93,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     const dag = defineDagFromArray({
       id: "fw-write",
       nodes: [readNode, writeNode],
-      edges: [{ from: "reader", to: "writer" }],
+      edges: [{ from: DAG_INPUT, to: "reader" }, { from: "reader", to: "writer" }],
     });
     await runDagStateful(dag, null, mkCtx(observer));
 
@@ -123,7 +125,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       // No extractWitness — freshness tracking silently skipped
       run: async () => ok({ version: 42 }),
     };
-    const dag = defineDagFromArray({ id: "fw-no-witness", nodes: [readNode], edges: [] });
+    const dag = defineDagFromArray({ id: "fw-no-witness", nodes: [readNode], edges: [{ from: DAG_INPUT, to: "reader-no-witness" }] });
     await runDagStateful(dag, null, mkCtx(observer));
 
     const witnessCaptured = observer.events.filter(
@@ -144,7 +146,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
       confidence: { mode: "none" },
       run: async () => { throw new Error("should not be called"); },
     };
-    const dag = defineDagFromArray({ id: "fw-checkpoint", nodes: [readNode], edges: [] });
+    const dag = defineDagFromArray({ id: "fw-checkpoint", nodes: [readNode], edges: [{ from: DAG_INPUT, to: "reader" }] });
 
     // Provide a checkpoint so the node is skipped
     const checkpoint = new Map<string, unknown>([["reader", { version: 99 }]]);

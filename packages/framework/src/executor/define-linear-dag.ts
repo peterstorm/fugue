@@ -11,6 +11,7 @@ import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId } from "../types/ids.js";
+import { dagInputEdgeFor } from "./dag-input-edge.js";
 
 export interface LinearDagConfig {
   readonly id: string;
@@ -44,10 +45,14 @@ export const defineLinearDag = (config: LinearDagConfig): DagDef => {
     });
   }
 
-  const edges = config.nodes.slice(0, -1).map((node, i) => ({
+  const chainEdges = config.nodes.slice(0, -1).map((node, i) => ({
     from: node.id as string,
     to: config.nodes[i + 1]!.id as string,
   }));
+
+  // The first node is the entry: feed it the request via a `$input` edge
+  // (unless it's a source node that consumes nothing).
+  const edges = [...dagInputEdgeFor(config.nodes[0]!), ...chainEdges];
 
   const lastNode = config.nodes[config.nodes.length - 1]!;
 

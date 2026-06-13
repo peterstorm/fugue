@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { NodeContext, NodeDef } from "../types/node.js";
@@ -22,6 +23,7 @@ const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
@@ -36,6 +38,7 @@ describe("topoSort", () => {
         createTransformNode({ id: N("C"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "A" },
         { from: "A", to: "B" },
         { from: "B", to: "C" },
       ],
@@ -57,6 +60,8 @@ describe("topoSort", () => {
         createTransformNode({ id: N("C"), inputSchema: z.any(), outputSchema: z.any(), transform: (i) => ok(i) }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "A" },
+        { from: DAG_INPUT, to: "B" },
         { from: "A", to: "C" },
         { from: "B", to: "C" },
       ],
@@ -115,6 +120,7 @@ describe("runDag", () => {
         }),
       ]),
       edges: [
+        { from: DAG_INPUT, to: "A" },
         { from: "A", to: "B" },
         { from: "B", to: "C" },
       ],
@@ -139,7 +145,7 @@ describe("runDag", () => {
           transform: (i) => ok(i),
         }),
       ]),
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "A" }],
     });
     const result = await runDag(dag, { value: "not a number" }, mkCtx());
     expect(result.ok).toBe(false);
@@ -159,7 +165,7 @@ describe("runDag", () => {
           transform: (_i) => ok({ value: "wrong" } as any),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "A" }],
     });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
@@ -186,7 +192,7 @@ describe("runDag", () => {
           transform: (i) => { log.push("B"); return ok(i); },
         }),
       ],
-      edges: [{ from: "A", to: "B" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
@@ -219,6 +225,7 @@ describe("runDag", () => {
         }),
       ]),
       edges: [
+        { from: DAG_INPUT, to: "A" },
         { from: "A", to: "B" },
         { from: "B", to: "C" },
       ],
@@ -278,7 +285,7 @@ describe("runDag", () => {
           transform: () => { log.push("A"); return ok({ value: 1, version: 2 as const }); },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "A" }],
     });
 
     // Old checkpoint persisted under previous schema (no `version` field).
@@ -323,7 +330,7 @@ describe("runDag", () => {
           transform: (i: { value: number }) => ok({ value: i.value * 2 }),
         }),
       ]),
-      edges: [{ from: "A", to: "B" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     });
 
     const observer = new RecordingObserver();
@@ -367,7 +374,7 @@ describe("runDag", () => {
           transform: (_i) => err({ kind: "node-crash" as const, nodeId: "B" as NodeId, retriability: "retriable" as const, message: "boom" }),
         }),
       ],
-      edges: [{ from: "A", to: "B" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     });
 
     const observer = new RecordingObserver();
@@ -398,7 +405,7 @@ describe("runDag", () => {
           transform: (i: { value: number }) => ok({ value: i.value * 2 }),
         }),
       ]),
-      edges: [{ from: "A", to: "B" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     });
 
     const cache = {
@@ -446,7 +453,7 @@ describe("runDag", () => {
       id: N("guard"),
       inputSchema: z.any(),
       outputSchema: z.any(),
-      validate: (input: any) => ({
+      validate: (input: unknown) => ({
         kind: "validated" as const,
         value: input,
         passed: false,
@@ -464,10 +471,11 @@ describe("runDag", () => {
           id: N("consumer"),
           inputSchema: z.any(),
           outputSchema: z.any(),
-          transform: (input: any) => ok({ received: input.passed, value: input.value }),
+          transform: (input: unknown) => ok({ received: (input as { passed: boolean; value: unknown }).passed, value: (input as { passed: boolean; value: unknown }).value }),
         }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "source" },
         { from: "source", to: "guard" },
         { from: "guard", to: "consumer" },
       ],
@@ -494,7 +502,7 @@ describe("runDag", () => {
       nodes: [
         createTransformNode({ id: N("A"), inputSchema: z.any(), outputSchema: z.any(), transform: () => ok(42) }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "A" }],
     });
     const result = await runDag(dag, {}, mkCtx({ checkpointWriter: failingCheckpointWriter }));
     expect(result.ok).toBe(false);
@@ -530,7 +538,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           transform: (i) => ok(i),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "A" }],
     });
 
   it("resume replays checkpoint values: A is skipped, B runs", async () => {
@@ -551,7 +559,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           transform: (i) => { log.push("B"); return ok(i); },
         }),
       ],
-      edges: [{ from: "A", to: "B" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     });
     const checkpoint = new Map<string, unknown>([["A", 10]]);
     const result = await runDag(dag, {}, mkCtx(), {
@@ -590,7 +598,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           humanReview: { prompt: "Please review" },
         } as NodeDef<unknown, unknown>,
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "reviewed" }],
     });
 
   const noopReview = async (_req: { nodeId: string; output: unknown; prompt: string }): Promise<HumanAction> =>
@@ -657,7 +665,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           humanReview: { prompt: "Please review" },
         } as NodeDef<unknown, unknown>,
       ],
-      edges: [{ from: "A", to: "reviewed" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "reviewed" }],
     });
     const checkpoint = new Map<string, unknown>([["A", 99]]);
     const result = await runDag(dag, {}, mkCtx(), {
@@ -698,7 +706,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
           retry: { backoffMs: [1] },
         } as NodeDef<unknown, unknown>,
       ],
-      edges: [{ from: "A", to: "flaky" }],
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "flaky" }],
     });
     const checkpoint = new Map<string, unknown>([["A", "cached-A"]]);
     const result = await runDag(dag, {}, mkCtx(), {
@@ -746,7 +754,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     const dag = defineDagFromArray({
       id: "default-retry-dag",
       nodes: [flakyNode],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "flaky" }],
       defaultRetryLimit: 2,
     });
     const result = await runDag(dag, {}, mkCtx());
@@ -776,7 +784,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     const dag = defineDagFromArray({
       id: "retry-limits-dag",
       nodes: [flakyNode],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "flaky" }],
       retryLimits: { flaky: 2 },
     });
     const result = await runDag(dag, {}, mkCtx());
@@ -803,7 +811,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     const dag = defineDagFromArray({
       id: "empty-retry-limits-dag",
       nodes: [flakyNode],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "flaky" }],
       retryLimits: {},
     });
     const result = await runDag(dag, {}, mkCtx());
@@ -834,7 +842,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     const dag = defineDagFromArray({
       id: "retry-dag",
       nodes: [flakyNode],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "flaky" }],
     });
 
     const result = await runDag(dag, {}, mkCtx(), {

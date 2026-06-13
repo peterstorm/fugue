@@ -38,12 +38,30 @@ export type LintResult =
  * Non-fatal lint hint. Advisories never set `ok: false` — they nudge the author
  * toward a better shape without blocking. Stable JSON shape for LLM tooling.
  */
-export type LintAdvisory = {
-  readonly kind: "shape-helper-hint";
-  readonly message: string;
-  /** The constructor the manual DAG is isomorphic to. */
-  readonly helper: "defineLinearDag" | "defineFanOut" | "defineDiamond" | "defineRouter";
-};
+export type LintAdvisory =
+  | {
+      readonly kind: "shape-helper-hint";
+      readonly message: string;
+      /** The constructor the manual DAG is isomorphic to. */
+      readonly helper:
+        | "defineLinearDag"
+        | "defineFanOut"
+        | "defineDiamond"
+        | "defineRouter"
+        | "defineSources";
+    }
+  | {
+      /**
+       * B2 (advisory): a transform node whose input and output schemas are the
+       * SAME reference (a pass-through / identity-shaped transform). Pre-0.2.0
+       * this was the `read-request` idiom — a node existing only to carry the
+       * DAG request past wave 1. The fix is a `DAG_INPUT` edge straight to the
+       * consumer; the pass-through node can then be deleted.
+       */
+      readonly kind: "redundant-passthrough";
+      readonly message: string;
+      readonly nodeId: string;
+    };
 
 /**
  * Discriminated lint error. `kind` is a stable string that machine consumers

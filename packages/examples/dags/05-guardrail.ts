@@ -5,7 +5,7 @@
 // the caller) inspect. Use it to surface quality signals without throwing.
 
 import { z } from "zod";
-import { defineDag, createTransformNode, createGuardrailNode, ok } from "@fuguejs/framework";
+import { defineDag, createTransformNode, createGuardrailNode, DAG_INPUT, ok } from "@fuguejs/framework";
 import type { GuardrailResult } from "@fuguejs/framework";
 import type { DagRegistration } from "@fuguejs/host/contract";
 
@@ -46,7 +46,10 @@ const dag = defineDag({
     "write-draft": writeDraft,
     "check-length": checkLength,
   },
-  edges: [{ from: "write-draft", to: "check-length" }],
+  edges: [
+    { from: DAG_INPUT, to: "write-draft" },
+    { from: "write-draft", to: "check-length" },
+  ],
   outputNodeId: "check-length",
 });
 

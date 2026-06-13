@@ -9,6 +9,7 @@ import { runDag } from "../executor/run-dag.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 /**
@@ -37,7 +38,10 @@ describe("second-dag (SC-007): hello world DAG", () => {
   const dag = defineDagFromArray({
     id: "hello-world",
     nodes: ([fetchGreeting, formatGreeting]),
-    edges: [{ from: "fetchGreeting", to: "formatGreeting" }],
+    edges: [
+      { from: DAG_INPUT, to: "fetchGreeting" },
+      { from: "fetchGreeting", to: "formatGreeting" },
+    ],
   });
 
   const mkCtx = (): NodeContext => ({
@@ -48,7 +52,7 @@ describe("second-dag (SC-007): hello world DAG", () => {
   judgeLlm: null,
     cache: null,
     prompts: null,
-    llm: null, http: null,
+    llm: null, http: null, clock: null,
     logger: { warn: () => {}, error: () => {} },
   });
 
@@ -65,6 +69,7 @@ describe("second-dag (SC-007): hello world DAG", () => {
     expect(fetchGreeting.kind).toBe("fetch");
     expect(formatGreeting.kind).toBe("transform");
     expect(dag.nodes.length).toBe(2);
-    expect(dag.edges.length).toBe(1);
+    // 2 edges now: the chain edge + the injected DAG_INPUT edge to the root.
+    expect(dag.edges.length).toBe(2);
   });
 });

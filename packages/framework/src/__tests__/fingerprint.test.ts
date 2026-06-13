@@ -4,6 +4,7 @@ import { dagFingerprint, FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js"
 import { createTransformNode } from "../nodes/transform.js";
 import type { DagDef } from "../types/dag.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { ok } from "../types/result.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
@@ -20,13 +21,19 @@ const dag = (
   nodes: ReturnType<typeof node>[],
   edges: { from: string; to: string }[] = [],
   outputNodeId?: string,
-): DagDef =>
-  defineDagFromArray({
+): DagDef => {
+  // Add DAG_INPUT edges for root nodes (nodes not appearing as `to` in any edge).
+  const toSet = new Set(edges.map((e) => e.to));
+  const dagInputEdges = nodes
+    .filter((n) => !toSet.has(n.id as string))
+    .map((n) => ({ from: DAG_INPUT as string, to: n.id as string }));
+  return defineDagFromArray({
     id,
     nodes,
-    edges,
+    edges: [...dagInputEdges, ...edges],
     outputNodeId,
   });
+};
 
 describe("dagFingerprint", () => {
   it("is stable for the same DAG shape", () => {
@@ -91,6 +98,7 @@ describe("dagFingerprint byte-stability (§6.15)", () => {
       id: "golden-dag",
       nodes: [node("fetch"), node("classify"), node("synthesize"), node("guardrail")],
       edges: [
+        { from: DAG_INPUT as string, to: "fetch" },
         { from: "fetch", to: "classify" },
         { from: "classify", to: "synthesize" },
         { from: "synthesize", to: "guardrail" },
@@ -109,7 +117,7 @@ describe("dagFingerprint byte-stability (§6.15)", () => {
     // human inspection; keep them in sync if the algorithm is bumped
     // (which requires a FRAMEWORK_VERSION bump — see
     // checkpoint/fingerprint.ts comment).
-    const GOLDEN_SHA = "8413a11636803a6ae3589722592e6994bd10e3665bb9900423cd47a660c94d94";
+    const GOLDEN_SHA = "37abe48d9a4508c6765d029ead2c8a5cc3a5e87e905de20af1f93f394f6b9cd3";
     const actual = dagFingerprint(goldenDag());
     expect(actual).toBe(GOLDEN_SHA);
   });

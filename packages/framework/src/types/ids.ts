@@ -18,10 +18,35 @@ declare const __runIdBrand: unique symbol;
 declare const __nodeIdBrand: unique symbol;
 declare const __dagIdBrand: unique symbol;
 declare const __gitShaBrand: unique symbol;
+declare const __dagInputBrand: unique symbol;
 
 export type RunId = string & { readonly [__runIdBrand]: void };
 export type NodeId = string & { readonly [__nodeIdBrand]: void };
 export type DagId = string & { readonly [__dagIdBrand]: void };
+
+// ---------------------------------------------------------------------------
+// DAG_INPUT — the reserved virtual edge source carrying the DAG's request
+// (C0 / framework 0.2.0). It is spelled "$input": `$` is outside `ID_REGEX`'s
+// character class *by construction*, so DAG_INPUT can never collide with a real
+// node id (every real id goes through `nodeId()`, which rejects `$`). At run
+// start the validated DAG input is seeded into the outputs map under this key,
+// so a `{ from: DAG_INPUT, to: <node> }` edge feeds the request to that node
+// through the ordinary input-wiring rules (bare value on a single edge, keyed
+// `"$input"` slot in a fan-in). No node implicitly receives the input any more.
+//
+// `DagInputId` is a *subtype* of `NodeId`, so the constant flows transparently
+// through every `NodeId`-typed runtime field (`EdgeDef.from`, the outputs map),
+// while the distinct brand lets `EdgeDefInput.from` admit it without widening
+// real-node literal checking to `string`.
+// ---------------------------------------------------------------------------
+
+export type DagInputId = NodeId & { readonly [__dagInputBrand]: void };
+
+/** The reserved virtual source id for a DAG's request input. See above. */
+export const DAG_INPUT = "$input" as DagInputId;
+
+/** Narrow a string/NodeId to the `DAG_INPUT` virtual source. */
+export const isDagInput = (id: string): id is DagInputId => id === DAG_INPUT;
 
 // Allow `:` so callers can namespace run ids (`tenant:run-abc`) without
 // jumping through encoding hoops. The regex stays restrictive enough that

@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -107,7 +108,7 @@ describe("predicate-malformed — runtime check throws when predicate check() th
       judgeLlm: null,
       cache: null,
       prompts: null,
-      llm: null, http: null,
+      llm: null, http: null, clock: null,
       logger: { warn: () => {}, error: () => {} },
     });
 
@@ -125,6 +126,7 @@ describe("predicate-malformed — runtime check throws when predicate check() th
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "a",

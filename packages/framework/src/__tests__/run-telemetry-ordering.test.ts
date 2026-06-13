@@ -27,7 +27,7 @@ describe("beginRunTelemetry — balanced start/end on observer throw (Wave 1.3)"
     judgeLlm: null,
     cache: null,
     prompts: null,
-    llm: null, http: null,
+    llm: null, http: null, clock: null,
     logger: { warn: () => {}, error: () => {} },
   });
 

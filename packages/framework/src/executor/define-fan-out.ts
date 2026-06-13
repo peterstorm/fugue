@@ -16,6 +16,7 @@ import type { DagDef, DagProvenance } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { defineDagFromArray } from "./define-dag.js";
+import { dagInputEdgeFor } from "./dag-input-edge.js";
 
 /**
  * Fan-out branches must be non-empty. The tuple type makes the empty-array
@@ -94,7 +95,9 @@ export const defineFanOut = (
   return defineDagFromArray({
     id: config.id,
     nodes,
-    edges: [...sourceEdges, ...joinEdges],
+    // The source is the entry: feed it the request via a `$input` edge unless
+    // it is itself a source node (consumes nothing).
+    edges: [...dagInputEdgeFor(config.source), ...sourceEdges, ...joinEdges],
     outputNodeId,
     evalJudges: config.evalJudges,
     defaultRetryLimit: config.defaultRetryLimit,

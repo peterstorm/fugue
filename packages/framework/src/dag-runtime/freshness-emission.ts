@@ -117,7 +117,7 @@ export async function emitFreshnessWitnessEvents(
 
         // Step 1: Rebuild the node's input via the shared helper
         const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
-        const inputResult = buildNodeInput(machineCtx.initialInput, priorOutputs, incoming, nodeId);
+        const inputResult = buildNodeInput(priorOutputs, incoming, nodeId);
         if (!inputResult.ok) {
           const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${inputResult.error.kind === "node-crash" ? inputResult.error.message : "unknown"}`;
           fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);

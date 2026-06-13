@@ -11,6 +11,7 @@ import { defineDag, runDag } from "../executor/index.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { makeNodeContext } from "../shared/index.js";
 import { ok } from "../types/result.js";
+import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
@@ -37,7 +38,7 @@ const buildChain = (count: number): {
       },
     } as NodeDef<unknown, unknown, FrameworkError, []>;
   }
-  const edges: { from: string; to: string }[] = [];
+  const edges: { from: string; to: string }[] = [{ from: DAG_INPUT as string, to: "n0" }];
   for (let i = 1; i < count; i++) edges.push({ from: `n${i - 1}`, to: `n${i}` });
   return { nodes, edges, outputId: `n${count - 1}` };
 };

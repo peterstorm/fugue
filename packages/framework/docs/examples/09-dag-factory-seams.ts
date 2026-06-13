@@ -16,6 +16,7 @@ import {
   createLlmNode,
   createTransformNode,
   defineDag,
+  DAG_INPUT,
   ok,
 } from "@fuguejs/framework";
 import type { LlmNodeDef } from "@fuguejs/framework";
@@ -96,6 +97,7 @@ export const createReportDag = (opts: ReportDagOpts = {}) =>
       assemble,
     },
     edges: [
+      { from: DAG_INPUT, to: "stamp-event" },
       { from: "stamp-event", to: "summarize" },
       { from: "stamp-event", to: "assemble" },
       { from: "summarize", to: "assemble" },
