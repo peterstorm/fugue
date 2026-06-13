@@ -129,16 +129,27 @@ export const runLint = async (path: string): Promise<LintResult> => {
 
   // `.dag` is present and object-shaped (importDagFile guaranteed it). Run the
   // structural checks the topology validator can't (schema-aware fan-in keys,
-  // shape-helper advisories). Defensive: a bug in the analyzer must not break
-  // lint — fall back to "no findings" rather than throwing.
+  // shape-helper advisories). Defensive: a bug in the analyzer must not crash
+  // the CLI — but it must NOT silently pass lint either, or a real
+  // `fan-in-key-mismatch` could hide behind a crashed analyzer. Surface the
+  // failure as an `analyzer-failed` error so the result is `ok: false`.
   let errors: readonly LintError[] = [];
   let advisories: readonly LintAdvisory[] = [];
   try {
     const analysis = analyzeDag(imported.defaultExport.dag as DagDef);
     errors = analysis.errors;
     advisories = analysis.advisories;
-  } catch {
-    // analyzer failure — surface nothing rather than fail the lint
+  } catch (e) {
+    return {
+      ok: false,
+      path: imported.path,
+      errors: [
+        {
+          kind: "analyzer-failed",
+          message: `Structural lint analyzer threw: ${e instanceof Error ? e.message : String(e)}`,
+        },
+      ],
+    };
   }
 
   if (errors.length > 0) {

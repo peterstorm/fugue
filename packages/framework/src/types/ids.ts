@@ -53,6 +53,17 @@ export const isDagInput = (id: string): id is DagInputId => id === DAG_INPUT;
 // IDs remain URL-safe and printable in operator UIs.
 const ID_REGEX = /^[A-Za-z0-9_:-]{1,128}$/;
 
+// Load-time assertion of the load-bearing invariant from the DAG_INPUT block
+// above: the reserved request id is spelled outside `ID_REGEX` so it can never
+// collide with a real node id (which always goes through `nodeId()`). Enforced
+// here rather than only commented — if either the constant or the regex ever
+// drifts so that `$input` becomes a valid id, the module fails to load.
+if (ID_REGEX.test(DAG_INPUT)) {
+  throw new Error(
+    `Framework invariant violated: DAG_INPUT ("${DAG_INPUT}") must not match ID_REGEX (${ID_REGEX.source}); it would collide with a real node id`,
+  );
+}
+
 /** The regex used to validate all framework identifiers. Exported for client-side validation reuse. */
 export const ID_PATTERN = ID_REGEX;
 

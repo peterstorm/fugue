@@ -194,12 +194,13 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     await mkdir(join(dir, "prompts"), { recursive: true });
     await write(join("prompts", `${scaffold.prompt.name}.txt`), scaffold.prompt.body);
     // Generate prompts/registry.json (new prompt → 1.0.0) so `fugue prompts
-    // check` is green out of the box.
+    // check` is green out of the box. Only record it as written after the sync
+    // succeeds — on failure the registry was not produced.
     const sync = await runPromptsSync(dir);
-    written.push(join(relDir, "prompts", "registry.json"));
     if (!sync.ok) {
       return { ok: false, problems: sync.problems };
     }
+    written.push(join(relDir, "prompts", "registry.json"));
   }
 
   const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";

@@ -19,7 +19,7 @@
 // Scope: only the shipped surface. Monorepo-internal docs (`docs/*.md`, plans,
 // ADRs) are intentionally not checked — they may link wherever they like.
 
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, relative, join } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -93,8 +93,8 @@ for (const file of docFiles) {
         });
       }
     }
-    // Directory link targets are fine (e.g. ./examples/).
-    void statSync(resolved);
+    // Directory link targets are fine (e.g. ./examples/) — existence was
+    // already verified above, so nothing more to check here.
   }
 }
 

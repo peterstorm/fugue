@@ -1103,10 +1103,13 @@ Possible `errors[].kind` values:
 | `fan-in-key-mismatch` | A fan-in node (≥2 incoming edges) has a `z.object` input schema whose keys don't equal the set of incoming node ids. Carries `nodeId`, `missingKeys`, `extraKeys`. This compiles but fails at runtime — the single most likely wiring mistake. |
 
 **Advisories.** Lint may also attach a non-fatal `advisories` array (it never
-flips `ok` to `false`). Today the only kind is `shape-helper-hint` — emitted
-when a manual `defineDag` is edge-for-edge isomorphic to a shape helper
-(`defineLinearDag`/`defineFanOut`/`defineDiamond`), naming the helper to adopt.
-A DAG already built with a helper never triggers it.
+flips `ok` to `false`). Two kinds today:
+- `shape-helper-hint` — emitted when a manual `defineDag` is edge-for-edge
+  isomorphic to a shape helper (`defineLinearDag`/`defineFanOut`/`defineDiamond`),
+  naming the helper to adopt. A DAG already built with a helper never triggers it.
+- `redundant-passthrough` — emitted for the legacy request-carrier idiom: a
+  transform whose sole input is `DAG_INPUT` and whose input/output schemas are
+  identical. Delete it and wire its consumer directly with a `DAG_INPUT` edge.
 
 ### `fugue describe <path>`
 

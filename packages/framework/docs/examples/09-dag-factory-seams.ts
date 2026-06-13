@@ -1,11 +1,15 @@
-// Example: DAG factory with injected seams (clock + model).
+// Example: DAG factory with an injected model seam (+ the clock capability).
 //
 // A module-scope `const dag = defineDag(...)` is untestable the moment a node
-// reads the wall clock or names a model — a test can't pin either. The fix is a
-// FACTORY that takes the seams as options and threads them into the nodes:
-// `createReportDag({ now, model })`. Production calls it with no args (system
-// clock, real model id); a test passes a fixed clock and a fake model id wired
-// to a `FakeLlmClient` (see 09-dag-factory-seams.test.ts).
+// names a model id — a test can't route it to a fake. The fix is a FACTORY that
+// takes the model as an option and threads it into the LLM node:
+// `createReportDag({ model })`. Production calls it with no args (a real model
+// id); a test passes a fake id wired to a `FakeLlmClient`.
+//
+// The clock is NOT a factory seam — it is a capability. A node that needs the
+// time declares `requires: ["clock"]` and reads `ctx.clock.now()`; tests pin it
+// by wiring `fixedClock(at)` into `makeNodeContext`, so the run is deterministic
+// without threading a `now` option through the factory (see the test).
 //
 // Use module-scope `defineDag` only for a DAG with NO seams (examples 01–08).
 
@@ -23,8 +27,6 @@ import type { LlmNodeDef } from "@fuguejs/framework";
 import type { DagRegistration } from "@fuguejs/host/contract";
 
 export interface ReportDagOpts {
-  /** Clock seam for the `asOf` stamp; defaults to the system clock. Tests pin it. */
-  readonly now?: () => Date;
   /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
   readonly model?: string;
 }
@@ -40,15 +42,16 @@ const SummarySchema = z.object({
 });
 const ReportSchema = z.object({ subject: z.string(), asOf: z.string(), summary: z.string() });
 
-// The clock seam lives in a fetch node — the only place the wall clock is read.
-// Pure transforms stay clock-free.
-const createStampEvent = (now: () => Date) =>
-  createFetchNode({
-    id: "stamp-event",
-    inputSchema: InputSchema,
-    outputSchema: EventSchema,
-    fetch: async (input) => ok({ subject: input.subject, asOf: now().toISOString() }),
-  });
+// The wall clock is read through the `clock` capability — the only place time
+// enters the DAG. Pure transforms stay clock-free; tests inject `fixedClock`.
+const stampEvent = createFetchNode({
+  id: "stamp-event",
+  inputSchema: InputSchema,
+  outputSchema: EventSchema,
+  requires: ["clock"] as const,
+  fetch: async (input, ctx) =>
+    ok({ subject: input.subject, asOf: ctx.clock.now().toISOString() }),
+});
 
 // The model seam lives in the LLM node. Bucketed confidence via spread-override.
 const createSummarize = (model: string): LlmNodeDef<
@@ -92,7 +95,7 @@ export const createReportDag = (opts: ReportDagOpts = {}) =>
   defineDag({
     id: "factory-seams-report",
     nodes: {
-      "stamp-event": createStampEvent(opts.now ?? (() => new Date())),
+      "stamp-event": stampEvent,
       summarize: createSummarize(opts.model ?? DEFAULT_MODEL),
       assemble,
     },
@@ -110,8 +113,8 @@ const registration: DagRegistration = {
   inputSchema: InputSchema,
   meta: {
     description:
-      "DAG factory with injected clock + model seams — the testable form. " +
-      "Production calls createReportDag() with no args.",
+      "DAG factory with an injected model seam + the clock capability — the " +
+      "testable form. Production calls createReportDag() with no args.",
     version: "1.0.0",
   },
 };

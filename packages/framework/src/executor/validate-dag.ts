@@ -222,7 +222,7 @@ export const validateDagShape = (
 
   // Source / root structural invariant (C0 / 0.2.0). No node implicitly
   // receives the DAG input: a node with zero incoming edges is a *source*
-  // (built via `createFetchNode` without `inputSchema`, `isSource: true`), and
+  // (built via `createSourceNode`, which sets `isSource: true`), and
   // a source must be a root. `DAG_INPUT` edges count as incoming here — a node
   // fed by `$input` is consuming the request and is therefore not a root.
   const incomingCount = new Map<NodeId, number>();
@@ -244,7 +244,7 @@ export const validateDagShape = (
       return err(
         frameworkError.rootExpectsInput(
           node.id,
-          `Node '${node.id}' has no incoming edges but is not a source node — under 0.2.0 no node implicitly receives the DAG input. Make it a source (createFetchNode without inputSchema) if it needs none, or feed the request explicitly with a { from: DAG_INPUT, to: '${node.id}' } edge`,
+          `Node '${node.id}' has no incoming edges but is not a source node — under 0.2.0 no node implicitly receives the DAG input. Make it a source (build it with createSourceNode) if it needs none, or feed the request explicitly with a { from: DAG_INPUT, to: '${node.id}' } edge`,
         ),
       );
     }

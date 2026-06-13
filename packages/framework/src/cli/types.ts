@@ -115,6 +115,17 @@ export type LintError =
       readonly missingKeys: readonly string[];
       /** Schema keys with no matching incoming source. */
       readonly extraKeys: readonly string[];
+    }
+  | {
+      /**
+       * A structural lint check (`analyzeDag`) threw while inspecting an
+       * already-`defineDag`-accepted DAG. This is a framework/analyzer bug, not
+       * an authoring error — but it is surfaced (not swallowed) so a real
+       * `fan-in-key-mismatch` can never silently pass lint behind a crashed
+       * analyzer.
+       */
+      readonly kind: "analyzer-failed";
+      readonly message: string;
     };
 
 /**

@@ -390,9 +390,9 @@ export interface NodeDef<
    * incoming edges, and conversely a node with zero incoming edges MUST be a
    * source — `defineDag` enforces both, rejecting a non-source root with
    * `root-expects-input` (the request is consumed only via `DAG_INPUT` edges,
-   * never implicitly). Produced by `createFetchNode` when its config omits
-   * `inputSchema`; its `inputSchema` is then a unit (`z.void()`) and its `run`
-   * ignores the (always-`undefined`) input argument. Absent ⇒ ordinary node.
+   * never implicitly). Produced by `createSourceNode`, which sets `isSource:
+   * true`, a unit `inputSchema` (`z.void()`), and a `run` that ignores the
+   * (always-`undefined`) input argument. Absent ⇒ ordinary node.
    */
   readonly isSource?: boolean;
   /**

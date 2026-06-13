@@ -1,13 +1,13 @@
-// defineSources — the multi-root constructor (C1). The shape both production
-// DAGs in `fugue-dags` use, and the most common real topology:
+// defineSources — the multi-root constructor (C1). The most common real
+// topology: N parallel sources fanning into a keyed join.
 //
 //   source[0] ─┐
 //   source[1] ─┤
 //   ...        ├─→ join ─(→ assemble)
 //   source[N] ─┘
 //
-//   - `sources`: N parallel root **source nodes** (createFetchNode without an
-//     `inputSchema`). They run concurrently in wave 0 and feed the join.
+//   - `sources`: N parallel root **source nodes** (built with
+//     `createSourceNode`). They run concurrently in wave 0 and feed the join.
 //   - `join`: a fan-in node receiving an object keyed by the source node ids.
 //     Its `inputSchema` keys must equal that set (`fugue lint` checks this).
 //   - `assemble` (optional): a second-stage fan-in over the join. Output node.
@@ -29,7 +29,7 @@ import type { NonEmptyNodeList } from "./define-fan-out.js";
 
 export interface SourcesDagConfig {
   readonly id: string;
-  /** Parallel root source nodes (createFetchNode without `inputSchema`). */
+  /** Parallel root source nodes (built with `createSourceNode`). */
   readonly sources: NonEmptyNodeList;
   /** Fan-in node keyed by the source node ids. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
@@ -104,7 +104,7 @@ export const defineSources = (config: SourcesDagConfig): DagDef => {
         nodeId: nodeId(s.id as string),
         message:
           `defineSources source '${s.id as string}' is not a source node — build it with ` +
-          `createFetchNode WITHOUT an inputSchema so its fetch is (ctx) => …. A source consumes no DAG input`,
+          `createSourceNode so its fetch is (ctx) => …. A source consumes no DAG input`,
       });
     }
   }
