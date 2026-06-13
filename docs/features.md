@@ -194,7 +194,7 @@ const synthesize = createLlmNode({
   inputSchema: UserSchema,
   outputSchema: SummarySchema,
   promptName: "summary",
-  model: "claude-sonnet-4-20250514",
+  model: "claude-sonnet-4-6",
   buildInput: (u) => ({ name: u.name }),
 });
 

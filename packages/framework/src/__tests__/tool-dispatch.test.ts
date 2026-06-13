@@ -19,7 +19,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: stubLlmClient, http: null,
+  llm: stubLlmClient, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });

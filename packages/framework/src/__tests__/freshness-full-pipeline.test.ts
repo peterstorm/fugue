@@ -14,6 +14,7 @@ import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness
 import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { ok } from "../types/result.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
@@ -174,6 +175,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "reader" },
         { from: "reader", to: "writer" },
         { from: "writer", to: "review" },
       ],
@@ -245,7 +247,7 @@ describe("Freshness extractor failure (fail-closed)", () => {
         }),
         next: makeNode("next"),
       },
-      edges: [{ from: "reader", to: "next" }],
+      edges: [{ from: DAG_INPUT, to: "reader" }, { from: "reader", to: "next" }],
     });
 
     const observer = new RecordingObserver();
@@ -281,7 +283,7 @@ describe("Freshness extractor failure (fail-closed)", () => {
           run: async () => ok({ written: true }),
         }),
       },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "writer" }],
     });
 
     const observer = new RecordingObserver();

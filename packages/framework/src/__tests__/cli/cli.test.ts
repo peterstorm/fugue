@@ -74,6 +74,68 @@ describe("runLint", () => {
       expect(result.errors[0]!.kind).toBe("import-failed");
     }
   });
+
+  it("propagates a B1 fan-in-key-mismatch from the analyzer (ok: false)", async () => {
+    // The DAG imports/defineDag-validates fine; the structural analyzer must
+    // surface the key mismatch and flip the lint result to ok: false.
+    const result = await runLint(fixturePath("manual-fan-in-mismatch.ts"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const e = result.errors.find((x) => x.kind === "fan-in-key-mismatch");
+      expect(e).toBeDefined();
+      if (e && e.kind === "fan-in-key-mismatch") {
+        expect(e.nodeId).toBe("join");
+        expect(e.missingKeys).toContain("right");
+        expect(e.extraKeys).toContain("WRONG");
+      }
+    }
+  });
+
+  it("surfaces an analyzer crash as analyzer-failed (ok: false), not a silent pass", async () => {
+    // `.dag` clears importDagFile's shape gate (non-null object) but has no
+    // `nodes`, so analyzeDag throws. runLint must convert that into ok: false
+    // with an `analyzer-failed` error rather than letting lint pass.
+    const result = await runLint(fixturePath("analyzer-throws.ts"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]!.kind).toBe("analyzer-failed");
+      const e = result.errors[0]!;
+      if (e.kind === "analyzer-failed") {
+        expect(e.message).toContain("analyzer threw");
+      }
+    }
+  });
+
+  it("propagates a B3 shape-helper-hint advisory alongside ok: true", async () => {
+    const result = await runLint(fixturePath("manual-linear-advisory.ts"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const hints = result.advisories.flatMap((a) =>
+        a.kind === "shape-helper-hint" ? [a.helper] : [],
+      );
+      expect(hints).toContain("defineLinearDag");
+    }
+  });
+
+  it("propagates a B2 redundant-passthrough advisory through runLint (ok: true)", async () => {
+    const result = await runLint(fixturePath("manual-redundant-passthrough.ts"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const carriers = result.advisories.flatMap((a) =>
+        a.kind === "redundant-passthrough" ? [a.nodeId] : [],
+      );
+      expect(carriers).toContain("read-request");
+    }
+  });
+
+  it("always exposes advisories as an array, even when there are none", async () => {
+    // `advisories` is non-optional on both LintResult variants — consumers never
+    // branch on present-vs-absent. A clean DAG yields an empty array, not undefined.
+    const clean = await runLint(fixturePath("valid-dag.ts"));
+    expect(Array.isArray(clean.advisories)).toBe(true);
+    const broken = await runLint(fixturePath("invalid-edge-typo.ts"));
+    expect(Array.isArray(broken.advisories)).toBe(true);
+  });
 });
 
 describe("runDescribe", () => {
@@ -95,15 +157,17 @@ describe("runDescribe", () => {
     expect(result.dag.nodes[0]!.kind).toBe("fetch");
     expect(result.dag.nodes[1]!.kind).toBe("transform");
 
-    // 1 edge
-    expect(result.dag.edges).toHaveLength(1);
-    expect(result.dag.edges[0]).toMatchObject({
-      from: "fetch-user",
-      to: "summarize",
-      kind: "unconditional",
-    });
+    // 2 edges: the chain edge + the DAG_INPUT edge defineLinearDag injects to
+    // the entry node (C0 — the request flows in over an explicit edge).
+    expect(result.dag.edges).toHaveLength(2);
+    expect(result.dag.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "fetch-user", to: "summarize", kind: "unconditional" }),
+        expect.objectContaining({ from: "$input", to: "fetch-user", kind: "unconditional" }),
+      ]),
+    );
 
-    // Two waves: [[fetch-user], [summarize]]
+    // Two waves: [[fetch-user], [summarize]] — $input adds no wave.
     expect(result.dag.waves).toEqual([["fetch-user"], ["summarize"]]);
 
     // JSON Schemas should be present (zod renders an object schema)
@@ -178,7 +242,7 @@ describe("runCapabilities", () => {
     const result = runCapabilities();
     expect(result.custom.mechanism).toContain("module augmentation");
     expect(result.custom.howToDeclare).toContain("requires");
-    expect(result.custom.seeAlso).toContain("docs/adapter-authoring.md");
+    expect(result.custom.seeAlso).toContain("@fuguejs/framework/docs/adapter-authoring.md");
   });
 });
 
@@ -214,7 +278,7 @@ describe("fugue bin (subprocess)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(true);
     expect(parsed.builtin.map((c: { name: string }) => c.name)).toContain("http");
-    expect(parsed.custom.seeAlso).toContain("docs/adapter-authoring.md");
+    expect(parsed.custom.seeAlso).toContain("@fuguejs/framework/docs/adapter-authoring.md");
   });
 
   it("capabilities exits 2 when given an argument", async () => {

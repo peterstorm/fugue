@@ -38,7 +38,7 @@ declare const __dagValidated: unique symbol;
 
 export interface DagDef {
   readonly id: string;
-  readonly nodes: readonly NodeDef<unknown, unknown, unknown>[];
+  readonly nodes: readonly NodeDef<unknown, unknown>[];
   readonly edges: readonly EdgeDef[];
   // ...
   readonly [__dagValidated]: true;
@@ -155,7 +155,7 @@ Two notes:
 - `NodeDef<any, any, any>` is a **deliberate variance leak**. Each node's
   generic parameters (input/output/error types) are typically
   heterogeneous within one DAG. The strict bound
-  `NodeDef<unknown, unknown, unknown>` would reject nodes that have more
+  `NodeDef<unknown, unknown>` would reject nodes that have more
   specific I/O types — co/contravariance bites in both directions. `any`
   on the parameters is the simplest escape; we recover safety at the
   call boundary because every node is invoked through `runNode`, which
@@ -286,28 +286,34 @@ trivial; the win (no inference flakiness) is permanent.
 
 ```ts
 export type EdgeDef =
-  | { readonly from: string; readonly to: string }
-  | { readonly from: string; readonly to: string; readonly when: Guard }
-  | { readonly from: string; readonly to: string; readonly kind: "default" };
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "conditional"; readonly when: Predicate<unknown> }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "default" };
 ```
 
-Three variants discriminated by *field presence* rather than an explicit
-`kind` on every variant. Why:
+Three variants discriminated by an explicit `kind` tag on *every*
+variant. This is the runtime shape — what code sees after `defineDag`
+strips literal id types. Why an explicit tag:
 
-- The unconditional variant `{ from, to }` is the existing wire shape.
-  Authors who don't use conditional edges write the same literal they
-  did before; nothing breaks.
-- Adding a `kind: "unconditional"` discriminator would require migrating
-  every existing edge literal. Not worth it.
+- Single-field narrowing (`e.kind === "conditional"`) replaces the
+  brittle `"when" in e && !("kind" in e)` field-presence checks of
+  earlier revisions. A new variant can't silently fall through a
+  presence test that happened to match.
+- Authors are not burdened by the tag: the **input** shape
+  (`EdgeDefRawInput` / `EdgeDefInput`) still accepts the implicit
+  unconditional form `{ from, to }` and the implicit conditional form
+  `{ from, to, when }`. `defineDag` materializes the explicit
+  `kind: "unconditional"` / `kind: "conditional"` after validation, so
+  existing edge literals keep working unchanged.
 - Narrowing happens through three centralized helpers:
 
 ```ts
-export const isUnconditionalEdge = (e: EdgeDef): e is { from, to } =>
-  !("when" in e) && !("kind" in e);
-export const isConditionalEdge = (e: EdgeDef): e is { from, to, when } =>
-  "when" in e;
-export const isDefaultEdge = (e: EdgeDef): e is { from, to, kind: "default" } =>
-  "kind" in e && e.kind === "default";
+export const isUnconditionalEdge = (e: EdgeDef): e is Extract<EdgeDef, { kind: "unconditional" }> =>
+  e.kind === "unconditional";
+export const isConditionalEdge = (e: EdgeDef): e is Extract<EdgeDef, { kind: "conditional" }> =>
+  e.kind === "conditional";
+export const isDefaultEdge = (e: EdgeDef): e is Extract<EdgeDef, { kind: "default" }> =>
+  e.kind === "default";
 ```
 
 A unit test forbids ad-hoc `"when" in e` checks elsewhere — narrowing
@@ -315,8 +321,10 @@ goes through the helpers, so adding a fourth variant later updates one
 place.
 
 The `EdgeDefInput<Ids>` form (used inside `defineDag`) parameterizes
-`from`/`to` over the literal id union; otherwise structurally
-identical.
+`from`/`to` over the literal id union and distributes the conditional
+branch so each edge's `when` is typed against the actual `from` node's
+output. `DAG_INPUT` (the virtual `$input` source) is admissible as
+`from` on the unconditional form only.
 
 ---
 
@@ -886,7 +894,7 @@ What happens:
 | Step | Where | What |
 | --- | --- | --- |
 | Inference | `tsc` | `<const Nodes>` infers `Nodes = { fetch, extract, synthesize }`. `keyof Nodes & string = "fetch" \| "extract" \| "synthesize"`. Edges and `outputNodeId` get squiggles on typos. |
-| Module load | Node import | `defineDag` executes. `validateDagShape` checks deps ↔ edges, else-totality, output reachability, key/id consistency, edge uniqueness, optionalDeps partitioning. On failure: throws `DagDefinitionError`. On success: returns the input cast (via `as unknown as DagDef`) to the branded type. |
+| Module load | Node import | `defineDag` executes. `validateDagShape` checks key/id consistency, edge endpoints, `$input`-edge well-formedness, edge uniqueness, conditional-predicate well-formedness, source/root invariant, else-totality, freshness-extractor consistency, and output reachability. On failure: throws `DagDefinitionError`. On success: returns the input cast (via `as unknown as DagDef`) to the branded type. |
 | First `runDag` call | Runtime | `compileDagToMachine` calls `topoSort` for cycle detection and wave assignment. |
 | Per-wave execution | Runtime | `runWave` filters by `activeNodeIds`, executes nodes, fires guards (which may throw `guard-threw`). |
 

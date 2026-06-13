@@ -11,7 +11,9 @@
 import { resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DagDefinitionError } from "../executor/define-dag.js";
-import type { LintError, LintResult } from "./types.js";
+import type { DagDef } from "../types/dag.js";
+import { analyzeDag } from "./lint-checks.js";
+import type { LintAdvisory, LintError, LintResult } from "./types.js";
 
 const toAbsolute = (path: string): string =>
   isAbsolute(path) ? path : resolve(process.cwd(), path);
@@ -122,7 +124,37 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
 export const runLint = async (path: string): Promise<LintResult> => {
   const imported = await importDagFile(path);
   if (!imported.ok) {
-    return { ok: false, path: imported.path, errors: imported.errors };
+    return { ok: false, path: imported.path, errors: imported.errors, advisories: [] };
   }
-  return { ok: true, path: imported.path };
+
+  // `.dag` is present and object-shaped (importDagFile guaranteed it). Run the
+  // structural checks the topology validator can't (schema-aware fan-in keys,
+  // shape-helper advisories). Defensive: a bug in the analyzer must not crash
+  // the CLI — but it must NOT silently pass lint either, or a real
+  // `fan-in-key-mismatch` could hide behind a crashed analyzer. Surface the
+  // failure as an `analyzer-failed` error so the result is `ok: false`.
+  let errors: readonly LintError[] = [];
+  let advisories: readonly LintAdvisory[] = [];
+  try {
+    const analysis = analyzeDag(imported.defaultExport.dag as DagDef);
+    errors = analysis.errors;
+    advisories = analysis.advisories;
+  } catch (e) {
+    return {
+      ok: false,
+      path: imported.path,
+      errors: [
+        {
+          kind: "analyzer-failed",
+          message: `Structural lint analyzer threw: ${e instanceof Error ? e.message : String(e)}`,
+        },
+      ],
+      advisories: [],
+    };
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, path: imported.path, errors, advisories };
+  }
+  return { ok: true, path: imported.path, advisories };
 };

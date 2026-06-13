@@ -131,6 +131,42 @@ export type FrameworkError =
   | { readonly kind: "duplicate-edge"; readonly fromNodeId: NodeId; readonly toNodeId: NodeId }
   | {
       /**
+       * A node has zero incoming edges but is not a source node (C0 / 0.2.0).
+       * Under 0.2.0 semantics no node implicitly receives the DAG input: a root
+       * is by definition a *source* (build it with `createSourceNode`, which
+       * sets `isSource: true`), and any other consumption of the request must flow over
+       * an explicit `DAG_INPUT` edge. This replaces the old "root inputSchema
+       * matches the DAG inputSchema" rule with a structural one.
+       */
+      readonly kind: "root-expects-input";
+      readonly nodeId: NodeId;
+      readonly message: string;
+    }
+  | {
+      /**
+       * A node marked `isSource` has at least one incoming edge. A source
+       * produces from the context alone and consumes no input, so an incoming
+       * edge (including a `DAG_INPUT` edge) is a definition error — drop the
+       * `isSource` form and accept the input, or remove the edge.
+       */
+      readonly kind: "source-has-incoming";
+      readonly nodeId: NodeId;
+      readonly message: string;
+    }
+  | {
+      /**
+       * A `DAG_INPUT` edge is malformed: `$input` appears as a `to` target, or
+       * carries conditional/default routing semantics. The virtual request
+       * source can only be an unconditional `from`. The offending edge endpoints
+       * are carried verbatim as raw strings — one end is `$input`, which is the
+       * virtual request source, not a real (brandable) node id.
+       */
+      readonly kind: "invalid-dag-input-edge";
+      readonly edge: { readonly from: string; readonly to: string };
+      readonly message: string;
+    }
+  | {
+      /**
        * Emitted at run start when one or more nodes declare a capability
        * (`requires: ["llm"]`, etc.) that the wired NodeContext does not
        * supply. The run aborts before any `node.run` is called.
@@ -291,6 +327,9 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "missing-default-edge" }, (e) => `node '${e.nodeId}' has conditional out-edges but no default edge`)
     .with({ kind: "output-unreachable-under-routing" }, (e) => `outputNodeId '${e.outputNodeId}' is not reachable along unconditional + default edges (frontier at '${e.missedFromNode}')`)
     .with({ kind: "duplicate-edge" }, (e) => `duplicate edge '${e.fromNodeId}' -> '${e.toNodeId}'`)
+    .with({ kind: "root-expects-input" }, (e) => `${e.message} (node '${e.nodeId}')`)
+    .with({ kind: "source-has-incoming" }, (e) => `${e.message} (node '${e.nodeId}')`)
+    .with({ kind: "invalid-dag-input-edge" }, (e) => `${e.message} ('${e.edge.from}' -> '${e.edge.to}')`)
     .with({ kind: "predicate-malformed" }, (e) => `${e.message} (node '${e.nodeId}')`)
     .with({ kind: "cycle-detected" }, (e) => `cycle detected: ${e.nodeIds.join(" -> ")}`)
     .with({ kind: "retry-exhausted" }, (e) => `node '${e.nodeId}' exhausted ${e.attempts} retries (root: ${e.rootErrorKind}): ${e.lastError}`)

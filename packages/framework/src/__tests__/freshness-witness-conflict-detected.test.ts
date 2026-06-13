@@ -24,6 +24,7 @@ import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
+import { DAG_INPUT } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
 
 const mkCtx = (observer: RecordingObserver, runId: string): NodeContext => ({
@@ -35,6 +36,7 @@ const mkCtx = (observer: RecordingObserver, runId: string): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -59,7 +61,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
     const dag1 = defineDagFromArray({
       id: "conflict-dag",
       nodes: [writeNodeRun1],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "writer" }],
     });
     await runDagStateful(dag1, null, mkCtx(observer1, "run-1"), {
       freshnessIndex,
@@ -94,7 +96,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
     const dag2 = defineDagFromArray({
       id: "conflict-dag",
       nodes: [writeNodeRun2],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "writer" }],
     });
     await runDagStateful(dag2, null, mkCtx(observer2, "run-2"), {
       freshnessIndex,
@@ -138,7 +140,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
     const dag1 = defineDagFromArray({
       id: "no-conflict",
       nodes: [writeNodeRun1],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "writer" }],
     });
     await runDagStateful(dag1, null, mkCtx(observer1, "run-a"), {
       freshnessIndex,
@@ -160,7 +162,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
     const dag2 = defineDagFromArray({
       id: "no-conflict",
       nodes: [writeNodeRun2],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "writer" }],
     });
     await runDagStateful(dag2, null, mkCtx(observer2, "run-b"), {
       freshnessIndex,

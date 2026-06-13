@@ -114,12 +114,16 @@ describe("buildManifest", () => {
     expect(manifest.nodes).toHaveLength(2);
     expect(manifest.nodes[0]!.id).toBe("fetch-user");
     expect(manifest.nodes[1]!.id).toBe("summarize");
-    expect(manifest.edges).toHaveLength(1);
-    expect(manifest.edges[0]).toMatchObject({
-      from: "fetch-user",
-      to: "summarize",
-      kind: "unconditional",
-    });
+    // 2 edges: the chain edge + the DAG_INPUT edge defineLinearDag injects to
+    // the entry node (0.2.0 — the request flows in over an explicit edge).
+    expect(manifest.edges).toHaveLength(2);
+    expect(manifest.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "fetch-user", to: "summarize", kind: "unconditional" }),
+        expect.objectContaining({ from: "$input", to: "fetch-user", kind: "unconditional" }),
+      ]),
+    );
+    // $input adds no wave; the topological waves are unchanged.
     expect(manifest.waves).toEqual([["fetch-user"], ["summarize"]]);
 
     expect(manifest.inputSchema).toBeDefined();

@@ -19,7 +19,7 @@ import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 import { createModuleLoader } from "./adapters/module-loader.js";
 import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability } from "@fuguejs/framework";
+import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
 import type { Result, LlmClient, CapabilityHandle } from "@fuguejs/framework";
 
 // ── Logger ─────────────────────────────────────────────────────────────────
@@ -190,7 +190,16 @@ const main = async () => {
     // correlation is restored in `extractClients`). Without this wiring
     // `ctx.http` would be null and a `requires: ["http"]` DAG would fail the
     // boot-time capability check.
-    const capabilities: CapabilityHandle[] = [createHttpCapability()];
+    // C2: the built-in `clock` capability also ships with the framework, so any
+    // node can declare `requires: ["clock"]` and read `ctx.clock.now()` instead
+    // of calling `new Date()` directly. `systemClock` is the production adapter;
+    // tests inject `fixedClock`. Like `http`, it reaches the NodeContext via this
+    // array; without it `ctx.clock` is null and a `requires: ["clock"]` DAG (e.g.
+    // golden example 09) fails the boot-time capability check.
+    const capabilities: CapabilityHandle[] = [
+      createHttpCapability(),
+      { name: "clock", client: systemClock },
+    ];
 
     // ADR-0052: optional `documents` capability, selected by environment.
     // Dynamic import mirrors the ioredis/Anthropic pattern — the adapter

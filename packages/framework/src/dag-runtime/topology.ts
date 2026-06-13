@@ -12,6 +12,7 @@ import {
   isUnconditionalEdge,
 } from "../types/dag.js";
 import type { NodeId } from "../types/ids.js";
+import { isDagInput } from "../types/ids.js";
 import type { IncomingSources } from "../shared/incoming.js";
 
 export type { IncomingSources };
@@ -63,9 +64,13 @@ export function seedInitialActiveSet(
   if (Array.isArray(dagOrEdges)) {
     edges = dagOrEdges;
     outgoing = precomputedOutgoing!;
-    // Derive node ids from edges (all unique from/to)
+    // Derive node ids from edges (all unique from/to). `DAG_INPUT` is a virtual
+    // source, never a real node — exclude it so it is not treated as a seed.
     const ids = new Set<NodeId>();
-    for (const e of edges) { ids.add(e.from); ids.add(e.to); }
+    for (const e of edges) {
+      if (!isDagInput(e.from)) ids.add(e.from);
+      ids.add(e.to);
+    }
     nodeIds = [...ids];
   } else {
     const dag = dagOrEdges as DagDef;
@@ -74,10 +79,15 @@ export function seedInitialActiveSet(
     nodeIds = dag.nodes.map(n => n.id);
   }
 
-  // Build incoming count
+  // Build incoming count. `DAG_INPUT` edges DON'T count: `$input` is a virtual
+  // wave-(-1) source, always satisfied, so a node whose only inbound is a
+  // `$input` edge is a wave-0 seed exactly like a true root.
   const incomingCount = new Map<NodeId, number>();
   for (const id of nodeIds) incomingCount.set(id, 0);
-  for (const e of edges) incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
+  for (const e of edges) {
+    if (isDagInput(e.from)) continue;
+    incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
+  }
 
   const seeds: NodeId[] = [];
   for (const id of nodeIds) {
@@ -151,6 +161,7 @@ export const computeOutgoingByNode = (
 ): ReadonlyMap<NodeId, readonly EdgeDef[]> => {
   const map = new Map<NodeId, EdgeDef[]>();
   for (const e of dag.edges) {
+    if (isDagInput(e.from)) continue; // virtual source has no node to dispatch from
     const bucket = map.get(e.from);
     if (bucket) bucket.push(e);
     else map.set(e.from, [e]);
@@ -170,6 +181,7 @@ export const computeUnconditionalAdj = (
   const map = new Map<NodeId, NodeId[]>();
   for (const e of dag.edges) {
     if (!isUnconditionalEdge(e)) continue;
+    if (isDagInput(e.from)) continue; // virtual source; activation seeds $input-fed nodes directly
     const bucket = map.get(e.from);
     if (bucket) bucket.push(e.to);
     else map.set(e.from, [e.to]);
@@ -219,8 +231,10 @@ const incomingSourcesFor = (
       }
       continue;
     }
-    // Unconditional edge.
-    if (alwaysActive.has(e.from)) {
+    // Unconditional edge. `DAG_INPUT` is always-active by construction (seeded
+    // at run start), so a `$input` edge is always a required source carrying
+    // the request — it never lands in `optional`.
+    if (isDagInput(e.from) || alwaysActive.has(e.from)) {
       if (!seenRequired.has(e.from)) {
         seenRequired.add(e.from);
         required.push(e.from);

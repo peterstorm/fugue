@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { N, R, D, nodeMap, nodeSet, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
@@ -61,16 +62,29 @@ const DEFAULT_NODES: readonly NodeDef<unknown, unknown>[] = [
   makeNode("c"),
 ];
 const DEFAULT_EDGES: readonly EdgeDefRawInput[] = [
+  { from: DAG_INPUT, to: "a" },
   { from: "a", to: "b" },
   { from: "b", to: "c" },
 ];
 
 const makeDag = (overrides: MakeDagOverrides = {}): DagDef => {
-  // If a test overrides `nodes` but not `edges`, default edges to `[]` so
-  // we don't leak the abc-chain default into a custom node set.
+  // If a test overrides `nodes` but not `edges`, auto-inject $input edges for
+  // every node in the custom set (0.2.0: roots must have an incoming edge).
   const nodes = overrides.nodes ?? DEFAULT_NODES;
-  const edges =
-    overrides.edges ?? (overrides.nodes ? [] : DEFAULT_EDGES);
+  const rawEdges =
+    overrides.edges !== undefined
+      ? overrides.edges
+      : overrides.nodes
+        ? []
+        : DEFAULT_EDGES;
+  // Under 0.2.0 every root (node with no incoming edge from another node) must
+  // have an explicit { from: DAG_INPUT, to: ... } edge. Auto-inject for any
+  // root in the resolved edge set so individual tests don't need to repeat it.
+  const toSet = new Set(rawEdges.map((e) => String(e.to)));
+  const inputEdges = nodes
+    .filter((n) => !toSet.has(String(n.id)))
+    .map((n) => ({ from: DAG_INPUT as string, to: String(n.id) }));
+  const edges = [...inputEdges, ...rawEdges];
   return defineDag({
     id: overrides.id ?? "test-dag",
     nodes: Object.fromEntries(nodes.map((n) => [n.id, n])),
@@ -391,7 +405,10 @@ describe("dagTransition — approve (FR-029)", () => {
         makeNode("a", { humanReview: { prompt: "Review A" } }),
         makeNode("b", { humanReview: { prompt: "Review B" } }),
       ],
-      edges: [],
+      edges: [
+        { from: DAG_INPUT, to: "a" },
+        { from: DAG_INPUT, to: "b" },
+      ],
     });
     const ctx = makeCtx({
       dag: dagWithMultiHitl,
@@ -434,7 +451,10 @@ describe("dagTransition — approve-with-edit (FR-029)", () => {
         makeNode("a", { humanReview: { prompt: "Review A" } }),
         makeNode("b", { humanReview: { prompt: "Review B" } }),
       ],
-      edges: [],
+      edges: [
+        { from: DAG_INPUT, to: "a" },
+        { from: DAG_INPUT, to: "b" },
+      ],
     });
     const ctx = makeCtx({
       dag: dagWithMultiHitl,
@@ -573,7 +593,10 @@ describe("handleWaveDone", () => {
         makeNode("z", { humanReview: { prompt: "Review Z" } }),
         makeNode("a", { humanReview: { prompt: "Review A" } }),
       ],
-      edges: [],
+      edges: [
+        { from: DAG_INPUT, to: "z" },
+        { from: DAG_INPUT, to: "a" },
+      ],
     });
     const ctx = makeCtx({
       dag,
@@ -795,7 +818,11 @@ describe("collectHumanReviewQueue", () => {
         makeNode("m", { humanReview: { prompt: "M" } }),
         makeNode("a", { humanReview: { prompt: "A" } }),
       ],
-      edges: [],
+      edges: [
+        { from: DAG_INPUT, to: "z" },
+        { from: DAG_INPUT, to: "m" },
+        { from: DAG_INPUT, to: "a" },
+      ],
     });
     const ctx = makeCtx({ dag, waves: [[N("z"), N("m"), N("a")]] });
     const queue = collectHumanReviewQueue(ctx, 0);
@@ -808,7 +835,7 @@ describe("collectHumanReviewQueue", () => {
         makeNode("a", { humanReview: { prompt: "A" } }),
         makeNode("b"),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
     });
     const ctx = makeCtx({ dag, waves: [[N("a")], [N("b")]] });
     // Wave 1 only — "b" has no humanReview
@@ -943,7 +970,7 @@ describe("compileDagToMachine", () => {
     const dag = defineDagFromArray({
       id: "linear",
       nodes: [makeNode("a"), makeNode("b")],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
     });
     const compiled = compileDagToMachine(dag, { input: "hello" });
     if (!compiled.ok) throw new Error("compile failed in test setup");
@@ -962,7 +989,7 @@ describe("compileDagToMachine", () => {
 
   it("threads initialInput into context", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const dag = defineDagFromArray({ id: "d", nodes: [makeNode("a")], edges: [] });
+    const dag = defineDagFromArray({ id: "d", nodes: [makeNode("a")], edges: [{ from: DAG_INPUT, to: "a" }] });
     const compiled = compileDagToMachine(dag, "my-input");
     if (!compiled.ok) throw new Error("compile failed in test setup");
     expect(compiled.value.initialContext.initialInput).toBe("my-input");
@@ -973,7 +1000,7 @@ describe("compileDagToMachine", () => {
     const dag = defineDagFromArray({
       id: "simple",
       nodes: [makeNode("a")],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed in test setup");
@@ -1314,7 +1341,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
 describe("compileDagToMachine — retrying-hook predicates", () => {
   it("retrying-hook is not terminal and not failed, progress=50", async () => {
     const { compileDagToMachine } = await import("../dag-runtime/machine.js");
-    const dag = defineDagFromArray({ id: "d", nodes: [makeNode("a")], edges: [] });
+    const dag = defineDagFromArray({ id: "d", nodes: [makeNode("a")], edges: [{ from: DAG_INPUT, to: "a" }] });
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed in test setup");
     const { machine } = compiled.value;

@@ -1,2 +1,6 @@
 .memory/
 .claude/cortex-memory.local.md
+.pi/cortex-memory.local.md
+
+# `fugue new` test scaffolds (see src/__tests__/cli/new.test.ts)
+**/.tmp-new/

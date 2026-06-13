@@ -5,6 +5,7 @@ import type { Machine } from "../state-machine/types.js";
 import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
@@ -90,7 +91,11 @@ export const compileDagToMachine = (
   const initialContext: DagMachineContext = {
     dag,
     waves,
-    outputs: new Map(),
+    // Seed the validated DAG input under the reserved `$input` key (C0). A
+    // `{ from: DAG_INPUT, to: n }` edge then resolves the request via the
+    // ordinary outputs-map lookup in `buildNodeInput` — no node receives the
+    // input implicitly. `initialInput` is retained for persistence/replay.
+    outputs: new Map<NodeId, unknown>([[DAG_INPUT, initialInput]]),
     retries: new Map(),
     initialInput,
     activeNodeIds: seedInitialActiveSet(dag),

@@ -156,7 +156,6 @@ export const executeWave = async (
         const incoming = machineCtx.incomingByNode.get(nodeId) ?? { required: [], optional: [] };
         const { result, outcome } = await runNodeShared(
           node,
-          machineCtx.initialInput,
           nodeCtx,
           dag.id,
           priorOutputs,

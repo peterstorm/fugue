@@ -2,6 +2,7 @@
 
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -37,7 +38,7 @@ const makeCtx = (): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -67,6 +68,7 @@ describe("conditional edges — reroute", () => {
         }),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],

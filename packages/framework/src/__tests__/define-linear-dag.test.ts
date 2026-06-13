@@ -33,9 +33,15 @@ describe("defineLinearDag", () => {
 
     expect(dag.id).toBe(dagId("linear-test"));
     expect(dag.nodes).toHaveLength(3);
-    expect(dag.edges).toHaveLength(2);
-    expect(dag.edges[0]).toMatchObject({ from: nodeId("fetch"), to: nodeId("transform") });
-    expect(dag.edges[1]).toMatchObject({ from: nodeId("transform"), to: nodeId("assemble") });
+    // 3 edges: $input→fetch, fetch→transform, transform→assemble
+    expect(dag.edges).toHaveLength(3);
+    expect(dag.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "$input", to: nodeId("fetch"), kind: "unconditional" }),
+        expect.objectContaining({ from: nodeId("fetch"), to: nodeId("transform") }),
+        expect.objectContaining({ from: nodeId("transform"), to: nodeId("assemble") }),
+      ]),
+    );
     expect(dag.outputNodeId).toBe(nodeId("assemble"));
   });
 
@@ -46,7 +52,9 @@ describe("defineLinearDag", () => {
     });
 
     expect(dag.nodes).toHaveLength(1);
-    expect(dag.edges).toHaveLength(0);
+    // 1 edge: $input→fetch
+    expect(dag.edges).toHaveLength(1);
+    expect(dag.edges[0]).toMatchObject({ from: "$input", to: nodeId("fetch"), kind: "unconditional" });
     expect(dag.outputNodeId).toBe(nodeId("fetch"));
   });
 

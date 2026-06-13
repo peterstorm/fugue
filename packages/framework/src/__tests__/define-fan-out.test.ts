@@ -60,10 +60,11 @@ describe("defineFanOut", () => {
     expect(dag.id).toBe(dagId("fan-out-no-join"));
     // 4 nodes: source + 3 branches
     expect(dag.nodes).toHaveLength(4);
-    // 3 edges: source→a, source→b, source→c
-    expect(dag.edges).toHaveLength(3);
+    // 4 edges: $input→source, source→a, source→b, source→c
+    expect(dag.edges).toHaveLength(4);
     expect(dag.edges).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ from: "$input", to: nodeId("source"), kind: "unconditional" }),
         expect.objectContaining({ from: nodeId("source"), to: nodeId("branch-a") }),
         expect.objectContaining({ from: nodeId("source"), to: nodeId("branch-b") }),
         expect.objectContaining({ from: nodeId("source"), to: nodeId("branch-c") }),
@@ -83,8 +84,8 @@ describe("defineFanOut", () => {
 
     // 5 nodes: source + 3 branches + join
     expect(dag.nodes).toHaveLength(5);
-    // 6 edges: source→{a,b,c} + {a,b,c}→merge
-    expect(dag.edges).toHaveLength(6);
+    // 7 edges: $input→source, source→{a,b,c}, {a,b,c}→merge
+    expect(dag.edges).toHaveLength(7);
     expect(dag.edges).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ from: nodeId("source"), to: nodeId("branch-a") }),

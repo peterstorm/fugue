@@ -1,11 +1,15 @@
 # DAG Authoring Reference (LLM-Optimized)
 
-Minimal, copy-paste-ready reference for generating Fugue DAGs.
-For deep dives: `library-ux.md`, `dag-type-system.md`, `packages/host/docs/writing-dags.md`.
-Reading files (Excel/CSV from disk, SharePoint, OneDrive): `llm-document-source.md`.
-Parsing `.xlsx` bytes → typed rows: `@fuguejs/xlsx` (`parseWorkbook`).
-Writing a capability adapter: `adapter-authoring.md`.
-Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
+Minimal, copy-paste-ready reference for generating Fugue DAGs. This file ships
+inside `@fuguejs/framework`; the relative links below resolve both in the
+monorepo and under `node_modules/@fuguejs/` (the packages are siblings either way).
+
+- Type-system deep dive: [`dag-type-system.md`](./dag-type-system.md).
+- The `DagRegistration` + `fugue.yaml` + discovery contract: [`writing-dags.md`](../../host/docs/writing-dags.md) (ships in `@fuguejs/host`).
+- Reading files (Excel/CSV from disk, SharePoint, OneDrive): [`llm-document-source.md`](../../document-source/docs/llm-document-source.md) (ships in `@fuguejs/document-source`).
+- Parsing `.xlsx` bytes → typed rows: `@fuguejs/xlsx` (`parseWorkbook`).
+- Writing a capability adapter: [`adapter-authoring.md`](./adapter-authoring.md).
+- Runnable, lint-tested examples (one per pattern): [`examples/`](./examples/).
 
 ---
 
@@ -15,7 +19,7 @@ Runnable, lint-tested examples (one per pattern): `packages/examples/dags/`.
 // dags/my-team/my-dag/dag.ts
 import { z } from "zod";
 import type { DagRegistration } from "@fuguejs/host/contract";
-import { defineDag, createFetchNode, createLlmNode, createTransformNode, ok } from "@fuguejs/framework";
+import { defineDag, createFetchNode, createLlmNode, createTransformNode, DAG_INPUT, ok } from "@fuguejs/framework";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // --- Schemas ---
@@ -48,7 +52,7 @@ const summarize = createLlmNode({
   inputSchema: UserSchema,
   outputSchema: SummarySchema,
   promptName: "user-summary",
-  model: "claude-sonnet-4-20250514",
+  model: "claude-sonnet-4-6",        // a current model id — see "Model ids" below
   buildInput: (input) => ({
     userName: input.name,
     userEmail: input.email,
@@ -63,6 +67,10 @@ const dag = defineDag({
     "summarize": summarize,
   },
   edges: [
+    // The request flows in over an explicit DAG_INPUT edge — no node receives
+    // the DAG input implicitly (see "Input Wiring Rules"). `fetch-user` gets the
+    // validated request as its bare input.
+    { from: DAG_INPUT, to: "fetch-user" },
     { from: "fetch-user", to: "summarize" },
   ],
   outputNodeId: "summarize",
@@ -111,6 +119,36 @@ createFetchNode({
 })
 ```
 
+### `createSourceNode` — a root fetch that consumes no DAG input
+
+A **source node** is a root that produces its output from the context alone —
+it takes no input, so its `fetch` receives only `ctx`. Use it for the parallel
+root fetches of a multi-source DAG (see `defineSources`). No node receives the
+DAG input implicitly; a source consumes nothing, and the request reaches
+downstream nodes over `DAG_INPUT` edges.
+
+```ts
+createSourceNode<O>({
+  id: string,
+  outputSchema: z.ZodType<O>,
+  fetch: (ctx: NodeContext) => Promise<Result<O, FrameworkError>>,  // no input arg
+  requires?: readonly Capability[],
+  sideEffects?: SideEffectProfile,   // default: { kind: "reads", resource: id }
+})
+
+// Parallel root fetch — produces from a capability, takes no request:
+createSourceNode({
+  id: "fetch-weights",
+  outputSchema: WeightsSchema,
+  requires: ["documents"] as const,
+  fetch: async (ctx) => readWeights(ctx.documents),
+})
+```
+
+A source node is marked `isSource: true` and MUST be a root (zero incoming
+edges). `defineDag` rejects a non-source root with `root-expects-input`, and a
+source with an incoming edge with `source-has-incoming`.
+
 ### `createTransformNode` — pure data transformation (no I/O)
 
 ```ts
@@ -130,7 +168,7 @@ createLlmNode<I, O>({
   inputSchema: z.ZodType<I>,
   outputSchema: z.ZodType<O>,
   promptName: string,              // loads template from ctx.prompts
-  model: string,                   // e.g. "claude-sonnet-4-20250514", "gpt-4o"
+  model: string,                   // a provider model id — see "Model ids" below
   buildInput: (input: I) => Record<string, unknown>,  // fills {{placeholders}}
   system?: string,                 // override system prompt
   thinking?: { type: "enabled"; budgetTokens: number },
@@ -195,6 +233,26 @@ createEvalJudgeNode({
 > to them. Only fetch nodes (which do arbitrary I/O) take an author-set
 > `requires`.
 
+### Model ids
+
+`model` is a provider model-id string passed through to the configured LLM
+client — the framework does not validate it (`fugue capabilities` lists
+*capabilities*, not models). Use a **current** id; ids carrying an explicit
+release date (e.g. `claude-sonnet-4-5`) are usually the stale form and get
+retired. As of this writing the current Claude ids are `claude-opus-4-8`
+(most capable) and `claude-sonnet-4-6` (speed/intelligence balance); the
+authoritative list lives in the host's LLM-provider configuration, not in
+this doc.
+
+Two conventions:
+
+- **Pin a literal** id when the DAG always wants the same model — but surface
+  it as a factory option so tests and environments can override it (see *DAG
+  factory with injected seams*), rather than hardcoding it at module scope.
+- **`<MODEL>` placeholder** — the `fugue new` scaffold writes the current id
+  into generated `dag.ts`; when copying an example by hand, treat a literal
+  id as a value to confirm, not gospel.
+
 ### Emitting confidence from a node
 
 `Confidence` is a semantic bucket with provenance (`{high|medium|low|unknown}`
@@ -250,6 +308,7 @@ Run `fugue capabilities` for the authoritative, machine-readable list. As of now
 | `judgeLlm` | `LlmClient` | Used by `createEvalJudgeNode`; separate from `llm`. |
 | `cache` | `ContextCacheAdapter` | Result/context cache. |
 | `http` | `HttpCapability` | Schema-validated JSON HTTP. Declare `requires: ["http"]` on a fetch node. |
+| `clock` | `ClockCapability` | Injectable wall clock — `ctx.clock.now(): Date`. Declare `requires: ["clock"]` instead of calling `new Date()`/`Date.now()` directly, so a time-dependent node is deterministic in tests (`fixedClock(at)`) without monkey-patching globals. Only fetch/source nodes may require it; pure transforms stay clock-free. |
 
 ### Custom capabilities (adapter-provided)
 
@@ -274,8 +333,8 @@ createFetchNode({
 })
 ```
 
-- Reading files (Excel/CSV from disk, SharePoint, OneDrive): **`llm-document-source.md`**.
-- Writing your own adapter (`db`, S3, …): **`adapter-authoring.md`**.
+- Reading files (Excel/CSV from disk, SharePoint, OneDrive): [**`llm-document-source.md`**](../../document-source/docs/llm-document-source.md).
+- Writing your own adapter (`db`, S3, …): [**`adapter-authoring.md`**](./adapter-authoring.md).
 - `fugue describe <dag>` reports the capabilities a specific DAG requires; the
   set actually *available* is a deployment choice (which handles the host wired).
 
@@ -393,18 +452,24 @@ declare both, either, or neither. They solve different problems (dedupe one
 logical operation vs. detect a concurrent overwrite), and neither allocates work
 across callers; that's an application-level concern (e.g. a claims table).
 
-Deep dive + rationale: `features.md` §9, `docs/adr/0025-freshness-witness-contract.md`.
+Deep dive + rationale: the freshness-witness ADR (ADR-0025) and `features.md` §9
+in the `fugue` monorepo — the contract above is the shipped summary.
 
 ---
 
 ## DAG constructors
 
-Five constructors, in order of preference. Each delegates to the same
-module-load validator and produces the same branded `DagDef`.
+Six constructors, in order of preference. Each delegates to the same
+module-load validator and produces the same branded `DagDef`. Every single-entry
+helper (`defineLinearDag`, `defineFanOut`, `defineDiamond`, `defineRouter`) wires
+the request to its entry node automatically with a `DAG_INPUT` edge — you don't
+add it. `defineSources` adds a `DAG_INPUT` edge to a join/assemble node only when
+that node's fan-in schema declares a `"$input"` key.
 
 | Constructor | Use when |
 |---|---|
 | `defineLinearDag` | Sequential pipeline A→B→C. Edges inferred from array order. |
+| `defineSources` | **N parallel source roots → keyed fan-in join → optional assemble.** The most common real shape; the entry roots are source nodes. |
 | `defineFanOut` | One source, N parallel branches, optional join. |
 | `defineDiamond` | One source, N parallel branches, **required** join. |
 | `defineRouter` | Classifier with predicate-driven cases plus a **required** default. |
@@ -421,6 +486,7 @@ defineDag({
     [nodeId]: NodeDef,           // key MUST match node.id
   },
   edges: [                       // array of edge objects
+    { from: DAG_INPUT, to: "nodeA" },                         // request → entry node
     { from: "nodeA", to: "nodeB" },                           // unconditional
     { from: "nodeA", to: "nodeC", when: predicate },          // conditional
     { from: "nodeA", to: "nodeD", kind: "default" },          // else/fallback
@@ -435,6 +501,9 @@ defineDag({
 ### Edge rules
 
 - `from`/`to` must reference keys in `nodes` — TypeScript catches typos at edit time
+- Wire the request in with `{ from: DAG_INPUT, to: "<entry>" }` — every non-source
+  node that needs the DAG input gets it over an explicit `DAG_INPUT` edge.
+  `DAG_INPUT` is never a `to`, and a `DAG_INPUT` edge is always unconditional.
 - Simple DAGs only need `{ from, to }` (unconditional)
 - Conditional edges need a `when: Predicate<T>` object
 - If any conditional edges leave a node, a `kind: "default"` edge is required (else-totality)
@@ -484,6 +553,29 @@ const registration: DagRegistration = {
 export default registration;
 ```
 
+### Configuration & environment
+
+Two kinds of configuration, two homes:
+
+- **Required env vars → `fugue.yaml` `env:`.** List the names a DAG cannot run
+  without (API keys, connection strings). The host checks them at load time and
+  **refuses to register the DAG** if any are unset — fail-closed, before a
+  single request. Read them inside the node (`ctx`/process env) knowing the host
+  already guaranteed their presence.
+- **Optional, defaulted config → a factory option.** A value with a safe default
+  (a model id, a brand string, a feature flag) may be read once at module scope
+  from `process.env` — but **surface it as a `create…Dag(opts)` option** so tests
+  and alternate environments can override it without mutating `process.env`:
+
+  ```ts
+  export const OPENER_MODEL = process.env.OPENER_MODEL ?? "claude-sonnet-4-6";
+  export const createOpenerDag = (opts: { model?: string } = {}) =>
+    defineDag({ /* … uses opts.model ?? OPENER_MODEL … */ });
+  ```
+
+  A bare module-scope `process.env` read with no factory seam is the smell: it
+  can't be overridden in a test and isn't declared anywhere a deployer can see.
+
 ---
 
 ## Common Patterns
@@ -504,6 +596,43 @@ const dag = defineLinearDag({
   id: "pipeline",
   nodes: [nodeA, nodeB, nodeC],
   // Edges inferred: A→B→C. outputNodeId: nodeC.
+  // The request is wired to nodeA automatically via a DAG_INPUT edge.
+});
+```
+
+### Multi-source join (N roots → fan-in → assemble) — `defineSources`
+
+The most common real-world shape: several independent **source nodes** fetched
+in parallel, a `join` that fans them in (an object keyed by source id), and an
+optional `assemble` stage. The request reaches `join`/`assemble` *only* when that
+node declares a `"$input"` key in its fan-in schema — then `defineSources` adds
+the `DAG_INPUT` edge for you. No pass-through "read-request" node, no
+`inputSchema: z.unknown()` roots.
+
+```ts
+import { defineSources, createSourceNode, createTransformNode, ok } from "@fuguejs/framework";
+
+// Parallel roots are SOURCE nodes — no inputSchema; fetch is (ctx) => …
+const fetchWeights = createSourceNode({ id: "fetch-weights", outputSchema: WeightsSchema,
+  requires: ["documents"] as const, fetch: async (ctx) => readWeights(ctx.documents) });
+const fetchBranches = createSourceNode({ id: "fetch-branches", outputSchema: BranchesSchema,
+  requires: ["documents"] as const, fetch: async (ctx) => readBranches(ctx.documents) });
+
+// join: fan-in keyed EXACTLY by the source node ids (fugue lint checks this).
+const ScoreFanIn = z.object({ "fetch-weights": WeightsSchema, "fetch-branches": BranchesSchema });
+const score = createTransformNode({ id: "score", inputSchema: ScoreFanIn, outputSchema: ScoredSchema,
+  transform: (i) => ok(scoreLeads(i["fetch-weights"], i["fetch-branches"])) });
+
+// assemble: declares "$input" → defineSources wires { from: DAG_INPUT, to: "assemble" }.
+const AssembleFanIn = z.object({ score: ScoredSchema, $input: RequestSchema });
+const assemble = createTransformNode({ id: "assemble", inputSchema: AssembleFanIn, outputSchema: ScoredSchema,
+  transform: (i) => ok(applyRequest(i.score, i.$input)) });
+
+const dag = defineSources({
+  id: "lead-scoring",
+  sources: [fetchWeights, fetchBranches],   // run concurrently in wave 0
+  join: score,                              // fan-in keyed by source ids
+  assemble,                                 // optional second stage = output node
 });
 ```
 
@@ -661,19 +790,73 @@ const dag = defineDag({
 });
 ```
 
+### DAG factory with injected seams (testability)
+
+A module-scope `const dag = defineDag(...)` is untestable the moment a node
+depends on a non-deterministic seam — a model id, a brand, anything a test needs
+to pin. The fix is a **factory** that takes the seams as options and threads them
+into the nodes; production calls it with no args, tests pass fakes.
+
+```ts
+export const createOpenerDag = (opts: { model?: string; brand?: string } = {}) =>
+  defineSources({
+    id: "lead-opener",
+    sources: [fetchWeights, fetchBranches],
+    join: scoreLead,
+    assemble: createDraftOpener(opts.model ?? DEFAULT_MODEL, opts.brand ?? DEFAULT_BRAND),
+  });
+
+// prod:  createOpenerDag()
+// test:  createOpenerDag({ model: "fake-model" })  // wired to a FakeLlmClient
+```
+
+The **clock** is no longer a factory seam: a node that needs the time declares
+`requires: ["clock"]` and reads `ctx.clock.now()`; tests inject `fixedClock(at)`
+via `makeNodeContext`, so the run is deterministic without a `now` option. Use a
+factory for the seams that remain capability-shaped (model, brand). Module-scope
+`defineDag` is fine for a DAG with no seams.
+
+### Sharing nodes across DAGs
+
+When several DAGs read the same sources, define the shared **source nodes**, row
+schemas, and the fan-in schema fragment ONCE in a shared module (e.g. `lib/`) and
+import them — don't duplicate per `dag.ts`. Source nodes (no `inputSchema`) are
+inherently reusable because they carry no per-DAG request shape. Export the
+fan-in fragment next to the nodes so each DAG's join schema spreads it:
+
+```ts
+// lib/sources.ts
+export const fetchWeights = createSourceNode({ id: "fetch-weights", /* … */ });
+export const fetchBranches = createSourceNode({ id: "fetch-branches", /* … */ });
+export const SourceFanInSchemas = {
+  "fetch-weights": WeightsSchema,
+  "fetch-branches": BranchesSchema,
+} as const;
+
+// dags/leads/lead-scoring/dag.ts
+const ScoreFanIn = z.object(SourceFanInSchemas);   // keys = the shared source ids
+```
+
 ---
 
 ## Input Wiring Rules
 
-How a node receives its input depends on incoming edges:
+No node receives the DAG input implicitly. The request enters the graph only over
+edges from the reserved virtual source `DAG_INPUT` (spelled `"$input"`); it is
+seeded at run start and then behaves like any other source. How a node receives
+its input depends on its incoming edges:
 
 | Incoming edges | Node receives as input |
 |---|---|
-| 0 edges (root node) | The DAG's initial input (validated by `inputSchema`) |
-| 1 edge | The upstream node's output directly |
-| 2+ edges | Object keyed by source node id: `{ "node-a": outputA, "node-b": outputB }` |
+| 0 edges | **Nothing** — the node must be a *source* (`createSourceNode`); `fetch` takes only `ctx`. A non-source root is a `root-expects-input` error. |
+| 1 edge | The upstream node's output directly. A single `{ from: DAG_INPUT, to: n }` edge delivers the validated request to `n` as its bare input. |
+| 2+ edges | Object keyed by source node id: `{ "node-a": outputA, "node-b": outputB }`. `DAG_INPUT` participates as the `"$input"` key: a fan-in that also wants the request declares `$input` in its `z.object({...})` schema. |
 
-Design your node's `inputSchema` accordingly.
+`DAG_INPUT` is a source like any other: a bare value on a single edge, the
+`"$input"` slot in a fan-in. It is never an edge *target*, and a `DAG_INPUT` edge
+is always unconditional (no `when`, no `kind: "default"`). Design your node's
+`inputSchema` accordingly — and remember `fugue lint` checks that a fan-in's
+object keys equal its incoming source ids (including `"$input"`).
 
 ---
 
@@ -732,32 +915,67 @@ bunx fugue prompts check dags/<team>/<name>
 
 ## Result Type
 
-All node functions return `Result<T, FrameworkError>`. The error kinds an
-author typically constructs are `transient`, `validation`, and `node-crash` —
-all three carry the (branded) `nodeId`; there is **no** `permanent` kind — a
-deterministic failure is `node-crash` with `retriability: "non-retriable"`:
+All node functions return `Result<T, FrameworkError>` — `ok(value)` on success,
+`err(...)` on failure. **Build errors with the `frameworkError.*` factories**,
+not raw object literals: the factories brand the `nodeId`, fill required fields,
+and keep call sites stable as the error types evolve. The kinds an author
+typically constructs are `validation`, `transient`, and `node-crash` — all
+carry the (branded) `nodeId`. There is **no** `permanent` kind: a deterministic
+failure is `node-crash` with `retriability: "non-retriable"`.
 
 ```ts
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err, frameworkError } from "@fuguejs/framework";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 
 // Success
 return ok(value);
 
-// Retriable failure — the runtime applies the node's retry budget
-return err({ kind: "transient", nodeId: nodeId("fetch-user"), message: "API timeout" });
-
 // Bad input / bad upstream data — names the problem, optional path
-return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not found", path: "cvr" });
+return err(frameworkError.validation("score", "CVR not found", "cvr"));
+
+// Retriable failure — the runtime applies the node's retry budget
+return err(frameworkError.transient("fetch-user", "API timeout"));
 
 // Deterministic failure — fast-fails without consuming the retry budget
-return err({
-  kind: "node-crash",
-  nodeId: nodeId("fetch-config"),
-  message: "config sheet is missing required rows",
+return err(frameworkError.nodeCrash("fetch-config", "config sheet is missing required rows", {
   retriability: "non-retriable",
-});
+}));
 ```
+
+`frameworkError` also carries the structural factories the framework itself
+emits (`missingCapability`, `retryExhausted`, `duplicateEdge`, …) — you rarely
+construct those, but they're the same namespace.
+
+<details><summary>Desugared form (what a factory produces)</summary>
+
+A factory call is exactly a branded object literal — this is equivalent to the
+`validation` line above, kept only to show the shape. Prefer the factory:
+
+```ts
+import { err, nodeId } from "@fuguejs/framework";
+return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not found", path: "cvr" });
+```
+
+</details>
+
+### Framework entry points never throw
+
+Capabilities (`ctx.documents.getContent`, `ctx.http.get`, …), `parseWorkbook`
+from `@fuguejs/xlsx`, and every framework entry point return `Result` and signal
+failure with `err(...)` — including "expected" failures like a missing file or a
+missing worksheet. They do **not** throw. A defensive `try/catch` wrapped around
+one of them is a smell: it catches nothing and hides the real control flow.
+Branch on `.ok` instead:
+
+```ts
+const parsed = await parseWorkbook(bytes, RowSchema, { sheet: "Data" });
+if (!parsed.ok) return parsed;        // propagate — no try/catch
+// … use parsed.value
+```
+
+(Genuinely throwing third-party code at the very edge of a fetch node — a
+library with no Result contract — is the only place a `try/catch` belongs, and
+it should convert straight into an `err(frameworkError.*)`.)
 
 ---
 
@@ -769,7 +987,11 @@ return err({
 - [ ] Output node is reachable via unconditional/default edges from roots
 - [ ] If conditional edges leave a node, a `kind: "default"` edge exists (else-totality)
 - [ ] `inputSchema` of downstream nodes matches what upstream produces
-- [ ] Root nodes' `inputSchema` matches the DAG-level `inputSchema`
+- [ ] Roots are **source nodes** (`createSourceNode`, no `inputSchema`); the request is consumed only via `DAG_INPUT` edges (a single `$input` edge for a bare consumer, the `"$input"` key for a fan-in)
+- [ ] A fan-in node's `z.object` keys equal its incoming source ids (including `"$input"` when it has a `DAG_INPUT` edge)
+- [ ] Errors are built with `frameworkError.*`, not raw `err({ kind, … })` literals
+- [ ] No defensive `try/catch` around capabilities / `parseWorkbook` / framework calls — they return `Result`, they don't throw
+- [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read
 - [ ] `export default` a `DagRegistration` object
 
 All structural rules are validated at module load by `defineDag()` — invalid
@@ -788,6 +1010,55 @@ on stdout**, designed for machine consumption.
 > directory `bunx` falls through to the npm registry — and rewrites the
 > lockfile while failing. Equivalent direct form:
 > `bun node_modules/@fuguejs/framework/bin/fugue.ts lint <path>`.
+
+### `fugue new <team>/<name> --shape <shape>`
+
+Scaffolds a **compliant DAG directory** so you start from a lint-clean file
+rather than a blank one. The generated `dag.ts` is a parameterized copy of the
+golden example for the shape — current model id, `frameworkError.*`, correctly
+keyed fan-in schemas, `$input` edges — so it passes `fugue lint` immediately;
+you replace the placeholder schemas and node bodies. Exits `0` on success, `1`
+on bad arguments or a non-empty target dir.
+
+```bash
+$ bunx fugue new leads/lead-opener --shape sources --llm
+{
+  "ok": true,
+  "dir": "/abs/path/dags/leads/lead-opener",
+  "shape": "sources",
+  "team": "leads",
+  "name": "lead-opener",
+  "llm": true,
+  "files": [
+    "dags/leads/lead-opener/dag.ts",
+    "dags/leads/lead-opener/fugue.yaml",
+    "dags/leads/lead-opener/README.md",
+    "dags/leads/lead-opener/prompts/lead-opener.txt",
+    "dags/leads/lead-opener/prompts/registry.json"
+  ],
+  "nextSteps": ["...", "bun ...fugue.ts lint ...", "bun test", "..."]
+}
+```
+
+Writes under `dags/<team>/<name>/` (relative to the cwd, or `--dir <root>`):
+`dag.ts`, `fugue.yaml` (team taken from the path), `README.md`, and — with
+`--llm` — a `prompts/<name>.txt` plus a synced `prompts/registry.json`.
+
+| Flag | Effect |
+|---|---|
+| `--shape <shape>` | **Required.** One of `linear`, `fan-out`, `diamond`, `router`, `sources`. |
+| `--llm` | Add an LLM node (bucketed confidence) + `prompts/` + synced `registry.json`. The DAG becomes a factory (`create<Name>Dag({ model })`) so a test can pin the model seam. |
+| `--owner <owner>` | Set `fugue.yaml`'s `owner`. |
+| `--dir <root>` | Root that contains `dags/`. Defaults to the current directory. |
+| `--force` | Overwrite a non-empty target directory. |
+
+`--shape sources` (and source nodes / `$input` edges generally) is the **0.2.0
+shape**; scaffolding it requires `@fuguejs/framework` ≥ 0.2.0. The other shapes
+emit only pre-0.2.0 APIs.
+
+On bad input the command returns `{ ok: false, problems: [...] }` listing
+*every* problem at once (missing `--shape`, a non-kebab name, an unknown flag),
+so you fix them in one pass.
 
 ### `fugue lint <path>`
 
@@ -829,6 +1100,17 @@ Possible `errors[].kind` values:
 | `missing-dag-field` | Default export exists but doesn't have a `.dag` field. |
 | `dag-definition-error` | `defineDag()` rejected the DAG. The typed `FrameworkError` is on `errors[].detail`. |
 | `describe-failed` | `defineDag` accepted the DAG but the describe step failed to assemble — usually a framework invariant bug. The `FrameworkError` is on `errors[].detail`. |
+| `fan-in-key-mismatch` | A fan-in node (≥2 incoming edges) has a `z.object` input schema whose keys don't equal the set of incoming node ids. Carries `nodeId`, `missingKeys`, `extraKeys`. This compiles but fails at runtime — the single most likely wiring mistake. |
+| `analyzer-failed` | `defineDag` accepted the DAG but a structural lint check (`analyzeDag`) threw while inspecting it — a framework/analyzer bug, not an authoring error. Surfaced (never swallowed) so a real `fan-in-key-mismatch` can't silently pass behind a crashed analyzer. |
+
+**Advisories.** Lint may also attach a non-fatal `advisories` array (it never
+flips `ok` to `false`). Two kinds today:
+- `shape-helper-hint` — emitted when a manual `defineDag` is edge-for-edge
+  isomorphic to a shape helper (`defineLinearDag`/`defineFanOut`/`defineDiamond`),
+  naming the helper to adopt. A DAG already built with a helper never triggers it.
+- `redundant-passthrough` — emitted for the legacy request-carrier idiom: a
+  transform whose sole input is `DAG_INPUT` and whose input/output schemas are
+  identical. Delete it and wire its consumer directly with a `DAG_INPUT` edge.
 
 ### `fugue describe <path>`
 
@@ -883,13 +1165,14 @@ $ bunx fugue capabilities
     { "name": "cache",    "clientType": "ContextCacheAdapter",  "description": "...", "reference": "computeCacheKey on createLlmNode" },
     { "name": "prompts",  "clientType": "PromptAccess",         "description": "...", "reference": "promptName on createLlmNode" },
     { "name": "judgeLlm", "clientType": "LlmClient",            "description": "...", "reference": "createEvalJudgeNode (DagDef.evalJudges)" },
-    { "name": "http",     "clientType": "HttpCapability",       "description": "...", "reference": "createFetchNode with requires: ['http']" }
+    { "name": "http",     "clientType": "HttpCapability",       "description": "...", "reference": "createFetchNode with requires: ['http']" },
+    { "name": "clock",    "clientType": "ClockCapability",      "description": "...", "reference": "createFetchNode with requires: ['clock']" }
   ],
   "custom": {
     "mechanism": "Adapter packages augment CapabilityRegistry and ship a CapabilityHandle the host wires at boot.",
     "howToDeclare": "Add the name to a node's `requires: [...] as const`; ctx.<name> is then typed non-null.",
     "discover": "Run `fugue describe <dag>` to see what a specific DAG requires.",
-    "seeAlso": ["docs/llm-document-source.md", "docs/adapter-authoring.md", "..."]
+    "seeAlso": ["@fuguejs/document-source/docs/llm-document-source.md", "@fuguejs/framework/docs/adapter-authoring.md"]
   }
 }
 ```

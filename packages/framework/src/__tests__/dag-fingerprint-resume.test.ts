@@ -7,6 +7,7 @@
 
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -28,7 +29,7 @@ const ctx: NodeContext = {
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 };
 
@@ -49,7 +50,7 @@ const dagV1 = (): DagDef =>
   defineDag({
     id: "fp-test",
     nodes: { A: transform("A"), B: transform("B") },
-    edges: [{ from: "A", to: "B" }],
+    edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     outputNodeId: "B",
   });
 
@@ -58,6 +59,7 @@ const dagV2 = (): DagDef =>
     id: "fp-test",
     nodes: { A: transform("A"), B: transform("B"), C: transform("C") },
     edges: [
+      { from: DAG_INPUT, to: "A" },
       { from: "A", to: "B" },
       { from: "B", to: "C" },
     ],

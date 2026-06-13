@@ -4,7 +4,7 @@ How the library actually works from a caller's perspective, with and without
 the state-machine path, and a precise account of every place Redis touches
 the system.
 
-> **For LLM code generation:** see [`llm-dag-authoring.md`](./llm-dag-authoring.md) — a minimal,
+> **For LLM code generation:** see [`llm-dag-authoring.md`](../packages/framework/docs/llm-dag-authoring.md) — a minimal,
 > copy-paste-ready reference with all node factory signatures and common patterns.
 
 ---
@@ -1229,42 +1229,29 @@ both become `is_error: true` results that the model sees and can react to
 
 ```ts
 import { z } from "zod";
-import { createLlmNode } from "@fuguejs/framework";
+import { createLlmWithToolsNode } from "@fuguejs/framework";
 
 const Summary = z.object({
   summary: z.string(),
   totalDealValue: z.number(),
 });
 
-const enrichSummaryNode = createLlmNode({
+const enrichSummaryNode = createLlmWithToolsNode({
   id: "enrich-summary",
   inputSchema: z.object({ customerId: z.string() }),
   outputSchema: Summary,
-  deps: ["fetch-customer"],
-  promptName: "enrich-summary",
-  model: "claude-sonnet-4-5",
-  buildInput: (i) => i,
-  // Custom run override — uses the framework's tool surface directly.
-  run: async (input, ctx) => {
-    if (!ctx.llm) return err({ kind: "node-crash", nodeId: "enrich-summary", message: "no llm" });
-    const result = await ctx.llm.sendWithTools(
-      {
-        system: "You are a CRM analyst. Use tools to gather facts before summarizing.",
-        user: `Summarize customer ${input.customerId}.`,
-        model: "claude-sonnet-4-5",
-        tools: [lookupDealsByCustomer],
-        schema: Summary,
-        maxIterations: 5,
-      },
-      ctx,
-    );
-    if (!result.ok) return result;
-    return ok(result.value.output);
-  },
+  model: "claude-sonnet-4-6",
+  system: "You are a CRM analyst. Use tools to gather facts before summarizing.",
+  buildUser: (input) => `Summarize customer ${input.customerId}.`,
+  tools: [lookupDealsByCustomer],
+  maxIterations: 5,
 });
 ```
 
-Two argument shapes deserve attention:
+`createLlmWithToolsNode` owns the `sendWithTools` call for you — under the hood
+it invokes `ctx.llm.sendWithTools(req, ctx)` with the validation retry, caching,
+and span enrichment already wired. Two argument shapes of that underlying call
+deserve attention:
 
 - `req` — data the *caller* curated (prompts, tools, schema, iteration cap).
 - `ctx` — the *node-runtime* surface (tracer, logger, cache, signal). Tools
@@ -1277,7 +1264,7 @@ The trace tree under the parent node span looks like:
 
 ```
 node:enrich-summary [CHAIN]
-├── chat claude-sonnet-4-5 [CHAT_MODEL]
+├── chat claude-sonnet-4-6 [CHAT_MODEL]
 │       gen_ai.system="anthropic"
 │       gen_ai.usage.input_tokens=412
 │       gen_ai.usage.output_tokens=87
@@ -1285,7 +1272,7 @@ node:enrich-summary [CHAIN]
 │       gen_ai.tool.name="lookup_deals_by_customer"
 │       gen_ai.tool.call.id="toolu_01..."
 │       gen_ai.tool.is_error=false
-├── chat claude-sonnet-4-5 [CHAT_MODEL]
+├── chat claude-sonnet-4-6 [CHAT_MODEL]
 │       gen_ai.usage.input_tokens=520
 │       gen_ai.usage.output_tokens=140
 └── (final answer parsed against schema)

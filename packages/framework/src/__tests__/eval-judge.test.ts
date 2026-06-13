@@ -26,6 +26,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });

@@ -2,6 +2,16 @@
 
 DAG-shaped, durable runtime for LLM-bearing workflows. See [`docs/adr/`](../../docs/adr/) for the decision record; this file is a reference for the public surface exported from `src/index.ts`.
 
+## Docs
+
+Authoring guidance ships in this package, version-locked to the code — read it
+straight from `node_modules/@fuguejs/framework/docs/`:
+
+- [`docs/llm-dag-authoring.md`](./docs/llm-dag-authoring.md) — the primary authoring reference (node factories, constructors, `Result`, the `fugue` CLI). Start here.
+- [`docs/examples/`](./docs/examples/) — runnable, lint-tested golden DAGs, one per shape. The canonical copy-paste source.
+- [`docs/dag-type-system.md`](./docs/dag-type-system.md) — the type-system guarantees behind `defineDag`.
+- [`docs/adapter-authoring.md`](./docs/adapter-authoring.md) — writing a capability adapter.
+
 The barrel is deliberately narrow. Anything not listed below is an internal detail — import from the concrete file path if you have a documented need (tests do this routinely), but treat that as a private contract subject to change without a major bump.
 
 ## Adding to the public surface
@@ -35,6 +45,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 ### `executor/`
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
+- `defineSources`, `SourcesDagConfig` — constructor for source-rooted DAGs; validates fan-in keys against source-node ids at definition time.
 - `validateDagShape`, `recordFromNodeArray` — pure validation utilities.
 - `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is available on `RunOptions`.)
 
@@ -43,6 +54,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 Built-in node factories (each declares its capability `requires`):
 
 - `createFetchNode`, `FetchNodeConfig`
+- `createSourceNode`, `SourceNodeConfig` — a root node that takes no DAG input (`z.void()`), for DAGs that begin from sources rather than `$input`
 - `createTransformNode`, `TransformNodeConfig`
 - `createLlmNode`, `LlmNodeConfig`
 - `createLlmWithToolsNode`, `LlmWithToolsNodeConfig`

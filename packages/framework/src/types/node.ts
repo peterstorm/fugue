@@ -9,9 +9,11 @@ import type { ContentFilter } from "./content-filter.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
 import type { HttpCapability } from "./http-capability.js";
+import type { ClockCapability } from "./clock.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
+export type { ClockCapability } from "./clock.js";
 
 /**
  * Confidence extraction mode for a node. Every node declares how (or whether)
@@ -139,6 +141,7 @@ export interface CapabilityRegistry {
   readonly prompts: PromptAccess;
   readonly judgeLlm: LlmClient;
   readonly http: HttpCapability;
+  readonly clock: ClockCapability;
 }
 
 /**
@@ -175,6 +178,7 @@ export const BUILTIN_CAPABILITY_KEYS = [
   "prompts",
   "judgeLlm",
   "http",
+  "clock",
 ] as const satisfies readonly Capability[];
 
 export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
@@ -230,6 +234,12 @@ export const BUILTIN_CAPABILITY_INFO = {
     clientType: "HttpCapability",
     reference: "createFetchNode with requires: ['http']",
   },
+  clock: {
+    description:
+      "Injectable wall-clock source (now(): Date). Wired to the system clock in production and a fixed instant in tests, so any time-dependent node is deterministic without monkey-patching globals.",
+    clientType: "ClockCapability",
+    reference: "any node factory (createFetchNode/createSourceNode/createTransformNode) with requires: ['clock']",
+  },
 } as const satisfies Record<BuiltinCapabilityKey, CapabilityInfo>;
 
 /**
@@ -257,6 +267,7 @@ export interface BaseNodeContext {
   readonly prompts: PromptAccess | null;
   readonly judgeLlm: LlmClient | null;
   readonly http: HttpCapability | null;
+  readonly clock: ClockCapability | null;
   readonly signal?: AbortSignal;
   /**
    * Optional content filter for trace span data. When set, content (prompts,
@@ -374,6 +385,17 @@ export interface NodeDef<
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   /**
+   * Marks a *source node* (C0 / 0.2.0): a root that produces its output from
+   * the context alone, consuming no DAG input. A source node MUST have zero
+   * incoming edges, and conversely a node with zero incoming edges MUST be a
+   * source — `defineDag` enforces both, rejecting a non-source root with
+   * `root-expects-input` (the request is consumed only via `DAG_INPUT` edges,
+   * never implicitly). Produced by `createSourceNode`, which sets `isSource:
+   * true`, a unit `inputSchema` (`z.void()`), and a `run` that ignores the
+   * (always-`undefined`) input argument. Absent ⇒ ordinary node.
+   */
+  readonly isSource?: boolean;
+  /**
    * Capabilities this node requires on its `NodeContext`. The runtime
    * validates that the wired ctx satisfies them before any node runs;
    * each required field appears as non-null in the `ctx` parameter of `run`.
@@ -439,14 +461,15 @@ export type NodeContextInit = {
   readonly prompts?: PromptAccess | null;
   readonly judgeLlm?: LlmClient | null;
   readonly http?: HttpCapability | null;
+  readonly clock?: ClockCapability | null;
   readonly signal?: AbortSignal;
   readonly contentFilter?: ContentFilter | null;
   /**
    * Extensible capabilities record. Keys correspond to `CapabilityRegistry`
    * entries. Values are the capability client instances.
    *
-   * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`) can
-   * also be passed here instead of as top-level fields.
+   * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`,
+   * `clock`) can also be passed here instead of as top-level fields.
    */
   readonly capabilities?: Partial<{ readonly [K in Capability]: CapabilityRegistry[K] | null }>;
 };

@@ -87,6 +87,9 @@ const EXECUTION_FAILURE_KINDS = [
   "predicate-malformed",
   "duplicate-edge",
   "missing-capability",
+  "root-expects-input",
+  "source-has-incoming",
+  "invalid-dag-input-edge",
 ] as const;
 
 /**

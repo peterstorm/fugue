@@ -8,7 +8,7 @@ This is the adapter with **no external unknowns** (no auth, no network): wire a
 DAG end-to-end against a local `.xlsx` for dev/test, then swap in
 [`@fuguejs/ms-graph`](../adapter-ms-graph) by configuration with no node changes.
 
-- **AI/usage guide:** [`docs/llm-document-source.md`](../../docs/llm-document-source.md)
+- **AI/usage guide:** [`../document-source/docs/llm-document-source.md`](../document-source/docs/llm-document-source.md)
 - **Design:** [`docs/adr/0052-document-source-capability.md`](../../docs/adr/0052-document-source-capability.md)
 
 ## Usage

@@ -10,8 +10,9 @@ import type { NodesRecord } from "../types/dag-internals.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
+import { frameworkError } from "../types/error-factories.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import { nodeId, tryNodeId, dagId } from "../types/ids.js";
+import { nodeId, tryNodeId, dagId, DAG_INPUT, isDagInput } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";
 
@@ -20,19 +21,25 @@ import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js"
  * to this module — only called after `validateDagShape` has confirmed that
  * `from`/`to` reference known node IDs.
  */
+// Brand an edge endpoint. `$input` (the virtual request source) bypasses the
+// `nodeId()` regex — `$` is not a legal id char by construction — and brands to
+// the reserved `DAG_INPUT` constant instead. Only ever legal on an edge `from`;
+// the validator rejects `$input` as a `to` before this is reached for targets.
+const brandEndpoint = (s: string): NodeId => (isDagInput(s) ? DAG_INPUT : nodeId(s));
+
 const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
   if ("kind" in e && e.kind === "default") {
-    return { from: nodeId(e.from), to: nodeId(e.to), kind: "default" };
+    return { from: brandEndpoint(e.from), to: brandEndpoint(e.to), kind: "default" };
   }
   if ("when" in e) {
     return {
-      from: nodeId(e.from),
-      to: nodeId(e.to),
+      from: brandEndpoint(e.from),
+      to: brandEndpoint(e.to),
       kind: "conditional",
       when: e.when,
     };
   }
-  return { from: nodeId(e.from), to: nodeId(e.to), kind: "unconditional" };
+  return { from: brandEndpoint(e.from), to: brandEndpoint(e.to), kind: "unconditional" };
 };
 
 const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
@@ -66,6 +73,7 @@ const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
  */
 export const validateDagShape = (
   input: DagDefInput,
+  provenance?: DagDef["provenance"],
 ): Result<DagDef, FrameworkError> => {
   const entries = Object.entries(input.nodes) as [
     string,
@@ -98,17 +106,46 @@ export const validateDagShape = (
   }
 
   const nodeIds = new Set(entries.map(([id]) => nodeId(id)));
+
+  // DAG_INPUT-edge well-formedness (C0). `$input` is the virtual request
+  // source: legal only as an unconditional `from`. Checked on the RAW edges,
+  // before `normalizeEdge` would brand a `$input` `to` through `nodeId()` and
+  // throw on the illegal `$` character.
+  const rawEdges = input.edges as readonly EdgeDefRawInput[];
+  for (const e of rawEdges) {
+    if (isDagInput(e.to)) {
+      return err(
+        frameworkError.invalidDagInputEdge(
+          { from: e.from, to: e.to },
+          `DAG_INPUT ('$input') cannot be an edge target — it is the virtual request source, never a node`,
+        ),
+      );
+    }
+    if (isDagInput(e.from)) {
+      const conditionalOrDefault =
+        ("when" in e) || ("kind" in e && e.kind === "default");
+      if (conditionalOrDefault) {
+        return err(
+          frameworkError.invalidDagInputEdge(
+            { from: e.from, to: e.to },
+            `DAG_INPUT ('$input') edge to '${e.to}' must be unconditional — it carries no routing semantics (no \`when\`, no \`default\`)`,
+          ),
+        );
+      }
+    }
+  }
+
   // Normalize edges into the tagged-discriminant runtime form. The input may
   // carry the implicit-unconditional or implicit-conditional (`when`-only)
   // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
   // normalized array.
-  const edges: readonly EdgeDef[] = (input.edges as readonly EdgeDefRawInput[])
-    .map(normalizeEdge);
+  const edges: readonly EdgeDef[] = rawEdges.map(normalizeEdge);
 
   // Edge endpoints reference known nodes (the literal-typed input guards
   // this at edit time, but defensive at runtime for `as DagDefInput` casts).
+  // `DAG_INPUT` is the one legal non-node source.
   for (const e of edges) {
-    if (!nodeIds.has(e.from)) {
+    if (!isDagInput(e.from) && !nodeIds.has(e.from)) {
       return err(validationErr(e.from, `Edge references unknown source node '${e.from}'`));
     }
     if (!nodeIds.has(e.to)) {
@@ -183,6 +220,50 @@ export const validateDagShape = (
     }
   }
 
+  // Source / root structural invariant (C0 / 0.2.0). No node implicitly
+  // receives the DAG input: a node with zero incoming edges is a *source*
+  // (built via `createSourceNode`, which sets `isSource: true`), and
+  // a source must be a root. `DAG_INPUT` edges count as incoming here — a node
+  // fed by `$input` is consuming the request and is therefore not a root.
+  const incomingCount = new Map<NodeId, number>();
+  for (const id of nodeIds) incomingCount.set(id, 0);
+  for (const e of edges) {
+    incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
+  }
+  for (const [, node] of entries) {
+    const inDeg = incomingCount.get(node.id) ?? 0;
+    if (node.isSource === true && inDeg > 0) {
+      return err(
+        frameworkError.sourceHasIncoming(
+          node.id,
+          `Source node '${node.id}' has ${inDeg} incoming edge(s) — a source produces from the context alone and consumes no input. Remove the incoming edge(s), or drop the source form and declare an inputSchema`,
+        ),
+      );
+    }
+    // A source consumes no DAG input, so its run always receives `undefined`.
+    // The `isSource` flag and the input schema are correlated but not coupled in
+    // the `NodeDef` type — `createSourceNode` sets `inputSchema: z.void()`, but a
+    // hand- or dynamically-built node could pair `isSource: true` with a non-unit
+    // schema that rejects `undefined`. Reject that here so the illegal state
+    // fails at definition time instead of surfacing as a confusing runtime parse.
+    if (node.isSource === true && !node.inputSchema.safeParse(undefined).success) {
+      return err(
+        validationErr(
+          node.id,
+          `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
+        ),
+      );
+    }
+    if (node.isSource !== true && inDeg === 0) {
+      return err(
+        frameworkError.rootExpectsInput(
+          node.id,
+          `Node '${node.id}' has no incoming edges but is not a source node — under 0.2.0 no node implicitly receives the DAG input. Make it a source (build it with createSourceNode) if it needs none, or feed the request explicitly with a { from: DAG_INPUT, to: '${node.id}' } edge`,
+        ),
+      );
+    }
+  }
+
   // Else-totality: every node with any conditional out-edge must have exactly
   // one default out-edge.
   const outgoingByNode = new Map<NodeId, EdgeDef[]>();
@@ -252,9 +333,14 @@ export const validateDagShape = (
   }
 
   if (input.outputNodeId !== undefined) {
+    // `DAG_INPUT` is a virtual wave-(-1) source: always satisfied, imposing no
+    // ordering. A node whose only inbound is a `$input` edge is therefore an
+    // entry for reachability purposes (skip `$input` edges when counting
+    // inbound), and the request flows in regardless of routing.
     const incomingAny = new Map<string, EdgeDef[]>();
     for (const id of nodeIds) incomingAny.set(id, []);
     for (const e of edges) {
+      if (isDagInput(e.from)) continue;
       const list = incomingAny.get(e.to);
       if (list) list.push(e);
     }
@@ -285,6 +371,7 @@ export const validateDagShape = (
       for (const id of nodeIds) incomingNonConditional.set(id, []);
       for (const e of edges) {
         if (isConditionalEdge(e)) continue;
+        if (isDagInput(e.from)) continue;
         const list = incomingNonConditional.get(e.to);
         if (list) list.push(e);
       }
@@ -329,6 +416,7 @@ export const validateDagShape = (
     ...(input.defaultRetryLimit !== undefined
       ? { defaultRetryLimit: input.defaultRetryLimit }
       : {}),
+    ...(provenance !== undefined ? { provenance } : {}),
   };
   return ok(brandAsDagDef(unbranded));
 };

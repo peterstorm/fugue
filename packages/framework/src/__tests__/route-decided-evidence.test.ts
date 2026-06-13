@@ -15,6 +15,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import type { RunId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { RouteDecidedEvent } from "../types/events.js";
 import { confidence } from "../types/confidence.js";
@@ -49,7 +50,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -70,6 +71,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         no: makeNode("no"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
@@ -101,6 +103,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         no: makeNode("no"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
@@ -129,6 +132,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         c: makeNode("c"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (v: any) => v?.kind === "a" } as any },
         { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (v: any) => v?.kind === "b" } as any },
         { from: "router", to: "c", kind: "default" },
@@ -163,6 +167,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "a", when: { label: "kind-is-x", version: 1, check: (v: any) => v?.kind === "x" } as any },
         { from: "router", to: "fallback", kind: "default" },
       ],
@@ -191,6 +196,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "a",
@@ -231,6 +237,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "a",
@@ -263,6 +270,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         {
           from: "router",
           to: "a",
@@ -305,6 +313,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
         fallback: makeNode("fallback"),
       },
       edges: [
+        { from: DAG_INPUT, to: "router" },
         { from: "router", to: "a", when: { label: "check", version: 1, check: (v: any) => v?.kind === "yes" } as any },
         { from: "router", to: "fallback", kind: "default" },
       ],

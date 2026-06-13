@@ -15,9 +15,15 @@ import { __brandNodeId } from "../types/ids.js";
  *
  * - `optional.length > 0`: input is an object keyed by `required ∪ optional`;
  *   absent optional sources surface as `undefined`.
- * - `required.length === 0`: input is the DAG-level `dagInput`.
- * - `required.length === 1`: input is the bare upstream value.
- * - `required.length >= 2`: input is an object keyed by `required`.
+ * - `required.length === 0`: input is `undefined` — the node is a *source*
+ *   (C0 / 0.2.0). No node implicitly receives the DAG input any more; the
+ *   request reaches a node only through a `DAG_INPUT` edge, which makes
+ *   `"$input"` one of its required sources (it is seeded into `outputs` at run
+ *   start, so it resolves like any other upstream output here).
+ * - `required.length === 1`: input is the bare upstream value (this is how a
+ *   single `DAG_INPUT` edge delivers the request verbatim).
+ * - `required.length >= 2`: input is an object keyed by `required` (a fan-in;
+ *   a `"$input"` key carries the request alongside the other sources).
  *
  * Why the 0/1/≥2 split rather than always passing a keyed object: with no or
  * exactly one required source the keyed form is pure overhead — the node's
@@ -33,7 +39,6 @@ import { __brandNodeId } from "../types/ids.js";
  * bug, not a transient failure.
  */
 export const buildNodeInput = (
-  dagInput: unknown,
   outputs: ReadonlyMap<string, unknown>,
   incoming: IncomingSources,
   nodeId: string,
@@ -59,7 +64,7 @@ export const buildNodeInput = (
       [...required, ...optional].map((d) => [d, outputs.get(d)]),
     ));
   }
-  if (required.length === 0) return ok(dagInput);
+  if (required.length === 0) return ok(undefined);
   if (required.length === 1) return ok(outputs.get(required[0]!));
   return ok(Object.fromEntries(required.map((d) => [d, outputs.get(d)])));
 };

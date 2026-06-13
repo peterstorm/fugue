@@ -4,6 +4,7 @@
 
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -48,6 +49,7 @@ const makeCtx = (): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -96,6 +98,7 @@ describe("runDagStateful — linear DAG", () => {
         }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "a" },
         { from: "a", to: "b" },
         { from: "b", to: "c" },
       ],
@@ -114,7 +117,7 @@ describe("runDagStateful — linear DAG", () => {
         makeNode("a", { run: async () => ok("a-out") }),
         makeNode("b", { run: async () => ok("b-out") }),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
       outputNodeId: "a",
     });
 
@@ -151,6 +154,7 @@ describe("runDagStateful — fan-out DAG", () => {
         }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "a" },
         { from: "a", to: "b" },
         { from: "a", to: "c" },
       ],
@@ -184,6 +188,8 @@ describe("runDagStateful — fan-in DAG", () => {
         }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "a" },
+        { from: DAG_INPUT, to: "b" },
         { from: "a", to: "c" },
         { from: "b", to: "c" },
       ],
@@ -213,6 +219,7 @@ describe("runDagStateful — diamond DAG", () => {
         }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "a" },
         { from: "a", to: "b" },
         { from: "a", to: "c" },
         { from: "b", to: "d" },
@@ -250,7 +257,7 @@ describe("runDagStateful — retry transient", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 2,
     });
 
@@ -277,7 +284,7 @@ describe("runDagStateful — retry transient", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 1,
     });
 
@@ -305,7 +312,7 @@ describe("runDagStateful — retry exhausted", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 2,
     });
 
@@ -332,7 +339,7 @@ describe("runDagStateful — retry exhausted", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       // defaultRetryLimit = 0 (default)
     });
 
@@ -358,7 +365,7 @@ describe("runDagStateful — HITL approve", () => {
           run: async () => ok("node-output"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     const onHumanReview = mock(
@@ -388,11 +395,11 @@ describe("runDagStateful — HITL approve-with-edit", () => {
           run: async () => ok("original"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
 
-    const onHumanReview = async (_req: any): Promise<HumanAction> => ({
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({
       kind: "approve-with-edit",
       newOutput: "edited-value",
     });
@@ -416,13 +423,13 @@ describe("runDagStateful — HITL approve-with-edit", () => {
           run: async () => ok({ score: 0.5 }),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
       // No retries — first validation failure surfaces as terminal.
       defaultRetryLimit: 0,
     });
 
-    const onHumanReview = async (_req: any): Promise<HumanAction> => ({
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({
       kind: "approve-with-edit",
       newOutput: { score: "not-a-number" }, // wrong shape
     });
@@ -463,14 +470,14 @@ describe("runDagStateful — HITL approve-with-edit", () => {
           run: async () => ok({ score: 0.5 }),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
       // Budget for two hook-retries — first attempt has bad output, second succeeds.
       defaultRetryLimit: 2,
     });
 
     let call = 0;
-    const onHumanReview = async (_req: any): Promise<HumanAction> => {
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => {
       call++;
       // First attempt: bad output. Second attempt: valid output.
       return call === 1
@@ -500,10 +507,10 @@ describe("runDagStateful — HITL reject", () => {
           run: async () => ok("output"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
-    const onHumanReview = async (_req: any): Promise<HumanAction> => ({
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({
       kind: "reject",
       reason: "not acceptable",
     });
@@ -544,12 +551,12 @@ describe("runDagStateful — HITL reroute-back", () => {
           },
         }),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
       outputNodeId: "b",
     });
 
     let rerouteCount = 0;
-    const onHumanReview = async (_req: any): Promise<HumanAction> => {
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => {
       rerouteCount++;
       if (rerouteCount === 1) {
         // First time: reroute back to wave 0 (node "a")
@@ -589,7 +596,7 @@ describe("runDagStateful — abort", () => {
     // Actually let's test it using the job directly with an aborted state pre-loaded.
     const dag = makeDag({
       nodes: [makeNode("a", { run: async () => ok("out") })],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     const compiled = compileDagToMachine(dag, null);
@@ -644,7 +651,7 @@ describe("runDagStateful — abort", () => {
       },
     };
 
-    const dag = makeDag({ nodes: [slowNode as NodeDef<unknown, unknown>], edges: [] });
+    const dag = makeDag({ nodes: [slowNode as NodeDef<unknown, unknown>], edges: [{ from: DAG_INPUT, to: "slow" }] });
 
     const ctx: NodeContext = { ...makeCtx(), signal: controller.signal };
 
@@ -669,7 +676,7 @@ describe("runDagStateful — abort", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     const result = await runDagStateful(dag, null, makeCtx());
@@ -694,7 +701,7 @@ describe("runDagStateful — validation (FR-025)", () => {
           run: async () => ok("out"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     // dag input is a number, not an object with name: string
@@ -715,7 +722,7 @@ describe("runDagStateful — validation (FR-025)", () => {
           run: async () => ok(42 as any), // returns a number when string expected
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     const result = await runDagStateful(dag, null, makeCtx());
@@ -731,10 +738,10 @@ describe("runDagStateful — validation (FR-025)", () => {
         makeNode("a", {
           inputSchema: z.string(),
           outputSchema: z.number(),
-          run: async (input: any) => ok(input.length as number),
+          run: async (input: unknown) => ok((input as string).length as number),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     const result = await runDagStateful(dag, "hello", makeCtx());
@@ -762,7 +769,7 @@ describe("runDagStateful — observer events", () => {
 
     const dag = makeDag({
       nodes: [makeNode("a", { run: async () => ok("out") })],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
 
     const ctx: NodeContext = { ...makeCtx(), observer };
@@ -788,7 +795,7 @@ describe("runDagStateful — observer events", () => {
         makeNode("a", { run: async () => ok("a-out") }),
         makeNode("b", { run: async () => ok("b-out") }),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
     });
 
     const ctx: NodeContext = { ...makeCtx(), observer };
@@ -810,7 +817,7 @@ describe("runDagStateful — durable job checkpointing", () => {
         makeNode("a", { run: async () => ok("a-out") }),
         makeNode("b", { run: async () => ok("b-out") }),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
     });
 
     const compiled = compileDagToMachine(dag, null);
@@ -843,7 +850,7 @@ describe("runDagStateful — durable job checkpointing", () => {
         makeNode("a", { run: async () => ok("a-out") }),
         makeNode("b", { run: async () => ok("b-out") }),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
     });
 
     // Snoop on every updateData write to the inner store.
@@ -887,7 +894,7 @@ describe("runDagStateful — durable job checkpointing", () => {
           run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       // defaultRetryLimit = 0 => fails immediately
     });
 
@@ -925,7 +932,7 @@ describe("runDagStateful — sequential human reviews (FR-028)", () => {
           run: async () => ok("a-out"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "z-node" }, { from: DAG_INPUT, to: "a-node" }],
       outputNodeId: "a-node",
     });
 
@@ -1014,7 +1021,7 @@ describe("runDagStateful — per-node retry limits", () => {
           },
         }),
       ],
-      edges: [{ from: "a", to: "b" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }],
       defaultRetryLimit: 1, // default: 1 retry
       retryLimits: { a: 5 }, // node "a" gets 5 retries
     });
@@ -1034,8 +1041,8 @@ describe("runDagStateful — onHumanReview throws", () => {
   it("onHumanReview throw (0 retries) => err(retry-exhausted) with nodeId + node-error observer event", async () => {
     const nodeErrorEvents: string[] = [];
     const observer = {
-      observe(e: any) {
-        if (e.type === "node-error") nodeErrorEvents.push(e.nodeId);
+      observe(e: { type: string; nodeId?: string }) {
+        if (e.type === "node-error" && e.nodeId !== undefined) nodeErrorEvents.push(e.nodeId);
       },
     };
 
@@ -1046,11 +1053,11 @@ describe("runDagStateful — onHumanReview throws", () => {
           run: async () => ok("node-output"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "review-node" }],
       // defaultRetryLimit = 0 => immediately terminal on hook crash
     });
 
-    const onHumanReview = async (_req: any): Promise<HumanAction> => {
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => {
       throw new Error("hook exploded");
     };
 
@@ -1076,8 +1083,8 @@ describe("runDagStateful — onHumanReview throws", () => {
     const nodeErrorEvents: string[] = [];
 
     const observer = {
-      observe(e: any) {
-        if (e.type === "node-error") nodeErrorEvents.push(e.nodeId);
+      observe(e: { type: string; nodeId?: string }) {
+        if (e.type === "node-error" && e.nodeId !== undefined) nodeErrorEvents.push(e.nodeId);
       },
     };
 
@@ -1092,11 +1099,11 @@ describe("runDagStateful — onHumanReview throws", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "review-node" }],
       defaultRetryLimit: 3, // allow up to 3 hook retries
     });
 
-    const onHumanReview = async (_req: any): Promise<HumanAction> => {
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => {
       hookCallCount++;
       if (hookCallCount < 3) {
         throw new Error(`hook crash #${hookCallCount}`);
@@ -1150,7 +1157,7 @@ describe("runDagStateful — runWave partial output staleness (M2)", () => {
           },
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: DAG_INPUT, to: "b" }],
       defaultRetryLimit: 1,
     });
 

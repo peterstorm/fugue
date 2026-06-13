@@ -1,7 +1,7 @@
 // Regression guard for the golden DAG examples.
 //
 // Every file in `dags/` is a copy-paste-ready authoring example referenced by
-// docs/llm-dag-authoring.md. This suite imports each one through the same
+// `@fuguejs/framework/docs/llm-dag-authoring.md`. This suite imports each one through the same
 // `runLint` the `fugue` CLI uses, so a structurally broken example fails the
 // build instead of silently rotting in the docs. (Type-level correctness —
 // including `requires` validity — is covered separately by `tsc --noEmit`.)
@@ -20,7 +20,7 @@ const exampleFiles = readdirSync(dagsDir)
 describe("golden DAG examples", () => {
   it("ships at least the documented set of examples", () => {
     // Guards against an empty glob silently passing the suite.
-    expect(exampleFiles.length).toBeGreaterThanOrEqual(7);
+    expect(exampleFiles.length).toBeGreaterThanOrEqual(9);
   });
 
   for (const file of exampleFiles) {

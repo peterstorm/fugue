@@ -53,6 +53,15 @@ export const frameworkError = {
   predicateMalformed: (nid: string | NodeId, message: string): FrameworkError =>
     ({ kind: "predicate-malformed", nodeId: toNodeId(nid), message }),
 
+  rootExpectsInput: (nid: string | NodeId, message: string): FrameworkError =>
+    ({ kind: "root-expects-input", nodeId: toNodeId(nid), message }),
+
+  sourceHasIncoming: (nid: string | NodeId, message: string): FrameworkError =>
+    ({ kind: "source-has-incoming", nodeId: toNodeId(nid), message }),
+
+  invalidDagInputEdge: (edge: { readonly from: string; readonly to: string }, message: string): FrameworkError =>
+    ({ kind: "invalid-dag-input-edge", edge: { from: edge.from, to: edge.to }, message }),
+
   outputUnreachable: (outputNodeId: string | NodeId, missedFromNode: string | NodeId): FrameworkError =>
     ({ kind: "output-unreachable-under-routing", outputNodeId: toNodeId(outputNodeId), missedFromNode: toNodeId(missedFromNode) }),
 

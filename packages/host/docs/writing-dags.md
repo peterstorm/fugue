@@ -3,7 +3,7 @@
 This guide explains how to create a DAG that the Fugue Host will discover, validate, and serve via HTTP.
 
 > **Quick reference:** For a copy-paste-ready skeleton and all node factory signatures,
-> see [`docs/llm-dag-authoring.md`](../../../docs/llm-dag-authoring.md).
+> see [`docs/llm-dag-authoring.md`](../../framework/docs/llm-dag-authoring.md).
 
 ## Directory Convention
 

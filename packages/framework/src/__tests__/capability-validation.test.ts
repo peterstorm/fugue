@@ -16,6 +16,7 @@ import { N, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { makeNodeContext, mergeScopedCapabilities } from "../shared/make-node-context.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
 import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import type { LlmClient } from "../types/llm.js";
@@ -48,6 +49,7 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
   llm: null, http: null,
   prompts: null,
   judgeLlm: null,
+  clock: null,
   ...overrides,
 });
 
@@ -58,7 +60,7 @@ describe("validateCapabilities", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [makeNode("a", [])],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     const result = validateCapabilities(dag, makeCtx());
     expect(isOk(result)).toBe(true);
@@ -68,7 +70,7 @@ describe("validateCapabilities", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [makeNode("a", ["llm", "cache"])],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     const result = validateCapabilities(dag, makeCtx({
       llm: fakeLlm,
@@ -81,7 +83,7 @@ describe("validateCapabilities", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [makeNode("a", ["llm"])],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     const result = validateCapabilities(dag, makeCtx());
     expect(isErr(result)).toBe(true);
@@ -102,7 +104,7 @@ describe("validateCapabilities", () => {
         makeNode("a", ["llm"]),
         makeNode("b", ["cache", "prompts"]),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: DAG_INPUT, to: "b" }],
     });
     const result = validateCapabilities(dag, makeCtx());
     expect(isErr(result)).toBe(true);
@@ -117,7 +119,7 @@ describe("validateCapabilities", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [makeNode("a", ["llm"])],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     const result = validateCapabilities(dag, makeCtx({ llm: null }));
     expect(isErr(result)).toBe(true);
@@ -135,7 +137,7 @@ describe("validateCapabilities", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [makeNode("a", ["logger" as Capability])],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     // `makeCtx` always provides a non-null `logger` infra field.
     const result = validateCapabilities(dag, makeCtx());
@@ -159,7 +161,7 @@ describe("validateCapabilities", () => {
     const dag = defineDagFromArray({
       id: "d",
       nodes: [makeNode("a", ["llm"])],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
     });
     // Even with a non-null static llm wired, the broker's claim is the defect.
     const result = validateCapabilities(dag, makeCtx({ llm: fakeLlm }), broker);
@@ -174,7 +176,7 @@ describe("validateCapabilities", () => {
     }
   });
 
-  it("each built-in capability key claimed by a broker is rejected (llm/cache/prompts/judgeLlm/http)", () => {
+  it("each built-in capability key claimed by a broker is rejected (llm/cache/prompts/judgeLlm/http/clock)", () => {
     for (const builtin of BUILTIN_CAPABILITY_KEYS) {
       const broker: CapabilityBroker = {
         mintFor: async () => ok({} as ScopedCapabilityHandle),
@@ -183,7 +185,7 @@ describe("validateCapabilities", () => {
       const dag = defineDagFromArray({
         id: "d",
         nodes: [makeNode("a", [builtin])],
-        edges: [],
+        edges: [{ from: DAG_INPUT, to: "a" }],
       });
       const result = validateCapabilities(dag, makeCtx(), broker);
       expect(isErr(result)).toBe(true);
@@ -198,7 +200,7 @@ describe("validateCapabilities", () => {
         makeNode("a", ["llm"]),
         makeNode("b", ["cache"]),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: DAG_INPUT, to: "b" }],
     });
     const result = validateCapabilities(dag, makeCtx());
     if (!result.ok && result.error.kind === "missing-capability") {
@@ -248,7 +250,7 @@ describe("validateCapabilities + mergeScopedCapabilities — seam invariant (pro
         const dag = defineDagFromArray({
           id: "d",
           nodes: [makeNode("a", [capName])],
-          edges: [],
+          edges: [{ from: DAG_INPUT, to: "a" }],
         });
         const validated = validateCapabilities(dag, makeCtx(), broker);
         expect(isOk(validated)).toBe(true);
@@ -276,7 +278,7 @@ describe("validateCapabilities + mergeScopedCapabilities — seam invariant (pro
         const dag = defineDagFromArray({
           id: "d",
           nodes: [makeNode("a", [builtin])],
-          edges: [],
+          edges: [{ from: DAG_INPUT, to: "a" }],
         });
         // Validation rejects the claim loudly…
         const validated = validateCapabilities(dag, makeCtx(), broker);

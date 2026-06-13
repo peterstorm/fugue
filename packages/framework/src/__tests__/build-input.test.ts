@@ -9,17 +9,31 @@ import { buildNodeInput } from "../shared/build-input.js";
 import type { IncomingSources } from "../shared/incoming.js";
 
 describe("buildNodeInput", () => {
-  it("no required sources → returns dagInput", () => {
-    const result = buildNodeInput("dag-level-input", new Map(), {
+  it("no required sources → returns undefined (source node, C0)", () => {
+    // Under 0.2.0 no node implicitly receives the DAG input: a 0-required node
+    // is a source and gets `undefined`. The request reaches a node only via a
+    // `$input` edge (which makes "$input" a required source).
+    const result = buildNodeInput(new Map(), {
       required: [],
       optional: [],
     }, "test-node");
-    expect(result).toEqual({ ok: true, value: "dag-level-input" });
+    expect(result).toEqual({ ok: true, value: undefined });
+  });
+
+  it("single $input source → returns the bare request (C0)", () => {
+    // A `{ from: DAG_INPUT, to: n }` edge: "$input" is the one required source,
+    // resolved from the seeded outputs map as a bare value.
+    const outputs = new Map<string, unknown>([["$input", { region: "dk" }]]);
+    const result = buildNodeInput(outputs, {
+      required: ["$input"],
+      optional: [],
+    }, "test-node");
+    expect(result).toEqual({ ok: true, value: { region: "dk" } });
   });
 
   it("single required source → returns bare upstream value", () => {
     const outputs = new Map([["fetch", { data: 42 }]]);
-    const result = buildNodeInput(null, outputs, {
+    const result = buildNodeInput(outputs, {
       required: ["fetch"],
       optional: [],
     }, "test-node");
@@ -31,11 +45,26 @@ describe("buildNodeInput", () => {
       ["a", "valueA"],
       ["b", "valueB"],
     ]);
-    const result = buildNodeInput(null, outputs, {
+    const result = buildNodeInput(outputs, {
       required: ["a", "b"],
       optional: [],
     }, "test-node");
     expect(result).toEqual({ ok: true, value: { a: "valueA", b: "valueB" } });
+  });
+
+  it("fan-in including $input → keyed object with the request in its slot (C0)", () => {
+    const outputs = new Map<string, unknown>([
+      ["score", { scored: [] }],
+      ["$input", { region: "dk", minScore: 5 }],
+    ]);
+    const result = buildNodeInput(outputs, {
+      required: ["score", "$input"],
+      optional: [],
+    }, "assemble");
+    expect(result).toEqual({
+      ok: true,
+      value: { score: { scored: [] }, $input: { region: "dk", minScore: 5 } },
+    });
   });
 
   it("optional sources present → keyed object with values", () => {
@@ -43,7 +72,7 @@ describe("buildNodeInput", () => {
       ["a", "valueA"],
       ["opt", "optValue"],
     ]);
-    const result = buildNodeInput(null, outputs, {
+    const result = buildNodeInput(outputs, {
       required: ["a"],
       optional: ["opt"],
     }, "test-node");
@@ -52,7 +81,7 @@ describe("buildNodeInput", () => {
 
   it("optional sources missing → keyed object with undefined", () => {
     const outputs = new Map([["a", "valueA"]]);
-    const result = buildNodeInput(null, outputs, {
+    const result = buildNodeInput(outputs, {
       required: ["a"],
       optional: ["opt"],
     }, "test-node");
@@ -61,7 +90,7 @@ describe("buildNodeInput", () => {
 
   it("optional forces keyed shape even with 0 required", () => {
     const outputs = new Map([["opt", "yes"]]);
-    const result = buildNodeInput("dagInput", outputs, {
+    const result = buildNodeInput(outputs, {
       required: [],
       optional: ["opt"],
     }, "test-node");
@@ -69,7 +98,7 @@ describe("buildNodeInput", () => {
   });
 
   it("returns non-retriable error when required source is missing", () => {
-    const result = buildNodeInput(null, new Map(), {
+    const result = buildNodeInput(new Map(), {
       required: ["missing"],
       optional: [],
     }, "test-node");

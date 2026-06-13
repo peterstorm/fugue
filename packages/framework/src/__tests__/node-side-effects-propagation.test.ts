@@ -22,6 +22,7 @@ import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { RunId, DagId, NodeId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
   runId: "r" as RunId,
@@ -32,6 +33,7 @@ const mkCtx = (observer: RecordingObserver): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -48,7 +50,7 @@ describe("node side-effects propagation (Phase 1)", () => {
   confidence: { mode: "none" },
       run: async (input) => ok(input),
     };
-    const dag = defineDagFromArray({ id: "se-test", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "se-test", nodes: [node], edges: [{ from: DAG_INPUT, to: "pure" }] });
     await runDagStateful(dag, "hello", mkCtx(observer));
 
     const starts = observer.events.filter((e): e is NodeStartEvent => e.type === "node-start");
@@ -73,7 +75,7 @@ describe("node side-effects propagation (Phase 1)", () => {
       confidence: { mode: "none" },
       run: async () => ok({ rows: [] }),
     };
-    const dag = defineDagFromArray({ id: "se-reads", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "se-reads", nodes: [node], edges: [{ from: DAG_INPUT, to: "reader" }] });
     await runDagStateful(dag, null, mkCtx(observer));
 
     const start = observer.events.find((e): e is NodeStartEvent => e.type === "node-start");
@@ -98,7 +100,7 @@ describe("node side-effects propagation (Phase 1)", () => {
         message: "boom",
       }),
     };
-    const dag = defineDagFromArray({ id: "se-error", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "se-error", nodes: [node], edges: [{ from: DAG_INPUT, to: "writer" }] });
     await runDagStateful(dag, null, mkCtx(observer));
 
     const errors = observer.events.filter((e): e is NodeErrorEvent => e.type === "node-error");
@@ -126,7 +128,7 @@ describe("node side-effects propagation (Phase 1)", () => {
       confidence: { mode: "none" },
       run: async (input) => ok({ charged: true, id: (input as { id: string }).id }),
     };
-    const dag = defineDagFromArray({ id: "se-idem", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "se-idem", nodes: [node], edges: [{ from: DAG_INPUT, to: "charge" }] });
     const observer = new RecordingObserver();
     const result = await runDagStateful(dag, { id: "ch_123" }, mkCtx(observer));
 
@@ -148,7 +150,7 @@ describe("node side-effects propagation (Phase 1)", () => {
       confidence: { mode: "none" },
       run: async () => ok({ answer: "42" }),
     };
-    const dag = defineDagFromArray({ id: "se-ext", nodes: [node], edges: [] });
+    const dag = defineDagFromArray({ id: "se-ext", nodes: [node], edges: [{ from: DAG_INPUT, to: "llm-call" }] });
     await runDagStateful(dag, null, mkCtx(observer));
 
     const start = observer.events.find((e): e is NodeStartEvent => e.type === "node-start");

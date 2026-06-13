@@ -8,6 +8,7 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { defineDag } from "../executor/define-dag.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
@@ -68,6 +69,7 @@ describe("concurrent wave failures", () => {
         sink: makeNode("sink"),
       },
       edges: [
+        { from: DAG_INPUT, to: "start" },
         { from: "start", to: "ok_node" },
         { from: "start", to: "fail_a" },
         { from: "start", to: "fail_b" },
@@ -126,6 +128,7 @@ describe("concurrent wave failures", () => {
         sink: makeNode("sink"),
       },
       edges: [
+        { from: DAG_INPUT, to: "start" },
         { from: "start", to: "good" },
         { from: "start", to: "bad" },
         { from: "good", to: "sink" },
@@ -149,7 +152,7 @@ describe("concurrent wave failures", () => {
     const nodeEnds = observer.events.filter(
       (e: ObserverEvent) => e.type === "node-end",
     );
-    const goodEnded = nodeEnds.some((e: any) => e.nodeId === N("good"));
+    const goodEnded = nodeEnds.some((e: ObserverEvent) => e.type === "node-end" && "nodeId" in e && (e as { nodeId: string }).nodeId === N("good"));
     expect(goodEnded).toBe(true);
   });
 });

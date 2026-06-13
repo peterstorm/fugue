@@ -130,7 +130,12 @@ export { withRetryLimits } from "./dag.js";
 // from `./types/dag.js` where needed.
 
 // ── Branded identifiers ───────────────────────────────────────────────────
-export type { RunId, NodeId, DagId, GitSha } from "./ids.js";
-export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, gitSha, tryGitSha, ID_PATTERN } from "./ids.js";
+export type { RunId, NodeId, DagId, GitSha, DagInputId } from "./ids.js";
+export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, gitSha, tryGitSha, ID_PATTERN, DAG_INPUT, isDagInput } from "./ids.js";
+
+// ── Clock capability (C2) ─────────────────────────────────────────────────
+export type { ClockCapability } from "./clock.js";
+export { systemClock, fixedClock } from "./clock.js";
+
 export type { NonEmptyString } from "./non-empty-string.js";
 export { asNonEmptyString } from "./non-empty-string.js";

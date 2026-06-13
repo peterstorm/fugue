@@ -8,6 +8,7 @@
 import { NoopObserver } from "../../observer/observer.js";
 import { N, R, D, nodeMap, nodeSet } from "../../__tests__/_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../../types/ids.js";
+import { DAG_INPUT } from "../../types/ids.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
 import type { JobLike } from "../../state-machine/types.js";
@@ -1082,6 +1083,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
         mkNode("c", async () => { callCount.c++; return ok("c-out"); }),
       ],
       edges: [
+        { from: DAG_INPUT, to: "a" },
         { from: "a", to: "b" },
         { from: "b", to: "c" },
       ],
@@ -1096,7 +1098,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
   judgeLlm: null,
       cache: null,
       prompts: null,
-      llm: null, http: null,
+      llm: null, http: null, clock: null,
       logger: { warn: () => {}, error: () => {} },
     });
 

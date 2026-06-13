@@ -3,6 +3,7 @@
 
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -40,7 +41,7 @@ const mkCtx = (): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -49,7 +50,7 @@ describe("runDagAsWorkerJob", () => {
     const dag = defineDagFromArray({
       id: "ok",
       nodes: [mkNode("a", { run: async () => ok("a-out") })],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 0,
     });
     const out = await runDagAsWorkerJob<unknown, string>(dag, null, mkCtx());
@@ -65,7 +66,7 @@ describe("runDagAsWorkerJob", () => {
           run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 0,
     });
     await expect(runDagAsWorkerJob(dag, null, mkCtx())).rejects.toThrow(/DAG 'fail' failed/);
@@ -83,7 +84,7 @@ describe("runDagAsWorkerJob", () => {
           run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 0,
     });
 
@@ -121,7 +122,7 @@ describe("runDagAsWorkerJob", () => {
           run: async () => ok("a-out"),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 0,
     });
     await expect(runDagAsWorkerJob(dag, null, mkCtx())).rejects.toThrow(/humanReview node\(s\)/);
@@ -142,7 +143,7 @@ describe("runDagAsWorkerJob", () => {
           run: async () => err({ kind: "node-crash" as const, retriability: "retriable" as const, nodeId: "a" as NodeId, message: "boom" }),
         }),
       ],
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       defaultRetryLimit: 0,
     });
 

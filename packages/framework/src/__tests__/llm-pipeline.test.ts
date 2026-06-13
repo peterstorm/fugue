@@ -54,7 +54,7 @@ const makeCtx = (cache?: ContextCacheAdapter | null): NodeContext => ({
   judgeLlm: null,
   cache: cache ?? null,
   prompts: null,
-  llm: null, http: null,
+  llm: null, http: null, clock: null,
   logger: { warn: (msg: string) => warns.push(msg), error: () => {} },
 });
 

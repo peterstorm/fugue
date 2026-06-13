@@ -5,7 +5,7 @@ import type {
   OutputsByNodeId,
   ConsistentNodes,
 } from "./dag-internals.js";
-import type { DagId, NodeId } from "./ids.js";
+import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 
 // Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
@@ -124,12 +124,19 @@ export type EdgeDefRawInput =
  * materializes `kind: "unconditional"` after validation). The conditional
  * form may omit `kind` when `when` is supplied; defineDag materializes
  * `kind: "conditional"`.
+ *
+ * `DAG_INPUT` (`DagInputId`) is admissible as `from` on the unconditional
+ * form only — it is the virtual source carrying the DAG request (C0). It is
+ * never a valid `to`, and an `$input` edge is never conditional or default
+ * (the validator rejects both). Because `DagInputId` is a distinct brand,
+ * adding it to the union keeps real-node literal checking intact: a typo'd
+ * `from` is still a compile error.
  */
 export type EdgeDefInput<
   Ids extends string,
   OutputsByNodeId extends { readonly [K in Ids]: unknown } = { readonly [K in Ids]: unknown },
 > =
-  | { readonly from: Ids; readonly to: Ids }
+  | { readonly from: Ids | DagInputId; readonly to: Ids }
   | {
       readonly [F in Ids]: {
         readonly from: F;
@@ -168,6 +175,22 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
 
 declare const __dagValidated: unique symbol;
 
+/**
+ * The closed set of DAG shapes the framework knows about — the single source of
+ * truth. Both `DagProvenance` (below) and the CLI's `SHAPES` / scaffold-helper
+ * union derive from this tuple, so a new shape is added in exactly one place and
+ * the projections cannot drift apart.
+ */
+export const DAG_SHAPES = ["linear", "fan-out", "diamond", "router", "sources"] as const;
+
+/**
+ * Which constructor produced a `DagDef`. Shape helpers stamp their own name;
+ * raw `defineDag` / `defineDagFromArray` leave it absent (treated as "manual").
+ * Used by `fugue lint`'s shape-helper hint to avoid suggesting a helper for a
+ * DAG that already used one.
+ */
+export type DagProvenance = (typeof DAG_SHAPES)[number];
+
 export interface DagDef {
   readonly id: DagId;
   readonly nodes: readonly NodeDef<unknown, unknown>[];
@@ -176,6 +199,8 @@ export interface DagDef {
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly retryLimits?: Readonly<Record<string, number>>;
   readonly defaultRetryLimit?: number;
+  /** The shape helper that built this DAG, if any. Absent ⇒ raw `defineDag`. */
+  readonly provenance?: DagProvenance;
   /** Brand — present only on values that have passed `validateDagShape`. */
   readonly [__dagValidated]: true;
 }

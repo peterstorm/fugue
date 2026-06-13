@@ -4,6 +4,7 @@ import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness
 // human-action variant, with correct fields (actor, action, context, elapsedMs).
 
 import { describe, test, expect } from "bun:test";
+import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { confidence } from "../types/confidence.js";
@@ -46,7 +47,7 @@ const makeDag = (nodeOverrides?: Partial<NodeDef<unknown, unknown>>) =>
       }),
       final: makeNode("final"),
     },
-    edges: [{ from: "review", to: "final" }],
+    edges: [{ from: DAG_INPUT, to: "review" }, { from: "review", to: "final" }],
   });
 
 const makeCtx = (observer: RecordingObserver): NodeContext =>
@@ -113,7 +114,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
         }),
         final: makeNode("final"),
       },
-      edges: [{ from: "review", to: "final" }],
+      edges: [{ from: DAG_INPUT, to: "review" }, { from: "review", to: "final" }],
     });
     const observer = new RecordingObserver();
     const ctx = makeCtx(observer);
@@ -173,7 +174,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
           humanReview: { prompt: "Approve this?" },
         }),
       },
-      edges: [{ from: "a", to: "review" }],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "review" }],
       outputNodeId: "review",
     });
     const observer = new RecordingObserver();
@@ -298,7 +299,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
           humanReview: { prompt: "Approve?" },
         }),
       },
-      edges: [{ from: "reader", to: "review" }],
+      edges: [{ from: DAG_INPUT, to: "reader" }, { from: "reader", to: "review" }],
     });
     const observer = new RecordingObserver();
     const ctx = makeNodeContext({
@@ -326,7 +327,7 @@ describe("Phase 4 — HumanInterventionEvent", () => {
         }),
         final: makeNode("final"),
       },
-      edges: [{ from: "review", to: "final" }],
+      edges: [{ from: DAG_INPUT, to: "review" }, { from: "review", to: "final" }],
     });
     const observer = new RecordingObserver();
     const ctx = makeNodeContext({

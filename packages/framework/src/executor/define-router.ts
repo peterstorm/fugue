@@ -21,6 +21,7 @@ import type { NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId } from "../types/ids.js";
+import { dagInputEdgeFor } from "./dag-input-edge.js";
 
 /**
  * One case in a router. Provides either the ergonomic `when` callback (which
@@ -158,10 +159,13 @@ export const defineRouter = (config: RouterDagConfig): DagDef => {
   return defineDagFromArray({
     id: config.id,
     nodes,
-    edges: [...conditionalEdges, defaultEdge],
+    // The classifier is the entry: feed it the request via a `$input` edge
+    // unless it is a source node (consumes nothing).
+    edges: [...dagInputEdgeFor(config.classifier), ...conditionalEdges, defaultEdge],
     outputNodeId: config.outputNodeId,
     evalJudges: config.evalJudges,
     defaultRetryLimit: config.defaultRetryLimit,
     retryLimits: config.retryLimits,
+    provenance: "router",
   });
 };

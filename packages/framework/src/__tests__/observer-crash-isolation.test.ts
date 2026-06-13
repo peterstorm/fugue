@@ -10,6 +10,7 @@ import type { Observer } from "../observer/observer.js";
 import { runDag } from "../executor/run-dag.js";
 import { defineDag } from "../executor/define-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
+import { DAG_INPUT } from "../types/ids.js";
 
 const mkCtx = (observer: Observer): NodeContext => ({
   runId: "crash-test-run" as RunId,
@@ -20,6 +21,7 @@ const mkCtx = (observer: Observer): NodeContext => ({
   cache: null,
   prompts: null,
   llm: null, http: null,
+  clock: null,
   logger: { warn: () => {}, error: () => {} },
 });
 
@@ -39,7 +41,7 @@ describe("Observer crash isolation", () => {
     const dag = defineDag({
       id: "crash-dag",
       nodes: { a: nodeA },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
 
@@ -76,7 +78,7 @@ describe("Observer crash isolation", () => {
     const dag = defineDag({
       id: "multi-crash-dag",
       nodes: { a: nodeA, b: nodeB },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }, { from: DAG_INPUT, to: "b" }],
       outputNodeId: "b",
     });
 
@@ -107,7 +109,7 @@ describe("Observer crash isolation", () => {
     const dag = defineDag({
       id: "async-crash-dag",
       nodes: { a: nodeA },
-      edges: [],
+      edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
 
