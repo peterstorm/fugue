@@ -238,7 +238,7 @@ export const BUILTIN_CAPABILITY_INFO = {
     description:
       "Injectable wall-clock source (now(): Date). Wired to the system clock in production and a fixed instant in tests, so any time-dependent node is deterministic without monkey-patching globals.",
     clientType: "ClockCapability",
-    reference: "createFetchNode with requires: ['clock']",
+    reference: "any node factory (createFetchNode/createSourceNode/createTransformNode) with requires: ['clock']",
   },
 } as const satisfies Record<BuiltinCapabilityKey, CapabilityInfo>;
 

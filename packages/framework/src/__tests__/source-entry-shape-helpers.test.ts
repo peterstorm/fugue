@@ -24,6 +24,7 @@ import {
   ok,
 } from "../index.js";
 import { dagInputEdgeFor } from "../executor/dag-input-edge.js";
+import { DAG_INPUT, nodeId } from "../types/ids.js";
 import { resourceName } from "../types/freshness.js";
 
 const V = z.object({ v: z.number() });
@@ -43,7 +44,7 @@ const hasInputEdge = (dag: { readonly edges: readonly { readonly from: string }[
 
 describe("dagInputEdgeFor — source vs non-source entry", () => {
   it("wires a $input→node edge for a non-source entry node", () => {
-    expect(dagInputEdgeFor(nonSource)).toEqual([{ from: "$input", to: "non-source" }]);
+    expect(dagInputEdgeFor(nonSource)).toEqual([{ from: DAG_INPUT, to: nodeId("non-source") }]);
   });
 
   it("wires NO edge for a source entry node (it consumes nothing)", () => {

@@ -1229,41 +1229,29 @@ both become `is_error: true` results that the model sees and can react to
 
 ```ts
 import { z } from "zod";
-import { createLlmNode } from "@fuguejs/framework";
+import { createLlmWithToolsNode } from "@fuguejs/framework";
 
 const Summary = z.object({
   summary: z.string(),
   totalDealValue: z.number(),
 });
 
-const enrichSummaryNode = createLlmNode({
+const enrichSummaryNode = createLlmWithToolsNode({
   id: "enrich-summary",
   inputSchema: z.object({ customerId: z.string() }),
   outputSchema: Summary,
-  promptName: "enrich-summary",
   model: "claude-sonnet-4-6",
-  buildInput: (i) => i,
-  // Custom run override — uses the framework's tool surface directly.
-  run: async (input, ctx) => {
-    if (!ctx.llm) return err({ kind: "node-crash", nodeId: "enrich-summary", message: "no llm" });
-    const result = await ctx.llm.sendWithTools(
-      {
-        system: "You are a CRM analyst. Use tools to gather facts before summarizing.",
-        user: `Summarize customer ${input.customerId}.`,
-        model: "claude-sonnet-4-6",
-        tools: [lookupDealsByCustomer],
-        schema: Summary,
-        maxIterations: 5,
-      },
-      ctx,
-    );
-    if (!result.ok) return result;
-    return ok(result.value.output);
-  },
+  system: "You are a CRM analyst. Use tools to gather facts before summarizing.",
+  buildUser: (input) => `Summarize customer ${input.customerId}.`,
+  tools: [lookupDealsByCustomer],
+  maxIterations: 5,
 });
 ```
 
-Two argument shapes deserve attention:
+`createLlmWithToolsNode` owns the `sendWithTools` call for you — under the hood
+it invokes `ctx.llm.sendWithTools(req, ctx)` with the validation retry, caching,
+and span enrichment already wired. Two argument shapes of that underlying call
+deserve attention:
 
 - `req` — data the *caller* curated (prompts, tools, schema, iteration cap).
 - `ctx` — the *node-runtime* surface (tracer, logger, cache, signal). Tools

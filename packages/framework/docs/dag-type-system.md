@@ -886,7 +886,7 @@ What happens:
 | Step | Where | What |
 | --- | --- | --- |
 | Inference | `tsc` | `<const Nodes>` infers `Nodes = { fetch, extract, synthesize }`. `keyof Nodes & string = "fetch" \| "extract" \| "synthesize"`. Edges and `outputNodeId` get squiggles on typos. |
-| Module load | Node import | `defineDag` executes. `validateDagShape` checks deps ↔ edges, else-totality, output reachability, key/id consistency, edge uniqueness, optionalDeps partitioning. On failure: throws `DagDefinitionError`. On success: returns the input cast (via `as unknown as DagDef`) to the branded type. |
+| Module load | Node import | `defineDag` executes. `validateDagShape` checks key/id consistency, edge endpoints, `$input`-edge well-formedness, edge uniqueness, conditional-predicate well-formedness, source/root invariant, else-totality, freshness-extractor consistency, and output reachability. On failure: throws `DagDefinitionError`. On success: returns the input cast (via `as unknown as DagDef`) to the branded type. |
 | First `runDag` call | Runtime | `compileDagToMachine` calls `topoSort` for cycle detection and wave assignment. |
 | Per-wave execution | Runtime | `runWave` filters by `activeNodeIds`, executes nodes, fires guards (which may throw `guard-threw`). |
 

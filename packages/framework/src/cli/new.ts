@@ -26,7 +26,7 @@ import {
   type Shape,
   type TemplateCtx,
 } from "./new-templates.js";
-import { runPromptsSync } from "./prompts.js";
+import { computePromptHash } from "../prompts/hash.js";
 import type { NewResult } from "./types.js";
 
 export interface NewOptions {
@@ -198,14 +198,20 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   if (scaffold.prompt) {
     await mkdir(join(dir, "prompts"), { recursive: true });
     await write(join("prompts", `${scaffold.prompt.name}.txt`), scaffold.prompt.body);
-    // Generate prompts/registry.json (new prompt → 1.0.0) so `fugue prompts
-    // check` is green out of the box. Only record it as written after the sync
-    // succeeds — on failure the registry was not produced.
-    const sync = await runPromptsSync(dir);
-    if (!sync.ok) {
-      return { ok: false, problems: sync.problems };
-    }
-    written.push(join(relDir, "prompts", "registry.json"));
+    // Write prompts/registry.json as part of the same scaffold write batch so
+    // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
+    // is always new → version 1.0.0, so the registry is computed in-memory here
+    // rather than via a separate `prompts sync` post-step — keeping the scaffold
+    // all-or-nothing (no window where a written .txt has no matching registry
+    // entry). Format matches `runPromptsSync` byte-for-byte (2-space JSON +
+    // trailing newline) so a later `prompts sync`/`check` sees no drift.
+    const registry = {
+      [scaffold.prompt.name]: {
+        version: "1.0.0",
+        hash: computePromptHash(scaffold.prompt.body),
+      },
+    };
+    await write(join("prompts", "registry.json"), `${JSON.stringify(registry, null, 2)}\n`);
   }
 
   const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";

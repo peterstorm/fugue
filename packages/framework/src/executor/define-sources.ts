@@ -33,10 +33,10 @@ export interface SourcesDagConfig {
   /** Parallel root source nodes (built with `createSourceNode`). */
   readonly sources: NonEmptyNodeList;
   /** Fan-in node keyed by the source node ids. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional: `run`'s contravariant input rejects NodeDef<unknown> for concrete-input nodes
   readonly join: NodeDef<any, any, any>;
   /** Optional second-stage fan-in over the join. When present, it is the output node. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional: see `join`
   readonly assemble?: NodeDef<any, any, any>;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly defaultRetryLimit?: number;

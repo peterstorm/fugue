@@ -128,6 +128,62 @@ describe("defineSources — definition-time fan-in key validation", () => {
     ).not.toThrow();
   });
 
+  it("rejects an assemble that declares $input as an OPTIONAL key", () => {
+    // Mirror of the join-optional case for the second-stage fan-in: the
+    // assertInputKeyRequired call on `assemble` (define-sources.ts) is otherwise
+    // only covered transitively via the join path. Pin it directly.
+    const join = createTransformNode({
+      id: "join",
+      inputSchema: z.object({ "src-a": A, "src-b": B }),
+      outputSchema: A,
+      transform: () => ok({ a: 3 }),
+    });
+    const assemble = createTransformNode({
+      id: "assemble",
+      inputSchema: z.object({ join: A, [DAG_INPUT as string]: Req.optional() }),
+      outputSchema: z.object({ done: z.boolean() }),
+      transform: () => ok({ done: true }),
+    });
+    let thrown: unknown;
+    try {
+      defineSources({ id: "assemble-optional-input", sources: [srcA, srcB], join, assemble });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DagDefinitionError);
+    const err = thrown as DagDefinitionError;
+    expect(err.detail.kind).toBe("validation");
+    expect(err.message).toContain("assemble"); // the second-stage node, not the join
+    expect(err.message).toContain("$input");
+    expect(err.message).toContain("required");
+  });
+
+  it("throws when given zero sources (defensive guard over the NonEmptyNodeList type)", () => {
+    const join = createTransformNode({
+      id: "join",
+      inputSchema: A,
+      outputSchema: A,
+      transform: (i) => ok(i),
+    });
+    let thrown: unknown;
+    try {
+      // The typed API forbids this (`sources: NonEmptyNodeList`); cast through
+      // `unknown` to exercise the runtime guard that protects `as`-cast callers.
+      defineSources({
+        id: "empty-sources",
+        sources: [] as unknown as Parameters<typeof defineSources>[0]["sources"],
+        join,
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DagDefinitionError);
+    const err = thrown as DagDefinitionError;
+    expect(err.dagId).toBe("empty-sources");
+    expect(err.detail.kind).toBe("validation");
+    expect(err.message).toContain("at least one source");
+  });
+
   it("accepts an unverifiable (non-object) join schema with ≥2 sources, deferring to the runtime parse", () => {
     // `z.unknown()` isn't an introspectable object schema, so `fanInKeyCheck`
     // returns `unverifiable` and defineSources must NOT throw — the keyed fan-in

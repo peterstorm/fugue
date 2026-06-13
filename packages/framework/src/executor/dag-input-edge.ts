@@ -7,7 +7,7 @@
 // the request. A *source* entry node (built via `createSourceNode`, which sets
 // `isSource: true`) consumes no input, so it gets no `$input` edge.
 
-import { DAG_INPUT } from "../types/ids.js";
+import { DAG_INPUT, type DagInputId, type NodeId } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 
 /**
@@ -15,9 +15,7 @@ import type { NodeDef } from "../types/node.js";
  * helper's entry node — empty when the node is a source (it consumes no input).
  */
 export const dagInputEdgeFor = (
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional: `run`'s contravariant input rejects NodeDef<unknown> for concrete-input nodes
   node: NodeDef<any, any, any>,
-): readonly { readonly from: string; readonly to: string }[] =>
-  node.isSource === true
-    ? []
-    : [{ from: DAG_INPUT as string, to: node.id as string }];
+): readonly { readonly from: DagInputId; readonly to: NodeId }[] =>
+  node.isSource === true ? [] : [{ from: DAG_INPUT, to: node.id }];
