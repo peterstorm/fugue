@@ -103,6 +103,34 @@ export type DagPhase =
   | { readonly kind: "succeeded"; readonly output: unknown }
   | { readonly kind: "failed"; readonly error: FrameworkError };
 
+/**
+ * Runtime-enumerable set of every `DagPhase` discriminant. The single source of
+ * truth a deserialization boundary uses to validate a checkpoint's `state.kind`
+ * BEFORE it drives an exhaustive `match` (a corrupt/unknown kind otherwise
+ * surfaces as a raw `NonExhaustiveError` instead of a clean handled error).
+ *
+ * Derived from a `Record<DagPhase["kind"], true>` so the compiler keeps it in
+ * lockstep with the union in BOTH directions: adding a `DagPhase` kind without
+ * listing it here — or listing a kind that is not a `DagPhase` — is a compile
+ * error. The set can never silently drift from the type.
+ */
+const DAG_PHASE_KIND_TABLE: Record<DagPhase["kind"], true> = {
+  pending: true,
+  running: true,
+  "awaiting-human": true,
+  suspended: true,
+  retrying: true,
+  "retrying-hook": true,
+  succeeded: true,
+  failed: true,
+};
+
+export const DAG_PHASE_KINDS: ReadonlySet<string> = new Set(Object.keys(DAG_PHASE_KIND_TABLE));
+
+/** Type guard: is `k` a known `DagPhase` discriminant? */
+export const isDagPhaseKind = (k: unknown): k is DagPhase["kind"] =>
+  typeof k === "string" && DAG_PHASE_KINDS.has(k);
+
 // ---------------------------------------------------------------------------
 // DagEvent — events the executor/external world can deliver to the machine
 // ---------------------------------------------------------------------------

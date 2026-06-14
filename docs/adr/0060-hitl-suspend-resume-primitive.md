@@ -154,6 +154,36 @@ work with one predicate and no extra bookkeeping.
   the host's decision/pending store cover the operational questions), but wiring
   the event journal for HITL runs is a tracked follow-up.
 
+### Known timing windows (accepted for v1)
+
+Two narrow, recoverable race windows are accepted rather than fixed in v1; both
+are recorded here so they are conscious decisions, not oversights.
+
+- **Transient `running`-window 409 at the approve pre-checks.** `recordDecision`
+  is the authority and gates on the decision-store *pending marker* (present for
+  the whole window a reviewer can respond), so the engine never drops an approval
+  that lands after `notify` but before `processRun` folds `suspended` back into
+  the store. The HTTP (`runs.ts`) and bot (`messages-handler.ts`) handlers,
+  however, pre-check the *lagging* run status to derive the gate node id and
+  render distinct UX before delegating — so a decision that arrives in that
+  sub-second window is rejected at the boundary (HTTP 409 / "already running")
+  even though the engine would accept it. **Recoverable:** no decision is
+  recorded, so a retry once the status settles succeeds; the run is not stranded.
+  The clean fix is a redesign (the HTTP body carries no node id, so accepting in
+  the window needs either a body `nodeId` — a breaking API change — or a
+  "list pending markers for run" store/port operation), disproportionate to a
+  sub-second recoverable window. Deferred to a dedicated design cycle.
+
+- **Decision consume not atomic with the post-gate checkpoint.** The host hook
+  clears a consumed decision before the kernel durably checkpoints the advanced
+  state. A worker crash in that window drops a stored approval; on resume the run
+  re-parks and re-notifies, and a human re-decides. **Recoverable:** no incorrect
+  execution and no silent data loss — only a redundant re-review. The real fix is
+  effectively-once consumption ordered *after* the durable checkpoint, which is a
+  kernel-level change (the kernel, not the host hook, controls persistence
+  timing); the lighter "don't clear eagerly" alternative merely trades this for
+  an accept-duplicate-after-resolve window. Deferred to a dedicated design cycle.
+
 ## References
 
 - ADR-0013 — `onHumanReview` hook crash retry (`retrying-hook`)

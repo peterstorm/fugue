@@ -181,15 +181,21 @@ const callHumanReviewHook = async (
 // ---------------------------------------------------------------------------
 
 /**
- * Builds an Executor closure for a DAG. The executor:
- * 1. If state is `retrying`: sleeps for `nextDelayMs * jitter` then re-runs the
- *    failed node. Returns `wave-done` (if all nodes in the wave now pass) or
- *    `node-failed`.
- * 2. If state is `pending`: returns a `start` event (drives first transition).
- * 3. If state is `running`: runs the full wave via Promise.all, returns
- *    `wave-done` or `node-failed` for the first failure.
- * 4. If state is `awaiting-human` and `onHumanReview` is supplied: dispatches
- *    the hook, returns `human-responded`.
+ * Builds an Executor closure for a DAG. The executor matches on `state.kind`:
+ * 1. `pending`: returns a `start` event (drives the first transition).
+ * 2. `running`: runs the full wave via Promise.all, returns `wave-done` or
+ *    `node-failed` for the first failure.
+ * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-runs the failed node.
+ *    Returns `wave-done` (if all nodes in the wave now pass) or `node-failed`.
+ * 4. `awaiting-human` / `suspended` / `retrying-hook` (ADR-0060): dispatches the
+ *    `onHumanReview` hook (the latter two are handled identically to
+ *    `awaiting-human`; `retrying-hook` additionally honours `nextDelayMs`).
+ *    Returns `human-responded` (a decision is present), `human-suspend` (the
+ *    hook returned `pending` → park the run), or `node-failed` (the hook threw
+ *    or an edited output failed schema validation).
+ *
+ * Terminal phases (`succeeded`, `failed`) are unreachable here — the runner's
+ * `isTerminal` guard stops the loop first — so those branches throw.
  *
  * The executor never performs state transitions — it only produces DagEvents.
  * Observer events (node-start, node-end, node-error, run-start, run-end) are

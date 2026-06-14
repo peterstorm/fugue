@@ -126,7 +126,20 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       });
     }
 
-    const jobLike = makeRunStoreJobLike(runStore, runId, record.checkpoint);
+    const jobLikeResult = makeRunStoreJobLike(runStore, runId, record.checkpoint);
+    if (!jobLikeResult.ok) {
+      // A corrupt checkpoint will not heal on retry — settle the run `failed`
+      // (terminal) so a status poll surfaces it, and return `ok` so the worker
+      // does NOT re-process (a retry would only hit the same corrupt state).
+      logger?.error?.("hitl: corrupt checkpoint — settling run failed", {
+        runId,
+        error: jobLikeResult.error.kind,
+      });
+      const settled = await runStore.setStatus(runId, { kind: "failed", error: asRunFailure(jobLikeResult.error) });
+      if (!settled.ok) return settled;
+      return ok(undefined);
+    }
+    const jobLike = jobLikeResult.value;
     const onHumanReview = makeOnHumanReview({
       decisions,
       notifier,

@@ -50,6 +50,11 @@ export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted,
 // to. Exported so hosts mapping their own infra failures onto a FrameworkError
 // reuse the validated sentinel instead of re-casting the raw string.
 export { EXECUTOR_NODE_ID } from "./dag-runtime/types.js";
+// Runtime guard + discriminant set for `DagPhase`, kept in lockstep with the
+// union by the compiler. Exported so a deserialization boundary (e.g. a host
+// reading a persisted checkpoint) can validate `state.kind` before driving an
+// exhaustive transition, rather than `as`-casting an unvalidated string in.
+export { DAG_PHASE_KINDS, isDagPhaseKind } from "./dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer

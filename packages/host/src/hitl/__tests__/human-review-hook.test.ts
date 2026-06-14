@@ -74,4 +74,39 @@ describe("makeOnHumanReview", () => {
     expect(notifier.sent).toHaveLength(1); // notified once, not on the re-park
     expect(notifier.sent[0]!.nodeId).toBe(NODE);
   });
+
+  it("still parks (pending) when notification fails on the first park — non-fatal, no re-notify", async () => {
+    // First park succeeds (markPending → true), but delivery fails. The run is
+    // already durably parked, so the hook must NOT fail the run: it logs and
+    // returns pending. A later re-park (markPending → false) must NOT retry
+    // delivery (the notify only fires on the first park).
+    let firstPark = true;
+    let notifyCalls = 0;
+    const decisions = decisionStore({
+      async markPending() { const was = firstPark; firstPark = false; return ok(was); },
+    });
+    const notifier: HumanReviewNotifierPort = {
+      async notify() { notifyCalls += 1; return err({ kind: "notification-failed", operation: "notify" }); },
+    };
+    const hook = makeOnHumanReview({ decisions, notifier, runId: RUN, dagId: DAG });
+
+    expect(await hook(req)).toEqual({ kind: "pending" }); // parked despite delivery failure
+    expect(await hook(req)).toEqual({ kind: "pending" }); // re-park
+    expect(notifyCalls).toBe(1); // attempted once on first park, never on re-park
+  });
+
+  it("fails OPEN when markPending errors — assumes first park and notifies anyway", async () => {
+    // A markPending store blip must not silence the review: better a possible
+    // duplicate notification on a later re-park than a run parked with no notice
+    // at all. The hook treats an errored markPending as the first park.
+    const notifier = notifierSpy();
+    const decisions = decisionStore({
+      async markPending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
+    });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+
+    expect(await hook(req)).toEqual({ kind: "pending" });
+    expect(notifier.sent).toHaveLength(1); // notified despite the marker write failing
+    expect(notifier.sent[0]!.nodeId).toBe(NODE);
+  });
 });
