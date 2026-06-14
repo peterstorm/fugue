@@ -56,6 +56,7 @@ Built-in node factories (each declares its capability `requires`):
 - `createFetchNode`, `FetchNodeConfig`
 - `createSourceNode`, `SourceNodeConfig` — a root node that takes no DAG input (`z.void()`), for DAGs that begin from sources rather than `$input`
 - `createTransformNode`, `TransformNodeConfig`
+- `createHumanReviewNode`, `HumanReviewNodeConfig`, `withHumanReview` — human-in-the-loop gates (ADR 0060). `createHumanReviewNode` is a typed passthrough that pauses for a decision; `withHumanReview(node, { prompt })` gates any existing node. A gated node routes the run to the durable state machine (host supplies `RunOptions.onHumanReview`).
 - `createLlmNode`, `LlmNodeConfig`
 - `createLlmWithToolsNode`, `LlmWithToolsNodeConfig`
 - `createGuardrailNode`, `GuardrailNodeConfig`, plus the `GuardrailResult` / `GuardrailSkipped` / `GuardrailValidated` / `GuardrailCheck` shapes

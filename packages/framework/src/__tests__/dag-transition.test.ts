@@ -21,6 +21,7 @@ import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "../dag-runtime/types.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
+import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { FrameworkError } from "../types/errors.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 import { z } from "zod";
@@ -33,7 +34,7 @@ const noop = async () => ({ ok: true as const, value: undefined });
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown>> = {},
+  overrides: NodeOverride = {},
 ): NodeDef<unknown, unknown> => ({
   id: N(id),
   kind: "transform",
@@ -43,7 +44,7 @@ const makeNode = (
   requires: [],
   sideEffects: NO_SIDE_EFFECTS,
   confidence: NO_CONFIDENCE,
-  ...overrides,
+  ...brandedOverride(overrides),
 });
 
 interface MakeDagOverrides {

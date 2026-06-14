@@ -9,10 +9,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rm, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import fc from "fast-check";
+import { parse as parseYaml } from "yaml";
 import { runLint } from "../../cli/lint.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
-import { SHAPES, buildScaffold } from "../../cli/new-templates.js";
+import { SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
 
 // NB: this package can't import `@fuguejs/host/contract` (host depends on
 // framework, not the reverse). The generated dag.ts references DagRegistration
@@ -53,7 +55,7 @@ describe("generated scaffolds lint clean", () => {
       it(`${label} → dag.ts lints, fugue.yaml parses${llm ? ", prompts check green" : ""}`, async () => {
         const root = join(tmpRoot, `lint-${shape}-${llm ? "llm" : "plain"}`);
         const name = `scaffold-${shape}`;
-        const result = await runNew({ team: "demo", name, shape, llm, force: false, root });
+        const result = await runNew({ team: "demo", name, shape, llm, review: false, force: false, root });
         if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
 
         const dagDir = join(root, "dags", "demo", name);
@@ -82,6 +84,43 @@ describe("generated scaffolds lint clean", () => {
         }
       });
     }
+  }
+});
+
+// --------------------------------------------------------------------------
+// Human-review scaffolds (--review).
+//
+// A human-review gate is an aspect, not a topology — `--review` adds a
+// `createHumanReviewNode` to the linear scaffold (plain and --llm). Both must
+// still lint clean, the same contract the shape × llm matrix proves.
+// --------------------------------------------------------------------------
+
+describe("human-review scaffolds (--review)", () => {
+  for (const llm of [false, true]) {
+    const label = `linear --review${llm ? " --llm" : ""}`;
+    it(`${label} → dag.ts lints and carries a human-review gate`, async () => {
+      const root = join(tmpRoot, `review-${llm ? "llm" : "plain"}`);
+      const name = "scaffold-review";
+      const result = await runNew({ team: "demo", name, shape: "linear", llm, review: true, force: false, root });
+      if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
+      expect(result.review).toBe(true);
+
+      const dagDir = join(root, "dags", "demo", name);
+      const dagTs = await readFile(join(dagDir, "dag.ts"), "utf-8");
+      expect(dagTs).toContain("createHumanReviewNode");
+
+      const lint = await runLint(join(dagDir, "dag.ts"));
+      if (!lint.ok) {
+        throw new Error(`${label} dag.ts failed to lint: ${JSON.stringify(lint.errors, null, 2)}`);
+      }
+      expect(lint.ok).toBe(true);
+
+      if (llm) {
+        const check = await runPromptsCheck(dagDir);
+        if (!check.ok) throw new Error(`prompts check failed: ${check.problems.join("; ")}`);
+        expect(check.ok).toBe(true);
+      }
+    });
   }
 });
 
@@ -128,9 +167,12 @@ describe("generated content guarantees", () => {
 describe("runNew file layout", () => {
   it("writes dag.ts, fugue.yaml, README.md under dags/<team>/<name>", async () => {
     const root = join(tmpRoot, "layout");
-    const result = await runNew({ team: "leads", name: "my-dag", shape: "linear", llm: false, force: false, root });
+    const result = await runNew({ team: "leads", name: "my-dag", shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
+      // The no-`--review` case carries the literal `false` (stable-JSON contract),
+      // not an absent field — the symmetric counterpart of the --review test.
+      expect(result.review).toBe(false);
       expect(result.dir).toBe(join(root, "dags", "leads", "my-dag"));
       expect(result.files).toEqual([
         join("dags", "leads", "my-dag", "dag.ts"),
@@ -143,7 +185,7 @@ describe("runNew file layout", () => {
 
   it("--llm adds prompts/<name>.txt and a synced registry.json", async () => {
     const root = join(tmpRoot, "layout-llm");
-    const result = await runNew({ team: "leads", name: "opener", shape: "sources", llm: true, force: false, root });
+    const result = await runNew({ team: "leads", name: "opener", shape: "sources", llm: true, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.files).toContain(join("dags", "leads", "opener", "prompts", "opener.txt"));
@@ -157,7 +199,7 @@ describe("runNew file layout", () => {
 
   it("--owner sets the fugue.yaml owner", async () => {
     const root = join(tmpRoot, "owner");
-    await runNew({ team: "leads", name: "owned", shape: "linear", llm: false, owner: "peter.hansen", force: false, root });
+    await runNew({ team: "leads", name: "owned", shape: "linear", llm: false, review: false, owner: "peter.hansen", force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "owned", "fugue.yaml"), "utf-8");
     expect(yaml).toContain("owner: peter.hansen");
   });
@@ -167,7 +209,7 @@ describe("runNew file layout", () => {
     // keys. The value is emitted double-quoted (JSON-escaped) by construction.
     const root = join(tmpRoot, "owner-hostile");
     const owner = "evil: true\ninjected: pwned";
-    await runNew({ team: "leads", name: "h", shape: "linear", llm: false, owner, force: false, root });
+    await runNew({ team: "leads", name: "h", shape: "linear", llm: false, review: false, owner, force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "h", "fugue.yaml"), "utf-8");
     // The whole owner sits inside one quoted scalar; the newline is escaped, so
     // `injected:` never appears as its own top-level mapping line.
@@ -177,9 +219,38 @@ describe("runNew file layout", () => {
 
   it("the LLM factory shape exports create<Pascal>Dag", async () => {
     const root = join(tmpRoot, "factory");
-    await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, force: false, root });
+    await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, review: false, force: false, root });
     const dagTs = await readFile(join(root, "dags", "leads", "lead-opener", "dag.ts"), "utf-8");
     expect(dagTs).toContain("export const createLeadOpenerDag");
+  });
+});
+
+// --------------------------------------------------------------------------
+// yamlScalar round-trip property — the whole input space, not one hostile example.
+// --------------------------------------------------------------------------
+
+describe("yamlScalar", () => {
+  it("round-trips ANY string through `owner: <scalar>` to the original value", () => {
+    // The invariant: whatever `s` is — a `:`-injection, a newline, a leading `#`,
+    // a trailing space, a YAML indicator — emitting it as a scalar and parsing
+    // `owner: <scalar>` yields exactly `{ owner: s }`. This subsumes the single
+    // hostile-owner example above and covers the trailing-space / leading-`#`
+    // branches the example never exercised.
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        const parsed = parseYaml(`owner: ${yamlScalar(s)}`) as { owner: unknown };
+        expect(parsed.owner).toBe(s);
+      }),
+    );
+  });
+
+  it("keeps conservative scalars plain (unquoted) and quotes the rest", () => {
+    expect(yamlScalar("peter.hansen")).toBe("peter.hansen");
+    expect(yamlScalar("a-b_c 1@2+3")).toBe("a-b_c 1@2+3");
+    // Trailing space, leading `#`, embedded `:` and newline all force quoting.
+    expect(yamlScalar("trailing ")).toBe(JSON.stringify("trailing "));
+    expect(yamlScalar("#comment")).toBe(JSON.stringify("#comment"));
+    expect(yamlScalar("evil: true")).toBe(JSON.stringify("evil: true"));
   });
 });
 
@@ -194,7 +265,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "existing.txt"), "keep me", "utf-8");
 
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.problems[0]).toContain("--force");
   });
@@ -205,7 +276,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "dag.ts"), "// stale", "utf-8");
 
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: true, root });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: true, root });
     expect(result.ok).toBe(true);
     const dagTs = await readFile(join(dir, "dag.ts"), "utf-8");
     expect(dagTs).not.toBe("// stale");
@@ -215,7 +286,7 @@ describe("runNew overwrite guard", () => {
     const root = join(tmpRoot, "guard-empty");
     const dir = join(root, "dags", "t", "x");
     await mkdir(dir, { recursive: true });
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
   });
 
@@ -228,7 +299,7 @@ describe("runNew overwrite guard", () => {
     await writeFile(join(root, "dags"), "i am a file, not a directory", "utf-8");
 
     await expect(
-      runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root }),
+      runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root }),
     ).rejects.toThrow();
   });
 });
@@ -257,6 +328,18 @@ describe("parseNewArgs", () => {
     const parsed = parseNewArgs(["--shape", "linear", "leads/x"]);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.options).toMatchObject({ team: "leads", name: "x", shape: "linear" });
+  });
+
+  it("parses --review on a linear shape", () => {
+    const parsed = parseNewArgs(["leads/x", "--shape", "linear", "--review"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.options.review).toBe(true);
+  });
+
+  it("rejects --review with a non-linear shape", () => {
+    const parsed = parseNewArgs(["leads/x", "--shape", "router", "--review"]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join()).toContain("--review");
   });
 
   it("reports missing shape", () => {

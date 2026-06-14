@@ -194,6 +194,8 @@ export type NewResult =
       readonly team: string;
       readonly name: string;
       readonly llm: boolean;
+      /** Whether a human-review gate (ADR-0060) was scaffolded. */
+      readonly review: boolean;
       /** Files written, relative to the root that contains `dags/`. */
       readonly files: readonly string[];
       /** Ordered, copy-pasteable follow-up commands for the author. */

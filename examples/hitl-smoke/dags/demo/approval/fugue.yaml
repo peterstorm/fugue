@@ -1,0 +1,5 @@
+# Per-DAG deployment config the host reads alongside dag.ts.
+# `team` is required and drives authorization isolation (the admin token can
+# access any team, which is what the smoke script uses).
+team: demo
+owner: smoke

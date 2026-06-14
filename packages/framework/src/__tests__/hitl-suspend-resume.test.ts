@@ -21,6 +21,7 @@ import { compileDagToMachine } from "../dag-runtime/machine.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
+import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanReviewOutcome, DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
 
@@ -32,7 +33,7 @@ const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unkno
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown>> = {},
+  overrides: NodeOverride = {},
 ): NodeDef<unknown, unknown> => ({
   // @ts-expect-error — branded ID test fixture
   id,
@@ -43,7 +44,7 @@ const makeNode = (
   requires: [],
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  ...overrides,
+  ...brandedOverride(overrides),
 });
 
 const makeCtx = (): NodeContext => ({

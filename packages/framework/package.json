@@ -1,6 +1,6 @@
 {
   "name": "@fuguejs/framework",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peterstorm/fugue.git",
@@ -33,6 +33,7 @@
     "cron-parser": "^4.9.0",
     "openai": "^6.35.0",
     "ts-pattern": "^5.9.0",
+    "yaml": "^2.8.3",
     "zod": "^4.3.6"
   },
   "peerDependencies": {

@@ -27,6 +27,7 @@ import {
   RecordingObserver,
   runDag,
   defineDag,
+  DAG_INPUT,
   createFetchNode,
   createTransformNode,
   createLlmNode,
@@ -284,7 +285,7 @@ console.log("\n=== Case 2: LLM with tool calls (CRM deal lookup) ===");
   const dag = defineDag({
     id: "deal-analysis-dag",
     nodes: { "deal-analysis": toolNode },
-    edges: [],
+    edges: [{ from: DAG_INPUT, to: "deal-analysis" }],
     outputNodeId: "deal-analysis",
   });
 
@@ -465,6 +466,7 @@ console.log("\n=== Case 3: Multi-node DAG (fetch → parallel analysis → guard
       "consistency-check": consistencyGuardrail,
     },
     edges: [
+      { from: DAG_INPUT, to: "fetch-customer" },
       { from: "fetch-customer", to: "analyze-sentiment" },
       { from: "fetch-customer", to: "assess-risk" },
       { from: "analyze-sentiment", to: "assemble-report" },
@@ -612,7 +614,7 @@ console.log("\n=== Case 4: Parallel tool dispatch (weather + calendar in one tur
   const dag = defineDag({
     id: "morning-briefing-dag",
     nodes: { "morning-briefing": briefingNode },
-    edges: [],
+    edges: [{ from: DAG_INPUT, to: "morning-briefing" }],
     outputNodeId: "morning-briefing",
   });
 
@@ -698,7 +700,7 @@ console.log("\n=== Case 5: Tool call failure (exercises error spans) ===");
   const dag = defineDag({
     id: "kb-qa-dag",
     nodes: { "kb-search": node },
-    edges: [],
+    edges: [{ from: DAG_INPUT, to: "kb-search" }],
     outputNodeId: "kb-search",
   });
 
@@ -788,7 +790,7 @@ console.log("\n=== Case 6: Eval judge node (summary quality assessment) ===");
   const dag = defineDag({
     id: "eval-judge-test",
     nodes: { "prepare-eval-input": transformToJudgeInput },
-    edges: [],
+    edges: [{ from: DAG_INPUT, to: "prepare-eval-input" }],
     outputNodeId: "prepare-eval-input",
     evalJudges: [evalJudge],
   });

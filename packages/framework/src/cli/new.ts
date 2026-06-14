@@ -2,7 +2,11 @@
 // string builders in `new-templates.ts`; the only side effect is writing files.
 //
 //   fugue new <team>/<name> --shape <linear|fan-out|diamond|router|sources>
-//             [--llm] [--owner <owner>] [--dir <root>] [--force]
+//             [--llm] [--review] [--owner <owner>] [--dir <root>] [--force]
+//
+// `--review` adds a human-review gate (ADR-0060) — a `createHumanReviewNode` that
+// pauses the run for an approve/reject decision. Currently supported only with
+// `--shape linear`; for other shapes, gate a node by hand with `withHumanReview`.
 //
 // Generates, under `<root>/dags/<team>/<name>/`:
 //   * dag.ts      — a lint-clean DAG for the chosen shape (current model ids,
@@ -34,6 +38,8 @@ export interface NewOptions {
   readonly name: string;
   readonly shape: Shape;
   readonly llm: boolean;
+  /** Add a human-review gate (ADR-0060). Linear shape only. */
+  readonly review: boolean;
   readonly owner?: string;
   /** Root dir that contains `dags/`; defaults to `process.cwd()`. */
   readonly root?: string;
@@ -74,6 +80,7 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParseNewE
   let owner: string | undefined;
   let root: string | undefined;
   let llm = false;
+  let review = false;
   let force = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -99,6 +106,9 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParseNewE
       })
       .with("--llm", () => {
         llm = true;
+      })
+      .with("--review", () => {
+        review = true;
       })
       .with("--force", () => {
         force = true;
@@ -136,10 +146,21 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParseNewE
     problems.push(`unknown --shape '${shape}' (one of: ${SHAPES.join(", ")})`);
   }
 
+  // `--review` is a human-review gate (an aspect) — but the scaffold only knows
+  // where to place it in a linear chain. For other shapes, gate a node by hand
+  // with `withHumanReview`. Reject the combination fail-fast rather than silently
+  // dropping the flag. (A missing/unknown shape is already reported above.)
+  if (review && shape !== undefined && (SHAPES as readonly string[]).includes(shape) && shape !== "linear") {
+    problems.push(
+      "--review is currently supported only with --shape linear " +
+        "(gate a node in other shapes with withHumanReview)",
+    );
+  }
+
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
-    options: { team, name, shape: shape as Shape, llm, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) },
+    options: { team, name, shape: shape as Shape, llm, review, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) },
   };
 };
 
@@ -180,6 +201,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     team: options.team,
     pascal: pascalCase(options.name),
     llm: options.llm,
+    review: options.review,
   };
   const scaffold = buildScaffold(options.shape, ctx);
 
@@ -201,10 +223,13 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     // Write prompts/registry.json as part of the same scaffold write batch so
     // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
     // is always new → version 1.0.0, so the registry is computed in-memory here
-    // rather than via a separate `prompts sync` post-step — keeping the scaffold
-    // all-or-nothing (no window where a written .txt has no matching registry
-    // entry). Format matches `runPromptsSync` byte-for-byte (2-space JSON +
-    // trailing newline) so a later `prompts sync`/`check` sees no drift.
+    // rather than via a separate `prompts sync` post-step. Computing it in-process
+    // (no post-step) means a successful run never leaves a written .txt without a
+    // matching registry entry. This is in-process ordering, NOT crash atomicity:
+    // a mid-batch IO failure (ENOSPC/EACCES) still propagates the real cause, but
+    // can leave a partially-written scaffold dir behind. Format matches
+    // `runPromptsSync` byte-for-byte (2-space JSON + trailing newline) so a later
+    // `prompts sync`/`check` sees no drift.
     const registry = {
       [scaffold.prompt.name]: {
         version: "1.0.0",
@@ -231,6 +256,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     team: options.team,
     name: options.name,
     llm: options.llm,
+    review: options.review,
     files: written,
     nextSteps,
   };

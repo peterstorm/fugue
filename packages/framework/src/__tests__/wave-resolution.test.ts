@@ -11,6 +11,7 @@ import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
 import type { Decision } from "../dag-runtime/routing.js";
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ const mkNodeDef = (id: string, opts?: { humanReview?: { prompt: string } }): Nod
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
   run: async (i: unknown) => ({ ok: true, value: i } as any),
-  ...(opts?.humanReview ? { humanReview: opts.humanReview } : {}),
+  ...(opts?.humanReview ? { humanReview: { prompt: nonEmptyString(opts.humanReview.prompt) } } : {}),
 });
 
 const mkEdge = (from: string, to: string): EdgeDef => ({
@@ -53,10 +54,10 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     defaultRetryLimit: dag.defaultRetryLimit,
     retryLimits: dag.retryLimits,
     humanReviewNodeIds: overrides.humanReviewNodeIds ?? new Set(
-      (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => n.id),
+      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => n.id),
     ),
     humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
-      (dag.nodes ?? []).filter((n: any) => n.humanReview !== undefined).map((n: any) => [n.id, n.humanReview!.prompt] as const),
+      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => [n.id, n.humanReview!.prompt] as const),
     ),
     edges: dag.edges ?? [],
     confidenceByNode: new Map(),

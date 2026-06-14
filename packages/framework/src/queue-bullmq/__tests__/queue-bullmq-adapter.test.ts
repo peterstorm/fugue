@@ -568,10 +568,13 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
       failedEvents.push({ id, err, attemptsMade });
     });
 
+    // attempts: 2 so the first throw is a MID-RETRY failure — per the WorkerHandle
+    // contract (queue/types.ts), onFailed fires only mid-retry (attempts < max);
+    // a terminal failure (attempts:1) routes to onExhausted instead.
     await queue.enqueue(
       "fail-j1",
       { state: { kind: "pending" }, context: { value: 0 } },
-      { attempts: 1 },
+      { attempts: 2 },
     );
 
     await new Promise<void>((resolve) => {
@@ -612,10 +615,12 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
       throw new Error("onFailed handler async rejection");
     });
 
+    // attempts: 2 so the first throw is a mid-retry failure that fires onFailed
+    // (whose rejection re-emits as worker "error"); see the onFailed test above.
     await queue.enqueue(
       "err-j1",
       { state: { kind: "pending" }, context: { value: 0 } },
-      { attempts: 1 },
+      { attempts: 2 },
     );
 
     await new Promise<void>((resolve) => {

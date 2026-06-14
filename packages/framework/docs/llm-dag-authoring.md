@@ -753,17 +753,23 @@ const dag = defineDag({
 
 ### With retries and human review
 
-`humanReview` is a field on `NodeDef`, not on the factory configs. Apply it by
-spreading the factory result and adding the field — the node record entry is
-the right place for any per-node `NodeDef` field (retries, human review, etc.).
+A **human-review gate** (ADR-0060) pauses a run until a human decides
+(approve / reject / approve-with-edit / reroute). Use the first-class helpers:
+`createHumanReviewNode` for a typed passthrough gate, or
+`withHumanReview(node, { prompt })` to gate a node that *also* does work (e.g. an
+LLM draft you want approved before it ships). Setting the gate routes the run to
+the durable state machine; the host wires the resume machinery
+(`RunOptions.onHumanReview`) — the DAG only declares the gate. See
+[`examples/10-human-review.ts`](./examples/10-human-review.ts), or scaffold one
+with `fugue new <team>/<name> --shape linear --review`.
 
 ```ts
-const reviewNode = createTransformNode({
-  id: "review",
-  inputSchema: ProcessedSchema,
-  outputSchema: ProcessedSchema,
-  transform: (input) => ok(input),
-});
+import {
+  createHumanReviewNode,
+  createTransformNode,
+  defineDag,
+  ok,
+} from "@fuguejs/framework";
 
 const dag = defineDag({
   id: "durable",
@@ -775,10 +781,13 @@ const dag = defineDag({
       outputSchema: ProcessedSchema,
       transform: (input) => ok(processData(input)),
     }),
-    "review": {
-      ...reviewNode,
-      humanReview: { prompt: "Please review the processed data" }, // pauses here
-    },
+    // Typed passthrough gate: the run pauses here; the reviewer sees `process`'s
+    // output (and may edit it via approve-with-edit).
+    "review": createHumanReviewNode({
+      id: "review",
+      schema: ProcessedSchema,
+      prompt: "Please review the processed data",
+    }),
   },
   edges: [
     { from: "fetch", to: "process" },
@@ -789,6 +798,19 @@ const dag = defineDag({
   retryLimits: { "fetch": 5 },   // fetch gets more retries
 });
 ```
+
+To gate a node that performs work — rather than inserting a separate passthrough —
+wrap it with `withHumanReview`, which preserves the node's input/output types:
+
+```ts
+"process": withHumanReview(
+  createTransformNode({ id: "process", inputSchema, outputSchema, transform }),
+  { prompt: "Approve the processed data before continuing" },
+),
+```
+
+Per-node `NodeDef` fields that have *no* factory option (e.g. `retry`) are still
+applied by spreading the factory result: `{ ...node, retry: { /* … */ } }`.
 
 ### DAG factory with injected seams (testability)
 
@@ -1048,6 +1070,7 @@ Writes under `dags/<team>/<name>/` (relative to the cwd, or `--dir <root>`):
 |---|---|
 | `--shape <shape>` | **Required.** One of `linear`, `fan-out`, `diamond`, `router`, `sources`. |
 | `--llm` | Add an LLM node (bucketed confidence) + `prompts/` + synced `registry.json`. The DAG becomes a factory (`create<Name>Dag({ model })`) so a test can pin the model seam. |
+| `--review` | Add a human-review gate (ADR-0060) — a `createHumanReviewNode` that pauses the run for an approve/reject decision. **`--shape linear` only**; for other shapes, gate a node by hand with `withHumanReview`. |
 | `--owner <owner>` | Set `fugue.yaml`'s `owner`. |
 | `--dir <root>` | Root that contains `dags/`. Defaults to the current directory. |
 | `--force` | Overwrite a non-empty target directory. |

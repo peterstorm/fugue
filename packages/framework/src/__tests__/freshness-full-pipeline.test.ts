@@ -18,6 +18,7 @@ import { DAG_INPUT } from "../types/ids.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { ok } from "../types/result.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
+import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent, HumanInterventionEvent } from "../types/events.js";
 
 // ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown>> = {},
+  overrides: NodeOverride = {},
 ): NodeDef<unknown, unknown> => ({
   // @ts-expect-error — branded ID test fixture
   id,
@@ -37,7 +38,7 @@ const makeNode = (
   requires: [] as const,
   sideEffects: NO_SIDE_EFFECTS,
   confidence: NO_CONFIDENCE,
-  ...overrides,
+  ...brandedOverride(overrides),
 });
 
 // ---------------------------------------------------------------------------

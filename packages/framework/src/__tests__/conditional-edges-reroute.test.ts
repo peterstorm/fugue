@@ -8,6 +8,7 @@ import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
+import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
 import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
@@ -16,7 +17,7 @@ const noop = async () => ok(undefined as unknown);
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown>> = {},
+  overrides: NodeOverride = {},
 ): NodeDef<unknown, unknown> => ({
   // @ts-expect-error — branded ID test fixture
   id,
@@ -27,7 +28,7 @@ const makeNode = (
   requires: [],
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  ...overrides,
+  ...brandedOverride(overrides),
 });
 
 const makeCtx = (): NodeContext => ({
@@ -69,7 +70,7 @@ describe("conditional edges — reroute", () => {
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: unknown) => (v as { kind?: string } | null)?.kind === "yes" } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 1,

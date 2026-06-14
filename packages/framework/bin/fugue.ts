@@ -7,7 +7,7 @@
 //                          as JSON. Exit 0 on success, 1 on failure.
 //   fugue describe <path>  Print a structured summary of a DAG file:
 //                          input/output schemas, waves, prompts, capabilities.
-//   fugue new <team>/<name> --shape <shape> [--llm]
+//   fugue new <team>/<name> --shape <shape> [--llm] [--review]
 //                          Scaffold a compliant DAG directory under dags/.
 //
 // All output is JSON on stdout. Unexpected errors land on stderr with a
@@ -35,6 +35,7 @@ Commands:
   new <team>/<name>        Scaffold a compliant DAG directory under dags/.
       --shape <shape>      Required: linear | fan-out | diamond | router | sources
       --llm                Add an LLM node + prompts/ + synced registry.json
+      --review             Add a human-review gate (ADR-0060); --shape linear only
       --owner <owner>      Set fugue.yaml owner (optional)
       --dir <root>         Root that contains dags/ (defaults to cwd)
       --force              Overwrite a non-empty target directory

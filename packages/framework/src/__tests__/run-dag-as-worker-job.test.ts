@@ -8,6 +8,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
+import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { DagDef } from "../types/dag.js";
 import { runDagAsWorkerJob } from "../executor/run-dag.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -19,7 +20,7 @@ const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unkno
 
 const mkNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown>> = {},
+  overrides: NodeOverride = {},
 ): NodeDef<unknown, unknown> => ({
   // @ts-expect-error — branded ID test fixture
   id,
@@ -30,7 +31,7 @@ const mkNode = (
   requires: [],
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  ...overrides,
+  ...brandedOverride(overrides),
 });
 
 const mkCtx = (): NodeContext => ({

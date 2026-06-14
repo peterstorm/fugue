@@ -1,0 +1,23 @@
+{
+  "name": "@fuguejs/hitl-smoke",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turnkey HITL (ADR-0060) smoke test — durable suspend/approve/resume over the HTTP API, no Azure/Teams creds.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "smoke": "bash run.sh"
+  },
+  "dependencies": {
+    "@fuguejs/framework": "workspace:*"
+  },
+  "devDependencies": {
+    "@fuguejs/host": "workspace:*",
+    "@types/bun": "latest",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "zod": "^4.3.6"
+  }
+}

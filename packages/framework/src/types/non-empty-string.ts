@@ -27,3 +27,19 @@ export type NonEmptyString = string & { readonly [__nonEmptyStringBrand]: void }
  */
 export const asNonEmptyString = (s: string): NonEmptyString | undefined =>
   s.trim() !== "" ? (s as NonEmptyString) : undefined;
+
+/**
+ * Throwing smart constructor — the gateway for callers that treat a blank value
+ * as a programmer error rather than an absent option (mirrors `nodeId`/`dagId`
+ * in `ids.js`, which throw, alongside the Option-returning `asNonEmptyString`).
+ * Returns the ORIGINAL (untrimmed) string; throws if it is empty or all
+ * whitespace. Prefer this when the non-blank invariant is a precondition the
+ * caller is asserting, not a value it is parsing-or-skipping.
+ */
+export const nonEmptyString = (s: string): NonEmptyString => {
+  const parsed = asNonEmptyString(s);
+  if (parsed === undefined) {
+    throw new Error("nonEmptyString: value must contain at least one non-whitespace character");
+  }
+  return parsed;
+};

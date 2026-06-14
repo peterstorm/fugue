@@ -1,0 +1,95 @@
+import type { z } from "zod";
+import type { NodeDef, Capability } from "../types/node.js";
+import type { FrameworkError } from "../types/errors.js";
+import { ok } from "../types/result.js";
+import { asNonEmptyString } from "../types/non-empty-string.js";
+import { createTransformNode } from "./transform.js";
+
+/**
+ * Human-in-the-loop authoring helpers (ADR-0060).
+ *
+ * A node carrying a `humanReview` config is a GATE: when the run reaches it, the
+ * DAG SUSPENDS after the node completes and awaits a human decision (approve /
+ * reject / approve-with-edit / reroute) delivered by the host's HITL engine.
+ * Setting the field is what routes the run to the durable state-machine path —
+ * the host supplies `RunOptions.onHumanReview`; the DAG author only declares the
+ * gate.
+ *
+ * `humanReview` is deliberately NOT a field on the per-kind factory configs
+ * (`createTransformNode` etc.) — gating is an ASPECT you add to a node, not a
+ * node kind. These two helpers are the front door:
+ *   - `withHumanReview(node, { prompt })` — gate ANY node (a fetch, an LLM draft);
+ *     the reviewer sees that node's output.
+ *   - `createHumanReviewNode({ id, schema, prompt })` — the common "pause to
+ *     review the previous step's output" gate (a typed passthrough).
+ */
+
+/**
+ * Attach a human-review gate to an existing node, preserving its input/output,
+ * error, and capability types. Use when the gated node ALSO does work (e.g. an
+ * LLM that drafts a message you want approved before it is sent) — the reviewer
+ * reviews (and may edit, via `approve-with-edit`) that node's output.
+ *
+ * This is the single choke point for both helpers and the SOLE gateway that
+ * parses a raw prompt string into the `NonEmptyString` the gate stores. Throws
+ * at construction (parse-don't-validate) if `prompt` is empty or whitespace:
+ * the prompt is the entire human-facing payload of the gate — what the reviewer
+ * reads to decide — so a blank one is an illegal state the brand makes
+ * unrepresentable downstream.
+ *
+ * Also throws if `node` is ALREADY gated: a node carries at most one review
+ * gate. Re-gating would silently spread the new config over the old, dropping
+ * the first prompt — another illegal state, not a last-write-wins overwrite.
+ */
+export const withHumanReview = <I, O, E extends FrameworkError, R extends readonly Capability[]>(
+  node: NodeDef<I, O, E, R>,
+  config: { readonly prompt: string },
+): NodeDef<I, O, E, R> => {
+  const prompt = asNonEmptyString(config.prompt);
+  if (prompt === undefined) {
+    throw new Error(
+      `human-review prompt must be a non-empty string (node '${node.id}'): the prompt is what the reviewer reads to decide`,
+    );
+  }
+  if (node.humanReview !== undefined) {
+    throw new Error(
+      `node '${node.id}' already carries a human-review gate (prompt '${node.humanReview.prompt}'): a node can be gated at most once — re-gating would silently drop the first prompt`,
+    );
+  }
+  return { ...node, humanReview: { prompt } };
+};
+
+/** Config for `createHumanReviewNode`. */
+export interface HumanReviewNodeConfig<T> {
+  readonly id: string;
+  /**
+   * Schema of the value under review. It is BOTH the input and the output: the
+   * gate forwards its input unchanged, so the reviewer sees exactly the upstream
+   * node's output (and `approve-with-edit` replaces a value of this same shape).
+   */
+  readonly schema: z.ZodType<T>;
+  /** Prompt shown to the reviewer. */
+  readonly prompt: string;
+}
+
+/**
+ * Create a passthrough human-review gate: a node that forwards its input
+ * unchanged and SUSPENDS for a human decision. The reviewer reviews (and may
+ * edit) the upstream node's output. Built on `createTransformNode` +
+ * `withHumanReview`, so it inherits the same `requires: []`, pure-transform
+ * profile.
+ *
+ * For gating a node that also performs work, use `withHumanReview` instead.
+ */
+export const createHumanReviewNode = <T>(
+  config: HumanReviewNodeConfig<T>,
+): NodeDef<T, T, FrameworkError, readonly []> =>
+  withHumanReview(
+    createTransformNode({
+      id: config.id,
+      inputSchema: config.schema,
+      outputSchema: config.schema,
+      transform: (input) => ok(input),
+    }),
+    { prompt: config.prompt },
+  );
