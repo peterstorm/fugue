@@ -198,7 +198,6 @@ export const runStateMachine = async <S, E, C>(
     // CONTROL FLOW: This throw is caught by handleKernelError() in
     // run-dag-stateful.ts which converts it back to Err<FrameworkError>.
     // See ADR-0005 for the two-layer retry rationale.
-    // See ADR 0005 for the two-layer retry rationale.
     if (isFailed) {
       throw new Error(
         `State machine reached failed terminal state: ${JSON.stringify(state)}`,

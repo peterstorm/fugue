@@ -203,6 +203,33 @@ is a conscious decision, not an oversight.
   "list pending markers for run" store/port operation), disproportionate to a
   sub-second recoverable window. Deferred to a dedicated design cycle.
 
+- **Duplicate approval → redundant resume slice.** `recordDecision` is a
+  read-check-write (`isPending` → `putDecision` → `enqueue`) that is not a single
+  atomic compare-and-set. Two valid approvals racing the *same* open gate (e.g. an
+  HTTP call and a Teams click landing together) can both pass `isPending` and both
+  `enqueue`. This does **not** double-execute the gated node nor emit a duplicate
+  card for the resolved gate: the worker's single-flight Redis lock
+  (`run-queue.ts`) serializes execution, and the second job hits the
+  terminal/already-advanced guards in `processRun` (the first job consumed the
+  decision and advanced past the gate before releasing the lock). The only cost is
+  one redundant worker slice. `putDecision` is last-writer-wins on the decision
+  *value*, so two *different* actions (approve then reject) within the window
+  resolve to whichever wrote last — acceptable for v1; a true CAS (`SET` with a
+  pending-marker guard, or making the enqueue idempotent per `(runId, nodeId)`)
+  would tighten it if approve/reject contention ever becomes a concern.
+
+- **Best-effort `running` status write asserts meta-key health only at settle.**
+  `processRun` writes `setStatus(running)` best-effort (logs and proceeds on
+  failure) because the *checkpoint* (`ckpt` key) is the durability authority, not
+  the *status* (`meta` key). Under a narrow partial-failure mode where the meta
+  key specifically is failing writes while the ckpt key succeeds, a (possibly
+  side-effecting) resume slice runs before the meta-write fault surfaces — the
+  *settle* `setStatus` is checked and returns `err`, triggering a queue retry from
+  the last durable checkpoint. Bounded by the single-flight lock; the trade-off is
+  that meta-write health is asserted at settle time, not slice entry. Accepted:
+  treating the early write as fatal would fail-fast a run whose checkpoint is
+  perfectly durable.
+
 ## References
 
 - ADR-0013 — `onHumanReview` hook crash retry (`retrying-hook`)

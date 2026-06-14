@@ -402,7 +402,7 @@ export const runDagStatefulOutcome = async <I, O>(
 };
 
 // ---------------------------------------------------------------------------
-// unexpectedNonTerminal — invariant violation: runStateMachine returned without a terminal state
+// runDagStateful — back-compat flat Result<O> entry point (ADR-0021)
 // ---------------------------------------------------------------------------
 
 /**
@@ -431,6 +431,10 @@ export const runDagStateful = async <I, O>(
   }
   return ok(outcome.value.output);
 };
+
+// ---------------------------------------------------------------------------
+// unexpectedNonTerminal — invariant violation: runStateMachine returned without a terminal state
+// ---------------------------------------------------------------------------
 
 const unexpectedNonTerminal = <O>(
   rootSpan: Span,

@@ -10,15 +10,31 @@ import type { RunRecord } from "../../types.js";
 import { createRedisRunStore } from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
 
-// A minimal in-memory RedisPort honoring get/set/del/setNx (TTL ignored).
-const fakeRedis = (): RedisPort => {
+/** A `set`/`setNx` opts record so a test can assert the TTL was passed (SET …EX). */
+type WriteOpts = { expiresInSec?: number } | undefined;
+
+/**
+ * A minimal in-memory RedisPort honoring get/set/del/setNx that ALSO records the
+ * opts each write was given, keyed by key. The store layer must pass
+ * `{ expiresInSec: ttlSec }` on every key-creating write so a crash never leaves
+ * a TTL-less key (mirrors the lock assertion in run-queue.test.ts).
+ */
+type RecordingRedis = RedisPort & {
+  readonly setOpts: Map<string, WriteOpts>;
+  readonly setNxOpts: Map<string, WriteOpts>;
+};
+const fakeRedis = (): RecordingRedis => {
   const m = new Map<string, string>();
+  const setOpts = new Map<string, WriteOpts>();
+  const setNxOpts = new Map<string, WriteOpts>();
   return {
+    setOpts,
+    setNxOpts,
     async get(k): Promise<Result<string | null, HostError>> { return ok(m.get(k) ?? null); },
-    async set(k, v): Promise<Result<string | null, HostError>> { m.set(k, v); return ok("OK"); },
+    async set(k, v, opts): Promise<Result<string | null, HostError>> { setOpts.set(k, opts); m.set(k, v); return ok("OK"); },
     async del(k): Promise<Result<number, HostError>> { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan(): Promise<Result<{ cursor: string; keys: string[] }, HostError>> { return ok({ cursor: "0", keys: [...m.keys()] }); },
-    async setNx(k, v): Promise<Result<boolean, HostError>> { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async setNx(k, v, opts): Promise<Result<boolean, HostError>> { setNxOpts.set(k, opts); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
   };
 };
 
@@ -59,6 +75,30 @@ describe("RedisRunStore", () => {
     const got = await store.get(r.runId);
     expect(got.ok).toBe(true);
     if (got.ok) expect(got.value).toEqual(r);
+  });
+
+  it("create applies the configured TTL to both the meta (SET NX EX) and checkpoint keys", async () => {
+    const redis = fakeRedis();
+    const store = createRedisRunStore(redis, { ttlSec: 4242 });
+    const r = record();
+    await store.create(r);
+    // Meta is created atomically WITH its TTL (never a TTL-less key on a crash).
+    expect(redis.setNxOpts.get("fugue:hitl:run:run-1")).toEqual({ expiresInSec: 4242 });
+    // The checkpoint key is bounded too.
+    expect(redis.setOpts.get("fugue:hitl:ckpt:run-1")).toEqual({ expiresInSec: 4242 });
+  });
+
+  it("saveCheckpoint and setStatus re-apply the TTL (sliding expiry, never a TTL-less write)", async () => {
+    const redis = fakeRedis();
+    const store = createRedisRunStore(redis, { ttlSec: 7 });
+    const r = record();
+    await store.create(r);
+
+    await store.saveCheckpoint(r.runId, '{"state":{"kind":"suspended"}}');
+    expect(redis.setOpts.get("fugue:hitl:ckpt:run-1")).toEqual({ expiresInSec: 7 });
+
+    await store.setStatus(r.runId, { kind: "completed", output: 1 });
+    expect(redis.setOpts.get("fugue:hitl:run:run-1")).toEqual({ expiresInSec: 7 });
   });
 
   it("create is single-shot (duplicate run id errs)", async () => {
@@ -165,6 +205,21 @@ describe("RedisDecisionStore", () => {
     const second = await store.markPending(runId, nodeId);
     expect(first.ok && first.value).toBe(true);
     expect(second.ok && second.value).toBe(false);
+  });
+
+  it("markPending applies the configured TTL to the pending marker (SET NX EX)", async () => {
+    const redis = fakeRedis();
+    const store = createRedisDecisionStore(redis, { ttlSec: 9001 });
+    await store.markPending(runId, nodeId);
+    // Pending marker can never exist without an expiry (crash-safe).
+    expect(redis.setNxOpts.get(`fugue:hitl:pending:${runId}\x1f${nodeId}`)).toEqual({ expiresInSec: 9001 });
+  });
+
+  it("putDecision applies the configured TTL to the decision key", async () => {
+    const redis = fakeRedis();
+    const store = createRedisDecisionStore(redis, { ttlSec: 1234 });
+    await store.putDecision(runId, nodeId, approve);
+    expect(redis.setOpts.get(`fugue:hitl:decision:${runId}\x1f${nodeId}`)).toEqual({ expiresInSec: 1234 });
   });
 
   it("putDecision then getDecision round-trips the action", async () => {

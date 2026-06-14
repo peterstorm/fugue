@@ -107,6 +107,9 @@ const inMemoryRunQueue = () => {
 const inMemoryDecisionStore = () => {
   const pendingMarks = new Set<string>();
   const decisions = new Map<string, HumanAction>();
+  // `clears` counts gate resolutions (decision consumed): the hook's
+  // `onDecisionConsumed` clears the gate once the post-gate checkpoint is durable.
+  const clears: string[] = [];
   const key = (runId: RunId, nodeId: NodeId) => `${runId}:${nodeId}`;
   const port: DecisionStorePort = {
     async markPending(runId, nodeId) {
@@ -127,12 +130,13 @@ const inMemoryDecisionStore = () => {
     },
     async clear(runId, nodeId) {
       const k = key(runId, nodeId);
+      clears.push(k);
       pendingMarks.delete(k);
       decisions.delete(k);
       return ok(undefined);
     },
   };
-  return { port, pendingMarks, decisions };
+  return { port, pendingMarks, decisions, clears };
 };
 
 const recordingNotifier = () => {
@@ -426,6 +430,52 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
 
     expect(observed).toEqual([{ statusAtNotify: "running", decisionOk: true }]);
     expect(store.runs.get(runId)!.status.kind).toBe("completed");
+  });
+
+  it("two valid approvals racing the SAME open gate → execute once, notify once, consume once (ADR-0060 duplicate-approval window)", async () => {
+    // ADR-0060 "Known timing window → Duplicate approval": two approvals can both
+    // observe `isPending === true` and both `enqueue` (the queue is intentionally
+    // non-idempotent; resume re-enqueues must never be dropped). The resolved
+    // behaviour: the single-flight lock + terminal/already-advanced guard mean the
+    // gated node executes EXACTLY ONCE; the second job is a redundant no-op slice,
+    // with NO duplicate notification and the decision consumed exactly once.
+    let draftRuns = 0;
+    let reviewRuns = 0;
+    const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
+    const { service, store, queue, dec, notif } = setup(dag);
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const runId = started.value.runId;
+
+    await queue.drain(); // park at the review gate + notify (1)
+    expect(store.runs.get(runId)!.status.kind).toBe("suspended");
+    expect(notif.sent).toHaveLength(1);
+
+    // TWO approvals race the SAME open gate: both see the pending marker, both
+    // record (idempotent — same gate, last write wins), both enqueue a wakeup.
+    const first = await service.recordDecision(runId, "review" as NodeId, { kind: "approve", actor: "Alice" });
+    const second = await service.recordDecision(runId, "review" as NodeId, { kind: "approve", actor: "Bob" });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    // Both passed `isPending` and both enqueued — TWO wakeup jobs are now queued.
+    expect(queue.pending).toHaveLength(2);
+
+    // Drain both jobs. The first resumes → completes + consumes (clears) the gate;
+    // the second hits the terminal guard in processRun and is a no-op slice.
+    await queue.drain();
+
+    const done = store.runs.get(runId)!;
+    expect(done.status.kind).toBe("completed");
+    if (done.status.kind === "completed") expect(done.status.output).toBe("review-out");
+
+    // EXACTLY-ONCE effects despite the duplicate approval:
+    expect(draftRuns).toBe(1);                                    // upstream node ran once
+    expect(reviewRuns).toBe(1);                                   // gated node executed once
+    expect(notif.sent).toHaveLength(1);                           // no duplicate notification
+    expect(dec.clears).toEqual([`${runId}:review`]);             // decision consumed exactly once
+    expect(dec.decisions.has(`${runId}:review`)).toBe(false);     // and not left dangling
+    expect(queue.pending).toHaveLength(0);                        // both jobs drained
   });
 
   it("processRun for a terminal (completed) run is a no-op — never re-executes", async () => {

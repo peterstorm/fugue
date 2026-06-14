@@ -56,7 +56,8 @@ const isEnvelope = (v: unknown): v is Envelope => {
  * serialized checkpoint. The returned handle persists each checkpoint back to
  * the store; `updateProgress`/`appendEvent` are intentional no-ops here (run
  * progress is derived from `RunStatus`; HITL runs carry only the latest
- * `{state, context}` checkpoint, with no per-transition event journal — see Fix A).
+ * `{state, context}` checkpoint, with no per-transition event journal — see
+ * ADR-0060 Consequences).
  *
  * Returns `err(internal-invariant-violated)` if the stored checkpoint is corrupt
  * (malformed JSON or an invalid envelope shape) rather than `as`-casting it in.
