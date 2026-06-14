@@ -107,6 +107,16 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
     wave: fc.nat(5),
   }),
+  // ADR-0060: the durable parked phase — the one serialized to Redis and replayed
+  // across restarts, exactly the event-log-replay scenario this property guards.
+  fc.record({
+    kind: fc.constant("suspended" as const),
+    nodeId: arbNodeId,
+    output: fc.oneof(fc.constant(null), fc.string(), fc.integer()),
+    prompt: fc.string({ maxLength: 20 }),
+    pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
+    wave: fc.nat(5),
+  }),
   fc.record({
     kind: fc.constant("retrying-hook" as const),
     nodeId: arbNodeId,
@@ -157,6 +167,12 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
       rerouteActiveSet: fc.constant(new Set<NodeId>()),
     }),
   ),
+  // ADR-0060: hook returned `pending` → park durably (awaiting-human → suspended,
+  // suspended → suspended, retrying-hook → suspended).
+  fc.record({
+    type: fc.constant("human-suspend" as const),
+    nodeId: arbNodeId,
+  }),
   fc.record({
     type: fc.constant("abort" as const),
     reason: fc.string({ maxLength: 20 }),

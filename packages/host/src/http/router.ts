@@ -21,6 +21,7 @@ import { listDagsHandler } from "./handlers/list-dags.js";
 import { createManifestHandler } from "./handlers/manifest.js";
 import { createRunDagHandler } from "./handlers/run-dag.js";
 import type { RunDagDeps } from "./handlers/run-dag.js";
+import { createGetRunHandler, createApproveRunHandler } from "./handlers/runs.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
 import type { LogPort } from "../ports.js";
@@ -45,6 +46,13 @@ export interface RouterDeps extends RunDagDeps, AuthMiddlewareDeps {
   readonly getHostState: () => HostState;
   readonly logger: LogPort;
   readonly adminHandlerDeps: AdminHandlerDeps;
+  /**
+   * Inbound Bot Framework activity handler (ADR-0060). When wired, mounts
+   * `POST /teams/messages` BEFORE the team-token auth middleware — Teams
+   * authenticates with a Bot Framework JWT (verified inside the handler), not a
+   * fugue team token. Undefined when the in-Teams transport isn't configured.
+   */
+  readonly teamsBot?: (input: { authHeader: string | undefined; activity: unknown }) => Promise<{ status: number; body?: unknown }>;
 }
 
 /**
@@ -69,6 +77,23 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   // ── Health routes (no auth, no concurrency guard) ────────────────────────
   app.get("/health", healthHandler);
   app.get("/readiness", readinessHandler);
+
+  // ── Bot Framework inbound endpoint (ADR-0060) ────────────────────────────
+  // Registered BEFORE the team-token auth middleware: Teams authenticates with
+  // a Bot Framework JWT (verified inside the handler), not a fugue team token.
+  if (deps.teamsBot) {
+    const teamsBot = deps.teamsBot;
+    app.post("/teams/messages", async (c) => {
+      let activity: unknown;
+      try {
+        activity = await c.req.json();
+      } catch {
+        return errorResponse(c, 400, "body-parse-failed", "Bot activity is not valid JSON");
+      }
+      const result = await teamsBot({ authHeader: c.req.header("authorization"), activity });
+      return result.body !== undefined ? c.json(result.body as object, result.status as 200) : c.body(null, result.status as 200);
+    });
+  }
 
   // ── Auth middleware (applied to all routes below) ────────────────────────
   app.use("*", createAuthMiddleware(deps));
@@ -101,6 +126,12 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   // POST /dags/:id/run
   const runDagHandler = createRunDagHandler(deps);
   app.post("/dags/:id/run", runDagHandler);
+
+  // ── HITL run routes (ADR-0060) — async status + approval ─────────────────
+  // Registered BEFORE the custom-route POST catch-all so the approval route
+  // binds rather than being swallowed as a custom DAG route.
+  app.get("/runs/:runId", createGetRunHandler(deps));
+  app.post("/runs/:runId/approve", createApproveRunHandler(deps));
 
   // ── Custom route overrides (DagRegistration.route / fugue.yaml route) ────
   // Registered as a POST fallback so hot-reloaded DAGs (whose routes change

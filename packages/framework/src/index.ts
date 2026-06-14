@@ -39,13 +39,23 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // DAG runtime — public surface only
 //
 // `runDag` and `runDagAsWorkerJob` are the sanctioned public entries.
-// `runDagStateful` (deprecated), `compileDagToMachine`, `buildDagExecutor`,
+// `runDagStateful` (the back-compat flat `Result<O>` entry for block-until-
+// decided callers, per ADR-0060 §4), `compileDagToMachine`, `buildDagExecutor`,
 // and `dagTransition` live on the `@fuguejs/framework/advanced` subpath
 // for callers building custom machines on the kernel — see `./advanced.ts`.
 // Keeping them off the main barrel signals that reaching for them is a
 // deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
-export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
+export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, HumanGatePayload, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
+// The synthetic node id the kernel attributes executor-level (non-node) crashes
+// to. Exported so hosts mapping their own infra failures onto a FrameworkError
+// reuse the validated sentinel instead of re-casting the raw string.
+export { EXECUTOR_NODE_ID } from "./dag-runtime/types.js";
+// Runtime guard + discriminant set for `DagPhase`, kept in lockstep with the
+// union by the compiler. Exported so a deserialization boundary (e.g. a host
+// reading a persisted checkpoint) can validate `state.kind` before driving an
+// exhaustive transition, rather than `as`-casting an unvalidated string in.
+export { DAG_PHASE_KINDS, isDagPhaseKind } from "./dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer

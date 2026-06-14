@@ -22,6 +22,7 @@
     "@fuguejs/fs": "workspace:*",
     "hono": "^4.7.11",
     "ioredis": "^5.10.1",
+    "jose": "^6.1.0",
     "ts-pattern": "^5.9.0",
     "zod": "^4.3.6"
   },

@@ -50,6 +50,39 @@ const makeRouterDeps = (tokenStore: TokenStorePort): RouterDeps => {
   };
 };
 
+describe("createRouter — Bot Framework /teams/messages mount (ADR-0060)", () => {
+  it("dispatches to the bot handler WITHOUT a fugue team token (own JWT auth)", async () => {
+    const calls: { authHeader: string | undefined; activity: unknown }[] = [];
+    const deps: RouterDeps = {
+      ...makeRouterDeps(createInMemoryTokenStore()),
+      teamsBot: async (input) => { calls.push(input); return { status: 200, body: { ok: true } }; },
+    };
+    const app = createRouter(deps);
+
+    // No Authorization header at all — the team-token middleware would 401, but
+    // this route is mounted before it and delegates auth to the bot handler.
+    const res = await app.request("/teams/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "conversationUpdate" }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect((calls[0]!.activity as { type: string }).type).toBe("conversationUpdate");
+  });
+
+  it("is absent (404) when no bot handler is wired", async () => {
+    const app = createRouter(makeRouterDeps(createInMemoryTokenStore()));
+    const res = await app.request("/teams/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ADMIN_TOKEN}` },
+      body: JSON.stringify({ type: "conversationUpdate" }),
+    });
+    // Falls through to the custom-route catch-all → no DAG at this route → 404.
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("createRouter — /admin/* defense-in-depth guard", () => {
   it("serves /health unauthenticated (registered before the auth middleware)", async () => {
     const app = createRouter(makeRouterDeps(createInMemoryTokenStore()));

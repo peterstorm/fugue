@@ -152,6 +152,19 @@ export const runStateMachine = async <S, E, C>(
       const dedupKey = dedupKeyFn(prevStateKey, attemptNumber, event);
       await job.appendEvent(event, dedupKey);
       await job.updateData({ state, context });
+      // ADR-0060: post-commit hook — fires ONLY after the post-state is durably
+      // persisted, so a caller's effectively-once side effect (e.g. consuming a
+      // human decision) is ordered strictly after durability. A crash between
+      // `updateData` and here leaves the side effect un-run, which is the safe
+      // direction: the decision is re-read on resume rather than lost. A throw
+      // is swallowed (the transition is already persisted) like `onTrace`.
+      if (opts.onCommitted !== undefined) {
+        try {
+          await opts.onCommitted({ prevState, event, state, context });
+        } catch (commitErr) {
+          log.error("[runStateMachine] onCommitted threw — ignoring to preserve durability:", commitErr);
+        }
+      }
       // Do not persist progress for failed states — the runner throws below
       // before reaching here in the failed branch, and FR-005 forbids
       // checkpointing terminal-failed.
@@ -185,13 +198,20 @@ export const runStateMachine = async <S, E, C>(
     // CONTROL FLOW: This throw is caught by handleKernelError() in
     // run-dag-stateful.ts which converts it back to Err<FrameworkError>.
     // See ADR-0005 for the two-layer retry rationale.
-    // See ADR 0005 for the two-layer retry rationale.
     if (isFailed) {
       throw new Error(
         `State machine reached failed terminal state: ${JSON.stringify(state)}`,
         { cause: { state, context } },
       );
     }
+
+    // ADR-0060: durable HALT. A halted state (e.g. `suspended` at a human gate)
+    // is non-terminal and non-failed, so it was checkpointed above — a later
+    // re-enqueue resumes from it. Break and return the paused state so the
+    // worker is freed. The check is post-transition only: a loop that STARTS in
+    // a halted state (a resumed job) re-enters via `!isTerminal` and re-runs the
+    // executor; the break fires only when a transition PRODUCES the halt here.
+    if (machine.isHalted?.(state)) break;
 
     // If terminal-succeeded, fall through to return below
     if (isTerminal) break;

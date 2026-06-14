@@ -17,25 +17,19 @@ import { match } from "ts-pattern";
 // stateProgress — maps DagPhase to a 0–100 progress value
 // ---------------------------------------------------------------------------
 
-const stateProgress = (phase: DagPhase): number => {
-  switch (phase.kind) {
-    case "pending":
-      return 0;
-    case "running":
-      return 10;
-    case "retrying":
-      return 10;
-    case "retrying-hook":
-      // Same progress as awaiting-human since we're still in the review phase.
-      return 50;
-    case "awaiting-human":
-      return 50;
-    case "succeeded":
-      return 100;
-    case "failed":
-      return 100;
-  }
-};
+const stateProgress = (phase: DagPhase): number =>
+  match(phase)
+    .with({ kind: "pending" }, () => 0)
+    .with({ kind: "running" }, () => 10)
+    .with({ kind: "retrying" }, () => 10)
+    // retrying-hook / awaiting-human / suspended are all the review phase.
+    // suspended is the durably-parked human gate (ADR-0060).
+    .with({ kind: "retrying-hook" }, () => 50)
+    .with({ kind: "awaiting-human" }, () => 50)
+    .with({ kind: "suspended" }, () => 50)
+    .with({ kind: "succeeded" }, () => 100)
+    .with({ kind: "failed" }, () => 100)
+    .exhaustive();
 
 // ---------------------------------------------------------------------------
 // isTerminal / isFailed
@@ -46,6 +40,11 @@ const isTerminal = (phase: DagPhase): boolean =>
 
 // retrying-hook is not failed (it's a transient retry state)
 const isFailed = (phase: DagPhase): boolean => phase.kind === "failed";
+
+// ADR-0060: `suspended` is a durable HALT — non-terminal, non-failed. The kernel
+// checkpoints it then breaks the run loop so the worker is freed while the run
+// is parked at a human gate awaiting an out-of-band decision.
+const isHalted = (phase: DagPhase): boolean => phase.kind === "suspended";
 
 // Retry detection for trace-outcome reporting. The DAG machine signals a retry
 // by transitioning *into* a retrying variant (`running → retrying` or
@@ -80,12 +79,14 @@ export const compileDagToMachine = (
   const waves: readonly (readonly NodeId[])[] = sortResult.value;
 
   const retryConfigs = new Map(
-    dag.nodes
-      .filter((n) => n.retry)
-      .map((n) => [n.id, {
-        backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000],
-        jitterRatio: n.retry!.jitterRatio ?? 0.2,
-      }] as const),
+    dag.nodes.flatMap((n) =>
+      n.retry
+        ? [[n.id, {
+            backoffMs: n.retry.backoffMs ?? [1000, 2000, 4000],
+            jitterRatio: n.retry.jitterRatio ?? 0.2,
+          }] as const]
+        : [],
+    ),
   );
 
   const initialContext: DagMachineContext = {
@@ -110,9 +111,9 @@ export const compileDagToMachine = (
     retryLimits: dag.retryLimits,
     humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
     humanReviewPrompts: new Map(
-      dag.nodes
-        .filter(n => n.humanReview !== undefined)
-        .map(n => [n.id, n.humanReview!.prompt] as const),
+      dag.nodes.flatMap((n) =>
+        n.humanReview !== undefined ? [[n.id, n.humanReview.prompt] as const] : [],
+      ),
     ),
     edges: dag.edges,
     confidenceByNode: new Map(),
@@ -129,6 +130,7 @@ export const compileDagToMachine = (
     },
     isTerminal,
     isFailed,
+    isHalted,
     stateProgress,
     isRetryTransition,
     // DagPhase key derivation — uses discriminant fields only to avoid
@@ -142,6 +144,7 @@ export const compileDagToMachine = (
         .with({ kind: "retrying" }, (p) => `retrying:${p.wave}:${p.nodeId}:${p.attempt}`)
         .with({ kind: "retrying-hook" }, (p) => `retrying-hook:${p.nodeId}:${p.attempt}`)
         .with({ kind: "awaiting-human" }, (p) => `awaiting-human:${p.nodeId}:${p.wave}`)
+        .with({ kind: "suspended" }, (p) => `suspended:${p.nodeId}:${p.wave}`)
         .with({ kind: "succeeded" }, () => "succeeded")
         .with({ kind: "failed" }, (p) => `failed:${p.error.kind}`)
         .exhaustive(),

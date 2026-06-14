@@ -1,0 +1,136 @@
+// run-queue.test.ts — single-flight lock + wakeup delivery (ADR-0060).
+//
+// Covers the three durability properties of the lock that the service-level
+// fakes can't (they use a lock-free fake queue):
+//   C2  the lock is acquired atomically WITH its TTL (SET NX EX), never a
+//       setNx-then-set that can strand a run on a crash in the gap.
+//   C1  a wakeup that LOSES the lock (another worker mid-slice) is RE-ENQUEUED
+//       (deferred), never dropped — otherwise a decided run parks forever.
+//   A1  a host-infra error from processRun is THROWN (so the queue retries),
+//       not swallowed, and the lock is released first.
+
+import { describe, it, expect } from "bun:test";
+import { ok, err } from "@fuguejs/framework";
+import type { Result, RunId, QueueBackend, JobLike, WorkerHandle, EnqueueOpts, QueueOpts } from "@fuguejs/framework";
+import type { RedisPort } from "../../../ports.js";
+import type { HostError } from "../../../domain/host-error.js";
+import { createRunQueue } from "../run-queue.js";
+
+const RUN = "run-1" as RunId;
+const lockKey = (runId: string) => `fugue:hitl:lock:${runId}`;
+
+// ── recording fake RedisPort ──────────────────────────────────────────────────
+const fakeRedis = (preset: Record<string, string> = {}) => {
+  const m = new Map<string, string>(Object.entries(preset));
+  const calls = { setNx: [] as { key: string; opts?: { expiresInSec?: number } }[], set: [] as string[], del: [] as string[] };
+  const redis: RedisPort = {
+    async get(k) { return ok(m.get(k) ?? null); },
+    async set(k, v, opts) { calls.set.push(k); m.set(k, v); return ok("OK"); },
+    async del(k) { calls.del.push(k); const had = m.delete(k); return ok(had ? 1 : 0); },
+    async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
+    async setNx(k, v, opts) { calls.setNx.push({ key: k, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+  };
+  return { redis, calls, m };
+};
+
+// ── fake QueueBackend: captures the worker fn + records enqueues ───────────────
+const fakeBackend = () => {
+  let workerFn: ((job: JobLike<RunId, unknown, null>) => Promise<void>) | undefined;
+  const enqueued: { id: string; delayMs?: number }[] = [];
+  let queueOpts: QueueOpts | undefined;
+  const backend: QueueBackend = {
+    createQueue(name, opts) {
+      queueOpts = opts;
+      return {
+        async enqueue(id: string, _data: { state: RunId; context: null }, eo?: EnqueueOpts) { enqueued.push({ id, delayMs: eo?.delayMs }); },
+        async drain() {},
+        async close() {},
+      } as never;
+    },
+    createWorker(_name, process, _opts) {
+      workerFn = process as never;
+      return { onFailed() {}, onExhausted() {}, onError() {}, async close() {} } as WorkerHandle;
+    },
+    async close() {},
+  };
+  const job = (state: RunId): JobLike<RunId, unknown, null> => ({ data: { state, context: null } } as never);
+  return { backend, enqueued, job, getWorker: () => workerFn!, getQueueOpts: () => queueOpts };
+};
+
+const okProcess = async (): Promise<Result<void, HostError>> => ok(undefined);
+
+describe("createRunQueue — single-flight lock", () => {
+  it("C2: acquires the lock atomically with its TTL (SET NX EX), not setNx-then-set", async () => {
+    const { redis, calls } = fakeRedis();
+    const fb = fakeBackend();
+    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    q.startWorker(okProcess, { concurrency: 2 });
+
+    await fb.getWorker()(fb.job(RUN));
+
+    // The single setNx carries the TTL atomically…
+    expect(calls.setNx).toEqual([{ key: lockKey(RUN), opts: { expiresInSec: 300 } }]);
+    // …and there is NO separate `set` on the lock key (the old crash-prone path).
+    expect(calls.set).not.toContain(lockKey(RUN));
+    // Lock released after the slice.
+    expect(calls.del).toContain(lockKey(RUN));
+  });
+
+  it("C1: re-enqueues (deferred) a wakeup that loses the lock — never drops it", async () => {
+    let processed = 0;
+    // Lock already held by another worker.
+    const { redis } = fakeRedis({ [lockKey(RUN)]: "1" });
+    const fb = fakeBackend();
+    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300, lockContentionDelayMs: 1500 });
+    q.startWorker(async () => { processed++; return ok(undefined); }, { concurrency: 2 });
+
+    await fb.getWorker()(fb.job(RUN));
+
+    expect(processed).toBe(0); // did NOT run the slice (lock held)…
+    expect(fb.enqueued).toEqual([{ id: RUN, delayMs: 1500 }]); // …but preserved the wakeup
+  });
+
+  it("C1: the preserved wakeup is processed once the lock frees (decision not lost)", async () => {
+    let processed = 0;
+    const { redis, m } = fakeRedis({ [lockKey(RUN)]: "1" });
+    const fb = fakeBackend();
+    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    q.startWorker(async () => { processed++; return ok(undefined); }, { concurrency: 2 });
+
+    await fb.getWorker()(fb.job(RUN)); // contention → deferred
+    expect(processed).toBe(0);
+    expect(fb.enqueued).toHaveLength(1);
+
+    m.delete(lockKey(RUN)); // the holding worker finishes (lock freed)
+    await fb.getWorker()(fb.job(RUN)); // the deferred wakeup runs
+    expect(processed).toBe(1);
+  });
+
+  it("A1: throws on a host-infra processRun error (so the queue retries) and releases the lock first", async () => {
+    const { redis, calls } = fakeRedis();
+    const fb = fakeBackend();
+    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    q.startWorker(async () => err({ kind: "redis-unavailable", operation: "run-store get" }), { concurrency: 2 });
+
+    await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/processRun failed for run-1/);
+    // The finally released the lock even though the slice threw.
+    expect(calls.del).toContain(lockKey(RUN));
+  });
+
+  it("A1: configures the queue with a retry budget (defaultAttempts > 1)", () => {
+    const { redis } = fakeRedis();
+    const fb = fakeBackend();
+    createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300, maxAttempts: 7 });
+    expect(fb.getQueueOpts()?.defaultAttempts).toBe(7);
+  });
+
+  it("throws when the lock STORE is unavailable (wakeup retried, not acked-and-dropped)", async () => {
+    const base = fakeRedis();
+    const redis: RedisPort = { ...base.redis, async setNx() { return err({ kind: "redis-unavailable", operation: "SETNX" }); } };
+    const fb = fakeBackend();
+    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    q.startWorker(okProcess, { concurrency: 2 });
+
+    await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/lock acquire failed/);
+  });
+});

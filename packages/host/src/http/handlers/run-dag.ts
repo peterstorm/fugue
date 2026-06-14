@@ -1,7 +1,9 @@
 /**
  * Run DAG handler — POST /dags/:id/run
  *
- * FR-020: Executes DAG and returns result as JSON with 200
+ * FR-020: Executes a DAG and returns the result as JSON with 200 (the
+ *         synchronous, non-HITL path). DAGs declaring a `humanReview` gate fork
+ *         to the durable HITL engine and return 202 + runId instead (see step 2.5).
  * FR-026: Error responses are machine-readable JSON with error/message/details/dagId/runId
  * FR-027: Per-DAG concurrency limit exceeded returns 429 with Retry-After
  * FR-028: Per-DAG timeout returns 408 with run ID (enables future resumption)
@@ -17,7 +19,7 @@ import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
-import { formatHostError } from "../../domain/host-error.js";
+import { formatHostError, httpStatusFor } from "../../domain/host-error.js";
 import { canServeRequests, getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
@@ -26,12 +28,21 @@ import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-guard.js";
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
+import type { HitlRunService } from "../../hitl/service.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
 // ---------------------------------------------------------------------------
 
 export interface RunDagDeps {
+  /**
+   * Durable HITL run service (ADR-0060). When a target DAG declares a
+   * `humanReview` gate, the run is enqueued here and the request returns
+   * `202 {runId}` (poll `GET /runs/:runId`) instead of executing inline. When
+   * undefined, a HITL DAG is refused (501) — the host must be configured for
+   * human review. Non-HITL DAGs never touch this and keep the synchronous path.
+   */
+  readonly hitl?: HitlRunService;
   readonly getConcurrency: () => ConcurrencyState;
   readonly setConcurrency: (s: ConcurrencyState) => void;
   readonly circuit: CircuitPort;
@@ -156,6 +167,30 @@ export const createRunDagHandler = (
         dagId,
         details: { issues },
       });
+    }
+
+    // 2.5. HITL fork (ADR-0060): a DAG declaring a `humanReview` gate cannot run
+    // synchronously — it may park for a human for an unbounded time. Enqueue it
+    // on the durable run engine and return 202 + runId; the client polls
+    // `GET /runs/:runId`. Non-HITL DAGs fall through to the synchronous path
+    // below, byte-for-byte unchanged.
+    const isHitlDag = registered.dag.nodes.some((n) => n.humanReview !== undefined);
+    if (isHitlDag) {
+      if (!deps.hitl) {
+        return errorResponse(c, 501, "hitl-not-configured",
+          `DAG '${dagId}' declares human review but this host is not configured for HITL`,
+          { dagId },
+        );
+      }
+      const started = await deps.hitl.startRun(dagId, parseResult.data, identity);
+      if (!started.ok) {
+        return errorResponse(c, httpStatusFor(started.error), started.error.kind, formatHostError(started.error), { dagId });
+      }
+      // 202 Accepted: the run is queued for durable execution; poll GET /runs/:id.
+      return c.json(
+        { ok: true as const, data: { runId: started.value.runId, status: "queued" }, runId: started.value.runId },
+        202,
+      );
     }
 
     // 3. Acquire per-DAG concurrency token BEFORE consuming the circuit probe.

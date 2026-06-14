@@ -1,0 +1,36 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "${{BOT_APP_ID}}",
+  "packageName": "dev.fugue.hitl",
+  "developer": {
+    "name": "Fugue",
+    "websiteUrl": "https://github.com/peterstorm/fugue",
+    "privacyUrl": "https://github.com/peterstorm/fugue",
+    "termsOfUseUrl": "https://github.com/peterstorm/fugue"
+  },
+  "name": {
+    "short": "Fugue Reviews",
+    "full": "Fugue Human-in-the-Loop Reviews"
+  },
+  "description": {
+    "short": "Approve or reject Fugue DAG human-review gates in Teams.",
+    "full": "Posts a card when a Fugue workflow pauses at a human-review gate, with Approve/Reject buttons that resume the run in place. See packages/host/docs/hitl-teams.md."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#5B5BD6",
+  "bots": [
+    {
+      "botId": "${{BOT_APP_ID}}",
+      "scopes": ["team", "groupchat", "personal"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}

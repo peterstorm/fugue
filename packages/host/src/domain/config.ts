@@ -132,6 +132,44 @@ export const HostConfigSchema = z.object({
     }),
   /** OpenTelemetry OTLP exporter endpoint */
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  // ── Human-in-the-loop (ADR-0060) ───────────────────────────────────────
+  /**
+   * Microsoft Teams Incoming Webhook (Workflows) URL for human-review
+   * notifications. This is ONE of two HITL notifier transports: setting it (or
+   * the Bot Framework pair `BOT_APP_ID`/`BOT_APP_PASSWORD`) ENABLES HITL, so
+   * DAGs declaring a `humanReview` gate run on the durable queue (202 + runId)
+   * and post a review card here. HITL is off (and a `humanReview` DAG is refused
+   * with 501) only when NEITHER transport is configured.
+   */
+  TEAMS_WEBHOOK_URL: z.string().url().optional(),
+  /**
+   * Public base URL of this host, used to build the approval deep-link in the
+   * Teams card (`<base>/runs/<runId>`). Required in practice when
+   * TEAMS_WEBHOOK_URL is set; falls back to `http://localhost:<PORT>`.
+   */
+  HITL_APPROVAL_BASE_URL: z.string().url().optional(),
+  /** TTL (seconds) for persisted HITL runs + decisions. Default 7 days. */
+  HITL_RUN_TTL_SEC: z.coerce.number().int().min(60).default(604_800),
+  /** Single-flight lock TTL (seconds) per run execution slice. Default 5 min. */
+  HITL_LOCK_TTL_SEC: z.coerce.number().int().min(1).default(300),
+  /** Max concurrent HITL run slices the worker processes. Default 4. */
+  HITL_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(4),
+  /**
+   * Microsoft Bot Framework app id. Setting this (with BOT_APP_PASSWORD)
+   * selects the IN-Teams transport: reviews post interactive Approve/Reject
+   * cards and the bot endpoint (`POST /teams/messages`) records decisions
+   * in-place — no link-out. Takes precedence over TEAMS_WEBHOOK_URL when both
+   * are set. Requires an Azure Bot resource + Teams app manifest (see
+   * docs/hitl-teams.md).
+   */
+  BOT_APP_ID: z.string().optional(),
+  /** Bot Framework app password (client secret). Required when BOT_APP_ID is set. */
+  BOT_APP_PASSWORD: z.string().optional(),
+  /**
+   * Override the Bot Framework token endpoint (single-tenant bots). Optional.
+   * Must be https — the app password (client secret) is POSTed here.
+   */
+  BOT_TOKEN_URL: z.string().url().optional(),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */
@@ -171,6 +209,22 @@ export const HostConfigSchema = z.object({
   }
   if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
     ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });
+  }
+  // The review card embeds the output-under-review and an approval deep-link;
+  // posting it over http would exfiltrate that in cleartext. Fail boot loudly
+  // rather than send HITL review content unencrypted.
+  if (c.TEAMS_WEBHOOK_URL !== undefined && !c.TEAMS_WEBHOOK_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["TEAMS_WEBHOOK_URL"], message: "must be an https:// URL (HITL review content must not be sent over cleartext http)" });
+  }
+  // The in-Teams (Bot Framework) transport needs both the app id AND the app
+  // password to mint a connector token. Enforce the pair at boot rather than
+  // failing on the first review when the connector tries to authenticate.
+  if (c.BOT_APP_ID !== undefined && !c.BOT_APP_PASSWORD) {
+    ctx.addIssue({ code: "custom", path: ["BOT_APP_PASSWORD"], message: "Required when BOT_APP_ID is set" });
+  }
+  // The app password is POSTed to the token endpoint; an http override leaks it.
+  if (c.BOT_TOKEN_URL !== undefined && !c.BOT_TOKEN_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["BOT_TOKEN_URL"], message: "must be an https:// URL (the bot app password is sent to this endpoint)" });
   }
 });
 

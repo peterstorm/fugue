@@ -76,14 +76,15 @@ const validateApproveEdit = (
 };
 
 /**
- * Shared body of the `awaiting-human` and `retrying-hook` executor branches.
- * Both paths: check for a wired hook, invoke it, catch exceptions into a
- * `node-failed`, validate `approve-with-edit` output against the node schema,
- * and finally emit `human-responded`. Only the retrying-hook branch prepends
- * a sleep — that lives at the call site.
+ * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
+ * executor branches. All three paths: check for a wired hook, invoke it, catch
+ * exceptions into a `node-failed`, validate `approve-with-edit` output against
+ * the node schema, and finally emit `human-responded` (or `human-suspend` when
+ * the hook returns `pending`). Only the retrying-hook branch prepends a sleep —
+ * that lives at the call site.
  */
 const callHumanReviewHook = async (
-  phaseKind: "awaiting-human" | "retrying-hook",
+  phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
   nodeId: NodeId,
   output: unknown,
   prompt: string,
@@ -92,7 +93,7 @@ const callHumanReviewHook = async (
       nodeId: NodeId;
       output: unknown;
       prompt: string;
-    }) => Promise<import("./types.js").HumanAction>;
+    }) => Promise<import("./types.js").HumanReviewOutcome>;
   } | undefined,
   nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
@@ -113,9 +114,9 @@ const callHumanReviewHook = async (
     } satisfies DagEvent;
   }
 
-  let action: import("./types.js").HumanAction;
+  let outcome: import("./types.js").HumanReviewOutcome;
   try {
-    action = await hooks.onHumanReview({ nodeId, output, prompt });
+    outcome = await hooks.onHumanReview({ nodeId, output, prompt });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;
@@ -137,6 +138,14 @@ const callHumanReviewHook = async (
       error: crash,
     } satisfies DagEvent;
   }
+
+  // ADR-0060: hook declined to decide → park the run. `human-suspend` drives
+  // `awaiting-human/suspended/retrying-hook → suspended` in the transition
+  // layer. No telemetry is emitted (no decision was made).
+  if (outcome.kind === "pending") {
+    return { type: "human-suspend", nodeId } satisfies DagEvent;
+  }
+  const action = outcome;
 
   // approve-with-edit goes through the live Zod schema here in the shell —
   // the pure transition can't validate (deserialized schemas are inert).
@@ -173,15 +182,21 @@ const callHumanReviewHook = async (
 // ---------------------------------------------------------------------------
 
 /**
- * Builds an Executor closure for a DAG. The executor:
- * 1. If state is `retrying`: sleeps for `nextDelayMs * jitter` then re-runs the
- *    failed node. Returns `wave-done` (if all nodes in the wave now pass) or
- *    `node-failed`.
- * 2. If state is `pending`: returns a `start` event (drives first transition).
- * 3. If state is `running`: runs the full wave via Promise.all, returns
- *    `wave-done` or `node-failed` for the first failure.
- * 4. If state is `awaiting-human` and `onHumanReview` is supplied: dispatches
- *    the hook, returns `human-responded`.
+ * Builds an Executor closure for a DAG. The executor matches on `state.kind`:
+ * 1. `pending`: returns a `start` event (drives the first transition).
+ * 2. `running`: runs the full wave via Promise.all, returns `wave-done` or
+ *    `node-failed` for the first failure.
+ * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-runs the failed node.
+ *    Returns `wave-done` (if all nodes in the wave now pass) or `node-failed`.
+ * 4. `awaiting-human` / `suspended` / `retrying-hook` (ADR-0060): dispatches the
+ *    `onHumanReview` hook (the latter two are handled identically to
+ *    `awaiting-human`; `retrying-hook` additionally honours `nextDelayMs`).
+ *    Returns `human-responded` (a decision is present), `human-suspend` (the
+ *    hook returned `pending` → park the run), or `node-failed` (the hook threw
+ *    or an edited output failed schema validation).
+ *
+ * Terminal phases (`succeeded`, `failed`) are unreachable here — the runner's
+ * `isTerminal` guard stops the loop first — so those branches throw.
  *
  * The executor never performs state transitions — it only produces DagEvents.
  * Observer events (node-start, node-end, node-error, run-start, run-end) are
@@ -196,7 +211,7 @@ export const buildDagExecutor = (
       nodeId: NodeId;
       output: unknown;
       prompt: string;
-    }) => Promise<import("./types.js").HumanAction>;
+    }) => Promise<import("./types.js").HumanReviewOutcome>;
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
     recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
     /**
@@ -278,12 +293,13 @@ export const buildDagExecutor = (
   };
 
   // ---------------------------------------------------------------------------
-  // handleHumanGate — unified human-review handler for awaiting-human + retrying-hook.
+  // handleHumanGate — unified human-review handler for awaiting-human,
+  // suspended, and retrying-hook.
   // Owns: optional sleep → hook call → enrich → emit telemetry → return event.
   // ---------------------------------------------------------------------------
 
   const handleHumanGate = async (
-    phaseKind: "awaiting-human" | "retrying-hook",
+    phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
     nodeId: NodeId,
     output: unknown,
     prompt: string,
@@ -359,6 +375,15 @@ export const buildDagExecutor = (
       // -----------------------------------------------------------------------
       .with({ kind: "awaiting-human" }, (p) =>
         handleHumanGate("awaiting-human", p.nodeId, p.output, p.prompt, machineCtx))
+
+      // -----------------------------------------------------------------------
+      // suspended (ADR-0060): a resumed parked gate. Re-dispatch the hook — it
+      // either finds a decision now (→ human-responded → proceed) or returns
+      // `pending` again (→ human-suspend → re-park). Identical handling to
+      // awaiting-human; the kernel's `isHalted` break is what parked it.
+      // -----------------------------------------------------------------------
+      .with({ kind: "suspended" }, (p) =>
+        handleHumanGate("suspended", p.nodeId, p.output, p.prompt, machineCtx))
 
       // -----------------------------------------------------------------------
       // retrying-hook: sleep with jitter then re-call the onHumanReview hook.

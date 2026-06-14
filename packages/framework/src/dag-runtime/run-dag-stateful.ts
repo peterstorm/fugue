@@ -13,7 +13,7 @@
 import { match } from "ts-pattern";
 import type { Span } from "@opentelemetry/api";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
-import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction } from "./types.js";
+import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanReviewOutcome } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../types/dag.js";
@@ -40,6 +40,22 @@ import type { CompiledDagMachine } from "./machine.js";
 // DagRunOpts — caller-supplied options for runDagStateful
 // ---------------------------------------------------------------------------
 
+/**
+ * Outcome of a stateful run (ADR-0060). A run that reaches `succeeded` is
+ * `completed` with its output; a run parked at a human gate (`suspended`) is
+ * surfaced as `suspended` so a durable worker can ack-and-park rather than
+ * treating the pause as success or failure. A `failed` run is the `err` channel
+ * of the enclosing `Result`, not a variant here.
+ */
+export type StatefulOutcome<O> =
+  | { readonly kind: "completed"; readonly output: O }
+  | {
+      readonly kind: "suspended";
+      readonly nodeId: NodeId;
+      readonly prompt: string;
+      readonly output: unknown;
+    };
+
 /** Result of background judge finalization, surfaced via `onBackground`. */
 export interface BackgroundResult {
   /** True when all judges returned `passed: true`. */
@@ -51,7 +67,7 @@ export interface BackgroundResult {
 }
 
 export interface DagRunOpts
-  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf" | "computeDedupKey" | "logger"> {
+  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf" | "computeDedupKey" | "logger" | "onCommitted"> {
   /** Provide a durable job backend (BullMQ, etc.). Falls back to in-memory when omitted.
    * Typed against `DagMachineContextPersisted` — the serialization-safe subset.
    * The runtime re-injects live DAG-derived fields (closures, schemas) on read.
@@ -65,7 +81,16 @@ export interface DagRunOpts
     nodeId: NodeId;
     output: unknown;
     prompt: string;
-  }) => Promise<HumanAction>;
+  }) => Promise<HumanReviewOutcome>;
+  /**
+   * ADR-0060: effectively-once decision consumption. Called with the gate's
+   * `nodeId` AFTER the post-gate transition (the one driven by the consumed
+   * `human-responded` decision) is durably checkpointed. The host wires this to
+   * clear the decision from its store, so a worker crash BEFORE the checkpoint
+   * re-reads the decision on resume instead of losing the approval. Implemented
+   * via the kernel's `onCommitted` hook, filtered to `human-responded` events.
+   */
+  readonly onDecisionConsumed?: (nodeId: NodeId) => void | Promise<void>;
   /**
    * Per-node retry limits passed at call time — merged with (and takes precedence over)
    * DagDef.retryLimits. Allows callers to override retry budgets without mutating the DAG.
@@ -189,9 +214,9 @@ const handleTerminalState = <O>(
   state: DagPhase,
   context: DagMachineContext,
   deps: TerminalDeps,
-): Promise<Result<O, FrameworkError>> =>
+): Promise<Result<StatefulOutcome<O>, FrameworkError>> =>
   match(state)
-    .returnType<Promise<Result<O, FrameworkError>>>()
+    .returnType<Promise<Result<StatefulOutcome<O>, FrameworkError>>>()
     .with({ kind: "succeeded" }, async (s) => {
       const finalize = (): Promise<DagRunMeta> =>
         finalizeRunWithJudges(
@@ -204,12 +229,21 @@ const handleTerminalState = <O>(
       } else {
         await finalize();
       }
-      return ok(s.output as O);
+      return ok({ kind: "completed", output: s.output as O });
     })
     .with({ kind: "failed" }, async (s) => {
       closeRootSpan(deps.rootSpan, { kind: "error", error: s.error });
       deps.emitRunEnd("error");
       return err(s.error);
+    })
+    // ADR-0060: the run parked at a human gate. Close the root span cleanly (not
+    // an error — the run is paused, not finished) and surface `suspended` so a
+    // durable worker acks the job and waits for an out-of-band decision. The
+    // run-end telemetry is intentionally NOT emitted here: the run has not
+    // ended; the matching run-end fires on the resume that reaches a terminal.
+    .with({ kind: "suspended" }, async (s) => {
+      closeRootSpan(deps.rootSpan, { kind: "ok" });
+      return ok({ kind: "suspended", nodeId: s.nodeId, prompt: s.prompt, output: s.output });
     })
     .with({ kind: "pending" }, async (s) =>
       unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
@@ -231,7 +265,7 @@ const handleKernelError = <O>(
   e: unknown,
   rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
-): Result<O, FrameworkError> => {
+): Result<StatefulOutcome<O>, FrameworkError> => {
   const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
   if (isAbort) {
     const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
@@ -264,8 +298,12 @@ const handleKernelError = <O>(
  * checkpointing. Falls back to an in-memory `JobLike` when `opts.jobLike` is
  * not supplied.
  *
- * Returns `ok(output)` when the DAG reaches `succeeded`, `err(error)` when
- * the machine ends in a `failed` terminal state.
+ * Returns `ok(StatefulOutcome<O>)` — `{ kind: "completed"; output }` when the
+ * DAG reaches `succeeded`, or `{ kind: "suspended"; nodeId; prompt; output }`
+ * when it halts at a human gate (ADR-0060) — and `err(error)` when the machine
+ * ends in a `failed` terminal state. (The flat-`Result<O>` back-compat entry is
+ * `runDagStateful` below, which unwraps `completed` and maps `suspended` to an
+ * invariant `err`.)
  *
  * Pipeline:
  *   1. prepareDagRun — merge retries, emit run-start, validate capabilities
@@ -273,21 +311,21 @@ const handleKernelError = <O>(
  *   3. compile       — topo sort, build initial context
  *   4. resolveJob    — caller-supplied or in-memory JobLike
  *   5. execute       — build executor, run state machine kernel
- *   6. terminal      — handle succeeded/failed/unexpected
+ *   6. terminal      — handle completed/suspended/failed/unexpected
  */
-export const runDagStateful = async <I, O>(
+export const runDagStatefulOutcome = async <I, O>(
   dag: DagDef,
   input: I,
   nodeCtx: NodeContext,
   opts?: DagRunOpts,
-): Promise<Result<O, FrameworkError>> => {
+): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
   // 1. Pre-flight
   const prepared = prepareDagRun(dag, nodeCtx, opts);
   if (!prepared.ok) return prepared;
   const { effectiveDag, validatedCtx, emitRunEnd } = prepared.value;
 
   // 2. OTel root span wraps compilation + execution
-  return startRunSpan(dag, nodeCtx, async (rootSpan): Promise<Result<O, FrameworkError>> => {
+  return startRunSpan(dag, nodeCtx, async (rootSpan): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
     // 3. Compile
     const compiled = compileDagToMachine(effectiveDag, input);
     if (!compiled.ok) {
@@ -327,6 +365,7 @@ export const runDagStateful = async <I, O>(
       error: classified.message,
     });
 
+    const onDecisionConsumed = opts?.onDecisionConsumed;
     const runOpts: KernelRunOpts<DagPhase, DagEvent, DagMachineContext> = {
       beforeExecute: opts?.beforeExecute,
       classifyError: opts?.classifyError,
@@ -335,6 +374,18 @@ export const runDagStateful = async <I, O>(
       now: opts?.now,
       computeDedupKey: sha256DedupKey,
       logger: fwLogger(),
+      // ADR-0060: translate the generic post-commit hook into the DAG-semantic
+      // "a decision was consumed" signal. `human-responded` is the only event
+      // produced by consuming a decision; its `nodeId` is the resolved gate.
+      ...(onDecisionConsumed !== undefined
+        ? {
+            onCommitted: async ({ event }: { event: DagEvent }): Promise<void> => {
+              if (event.type === "human-responded") {
+                await onDecisionConsumed(event.nodeId);
+              }
+            },
+          }
+        : {}),
     };
 
     try {
@@ -351,6 +402,37 @@ export const runDagStateful = async <I, O>(
 };
 
 // ---------------------------------------------------------------------------
+// runDagStateful — back-compat flat Result<O> entry point (ADR-0021)
+// ---------------------------------------------------------------------------
+
+/**
+ * Back-compat kernel entry returning the flat `Result<O>` (ADR-0021). Unwraps a
+ * `completed` outcome to its output. A `suspended` outcome (ADR-0060) cannot be
+ * represented in `Result<O>`, so it surfaces as an invariant `err` — callers
+ * that want durable suspend must use `runDagStatefulOutcome` /
+ * `runResumableDagJob`. Existing non-HITL (and block-until-decided) callers are
+ * unaffected: they never produce `suspended`.
+ */
+export const runDagStateful = async <I, O>(
+  dag: DagDef,
+  input: I,
+  nodeCtx: NodeContext,
+  opts?: DagRunOpts,
+): Promise<Result<O, FrameworkError>> => {
+  const outcome = await runDagStatefulOutcome<I, O>(dag, input, nodeCtx, opts);
+  if (!outcome.ok) return outcome;
+  if (outcome.value.kind === "suspended") {
+    return err({
+      kind: "node-crash",
+      retriability: "non-retriable",
+      nodeId: EXECUTOR_NODE_ID,
+      message: `runDagStateful: DAG '${dag.id}' suspended at human gate '${outcome.value.nodeId}' — use runDagStatefulOutcome / runResumableDagJob for suspendable runs`,
+    });
+  }
+  return ok(outcome.value.output);
+};
+
+// ---------------------------------------------------------------------------
 // unexpectedNonTerminal — invariant violation: runStateMachine returned without a terminal state
 // ---------------------------------------------------------------------------
 
@@ -359,7 +441,7 @@ const unexpectedNonTerminal = <O>(
   emitRunEnd: (status: "ok" | "error") => void,
   kind: string,
   nodeId: NodeId,
-): Result<O, FrameworkError> => {
+): Result<StatefulOutcome<O>, FrameworkError> => {
   const message = `runDagStateful: unexpected non-terminal state ${kind}`;
   const error: FrameworkError = {
     kind: "node-crash",

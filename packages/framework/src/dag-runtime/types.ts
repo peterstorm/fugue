@@ -25,23 +25,61 @@ export type HumanAction =
   | { readonly kind: "reject"; readonly reason: string; readonly actor?: string }
   | { readonly kind: "reroute"; readonly targetNodeId: NodeId; readonly reason?: string; readonly actor?: string };
 
+/**
+ * What an `onHumanReview` hook returns (ADR-0060). Either a settled decision
+ * (`HumanAction`) that resolves the gate, or `{ kind: "pending" }` — "no
+ * decision yet, suspend this run". `pending` is deliberately NOT a `HumanAction`
+ * so the exhaustive resolution layer (`handleHumanResponse`) stays closed over
+ * genuine decisions; the suspend path is a separate, earlier branch. A hook
+ * returning `pending` is expected to have already recorded the pending review
+ * and emitted its notification (e.g. posted a Teams card) before returning.
+ */
+export type HumanReviewOutcome = HumanAction | { readonly kind: "pending" };
+
 // ---------------------------------------------------------------------------
 // DagPhase — state of the DAG machine
 // ---------------------------------------------------------------------------
 
+/**
+ * The state a run carries while parked at a human gate. Shared VERBATIM by the
+ * three phases that mean "paused at node `nodeId` for a human": `awaiting-human`
+ * (in-process wait), `suspended` (durably parked, ADR-0060), and `retrying-hook`
+ * (which adds retry bookkeeping on top of it). Extracted into one interface so
+ * the "identical gate payload" invariant is enforced by the compiler — a field
+ * added here propagates to every gate phase and to the `transition` branches
+ * that project one phase onto another — instead of being kept in sync by hand
+ * across four hand-written copies.
+ */
+export interface HumanGatePayload {
+  readonly nodeId: NodeId;
+  /** The gated node's already-produced output — what is under review. */
+  readonly output: unknown;
+  /** The review prompt shown to the human. */
+  readonly prompt: string;
+  /** Remaining review queue: node ids to review after the current one (ascending order). */
+  readonly pendingReviews: readonly NodeId[];
+  /** Wave index we paused on. */
+  readonly wave: number;
+}
+
 export type DagPhase =
   | { readonly kind: "pending" }
   | { readonly kind: "running"; readonly wave: number }
-  | {
-      readonly kind: "awaiting-human";
-      readonly nodeId: NodeId;
-      readonly output: unknown;
-      readonly prompt: string;
-      /** Remaining review queue: node ids to review after the current one (ascending order). */
-      readonly pendingReviews: readonly NodeId[];
-      /** Wave index we paused on. */
-      readonly wave: number;
-    }
+  | (HumanGatePayload & { readonly kind: "awaiting-human" })
+  | (HumanGatePayload & {
+      /**
+       * Durably-parked human gate (ADR-0060). Reached when the `onHumanReview`
+       * hook returns `{ kind: "pending" }` — no decision yet. Carries the
+       * IDENTICAL `HumanGatePayload` to `awaiting-human`: on resume the executor
+       * treats it exactly like `awaiting-human` (re-dispatches the hook), so a
+       * resumed run either proceeds (decision now present) or re-parks (still
+       * `pending`).
+       *
+       * NOT terminal and NOT failed — the kernel checkpoints it (durability) and
+       * `isHalted` breaks the run loop so the worker is freed while parked.
+       */
+      readonly kind: "suspended";
+    })
   | {
       readonly kind: "retrying";
       readonly wave: number;
@@ -49,29 +87,49 @@ export type DagPhase =
       readonly attempt: number;
       readonly nextDelayMs: number;
     }
-  | {
+  | (HumanGatePayload & {
       /**
-       * The `onHumanReview` hook threw. The node's output and prompt are preserved.
-       * The hook will be retried up to the node's retry budget (shared with node retries).
-       * FR-029a: hook-crash retry semantics.
+       * The `onHumanReview` hook threw. The gate payload (output, prompt,
+       * pendingReviews, wave) is preserved across retries; the hook is retried up
+       * to the node's retry budget (shared with node retries). FR-029a:
+       * hook-crash retry semantics.
        */
       readonly kind: "retrying-hook";
-      readonly nodeId: NodeId;
-      /** The node's already-produced output — preserved across hook retries. */
-      readonly output: unknown;
-      /** The original review prompt — preserved across hook retries. */
-      readonly prompt: string;
       /** Hook retry attempt (1-based). */
       readonly attempt: number;
       /** Delay before next hook call. Executor applies jitter. */
       readonly nextDelayMs: number;
-      /** Remaining reviews after this node — preserved from the original awaiting-human phase. */
-      readonly pendingReviews: readonly NodeId[];
-      /** Wave index we paused on — preserved from the original awaiting-human phase. */
-      readonly wave: number;
-    }
+    })
   | { readonly kind: "succeeded"; readonly output: unknown }
   | { readonly kind: "failed"; readonly error: FrameworkError };
+
+/**
+ * Runtime-enumerable set of every `DagPhase` discriminant. The single source of
+ * truth a deserialization boundary uses to validate a checkpoint's `state.kind`
+ * BEFORE it drives an exhaustive `match` (a corrupt/unknown kind otherwise
+ * surfaces as a raw `NonExhaustiveError` instead of a clean handled error).
+ *
+ * Derived from a `Record<DagPhase["kind"], true>` so the compiler keeps it in
+ * lockstep with the union in BOTH directions: adding a `DagPhase` kind without
+ * listing it here — or listing a kind that is not a `DagPhase` — is a compile
+ * error. The set can never silently drift from the type.
+ */
+const DAG_PHASE_KIND_TABLE: Record<DagPhase["kind"], true> = {
+  pending: true,
+  running: true,
+  "awaiting-human": true,
+  suspended: true,
+  retrying: true,
+  "retrying-hook": true,
+  succeeded: true,
+  failed: true,
+};
+
+export const DAG_PHASE_KINDS: ReadonlySet<string> = new Set(Object.keys(DAG_PHASE_KIND_TABLE));
+
+/** Type guard: is `k` a known `DagPhase` discriminant? */
+export const isDagPhaseKind = (k: unknown): k is DagPhase["kind"] =>
+  typeof k === "string" && DAG_PHASE_KINDS.has(k);
 
 // ---------------------------------------------------------------------------
 // DagEvent — events the executor/external world can deliver to the machine
@@ -137,6 +195,17 @@ export type DagEvent =
        * the executor from ever emitting a reroute event without it.
        */
       readonly rerouteActiveSet: ReadonlySet<NodeId>;
+    }
+  | {
+      /**
+       * The `onHumanReview` hook returned `{ kind: "pending" }` (ADR-0060): no
+       * decision yet, park the run. Drives `awaiting-human → suspended` (and
+       * `suspended → suspended` on a resume that re-parks). All payload the
+       * suspend needs is already in the current `awaiting-human`/`suspended`
+       * phase, so this event only carries the node id for the guard.
+       */
+      readonly type: "human-suspend";
+      readonly nodeId: NodeId;
     }
   | { readonly type: "abort"; readonly reason: string }
   | { readonly type: "executor-error"; readonly retriable: boolean; readonly error: string };

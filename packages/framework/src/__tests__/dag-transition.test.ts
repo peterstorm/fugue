@@ -1335,6 +1335,259 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// dagTransition: suspended (durable park) transitions — ADR-0060
+//
+// `suspended` is the phase serialized to Redis and replayed across restarts. On
+// resume the executor re-dispatches the hook, so it accepts the SAME events as
+// `awaiting-human`: a decision resolves the gate, another `pending` re-parks, a
+// hook crash retries. These pin the guards that live at this pure layer.
+// ---------------------------------------------------------------------------
+
+describe("dagTransition — suspended (ADR-0060)", () => {
+  const suspendedPhase = (
+    nodeId = "a",
+    pendingReviews: string[] = [],
+    wave = 0,
+  ): Extract<DagPhase, { kind: "suspended" }> => ({
+    kind: "suspended",
+    // @ts-expect-error — branded ID test fixture
+    nodeId,
+    output: { result: "preserved-output" },
+    prompt: "original-prompt",
+    // @ts-expect-error — branded ID test fixture
+    pendingReviews,
+    wave,
+  });
+
+  // ── entry: awaiting-human → suspended on human-suspend ──────────────────
+  it("awaiting-human + human-suspend (matching node) => parks durably (suspended)", () => {
+    const ctx = makeCtx();
+    const phase: Extract<DagPhase, { kind: "awaiting-human" }> = {
+      kind: "awaiting-human",
+      nodeId: "a" as NodeId,
+      output: { result: "preserved-output" },
+      prompt: "original-prompt",
+      pendingReviews: [],
+      wave: 0,
+    };
+    const event: DagEvent = { type: "human-suspend", nodeId: "a" as NodeId };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toMatchObject({
+      kind: "suspended",
+      nodeId: N("a"),
+      output: { result: "preserved-output" },
+      prompt: "original-prompt",
+      wave: 0,
+    });
+  });
+
+  it("awaiting-human + human-suspend for a different node => no-op (stays awaiting-human)", () => {
+    const ctx = makeCtx();
+    const phase: Extract<DagPhase, { kind: "awaiting-human" }> = {
+      kind: "awaiting-human",
+      nodeId: "a" as NodeId,
+      output: { result: "preserved-output" },
+      prompt: "original-prompt",
+      pendingReviews: [],
+      wave: 0,
+    };
+    const event: DagEvent = { type: "human-suspend", nodeId: "b" as NodeId };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toEqual(phase);
+  });
+
+  // ── resume: a decision now present resolves the gate ────────────────────
+  it("suspended + human-responded approve (no pending reviews) => next wave", () => {
+    const ctx = makeCtx({ outputs: new Map([["a", { result: "preserved-output" }]]) as any });
+    const phase = suspendedPhase("a", [], 0);
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toMatchObject({ kind: "running", wave: 1 });
+  });
+
+  it("suspended + human-responded reject => failed with rejected error", () => {
+    const ctx = makeCtx();
+    const phase = suspendedPhase("a", [], 0);
+    const event: DagEvent = {
+      type: "human-responded",
+      nodeId: "a" as NodeId,
+      action: { kind: "reject", reason: "not good enough" },
+    };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toMatchObject({
+      kind: "failed",
+      error: { kind: "rejected", nodeId: "a" as NodeId, reason: "not good enough" },
+    });
+  });
+
+  it("suspended + human-responded approve-with-edit replaces output and advances", () => {
+    const ctx = makeCtx({ outputs: new Map([["a", "original"]]) as any });
+    const phase = suspendedPhase("a", [], 0);
+    const event: DagEvent = {
+      type: "human-responded",
+      nodeId: "a" as NodeId,
+      action: { kind: "approve-with-edit", newOutput: "edited" },
+    };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.context.outputs.get(N("a"))).toBe(N("edited"));
+    expect(result.state).toMatchObject({ kind: "running", wave: 1 });
+  });
+
+  it("suspended + human-responded approve with pending reviews => awaiting-human for next", () => {
+    const dagWithMultiHitl = makeDag({
+      nodes: [
+        makeNode("a", { humanReview: { prompt: "Review A" } }),
+        makeNode("b", { humanReview: { prompt: "Review B" } }),
+      ],
+      edges: [],
+    });
+    const ctx = makeCtx({
+      dag: dagWithMultiHitl,
+      waves: [[N("a"), N("b")]],
+      outputs: new Map([["a", "a-out"], ["b", "b-out"]]) as any,
+    });
+    const phase = suspendedPhase("a", ["b"], 0);
+    const event: DagEvent = { type: "human-responded", nodeId: "a" as NodeId, action: { kind: "approve" } };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toMatchObject({ kind: "awaiting-human", nodeId: "b" as NodeId });
+  });
+
+  // ── staleness guard: a decision for a gate the run is NOT parked at ──────
+  it("suspended + human-responded for the wrong node => no-op (stale gate cannot auto-resolve)", () => {
+    const ctx = makeCtx();
+    const phase = suspendedPhase("a", [], 0);
+    const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action: { kind: "approve" } };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toEqual(phase);
+    expect(result.context).toBe(ctx);
+  });
+
+  // ── idempotent re-park: resumed but still no decision ───────────────────
+  it("suspended + human-suspend => idempotent re-park (stays suspended)", () => {
+    const ctx = makeCtx();
+    const phase = suspendedPhase("a", ["b"], 1);
+    const event: DagEvent = { type: "human-suspend", nodeId: "a" as NodeId };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toEqual(phase);
+  });
+
+  it("suspended + human-suspend re-parks unconditionally (node id is irrelevant)", () => {
+    const ctx = makeCtx();
+    const phase = suspendedPhase("a", [], 0);
+    // A re-dispatch carrying a different node id still just re-parks the run.
+    const event: DagEvent = { type: "human-suspend", nodeId: "b" as NodeId };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toEqual(phase);
+  });
+
+  // ── hook crash WHILE parked → retrying-hook ─────────────────────────────
+  it("suspended + node-failed within budget => retrying-hook with preserved gate payload", () => {
+    const dag = makeDag({ defaultRetryLimit: 2 });
+    const ctx = makeCtx({ dag });
+    const phase = suspendedPhase("a", ["b", "c"], 2);
+    const event: DagEvent = { type: "node-failed", nodeId: "a" as NodeId, error: nodeFailedError };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state.kind).toBe("retrying-hook");
+    if (result.state.kind === "retrying-hook") {
+      expect(result.state.nodeId).toBe(N("a"));
+      expect(result.state.output).toEqual({ result: "preserved-output" });
+      expect(result.state.prompt).toBe("original-prompt");
+      expect(result.state.attempt).toBe(1);
+      expect(result.state.pendingReviews).toEqual([N("b"), N("c")]);
+      expect(result.state.wave).toBe(2);
+    }
+  });
+
+  it("suspended + executor-error within budget => retrying-hook", () => {
+    const dag = makeDag({ defaultRetryLimit: 2 });
+    const ctx = makeCtx({ dag });
+    const phase = suspendedPhase("a", [], 0);
+    const event: DagEvent = { type: "executor-error", retriable: true, error: "hook network failure" };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state.kind).toBe("retrying-hook");
+    if (result.state.kind === "retrying-hook") {
+      expect(result.state.nodeId).toBe(N("a"));
+    }
+  });
+
+  it("suspended + node-failed for the wrong node => no-op", () => {
+    const dag = makeDag({ defaultRetryLimit: 2 });
+    const ctx = makeCtx({ dag });
+    const phase = suspendedPhase("a", [], 0);
+    const mismatchedError: FrameworkError = { kind: "node-crash", nodeId: "b" as NodeId, retriability: "retriable", message: "wrong node" };
+    const event: DagEvent = { type: "node-failed", nodeId: "b" as NodeId, error: mismatchedError };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toEqual(phase);
+    expect(result.context).toBe(ctx);
+  });
+
+  // ── abort from a parked run (FR-033 global handler) ─────────────────────
+  it("suspended + abort => terminal failed via aborted", () => {
+    const ctx = makeCtx();
+    const phase = suspendedPhase("a", [], 0);
+    const event: DagEvent = { type: "abort", reason: "cancelled while parked" };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toMatchObject({
+      kind: "failed",
+      error: { kind: "aborted", reason: "cancelled while parked" },
+    });
+  });
+
+  // ── retrying-hook → suspended: a previously-crashed hook now returns pending ─
+  it("retrying-hook + human-suspend (matching node) => parks durably (suspended)", () => {
+    const ctx = makeCtx();
+    const phase: Extract<DagPhase, { kind: "retrying-hook" }> = {
+      kind: "retrying-hook",
+      nodeId: "a" as NodeId,
+      output: { result: "preserved-output" },
+      prompt: "original-prompt",
+      attempt: 2,
+      nextDelayMs: 1000,
+      pendingReviews: ["b" as NodeId],
+      wave: 1,
+    };
+    const event: DagEvent = { type: "human-suspend", nodeId: "a" as NodeId };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toMatchObject({ kind: "suspended", nodeId: N("a"), wave: 1 });
+    // Retry bookkeeping (attempt/nextDelayMs) is dropped on the projection.
+    expect(result.state).not.toHaveProperty("attempt");
+    expect(result.state).not.toHaveProperty("nextDelayMs");
+  });
+
+  it("retrying-hook + human-suspend for a different node => no-op", () => {
+    const ctx = makeCtx();
+    const phase: Extract<DagPhase, { kind: "retrying-hook" }> = {
+      kind: "retrying-hook",
+      nodeId: "a" as NodeId,
+      output: { result: "preserved-output" },
+      prompt: "original-prompt",
+      attempt: 2,
+      nextDelayMs: 1000,
+      pendingReviews: [],
+      wave: 0,
+    };
+    const event: DagEvent = { type: "human-suspend", nodeId: "b" as NodeId };
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state).toEqual(phase);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // compileDagToMachine — retrying-hook stateProgress / isTerminal / isFailed
 // ---------------------------------------------------------------------------
 
