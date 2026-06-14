@@ -14,6 +14,7 @@ import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
+import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanInterventionEvent } from "../types/events.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 
@@ -23,7 +24,7 @@ import type { HumanAction } from "../dag-runtime/types.js";
 
 const makeNode = (
   id: string,
-  overrides: Partial<NodeDef<unknown, unknown>> = {},
+  overrides: NodeOverride = {},
 ): NodeDef<unknown, unknown> => ({
   // @ts-expect-error — branded ID test fixture
   id,
@@ -34,7 +35,7 @@ const makeNode = (
   requires: [] as const,
   sideEffects: NO_SIDE_EFFECTS,
   confidence: NO_CONFIDENCE,
-  ...overrides,
+  ...brandedOverride(overrides),
 });
 
 const makeDag = (nodeOverrides?: Partial<NodeDef<unknown, unknown>>) =>

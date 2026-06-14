@@ -22,6 +22,7 @@ import {
   runId as mkRunId,
   DAG_INPUT,
   NoopObserver,
+  nonEmptyString,
 } from "@fuguejs/framework";
 import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
 import type {
@@ -247,7 +248,7 @@ const twoWaveDag = (drafts: { onDraft?: () => void; onReview?: () => void } = {}
     nodes: {
       draft: makeNode("draft", { run: async () => { drafts.onDraft?.(); return ok("draft-out"); } }),
       review: makeNode("review", {
-        humanReview: { prompt: "Approve the draft?" },
+        humanReview: { prompt: nonEmptyString("Approve the draft?") },
         run: async () => { drafts.onReview?.(); return ok("review-out"); },
       }),
     },

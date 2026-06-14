@@ -1,7 +1,8 @@
 import type { z } from "zod";
-import type { NodeDef, Capability, NodeHumanReviewConfig } from "../types/node.js";
+import type { NodeDef, Capability } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
+import { asNonEmptyString } from "../types/non-empty-string.js";
 import { createTransformNode } from "./transform.js";
 
 /**
@@ -29,10 +30,12 @@ import { createTransformNode } from "./transform.js";
  * LLM that drafts a message you want approved before it is sent) — the reviewer
  * reviews (and may edit, via `approve-with-edit`) that node's output.
  *
- * Throws at construction (parse-don't-validate) if `prompt` is empty or
- * whitespace: the prompt is the entire human-facing payload of the gate — what
- * the reviewer reads to decide — so a blank one is an illegal state that must
- * not be representable. This is the single choke point for both helpers.
+ * This is the single choke point for both helpers and the SOLE gateway that
+ * parses a raw prompt string into the `NonEmptyString` the gate stores. Throws
+ * at construction (parse-don't-validate) if `prompt` is empty or whitespace:
+ * the prompt is the entire human-facing payload of the gate — what the reviewer
+ * reads to decide — so a blank one is an illegal state the brand makes
+ * unrepresentable downstream.
  *
  * Also throws if `node` is ALREADY gated: a node carries at most one review
  * gate. Re-gating would silently spread the new config over the old, dropping
@@ -40,9 +43,10 @@ import { createTransformNode } from "./transform.js";
  */
 export const withHumanReview = <I, O, E extends FrameworkError, R extends readonly Capability[]>(
   node: NodeDef<I, O, E, R>,
-  config: NodeHumanReviewConfig,
+  config: { readonly prompt: string },
 ): NodeDef<I, O, E, R> => {
-  if (config.prompt.trim() === "") {
+  const prompt = asNonEmptyString(config.prompt);
+  if (prompt === undefined) {
     throw new Error(
       `human-review prompt must be a non-empty string (node '${node.id}'): the prompt is what the reviewer reads to decide`,
     );
@@ -52,7 +56,7 @@ export const withHumanReview = <I, O, E extends FrameworkError, R extends readon
       `node '${node.id}' already carries a human-review gate (prompt '${node.humanReview.prompt}'): a node can be gated at most once — re-gating would silently drop the first prompt`,
     );
   }
-  return { ...node, humanReview: config };
+  return { ...node, humanReview: { prompt } };
 };
 
 /** Config for `createHumanReviewNode`. */

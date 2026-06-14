@@ -10,6 +10,7 @@ import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
 import type { HttpCapability } from "./http-capability.js";
 import type { ClockCapability } from "./clock.js";
+import type { NonEmptyString } from "./non-empty-string.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
@@ -46,8 +47,15 @@ export interface NodeRetryConfig {
  * `RunOptions.onHumanReview`, otherwise it returns a validation error.
  */
 export interface NodeHumanReviewConfig {
-  /** Prompt shown to the reviewer. */
-  readonly prompt: string;
+  /**
+   * Prompt shown to the reviewer — the gate's entire human-facing payload.
+   * Branded `NonEmptyString`: a blank prompt (a gate that asks nothing) is
+   * unrepresentable by construction, so the invariant lives in the type, not in
+   * a runtime guard. The only gateway is `withHumanReview` (which parses a raw
+   * string into the brand), so attaching this field with a bare `""` literal is
+   * a compile error — the validation choke point cannot be bypassed.
+   */
+  readonly prompt: NonEmptyString;
 }
 
 export interface PromptAccess {

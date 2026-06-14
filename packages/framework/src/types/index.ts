@@ -138,4 +138,4 @@ export type { ClockCapability } from "./clock.js";
 export { systemClock, fixedClock } from "./clock.js";
 
 export type { NonEmptyString } from "./non-empty-string.js";
-export { asNonEmptyString } from "./non-empty-string.js";
+export { asNonEmptyString, nonEmptyString } from "./non-empty-string.js";

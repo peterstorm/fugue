@@ -39,14 +39,18 @@
 - **Issue:** the `--review` happy path asserts `review === true`; the no-`--review` case (stable-JSON contract: `review` is the literal `false`, not absent) is untested.
 - **Fix:** add `expect(result.review).toBe(false)` to a non-review scaffold test.
 
-## Deferred (documented, not applied this pass)
+## Implemented as a follow-up (user-approved after pass 2)
 
-### A3: prompt non-empty invariant lives in a runtime guard + comment, not the type
+### A3: prompt non-empty invariant moved into the type (NonEmptyString brand) ✅
 - **Source:** type-design-analyzer (×2: primitive-obsession + choke-point bypass)
-- **File:** `packages/framework/src/types/node.ts:48-51`, `:436`
-- **Reason deferred:** The real fix (brand `prompt` as `NonEmptyString` with a parse constructor) changes an exported framework type, introduces new public API, and ripples into host-package test fixtures (`makeNode` in `service.test.ts:159` uses `Partial<NodeDef>`; `hitl-http.test.ts:30` builds `humanReview: { prompt }` literals). That is a deliberate type-system design decision, not a targeted remediation edit, and warrants explicit sign-off.
-- **Mitigation in place:** Both helpers route through `withHumanReview`'s construction guard (the single choke point), which is present and tested for empty + whitespace prompts. The bypass requires deliberately hand-constructing a `humanReview: { prompt: "" }` literal past the documented front door.
-- **Recommendation:** Introduce `NonEmptyString` (or `ReviewPrompt`) with a `parsePrompt` constructor; change `withHumanReview`'s param to raw `{ prompt: string }` parsed internally; type `NodeHumanReviewConfig.prompt` as the brand. Makes the runtime throw redundant (true parse-don't-validate) and the literal-bypass a compile error.
+- **Files:** `packages/framework/src/types/node.ts` (field), `nodes/human-review.ts` (gateway), `types/non-empty-string.ts` (constructor), + test factories
+- **What shipped:**
+  - Reused the existing `NonEmptyString` brand (`types/non-empty-string.ts`) and added a throwing smart-constructor `nonEmptyString(s)` alongside the Option-returning `asNonEmptyString` (mirrors `nodeId`/`dagId` in `ids.ts`). Both exported from the barrel.
+  - `NodeHumanReviewConfig.prompt` is now `NonEmptyString` — the invariant lives in the type, not a runtime guard + comment. A bare `{ prompt: "" }` literal on the field is a compile error, so the `withHumanReview` choke point cannot be bypassed.
+  - `withHumanReview(node, { prompt: string })` now parses the raw string into the brand via `asNonEmptyString` (the public authoring API is unchanged — authors still pass a plain string). The runtime throw is now defense-in-depth rather than load-bearing.
+  - The `humanReviewPrompts` runtime map is `ReadonlyMap<NodeId, string>` (covariant), so `NonEmptyString` widens to `string` at every read/serialize site — zero runtime-code change.
+  - ~50 type-checked test construction sites updated: a shared `_node-override.ts` helper relaxes the `makeNode`-style factories' `humanReview` override to a raw string and re-brands internally (zero call-site churn); the two `mkNodeDef` factories and the host `service.test.ts` fixture brand inline. Sites already cast (`as NodeDef`/`as any`/`as unknown as`) were untouched. Two pre-existing `: any` lint violations (incidentally surfaced) were cleaned.
+- **Validation:** full workspace typecheck clean (10 packages); framework 1674 pass / 0 fail; host HITL 128 + run-dag 32 pass / 0 fail.
 
 ### A6: `--force` re-scaffold leaves stale files behind
 - **Source:** silent-failure-hunter

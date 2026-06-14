@@ -11,7 +11,7 @@ describe("createHumanReviewNode", () => {
 
   it("attaches the humanReview gate with the given prompt", () => {
     const gate = createHumanReviewNode({ id: N("review"), schema, prompt: "Approve?" });
-    expect(gate.humanReview).toEqual({ prompt: "Approve?" });
+    expect(gate.humanReview?.prompt as string).toBe("Approve?");
     expect(gate.kind).toBe("transform");
     expect(gate.requires).toEqual([]);
   });
@@ -55,7 +55,7 @@ describe("withHumanReview", () => {
 
     expect(gated.id).toBe(base.id);
     expect(gated.kind).toBe("transform");
-    expect(gated.humanReview).toEqual({ prompt: "Approve the draft?" });
+    expect(gated.humanReview?.prompt as string).toBe("Approve the draft?");
     // The original node's work is preserved — the gate is purely additive.
     expect(base.humanReview).toBeUndefined();
     const result = await gated.run({ n: 21 }, {} as never);
@@ -73,7 +73,7 @@ describe("withHumanReview", () => {
 
     const gated = withHumanReview(fetchNode, { prompt: "Approve the fetched record?" });
     expect(gated.kind).toBe("fetch");
-    expect(gated.humanReview).toEqual({ prompt: "Approve the fetched record?" });
+    expect(gated.humanReview?.prompt as string).toBe("Approve the fetched record?");
     expect(gated.requires).toEqual(fetchNode.requires);
   });
 
@@ -102,6 +102,6 @@ describe("withHumanReview", () => {
       /already carries a human-review gate/,
     );
     // The first gate is untouched — the failed re-gate did not mutate it.
-    expect(gated.humanReview).toEqual({ prompt: "First gate?" });
+    expect(gated.humanReview?.prompt as string).toBe("First gate?");
   });
 });
