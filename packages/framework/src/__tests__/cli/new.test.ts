@@ -55,7 +55,7 @@ describe("generated scaffolds lint clean", () => {
       it(`${label} → dag.ts lints, fugue.yaml parses${llm ? ", prompts check green" : ""}`, async () => {
         const root = join(tmpRoot, `lint-${shape}-${llm ? "llm" : "plain"}`);
         const name = `scaffold-${shape}`;
-        const result = await runNew({ team: "demo", name, shape, llm, force: false, root });
+        const result = await runNew({ team: "demo", name, shape, llm, review: false, force: false, root });
         if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
 
         const dagDir = join(root, "dags", "demo", name);
@@ -167,9 +167,12 @@ describe("generated content guarantees", () => {
 describe("runNew file layout", () => {
   it("writes dag.ts, fugue.yaml, README.md under dags/<team>/<name>", async () => {
     const root = join(tmpRoot, "layout");
-    const result = await runNew({ team: "leads", name: "my-dag", shape: "linear", llm: false, force: false, root });
+    const result = await runNew({ team: "leads", name: "my-dag", shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
+      // The no-`--review` case carries the literal `false` (stable-JSON contract),
+      // not an absent field — the symmetric counterpart of the --review test.
+      expect(result.review).toBe(false);
       expect(result.dir).toBe(join(root, "dags", "leads", "my-dag"));
       expect(result.files).toEqual([
         join("dags", "leads", "my-dag", "dag.ts"),
@@ -182,7 +185,7 @@ describe("runNew file layout", () => {
 
   it("--llm adds prompts/<name>.txt and a synced registry.json", async () => {
     const root = join(tmpRoot, "layout-llm");
-    const result = await runNew({ team: "leads", name: "opener", shape: "sources", llm: true, force: false, root });
+    const result = await runNew({ team: "leads", name: "opener", shape: "sources", llm: true, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.files).toContain(join("dags", "leads", "opener", "prompts", "opener.txt"));
@@ -196,7 +199,7 @@ describe("runNew file layout", () => {
 
   it("--owner sets the fugue.yaml owner", async () => {
     const root = join(tmpRoot, "owner");
-    await runNew({ team: "leads", name: "owned", shape: "linear", llm: false, owner: "peter.hansen", force: false, root });
+    await runNew({ team: "leads", name: "owned", shape: "linear", llm: false, review: false, owner: "peter.hansen", force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "owned", "fugue.yaml"), "utf-8");
     expect(yaml).toContain("owner: peter.hansen");
   });
@@ -206,7 +209,7 @@ describe("runNew file layout", () => {
     // keys. The value is emitted double-quoted (JSON-escaped) by construction.
     const root = join(tmpRoot, "owner-hostile");
     const owner = "evil: true\ninjected: pwned";
-    await runNew({ team: "leads", name: "h", shape: "linear", llm: false, owner, force: false, root });
+    await runNew({ team: "leads", name: "h", shape: "linear", llm: false, review: false, owner, force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "h", "fugue.yaml"), "utf-8");
     // The whole owner sits inside one quoted scalar; the newline is escaped, so
     // `injected:` never appears as its own top-level mapping line.
@@ -216,7 +219,7 @@ describe("runNew file layout", () => {
 
   it("the LLM factory shape exports create<Pascal>Dag", async () => {
     const root = join(tmpRoot, "factory");
-    await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, force: false, root });
+    await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, review: false, force: false, root });
     const dagTs = await readFile(join(root, "dags", "leads", "lead-opener", "dag.ts"), "utf-8");
     expect(dagTs).toContain("export const createLeadOpenerDag");
   });
@@ -262,7 +265,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "existing.txt"), "keep me", "utf-8");
 
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.problems[0]).toContain("--force");
   });
@@ -273,7 +276,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "dag.ts"), "// stale", "utf-8");
 
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: true, root });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: true, root });
     expect(result.ok).toBe(true);
     const dagTs = await readFile(join(dir, "dag.ts"), "utf-8");
     expect(dagTs).not.toBe("// stale");
@@ -283,7 +286,7 @@ describe("runNew overwrite guard", () => {
     const root = join(tmpRoot, "guard-empty");
     const dir = join(root, "dags", "t", "x");
     await mkdir(dir, { recursive: true });
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
   });
 
@@ -296,7 +299,7 @@ describe("runNew overwrite guard", () => {
     await writeFile(join(root, "dags"), "i am a file, not a directory", "utf-8");
 
     await expect(
-      runNew({ team: "t", name: "x", shape: "linear", llm: false, force: false, root }),
+      runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root }),
     ).rejects.toThrow();
   });
 });

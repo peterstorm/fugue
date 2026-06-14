@@ -38,8 +38,8 @@ export interface NewOptions {
   readonly name: string;
   readonly shape: Shape;
   readonly llm: boolean;
-  /** Add a human-review gate (ADR-0060). Linear shape only. Defaults to false. */
-  readonly review?: boolean;
+  /** Add a human-review gate (ADR-0060). Linear shape only. */
+  readonly review: boolean;
   readonly owner?: string;
   /** Root dir that contains `dags/`; defaults to `process.cwd()`. */
   readonly root?: string;
@@ -256,7 +256,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     team: options.team,
     name: options.name,
     llm: options.llm,
-    review: options.review ?? false,
+    review: options.review,
     files: written,
     nextSteps,
   };

@@ -33,6 +33,10 @@ import { createTransformNode } from "./transform.js";
  * whitespace: the prompt is the entire human-facing payload of the gate — what
  * the reviewer reads to decide — so a blank one is an illegal state that must
  * not be representable. This is the single choke point for both helpers.
+ *
+ * Also throws if `node` is ALREADY gated: a node carries at most one review
+ * gate. Re-gating would silently spread the new config over the old, dropping
+ * the first prompt — another illegal state, not a last-write-wins overwrite.
  */
 export const withHumanReview = <I, O, E extends FrameworkError, R extends readonly Capability[]>(
   node: NodeDef<I, O, E, R>,
@@ -41,6 +45,11 @@ export const withHumanReview = <I, O, E extends FrameworkError, R extends readon
   if (config.prompt.trim() === "") {
     throw new Error(
       `human-review prompt must be a non-empty string (node '${node.id}'): the prompt is what the reviewer reads to decide`,
+    );
+  }
+  if (node.humanReview !== undefined) {
+    throw new Error(
+      `node '${node.id}' already carries a human-review gate (prompt '${node.humanReview.prompt}'): a node can be gated at most once — re-gating would silently drop the first prompt`,
     );
   }
   return { ...node, humanReview: config };

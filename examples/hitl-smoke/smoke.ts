@@ -21,13 +21,22 @@ import { decisionBody, expectedTerminal, isPollDone, parseDecision } from "./smo
 
 const BASE = process.env.SMOKE_BASE_URL ?? "http://localhost:3000";
 const TOKEN = process.env.ADMIN_TOKEN;
-const DECISION = parseDecision(process.env.SMOKE_DECISION);
 const DAG_ID = "approval-demo";
 
 if (!TOKEN) {
   console.error("ADMIN_TOKEN is required (the host's ADMIN_TOKEN). Set it and retry.");
   process.exit(2);
 }
+
+const parsedDecision = parseDecision(process.env.SMOKE_DECISION);
+if (!parsedDecision.ok) {
+  console.error(
+    `SMOKE_DECISION must be "approve" or "reject" (or unset for the default approve); ` +
+      `got "${parsedDecision.raw}". Fix it and retry.`,
+  );
+  process.exit(2);
+}
+const DECISION = parsedDecision.decision;
 
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

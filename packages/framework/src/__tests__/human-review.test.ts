@@ -86,4 +86,22 @@ describe("withHumanReview", () => {
     });
     expect(() => withHumanReview(base, { prompt: "  " })).toThrow(/non-empty/);
   });
+
+  it("rejects re-gating an already-gated node (double-gate is illegal)", () => {
+    // Spreading a second gate over the first would silently drop the first
+    // prompt — a node carries at most one review gate, so re-gating must throw
+    // rather than last-write-win.
+    const base = createTransformNode({
+      id: N("draft"),
+      inputSchema: z.object({ n: z.number() }),
+      outputSchema: z.object({ n: z.number() }),
+      transform: (input) => ok(input),
+    });
+    const gated = withHumanReview(base, { prompt: "First gate?" });
+    expect(() => withHumanReview(gated, { prompt: "Second gate?" })).toThrow(
+      /already carries a human-review gate/,
+    );
+    // The first gate is untouched — the failed re-gate did not mutate it.
+    expect(gated.humanReview).toEqual({ prompt: "First gate?" });
+  });
 });
