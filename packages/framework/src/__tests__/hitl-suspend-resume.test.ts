@@ -21,7 +21,7 @@ import { compileDagToMachine } from "../dag-runtime/machine.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
-import type { HumanReviewOutcome } from "../dag-runtime/types.js";
+import type { HumanReviewOutcome, DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
 
 // ---------------------------------------------------------------------------
@@ -252,6 +252,115 @@ describe("HITL telemetry (ADR-0060) — elapsedMsSinceAwait excludes park durati
     // each dispatch, so elapsed reflects only the final (resuming) hook call.
     expect(evt!.elapsedMsSinceAwait).toBeGreaterThanOrEqual(0);
     expect(evt!.elapsedMsSinceAwait).toBeLessThan(PARK_MS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. effectively-once consumption — crash before the durable post-gate
+//     checkpoint must NOT lose the approval (onDecisionConsumed ordering)
+// ---------------------------------------------------------------------------
+
+describe("HITL effectively-once consumption (ADR-0060) — crash before commit keeps the approval", () => {
+  it("re-reads the decision on resume when a crash lands between read and the durable post-gate checkpoint", async () => {
+    let runCount = 0;
+    const dag = makeDag(
+      [makeNode("a", {
+        humanReview: { prompt: "Approve?" },
+        run: async () => { runCount++; return ok("a-out"); },
+      })],
+      [{ from: DAG_INPUT, to: "a" }],
+      "a",
+    );
+
+    // A decision store proxy modelling the read/consume split: getDecision READS
+    // (does not consume); onDecisionConsumed CONSUMES (clears). The fix relies on
+    // consume firing only AFTER the durable post-gate checkpoint.
+    const decisions = new Map<string, HumanReviewOutcome>();
+    const consumed: string[] = [];
+    const onHumanReview = async (req: { nodeId: NodeId }): Promise<HumanReviewOutcome> =>
+      decisions.get(req.nodeId as string) ?? PENDING;
+    const onDecisionConsumed = async (nodeId: NodeId): Promise<void> => {
+      decisions.delete(nodeId as string);
+      consumed.push(nodeId as string);
+    };
+
+    // Durable job that can be told to throw on the NEXT non-suspended (i.e.
+    // post-gate / resume) checkpoint write — simulating a worker crash after the
+    // kernel reads the decision but before it persists the advanced state.
+    const inner = durableJob(dag, null);
+    let failNextPostGateWrite = false;
+    const job = {
+      get data() { return inner.data; },
+      async updateData(d: { state: DagPhase; context: DagMachineContext }) {
+        if (failNextPostGateWrite && d.state.kind !== "suspended") {
+          failNextPostGateWrite = false;
+          throw new Error("simulated crash: worker died before the durable post-gate checkpoint");
+        }
+        return inner.updateData(d);
+      },
+      async updateProgress(p: number) { return inner.updateProgress(p); },
+      async appendEvent(e: unknown, k?: string) { return inner.appendEvent(e, k); },
+    };
+
+    // 1. Attempt 1: no decision yet → park at the gate.
+    const parked = await runResumableDagJob<unknown, string>(dag, null, makeCtx(), {
+      jobLike: job, onHumanReview, onDecisionConsumed,
+    });
+    expect(parked.kind).toBe("suspended");
+    expect(runCount).toBe(1); // the gated node ran once, before parking
+
+    // 2. The human approves (decision now recorded, NOT yet consumed).
+    decisions.set("a", { kind: "approve" });
+
+    // 3. Attempt 2: resume, but crash right after the kernel reads the decision
+    //    and before it durably persists the post-gate state.
+    failNextPostGateWrite = true;
+    await expect(
+      runResumableDagJob<unknown, string>(dag, null, makeCtx(), { jobLike: job, onHumanReview, onDecisionConsumed }),
+    ).rejects.toThrow(/simulated crash/);
+
+    // The approval was NOT consumed (onDecisionConsumed never fired — the write
+    // threw first), and the durable checkpoint is still the parked gate.
+    expect(consumed).toEqual([]);
+    expect(decisions.has("a")).toBe(true);
+    expect(inner.data.state.kind).toBe("suspended");
+
+    // 4. Attempt 3: resume cleanly → the decision is RE-READ (not lost) and the
+    //    run completes; consumption happens now, after the durable checkpoint.
+    const resumed = await runResumableDagJob<unknown, string>(dag, null, makeCtx(), {
+      jobLike: job, onHumanReview, onDecisionConsumed,
+    });
+    expect(resumed.kind).toBe("completed");
+    if (resumed.kind === "completed") expect(resumed.output).toBe("a-out");
+    expect(runCount).toBe(1); // never re-ran the node across the crash + resumes
+    expect(consumed).toEqual(["a"]); // consumed exactly once, only after durability
+    expect(decisions.has("a")).toBe(false);
+  });
+
+  it("does not consume (clear) the decision until after the post-gate checkpoint on a clean resume", async () => {
+    const dag = makeDag(
+      [makeNode("a", { humanReview: { prompt: "Approve?" }, run: async () => ok("a-out") })],
+      [{ from: DAG_INPUT, to: "a" }],
+      "a",
+    );
+    const decisions = new Map<string, HumanReviewOutcome>([["a", { kind: "approve" }]]);
+    const consumeOrder: string[] = [];
+    const job = durableJob(dag, null);
+    // Park first so the resume below is a genuine gate resolution.
+    await runResumableDagJob(dag, null, makeCtx(), {
+      jobLike: job,
+      onHumanReview: async () => PENDING,
+      onDecisionConsumed: async () => { consumeOrder.push("consumed"); },
+    });
+    expect(consumeOrder).toEqual([]); // nothing consumed on a park (human-suspend)
+
+    const resumed = await runResumableDagJob<unknown, string>(dag, null, makeCtx(), {
+      jobLike: job,
+      onHumanReview: async (req: { nodeId: NodeId }) => decisions.get(req.nodeId as string) ?? PENDING,
+      onDecisionConsumed: async () => { consumeOrder.push("consumed"); },
+    });
+    expect(resumed.kind).toBe("completed");
+    expect(consumeOrder).toEqual(["consumed"]); // consumed exactly once, on the resolving resume
   });
 });
 

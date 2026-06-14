@@ -152,6 +152,19 @@ export const runStateMachine = async <S, E, C>(
       const dedupKey = dedupKeyFn(prevStateKey, attemptNumber, event);
       await job.appendEvent(event, dedupKey);
       await job.updateData({ state, context });
+      // ADR-0060: post-commit hook — fires ONLY after the post-state is durably
+      // persisted, so a caller's effectively-once side effect (e.g. consuming a
+      // human decision) is ordered strictly after durability. A crash between
+      // `updateData` and here leaves the side effect un-run, which is the safe
+      // direction: the decision is re-read on resume rather than lost. A throw
+      // is swallowed (the transition is already persisted) like `onTrace`.
+      if (opts.onCommitted !== undefined) {
+        try {
+          await opts.onCommitted({ prevState, event, state, context });
+        } catch (commitErr) {
+          log.error("[runStateMachine] onCommitted threw — ignoring to preserve durability:", commitErr);
+        }
+      }
       // Do not persist progress for failed states — the runner throws below
       // before reaching here in the failed branch, and FR-005 forbids
       // checkpointing terminal-failed.

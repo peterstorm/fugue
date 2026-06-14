@@ -3,10 +3,20 @@
  * kernel's human gate and the durable decision/notification stores.
  *
  * On each (re)dispatch for a gate `(runId, nodeId)`:
- *   1. A decision already recorded  → clear it and return it (the gate resolves).
+ *   1. A decision already recorded  → RETURN it (the gate resolves). The hook
+ *      does NOT clear it here — consumption is deferred to `makeOnDecisionConsumed`,
+ *      which the kernel calls only AFTER the post-gate checkpoint is durable.
  *   2. No decision yet              → mark the gate pending; on the FIRST park
  *      (markPending returned `true`) send the notification; return `pending` so
  *      the run suspends.
+ *
+ * Read/consume split (the durability fix): if the hook cleared the decision the
+ * moment it read it, a worker crash AFTER the clear but BEFORE the kernel
+ * persists the advanced state would lose the approval — the durable checkpoint
+ * still says `suspended` while the decision is gone, so the resumed run re-parks
+ * and a human must decide again. By only READING here and deferring the clear to
+ * the post-commit callback, a crash in that window re-reads the same decision on
+ * resume (effectively-once consumption).
  *
  * Fail-safe by construction: a decision-store read error returns `pending`
  * (re-park) rather than fabricating an approval — a missing/erroring decision
@@ -35,24 +45,17 @@ export interface OnHumanReviewDeps {
 /**
  * Build the per-run `onHumanReview` hook the worker passes to
  * `runResumableDagJob`. Closes over the run's id + the decision/notifier stores.
+ * READ-ONLY with respect to the decision store's recorded decision: it returns a
+ * present decision without consuming it (see `makeOnDecisionConsumed`).
  */
 export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
   async (req: { nodeId: NodeId; output: unknown; prompt: string }): Promise<HumanReviewOutcome> => {
     const { decisions, notifier, runId, dagId, logger } = deps;
 
-    // 1. Decision already in? Resolve the gate.
+    // 1. Decision already in? Resolve the gate by RETURNING it. Consumption
+    //    (clear) is deferred to onDecisionConsumed, fired post-checkpoint.
     const decision = await decisions.getDecision(runId, req.nodeId);
     if (decision.ok && decision.value !== null) {
-      const cleared = await decisions.clear(runId, req.nodeId);
-      if (!cleared.ok) {
-        // Non-fatal: a stale pending marker is harmless (the decision is
-        // consumed once via the returned action). Log and proceed.
-        logger?.warn?.("hitl: failed to clear resolved review marker", {
-          runId,
-          nodeId: req.nodeId,
-          error: cleared.error.kind,
-        });
-      }
       return decision.value;
     }
 
@@ -99,4 +102,35 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
       }
     }
     return { kind: "pending" };
+  };
+
+export interface OnDecisionConsumedDeps {
+  readonly decisions: DecisionStorePort;
+  readonly runId: RunId;
+  readonly logger?: LogPort;
+}
+
+/**
+ * Build the `onDecisionConsumed` callback the kernel invokes AFTER the post-gate
+ * transition is durably checkpointed (ADR-0060). It clears the consumed decision
+ * (and its pending marker) for `(runId, nodeId)`, completing effectively-once
+ * consumption: the decision survives until the run has durably advanced past the
+ * gate, so a crash mid-resume re-reads it rather than losing the approval.
+ *
+ * A clear failure is non-fatal: the post-gate state is already durable, so a
+ * stale decision lingers harmlessly until its TTL (a DAG node gates once per run
+ * except on `reroute`, which re-gates only after this clear has already run). We
+ * log and move on.
+ */
+export const makeOnDecisionConsumed = (deps: OnDecisionConsumedDeps) =>
+  async (nodeId: NodeId): Promise<void> => {
+    const { decisions, runId, logger } = deps;
+    const cleared = await decisions.clear(runId, nodeId);
+    if (!cleared.ok) {
+      logger?.warn?.("hitl: failed to clear consumed decision (non-fatal, TTL reaps)", {
+        runId,
+        nodeId,
+        error: cleared.error.kind,
+      });
+    }
   };

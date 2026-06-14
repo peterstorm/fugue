@@ -107,12 +107,23 @@ export interface RunExecutionRequest {
   readonly identity: PersistedIdentity;
   /** Run-store-backed durable job handle (carries + persists the checkpoint). */
   readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
-  /** The host's review hook (decision-store + notifier closure). */
+  /** The host's review hook (decision-store + notifier closure). Read-only: it
+   * resolves a gate by READING the recorded decision; it does NOT consume it. */
   readonly onHumanReview: (req: {
     nodeId: NodeId;
     output: unknown;
     prompt: string;
   }) => Promise<HumanReviewOutcome>;
+  /**
+   * ADR-0060: consume a decision AFTER the post-gate checkpoint is durable.
+   * Called by the kernel (via `onDecisionConsumed`) with the resolved gate's
+   * `nodeId` once the transition driven by that decision has been persisted, so
+   * the decision is cleared only when a crash can no longer lose it. Splitting
+   * read (`onHumanReview`) from consume (this) is what makes the resume
+   * effectively-once: a crash between reading and the durable checkpoint
+   * re-reads the same decision instead of dropping the approval.
+   */
+  readonly onDecisionConsumed: (nodeId: NodeId) => Promise<void>;
 }
 
 /**

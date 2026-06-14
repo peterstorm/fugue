@@ -192,6 +192,7 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
       const outcome = await runResumableDagJob<unknown, unknown>(dag, req.input, makeCtx(), {
         jobLike: req.jobLike,
         onHumanReview: req.onHumanReview,
+        onDecisionConsumed: req.onDecisionConsumed,
       });
       if (outcome.kind === "suspended") {
         return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt: outcome.prompt });

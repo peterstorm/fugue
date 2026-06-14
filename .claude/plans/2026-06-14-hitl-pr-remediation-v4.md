@@ -79,17 +79,21 @@ oversights:
   run" store/port operation (Redis scan). Disproportionate to a sub-second recoverable
   window; belongs in a dedicated design cycle.
 
-### F. Decision consume not atomic with the post-gate checkpoint
+### F. Decision consume not atomic with the post-gate checkpoint — **FIXED (follow-up)**
 - **Source:** architecture-tech-lead (conf 80), advisory.
-- The hook `clear`s the decision before the kernel durably checkpoints the advanced
-  state. A worker crash in that window drops a stored approval; on resume the run
-  re-parks/re-notifies and a human re-decides.
-- **Why not fixed now:** Recoverable (re-notify, no incorrect execution / data loss).
-  The real fix is effectively-once consume ordered after the durable checkpoint — a
-  framework-kernel change (the kernel, not the host hook, controls persistence timing).
-  The lighter "don't clear eagerly" alternative trades this window for an
-  accept-duplicate-after-resolve window and ripples through the consume-once tests.
-  Needs its own design cycle.
+- The hook `clear`ed the decision before the kernel durably checkpointed the advanced
+  state. A worker crash in that window dropped a stored approval; on resume the run
+  re-parked/re-notified and a human re-decided.
+- **Fix (implemented after the initial pass-5 commit):** effectively-once consumption
+  ordered AFTER the durable checkpoint. Added `KernelRunOpts.onCommitted` (fires after
+  `updateData` resolves), surfaced through the DAG layer as `onDecisionConsumed(nodeId)`
+  (filtered to `human-responded`). The host `onHumanReview` hook is now READ-ONLY; the
+  new `makeOnDecisionConsumed` clears the decision via the post-commit callback, threaded
+  service → run-executor → `runResumableDagJob` → kernel. A crash between read and the
+  durable checkpoint now re-reads the decision on resume instead of losing it. Proven by
+  a framework crash-before-commit test; reroute re-gate safety preserved (clear runs in
+  the same iteration as the post-gate checkpoint, before any re-gate). Residual (crash in
+  the `updateData`→`onCommitted` gap + a later reroute re-gate) documented in ADR-0060.
 
 ## Deliberately NOT changed
 - In-Teams per-user/per-team click authorization (architecture conf 78) — already an

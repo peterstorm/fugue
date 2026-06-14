@@ -67,7 +67,7 @@ export interface BackgroundResult {
 }
 
 export interface DagRunOpts
-  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf" | "computeDedupKey" | "logger"> {
+  extends Omit<KernelRunOpts<DagPhase, DagEvent, DagMachineContext>, "errorEventOf" | "computeDedupKey" | "logger" | "onCommitted"> {
   /** Provide a durable job backend (BullMQ, etc.). Falls back to in-memory when omitted.
    * Typed against `DagMachineContextPersisted` — the serialization-safe subset.
    * The runtime re-injects live DAG-derived fields (closures, schemas) on read.
@@ -82,6 +82,15 @@ export interface DagRunOpts
     output: unknown;
     prompt: string;
   }) => Promise<HumanReviewOutcome>;
+  /**
+   * ADR-0060: effectively-once decision consumption. Called with the gate's
+   * `nodeId` AFTER the post-gate transition (the one driven by the consumed
+   * `human-responded` decision) is durably checkpointed. The host wires this to
+   * clear the decision from its store, so a worker crash BEFORE the checkpoint
+   * re-reads the decision on resume instead of losing the approval. Implemented
+   * via the kernel's `onCommitted` hook, filtered to `human-responded` events.
+   */
+  readonly onDecisionConsumed?: (nodeId: NodeId) => void | Promise<void>;
   /**
    * Per-node retry limits passed at call time — merged with (and takes precedence over)
    * DagDef.retryLimits. Allows callers to override retry budgets without mutating the DAG.
@@ -356,6 +365,7 @@ export const runDagStatefulOutcome = async <I, O>(
       error: classified.message,
     });
 
+    const onDecisionConsumed = opts?.onDecisionConsumed;
     const runOpts: KernelRunOpts<DagPhase, DagEvent, DagMachineContext> = {
       beforeExecute: opts?.beforeExecute,
       classifyError: opts?.classifyError,
@@ -364,6 +374,18 @@ export const runDagStatefulOutcome = async <I, O>(
       now: opts?.now,
       computeDedupKey: sha256DedupKey,
       logger: fwLogger(),
+      // ADR-0060: translate the generic post-commit hook into the DAG-semantic
+      // "a decision was consumed" signal. `human-responded` is the only event
+      // produced by consuming a decision; its `nodeId` is the resolved gate.
+      ...(onDecisionConsumed !== undefined
+        ? {
+            onCommitted: async ({ event }: { event: DagEvent }): Promise<void> => {
+              if (event.type === "human-responded") {
+                await onDecisionConsumed(event.nodeId);
+              }
+            },
+          }
+        : {}),
     };
 
     try {

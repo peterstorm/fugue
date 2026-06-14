@@ -1,17 +1,20 @@
 // human-review-hook.test.ts — the host onHumanReview hook (ADR-0060).
 //
 // The hook is the fail-safe boundary between the kernel's human gate and the
-// decision/notification stores. Its load-bearing invariant: an ERRORED decision
-// lookup must NEVER be read as approval — it must re-park. These unit-test that
-// branch (and the non-fatal clear failure) directly, which the full-loop
-// service test never exercises (it only drives ok(null)/ok(action)).
+// decision/notification stores. Its load-bearing invariants: an ERRORED decision
+// lookup must NEVER be read as approval (re-park); and the hook is READ-ONLY —
+// it returns a recorded decision WITHOUT consuming it. Consumption is deferred
+// to makeOnDecisionConsumed, which the kernel calls only after the post-gate
+// checkpoint is durable, so a crash mid-resume re-reads the decision instead of
+// losing the approval. These unit-test those branches directly, which the
+// full-loop service test never exercises.
 
 import { describe, it, expect } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
 import type { RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
 import type { DecisionStorePort, HumanReviewNotifierPort } from "../ports.js";
 import type { ReviewNotification } from "../types.js";
-import { makeOnHumanReview } from "../human-review-hook.js";
+import { makeOnHumanReview, makeOnDecisionConsumed } from "../human-review-hook.js";
 
 const RUN = "run-1" as RunId;
 const NODE = "review" as NodeId;
@@ -48,17 +51,21 @@ describe("makeOnHumanReview", () => {
     expect(notifier.sent).toHaveLength(0);
   });
 
-  it("returns the recorded action even if clearing the marker fails (non-fatal)", async () => {
+  it("returns a recorded action WITHOUT consuming it (read-only — clear is deferred)", async () => {
     const action: HumanAction = { kind: "approve", actor: "Alice" };
+    let clearCalls = 0;
     const decisions = decisionStore({
       async getDecision() { return ok(action); },
-      async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
+      async clear() { clearCalls += 1; return ok(undefined); },
     });
     const hook = makeOnHumanReview({ decisions, notifier: notifierSpy().port, runId: RUN, dagId: DAG });
 
     const outcome = await hook(req);
 
     expect(outcome).toEqual(action);
+    // The hook must NOT clear here — consumption is deferred to onDecisionConsumed
+    // so a crash before the durable post-gate checkpoint re-reads the decision.
+    expect(clearCalls).toBe(0);
   });
 
   it("parks and notifies on the FIRST park, then re-parks without re-notifying", async () => {
@@ -108,5 +115,29 @@ describe("makeOnHumanReview", () => {
     expect(await hook(req)).toEqual({ kind: "pending" });
     expect(notifier.sent).toHaveLength(1); // notified despite the marker write failing
     expect(notifier.sent[0]!.nodeId).toBe(NODE);
+  });
+});
+
+describe("makeOnDecisionConsumed", () => {
+  it("clears the decision (and marker) for the resolved gate", async () => {
+    const cleared: [RunId, NodeId][] = [];
+    const decisions = decisionStore({
+      async clear(runId, nodeId) { cleared.push([runId, nodeId]); return ok(undefined); },
+    });
+    const consume = makeOnDecisionConsumed({ decisions, runId: RUN });
+
+    await consume(NODE);
+
+    expect(cleared).toEqual([[RUN, NODE]]);
+  });
+
+  it("is non-fatal when the clear fails (post-gate state is already durable; TTL reaps)", async () => {
+    const decisions = decisionStore({
+      async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
+    });
+    const consume = makeOnDecisionConsumed({ decisions, runId: RUN });
+
+    // Must resolve, not reject — a failed consume cannot fail an already-committed run.
+    await expect(consume(NODE)).resolves.toBeUndefined();
   });
 });

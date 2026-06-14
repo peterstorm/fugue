@@ -29,7 +29,7 @@ import type {
 } from "./ports.js";
 import type { RunRecord } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
-import { makeOnHumanReview } from "./human-review-hook.js";
+import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
 import { toPersistedIdentity } from "./identity.js";
 
 export interface HitlRunServiceDeps {
@@ -147,6 +147,12 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       dagId: record.dagId,
       logger,
     });
+    // ADR-0060: decision consumption is deferred to AFTER the post-gate
+    // checkpoint is durable (the kernel calls this once the resuming transition
+    // is persisted), so a crash mid-resume re-reads the decision instead of
+    // losing the approval. The read (onHumanReview) and the consume (here) are
+    // deliberately split across the durability boundary.
+    const onDecisionConsumed = makeOnDecisionConsumed({ decisions, runId, logger });
 
     const result = await executor.run({
       runId,
@@ -155,6 +161,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       identity: record.identity,
       jobLike,
       onHumanReview,
+      onDecisionConsumed,
     });
 
     if (!result.ok) {

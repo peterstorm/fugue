@@ -84,6 +84,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
           jobLike: req.jobLike,
           onHumanReview: req.onHumanReview,
+          onDecisionConsumed: req.onDecisionConsumed,
           ...(broker !== undefined ? { minting: { broker, origin } } : {}),
         });
 

@@ -54,6 +54,13 @@ export interface RunOptions {
    */
   readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: string }) => Promise<HumanReviewOutcome>;
   /**
+   * ADR-0060: effectively-once decision consumption. Invoked with the resolved
+   * gate's `nodeId` AFTER the post-gate state is durably checkpointed, so a host
+   * can clear a consumed decision only once it is safe to — a crash before the
+   * checkpoint re-reads the decision on resume rather than losing it.
+   */
+  readonly onDecisionConsumed?: (nodeId: import("../types/ids.js").NodeId) => void | Promise<void>;
+  /**
    * Per-call retry limit overrides, merged with (and taking precedence over)
    * `DagDef.retryLimits`.
    */
@@ -166,6 +173,7 @@ const runDagToOutcome = async <I, O>(
   return runDagStatefulInternal<I, O>(dag, input, ctx, {
     jobLike: opts?.jobLike,
     onHumanReview: opts?.onHumanReview,
+    onDecisionConsumed: opts?.onDecisionConsumed,
     retryLimits: opts?.retryLimits,
     onBackground: opts?.onBackground,
     resumeCheckpoint: opts?.resume?.checkpoint,

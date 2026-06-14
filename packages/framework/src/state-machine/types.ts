@@ -117,6 +117,19 @@ export interface KernelRunOpts<S, E, C> {
    * silent no-op so the kernel is side-effect-free when no logger is wired.
    */
   logger?: { warn: (msg: string, ...args: unknown[]) => void; error: (msg: string, ...args: unknown[]) => void };
+  /**
+   * Called AFTER a transition's post-state has been durably checkpointed
+   * (`updateData` resolved). Lets a caller run an effectively-once side effect
+   * that must be ordered strictly after durability — e.g. consuming a human
+   * decision only once the post-gate state is persisted, so a crash BEFORE the
+   * checkpoint re-reads the decision on resume instead of losing it (ADR-0060).
+   *
+   * Like `onTrace`, a throw is swallowed (logged): the transition is already
+   * persisted, so a post-commit side-effect failure must not surface a
+   * successful, durably-advanced transition as a fatal run failure. Not called
+   * for terminal-failed transitions (which are never checkpointed, FR-005).
+   */
+  onCommitted?: (args: { prevState: S; event: E; state: S; context: C }) => void | Promise<void>;
 }
 
 // AD-4: Post-transition trace event with FROM + TO state

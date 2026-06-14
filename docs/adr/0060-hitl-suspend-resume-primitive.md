@@ -154,10 +154,39 @@ work with one predicate and no extra bookkeeping.
   the host's decision/pending store cover the operational questions), but wiring
   the event journal for HITL runs is a tracked follow-up.
 
-### Known timing windows (accepted for v1)
+### Effectively-once decision consumption (the read/consume split)
 
-Two narrow, recoverable race windows are accepted rather than fixed in v1; both
-are recorded here so they are conscious decisions, not oversights.
+A consumed decision is cleared only AFTER the post-gate state is durably
+checkpointed, not the moment the hook reads it. This closes a lost-approval
+window: if the hook cleared on read, a worker crash between the clear and the
+kernel's `updateData` would leave the durable checkpoint at `suspended` with the
+decision gone — the resumed run would re-park and a human would have to decide
+again. The mechanism:
+
+- The host `onHumanReview` hook is **read-only**: it returns a recorded decision
+  without consuming it.
+- A new kernel hook, `KernelRunOpts.onCommitted`, fires after each transition's
+  post-state is persisted (`updateData` resolved). The DAG layer exposes it as
+  `onDecisionConsumed(nodeId)`, called only for the `human-responded` event that
+  consumed the decision.
+- The host wires `onDecisionConsumed` to clear the decision + pending marker.
+
+So a crash before the durable checkpoint re-reads the same decision on resume
+(safe direction); the clear runs strictly after durability. This is also safe
+under `reroute` (which re-gates the same node within a run): the clear runs in
+the same kernel iteration as the post-reroute checkpoint, many iterations before
+any re-gate, so a re-gate never sees a stale decision. **Residual (documented):**
+a crash landing in the tiny window between `updateData` and `onCommitted`, *and*
+a later `reroute` re-gate of that exact node, could let the un-cleared decision
+auto-resolve the re-review. This is far narrower than the original window (it
+needs reroute + a crash in an adjacent-await gap) and no worse than a tolerated
+`clear` failure; fully closing it would require a decision-store transaction
+spanning the checkpoint write.
+
+### Known timing window (accepted for v1)
+
+One narrow, recoverable race is accepted rather than fixed; recorded here so it
+is a conscious decision, not an oversight.
 
 - **Transient `running`-window 409 at the approve pre-checks.** `recordDecision`
   is the authority and gates on the decision-store *pending marker* (present for
@@ -173,16 +202,6 @@ are recorded here so they are conscious decisions, not oversights.
   the window needs either a body `nodeId` — a breaking API change — or a
   "list pending markers for run" store/port operation), disproportionate to a
   sub-second recoverable window. Deferred to a dedicated design cycle.
-
-- **Decision consume not atomic with the post-gate checkpoint.** The host hook
-  clears a consumed decision before the kernel durably checkpoints the advanced
-  state. A worker crash in that window drops a stored approval; on resume the run
-  re-parks and re-notifies, and a human re-decides. **Recoverable:** no incorrect
-  execution and no silent data loss — only a redundant re-review. The real fix is
-  effectively-once consumption ordered *after* the durable checkpoint, which is a
-  kernel-level change (the kernel, not the host hook, controls persistence
-  timing); the lighter "don't clear eagerly" alternative merely trades this for
-  an accept-duplicate-after-resolve window. Deferred to a dedicated design cycle.
 
 ## References
 
