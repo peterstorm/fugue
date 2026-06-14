@@ -205,7 +205,13 @@ export function adaptBullMQJob<S, C>(
         dedupKey ?? "",
         type,
         payload,
-        "8", // dedup scan depth — covers interleaving from concurrent traces
+        // ADR 0014: dedup against the MOST RECENT entry only (last-seen-only).
+        // The per-job lock serializes appends to this job's stream, so there is
+        // no concurrent interleaving to scan deeper for — and a deeper scan would
+        // wrongly drop a legitimately-recurring transition key (e.g. k1, k2, k1).
+        // This also keeps the BullMQ adapter consistent with the in-memory one,
+        // which remembers only the last-seen key.
+        "1",
       ];
 
       const runScript = async (): Promise<unknown> => {
