@@ -40,39 +40,46 @@ export type HumanReviewOutcome = HumanAction | { readonly kind: "pending" };
 // DagPhase — state of the DAG machine
 // ---------------------------------------------------------------------------
 
+/**
+ * The state a run carries while parked at a human gate. Shared VERBATIM by the
+ * three phases that mean "paused at node `nodeId` for a human": `awaiting-human`
+ * (in-process wait), `suspended` (durably parked, ADR-0060), and `retrying-hook`
+ * (which adds retry bookkeeping on top of it). Extracted into one interface so
+ * the "identical gate payload" invariant is enforced by the compiler — a field
+ * added here propagates to every gate phase and to the `transition` branches
+ * that project one phase onto another — instead of being kept in sync by hand
+ * across four hand-written copies.
+ */
+export interface HumanGatePayload {
+  readonly nodeId: NodeId;
+  /** The gated node's already-produced output — what is under review. */
+  readonly output: unknown;
+  /** The review prompt shown to the human. */
+  readonly prompt: string;
+  /** Remaining review queue: node ids to review after the current one (ascending order). */
+  readonly pendingReviews: readonly NodeId[];
+  /** Wave index we paused on. */
+  readonly wave: number;
+}
+
 export type DagPhase =
   | { readonly kind: "pending" }
   | { readonly kind: "running"; readonly wave: number }
-  | {
-      readonly kind: "awaiting-human";
-      readonly nodeId: NodeId;
-      readonly output: unknown;
-      readonly prompt: string;
-      /** Remaining review queue: node ids to review after the current one (ascending order). */
-      readonly pendingReviews: readonly NodeId[];
-      /** Wave index we paused on. */
-      readonly wave: number;
-    }
-  | {
+  | (HumanGatePayload & { readonly kind: "awaiting-human" })
+  | (HumanGatePayload & {
       /**
        * Durably-parked human gate (ADR-0060). Reached when the `onHumanReview`
        * hook returns `{ kind: "pending" }` — no decision yet. Carries the
-       * IDENTICAL payload to `awaiting-human`: on resume the executor treats it
-       * exactly like `awaiting-human` (re-dispatches the hook), so a resumed run
-       * either proceeds (decision now present) or re-parks (still `pending`).
+       * IDENTICAL `HumanGatePayload` to `awaiting-human`: on resume the executor
+       * treats it exactly like `awaiting-human` (re-dispatches the hook), so a
+       * resumed run either proceeds (decision now present) or re-parks (still
+       * `pending`).
        *
        * NOT terminal and NOT failed — the kernel checkpoints it (durability) and
        * `isHalted` breaks the run loop so the worker is freed while parked.
        */
       readonly kind: "suspended";
-      readonly nodeId: NodeId;
-      readonly output: unknown;
-      readonly prompt: string;
-      /** Remaining review queue: node ids to review after the current one (ascending order). */
-      readonly pendingReviews: readonly NodeId[];
-      /** Wave index we paused on. */
-      readonly wave: number;
-    }
+    })
   | {
       readonly kind: "retrying";
       readonly wave: number;
@@ -80,27 +87,19 @@ export type DagPhase =
       readonly attempt: number;
       readonly nextDelayMs: number;
     }
-  | {
+  | (HumanGatePayload & {
       /**
-       * The `onHumanReview` hook threw. The node's output and prompt are preserved.
-       * The hook will be retried up to the node's retry budget (shared with node retries).
-       * FR-029a: hook-crash retry semantics.
+       * The `onHumanReview` hook threw. The gate payload (output, prompt,
+       * pendingReviews, wave) is preserved across retries; the hook is retried up
+       * to the node's retry budget (shared with node retries). FR-029a:
+       * hook-crash retry semantics.
        */
       readonly kind: "retrying-hook";
-      readonly nodeId: NodeId;
-      /** The node's already-produced output — preserved across hook retries. */
-      readonly output: unknown;
-      /** The original review prompt — preserved across hook retries. */
-      readonly prompt: string;
       /** Hook retry attempt (1-based). */
       readonly attempt: number;
       /** Delay before next hook call. Executor applies jitter. */
       readonly nextDelayMs: number;
-      /** Remaining reviews after this node — preserved from the original awaiting-human phase. */
-      readonly pendingReviews: readonly NodeId[];
-      /** Wave index we paused on — preserved from the original awaiting-human phase. */
-      readonly wave: number;
-    }
+    })
   | { readonly kind: "succeeded"; readonly output: unknown }
   | { readonly kind: "failed"; readonly error: FrameworkError };
 

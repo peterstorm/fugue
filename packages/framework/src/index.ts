@@ -45,7 +45,7 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // Keeping them off the main barrel signals that reaching for them is a
 // deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
-export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
+export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, HumanGatePayload, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
 // The synthetic node id the kernel attributes executor-level (non-node) crashes
 // to. Exported so hosts mapping their own infra failures onto a FrameworkError
 // reuse the validated sentinel instead of re-casting the raw string.

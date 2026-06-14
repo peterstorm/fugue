@@ -7,7 +7,7 @@
 // compile error via `.exhaustive()`.
 
 import { match, P } from "ts-pattern";
-import type { DagPhase, DagEvent, DagMachineContextPersisted } from "./types.js";
+import type { DagPhase, DagEvent, DagMachineContextPersisted, HumanGatePayload } from "./types.js";
 import { handleWaveDone } from "./wave-resolution.js";
 import { handleNodeFailed, handleHookCrash } from "./retry-policy.js";
 import { handleHumanResponse } from "./human-resolution.js";
@@ -17,6 +17,27 @@ import type { NodeId } from "../types/ids.js";
 
 type TransitionResult = { state: DagPhase; context: DagMachineContextPersisted };
 const stay = (phase: DagPhase, ctx: DagMachineContextPersisted): TransitionResult => ({ state: phase, context: ctx });
+
+// Project any gate-bearing phase onto another gate phase. Because `awaiting-human`,
+// `suspended`, and `retrying-hook` all carry the same `HumanGatePayload`, these
+// take that shared shape and copy exactly the five payload fields — dropping any
+// extra (e.g. `retrying-hook`'s retry bookkeeping) so the rebuilt phase is clean.
+const asAwaitingHuman = (p: HumanGatePayload): Extract<DagPhase, { kind: "awaiting-human" }> => ({
+  kind: "awaiting-human",
+  nodeId: p.nodeId,
+  output: p.output,
+  prompt: p.prompt,
+  pendingReviews: p.pendingReviews,
+  wave: p.wave,
+});
+const asSuspended = (p: HumanGatePayload): Extract<DagPhase, { kind: "suspended" }> => ({
+  kind: "suspended",
+  nodeId: p.nodeId,
+  output: p.output,
+  prompt: p.prompt,
+  pendingReviews: p.pendingReviews,
+  wave: p.wave,
+});
 
 /** Merge new confidence values into the context's accumulated map. Pure. */
 const mergeConfidence = (
@@ -120,17 +141,7 @@ export const dagTransition = (
     // ADR-0060: hook returned `pending` → park durably. Guard on node id.
     .with([{ kind: "awaiting-human" }, { type: "human-suspend" }], ([p, e]) => {
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
-      return stay(
-        {
-          kind: "suspended",
-          nodeId: p.nodeId,
-          output: p.output,
-          prompt: p.prompt,
-          pendingReviews: p.pendingReviews,
-          wave: p.wave,
-        },
-        ctx,
-      );
+      return stay(asSuspended(p), ctx);
     })
     .with([{ kind: "awaiting-human" }, P._], ([p]) => stay(p, ctx))
 
@@ -142,16 +153,8 @@ export const dagTransition = (
     // resolution/retry helpers.
     .with([{ kind: "suspended" }, { type: "human-responded" }], ([p, e]) => {
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
-      const awaitingState: Extract<DagPhase, { kind: "awaiting-human" }> = {
-        kind: "awaiting-human",
-        nodeId: p.nodeId,
-        output: p.output,
-        prompt: p.prompt,
-        pendingReviews: p.pendingReviews,
-        wave: p.wave,
-      };
       const rerouteActiveSet = "rerouteActiveSet" in e ? e.rerouteActiveSet : undefined;
-      const r = handleHumanResponse(awaitingState, e.action, ctx, rerouteActiveSet);
+      const r = handleHumanResponse(asAwaitingHuman(p), e.action, ctx, rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "suspended" }, { type: "human-suspend" }], ([p]) => {
@@ -179,16 +182,8 @@ export const dagTransition = (
     // ─── retrying-hook ──────────────────────────────────────────────────
     .with([{ kind: "retrying-hook" }, { type: "human-responded" }], ([p, e]) => {
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
-      const awaitingState: Extract<DagPhase, { kind: "awaiting-human" }> = {
-        kind: "awaiting-human",
-        nodeId: p.nodeId,
-        output: p.output,
-        prompt: p.prompt,
-        pendingReviews: p.pendingReviews,
-        wave: p.wave,
-      };
       const rerouteActiveSet = "rerouteActiveSet" in e ? e.rerouteActiveSet : undefined;
-      const r = handleHumanResponse(awaitingState, e.action, ctx, rerouteActiveSet);
+      const r = handleHumanResponse(asAwaitingHuman(p), e.action, ctx, rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "retrying-hook" }, { type: "node-failed" }], ([p, e]) => {
@@ -210,17 +205,7 @@ export const dagTransition = (
     // park durably rather than continuing the in-process retry loop.
     .with([{ kind: "retrying-hook" }, { type: "human-suspend" }], ([p, e]) => {
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
-      return stay(
-        {
-          kind: "suspended",
-          nodeId: p.nodeId,
-          output: p.output,
-          prompt: p.prompt,
-          pendingReviews: p.pendingReviews,
-          wave: p.wave,
-        },
-        ctx,
-      );
+      return stay(asSuspended(p), ctx);
     })
     .with([{ kind: "retrying-hook" }, P._], ([p]) => stay(p, ctx))
 
