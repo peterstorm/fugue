@@ -94,6 +94,29 @@ describe("HostConfigSchema", () => {
     expect(result.value.DOCUMENTS_ADAPTER).toBeUndefined();
   });
 
+  it("rejects BOT_APP_ID without BOT_APP_PASSWORD (ADR-0060)", () => {
+    const result = parseHostConfig({ ...validEnv, BOT_APP_ID: "00000000-0000-0000-0000-000000000000" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("BOT_APP_PASSWORD");
+  });
+
+  it("accepts BOT_APP_ID with BOT_APP_PASSWORD", () => {
+    const result = parseHostConfig({ ...validEnv, BOT_APP_ID: "00000000-0000-0000-0000-000000000000", BOT_APP_PASSWORD: "bot-secret" });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects an http BOT_TOKEN_URL (the app password is POSTed there)", () => {
+    const result = parseHostConfig({ ...validEnv, BOT_TOKEN_URL: "http://login.example.com/token" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("BOT_TOKEN_URL");
+  });
+
   it("coerces string numbers for MAX_GLOBAL_CONCURRENCY", () => {
     const result = parseHostConfig({ ...validEnv, MAX_GLOBAL_CONCURRENCY: "100" });
     expect(result.ok).toBe(true);

@@ -29,6 +29,11 @@ export type PersistedIdentity =
  * A run's lifecycle status (an ADT — illegal combinations are unrepresentable).
  * `suspended` carries the gate the run is parked at so a status poll / Teams
  * card can render the prompt; `completed`/`failed` carry the settled result.
+ *
+ * Note: unlike `DagPhase.suspended` / `RunExecOutcome.suspended`, `suspended`
+ * here deliberately does NOT carry the `output` under review — a generic status
+ * poll must not re-expose it. The output reaches a reviewer once, via the
+ * `ReviewNotification` the notifier delivers when the run first parks.
  */
 export type RunStatus =
   | { readonly kind: "queued" }

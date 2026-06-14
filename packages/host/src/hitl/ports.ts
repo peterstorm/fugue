@@ -39,10 +39,13 @@ export interface RunStorePort {
 }
 
 /**
- * The wake-up trigger. `enqueue` schedules a worker to (re)process a run; it is
- * idempotent on `runId` within a short window so a double-approval doesn't run
- * the same parked run twice concurrently. The durable state lives in the
- * `RunStorePort`, NOT in the queue payload — the queue only carries the id.
+ * The wake-up trigger. `enqueue` schedules a worker to (re)process a run. It is
+ * intentionally NON-idempotent — each call creates a fresh queue job (no `jobId`
+ * dedup) so a resume re-enqueue is never silently dropped. Safety against running
+ * the same parked run twice concurrently comes from the single-flight Redis lock
+ * the worker takes around `processRun` (see `run-queue.ts#startWorker`), NOT from
+ * enqueue dedup. The durable state lives in the `RunStorePort`, NOT in the queue
+ * payload — the queue only carries the id.
  */
 export interface RunQueuePort {
   enqueue(runId: RunId): Promise<Result<void, HostError>>;

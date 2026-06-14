@@ -154,9 +154,9 @@ export const dagTransition = (
       const r = handleHumanResponse(awaitingState, e.action, ctx, rerouteActiveSet);
       return { state: r.state, context: r.context };
     })
-    .with([{ kind: "suspended" }, { type: "human-suspend" }], ([p, e]) => {
-      // Resumed but still no decision — stay parked (idempotent re-park).
-      if (e.nodeId !== p.nodeId) return stay(p, ctx);
+    .with([{ kind: "suspended" }, { type: "human-suspend" }], ([p]) => {
+      // Resumed but still no decision — stay parked (idempotent re-park). The
+      // event nodeId is irrelevant here: a suspended run re-parks unconditionally.
       return stay(p, ctx);
     })
     .with([{ kind: "suspended" }, { type: "node-failed" }], ([p, e]) => {

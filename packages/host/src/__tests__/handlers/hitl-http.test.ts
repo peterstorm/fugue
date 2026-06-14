@@ -193,4 +193,22 @@ describe("POST /runs/:runId/approve", () => {
     const res = await postJson(app(baseRunDagDeps({ hitl }), state), "/runs/run-1/approve", { decision: "reject" });
     expect(res.status).toBe(400);
   });
+
+  it("400 when reroute carries a malformed targetNodeId (parsed, not cast)", async () => {
+    const hitl = fakeHitl();
+    // "../evil" has '/' and '.', neither permitted by the id grammar.
+    const res = await postJson(app(baseRunDagDeps({ hitl }), state), "/runs/run-1/approve", { decision: "reroute", targetNodeId: "../evil" });
+    expect(res.status).toBe(400);
+    expect(hitl.recordDecision).toHaveBeenCalledTimes(0);
+  });
+
+  it("404 on a malformed runId in the path without touching the store", async () => {
+    const getRun = mock(async () => ok(record()));
+    const hitl = fakeHitl({ getRun });
+    // "bad.id" routes (period is path-safe) but is not a valid runId.
+    const res = await postJson(app(baseRunDagDeps({ hitl }), state), "/runs/bad.id/approve", { decision: "approve" });
+    expect(res.status).toBe(404);
+    expect(getRun).toHaveBeenCalledTimes(0);
+    expect(hitl.recordDecision).toHaveBeenCalledTimes(0);
+  });
 });

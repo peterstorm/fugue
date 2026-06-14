@@ -206,6 +206,36 @@ describe("bot messages handler", () => {
     expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
   });
 
+  it("does NOT record when a stale card's gate differs from the run's current gate", async () => {
+    // The run has resumed and re-parked at a LATER gate ("review-2"); the click
+    // arrives from the old card-A ("review"). Recording now would silently
+    // approve gate B, which the reviewer never saw.
+    const hitl = fakeHitl({
+      getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: "ok?" } })),
+    });
+    const res = await handleBotActivity(
+      { verify: okVerify, hitl, conversations: createInMemoryConversationStore() },
+      { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, runId: "run-1", nodeId: "review", decision: "approve" }) },
+    );
+    expect(res.status).toBe(200);
+    // Stale card is refreshed, no decision recorded.
+    expect((res.body as { type: string }).type).toBe("application/vnd.microsoft.card.adaptive");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+  });
+
+  it("rejects a malformed runId off the wire ('Malformed review action.') without recording", async () => {
+    const hitl = fakeHitl();
+    const res = await handleBotActivity(
+      { verify: okVerify, hitl, conversations: createInMemoryConversationStore() },
+      // "../secret" contains '/' and '.', neither permitted by ID_REGEX.
+      { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, runId: "../secret", nodeId: "review", decision: "approve" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { type: string; value: string }).value).toBe("Malformed review action.");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+    // getRun must never see an unparsed id.
+  });
+
   it("ignores a card action that isn't ours (foreign verb)", async () => {
     const hitl = fakeHitl();
     const res = await handleBotActivity(

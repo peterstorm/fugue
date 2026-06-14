@@ -15,8 +15,8 @@
 
 import { match } from "ts-pattern";
 import type { Context } from "hono";
-import type { HumanAction, NodeId } from "@fuguejs/framework";
-import { formatFrameworkError } from "@fuguejs/framework";
+import type { HumanAction } from "@fuguejs/framework";
+import { formatFrameworkError, tryRunId, tryNodeId } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
@@ -93,8 +93,15 @@ export const createGetRunHandler = (deps: RunsHandlerDeps) =>
     if (!deps.hitl) {
       return errorResponse(c, 501, "hitl-not-configured", "HITL is not configured on this host");
     }
-    const runId = c.req.param("runId") ?? "";
-    const fetched = await deps.hitl.getRun(runId as RunRecord["runId"]);
+    const runIdRaw = c.req.param("runId") ?? "";
+    const runIdParsed = tryRunId(runIdRaw);
+    if (!runIdParsed.ok) {
+      // A malformed id can reference no run; treat as not-found (don't leak the
+      // id-format rule), and never feed an unparsed string into the store.
+      return errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`);
+    }
+    const runId = runIdParsed.value;
+    const fetched = await deps.hitl.getRun(runId);
     if (!fetched.ok) {
       return errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error));
     }
@@ -125,18 +132,23 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
       typeof b.reason === "string"
         ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason, ...(actor ? { actor } : {}) } }
         : { ok: false as const, message: "reject requires a string 'reason'" })
-    .with("reroute", () =>
-      typeof b.targetNodeId === "string"
-        ? {
-            ok: true as const,
-            action: {
-              kind: "reroute" as const,
-              targetNodeId: b.targetNodeId as NodeId,
-              ...(typeof b.reason === "string" ? { reason: b.reason } : {}),
-              ...(actor ? { actor } : {}),
-            },
-          }
-        : { ok: false as const, message: "reroute requires a string 'targetNodeId'" })
+    .with("reroute", () => {
+      if (typeof b.targetNodeId !== "string") {
+        return { ok: false as const, message: "reroute requires a string 'targetNodeId'" };
+      }
+      // Parse the target through the smart constructor — the body is untrusted.
+      const target = tryNodeId(b.targetNodeId);
+      if (!target.ok) return { ok: false as const, message: target.error };
+      return {
+        ok: true as const,
+        action: {
+          kind: "reroute" as const,
+          targetNodeId: target.value,
+          ...(typeof b.reason === "string" ? { reason: b.reason } : {}),
+          ...(actor ? { actor } : {}),
+        },
+      };
+    })
     .otherwise(() => ({ ok: false as const, message: "decision must be one of: approve, approve-with-edit, reject, reroute" }));
 };
 
@@ -145,9 +157,14 @@ export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
     if (!deps.hitl) {
       return errorResponse(c, 501, "hitl-not-configured", "HITL is not configured on this host");
     }
-    const runId = c.req.param("runId") ?? "";
+    const runIdRaw = c.req.param("runId") ?? "";
+    const runIdParsed = tryRunId(runIdRaw);
+    if (!runIdParsed.ok) {
+      return errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`);
+    }
+    const runId = runIdParsed.value;
 
-    const fetched = await deps.hitl.getRun(runId as RunRecord["runId"]);
+    const fetched = await deps.hitl.getRun(runId);
     if (!fetched.ok) {
       return errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error));
     }

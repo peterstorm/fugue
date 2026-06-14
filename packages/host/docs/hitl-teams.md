@@ -9,7 +9,7 @@ in how the review is delivered and how the decision comes back.
 
 | Transport | Delivery | Decision | Setup |
 |---|---|---|---|
-| **Webhook** (smoke-test) | Incoming Webhook posts an Adaptive Card | Card **links out** to a host approval page | Just a webhook URL |
+| **Webhook** (smoke-test) | Incoming Webhook posts an Adaptive Card | Card **deep-links out** to the run's status endpoint; approval is `POST /runs/<id>/approve` | Just a webhook URL |
 | **Bot Framework** (in-Teams) | Bot posts a card proactively | **Approve/Reject buttons inside Teams** | Azure Bot + app manifest |
 
 The Bot Framework transport is selected when `BOT_APP_ID`/`BOT_APP_PASSWORD` are
@@ -46,7 +46,7 @@ POST /teams/messages           # Bot Framework inbound (button clicks); BF-JWT a
 | Env var | Required | Purpose |
 |---|---|---|
 | `TEAMS_WEBHOOK_URL` | webhook transport | Incoming Webhook (Workflows) URL |
-| `HITL_APPROVAL_BASE_URL` | webhook transport | Public host URL for the card's approval link (`<base>/runs/<id>`) |
+| `HITL_APPROVAL_BASE_URL` | webhook transport | Public host URL for the card's deep-link to the run's status endpoint (`<base>/runs/<id>`); approval is `POST <base>/runs/<id>/approve` |
 | `BOT_APP_ID` | bot transport | Azure Bot / Entra app (client) id |
 | `BOT_APP_PASSWORD` | bot transport | Bot app client secret |
 | `BOT_TOKEN_URL` | optional | Override the BF token endpoint (single-tenant bots) |

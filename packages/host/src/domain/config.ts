@@ -163,7 +163,10 @@ export const HostConfigSchema = z.object({
   BOT_APP_ID: z.string().optional(),
   /** Bot Framework app password (client secret). Required when BOT_APP_ID is set. */
   BOT_APP_PASSWORD: z.string().optional(),
-  /** Override the Bot Framework token endpoint (single-tenant bots). Optional. */
+  /**
+   * Override the Bot Framework token endpoint (single-tenant bots). Optional.
+   * Must be https — the app password (client secret) is POSTed here.
+   */
   BOT_TOKEN_URL: z.string().url().optional(),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
@@ -210,6 +213,16 @@ export const HostConfigSchema = z.object({
   // rather than send HITL review content unencrypted.
   if (c.TEAMS_WEBHOOK_URL !== undefined && !c.TEAMS_WEBHOOK_URL.startsWith("https://")) {
     ctx.addIssue({ code: "custom", path: ["TEAMS_WEBHOOK_URL"], message: "must be an https:// URL (HITL review content must not be sent over cleartext http)" });
+  }
+  // The in-Teams (Bot Framework) transport needs both the app id AND the app
+  // password to mint a connector token. Enforce the pair at boot rather than
+  // failing on the first review when the connector tries to authenticate.
+  if (c.BOT_APP_ID !== undefined && !c.BOT_APP_PASSWORD) {
+    ctx.addIssue({ code: "custom", path: ["BOT_APP_PASSWORD"], message: "Required when BOT_APP_ID is set" });
+  }
+  // The app password is POSTed to the token endpoint; an http override leaks it.
+  if (c.BOT_TOKEN_URL !== undefined && !c.BOT_TOKEN_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["BOT_TOKEN_URL"], message: "must be an https:// URL (the bot app password is sent to this endpoint)" });
   }
 });
 

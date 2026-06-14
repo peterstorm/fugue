@@ -3,11 +3,14 @@
  *
  * Posts an Adaptive Card to a Teams Incoming Webhook (Workflows) URL. Incoming
  * webhooks CANNOT receive interactive button callbacks — a card posted this way
- * only supports `Action.OpenUrl` — so the card links OUT to a host-hosted
- * approval page (`<approvalBaseUrl>/runs/<runId>` with the gate node). This is
- * deliberately the low-ceremony transport that proves the whole loop end-to-end
- * with zero Azure setup; the in-Teams Approve/Reject button UX is the Bot
- * Framework adapter (a later, additive layer — the engine is identical).
+ * only supports `Action.OpenUrl` — so the card deep-links OUT to the run's status
+ * endpoint (`<approvalBaseUrl>/runs/<runId>`), which returns auth-protected JSON
+ * (there is no rendered approval page). Actually approving over this transport is
+ * the authenticated `POST /runs/<runId>/approve` call — the deep-link only points
+ * the reviewer at the run. This is deliberately the low-ceremony transport that
+ * proves the whole loop end-to-end with zero Azure setup; the in-Teams
+ * Approve/Reject button UX is the Bot Framework adapter (a later, additive layer
+ * — the engine is identical).
  *
  * The HTTP transport is INJECTED so the card body + target URL are unit-testable
  * with no network. `buildAdaptiveCardPayload` is pure and exported for the same
@@ -30,8 +33,9 @@ export interface WebhookNotifierConfig {
   /** Teams Incoming Webhook (Workflows) URL the card is POSTed to. */
   readonly webhookUrl: string;
   /**
-   * Base URL of the host's approval page, e.g. `https://fugue.example.com`. The
-   * card's "Review" button links to `<approvalBaseUrl>/runs/<runId>`.
+   * Base URL of the host, e.g. `https://fugue.example.com`. The card's "Review"
+   * button deep-links to the run's status endpoint `<approvalBaseUrl>/runs/<runId>`
+   * (auth-protected JSON); approval itself is `POST <approvalBaseUrl>/runs/<runId>/approve`.
    */
   readonly approvalBaseUrl: string;
 }

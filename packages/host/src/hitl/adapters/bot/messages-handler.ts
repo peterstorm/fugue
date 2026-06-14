@@ -28,7 +28,8 @@
  */
 
 import { match } from "ts-pattern";
-import type { HumanAction, RunId, NodeId } from "@fuguejs/framework";
+import type { HumanAction } from "@fuguejs/framework";
+import { tryRunId } from "@fuguejs/framework";
 import type { HitlRunService } from "../../service.js";
 import type { LogPort } from "../../../ports.js";
 import type { ConversationStorePort, VerifyBotToken, ConversationReference } from "./ports.js";
@@ -119,27 +120,41 @@ export const handleBotActivity = async (
   const data = obj(obj(obj(activity.value).action).data);
   if (data.verb !== REVIEW_VERB) return { status: 200 }; // not ours
 
-  const runId = str(data.runId);
+  const runIdRaw = str(data.runId);
   const nodeId = str(data.nodeId);
   const decision = str(data.decision) ?? "";
-  if (runId === undefined || nodeId === undefined) {
+  if (runIdRaw === undefined || nodeId === undefined) {
     return messageInvokeResponse("Malformed review action.");
   }
+  // Parse the off-the-wire runId through the smart constructor rather than
+  // `as`-casting it: the card `data` is POSTed back by a client and is not
+  // trusted (parse-don't-validate at the boundary).
+  const runIdParsed = tryRunId(runIdRaw);
+  if (!runIdParsed.ok) return messageInvokeResponse("Malformed review action.");
+  const runId = runIdParsed.value;
   const actor = str(obj(activity.from).name) ?? str(obj(activity.from).aadObjectId) ?? "teams-user";
   const action = toAction(decision, str(data.reason), actor);
   if (action === null) return messageInvokeResponse(`Unknown decision '${decision}'.`);
 
   // 4. The gate must still be open. If the run already resolved, refresh the
   // card to say so rather than recording a stale decision.
-  const fetched = await deps.hitl.getRun(runId as RunId);
+  const fetched = await deps.hitl.getRun(runId);
   if (!fetched.ok) return messageInvokeResponse("Could not load the run.");
   const record = fetched.value;
   if (record === null) return messageInvokeResponse(`Run '${runId}' not found.`);
   if (record.status.kind !== "suspended") {
     return cardInvokeResponse(buildResolvedCard({ runId, nodeId, outcome: `This review is already ${record.status.kind}.` }));
   }
+  // The card embeds the gate it was issued for. If the run has since resumed and
+  // re-parked at a DIFFERENT gate, this card is stale — recording now would
+  // silently resolve a gate the reviewer never saw (sequential gates A→B: a
+  // click on the old card-A must not approve the current gate B). Refuse and
+  // refresh the stale card instead.
+  if (record.status.nodeId !== nodeId) {
+    return cardInvokeResponse(buildResolvedCard({ runId, nodeId, outcome: "This review has moved on to a later step; use the current review card." }));
+  }
 
-  const recorded = await deps.hitl.recordDecision(record.runId, record.status.nodeId as NodeId, action);
+  const recorded = await deps.hitl.recordDecision(record.runId, record.status.nodeId, action);
   if (!recorded.ok) {
     deps.logger?.error?.("hitl/bot: recordDecision failed", { runId, error: recorded.error.kind });
     return messageInvokeResponse("Failed to record the decision; please retry.");
