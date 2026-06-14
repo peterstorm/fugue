@@ -1070,6 +1070,7 @@ Writes under `dags/<team>/<name>/` (relative to the cwd, or `--dir <root>`):
 |---|---|
 | `--shape <shape>` | **Required.** One of `linear`, `fan-out`, `diamond`, `router`, `sources`. |
 | `--llm` | Add an LLM node (bucketed confidence) + `prompts/` + synced `registry.json`. The DAG becomes a factory (`create<Name>Dag({ model })`) so a test can pin the model seam. |
+| `--review` | Add a human-review gate (ADR-0060) — a `createHumanReviewNode` that pauses the run for an approve/reject decision. **`--shape linear` only**; for other shapes, gate a node by hand with `withHumanReview`. |
 | `--owner <owner>` | Set `fugue.yaml`'s `owner`. |
 | `--dir <root>` | Root that contains `dags/`. Defaults to the current directory. |
 | `--force` | Overwrite a non-empty target directory. |

@@ -9,6 +9,7 @@
 // promise honest — a template that stops linting fails the build.
 
 import { match } from "ts-pattern";
+import { parse as parseYaml } from "yaml";
 import { DAG_SHAPES } from "../types/dag.js";
 
 /**
@@ -795,10 +796,13 @@ export const buildScaffold = (shape: Shape, ctx: TemplateCtx): Scaffold =>
     .with("sources", () => sources(ctx))
     .exhaustive();
 
-// A plain (unquoted) YAML scalar is only safe for a conservative shape: it must
+// A plain (unquoted) YAML scalar is only a SYNTAX-safe shape candidate: it must
 // start alphanumeric and contain no character that changes YAML meaning (`:`,
 // `#`, newlines, leading/trailing space, indicators). `team` is path-derived and
 // kebab-constrained so it is always safe; `owner` is freeform author input.
+// Passing this regex is necessary but NOT sufficient — a syntactically-plain
+// `0`/`true`/`null`/`1.5` parses back as a number/boolean/null, not the original
+// string (see the round-trip guard in `yamlScalar`).
 const SAFE_YAML_SCALAR = /^[A-Za-z0-9][\w .@+-]*$/;
 
 /**
@@ -807,9 +811,27 @@ const SAFE_YAML_SCALAR = /^[A-Za-z0-9][\w .@+-]*$/;
  * double-quoted scalar via `JSON.stringify` — JSON's escape grammar is a subset
  * of YAML's double-quoted grammar, so `owner: foo: bar` / a newline / a leading
  * `#` produce valid `fugue.yaml` by construction instead of malformed output.
+ *
+ * A plain scalar is emitted ONLY when it is both syntax-safe AND parses back to
+ * the identical STRING — otherwise YAML's type coercion (`owner: 0` → the number
+ * 0, `owner: true` → a boolean, `owner: null` → null) would silently change the
+ * value. The round-trip is verified with the same parser the host reads
+ * `fugue.yaml` with, so the guard can never drift from the coercion grammar.
+ *
+ * Exported for property testing: `parse('owner: ' + yamlScalar(s))` must equal
+ * `{ owner: s }` for any string `s`.
  */
-const yamlScalar = (value: string): string =>
-  SAFE_YAML_SCALAR.test(value) && !value.endsWith(" ") ? value : JSON.stringify(value);
+export const yamlScalar = (value: string): string => {
+  if (SAFE_YAML_SCALAR.test(value) && !value.endsWith(" ")) {
+    try {
+      const parsed = parseYaml(`v: ${value}`) as { v: unknown };
+      if (parsed.v === value) return value;
+    } catch {
+      // Unparseable as a plain scalar in mapping context — fall through to quoting.
+    }
+  }
+  return JSON.stringify(value);
+};
 
 /** `fugue.yaml` — team from the `<team>/<name>` path; owner optional. */
 export const fugueYaml = (ctx: TemplateCtx, owner?: string): string =>

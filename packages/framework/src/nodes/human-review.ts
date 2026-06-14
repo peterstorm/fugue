@@ -28,11 +28,23 @@ import { createTransformNode } from "./transform.js";
  * error, and capability types. Use when the gated node ALSO does work (e.g. an
  * LLM that drafts a message you want approved before it is sent) — the reviewer
  * reviews (and may edit, via `approve-with-edit`) that node's output.
+ *
+ * Throws at construction (parse-don't-validate) if `prompt` is empty or
+ * whitespace: the prompt is the entire human-facing payload of the gate — what
+ * the reviewer reads to decide — so a blank one is an illegal state that must
+ * not be representable. This is the single choke point for both helpers.
  */
 export const withHumanReview = <I, O, E extends FrameworkError, R extends readonly Capability[]>(
   node: NodeDef<I, O, E, R>,
   config: NodeHumanReviewConfig,
-): NodeDef<I, O, E, R> => ({ ...node, humanReview: config });
+): NodeDef<I, O, E, R> => {
+  if (config.prompt.trim() === "") {
+    throw new Error(
+      `human-review prompt must be a non-empty string (node '${node.id}'): the prompt is what the reviewer reads to decide`,
+    );
+  }
+  return { ...node, humanReview: config };
+};
 
 /** Config for `createHumanReviewNode`. */
 export interface HumanReviewNodeConfig<T> {

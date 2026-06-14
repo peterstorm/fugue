@@ -17,9 +17,11 @@
  *   SMOKE_DECISION  (default "approve"; try "reject" to see the run fail)
  */
 
+import { decisionBody, expectedTerminal, isPollDone, parseDecision } from "./smoke-logic.js";
+
 const BASE = process.env.SMOKE_BASE_URL ?? "http://localhost:3000";
 const TOKEN = process.env.ADMIN_TOKEN;
-const DECISION = process.env.SMOKE_DECISION ?? "approve";
+const DECISION = parseDecision(process.env.SMOKE_DECISION);
 const DAG_ID = "approval-demo";
 
 if (!TOKEN) {
@@ -36,7 +38,31 @@ const log = (step: string, detail?: unknown) =>
 const unwrap = (body: Record<string, unknown>): Record<string, unknown> =>
   (body.data as Record<string, unknown> | undefined) ?? body;
 
-/** Poll GET /runs/:id until `want` (or a terminal status), up to `timeoutMs`. */
+/**
+ * Perform a request and return the unwrapped status view, surfacing failures
+ * LOUDLY rather than letting an error body masquerade as run state. Throws an
+ * actionable error (HTTP status + body) on a non-OK response, a non-JSON body,
+ * or an `{ ok: false }` error envelope — so a 401 (bad ADMIN_TOKEN), 404 (wrong
+ * runId), or 5xx is reported as itself instead of a generic poll timeout.
+ */
+const requestJson = async (what: string, res: Response): Promise<Record<string, unknown>> => {
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`${what} → HTTP ${res.status}: ${text || "(empty body)"}`);
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`${what} → HTTP ${res.status}: non-JSON body: ${text.slice(0, 200)}`);
+  }
+  if (body.ok === false) {
+    throw new Error(`${what} → host error envelope: ${JSON.stringify(body.error ?? body)}`);
+  }
+  return unwrap(body);
+};
+
+/** Poll GET /runs/:id until `want` (or terminal `failed`), up to `timeoutMs`. */
 const pollUntil = async (
   runId: string,
   want: "suspended" | "completed",
@@ -46,18 +72,11 @@ const pollUntil = async (
   let last: Record<string, unknown> = {};
   while (Date.now() < deadline) {
     const res = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}`, { headers: auth });
-    last = unwrap((await res.json()) as Record<string, unknown>);
-    const status = last.status;
-    if (status === want || status === "failed") return last; // matched, or terminal — surface it
+    last = await requestJson(`GET /runs/${runId}`, res);
+    if (isPollDone(last.status, want)) return last; // matched, or terminal `failed` — surface it
     await sleep(400);
   }
   throw new Error(`timed out after ${timeoutMs}ms waiting for '${want}' (last: ${JSON.stringify(last)})`);
-};
-
-/** Build the decision body for the chosen decision kind. */
-const decisionBody = (): Record<string, unknown> => {
-  if (DECISION === "reject") return { decision: "reject", reason: "smoke: rejected for demo", actor: "smoke-script" };
-  return { decision: "approve", actor: "smoke-script" };
 };
 
 const main = async () => {
@@ -67,34 +86,41 @@ const main = async () => {
     headers: auth,
     body: JSON.stringify({ orderId: "order-42", amount: 25 }),
   });
-  const runBody = (await runRes.json()) as Record<string, unknown>;
+  const runBody = await requestJson(`POST /dags/${DAG_ID}/run`, runRes);
   log(`POST /dags/${DAG_ID}/run → ${runRes.status}`, runBody);
   if (runRes.status !== 202 || typeof runBody.runId !== "string") {
-    throw new Error(`expected 202 + runId; got ${runRes.status}. Is HITL enabled (TEAMS_WEBHOOK_URL set)?`);
+    throw new Error(
+      `expected 202 + runId; got ${runRes.status} ${JSON.stringify(runBody)}` +
+        ` (a 200 with an inline result means this DAG has no humanReview gate)`,
+    );
   }
   const runId = runBody.runId;
 
-  // 2. Poll until parked for review.
+  // 2. Poll until parked for review (or surface a run that died before parking).
   const suspended = await pollUntil(runId, "suspended");
-  if (suspended.status !== "suspended") throw new Error(`run did not park: ${JSON.stringify(suspended)}`);
+  if (suspended.status !== "suspended") {
+    throw new Error(`run did not park (status '${suspended.status}'): ${JSON.stringify(suspended.error ?? suspended)}`);
+  }
   log("Run SUSPENDED (awaiting human review)", suspended);
 
   // 3. Approve (or reject) over the authenticated HTTP API.
   const approveRes = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/approve`, {
     method: "POST",
     headers: auth,
-    body: JSON.stringify(decisionBody()),
+    body: JSON.stringify(decisionBody(DECISION, "smoke-script")),
   });
-  log(`POST /runs/${runId}/approve (${DECISION}) → ${approveRes.status}`, await approveRes.json());
-  if (!approveRes.ok) throw new Error(`approve failed: HTTP ${approveRes.status}`);
+  const approveBody = await requestJson(`POST /runs/${runId}/approve`, approveRes);
+  log(`POST /runs/${runId}/approve (${DECISION}) → ${approveRes.status}`, approveBody);
 
   // 4. Poll until terminal.
   const terminal = await pollUntil(runId, "completed");
   log("Run TERMINAL", terminal);
 
-  const expected = DECISION === "reject" ? "failed" : "completed";
+  const expected = expectedTerminal(DECISION);
   if (terminal.status !== expected) {
-    throw new Error(`expected terminal status '${expected}', got '${terminal.status}'`);
+    throw new Error(
+      `expected terminal status '${expected}', got '${terminal.status}': ${JSON.stringify(terminal.error ?? terminal)}`,
+    );
   }
   console.log(`\n✅ HITL loop OK — run ${runId} reached '${terminal.status}' after a '${DECISION}' decision.`);
 };

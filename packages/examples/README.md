@@ -25,7 +25,7 @@ So if an example compiles and the suite is green, you can paste it and it works.
 | `dags/07-documents-capability.ts` | A node requiring an **adapter-provided** capability | `requires: ["documents"]` |
 | `dags/08-multi-source-join.ts` | N parallel sources → keyed join → assemble (request via `$input`) | `defineSources` |
 | `dags/09-dag-factory-seams.ts` | Injectable model seam via a `create…Dag()` factory | factory pattern |
-| `dags/10-human-review.ts` | A pipeline that **pauses for human approval** (HITL gate) | `createHumanReviewNode` / `withHumanReview` |
+| `dags/10-human-review.ts` | A pipeline that **pauses for human approval** (HITL gate) | `createHumanReviewNode` |
 
 ## See also
 

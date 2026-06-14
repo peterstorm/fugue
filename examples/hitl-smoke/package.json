@@ -6,6 +6,7 @@
   "description": "Turnkey HITL (ADR-0060) smoke test — durable suspend/approve/resume over the HTTP API, no Azure/Teams creds.",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "smoke": "bash run.sh"
   },
   "dependencies": {

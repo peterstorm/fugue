@@ -5,5 +5,5 @@
     "composite": false,
     "types": ["@types/bun"]
   },
-  "include": ["dags", "smoke.ts"]
+  "include": ["dags", "*.ts"]
 }

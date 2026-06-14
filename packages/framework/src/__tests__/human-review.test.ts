@@ -29,6 +29,17 @@ describe("createHumanReviewNode", () => {
     expect(gate.inputSchema).toBe(schema);
     expect(gate.outputSchema).toBe(schema);
   });
+
+  it("rejects an empty or whitespace-only prompt at construction", () => {
+    // The prompt is the gate's entire human-facing payload — a blank one is an
+    // illegal "asks nothing" gate that must not be representable.
+    expect(() => createHumanReviewNode({ id: N("review"), schema, prompt: "" })).toThrow(
+      /non-empty/,
+    );
+    expect(() => createHumanReviewNode({ id: N("review"), schema, prompt: "   \n\t " })).toThrow(
+      /non-empty/,
+    );
+  });
 });
 
 describe("withHumanReview", () => {
@@ -64,5 +75,15 @@ describe("withHumanReview", () => {
     expect(gated.kind).toBe("fetch");
     expect(gated.humanReview).toEqual({ prompt: "Approve the fetched record?" });
     expect(gated.requires).toEqual(fetchNode.requires);
+  });
+
+  it("rejects an empty prompt at construction", () => {
+    const base = createTransformNode({
+      id: N("draft"),
+      inputSchema: z.object({ n: z.number() }),
+      outputSchema: z.object({ n: z.number() }),
+      transform: (input) => ok(input),
+    });
+    expect(() => withHumanReview(base, { prompt: "  " })).toThrow(/non-empty/);
   });
 });

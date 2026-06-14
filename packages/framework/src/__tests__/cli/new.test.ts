@@ -9,10 +9,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { rm, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import fc from "fast-check";
+import { parse as parseYaml } from "yaml";
 import { runLint } from "../../cli/lint.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
-import { SHAPES, buildScaffold } from "../../cli/new-templates.js";
+import { SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
 
 // NB: this package can't import `@fuguejs/host/contract` (host depends on
 // framework, not the reverse). The generated dag.ts references DagRegistration
@@ -217,6 +219,35 @@ describe("runNew file layout", () => {
     await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, force: false, root });
     const dagTs = await readFile(join(root, "dags", "leads", "lead-opener", "dag.ts"), "utf-8");
     expect(dagTs).toContain("export const createLeadOpenerDag");
+  });
+});
+
+// --------------------------------------------------------------------------
+// yamlScalar round-trip property — the whole input space, not one hostile example.
+// --------------------------------------------------------------------------
+
+describe("yamlScalar", () => {
+  it("round-trips ANY string through `owner: <scalar>` to the original value", () => {
+    // The invariant: whatever `s` is — a `:`-injection, a newline, a leading `#`,
+    // a trailing space, a YAML indicator — emitting it as a scalar and parsing
+    // `owner: <scalar>` yields exactly `{ owner: s }`. This subsumes the single
+    // hostile-owner example above and covers the trailing-space / leading-`#`
+    // branches the example never exercised.
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        const parsed = parseYaml(`owner: ${yamlScalar(s)}`) as { owner: unknown };
+        expect(parsed.owner).toBe(s);
+      }),
+    );
+  });
+
+  it("keeps conservative scalars plain (unquoted) and quotes the rest", () => {
+    expect(yamlScalar("peter.hansen")).toBe("peter.hansen");
+    expect(yamlScalar("a-b_c 1@2+3")).toBe("a-b_c 1@2+3");
+    // Trailing space, leading `#`, embedded `:` and newline all force quoting.
+    expect(yamlScalar("trailing ")).toBe(JSON.stringify("trailing "));
+    expect(yamlScalar("#comment")).toBe(JSON.stringify("#comment"));
+    expect(yamlScalar("evil: true")).toBe(JSON.stringify("evil: true"));
   });
 });
 

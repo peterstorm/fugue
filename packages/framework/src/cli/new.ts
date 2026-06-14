@@ -223,10 +223,13 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     // Write prompts/registry.json as part of the same scaffold write batch so
     // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
     // is always new → version 1.0.0, so the registry is computed in-memory here
-    // rather than via a separate `prompts sync` post-step — keeping the scaffold
-    // all-or-nothing (no window where a written .txt has no matching registry
-    // entry). Format matches `runPromptsSync` byte-for-byte (2-space JSON +
-    // trailing newline) so a later `prompts sync`/`check` sees no drift.
+    // rather than via a separate `prompts sync` post-step. Computing it in-process
+    // (no post-step) means a successful run never leaves a written .txt without a
+    // matching registry entry. This is in-process ordering, NOT crash atomicity:
+    // a mid-batch IO failure (ENOSPC/EACCES) still propagates the real cause, but
+    // can leave a partially-written scaffold dir behind. Format matches
+    // `runPromptsSync` byte-for-byte (2-space JSON + trailing newline) so a later
+    // `prompts sync`/`check` sees no drift.
     const registry = {
       [scaffold.prompt.name]: {
         version: "1.0.0",
