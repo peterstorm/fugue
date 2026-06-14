@@ -8,7 +8,7 @@ import type { SynthesisOutput } from "../schemas/summary.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
 import { join } from "node:path";
-import { defineDag, defineDagFromArray } from "@fuguejs/framework";
+import { defineDag, defineDagFromArray, DAG_INPUT } from "@fuguejs/framework";
 
 const FIXTURES_DIR = join(import.meta.dir, "../../fixtures/customers");
 
@@ -34,7 +34,7 @@ const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
     runId: runId("test-run"),
     dagId: "test-dag",
     prompts: { get: (_name: string) => "prompt template" },
-    llm: new FakeLlmClient((_req: any) => fakeSynthesisOutput),
+    llm: new FakeLlmClient((_req: unknown) => fakeSynthesisOutput),
     ...overrides,
   });
 
@@ -241,6 +241,8 @@ describe("Framework resume with InMemoryCheckpointer pattern", () => {
         }),
       ]),
       edges: [
+        // 0.2.0: the root node is fed the DAG input explicitly (N1 consumes `{ v }`).
+        { from: DAG_INPUT, to: "N1" },
         { from: "N1", to: "N2" },
         { from: "N2", to: "N3" },
       ],

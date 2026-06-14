@@ -1,5 +1,5 @@
 import type { DagDef } from "@fuguejs/framework";
-import { createEvalJudgeNode, defineDag } from "@fuguejs/framework";
+import { createEvalJudgeNode, defineDag, DAG_INPUT } from "@fuguejs/framework";
 import type { ConversationSource } from "../sources/conversation-source.js";
 import { createFetchCustomerNode } from "./nodes/fetch-customer.js";
 import { createExtractFeaturesNode } from "./nodes/extract-features.js";
@@ -47,6 +47,10 @@ export const createSummaryDag = (
       "assemble-response": assembleResponse,
     },
     edges: [
+      // 0.2.0: a node with no incoming edges must be a source node or be fed the
+      // DAG request explicitly. `fetch-crm` consumes the request (`{ customerId }`),
+      // so it takes the DAG input rather than being a source.
+      { from: DAG_INPUT, to: "fetch-crm" },
       { from: "fetch-crm", to: "extract-features" },
       { from: "extract-features", to: "synthesize" },
       { from: "synthesize", to: "grounding-guardrail" },
