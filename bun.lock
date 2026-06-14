@@ -48,7 +48,7 @@
     },
     "packages/adapter-fs": {
       "name": "@fuguejs/fs",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "dependencies": {
         "@fuguejs/document-source": "workspace:*",
         "@fuguejs/framework": "workspace:*",
@@ -60,7 +60,7 @@
     },
     "packages/adapter-ms-graph": {
       "name": "@fuguejs/ms-graph",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "dependencies": {
         "@fuguejs/document-source": "workspace:*",
         "@fuguejs/framework": "workspace:*",
@@ -76,7 +76,7 @@
     },
     "packages/adapter-pg": {
       "name": "@fuguejs/pg",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
       },
@@ -93,7 +93,7 @@
     },
     "packages/document-source": {
       "name": "@fuguejs/document-source",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
         "ts-pattern": "^5.9.0",
@@ -121,7 +121,7 @@
     },
     "packages/framework": {
       "name": "@fuguejs/framework",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "bin": {
         "fugue": "./bin/fugue.ts",
       },
@@ -156,7 +156,7 @@
     },
     "packages/host": {
       "name": "@fuguejs/host",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "bin": "src/main.ts",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.91.1",
@@ -175,7 +175,7 @@
     },
     "packages/xlsx": {
       "name": "@fuguejs/xlsx",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
         "exceljs": "^4.4.0",
