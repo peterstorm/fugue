@@ -137,6 +137,20 @@ describe("RedisRunStore", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
   });
+
+  it("errs internal-invariant-violated on structurally-invalid metadata (valid JSON, bad shape)", async () => {
+    const { redis, seed } = seedableRedis();
+    // Parses as JSON but the status discriminant is unknown — must be rejected
+    // (parse-don't-validate) rather than flowing in to drive an exhaustive match.
+    seed("fugue:hitl:run:run-1", JSON.stringify({
+      runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" },
+      status: { kind: "teleported" }, createdAtMs: 1, updatedAtMs: 1,
+    }));
+    const store = createRedisRunStore(redis, cfg);
+    const res = await store.get("run-1" as RunId);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
+  });
 });
 
 describe("RedisDecisionStore", () => {
@@ -195,6 +209,31 @@ describe("RedisDecisionStore", () => {
     const got = await store.getDecision(runId, nodeId);
     expect(got.ok).toBe(false);
     if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("errs internal-invariant-violated on a structurally-invalid decision (valid JSON, bad shape)", async () => {
+    const { redis, seed } = seedableRedis();
+    // A `reject` missing its required `reason` parses as JSON but is not a valid
+    // HumanAction — never resume a run on a malformed decision.
+    seed(`fugue:hitl:decision:${runId}\x1f${nodeId}`, JSON.stringify({ kind: "reject" }));
+    const store = createRedisDecisionStore(redis, cfg);
+    const got = await store.getDecision(runId, nodeId);
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("isPending reflects the marker: true while parked, false before/after clear", async () => {
+    const store = createRedisDecisionStore(fakeRedis(), cfg);
+    const isPending = async (): Promise<boolean> => {
+      const r = await store.isPending(runId, nodeId);
+      if (!r.ok) throw new Error("isPending errored");
+      return r.value;
+    };
+    expect(await isPending()).toBe(false);
+    await store.markPending(runId, nodeId);
+    expect(await isPending()).toBe(true);
+    await store.clear(runId, nodeId);
+    expect(await isPending()).toBe(false);
   });
 
   it("composite keys are injective — `:` in an id cannot alias a different gate", async () => {

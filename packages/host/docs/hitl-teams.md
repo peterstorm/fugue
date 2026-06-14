@@ -99,9 +99,11 @@ constructs a BullMQ queue backend over `REDIS_URL`.
   60s clock tolerance.
 - The captured `serviceUrl` (where proactive cards are POSTed, with an app-only
   bearer token attached) is **allowlisted** to Microsoft Bot Framework / Teams
-  hosts (`*.botframework.com`, `*.skype.com`, `smba.trafficmanager.net`). A
-  forged `serviceUrl` is refused at capture and again before send, so the
-  connector credential can never leak to an attacker host.
+  hosts (`https` only): the `*.botframework.com`, `*.skype.com`, and
+  `*.smba.trafficmanager.net` subdomain suffixes, plus the exact host
+  `smba.trafficmanager.net`. A forged `serviceUrl` is refused at capture and
+  again before send, so the connector credential can never leak to an attacker
+  host.
 - A decision is only ever consumed once, at the gate it targets; a click on an
   already-resolved run refreshes the card without recording anything.
 - A double-click / double-approval cannot double-run side-effecting nodes — a

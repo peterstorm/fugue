@@ -10,11 +10,28 @@
  *   fugue:hitl:decision:<runId>␟<nodeId>  →  JSON HumanAction
  */
 
+import { z } from "zod";
 import { ok, err } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { DecisionStorePort } from "../ports.js";
+
+/**
+ * Shape validator for a persisted `HumanAction` (ADR-0060). The decision is read
+ * back off the wire (Redis) and then drives the exhaustive transition match on
+ * resume, so — exactly like the `tryRunId`/`tryNodeId` smart constructors on the
+ * HTTP/bot read paths — it must be PARSED, not `as`-cast: a structurally-invalid
+ * value (unknown `kind`, an `approve-with-edit` missing `newOutput`, a `reject`
+ * missing `reason`) must be rejected here rather than resuming a run with a
+ * corrupt decision. Branded ids validate as strings (the brand is compile-time).
+ */
+const HumanActionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("approve"), actor: z.string().optional() }),
+  z.object({ kind: z.literal("approve-with-edit"), newOutput: z.unknown(), actor: z.string().optional() }),
+  z.object({ kind: z.literal("reject"), reason: z.string(), actor: z.string().optional() }),
+  z.object({ kind: z.literal("reroute"), targetNodeId: z.string().min(1), reason: z.string().optional(), actor: z.string().optional() }),
+]);
 
 /**
  * Composite-key separator between `runId` and `nodeId`. The unit separator
@@ -40,6 +57,9 @@ export const createInMemoryDecisionStore = (): DecisionStorePort => {
       if (pending.has(k)) return ok(false);
       pending.add(k);
       return ok(true);
+    },
+    async isPending(runId, nodeId) {
+      return ok(pending.has(key(runId, nodeId)));
     },
     async putDecision(runId, nodeId, action) {
       decisions.set(key(runId, nodeId), action);
@@ -86,6 +106,12 @@ export const createRedisDecisionStore = (
       return ok(set.value);
     },
 
+    async isPending(runId, nodeId) {
+      const res = await redis.get(pendingKey(runId, nodeId));
+      if (!res.ok) return err(res.error);
+      return ok(res.value !== null);
+    },
+
     async putDecision(runId, nodeId, action) {
       const res = await redis.set(decisionKey(runId, nodeId), JSON.stringify(action), expiry);
       if (!res.ok) return err(res.error);
@@ -96,12 +122,21 @@ export const createRedisDecisionStore = (
       const res = await redis.get(decisionKey(runId, nodeId));
       if (!res.ok) return err(res.error);
       if (res.value === null) return ok(null);
+      let raw: unknown;
       try {
-        return ok(JSON.parse(res.value) as HumanAction);
+        raw = JSON.parse(res.value);
       } catch (e) {
-        logger?.error?.("hitl: corrupt decision in store", { runId, nodeId, error: e instanceof Error ? e.message : String(e) });
+        logger?.error?.("hitl: corrupt decision in store (malformed JSON)", { runId, nodeId, error: e instanceof Error ? e.message : String(e) });
         return err({ kind: "internal-invariant-violated", message: `corrupt decision for '${runId}/${nodeId}'`, context: {} });
       }
+      const parsed = HumanActionSchema.safeParse(raw);
+      if (!parsed.success) {
+        // Parses as JSON but is not a well-formed HumanAction — never resume a
+        // run on a malformed decision; surface it via the same error channel.
+        logger?.error?.("hitl: corrupt decision in store (invalid shape)", { runId, nodeId, error: parsed.error.message });
+        return err({ kind: "internal-invariant-violated", message: `corrupt decision for '${runId}/${nodeId}'`, context: {} });
+      }
+      return ok(parsed.data as HumanAction);
     },
 
     async clear(runId, nodeId): Promise<Result<void, HostError>> {

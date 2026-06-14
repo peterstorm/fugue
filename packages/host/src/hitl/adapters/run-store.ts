@@ -12,12 +12,49 @@
  *   fugue:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`)
  */
 
+import { z } from "zod";
 import { ok, err } from "@fuguejs/framework";
 import type { Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { RunStorePort } from "../ports.js";
 import type { RunRecord, RunStatus } from "../types.js";
+
+// ── Persisted-shape validators (parse-don't-validate across the Redis boundary) ─
+//
+// The metadata half of a run is read back off the wire and then drives status
+// projections and exhaustive `match`es on resume. Like the `tryRunId`/`tryNodeId`
+// smart constructors guarding the HTTP/bot read paths, it must be PARSED, not
+// `as`-cast: a value that parses as JSON but is structurally wrong (unknown
+// status/identity `kind`, missing field) is rejected rather than flowing in to
+// drive an exhaustive match off a corrupt discriminant. The `failed` error is
+// kept loose (only its `kind` discriminant is asserted) so a `FrameworkError`
+// shape change never trips the reader; all of its fields round-trip intact.
+// Branded ids validate as strings — the brand is a compile-time fiction.
+
+const PersistedIdentitySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("admin") }),
+  z.object({ kind: z.literal("team"), team: z.string(), label: z.string() }),
+  z.object({ kind: z.literal("user"), sub: z.string(), azp: z.string() }),
+]);
+
+const RunStatusSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("queued") }),
+  z.object({ kind: z.literal("running") }),
+  z.object({ kind: z.literal("suspended"), nodeId: z.string().min(1), prompt: z.string() }),
+  z.object({ kind: z.literal("completed"), output: z.unknown() }),
+  z.object({ kind: z.literal("failed"), error: z.looseObject({ kind: z.string() }) }),
+]);
+
+const RunMetaSchema = z.object({
+  runId: z.string().min(1),
+  dagId: z.string().min(1),
+  input: z.unknown(),
+  identity: PersistedIdentitySchema,
+  status: RunStatusSchema,
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+});
 
 // ── In-Memory Adapter (tests/dev) ───────────────────────────────────────────
 
@@ -95,12 +132,19 @@ export const createRedisRunStore = (
     const res = await redis.get(runKey(runId));
     if (!res.ok) return err(res.error);
     if (res.value === null) return ok(null);
+    let raw: unknown;
     try {
-      return ok(JSON.parse(res.value) as RunMeta);
+      raw = JSON.parse(res.value);
     } catch (e) {
-      logger?.error?.("hitl: corrupt run metadata in store", { runId, error: e instanceof Error ? e.message : String(e) });
+      logger?.error?.("hitl: corrupt run metadata in store (malformed JSON)", { runId, error: e instanceof Error ? e.message : String(e) });
       return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
     }
+    const parsed = RunMetaSchema.safeParse(raw);
+    if (!parsed.success) {
+      logger?.error?.("hitl: corrupt run metadata in store (invalid shape)", { runId, error: parsed.error.message });
+      return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
+    }
+    return ok(parsed.data as RunMeta);
   };
 
   return {

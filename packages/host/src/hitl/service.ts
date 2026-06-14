@@ -185,12 +185,21 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     }
 
     // Engine-level invariant: a decision can only resolve the gate the run is
-    // CURRENTLY parked at. The HTTP and bot boundaries already check this, but
-    // enforcing it here makes the illegal state (deciding a non-suspended run,
-    // or a stale gate after the run re-parked elsewhere) unrepresentable for any
-    // caller — a decision for a future gate must not silently auto-resolve it.
-    if (record.status.kind !== "suspended" || record.status.nodeId !== nodeId) {
-      const status = record.status.kind === "suspended"
+    // CURRENTLY parked at. The authority is the decision store's pending marker,
+    // NOT the run-store status: the hook writes the marker (markPending) BEFORE
+    // it sends the notification and clears it when the gate resolves, so it is
+    // present for the whole window a reviewer could respond — including the brief
+    // slice after the notification is delivered but before the worker has folded
+    // the `suspended` status back into the run store (`processRun` sets `running`,
+    // runs the executor — which notifies — and only then writes `suspended`).
+    // Gating on the lagging status field would 409-drop an approval that lands in
+    // that window and permanently strand the decided run. The marker absence also
+    // covers the cases the status check did: a never-parked (`queued`) run and a
+    // stale gate the run already advanced past (its marker was cleared on resolve).
+    const pending = await decisions.isPending(runId, nodeId);
+    if (!pending.ok) return pending;
+    if (!pending.value) {
+      const status = record.status.kind === "suspended" && record.status.nodeId !== nodeId
         ? `suspended at a different gate (${record.status.nodeId})`
         : record.status.kind;
       return err({ kind: "run-not-suspended", runId, status });

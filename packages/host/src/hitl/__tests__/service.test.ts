@@ -49,6 +49,7 @@ import type {
   RunExecutionRequest,
 } from "../ports.js";
 import { createHitlRunService } from "../service.js";
+import type { HitlRunService } from "../service.js";
 
 // ---------------------------------------------------------------------------
 // In-memory fakes
@@ -113,6 +114,9 @@ const inMemoryDecisionStore = () => {
       if (pendingMarks.has(k)) return ok(false);
       pendingMarks.add(k);
       return ok(true);
+    },
+    async isPending(runId, nodeId) {
+      return ok(pendingMarks.has(key(runId, nodeId)));
     },
     async putDecision(runId, nodeId, action) {
       decisions.set(key(runId, nodeId), action);
@@ -377,6 +381,50 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     // The decision for the CURRENT gate still resolves the run.
     const onGate = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
     expect(onGate.ok).toBe(true);
+  });
+
+  it("recordDecision accepts an approval that lands in the `running` window (no lost wakeup)", async () => {
+    // Reproduces the race: the notifier fires from INSIDE the hook, while the
+    // worker is still mid-`processRun` (status === "running") and the `suspended`
+    // status has NOT yet been folded back into the run store. An approval arriving
+    // here must be accepted — gated on the pending marker (written before notify),
+    // not the lagging run-store status — or it is dropped and the run is stranded.
+    const dag = twoWaveDag();
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue();
+    const dec = inMemoryDecisionStore();
+    let counter = 0;
+    let service: HitlRunService;
+    const observed: { statusAtNotify: string; decisionOk: boolean }[] = [];
+    const racyNotifier: HumanReviewNotifierPort = {
+      async notify(n) {
+        // We are inside the hook → the worker has set `running` but not yet `suspended`.
+        const statusAtNotify = store.runs.get(n.runId)!.status.kind;
+        const decided = await service.recordDecision(n.runId, n.nodeId, { kind: "approve" });
+        observed.push({ statusAtNotify, decisionOk: decided.ok });
+        return ok(undefined);
+      },
+    };
+    service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue.port,
+      decisions: dec.port,
+      notifier: racyNotifier,
+      executor: realExecutor(dag),
+      clock: () => 1_000,
+      newRunId: () => mkRunId(`run-${++counter}`),
+    });
+    queue.setProcessor(service.processRun);
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const runId = started.value.runId;
+
+    // park (notify fires + records the decision mid-flight, re-enqueuing) → resume → complete
+    await queue.drain();
+
+    expect(observed).toEqual([{ statusAtNotify: "running", decisionOk: true }]);
+    expect(store.runs.get(runId)!.status.kind).toBe("completed");
   });
 
   it("processRun for a terminal (completed) run is a no-op — never re-executes", async () => {

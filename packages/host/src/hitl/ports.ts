@@ -70,6 +70,16 @@ export interface HumanReviewNotifierPort {
 export interface DecisionStorePort {
   /** Mark a gate as pending review. Returns `true` if newly created (dedups notifications). */
   markPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
+  /**
+   * Is `(runId, nodeId)` currently the gate the run is parked at? The marker is
+   * written by the hook BEFORE it notifies and cleared when the gate resolves,
+   * so it is the authoritative "parked here right now" signal — present for the
+   * whole window a reviewer could respond, including the brief slice after the
+   * notification is delivered but before the worker has folded the `suspended`
+   * status back into the run store. Gating an approval on this (not the lagging
+   * run status) is what stops a fast approval being dropped and stranding the run.
+   */
+  isPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
   /** Record the human's decision for a parked gate. */
   putDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
   /** Fetch a recorded decision, or `ok(null)` if none yet. */
