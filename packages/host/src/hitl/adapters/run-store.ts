@@ -26,7 +26,9 @@ import type { RunRecord, RunStatus } from "../types.js";
  * Semantics match the Redis adapter (create is single-shot; checkpoint/status
  * are independent updates).
  */
-export const createInMemoryRunStore = (): RunStorePort & {
+export const createInMemoryRunStore = (
+  now: () => number = Date.now,
+): RunStorePort & {
   readonly _runs: ReadonlyMap<string, RunRecord>;
 } => {
   const runs = new Map<string, RunRecord>();
@@ -51,7 +53,7 @@ export const createInMemoryRunStore = (): RunStorePort & {
     async setStatus(runId, status: RunStatus) {
       const r = runs.get(runId);
       if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, status });
+      runs.set(runId, { ...r, status, updatedAtMs: now() });
       return ok(undefined);
     },
   };
@@ -71,6 +73,8 @@ type RunMeta = Omit<RunRecord, "checkpoint">;
 export interface RedisRunStoreConfig {
   /** TTL applied to run keys on every write, in seconds. Bounds storage growth. */
   readonly ttlSec: number;
+  /** Wall-clock source (injected for tests). Defaults to `Date.now`. */
+  readonly now?: () => number;
 }
 
 export const createRedisRunStore = (
@@ -79,6 +83,7 @@ export const createRedisRunStore = (
   logger?: LogPort,
 ): RunStorePort => {
   const expiry = { expiresInSec: config.ttlSec };
+  const now = config.now ?? Date.now;
 
   const writeMeta = async (runId: RunId, meta: RunMeta): Promise<Result<void, HostError>> => {
     const res = await redis.set(runKey(runId), JSON.stringify(meta), expiry);
@@ -138,7 +143,7 @@ export const createRedisRunStore = (
       const metaRes = await readMeta(runId);
       if (!metaRes.ok) return err(metaRes.error);
       if (metaRes.value === null) return err({ kind: "run-not-found", runId });
-      return writeMeta(runId, { ...metaRes.value, status, updatedAtMs: metaRes.value.updatedAtMs });
+      return writeMeta(runId, { ...metaRes.value, status, updatedAtMs: now() });
     },
   };
 };

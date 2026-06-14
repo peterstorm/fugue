@@ -146,6 +146,13 @@ work with one predicate and no extra bookkeeping.
   click-time authorization land, the bot must only be installed in a channel
   whose members are authorised approvers for every team whose runs gate through
   it. Tracked as a follow-up; documented in `packages/host/docs/hitl-teams.md`.
+- The host's run-store-backed `JobLike.appendEvent` is a **no-op**: the durable
+  run record carries the latest `{state, context}` checkpoint (sufficient for
+  suspend/resume correctness) but **not** the kernel's per-transition event
+  journal. So HITL runs have no at-most-once event audit trail the way a
+  Redis-Streams-backed durable job would. Acceptable for v1 (the status record +
+  the host's decision/pending store cover the operational questions), but wiring
+  the event journal for HITL runs is a tracked follow-up.
 
 ## References
 

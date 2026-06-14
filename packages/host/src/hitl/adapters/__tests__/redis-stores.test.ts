@@ -91,6 +91,19 @@ describe("RedisRunStore", () => {
     expect(got.value.dagId).toBe("dag-1" as DagId);
   });
 
+  it("setStatus bumps updatedAtMs from the injected clock; createdAtMs is preserved", async () => {
+    let t = 500;
+    const store = createRedisRunStore(fakeRedis(), { ...cfg, now: () => t });
+    const r = record(); // createdAtMs/updatedAtMs = 100
+    await store.create(r);
+    t = 999;
+    await store.setStatus(r.runId, { kind: "completed", output: 1 });
+    const got = await store.get(r.runId);
+    if (!got.ok || !got.value) throw new Error("expected record");
+    expect(got.value.updatedAtMs).toBe(999);
+    expect(got.value.createdAtMs).toBe(100);
+  });
+
   it("setStatus on an unknown run errs run-not-found", async () => {
     const store = createRedisRunStore(fakeRedis(), cfg);
     const res = await store.setStatus("ghost" as RunId, { kind: "completed", output: 1 });

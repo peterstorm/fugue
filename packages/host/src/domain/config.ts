@@ -135,9 +135,11 @@ export const HostConfigSchema = z.object({
   // ── Human-in-the-loop (ADR-0060) ───────────────────────────────────────
   /**
    * Microsoft Teams Incoming Webhook (Workflows) URL for human-review
-   * notifications. Setting this ENABLES HITL: DAGs declaring a `humanReview`
-   * gate run on the durable queue (202 + runId) and post a review card here.
-   * Unset → HITL is off and a `humanReview` DAG is refused with 501.
+   * notifications. This is ONE of two HITL notifier transports: setting it (or
+   * the Bot Framework pair `BOT_APP_ID`/`BOT_APP_PASSWORD`) ENABLES HITL, so
+   * DAGs declaring a `humanReview` gate run on the durable queue (202 + runId)
+   * and post a review card here. HITL is off (and a `humanReview` DAG is refused
+   * with 501) only when NEITHER transport is configured.
    */
   TEAMS_WEBHOOK_URL: z.string().url().optional(),
   /**

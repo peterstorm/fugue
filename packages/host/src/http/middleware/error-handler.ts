@@ -56,6 +56,7 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "discovery-failed" }, () => undefined)
     .with({ kind: "async-result-expired" }, () => undefined)
     .with({ kind: "run-not-found" }, () => undefined)
+    .with({ kind: "run-not-suspended" }, (e) => ({ status: e.status }))
     .with({ kind: "notification-failed" }, () => undefined)
     .with({ kind: "unauthorized" }, () => undefined)
     .with({ kind: "team-already-exists" }, () => undefined)

@@ -10,12 +10,11 @@
  * the `err` channel.
  */
 
-import { runResumableDagJob, ok, err } from "@fuguejs/framework";
+import { runResumableDagJob, ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
   CapabilityBroker,
-  NodeId,
 } from "@fuguejs/framework";
 import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
 import { toJson } from "@fuguejs/framework";
@@ -41,7 +40,7 @@ const toFrameworkError = (e: unknown): FrameworkError => {
   return {
     kind: "node-crash",
     retriability: "retriable",
-    nodeId: "__executor__" as NodeId,
+    nodeId: EXECUTOR_NODE_ID,
     message: e instanceof Error ? e.message : String(e),
   };
 };

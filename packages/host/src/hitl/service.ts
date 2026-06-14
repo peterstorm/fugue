@@ -15,7 +15,7 @@
 
 import { match } from "ts-pattern";
 import type { DagId, RunId, NodeId, HumanAction, FrameworkError } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { AuthIdentity } from "../domain/auth.js";
@@ -58,7 +58,7 @@ export interface HitlRunService {
 const asRunFailure = (hostError: HostError): FrameworkError => ({
   kind: "node-crash",
   retriability: "retriable",
-  nodeId: "__executor__" as NodeId,
+  nodeId: EXECUTOR_NODE_ID,
   message: `host run execution failed: ${hostError.kind}`,
 });
 
@@ -179,14 +179,40 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
   ): Promise<Result<void, HostError>> => {
     const fetched = await runStore.get(runId);
     if (!fetched.ok) return fetched;
-    if (fetched.value === null) {
+    const record = fetched.value;
+    if (record === null) {
       return err({ kind: "run-not-found", runId });
+    }
+
+    // Engine-level invariant: a decision can only resolve the gate the run is
+    // CURRENTLY parked at. The HTTP and bot boundaries already check this, but
+    // enforcing it here makes the illegal state (deciding a non-suspended run,
+    // or a stale gate after the run re-parked elsewhere) unrepresentable for any
+    // caller — a decision for a future gate must not silently auto-resolve it.
+    if (record.status.kind !== "suspended" || record.status.nodeId !== nodeId) {
+      const status = record.status.kind === "suspended"
+        ? `suspended at a different gate (${record.status.nodeId})`
+        : record.status.kind;
+      return err({ kind: "run-not-suspended", runId, status });
     }
 
     const stored = await decisions.putDecision(runId, nodeId, action);
     if (!stored.ok) return stored;
 
-    return runQueue.enqueue(runId);
+    const enqueued = await runQueue.enqueue(runId);
+    if (!enqueued.ok) {
+      // The decision is now durably stored but the run was not re-enqueued to
+      // act on it. Recoverable (a retried approval re-enqueues; the decision
+      // TTL outlives the run), but surface the half-completed approval so the
+      // decided-but-not-woken run is diagnosable rather than silently stuck.
+      logger?.error?.("hitl: decision stored but resume enqueue failed — run not woken", {
+        runId,
+        nodeId,
+        error: enqueued.error.kind,
+      });
+      return enqueued;
+    }
+    return ok(undefined);
   };
 
   const getRun = (runId: RunId): Promise<Result<RunRecord | null, HostError>> => runStore.get(runId);

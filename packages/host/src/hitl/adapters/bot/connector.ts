@@ -4,10 +4,10 @@
  * token (client_credentials against the Bot Framework login). The token is
  * cached until shortly before expiry.
  *
- * The HTTP form/JSON shaping is INJECTED-free here (direct `fetch`), so this is
- * the production wiring; the notifier + handler logic is tested against the
- * `BotConnectorPort` with fakes. SC: the app password is the only credential and
- * is read from config, never logged.
+ * This is the production wiring (direct `fetch`, no injected transport); the
+ * notifier + handler logic is tested against the `BotConnectorPort` with fakes.
+ * SC: the app password is the only credential and is read from config, never
+ * logged.
  */
 
 import { ok, err } from "@fuguejs/framework";
@@ -60,7 +60,16 @@ export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort)
       return err({ kind: "notification-failed", operation: `bot token fetch: ${e instanceof Error ? e.message : String(e)}` });
     }
     if (!res.ok) return err({ kind: "notification-failed", operation: `bot token endpoint HTTP ${res.status}` });
-    const json = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+    let json: { access_token?: unknown; expires_in?: unknown };
+    try {
+      // A 200 with a malformed/truncated body (proxy error page, reset
+      // mid-stream) rejects here; classify it as `notification-failed` like the
+      // other token-fetch failures rather than letting it escape as an
+      // `onHumanReview` hook crash (which would burn the hook retry budget).
+      json = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+    } catch (e) {
+      return err({ kind: "notification-failed", operation: `bot token response not valid JSON: ${e instanceof Error ? e.message : String(e)}` });
+    }
     if (typeof json.access_token !== "string" || typeof json.expires_in !== "number") {
       return err({ kind: "notification-failed", operation: "bot token response missing access_token/expires_in" });
     }

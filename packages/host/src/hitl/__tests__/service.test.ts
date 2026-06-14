@@ -353,6 +353,66 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     if (!res.ok) expect(res.error.kind).toBe("run-not-found");
   });
 
+  it("recordDecision refuses a run not parked at the gate (run-not-suspended)", async () => {
+    const dag = twoWaveDag();
+    const { service, store, queue } = setup(dag);
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const runId = started.value.runId;
+
+    // The run is `queued` (worker hasn't run) — nothing to decide yet.
+    const tooEarly = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
+    expect(tooEarly.ok).toBe(false);
+    if (!tooEarly.ok) expect(tooEarly.error.kind).toBe("run-not-suspended");
+
+    // Parked at `review` — a decision aimed at a DIFFERENT gate is refused too,
+    // so a stale card for an earlier gate can't auto-resolve the current one.
+    await queue.drain();
+    expect(store.runs.get(runId)!.status.kind).toBe("suspended");
+    const wrongGate = await service.recordDecision(runId, "draft" as NodeId, { kind: "approve" });
+    expect(wrongGate.ok).toBe(false);
+    if (!wrongGate.ok) expect(wrongGate.error.kind).toBe("run-not-suspended");
+
+    // The decision for the CURRENT gate still resolves the run.
+    const onGate = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
+    expect(onGate.ok).toBe(true);
+  });
+
+  it("processRun for a terminal (completed) run is a no-op — never re-executes", async () => {
+    let draftRuns = 0;
+    let reviewRuns = 0;
+    const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
+    const { service, store, queue } = setup(dag);
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const runId = started.value.runId;
+
+    await queue.drain(); // park
+    await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
+    await queue.drain(); // resume → complete
+    expect(store.runs.get(runId)!.status.kind).toBe("completed");
+    expect(draftRuns).toBe(1);
+    expect(reviewRuns).toBe(1);
+
+    // A stray double-enqueue AFTER completion (e.g. a duplicate/replayed approval
+    // re-waking the run) must hit the terminal guard, not re-run the DAG's
+    // side-effecting nodes.
+    const replay = await service.processRun(runId);
+    expect(replay.ok).toBe(true);
+    expect(store.runs.get(runId)!.status.kind).toBe("completed");
+    expect(draftRuns).toBe(1); // unchanged — guard held
+    expect(reviewRuns).toBe(1);
+  });
+
+  it("processRun for an unknown run is an ok no-op (stale enqueue)", async () => {
+    const dag = twoWaveDag();
+    const { service } = setup(dag);
+    const res = await service.processRun(mkRunId("ghost"));
+    expect(res.ok).toBe(true);
+  });
+
   it("getRun reflects the lifecycle: queued → suspended → completed", async () => {
     const dag = twoWaveDag();
     const { service, queue } = setup(dag);

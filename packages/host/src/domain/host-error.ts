@@ -34,6 +34,7 @@ export type HostError =
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId }
   | { readonly kind: "run-not-found"; readonly runId: RunId }
+  | { readonly kind: "run-not-suspended"; readonly runId: RunId; readonly status: string }
   | { readonly kind: "notification-failed"; readonly operation: string }
   | { readonly kind: "unauthorized"; readonly reason: string }
   | { readonly kind: "forbidden"; readonly dagId: DagId; readonly callerTeam: string; readonly dagTeam: string }
@@ -60,6 +61,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "redis-unavailable" }, () => 503)
     .with({ kind: "async-result-expired" }, () => 410)
     .with({ kind: "run-not-found" }, () => 404)
+    .with({ kind: "run-not-suspended" }, () => 409)
     .with({ kind: "notification-failed" }, () => 502)
     .with({ kind: "git-clone-failed" }, () => 500)
     .with({ kind: "git-pull-failed" }, () => 500)
@@ -105,6 +107,7 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "discovery-failed" }, (e) => `DAG discovery failed for '${e.dagsRoot}': ${e.message}`)
     .with({ kind: "async-result-expired" }, (e) => `async result for run '${e.runId}' has expired`)
     .with({ kind: "run-not-found" }, (e) => `run '${e.runId}' not found`)
+    .with({ kind: "run-not-suspended" }, (e) => `run '${e.runId}' is '${e.status}', not awaiting human review`)
     .with({ kind: "notification-failed" }, (e) => `review notification failed during '${e.operation}'`)
     .with({ kind: "unauthorized" }, (e) => `unauthorized: ${e.reason}`)
     .with({ kind: "forbidden" }, (e) => `token for team '${e.callerTeam}' cannot access DAG '${e.dagId}' (owned by '${e.dagTeam}')`)

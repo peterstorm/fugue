@@ -46,6 +46,10 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // deliberate choice, not an accident from a wildcard import.
 // ---------------------------------------------------------------------------
 export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
+// The synthetic node id the kernel attributes executor-level (non-node) crashes
+// to. Exported so hosts mapping their own infra failures onto a FrameworkError
+// reuse the validated sentinel instead of re-casting the raw string.
+export { EXECUTOR_NODE_ID } from "./dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
 // Queue layer

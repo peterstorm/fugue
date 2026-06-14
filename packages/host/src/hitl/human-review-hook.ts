@@ -69,6 +69,16 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
 
     // 2. No decision yet → park. Notify only on the first park for this gate.
     const pending = await decisions.markPending(runId, req.nodeId);
+    if (!pending.ok) {
+      // Fail-open: if the pending marker is unwritable (store blip), assume this
+      // is the first park and notify, rather than going silent. Surface the
+      // store error so a duplicate notification on a later re-park is explained.
+      logger?.warn?.("hitl: markPending failed — assuming first park and notifying", {
+        runId,
+        nodeId: req.nodeId,
+        error: pending.error.kind,
+      });
+    }
     const isFirstPark = pending.ok ? pending.value : true;
     if (isFirstPark) {
       const notified = await notifier.notify({

@@ -93,10 +93,10 @@ export const buildAdaptiveCardPayload = (
 };
 
 /**
- * Construct the webhook notifier. `notify` POSTs the card; a non-2xx status is a
- * `redis-unavailable`-style infra failure on the Result channel (the review
- * hook treats a notify failure as non-fatal — the run stays parked — and logs
- * it), and a transport rejection is mapped the same way rather than thrown.
+ * Construct the webhook notifier. `notify` POSTs the card; a non-2xx status is
+ * surfaced as a `notification-failed` (HTTP 502) on the Result channel — the
+ * review hook treats a notify failure as non-fatal (the run stays parked) and
+ * logs it — and a transport rejection is mapped the same way rather than thrown.
  */
 export const createWebhookNotifier = (
   config: WebhookNotifierConfig,

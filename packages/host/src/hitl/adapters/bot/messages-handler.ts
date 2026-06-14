@@ -29,7 +29,7 @@
 
 import { match } from "ts-pattern";
 import type { HumanAction } from "@fuguejs/framework";
-import { tryRunId } from "@fuguejs/framework";
+import { tryRunId, tryNodeId } from "@fuguejs/framework";
 import type { HitlRunService } from "../../service.js";
 import type { LogPort } from "../../../ports.js";
 import type { ConversationStorePort, VerifyBotToken, ConversationReference } from "./ports.js";
@@ -121,17 +121,21 @@ export const handleBotActivity = async (
   if (data.verb !== REVIEW_VERB) return { status: 200 }; // not ours
 
   const runIdRaw = str(data.runId);
-  const nodeId = str(data.nodeId);
+  const nodeIdRaw = str(data.nodeId);
   const decision = str(data.decision) ?? "";
-  if (runIdRaw === undefined || nodeId === undefined) {
+  if (runIdRaw === undefined || nodeIdRaw === undefined) {
     return messageInvokeResponse("Malformed review action.");
   }
-  // Parse the off-the-wire runId through the smart constructor rather than
-  // `as`-casting it: the card `data` is POSTed back by a client and is not
-  // trusted (parse-don't-validate at the boundary).
+  // Parse BOTH off-the-wire ids through their smart constructors rather than
+  // `as`-casting: the card `data` is POSTed back by a client and is not trusted
+  // (parse-don't-validate at the boundary). Parsing nodeId too keeps the
+  // staleness guard below a brand-correct NodeId-vs-NodeId comparison.
   const runIdParsed = tryRunId(runIdRaw);
   if (!runIdParsed.ok) return messageInvokeResponse("Malformed review action.");
   const runId = runIdParsed.value;
+  const nodeIdParsed = tryNodeId(nodeIdRaw);
+  if (!nodeIdParsed.ok) return messageInvokeResponse("Malformed review action.");
+  const nodeId = nodeIdParsed.value;
   const actor = str(obj(activity.from).name) ?? str(obj(activity.from).aadObjectId) ?? "teams-user";
   const action = toAction(decision, str(data.reason), actor);
   if (action === null) return messageInvokeResponse(`Unknown decision '${decision}'.`);

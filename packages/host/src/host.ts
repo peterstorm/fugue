@@ -82,8 +82,9 @@ export interface HostDeps {
   /**
    * Queue backend for the durable HITL run engine (ADR-0060). Constructed by
    * the binary (BullMQ over Redis) and injected so the host stays testable with
-   * an in-memory backend. When omitted (or TEAMS_WEBHOOK_URL unset), HITL is
-   * off and a `humanReview` DAG is refused with 501.
+   * an in-memory backend. HITL requires BOTH this queue backend AND a notifier
+   * transport (TEAMS_WEBHOOK_URL or the Bot Framework BOT_APP_ID/BOT_APP_PASSWORD
+   * pair); absent either, HITL is off and a `humanReview` DAG is refused with 501.
    */
   readonly queueBackend?: QueueBackend;
   /** Called during graceful shutdown to clean up infrastructure (e.g., close Redis). */

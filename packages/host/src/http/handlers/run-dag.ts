@@ -1,7 +1,9 @@
 /**
  * Run DAG handler — POST /dags/:id/run
  *
- * FR-020: Executes DAG and returns result as JSON with 200
+ * FR-020: Executes a DAG and returns the result as JSON with 200 (the
+ *         synchronous, non-HITL path). DAGs declaring a `humanReview` gate fork
+ *         to the durable HITL engine and return 202 + runId instead (see step 2.5).
  * FR-026: Error responses are machine-readable JSON with error/message/details/dagId/runId
  * FR-027: Per-DAG concurrency limit exceeded returns 429 with Retry-After
  * FR-028: Per-DAG timeout returns 408 with run ID (enables future resumption)
