@@ -86,6 +86,43 @@ describe("generated scaffolds lint clean", () => {
 });
 
 // --------------------------------------------------------------------------
+// Human-review scaffolds (--review).
+//
+// A human-review gate is an aspect, not a topology — `--review` adds a
+// `createHumanReviewNode` to the linear scaffold (plain and --llm). Both must
+// still lint clean, the same contract the shape × llm matrix proves.
+// --------------------------------------------------------------------------
+
+describe("human-review scaffolds (--review)", () => {
+  for (const llm of [false, true]) {
+    const label = `linear --review${llm ? " --llm" : ""}`;
+    it(`${label} → dag.ts lints and carries a human-review gate`, async () => {
+      const root = join(tmpRoot, `review-${llm ? "llm" : "plain"}`);
+      const name = "scaffold-review";
+      const result = await runNew({ team: "demo", name, shape: "linear", llm, review: true, force: false, root });
+      if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
+      expect(result.review).toBe(true);
+
+      const dagDir = join(root, "dags", "demo", name);
+      const dagTs = await readFile(join(dagDir, "dag.ts"), "utf-8");
+      expect(dagTs).toContain("createHumanReviewNode");
+
+      const lint = await runLint(join(dagDir, "dag.ts"));
+      if (!lint.ok) {
+        throw new Error(`${label} dag.ts failed to lint: ${JSON.stringify(lint.errors, null, 2)}`);
+      }
+      expect(lint.ok).toBe(true);
+
+      if (llm) {
+        const check = await runPromptsCheck(dagDir);
+        if (!check.ok) throw new Error(`prompts check failed: ${check.problems.join("; ")}`);
+        expect(check.ok).toBe(true);
+      }
+    });
+  }
+});
+
+// --------------------------------------------------------------------------
 // Generated-content guarantees.
 //
 // The matrix above proves scaffolds *lint clean*; these pin the specific
@@ -257,6 +294,18 @@ describe("parseNewArgs", () => {
     const parsed = parseNewArgs(["--shape", "linear", "leads/x"]);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.options).toMatchObject({ team: "leads", name: "x", shape: "linear" });
+  });
+
+  it("parses --review on a linear shape", () => {
+    const parsed = parseNewArgs(["leads/x", "--shape", "linear", "--review"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.options.review).toBe(true);
+  });
+
+  it("rejects --review with a non-linear shape", () => {
+    const parsed = parseNewArgs(["leads/x", "--shape", "router", "--review"]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join()).toContain("--review");
   });
 
   it("reports missing shape", () => {

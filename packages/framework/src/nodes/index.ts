@@ -1,5 +1,6 @@
 export { createFetchNode, type FetchNodeConfig, createSourceNode, type SourceNodeConfig } from "./fetch.js";
 export { createTransformNode, type TransformNodeConfig } from "./transform.js";
+export { createHumanReviewNode, withHumanReview, type HumanReviewNodeConfig } from "./human-review.js";
 export { createLlmNode, type LlmNodeConfig, type LlmNodeDef } from "./llm.js";
 export { createLlmWithToolsNode, type LlmWithToolsNodeConfig, type LlmWithToolsNodeDef } from "./llm-with-tools.js";
 export { createGuardrailNode, type GuardrailNodeConfig, type GuardrailResult, type GuardrailSkipped, type GuardrailValidated, type GuardrailCheck } from "./guardrail.js";

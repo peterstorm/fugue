@@ -1,7 +1,7 @@
 {
   "name": "fugue",
   "private": true,
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": ["packages/*", "apps/*", "examples/*"],
   "scripts": {
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
@@ -12,6 +12,7 @@
     "eval:ci": "podman-compose -f infra/compose.yaml --profile eval-ci up --build eval-ci",
     "eval:pull-model": "bash scripts/pull-judge-model.sh",
     "dev": "bun run --filter customer-summary dev",
+    "hitl:smoke": "bash examples/hitl-smoke/run.sh",
     "test:redis": "podman run --rm -d --name fugue-redis-test -p 6379:6379 redis:7-alpine && sleep 1 && REDIS_URL=redis://localhost:6379 bun run --filter '*' test; podman stop fugue-redis-test"
   },
   "devDependencies": {
