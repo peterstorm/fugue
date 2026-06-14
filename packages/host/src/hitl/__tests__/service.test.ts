@@ -255,6 +255,15 @@ const twoWaveDag = (drafts: { onDraft?: () => void; onReview?: () => void } = {}
     outputNodeId: "review",
   });
 
+// Single ungated node — completes in one processRun slice (no human gate).
+const oneNodeDag = (): DagDef =>
+  defineDag({
+    id: "test-dag",
+    nodes: { only: makeNode("only", { run: async () => ok("done") }) },
+    edges: [{ from: DAG_INPUT, to: "only" }],
+    outputNodeId: "only",
+  });
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -510,6 +519,134 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const { service } = setup(dag);
     const res = await service.processRun(mkRunId("ghost"));
     expect(res.ok).toBe(true);
+  });
+
+  it("settles a corrupt-checkpoint run `failed` and returns ok (no infinite retry)", async () => {
+    // service.ts:130-141 — a structurally-corrupt checkpoint cannot heal on
+    // retry, so processRun settles the run terminal `failed` (a status poll
+    // surfaces it) and returns OK so the worker acks the job rather than
+    // re-processing the same corrupt state forever. The unit boundary
+    // (makeRunStoreJobLike rejecting the checkpoint) is covered in
+    // run-store-job.test.ts; this pins the service-level wiring end-to-end.
+    const dag = twoWaveDag();
+    const { service, store } = setup(dag);
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const runId = started.value.runId;
+
+    // Corrupt the persisted checkpoint in place (torn / garbage Redis value).
+    const rec = store.runs.get(runId)!;
+    store.runs.set(runId, { ...rec, checkpoint: "}{ not a valid envelope" });
+
+    const res = await service.processRun(runId);
+    expect(res.ok).toBe(true); // acked — no queue retry
+    expect(store.runs.get(runId)!.status.kind).toBe("failed"); // settled terminal
+  });
+
+  it("returns err (queue retry) when settling `failed` after a host-infra failure also fails to write", async () => {
+    // service.ts:174-178 — the executor returns a host-infra `err`, so the run
+    // must settle `failed`; if that settle `setStatus` ITSELF fails there is no
+    // durable terminal state, so processRun returns `err` and the worker retries
+    // rather than acking a run still stuck `running`.
+    const dag = twoWaveDag();
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue();
+    const dec = inMemoryDecisionStore();
+    const notif = recordingNotifier();
+    let counter = 0;
+    const real = realExecutor(dag);
+    const executor: RunExecutorPort = {
+      seedCheckpoint: real.seedCheckpoint,
+      async run() {
+        return err({ kind: "internal-invariant-violated", message: "infra boom", context: {} });
+      },
+    };
+    // Fail only the terminal `failed` write; the best-effort `running` write succeeds.
+    const failingStore: RunStorePort = {
+      ...store.port,
+      async setStatus(runId, status: RunStatus) {
+        if (status.kind === "failed") return err({ kind: "redis-unavailable", operation: "setStatus(failed)" });
+        return store.port.setStatus(runId, status);
+      },
+    };
+    const service = createHitlRunService({
+      runStore: failingStore, runQueue: queue.port, decisions: dec.port,
+      notifier: notif.port, executor, clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
+    });
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const res = await service.processRun(started.value.runId);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+  });
+
+  it("returns err (queue retry) when folding a `completed` outcome into the store fails", async () => {
+    // service.ts:184-185 — the executor completed, but writing the `completed`
+    // status fails; the outcome is not durably recorded, so processRun surfaces
+    // the err for the worker to retry rather than silently losing the result.
+    const dag = oneNodeDag();
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue();
+    const dec = inMemoryDecisionStore();
+    const notif = recordingNotifier();
+    let counter = 0;
+    const failingStore: RunStorePort = {
+      ...store.port,
+      async setStatus(runId, status: RunStatus) {
+        if (status.kind === "completed") return err({ kind: "redis-unavailable", operation: "setStatus(completed)" });
+        return store.port.setStatus(runId, status);
+      },
+    };
+    const service = createHitlRunService({
+      runStore: failingStore, runQueue: queue.port, decisions: dec.port,
+      notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
+    });
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const res = await service.processRun(started.value.runId);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+  });
+
+  it("recordDecision returns err when the decision is stored but the resume enqueue fails (decided-but-not-woken)", async () => {
+    // service.ts:231-243 — putDecision succeeds (the approval is durable) but
+    // runQueue.enqueue fails, so the run is not re-woken. The decision is NOT
+    // lost (it outlives via the store), but the half-completed approval must be
+    // surfaced as `err` rather than reported ok, so the stuck run is diagnosable.
+    const dag = twoWaveDag();
+    const store = inMemoryRunStore();
+    const baseQueue = inMemoryRunQueue();
+    const dec = inMemoryDecisionStore();
+    const notif = recordingNotifier();
+    let counter = 0;
+    let failEnqueue = false;
+    const queuePort: RunQueuePort = {
+      async enqueue(runId) {
+        if (failEnqueue) return err({ kind: "redis-unavailable", operation: "enqueue" });
+        return baseQueue.port.enqueue(runId);
+      },
+    };
+    const service = createHitlRunService({
+      runStore: store.port, runQueue: queuePort, decisions: dec.port,
+      notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
+    });
+    baseQueue.setProcessor(service.processRun);
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const runId = started.value.runId;
+    await baseQueue.drain(); // park at the review gate
+    expect(store.runs.get(runId)!.status.kind).toBe("suspended");
+
+    failEnqueue = true;
+    const res = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+    // The decision IS durably stored despite the failed wakeup — "decided but not woken".
+    expect(dec.decisions.has(`${runId}:review`)).toBe(true);
   });
 
   it("getRun reflects the lifecycle: queued → suspended → completed", async () => {

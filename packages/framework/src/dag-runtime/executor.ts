@@ -76,11 +76,12 @@ const validateApproveEdit = (
 };
 
 /**
- * Shared body of the `awaiting-human` and `retrying-hook` executor branches.
- * Both paths: check for a wired hook, invoke it, catch exceptions into a
- * `node-failed`, validate `approve-with-edit` output against the node schema,
- * and finally emit `human-responded`. Only the retrying-hook branch prepends
- * a sleep — that lives at the call site.
+ * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
+ * executor branches. All three paths: check for a wired hook, invoke it, catch
+ * exceptions into a `node-failed`, validate `approve-with-edit` output against
+ * the node schema, and finally emit `human-responded` (or `human-suspend` when
+ * the hook returns `pending`). Only the retrying-hook branch prepends a sleep —
+ * that lives at the call site.
  */
 const callHumanReviewHook = async (
   phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
@@ -292,7 +293,8 @@ export const buildDagExecutor = (
   };
 
   // ---------------------------------------------------------------------------
-  // handleHumanGate — unified human-review handler for awaiting-human + retrying-hook.
+  // handleHumanGate — unified human-review handler for awaiting-human,
+  // suspended, and retrying-hook.
   // Owns: optional sleep → hook call → enrich → emit telemetry → return event.
   // ---------------------------------------------------------------------------
 

@@ -39,7 +39,8 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // DAG runtime — public surface only
 //
 // `runDag` and `runDagAsWorkerJob` are the sanctioned public entries.
-// `runDagStateful` (deprecated), `compileDagToMachine`, `buildDagExecutor`,
+// `runDagStateful` (the back-compat flat `Result<O>` entry for block-until-
+// decided callers, per ADR-0060 §4), `compileDagToMachine`, `buildDagExecutor`,
 // and `dagTransition` live on the `@fuguejs/framework/advanced` subpath
 // for callers building custom machines on the kernel — see `./advanced.ts`.
 // Keeping them off the main barrel signals that reaching for them is a

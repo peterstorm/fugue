@@ -11,7 +11,7 @@
  */
 
 import { z } from "zod";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, tryNodeId } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { RedisPort, LogPort } from "../../ports.js";
@@ -24,13 +24,15 @@ import type { DecisionStorePort } from "../ports.js";
  * HTTP/bot read paths — it must be PARSED, not `as`-cast: a structurally-invalid
  * value (unknown `kind`, an `approve-with-edit` missing `newOutput`, a `reject`
  * missing `reason`) must be rejected here rather than resuming a run with a
- * corrupt decision. Branded ids validate as strings (the brand is compile-time).
+ * corrupt decision. `targetNodeId` is refined through the same `tryNodeId` smart
+ * constructor the ingress paths use, so a persisted reroute target outside
+ * `ID_PATTERN` is rejected rather than flowing in as a branded `NodeId`.
  */
 const HumanActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("approve"), actor: z.string().optional() }),
   z.object({ kind: z.literal("approve-with-edit"), newOutput: z.unknown(), actor: z.string().optional() }),
   z.object({ kind: z.literal("reject"), reason: z.string(), actor: z.string().optional() }),
-  z.object({ kind: z.literal("reroute"), targetNodeId: z.string().min(1), reason: z.string().optional(), actor: z.string().optional() }),
+  z.object({ kind: z.literal("reroute"), targetNodeId: z.string().refine((s) => tryNodeId(s).ok, { message: "value is not a valid branded id" }), reason: z.string().optional(), actor: z.string().optional() }),
 ]);
 
 /**

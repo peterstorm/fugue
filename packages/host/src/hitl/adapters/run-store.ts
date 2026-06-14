@@ -13,7 +13,7 @@
  */
 
 import { z } from "zod";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
 import type { Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { RedisPort, LogPort } from "../../ports.js";
@@ -30,7 +30,17 @@ import type { RunRecord, RunStatus } from "../types.js";
 // drive an exhaustive match off a corrupt discriminant. The `failed` error is
 // kept loose (only its `kind` discriminant is asserted) so a `FrameworkError`
 // shape change never trips the reader; all of its fields round-trip intact.
-// Branded ids validate as strings — the brand is a compile-time fiction.
+//
+// Branded ids are refined through the SAME smart constructors the HTTP/bot
+// ingress paths use (`tryRunId`/`tryNodeId`/`tryDagId`), not a bare
+// `z.string()`: a hand-edited Redis value carrying a `nodeId` with a space (or
+// any char outside `ID_PATTERN`) is rejected here rather than flowing in as a
+// branded `NodeId` its own regex would reject — closing the last gap between
+// "parses" and "is a valid branded id".
+
+/** A zod string refined by a framework id smart constructor (parse-don't-validate). */
+const brandedId = (parse: (s: string) => Result<unknown, string>) =>
+  z.string().refine((s) => parse(s).ok, { message: "value is not a valid branded id" });
 
 const PersistedIdentitySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("admin") }),
@@ -41,14 +51,14 @@ const PersistedIdentitySchema = z.discriminatedUnion("kind", [
 const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("queued") }),
   z.object({ kind: z.literal("running") }),
-  z.object({ kind: z.literal("suspended"), nodeId: z.string().min(1), prompt: z.string() }),
+  z.object({ kind: z.literal("suspended"), nodeId: brandedId(tryNodeId), prompt: z.string() }),
   z.object({ kind: z.literal("completed"), output: z.unknown() }),
   z.object({ kind: z.literal("failed"), error: z.looseObject({ kind: z.string() }) }),
 ]);
 
 const RunMetaSchema = z.object({
-  runId: z.string().min(1),
-  dagId: z.string().min(1),
+  runId: brandedId(tryRunId),
+  dagId: brandedId(tryDagId),
   input: z.unknown(),
   identity: PersistedIdentitySchema,
   status: RunStatusSchema,

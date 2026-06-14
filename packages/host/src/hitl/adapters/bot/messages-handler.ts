@@ -147,6 +147,17 @@ export const handleBotActivity = async (
   const record = fetched.value;
   if (record === null) return messageInvokeResponse(`Run '${runId}' not found.`);
   if (record.status.kind !== "suspended") {
+    // `queued`/`running` are TRANSIENT, not terminal: the run may be mid-slice
+    // with its `suspended` status not yet folded back into the store (the notify
+    // that produced this card fires from inside the slice while status is still
+    // `running` — see service.ts recordDecision). Rendering a resolved card here
+    // would replace the buttons and mislead the reviewer into thinking the review
+    // is over, when the gate is in fact still open and re-approvable, and no
+    // re-notification fires for the same gate. Keep the card and ask them to
+    // retry shortly. Only `completed`/`failed` are genuinely resolved.
+    if (record.status.kind === "queued" || record.status.kind === "running") {
+      return messageInvokeResponse("This review is still being prepared; please try again in a moment.");
+    }
     return cardInvokeResponse(buildResolvedCard({ runId, nodeId, outcome: `This review is already ${record.status.kind}.` }));
   }
   // The card embeds the gate it was issued for. If the run has since resumed and

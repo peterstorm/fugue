@@ -73,8 +73,13 @@ export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort)
     if (typeof json.access_token !== "string" || typeof json.expires_in !== "number") {
       return err({ kind: "notification-failed", operation: "bot token response missing access_token/expires_in" });
     }
-    // Refresh 60s early to avoid edge-of-expiry failures.
-    cached = { token: json.access_token, expiresAtMs: now() + (json.expires_in - 60) * 1000 };
+    // Refresh 60s early to avoid edge-of-expiry failures, but never skew past
+    // the token's own lifetime: a token with `expires_in < 60` (or 0) would
+    // otherwise yield an `expiresAtMs` in the past, marking the cache stale on
+    // write and forcing a fresh fetch on every call. Cap the early-refresh at
+    // half the lifetime so short-lived tokens stay cached for a bounded window.
+    const skewSeconds = Math.min(60, json.expires_in / 2);
+    cached = { token: json.access_token, expiresAtMs: now() + (json.expires_in - skewSeconds) * 1000 };
     return ok(cached.token);
   };
 

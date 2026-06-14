@@ -169,7 +169,7 @@ export const handleNodeFailed = (
 // ---------------------------------------------------------------------------
 
 /**
- * Called when the `onHumanReview` hook throws (from `awaiting-human` or `retrying-hook`).
+ * Called when the `onHumanReview` hook throws (from `awaiting-human`, `suspended`, or `retrying-hook`).
  *
  * The node's output and prompt are preserved. Retries the hook up to the node's retry
  * budget (shared with node retries). Hook retries do NOT re-execute the node.
