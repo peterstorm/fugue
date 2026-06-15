@@ -45,6 +45,9 @@ Key helper: `fileRefKey(ref)`.
 | `DocumentSource`, `FileRef`, `FileMeta`, `ReadOpts` | port types |
 | `sharePointPathRef` / `driveItemRef` / `shareUrlRef` / `localPathRef` | ref constructors |
 | `fileRefKey` | stable string key for a ref |
+| `IsoUtcTimestamp` | branded canonical-ISO-8601-UTC timestamp type for `FileMeta.lastModified` |
+| `isoUtcFromDate(d)` / `parseIsoUtc(value)` | mint/parse an `IsoUtcTimestamp` (parse normalises offsets to `…Z`, `Err`s on garbage) |
+| `createCachedDocumentParser(parse)` | memoize an expensive bytes→value parse, keyed by file fingerprint (`eTag`, else `lastModified`+`sizeBytes`) |
 | `unsupportedRefError(adapter, ref)` | fail-closed error adapters return for foreign variants |
 | `createFakeDocumentSource(routes)`, `FakeDocRoute` | in-memory fake for node tests |
 

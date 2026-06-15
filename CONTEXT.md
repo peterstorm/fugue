@@ -37,12 +37,13 @@ gates, freshness-aware state management, and production observability.
 |------|-----------|
 | **Branded ID** | `RunId`, `NodeId`, `DagId` — string newtypes with compile-time brands. Only smart constructors or `__brand` escapes produce them. |
 | **Result\<T, E\>** | Either-style type: `Ok<T>` or `Err<E>`. No exceptions cross module boundaries. |
-| **FrameworkError** | Discriminated union of 17+ error kinds, exhaustively formatted via `formatFrameworkError`. |
-| **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
+| **FrameworkError** | Discriminated union of 27 error kinds, exhaustively formatted via `formatFrameworkError`. |
+| **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`, `"clock"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
 | **CapabilityRegistry** | Extensible interface mapping capability names to client types. Adapter packages augment it via `declare module "@fuguejs/framework"`. |
 | **CapabilityHandle\<K\>** | Runtime lifecycle wrapper: `{ name, client, connect?, close?, healthCheck? }`. Adapters produce these; runtime manages lifecycle. |
 | **AdapterFactory\<K, C\>** | `(config: C) => CapabilityHandle<K>`. Standard factory shape for adapter packages. |
 | **HttpCapability** | Built-in capability for HTTP API calls. Returns `Result`, validates responses against Zod schemas. |
+| **ClockCapability** | Built-in `"clock"` capability. Nodes read time through `ctx.clock` instead of ambient `Date`; `systemClock` is the production default, `fixedClock` pins time for deterministic tests. |
 | **ValidatedNodeContext** | Phantom-branded `NodeContext` proving capability validation passed. Only `validateCapabilities` can produce it. |
 
 ### Routing & Confidence
@@ -80,7 +81,7 @@ gates, freshness-aware state management, and production observability.
 | **Observer** | Single-method interface: `observe(event: ObserverEvent): void`. 13 event types via discriminated union. |
 | **ObserverEvent** | Union of: `run-start`, `node-start`, `node-end`, `node-skipped`, `node-error`, `sub-span`, `run-end`, `route-decided`, `node-pruned`, `witness-captured`, `write-attempted`, `freshness-violation`, `human-intervention`. |
 | **BufferedObserver** | Accumulates per-run events, applies tail-sampling persistence policy, emits `RunSummary`. |
-| **PersistencePolicy** | Combinable predicates (`alwaysOn`, `errorOnly`, `ratio`, `hadRetry`, `coldCache`, etc.) that decide whether a run's events are flushed to the exporter. |
+| **PersistencePolicy** | Combinable predicates (`alwaysOn`, `errorOnly`, `ratio`, `hadRetry`, `anyOf`, `allOf`, `custom`) that decide whether a run's events are flushed to the exporter. |
 | **Tracer** | OTel trace interface. Carries infrastructure telemetry (latency, token costs) — separate from Observer domain events. |
 
 ### Queue & Scheduling
@@ -141,7 +142,7 @@ The host is the **imperative shell** that wires the framework into a production 
 | `domain/circuit-breaker.ts` | Pure closed/open/half-open state machine |
 | `domain/circuit-guard.ts` | Protocol-enforcing permit token (check→execute→mark) |
 | `domain/config.ts` | Zod-validated environment config with sensible defaults |
-| `domain/host-error.ts` | 24-variant discriminated union, exhaustive HTTP mapping |
+| `domain/host-error.ts` | 28-variant discriminated union, exhaustive HTTP mapping |
 | `adapters/git-sync.ts` | Bun.spawn → git clone/pull/rev-parse with timeout |
 | `adapters/module-loader.ts` | Dynamic import + validation + prompt loading |
 | `adapters/node-context-factory.ts` | Constructs per-request NodeContext with DAG-namespaced keys |
@@ -153,3 +154,23 @@ The host is the **imperative shell** that wires the framework into a production 
 | `lifecycle/redis-probe.ts` | Post-boot Redis liveness probe → degraded/recovered transitions |
 | `host.ts` | Top-level imperative shell wiring all subsystems |
 | `main.ts` | Binary entry point (process.exit, real Redis, real git) |
+
+**HITL subsystem (`hitl/`).** Durable human-review suspend/resume (ADR-0060).
+
+| Component | Responsibility |
+|-----------|---------------|
+| `hitl/service.ts` | Suspend/resume orchestration: park a run, resolve a decision, resume execution |
+| `hitl/human-review-hook.ts` | Bridges the framework's `onHumanReview` hook to the durable run store |
+| `hitl/run-store-job.ts` / `adapters/run-queue.ts` / `run-store.ts` / `run-executor.ts` | BullMQ-over-Redis durable run queue, store, and resume worker |
+| `hitl/identity.ts` | Binds the approving identity to the resolved decision |
+| `hitl/adapters/webhook-notifier.ts` / `bot/` | Teams approval transports — deep-link webhook and in-Teams Bot Framework cards |
+
+**Identity-scoped capabilities (`adapters/`).** Per-identity capability brokering (ADRs 0051–0059).
+
+| Component | Responsibility |
+|-----------|---------------|
+| `adapters/keycloak-broker.ts` / `keycloak-token-endpoint.ts` | Mint a downscoped per-identity token via Keycloak Standard Token Exchange |
+| `adapters/entra-wif.ts` | Entra workload-identity-federation exchange for MS Graph access |
+| `adapters/graph-capability.ts` | Identity-scoped MS Graph document capability |
+| `adapters/metered-llm.ts` | LLM capability wrapper that meters token usage per identity |
+| `adapters/broker-audit.ts` | Audit trail for brokered capability grants |

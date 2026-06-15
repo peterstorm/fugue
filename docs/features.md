@@ -41,6 +41,7 @@ Fugue is a DAG-shaped, durable runtime for LLM-bearing workflows. This document 
 - No duplicate `(from, to)` edge pairs
 - Predicates have `label`, `version`, and `check` function
 - Writes nodes declare both freshness extractors or neither (never one without the other)
+- Every entry node receives the request explicitly: no node implicitly gets the DAG input (0.2.0). A request-consuming root needs an edge from the `DAG_INPUT` (`"$input"`) sentinel; a root that consumes nothing is built with `createSourceNode` (or declared via `defineSources`). The validator rejects an input-less non-source root with `root-expects-input`.
 
 ### What It Catches
 
@@ -127,7 +128,7 @@ Without branded IDs, argument-swap bugs are **invisible at compile time**. A fun
 
 ### What It Does
 
-Every function that can fail returns `Result<T, FrameworkError>` instead of throwing. The `FrameworkError` is a discriminated union of 17+ kinds, each with typed fields. A `never` guard in `formatFrameworkError` ensures adding a new error kind without handling it is a **compile error**.
+Every function that can fail returns `Result<T, FrameworkError>` instead of throwing. The `FrameworkError` is a discriminated union of 27 kinds, each with typed fields. A `never` guard in `formatFrameworkError` ensures adding a new error kind without handling it is a **compile error**.
 
 ### What It Catches
 
@@ -161,7 +162,7 @@ const result = await andThenAsync(
 switch (e.kind) {
   case "validation": return ...;
   case "node-crash": return ...;
-  // ... all 17 kinds ...
+  // ... all 27 kinds ...
   default: {
     const _exhaustive: never = e;  // 💥 COMPILE ERROR if you add a kind above without a case
     return `unhandled: ${JSON.stringify(_exhaustive)}`;
@@ -181,7 +182,7 @@ Exceptions are **invisible in the type system**. Any function can throw anything
 
 Each node declares `requires: readonly Capability[]` (e.g., `["llm", "prompts"]`). At run start — **before any node executes** — the runtime validates that the wired context satisfies all declared capabilities. The node's `run` function receives a narrowed `TypedNodeContext<R>` where required fields are guaranteed non-null.
 
-The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
+The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`, `clock`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
 
 ### What It Catches
 

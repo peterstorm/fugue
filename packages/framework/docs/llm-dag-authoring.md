@@ -714,6 +714,7 @@ const dag = defineDag({
     "handle-complex": complexHandler,
   },
   edges: [
+    { from: DAG_INPUT, to: "classify" },
     {
       from: "classify",
       to: "handle-simple",
@@ -741,6 +742,7 @@ const dag = defineDag({
     "assemble": assembleNode,
   },
   edges: [
+    { from: DAG_INPUT, to: "fetch" },
     { from: "fetch", to: "synthesize" },
     { from: "synthesize", to: "check-facts" },
     { from: "fetch", to: "check-facts" },          // guardrail gets source data too
@@ -767,6 +769,7 @@ with `fugue new <team>/<name> --shape linear --review`.
 import {
   createHumanReviewNode,
   createTransformNode,
+  DAG_INPUT,
   defineDag,
   ok,
 } from "@fuguejs/framework";
@@ -790,6 +793,7 @@ const dag = defineDag({
     }),
   },
   edges: [
+    { from: DAG_INPUT, to: "fetch" },
     { from: "fetch", to: "process" },
     { from: "process", to: "review" },
   ],

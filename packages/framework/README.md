@@ -33,7 +33,8 @@ Types and entry points that workflow authors touch.
 
 - `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate`, `withRetryLimits` — the DAG shape, edge-predicate vocabulary (ADR 0015, ADR 0016), and the retry-limit helper.
 - `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — node authoring contract.
-- `Capability`, `CapabilityFields`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
+- `Capability`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
+- `ClockCapability` plus the `systemClock` / `fixedClock` constructors — the `clock` capability (`requires: ["clock"]`); `fixedClock` pins time for deterministic tests, `systemClock` is the production default.
 - `RunId`, `NodeId`, `DagId` plus the `runId`, `nodeId`, `dagId` smart constructors — branded identifiers; raw strings cross the boundary at the entry points (`defineDag`, `makeNodeContext`, `runDag`) and become branded once.
 - `ContextCacheAdapter`, `CacheLookup`, `PromptAccess`, `Logger`, `Tracer` — pluggable seams.
 - `ObserverEvent` (and the per-event types `RunStartEvent`, `NodeStartEvent`, `NodeEndEvent`, `NodeSkippedEvent`, `NodeErrorEvent`, `SubSpanEvent`, `RunEndEvent`, `RouteDecidedEvent`, `NodePrunedEvent`, `WitnessCapturedEvent`, `WriteAttemptedEvent`, `FreshnessViolationEvent`, `HumanInterventionEvent`), `SpanKind` — the typed event envelope flowing through the `Observer` interface (which lives under `observer/`).
@@ -169,6 +170,9 @@ Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 
 - `@fuguejs/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
 - `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
+- `@fuguejs/framework/bullmq` — the BullMQ transport adapter (`createBullMQBackend`, `adaptBullMQJob`, `createRedisMarkerStore`, `createRedisStreamReader`). Pulls in the optional `bullmq` / `ioredis` peer deps; isolated off the main barrel so transport-agnostic consumers stay clean.
+- `@fuguejs/framework/redis` — Redis-backed durable adapters (`RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex`). Requires the optional `ioredis` peer dep.
+- `@fuguejs/framework/testing` — stable import path for test tooling (`FakeLlmClient`, `createFakeHttpCapability`).
 - `setFrameworkLogger(...)` / `setFrameworkTracer(...)` — host-injectable logger + OTel tracer seams. Defaults are `console.*` and `trace.getTracer("fugue-framework")` respectively, matching prior behaviour; tests typically pass recording stubs.
 
 ## State-Transition Observability

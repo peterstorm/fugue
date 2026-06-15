@@ -43,14 +43,16 @@ One image serves all team instances — only config differs.
 podman build -f packages/host/Dockerfile -t fugue-host:latest .
 
 # Tag and push
-podman tag fugue-host:latest your-registry.example.com/fugue/host:1.0.0
-podman push your-registry.example.com/fugue/host:1.0.0
+podman tag fugue-host:latest your-registry.example.com/fugue/host:0.2.0
+podman push your-registry.example.com/fugue/host:0.2.0
 ```
 
 **What's in the image:**
 - Bun 1.2 runtime (Alpine-based, ~50MB)
-- `git` (for DAG repo sync)
-- `packages/framework/` + `packages/host/` source
+- `git` + `openssh-client` (for DAG repo sync over https/ssh)
+- `packages/framework/`, `packages/host/`, `packages/adapter-fs/`, and
+  `packages/document-source/` source (the last two back `DOCUMENTS_ADAPTER=fs`,
+  which `main.ts` imports dynamically)
 - Dependencies via `bun install --frozen-lockfile --production`
 - Non-root user `fugue`, port 3000, health check at `GET /health`
 
@@ -170,6 +172,46 @@ oc create secret generic fugue-git-credentials \
   --from-literal=GIT_ASKPASS_TOKEN="ghp_your-github-pat"
 ```
 
+### (Optional) HITL, identity, and documents adapter
+
+These are off by default. Add the relevant block to the host's env when a team's
+DAGs need them.
+
+**Human-in-the-loop (Teams approvals).** Required when any DAG declares a
+`humanReview` gate — HITL runs on the durable BullMQ-over-Redis queue backend
+(no extra service; it reuses `REDIS_URL`). Setting either the webhook URL or the
+`BOT_APP_ID`/`BOT_APP_PASSWORD` pair enables HITL; a `humanReview` DAG is refused
+with 501 when neither transport is configured. See [`hitl-teams.md`](./hitl-teams.md).
+
+| Env var | Required | Purpose |
+|---------|----------|---------|
+| `TEAMS_WEBHOOK_URL` | webhook transport | Teams Incoming Webhook (Workflows) URL — must be `https://` |
+| `HITL_APPROVAL_BASE_URL` | webhook transport | Public host URL for the card's approval deep-link (`<base>/runs/<id>`) |
+| `BOT_APP_ID` | bot transport | Bot Framework / Entra app (client) id — takes precedence over the webhook |
+| `BOT_APP_PASSWORD` | bot transport | Bot app client secret (required when `BOT_APP_ID` is set) |
+| `BOT_TOKEN_URL` | optional | Override the BF token endpoint (single-tenant bots) — must be `https://` |
+| `HITL_RUN_TTL_SEC` | optional | TTL for persisted runs/decisions (default 604800 = 7 days) |
+| `HITL_LOCK_TTL_SEC` | optional | Single-flight lock TTL per run slice (default 300) |
+| `HITL_WORKER_CONCURRENCY` | optional | Concurrent HITL run slices the worker processes (default 4) |
+
+**Identity-scoped capabilities (Keycloak).** Wires the live capability broker and
+the realm-JWT inbound mode. See [`auth.md`](./auth.md).
+
+| Env var | Required | Purpose |
+|---------|----------|---------|
+| `REALM_JWT_ISSUER` | enables JWT mode | Issuer URL of the `fugue-platform` realm; also selects the live Keycloak broker |
+| `REALM_JWT_AUDIENCE` | optional | Audience the host must appear in (default `fugue-host`) |
+| `AGENT_CLIENT_SCOPES` | optional | Fail-closed scope policy: JSON `{ clientId: ["provider:operation", …] }` — absent client/scope mints nothing |
+
+**Documents capability.** Required for DAGs declaring `requires: ["documents"]`
+(the `fs` adapter is backed by `packages/adapter-fs` + `packages/document-source`,
+both in the image).
+
+| Env var | Required | Purpose |
+|---------|----------|---------|
+| `DOCUMENTS_ADAPTER` | for `documents` DAGs | Adapter to wire (`fs`) |
+| `DOCUMENTS_FS_ROOT` | when `DOCUMENTS_ADAPTER=fs` | Root directory for the fs adapter (mounted volume / staged files) |
+
 ---
 
 ## Deploy the Host
@@ -196,7 +238,7 @@ spec:
     spec:
       containers:
         - name: fugue-host
-          image: your-registry.example.com/fugue/host:1.0.0
+          image: your-registry.example.com/fugue/host:0.2.0
           ports:
             - containerPort: 3000
           env:
@@ -348,7 +390,7 @@ mkdir -p dags/cx/customer-summary/prompts
 // dags/cx/customer-summary/dag.ts
 import { z } from "zod";
 import type { DagRegistration } from "@fuguejs/host/contract";
-import { defineDag, createFetchNode, createLlmNode } from "@fuguejs/framework";
+import { defineDag, createFetchNode, createLlmNode, DAG_INPUT } from "@fuguejs/framework";
 
 const InputSchema = z.object({ customerId: z.string().min(1) });
 
@@ -373,7 +415,10 @@ const summarize = createLlmNode({
 const dag = defineDag({
   id: "customer-summary",
   nodes: { "fetch-crm": fetch, "summarize": summarize },
-  edges: [{ from: "fetch-crm", to: "summarize" }],
+  edges: [
+    { from: DAG_INPUT, to: "fetch-crm" },   // feed the request into the root (0.2.0)
+    { from: "fetch-crm", to: "summarize" },
+  ],
   outputNodeId: "summarize",
 });
 
@@ -548,10 +593,10 @@ Deploy multiple replicas. Each independently:
 ### Host upgrades (rolling)
 
 ```bash
-podman build -f packages/host/Dockerfile -t your-registry.example.com/fugue/host:1.1.0 .
-podman push your-registry.example.com/fugue/host:1.1.0
+podman build -f packages/host/Dockerfile -t your-registry.example.com/fugue/host:0.2.0 .
+podman push your-registry.example.com/fugue/host:0.2.0
 
-oc set image deployment/fugue-host fugue-host=your-registry.example.com/fugue/host:1.1.0
+oc set image deployment/fugue-host fugue-host=your-registry.example.com/fugue/host:0.2.0
 oc rollout status deployment/fugue-host
 ```
 

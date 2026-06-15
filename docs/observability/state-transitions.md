@@ -143,6 +143,7 @@ fetch-order → assess-risk → execute-refund → human-review
 ### Node definitions
 
 ```ts
+// withHumanReview, ok imported from "@fuguejs/framework"
 const dag = defineDag({
   id: "refund-pipeline",
   nodes: {
@@ -182,13 +183,16 @@ const dag = defineDag({
       confidence: { mode: "none" },
       run: async (input, ctx) => { /* execute the refund */ },
     },
-    "human-review": {
-      kind: "transform",
-      sideEffects: { kind: "none" },
-      confidence: { mode: "none" },
-      humanReview: { prompt: "Approve this refund?" },
-      run: async (input) => ok(input),
-    },
+    "human-review": withHumanReview(
+      {
+        id: "human-review",
+        kind: "transform",
+        sideEffects: { kind: "none" },
+        confidence: { mode: "none" },
+        run: async (input) => ok(input),
+      },
+      { prompt: "Approve this refund?" },
+    ),
   },
   edges: [
     { from: "fetch-order", to: "assess-risk" },
@@ -393,7 +397,7 @@ This is the **calibration segmentation payoff**: you can see which confidence so
 
 ### Declaring `sideEffects`
 
-Every `NodeDef` requires a `sideEffects` field. Use the `defineSimpleNode()` helper for pure transforms, or declare explicitly:
+Every `NodeDef` requires a `sideEffects` field. Use the `createTransformNode()` helper for pure transforms, or declare explicitly:
 
 ```ts
 // Pure computation — no external interactions
@@ -436,8 +440,6 @@ The `resource` string should be a stable identifier matching the pattern `{syste
 Every `NodeDef` requires a `confidence` field. Opt out explicitly with `{ mode: "none" }` or declare an extractor:
 
 ```ts
-import { bucketFromProbability } from "@fuguejs/framework";
-
 // No confidence signal (deterministic node)
 const deterministicNode = {
   confidence: { mode: "none" },
@@ -461,7 +463,7 @@ const classifierNode = {
   confidence: {
     mode: "value",
     extract: (output) => ({
-      bucket: bucketFromProbability(output.score),  // 0.85+ → high, 0.6+ → medium, else → low
+      bucket: output.score >= 0.85 ? "high" : output.score >= 0.6 ? "medium" : "low",  // 0.85+ → high, 0.6+ → medium, else → low
       source: "classifier-probability",
       raw: output.score,  // kept for forensics
     }),
@@ -479,10 +481,10 @@ const guardrailNode = {
 };
 ```
 
-**Bucket thresholds:** `bucketFromProbability` defaults to `{ high: 0.85, medium: 0.6 }`. Override per node:
+**Bucket thresholds:** the convention is `high ≥ 0.85`, `medium ≥ 0.6`, else `low` — inline the threshold check as above. (Reusable `bucketFromProbability`/`bucketFromEnsemble` helpers live in the internal `sugar/` module and are not on the public barrel.) Override the cutoffs per node by adjusting the literals:
 
 ```ts
-bucketFromProbability(score, { high: 0.9, medium: 0.7 })
+output.score >= 0.9 ? "high" : output.score >= 0.7 ? "medium" : "low"
 ```
 
 ### Declaring freshness extractors (`extractWitness`, `extractConditionedOn`, `extractNewWitness`)
@@ -549,16 +551,14 @@ const executeRefundNode = {
 | `idempotency-key` | Request-scoped (Stripe, Plaid) | `"ikey_abc123"` |
 | `custom` | Domain-specific | Any opaque string |
 
-### Sugar helpers
+### The no-op profiles
 
-For nodes with no side effects and no confidence, use the constants:
+For nodes with no side effects and no confidence, declare the literal profiles directly:
 
 ```ts
-import { NO_SIDE_EFFECTS, NO_CONFIDENCE } from "@fuguejs/framework";
-
 const simpleNode = {
-  sideEffects: NO_SIDE_EFFECTS,  // { kind: "none" }
-  confidence: NO_CONFIDENCE,      // { mode: "none" }
+  sideEffects: { kind: "none" },
+  confidence: { mode: "none" },
   // ...
 };
 ```

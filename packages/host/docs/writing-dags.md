@@ -40,7 +40,7 @@ your-dags-repo/
 // dag.ts
 import { z } from "zod";
 import type { DagRegistration } from "@fuguejs/host/contract";
-import { defineDag, createLlmNode, createFetchNode } from "@fuguejs/framework";
+import { defineDag, createLlmNode, createFetchNode, DAG_INPUT } from "@fuguejs/framework";
 
 // 1. Define your input schema
 const InputSchema = z.object({
@@ -55,6 +55,7 @@ const dag = defineDag({
     "synthesize": createLlmNode({ /* ... */ }),
   },
   edges: [
+    { from: DAG_INPUT, to: "fetch-data" },   // feed the request into the root
     { from: "fetch-data", to: "synthesize" },
   ],
   outputNodeId: "synthesize",
@@ -83,6 +84,23 @@ const registration: DagRegistration = {
 
 export default registration;
 ```
+
+### Feeding the request in (`DAG_INPUT` edges and source nodes)
+
+As of 0.2.0 no node implicitly receives the DAG input. Every non-source entry
+node must receive the request over an explicit `{ from: DAG_INPUT, to: <node> }`
+edge (`DAG_INPUT` is the reserved `"$input"` source, imported from
+`@fuguejs/framework`); a root with no such edge fails validation with
+`root-expects-input`. A root that consumes no request at all is a *source* —
+build it with `createSourceNode` (it sets `isSource`) instead of wiring a
+`DAG_INPUT` edge.
+
+```typescript
+edges: [{ from: DAG_INPUT, to: "fetch-data" }, /* ... */]
+```
+
+See [`docs/llm-dag-authoring.md`](../../framework/docs/llm-dag-authoring.md) for
+the canonical authoring guide.
 
 ### Required Fields
 
@@ -282,7 +300,7 @@ Each DAG has an automatic circuit breaker:
 The host polls git every `DAGS_POLL_INTERVAL_MS`:
 1. `git pull --ff-only`
 2. Compare SHA — skip if unchanged
-3. If `bun.lockb` changed → `bun install --frozen-lockfile`
+3. If `bun.lock` changed → `bun install --frozen-lockfile`
 4. Discover and load all DAGs
 5. Atomically swap the registry (immutable snapshot)
 6. Force-reset all circuit breakers

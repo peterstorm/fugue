@@ -46,7 +46,10 @@ TEAMS_WEBHOOK_URL=https://webhook.site/<your-id> bun run hitl:smoke   # actually
 ```
 dags/demo/approval/dag.ts     draft → review[humanReview gate] → finalize   (transform-only, no LLM)
 dags/demo/approval/fugue.yaml team: demo
-smoke.ts                      the loop driver (trigger → poll → approve → poll)
+smoke.ts                      the loop driver (trigger → poll → approve → poll); I/O only
+smoke-logic.ts                pure decision logic (parseDecision, expectedTerminal, decisionBody, isPollDone)
+smoke-logic.test.ts           unit tests for the decision logic — no host (pins the reject → failed path)
+smoke-dag.test.ts             lints the approval DAG via the CLI's runLint — catches wiring typos at build time
 run.sh                        turnkey orchestrator (Redis + host + smoke + teardown)
 ```
 

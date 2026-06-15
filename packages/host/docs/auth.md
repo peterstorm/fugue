@@ -14,6 +14,8 @@ This separation ensures applications never hold the admin key. A leaked team tok
 
 The user tier is **verifier-gated and fail-closed**: the JWT path is only entered when a JWKS signature verifier is injected alongside the `iss`/`aud` policy and the `authorizeUserRun` user-run authorization policy — the three travel together as one required group (`RealmJwtDeps`), so a half-wired state (verifier without a run policy) is unrepresentable. The group is deliberately unwired today (pending the JWKS wave), so a JWT-shaped token currently 401s — it never degrades to a weaker identity. See ADR-0058 for the full design.
 
+Setting `REALM_JWT_ISSUER` also selects the live Keycloak capability broker for per-hop downstream-scope minting; the broker is gated by `AGENT_CLIENT_SCOPES`, a fail-closed JSON policy mapping each agent client to its allowed `provider:operation` scopes — an absent client or scope mints nothing (a client with no entry has no scopes). For the Teams approval / Bot Framework endpoints (`POST /runs/:runId/approve`, `POST /teams/messages`), see [`hitl-teams.md`](./hitl-teams.md).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         Request Flow                                         │

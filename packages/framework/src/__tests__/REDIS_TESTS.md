@@ -2,10 +2,14 @@
 
 ## Why they're skipped
 
-These 34 tests require a running Redis instance. They are guarded by:
+~34 Redis-gated tests across these files require a running Redis instance. They
+are guarded at module-load time by:
 
 ```typescript
-describe.skipIf(!process.env.REDIS_URL)("...", () => { ... });
+const hasRedis = Boolean(process.env.REDIS_URL);
+const describeRedis = hasRedis ? describe : describe.skip;
+
+describeRedis("...", () => { ... });
 ```
 
 This ensures the test suite passes in any environment without Redis, while
@@ -17,22 +21,17 @@ still validating Redis-specific behavior when infrastructure is available.
 # Start Redis via Docker Compose
 docker compose -f infra/compose.yaml up redis -d
 
-# Set the connection URL
-export REDIS_URL=redis://localhost:6379
-
-# Run Redis-dependent tests
-bun test --filter redis
-bun test --filter bullmq
-bun test packages/framework/src/queue-bullmq/
+# Run the Redis-gated tests (REDIS_URL un-skips them at module load)
+REDIS_URL=redis://localhost:6379 bun test packages/framework/src/queue-bullmq/
+REDIS_URL=redis://localhost:6379 bun test packages/framework/src/__tests__/redis-cache.test.ts
+REDIS_URL=redis://localhost:6379 bun test packages/framework/src/__tests__/redis-checkpointer.test.ts
 ```
 
 ## What they cover
 
 - `redis-cache.test.ts` — LLM response caching with TTL via Redis
 - `redis-checkpointer.test.ts` — Durable checkpoint persistence (HSET/GET, Lua atomicity)
-- `redis-freshness-index.test.ts` — Cross-process witness tracking (ZADD/ZRANGEBYSCORE)
 - `queue-bullmq-adapter.test.ts` — BullMQ enqueue/process, Map serialization round-trip
-- `bullmq-adapter-unit.test.ts` — Worker lifecycle, onFailed/onExhausted, dead-letter
 - Redis Streams event log — XADD/XRANGE, envelope format, replay-to-timestamp
 
 ## CI Coverage

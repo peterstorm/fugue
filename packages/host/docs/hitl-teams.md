@@ -72,7 +72,7 @@ constructs a BullMQ queue backend over `REDIS_URL`.
    Framework JWT (issuer `https://api.botframework.com`, audience = `BOT_APP_ID`)
    against the BF JWKS — there is no shared secret on the inbound path.
 4. **Enable the Microsoft Teams channel** on the Azure Bot.
-5. **Package the Teams app**: zip `manifest.json` (in this directory) with a
+5. **Package the Teams app**: zip `manifest.json` (in `packages/host/teams/`) with a
    `color.png` (192×192) and `outline.png` (32×32) icon. `${{BOT_APP_ID}}` is
    substituted with your App ID (the Teams Developer Portal / Toolkit does this,
    or replace by hand).

@@ -32,6 +32,17 @@ edges at compile time (ADR 0017). A `NodeDef`'s contract is "I produce O
 from I"; the same node can be reused in any DAG whose edges supply the
 right upstream outputs, with no rename required.
 
+**Root input wiring (0.2.0).** No node implicitly receives the DAG's
+request. A node that consumes the request needs an explicit edge from the
+reserved virtual source `DAG_INPUT` (the constant `"$input"`):
+`{ from: DAG_INPUT, to: "fetch" }`. A root that produces its output from
+the context alone, consuming no DAG input, is a
+**source node**: it sets `isSource: true` (a unit `z.void()` input schema)
+and is produced by `createSourceNode` / `defineSources`. `defineDag`
+enforces the dichotomy: a node with zero incoming edges MUST be a source,
+and a non-source root with no `$input` edge is rejected with
+`root-expects-input`.
+
 LLM nodes can additionally declare tools the model may call mid-completion
 (see §7).
 
@@ -127,7 +138,7 @@ tracer, and an `AbortSignal`.
 | Stage | What surfaces |
 | --- | --- |
 | Edit time / `tsc` | Edge endpoint typos, `outputNodeId` typos, `retryLimits` key typos, hand-rolled `DagDef` literals. |
-| Module load (import) | Everything `validateDagShape` checks: missing deps, missing default edges, unreachable output, duplicate edges, optionalDeps mismatches, key/id mismatch. `defineDag` throws. |
+| Module load (import) | Everything `validateDagShape` checks: unknown edge endpoints, missing default edges, unreachable output, duplicate edges, a non-source root with no `$input` edge (`root-expects-input`), key/id mismatch. `defineDag` throws. |
 | Test run | Same as module load — importing the DAG into a test imports through `defineDag`. CI catches it before merge. |
 | App boot | Same as module load — your wiring code calls `defineDag` at startup, the process fails fast with a stack pointing at the DAG file. |
 | First request | Cycle detection (`topoSort` runs at compile, before the first wave). |
@@ -169,10 +180,11 @@ no human review (e.g. the current `apps/customer-summary` HTTP handler).
 ### Loop
 `runDagInner` (`executor.ts:223`):
 
-1. **Validate DAG shape** (cycles, dup ids, deps↔edges consistency, output
-   node exists).
-2. **Topo-sort into waves** — sets of nodes whose deps have all been
-   satisfied. All nodes in the same wave run via `Promise.all`.
+1. **Validate DAG shape** (cycles, dup ids, edge endpoints resolve to known
+   nodes, every non-source root has a `$input` edge, output node exists).
+2. **Topo-sort into waves** — sets of nodes whose upstream sources (derived
+   from incoming edges) have all completed. All nodes in the same wave run
+   via `Promise.all`.
 3. For each wave:
    - Build each node's input from upstream outputs (single dep → unwrapped;
      multi-dep → `{ depId: out }` object).
@@ -1324,89 +1336,114 @@ never converges is the simplest way to burn an unbounded number of tokens.
 ## 8. Conditional edges
 
 LLM-outcome routing — "summarise / translate / skip" picked by a router node
-— is first-class via three edge variants. `when` carries a
-**structural-match predicate** (data, not a function): keys are top-level
-fields of the upstream output, values are the expected matches. Inside
-`defineDag`, where the node-id union and per-node output types are
-inferred, `from`/`to` are constrained to known node ids and `when` is
-type-checked against the actual upstream output schema.
+— is first-class via three edge variants. `when` carries a **function-based
+predicate**: a value with a human-readable `label`, an integer `version`, a
+`check` function over the upstream output, and an optional `minConfidence`
+gate. Inside `defineDag`, where the node-id union and per-node output types
+are inferred, `from`/`to` are constrained to known node ids and `when` is
+type-checked against the actual upstream output schema (`Predicate<O>` for
+the `from` node's `O`).
 
 ```ts
 import { defineDag } from "@fuguejs/framework";
+
+const isSummarize: Predicate<RouterOutput> = {
+  label: "route-summarize",
+  version: 1,
+  check: (out) => out.kind === "summarize",
+};
+const isTranslate: Predicate<RouterOutput> = {
+  label: "route-translate",
+  version: 1,
+  check: (out) => out.kind === "translate",
+};
 
 const dag = defineDag({
   id: "router-demo",
   nodes: { router, summarize, translate, skip },
   edges: [
-    { from: "router", to: "summarize", when: { kind: "summarize" } },
-    { from: "router", to: "translate", when: { kind: "translate" } },
+    { from: "router", to: "summarize", when: isSummarize },
+    { from: "router", to: "translate", when: isTranslate },
     { from: "router", to: "skip", kind: "default" },
   ],
   outputNodeId: "summarize",  // see §8.4 for what this requires
 });
 ```
 
-`oneOf` matches any of a list of values:
+`check` is an ordinary predicate function, so any boolean expression is
+fair game — there is no `oneOf` / field-equality DSL to learn:
 
 ```ts
-{ from: "router", to: "fastpath", when: { kind: { oneOf: ["a", "b"] } } }
+const fastpath: Predicate<RouterOutput> = {
+  label: "route-fastpath",
+  version: 1,
+  check: (out) => out.kind === "a" || out.kind === "b",
+};
+
+const premiumFast: Predicate<AccountOutput> = {
+  label: "route-premium-fast",
+  version: 1,
+  check: (out) => out.tier === "gold" && out.region === "eu",
+};
 ```
 
-Multi-key predicates require **every** key to match (logical AND across
-keys):
+**Confidence gating.** When a predicate sets `minConfidence`, the framework
+short-circuits *before* `check` runs: if the upstream node's confidence
+bucket is below `minConfidence` (per `CONFIDENCE_ORDER`:
+`high > medium > low > unknown`), the predicate is recorded with
+`outcome: "below-min-confidence"` and `check` is never called. The
+`confidence` argument passed to `check` is the upstream `Confidence | null`
+(`null` for nodes that declare `confidence: { mode: "none" }`):
 
 ```ts
-{ from: "router", to: "premium-fast", when: { tier: "gold", region: "eu" } }
+const highConfRoute: Predicate<SynthesisOutput> = {
+  label: "high-confidence-synthesis",
+  version: 1,
+  minConfidence: "high",  // only fires when upstream confidence ≥ high
+  check: (out, confidence) => out.keyTopics.length >= 3,
+};
 ```
+
+`Confidence` is a branded `{ bucket, source, raw? }` value, never a bare
+number — the framework gates on bucket ordering and never compares raw
+values (see §7 of `docs/features.md`).
 
 The runtime variant types — written by the framework, used only when you
 need them outside `defineDag` (e.g. building edges programmatically):
 
 ```ts
-type Predicate<O> = {
-  readonly [K in keyof O]?: O[K] | { readonly oneOf: readonly O[K][] };
-};
+interface Predicate<T> {
+  readonly label: string;
+  readonly version: number;   // bump when check logic changes (DAG fingerprint)
+  readonly check: (value: T, confidence: Confidence | null) => boolean;
+  readonly minConfidence?: ConfidenceBucket;
+}
 
 type EdgeDef =
-  | { from: string; to: string }                            // unconditional
-  | { from: string; to: string; when: Predicate<unknown> }  // conditional
-  | { from: string; to: string; kind: "default" };           // else branch
+  | { from: string; to: string; kind: "unconditional" }
+  | { from: string; to: string; kind: "conditional"; when: Predicate<unknown> }
+  | { from: string; to: string; kind: "default" };
 ```
 
-**Predicates are pure data.** There is no closure to capture external
-state, so replay determinism is a system guarantee (not author
-discipline), predicates survive JSON / process boundaries, the DAG
-fingerprint detects predicate edits, and observer events carry the matched
-predicate verbatim (no more `[Function]` in routing decisions).
+`EdgeDef` is the validated runtime shape — every variant carries an explicit
+`kind` discriminant, narrowed by `isUnconditionalEdge` / `isConditionalEdge`
+/ `isDefaultEdge`. Authoring is more forgiving: the unconditional and
+conditional forms may omit `kind` (supply `when` for conditional), and
+`defineDag` materializes the explicit discriminant after validation. At
+runtime `when` is widened to `Predicate<unknown>` because the DAG carries
+heterogeneous node types; per-edge type safety is recovered at authoring
+time inside `defineDag`.
 
-**Boolean composition is deliberately absent** — no `and`/`or`/`not` /
-comparison operators. If your routing logic doesn't fit the
-field-equality + `oneOf` vocabulary, add a **classifier node** upstream
-that pre-computes a routing key:
+**`version` powers resume safety.** Bumping a predicate's `version` changes
+the DAG fingerprint (which folds in each conditional edge's
+`label:version`), so a checkpointed run resumed after a routing-logic change
+is rejected as stale rather than silently replayed against the old decision.
 
-```ts
-const classifier = createTransformNode({
-  id: "classifier",
-  inputSchema: z.object({ score: z.number(), region: z.string() }),
-  outputSchema: z.object({ bucket: z.enum(["hot", "warm", "cold"]) }),
-  transform: ({ score, region }) =>
-    ok({
-      bucket:
-        score > 90 && region === "eu" ? "hot" :
-        score > 50                    ? "warm" :
-                                        "cold",
-    }),
-});
-
-// then route on the classifier's output:
-{ from: "classifier", to: "hot-path",  when: { bucket: "hot" } },
-{ from: "classifier", to: "warm-path", when: { bucket: "warm" } },
-{ from: "classifier", to: "cold-path", kind: "default" },
-```
-
-The DAG grows by one node per non-trivial decision, but routing decisions
-become first-class observable artifacts and the classifier's logic is
-testable in isolation.
+**Predicates are functions, so they can throw** — `check` runs arbitrary
+user code. A predicate that throws is treated as a programming error and
+surfaced as `predicate-malformed` (§8.5), not silently swallowed into the
+default edge. Keep `check` total and side-effect-free; for replay
+determinism it must be a pure function of its arguments.
 
 ### 8.1 Routing semantics
 
@@ -1421,8 +1458,9 @@ For each routing node, when the wave it lives in completes:
 A node with at least one `when` out-edge must have **exactly one**
 `kind: "default"` out-edge. The validator rejects DAGs that violate this.
 Routing is exclusive: at most one of the guarded-or-default targets fires
-per source per wave. An **empty predicate `{}`** is rejected by the
-validator — use an unconditional edge instead.
+per source per wave. A **malformed predicate** (missing `check`/`label`, or
+not an object) is rejected by the validator — if you want an edge that
+always fires, use an unconditional edge instead.
 
 ### 8.2 The active set
 
@@ -1441,9 +1479,13 @@ through unconditional descendants).
 The framework emits two new observer events for routing visibility:
 
 - `route-decided` — `{ fromNodeId, chosenTargets, prunedTargets,
-  defaultTaken, matchedPredicate }`. `matchedPredicate` is the literal
-  predicate object that fired (e.g. `{ kind: "summarize" }`) or `null`
-  when the default was taken.
+  defaultTaken, evidence }`. `evidence` (`RouteEvidence`) colocates the
+  upstream output, the upstream `Confidence | null`, and a
+  `predicateResults` array — one `PredicateResult` per evaluated predicate,
+  each carrying `predicateLabel`, `predicateVersion`, `evaluatedConfidence`,
+  and an `outcome` of `"matched"` / `"not-matched"` /
+  `"below-min-confidence"` / `"threw"`. An operator can answer "why did this
+  route fire?" from the event log alone.
 - `node-pruned` — one per pruned target
 
 ### 8.3 Derived per-node input shape
@@ -1460,12 +1502,15 @@ every node, edges resolve into two buckets:
   fire: a conditional `when` edge, a `default` edge, OR an unconditional
   edge whose source itself sits behind a conditional/default.
 
-The input shape rule (`runNode`):
+The input shape rule (`buildNodeInput`). The reserved `DAG_INPUT` (`"$input"`)
+virtual source is seeded into the outputs map at run start, so a node fed by
+`{ from: DAG_INPUT, to: ... }` carries `"$input"` as one of its *required*
+sources and resolves like any other upstream output here:
 
 | `required.length` / `optional.length` | `nodeInput` shape                            |
 | ------------------------------------- | -------------------------------------------- |
-| 0 required, 0 optional                | the DAG's `input` (root-level argument)      |
-| 1 required, 0 optional                | the source's output **bare**                 |
+| 0 required, 0 optional                | `undefined` — a **source node** (no DAG input is delivered implicitly) |
+| 1 required, 0 optional                | the source's output **bare** (a single `$input` edge delivers the request verbatim) |
 | ≥2 required, 0 optional               | `{ [sourceId]: sourceOutput, ... }`          |
 | any optional > 0                      | `{ [sourceId]: sourceOutput, ... }` always   |
 
@@ -1498,8 +1543,15 @@ node and pick the produced value there:
 ```ts
 const merge: NodeDef = {
   // ...
-  optionalDeps: ["yes-branch", "no-branch"],
-  run: async (input: any) =>
+  // No deps/optionalDeps field — the framework derives merge's incoming
+  // wiring from the edges (ADR 0017). The two branch edges land in
+  // `optional`, so `input` is the keyed `{ "yes-branch", "no-branch" }`
+  // object with pruned branches surfacing as `undefined` (see §8.3).
+  inputSchema: z.object({
+    "yes-branch": z.string().optional(),
+    "no-branch": z.string().optional(),
+  }),
+  run: async (input) =>
     ok(input["yes-branch"] ?? input["no-branch"] ?? null),
 };
 ```
@@ -1512,25 +1564,30 @@ Conditional edges introduce four `FrameworkError` kinds:
 - `output-unreachable-under-routing` — `outputNodeId` not reachable along
   unconditional + default edges.
 - `duplicate-edge` — multiple edges with the same `(from, to)`.
-- `predicate-malformed` — defense-in-depth for predicates introduced via
-  `as`-casts (e.g. a value that's neither a literal nor `{ oneOf: [...] }`).
-  Well-typed predicates can't reach this state.
-
-The previous `guard-threw` error is gone — predicates can't throw because
-they don't execute code.
+- `predicate-malformed` — raised when a predicate is structurally broken or
+  its `check` function **throws**. Two sub-cases: (a) defense-in-depth for
+  predicates introduced via `as`-casts or deserialized DAGs — a `when` that
+  isn't an object, or is missing its `check`/`label` (caught before any
+  `check` runs); (b) a `check` that throws at evaluation time. A throwing
+  predicate is a programming bug, so the framework surfaces it as
+  `predicate-malformed` (carrying the predicate's `label` and the thrown
+  message) rather than silently falling through to the default edge.
 
 ### 8.6 Replay & checkpoints
 
-Replay determinism is now a **system guarantee**, not author discipline:
-predicates are pure data, the evaluator is pure, so identical events
-produce identical state. `replayEvents` reproduces live `(state, outputs,
+Replay determinism rests on the **evaluator** being pure (it re-applies
+recorded events without re-running `check`) and on authors keeping each
+`check` a pure function of its arguments — same upstream output and
+confidence ⇒ same boolean. `replayEvents` reproduces live `(state, outputs,
 activeNodeIds)` exactly.
 
-The DAG fingerprint includes each conditional edge's predicate JSON, so
-editing a predicate (`{ kind: "yes" }` → `{ kind: "y" }`) changes the
-fingerprint and invalidates cached results. Previously, semantic guard
-changes were invisible to the fingerprint and required a manual
-`FRAMEWORK_VERSION` bump.
+The DAG fingerprint folds in each conditional edge's `label:version`, so
+bumping a predicate's `version` after editing its `check` logic changes the
+fingerprint and invalidates cached results — a resumed run with stale
+decisions is rejected rather than silently replayed. Because the fingerprint
+keys on `version` (not the `check` source), **you must bump `version`
+whenever you change `check`**; otherwise a logic change is invisible to
+resume safety.
 
 ### 8.7 Routing implication for `runDag`
 

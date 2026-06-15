@@ -60,6 +60,23 @@ Start with these to understand the runtime as it stands today:
 | [0041](0041-separate-dags-repository.md) | Separate DAGs repository | Accepted |
 | [0042](0042-config-via-zod-env-yaml.md) | Config via Zod env/YAML | Accepted |
 | [0043](0043-otel-tracing-for-host-operations.md) | OTel tracing for host operations | Accepted |
+| [0044](0044-thin-factories-bootstrap-composition.md) | Thin vendor exporter factories with bootstrap composition | Accepted |
+| [0045](0045-composite-span-exporter-fault-isolation.md) | `CompositeSpanExporter` fault-isolation policy | Accepted |
+| [0046](0046-init-tracing-accepts-exporter-list.md) | `initTracing` accepts a `SpanExporter` or non-empty exporter list | Accepted |
+| [0047](0047-azure-foundry-sdks-hard-dependencies.md) | Azure / Foundry SDKs as hard dependencies | Accepted |
+| [0048](0048-domain-events-via-applicationinsights-sdk.md) | Domain events and metrics via the Application Insights SDK | Accepted |
+| [0049](0049-foundry-native-eval-path-selectable.md) | Foundry-native evaluation path, selectable at run time | Accepted |
+| [0050](0050-backend-selection-in-app-config.md) | Observability backend selection in the app config layer | Accepted |
+| [0051](0051-extensible-capability-registry.md) | Extensible capability registry | Accepted |
+| [0052](0052-document-source-capability.md) | Document-source capability (generic file reads, MS Graph adapter) | Accepted |
+| [0053](0053-per-invocation-capability-axis.md) | Per-invocation capability axis (`mintFor`) | Accepted (amends 0051) |
+| [0054](0054-capability-broker-port-passthrough.md) | `CapabilityBroker` port + pass-through default; Keycloak/Entra impl in host | Accepted |
+| [0055](0055-one-entra-app-per-trust-boundary.md) | One Entra app per trust boundary (`fugue-agents`) | Accepted |
+| [0056](0056-fic-variant-a-per-agent-client.md) | FIC Variant A — one federated identity credential per agent-type client | Accepted |
+| [0057](0057-keycloak-optional-scopes-mirror-permissions.md) | Keycloak optional client scopes mirror downstream permissions | Accepted |
+| [0058](0058-two-path-inbound-host-auth.md) | Two-path inbound host auth (opaque `fug_` + `fugue-platform` JWT) | Accepted |
+| [0059](0059-capability-failure-taxonomy.md) | Capability failure taxonomy — typed `FrameworkError` variants, fail-closed before Entra | Accepted |
+| [0060](0060-hitl-suspend-resume-primitive.md) | Durable human-in-the-loop — first-class suspend/resume primitive | Accepted |
 
 ## Conventions
 
@@ -71,6 +88,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-05-22: all 43 ADRs present, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing).
+Verified 2026-06-15: all 60 ADRs present (0001–0060), contiguous, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing). ADRs 0044–0050 cover multi-backend observability / Azure AI Foundry (thin exporter factories, composite exporter fault isolation, Foundry SDKs, domain events, native eval path, backend selection). ADRs 0051–0059 cover the capability registry + identity-scoped capabilities (extensible registry, document-source capability, per-invocation `mintFor` axis, `CapabilityBroker` port, Entra/Keycloak app and FIC topology, optional-scope mirroring, two-path inbound auth, failure taxonomy). ADR 0060 covers durable HITL suspend/resume.
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

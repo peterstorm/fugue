@@ -1,6 +1,6 @@
 # @fuguejs/host
 
-The Fugue Host is a production-grade runtime that discovers, loads, and serves DAG-based AI workflows via HTTP. It polls a git repository for DAG definitions, validates them at load time, and exposes them as authenticated REST endpoints with concurrency limiting, circuit breaking, and graceful shutdown.
+The Fugue Host is a production-grade runtime that discovers, loads, and serves DAG-based AI workflows via HTTP. It polls a git repository for DAG definitions, validates them at load time, and exposes them as authenticated REST endpoints with concurrency limiting, circuit breaking, and graceful shutdown. DAGs may suspend at **human-review gates** (durable approve/reject/resume over HTTP or Microsoft Teams) and reach the outside world through **identity-scoped capabilities** brokered per request.
 
 ## Docs
 
@@ -9,6 +9,7 @@ Shipped in this package — read from `node_modules/@fuguejs/host/docs/`:
 - [`docs/writing-dags.md`](./docs/writing-dags.md) — the `DagRegistration` + `fugue.yaml` + discovery contract DAG authors deploy against.
 - [`docs/auth.md`](./docs/auth.md) — admin / team-token / OIDC auth and team isolation.
 - [`docs/deployment.md`](./docs/deployment.md) — container + Redis + OpenShift deployment.
+- [`docs/hitl-teams.md`](./docs/hitl-teams.md) — human-in-the-loop approvals in Microsoft Teams (webhook + Bot Framework transports).
 
 For authoring DAGs themselves, see [`@fuguejs/framework/docs/llm-dag-authoring.md`](../framework/docs/llm-dag-authoring.md).
 
@@ -51,13 +52,14 @@ The auth layer still adds value in this model:
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │  HTTP Layer (Hono)                                            │  │
-│  │  /health  /readiness  /admin/*  /dags  /dags/:id/run         │  │
+│  │  /health /readiness /admin/* /dags /dags/:id/run             │  │
+│  │  /runs/:id /runs/:id/approve /teams/messages                 │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 │                              │                                      │
 │  ┌──────────┐  ┌────────────┴─────────┐  ┌──────────────────┐    │
 │  │ Auth     │  │ Domain (pure)         │  │ Sync Loop        │    │
 │  │ Middleware│  │ • HostState machine   │  │ • git pull       │    │
-│  │          │  │ • Registry (immutable) │  │ • module load    │    │
+│  │ token+JWT│  │ • Registry (immutable) │  │ • module load    │    │
 │  │          │  │ • Concurrency limiter  │  │ • registry swap  │    │
 │  │          │  │ • Circuit breaker      │  │                  │    │
 │  └──────────┘  └───────────────────────┘  └──────────────────┘    │
@@ -66,11 +68,15 @@ The auth layer still adds value in this model:
 │  │  Adapters (imperative)                                       │  │
 │  │  • GitSync (Bun.spawn → git)    • ModuleLoader (import())   │  │
 │  │  • TokenStore (Redis)           • NodeContextFactory         │  │
+│  │  • HITL run store + worker      • Capability broker          │  │
+│  │    (durable suspend/resume)       (Keycloak token exchange,  │  │
+│  │  • Teams approval transport       JWT validation, metering)  │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 │                              │                                      │
 │  ┌──────────────────────────┴──────────────────────────────────┐  │
 │  │  Infrastructure                                              │  │
-│  │  Redis (tokens, cache, checkpoints)   LLM (team's provider)  │  │
+│  │  Redis (tokens, cache, checkpoints, HITL run store)         │  │
+│  │  LLM (team's provider)   Keycloak/Entra (identity, optional)│  │
 │  └──────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -97,7 +103,7 @@ mkdir -p /tmp/my-dags/dags/my-team/my-dag/prompts
 // /tmp/my-dags/dags/my-team/my-dag/dag.ts
 import { z } from "zod";
 import type { DagRegistration } from "@fuguejs/host/contract";
-import { defineDag, createLlmNode } from "@fuguejs/framework";
+import { defineDag, createLlmNode, DAG_INPUT } from "@fuguejs/framework";
 
 const summarize = createLlmNode({
   id: "summarize",
@@ -111,7 +117,9 @@ const summarize = createLlmNode({
 const dag = defineDag({
   id: "my-dag",
   nodes: { summarize },
-  edges: [],
+  // Under 0.2.0 no node implicitly receives the request — feed the entry
+  // node explicitly from the DAG_INPUT ("$input") sentinel.
+  edges: [{ from: DAG_INPUT, to: "summarize" }],
   outputNodeId: "summarize",
 });
 
@@ -222,6 +230,24 @@ All configuration is via environment variables, validated at startup with Zod. T
 | `MLFLOW_TRACKING_URI` | — | MLflow tracking server URI |
 | `MLFLOW_EXPERIMENT_ID` | — | MLflow experiment ID |
 
+### Human-in-the-Loop & Identity (optional)
+
+Only needed when a DAG uses human-review gates or identity-scoped capabilities. HITL approvals run on the BullMQ-over-Redis backend, so a reachable `REDIS_URL` is required.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HITL_APPROVAL_BASE_URL` | — | Public base URL embedded in approval deep links |
+| `HITL_RUN_TTL_SEC` | `604800` | Suspended-run retention (7 days) |
+| `HITL_LOCK_TTL_SEC` | `300` | Per-run worker lock TTL |
+| `HITL_WORKER_CONCURRENCY` | `4` | HITL resume-worker concurrency |
+| `TEAMS_WEBHOOK_URL` | — | Incoming webhook for deep-link-out Teams approvals |
+| `BOT_APP_ID` | — | Bot Framework app id (enables in-Teams button approvals; takes precedence over the webhook) |
+| `BOT_APP_PASSWORD` | — | Bot Framework app secret |
+| `BOT_TOKEN_URL` | — | Bot Framework token endpoint override |
+| `REALM_JWT_ISSUER` | — | OIDC issuer for end-user (realm) JWT validation |
+| `REALM_JWT_AUDIENCE` | `fugue-host` | Expected audience for realm JWTs |
+| `AGENT_CLIENT_SCOPES` | — | Fail-closed scope policy for brokered capability tokens |
+
 ---
 
 ## LLM & Model Selection
@@ -258,12 +284,15 @@ Different nodes in the same DAG can use different models. The `model` string is 
 
 ## Authentication & Team Provisioning
 
-The host uses bearer token authentication with two tiers:
+The host authenticates bearer tokens across three identity tiers:
 
 | Tier | Source | Purpose |
 |------|--------|---------|
 | **Admin** | `ADMIN_TOKEN` env var | Platform ops: provisioning, monitoring, debugging |
 | **Team** | Generated via `POST /admin/teams` | Application credential: what the team's services use |
+| **User (OIDC)** | Realm JWT (`REALM_JWT_ISSUER` / `REALM_JWT_AUDIENCE`) | End-user identity for identity-scoped capability brokering; verifier-gated and fail-closed (a JWT is rejected unless the realm verifier is configured) |
+
+See [`docs/auth.md`](docs/auth.md) for the full three-tier model and the capability-broker flow.
 
 ### First-time setup (at deploy time)
 
@@ -333,8 +362,18 @@ For the full auth guide (token anatomy, security internals, rotation workflow, o
 |--------|------|-------------|
 | `GET` | `/dags` | List registered DAGs |
 | `GET` | `/dags/:id/manifest` | DAG schema/structure manifest |
-| `POST` | `/dags/:id/run` | Execute a DAG |
+| `POST` | `/dags/:id/run` | Execute a DAG (synchronous `200`, or `202` queued when the DAG suspends at a human-review gate) |
 | `POST` | `/<custom-route>` | Execute via custom route override |
+
+### Human-in-the-Loop (HITL)
+
+A DAG that reaches a `humanReview` gate suspends and the run is durably parked. Approvers drive it forward over HTTP, or in Microsoft Teams (see [`docs/hitl-teams.md`](docs/hitl-teams.md)).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/runs/:runId` | Poll a suspended/terminal run's status |
+| `POST` | `/runs/:runId/approve` | Resolve a pending review (approve / reject / approve-with-edit / reroute) |
+| `POST` | `/teams/messages` | Bot Framework messaging endpoint for in-Teams approvals |
 
 ### Response Format
 
@@ -346,6 +385,11 @@ For the full auth guide (token anatomy, security internals, rotation workflow, o
   "runId": "f644de42-2085-44cf-880d-e9efd659c590",
   "durationMs": 3200
 }
+```
+
+**Suspended at a human-review gate (202):**
+```json
+{ "runId": "f644de42-2085-44cf-880d-e9efd659c590", "status": "queued" }
 ```
 
 **Error (4xx/5xx):**
@@ -441,7 +485,7 @@ DAGs are updated by pushing to the git repository. No host restart needed.
 
 1. Host polls git every `DAGS_POLL_INTERVAL_MS` (default 30s)
 2. `git pull --ff-only` → compare SHA
-3. If `bun.lockb` changed → `bun install --frozen-lockfile`
+3. If `bun.lock` changed → `bun install --frozen-lockfile`
 4. Discover and load all DAGs
 5. Atomically swap the registry (immutable snapshot)
 6. Force-reset all circuit breakers
@@ -492,6 +536,7 @@ bun run typecheck           # TypeScript validation
 
 | Document | Contents |
 |----------|----------|
-| [`docs/auth.md`](docs/auth.md) | Full auth guide: token anatomy, security model, rotation, operational runbook |
+| [`docs/auth.md`](docs/auth.md) | Full auth guide: token anatomy, three-tier security model, rotation, operational runbook |
 | [`docs/writing-dags.md`](docs/writing-dags.md) | DAG authoring: directory convention, contract, prompts, per-DAG config |
 | [`docs/deployment.md`](docs/deployment.md) | OpenShift deployment: container, Redis, secrets, monitoring, scaling |
+| [`docs/hitl-teams.md`](docs/hitl-teams.md) | Human-in-the-loop approvals in Microsoft Teams: webhook + Bot Framework transports |

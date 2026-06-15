@@ -877,11 +877,14 @@ have yet.
 ## 7. Putting it together — the lifecycle of a DAG
 
 ```ts
+import { DAG_INPUT } from "@fuguejs/framework";
+
 // 1. Author writes the DAG.
 export const summaryDag = defineDag({
   id: "summarize",
   nodes: { fetch, extract, synthesize },
   edges: [
+    { from: DAG_INPUT, to: "fetch" },
     { from: "fetch", to: "extract" },
     { from: "extract", to: "synthesize" },
   ],
