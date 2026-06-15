@@ -84,6 +84,7 @@ A production container image is at [`packages/host/Dockerfile`](packages/host/Do
 - **[Human-in-the-Loop in Teams](packages/host/docs/hitl-teams.md)** — approval transports (webhook + Bot Framework)
 
 **Reference**
+- **[Team Security & Capabilities](docs/team-security-and-capabilities.md)** — single source of truth for team/tenant isolation, inbound host/DAG auth, and Keycloak/Entra capability minting (today's live state + the target model + the wiring plan)
 - **[ADR Index](docs/adr/README.md)** — 60 Architecture Decision Records
 - **[Features](docs/features.md)** — the feature surface, end to end
 - **[Observability Backends](docs/observability-backends.md)** / **[Tracing Pipeline](docs/tracing-pipeline.md)** — MLflow + Azure AI Foundry

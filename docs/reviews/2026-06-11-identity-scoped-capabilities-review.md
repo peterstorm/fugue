@@ -22,7 +22,7 @@
 
 **Method:** seven parallel specialized agents — general code review, silent-failure hunt, test-coverage analysis, type-design analysis, comment/doc accuracy, architecture review, security review. Both fugue suites pass under `bun test` (framework 1533 pass, host exit 0) and typecheck clean. The Keycloak repo was reviewed statically (no Maven run).
 
-**Plan/spec:** `docs/plans/2026-06-10-identity-scoped-capabilities.md`, `.claude/specs/2026-06-10-identity-scoped-capabilities/spec.md`, ADRs 0053–0059.
+**Plan/spec:** `docs/team-security-and-capabilities.md` (consolidated; was `docs/plans/2026-06-10-identity-scoped-capabilities.md`), `.claude/specs/2026-06-10-identity-scoped-capabilities/spec.md`, ADRs 0053–0059.
 
 ---
 
@@ -60,7 +60,7 @@ The audit correlation triple would also carry the sentinel `nodeId: "__run__"` e
 
 **Location:** `packages/host/src/adapters/graph-capability.ts:164`
 
-The handle is built exclusively over the app-only WIF token (client-credentials grant). Graph rejects `/me` for application-permission tokens unconditionally ("/me request is only valid with delegated authentication flow"). The repo's own runbook contradicts the code: `docs/runbooks/2026-06-10-entra-fugue-agents-provisioning.md:251` specifies `POST /users/{mailbox}/sendMail`, as does spike-3 Part B step 5. The test (`graph-capability.test.ts:89,96`) pins the wrong URL, so this ships green and fails on first live call — surfacing as `downstream-denied` and likely misread as an Entra permission problem.
+The handle is built exclusively over the app-only WIF token (client-credentials grant). Graph rejects `/me` for application-permission tokens unconditionally ("/me request is only valid with delegated authentication flow"). The repo's own runbook contradicts the code: `docs/team-security-and-capabilities.md` (Appendix A, Step 4b) specifies `POST /users/{mailbox}/sendMail`, as does spike-3 Part B step 5. The test (`graph-capability.test.ts:89,96`) pins the wrong URL, so this ships green and fails on first live call — surfacing as `downstream-denied` and likely misread as an Entra permission problem.
 
 **Fix:** thread a sender mailbox (id/UPN) through config or `MailMessage` (`capability-scope.ts:88` currently has no field for it) and target `/users/{sender}/sendMail`. This needs config threading, not just a URL edit. Unlike the Dynamics placeholder, this defect carries no KNOWN LIMITATION marker — the comments affirmatively claim a working app-only path (`@satisfies US7`).
 

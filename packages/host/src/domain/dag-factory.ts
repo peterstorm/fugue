@@ -51,19 +51,22 @@ export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: GitS
   }));
 
 /**
- * Extract team name from a module path following the dags/{team}/{name}/dag.ts
- * convention. Returns "unknown" when the path does not follow it — the caller
- * (sync-callbacks) warns on "unknown", and team drives authorization isolation,
- * so a wrong-but-plausible team must NOT slip through.
+ * Extract team name from a module path following the `dags/{team}/.../{name}/dag.ts`
+ * convention. The team is the FIRST folder under `dags/`; any intermediate
+ * folders are intra-team grouping (e.g. `dags/business-sales/leads/lead-scoring/dag.ts`
+ * → team `business-sales`). Returns "unknown" when the path does not follow it —
+ * the caller (sync-callbacks) warns on "unknown", and team drives authorization
+ * isolation, so a wrong-but-plausible team must NOT slip through.
  *
  * Uses the FIRST exact "dags" segment (the repo's dags root) rather than the last,
- * and requires the full {team}/{name}/{file} tail to be present, so a stray leaf
- * segment literally named "dags" cannot misattribute a team.
+ * and requires at least the `{team}/{name}/{file}` tail, so a stray leaf segment
+ * literally named "dags" cannot misattribute a team. Depth beyond that is fine —
+ * only the first segment is read. A fugue.yaml `team` field overrides this.
  */
 export const extractTeam = (modulePath: string): string => {
   const parts = modulePath.split("/");
   const dagsIdx = parts.indexOf("dags");
-  // Need dags/{team}/{name}/{file} — at least three segments after "dags".
+  // Need at least dags/{team}/{name}/{file} — three or more segments after "dags".
   if (dagsIdx >= 0 && dagsIdx + 3 < parts.length) {
     const team = parts[dagsIdx + 1];
     if (team.length > 0) return team;

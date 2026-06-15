@@ -1,5 +1,7 @@
 # ADR-0056: FIC Variant A — one federated identity credential per agent-type Keycloak client
 
+> **Consolidated reference:** the live, end-to-end team-security picture this decision feeds into lives in [`docs/team-security-and-capabilities.md`](../team-security-and-capabilities.md). This ADR remains the immutable "why".
+
 ## Status
 
 Accepted
@@ -67,7 +69,7 @@ Concretely:
   assertion's `iss`/`sub`/`aud`. Which FIC matched is the agent-type discriminator.
 
 Spike outcomes that gate this decision (recorded in the wave-4 runbook
-`docs/runbooks/2026-06-10-entra-fugue-agents-provisioning.md`, currently
+`docs/team-security-and-capabilities.md (Appendix A)`, currently
 `PENDING-LIVE-VERIFICATION` against a live tenant + realm; the runbook's spike table
 carries the expected PASS criteria each step asserts):
 

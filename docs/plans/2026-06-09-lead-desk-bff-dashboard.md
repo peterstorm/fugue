@@ -404,7 +404,7 @@ The supported, secretless bridge is **Entra workload identity federation**
   (`fugue-agents`) with one FIC per agent-type client — not one app per
   agent.** The concrete design (trust model, FIC variants, resource-scoping
   policies, escalation path) lives in
-  [2026-06-10-identity-scoped-capabilities.md](./2026-06-10-identity-scoped-capabilities.md),
+  [team-security-and-capabilities.md](./team-security-and-capabilities.md),
   which supersedes any per-agent-app reading of this section.
 - Flow: agent mints its Keycloak service-account token → presents it as
   `client_assertion` in a `client_credentials` request to Entra → receives an
@@ -612,7 +612,7 @@ instance, is additive to resource servers already logging `sub`+`azp`.
 | Concurrency | Lease-based claims table, atomic upsert, auto-expiry | DB-layer lock, idempotent retries |
 | Token to fugue | Held server-side in BFF; injected via env | Never exposed to browser; long-term, host also accepts realm JWTs so user context survives the hop |
 | Agent identity unit | One client per agent *type* / per DAG, static in config-as-code | Rides the same PR governance as the agent code; right forensics grain; respects Entra's 20-FIC cap; DCR only as a deliberate escape hatch |
-| Entra-protected downstreams (Graph/Dynamics) | Workload identity federation — **one** `fugue-agents` Entra app, one FIC per agent-type client trusting `fugue-platform` (see [identity-scoped capabilities plan](./2026-06-10-identity-scoped-capabilities.md)) | OBO impossible behind the broker; WIF is the supported secretless bridge; app-only tokens accepted; per-agent policy stays in Keycloak |
+| Entra-protected downstreams (Graph/Dynamics) | Workload identity federation — **one** `fugue-agents` Entra app, one FIC per agent-type client trusting `fugue-platform` (see [team-security & capabilities](./team-security-and-capabilities.md)) | OBO impossible behind the broker; WIF is the supported secretless bridge; app-only tokens accepted; per-agent policy stays in Keycloak |
 | Delegation attribution (until `act` ships) | Log `sub`+`azp` at resource servers + trace-based chain | V2 exchange already stamps `azp`=agent, `sub`=user; full chain lives in observability |
 | Per-hop token strategy | User-initiated runs: V2 exchange of the user's token; agent-initiated runs: direct narrow `client_credentials` minting | Exchange only earns its keep when there's a user subject to preserve |
 

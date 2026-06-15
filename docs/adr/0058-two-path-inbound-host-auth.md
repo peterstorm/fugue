@@ -1,5 +1,7 @@
 # ADR-0058: Two-Path Inbound Host Auth (opaque `fug_` + `fugue-platform` JWT)
 
+> **Consolidated reference:** the live, end-to-end team-security picture this decision feeds into lives in [`docs/team-security-and-capabilities.md`](../team-security-and-capabilities.md). This ADR remains the immutable "why".
+
 ## Status
 
 Accepted

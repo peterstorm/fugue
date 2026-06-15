@@ -1,5 +1,7 @@
 # ADR-0055: One Entra App per Trust Boundary (`fugue-agents`)
 
+> **Consolidated reference:** the live, end-to-end team-security picture this decision feeds into lives in [`docs/team-security-and-capabilities.md`](../team-security-and-capabilities.md). This ADR remains the immutable "why".
+
 ## Status
 
 Accepted
@@ -125,7 +127,7 @@ the deployed host process, not the agent.**
   steps — register `fugue-agents`, add the union, admin-consent once, add the
   variant-A FICs, apply `Sites.Selected` and Exchange access policies, confirm
   zero secrets/certs — live in
-  `docs/runbooks/2026-06-10-entra-fugue-agents-provisioning.md` (FR-W4-006), each
+  `docs/team-security-and-capabilities.md (Appendix A)` (FR-W4-006), each
   step with an explicit, checkable acceptance and gated by the Wave 4 spikes.
 
 ### Escalation rule

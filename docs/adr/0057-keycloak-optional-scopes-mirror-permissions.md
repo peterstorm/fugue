@@ -1,5 +1,7 @@
 # ADR-0057: Keycloak Optional Client Scopes Mirror Downstream Permissions
 
+> **Consolidated reference:** the live, end-to-end team-security picture this decision feeds into lives in [`docs/team-security-and-capabilities.md`](../team-security-and-capabilities.md). This ADR remains the immutable "why".
+
 ## Status
 
 Accepted

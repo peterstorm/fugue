@@ -2,7 +2,7 @@
 
 > **Date:** 2026-06-10 · **Spec anchors:** FR-SPK-001, SC-014, US7 ·
 > **Gates:** Phase 5 Entra bridge (wave 4) — FIC wiring **variant A vs B** decision.
-> **Design:** [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+> **Design:** [team-security-and-capabilities.md](../team-security-and-capabilities.md)
 > — "Verify before building" item #1; "FIC wiring — two variants".
 
 ## Objective
@@ -149,7 +149,7 @@ Per the project standard, no PASS is recorded for an unobserved result.
 
 ## References
 
-- Design: [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+- Design: [team-security-and-capabilities.md](../team-security-and-capabilities.md)
   — "FIC wiring — two variants" (variant A vs B), "Verify before building" #1,
   Design-decisions row "FIC wiring".
 - [Entra workload identity federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)

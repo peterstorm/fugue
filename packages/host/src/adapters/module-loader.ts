@@ -278,7 +278,17 @@ export const loadPromptsForModule = async (
 
 /**
  * Discover all DAG module paths in the given root directory.
- * Convention: dags/{team}/{dag-name}/dag.ts
+ *
+ * Convention: `dags/{team}/.../{dag-name}/dag.ts` — the FIRST folder under
+ * `dags/` is the team (see `extractTeam`); intermediate folders are free-form
+ * intra-team grouping (e.g. `dags/business-sales/leads/lead-scoring/dag.ts`).
+ * A `dag.ts` file marks a DAG root at ANY depth, so the glob is depth-agnostic
+ * (`dags/**` + `dag.ts`) rather than the old fixed two-level team/dag glob.
+ *
+ * `dag.ts` therefore means "this is a DAG root" — do NOT name a non-DAG module
+ * `dag.ts` (a node helper, a barrel) anywhere under `dags/`. Paths inside a
+ * `node_modules/` are excluded so a baked dependency's example `dag.ts` is never
+ * mistaken for a deployed DAG.
  *
  * Returns absolute paths to each discovered dag.ts file.
  * Wraps all I/O in Result — never throws.
@@ -286,16 +296,21 @@ export const loadPromptsForModule = async (
 export const discoverDagPaths = async (dagsRoot: string): Promise<Result<string[], HostError>> => {
   try {
     const pathSet = new Set<string>();
+    // A baked image (DAGS_LOCAL_PATH) ships node_modules alongside dags/; a
+    // dependency may carry its own example dag.ts. Never register those.
+    const isDeployable = (file: string): boolean => !file.includes("/node_modules/");
 
-    const primaryGlob = new Bun.Glob("dags/*/*/dag.ts");
+    // Any depth under dags/ — supports both dags/{team}/{dag} and deeper
+    // domain grouping like dags/{team}/{domain}/{dag}.
+    const primaryGlob = new Bun.Glob("dags/**/dag.ts");
     for await (const file of primaryGlob.scan({ cwd: dagsRoot, absolute: true })) {
-      pathSet.add(file);
+      if (isDeployable(file)) pathSet.add(file);
     }
 
-    // Fallback glob for flat layouts — deduplication via Set is O(1) per add
-    const altGlob = new Bun.Glob("*/*/dag.ts");
+    // Fallback glob for flat layouts (cwd is already the dags root) — dedup via Set.
+    const altGlob = new Bun.Glob("**/dag.ts");
     for await (const file of altGlob.scan({ cwd: dagsRoot, absolute: true })) {
-      pathSet.add(file);
+      if (isDeployable(file)) pathSet.add(file);
     }
 
     return ok([...pathSet].sort());

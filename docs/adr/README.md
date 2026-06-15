@@ -77,6 +77,7 @@ Start with these to understand the runtime as it stands today:
 | [0058](0058-two-path-inbound-host-auth.md) | Two-path inbound host auth (opaque `fug_` + `fugue-platform` JWT) | Accepted |
 | [0059](0059-capability-failure-taxonomy.md) | Capability failure taxonomy — typed `FrameworkError` variants, fail-closed before Entra | Accepted |
 | [0060](0060-hitl-suspend-resume-primitive.md) | Durable human-in-the-loop — first-class suspend/resume primitive | Accepted |
+| [0061](0061-per-team-dag-image-scoping.md) | Per-team DAG image scoping — shared monorepo, one image per team (trust boundary) | Accepted |
 
 ## Conventions
 
@@ -88,6 +89,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-06-15: all 60 ADRs present (0001–0060), contiguous, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing). ADRs 0044–0050 cover multi-backend observability / Azure AI Foundry (thin exporter factories, composite exporter fault isolation, Foundry SDKs, domain events, native eval path, backend selection). ADRs 0051–0059 cover the capability registry + identity-scoped capabilities (extensible registry, document-source capability, per-invocation `mintFor` axis, `CapabilityBroker` port, Entra/Keycloak app and FIC topology, optional-scope mirroring, two-path inbound auth, failure taxonomy). ADR 0060 covers durable HITL suspend/resume.
+Verified 2026-06-15: all 61 ADRs present (0001–0061), contiguous, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing). ADRs 0044–0050 cover multi-backend observability / Azure AI Foundry (thin exporter factories, composite exporter fault isolation, Foundry SDKs, domain events, native eval path, backend selection). ADRs 0051–0059 cover the capability registry + identity-scoped capabilities (extensible registry, document-source capability, per-invocation `mintFor` axis, `CapabilityBroker` port, Entra/Keycloak app and FIC topology, optional-scope mirroring, two-path inbound auth, failure taxonomy). ADR 0060 covers durable HITL suspend/resume. ADR 0061 covers per-team DAG image scoping (shared monorepo, one image per team; amends 0041's discovery to be depth-agnostic).
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.
