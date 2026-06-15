@@ -1,0 +1,24 @@
+# Never ship host-built node_modules into the image — the workspace symlinks
+# point at paths that only exist on the developer's machine and shadow the
+# clean `bun install` performed inside the image (breaks module resolution).
+node_modules
+**/node_modules
+
+# Git metadata
+.git
+.gitignore
+
+# Local dev / scratch artifacts
+dump.rdb
+**/dump.rdb
+*.log
+.DS_Store
+**/.DS_Store
+
+# Editor / OS cruft
+.idea
+.vscode
+
+# Nix dev shell
+.direnv
+result

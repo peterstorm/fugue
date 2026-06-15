@@ -3,6 +3,7 @@
 **Spec anchors:** US4–US8, FR-W3-006..009, FR-W4-001..006, FR-X-002, SC-006..012, ADR-0055..0060
 **Created:** 2026-06-14
 **Status:** proposal — awaiting decisions in "Open Decisions" before implementation
+**Re-verified:** 2026-06-14 against `main` HEAD — Current State table confirmed unchanged (evidence below); no implementation started.
 
 ## Summary
 
@@ -44,6 +45,30 @@ The work is asymmetric:
 | HITL Bot connector / inbound verify / endpoint | `hitl/adapters/bot/**`, `http/router.ts` | WIRED | needs Azure Bot provisioned |
 | HITL Teams-button per-team authz | `hitl/adapters/bot/messages-handler.ts` | **v1 GAP** | any channel member can approve any team's run |
 | `.env.example` HITL/Entra vars | `.env.example` | **MISSING** | only foundation vars documented |
+
+### Re-verification evidence (2026-06-14, against `main` HEAD)
+
+Spot-checked every "STUB ONLY / UNWIRED / MISSING / PLACEHOLDER" row against the actual code. No drift —
+the table holds. Concrete anchors found:
+
+- **Not started.** Branch `feat/keycloak-entra-wiring` exists but is **0 commits ahead of `main`** — none
+  of the work below has begun.
+- **Boot wires the three stubs**, confirming all three egresses fail closed today:
+  - `host.ts:170` → `createUnwiredTokenEndpoint()` (Keycloak token endpoint stub)
+  - `host.ts:176` → `createUnwiredEntraWifExchange()` (Entra WIF stub; live `createEntraWifExchange` never called outside tests)
+  - `host.ts:177` → `createUnwiredGraphHttp()` — note this stub lives in **`adapters/unwired-entra-wif.ts`**, not a separate file; the live `GraphHttp` port + operation builders are in `adapters/graph-capability.ts`.
+- **Realm JWT path verifier-less / fails closed:** `selectCapabilityBroker` (`host.ts:132`) leaves the
+  `realmJwt` group `undefined` by design (`host.ts:130`, comment block ~407–415); no JWKS adapter exists.
+- **Teams card is code-complete (only ops + authz gap remain):** `hitl/adapters/bot/card.ts` (102 lines)
+  builds a real `AdaptiveCard` v1.4 — `buildReviewCard` with approve/reject `Action.Execute` (verb
+  `REVIEW_VERB = "fugue.review"`) + required-reason `Input.Text`, plus `buildReviewActivity` and
+  `buildResolvedCard`. Connector/notifier/inbound-verify and the suspend/resume engine (Redis/BullMQ) are wired.
+- **Teams-button authz gap is real and documented in-code:** `hitl/adapters/bot/messages-handler.ts:18`
+  carries the `SECURITY CONSTRAINT (v1, ADR-0060)` block — any channel member can approve any team's run.
+  AD-7's required input is already available: the inbound activity exposes `from.aadObjectId`
+  (`messages-handler.ts:139`), so the approver→team mapping has a source.
+- **`.env.example` confirmed MISSING all HITL/Bot/Entra/Keycloak vars** — only Server, Redis, MLflow,
+  LLM provider, and Eval (Ollama) vars are present.
 
 ---
 
