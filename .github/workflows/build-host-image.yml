@@ -1,0 +1,64 @@
+# Build + push the shared fugue-host runtime image to GHCR.
+#
+# ONE image for ALL teams: the host is the engine and bakes NO DAGs (it loads a
+# team's DAGs at runtime from DAGS_LOCAL_PATH). Per-team payloads are the separate
+# fugue-dags-<team> images built in the fugue-dags repo. A deployment composes one
+# shared host image + one per-team DAGs image (initContainer) + per-team env/token.
+#
+# Image: ghcr.io/<owner>/fugue-host : { sha-<commit>, <host package.json version>, latest }
+# Pushes to GHCR only; mirroring GHCR -> quay.om.tre.se is handled out-of-band.
+#
+# ci.yml (typecheck + test) is the correctness gate; this only builds the image.
+name: build-host-image
+
+on:
+  push:
+    branches: [main]
+    # The host image's runtime closure (packages/host/Dockerfile COPYs these) +
+    # the lockfile/manifest. Doc/test-only changes don't rebuild the image.
+    paths:
+      - "packages/framework/**"
+      - "packages/host/**"
+      - "packages/adapter-fs/**"
+      - "packages/document-source/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/build-host-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve image + tags
+        id: meta
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner}/fugue-host"
+          version=$(jq -r .version packages/host/package.json)
+          {
+            echo "tags<<EOF"
+            echo "${image}:sha-${{ github.sha }}"
+            echo "${image}:${version}"
+            echo "${image}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/host/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
