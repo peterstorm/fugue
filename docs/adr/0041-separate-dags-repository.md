@@ -1,7 +1,13 @@
 # ADR-0041: Separate Dags Repository
 
+> **Amendment (2026-06-15):** discovery is now **depth-agnostic** — the host scans
+> `dags/**/dag.ts` (any depth), not the fixed two-level `dags/{team}/{dag}` glob.
+> The **team is the first folder under `dags/`**; folders below it are free-form
+> intra-team grouping (e.g. `dags/business-sales/leads/lead-scoring/dag.ts`). See
+> ADR-0061 (per-team image scoping) and `docs/team-security-and-capabilities.md` §2.
+
 ## Status
-Accepted
+Accepted (amended 2026-06-15 — see top note)
 
 ## Date
 2026-05-20
@@ -35,19 +41,23 @@ fugue-dags/                     # Separate git repo
 ├── package.json                # depends on @fuguejs/framework
 ├── bun.lockb
 └── dags/
-    └── {team}/
-        └── {dag-name}/
-            ├── dag.ts          # exports DagRegistration (default export)
-            ├── fugue.yaml      # per-DAG config
-            └── nodes/          # node implementations
+    └── {team}/                 # first folder under dags/ = the team
+        └── [{domain}/ ...]/    # optional intra-team grouping (any depth)
+            └── {dag-name}/
+                ├── dag.ts      # exports DagRegistration (default export)
+                ├── fugue.yaml  # per-DAG config (team: {team})
+                └── nodes/      # node implementations
 ```
+
+Example with grouping: `dags/business-sales/leads/lead-scoring/dag.ts`
+(team `business-sales`).
 
 Host behavior:
 - **Startup:** `git clone --depth=1 --branch={branch} {DAGS_REPO_URL}` into a working directory, then `bun install --frozen-lockfile` (skipped when the repo has no `package.json`)
 - **Poll loop:** Every `DAGS_POLL_INTERVAL_MS` (default 30s), `git fetch` + compare remote HEAD SHA
 - **On new commit:** `git pull`, optionally `bun install --frozen-lockfile` if the lockfile (`bun.lock` / `bun.lockb`) changed, re-scan and re-import DAGs
 - **Dev mode:** `DAGS_LOCAL_PATH` env var skips git entirely, uses a local directory (for development)
-- **Discovery:** Scan `dags/*/*/dag.ts` pattern — one level of team nesting
+- **Discovery:** Scan `dags/**/dag.ts` (any depth; amended 2026-06-15 — was a fixed two-level `dags/{team}/{dag}` glob). The team is the first folder under `dags/`; deeper folders are intra-team grouping. `node_modules/` paths are excluded.
 
 The host imports DAGs via dynamic `import()` with cache-busting (append `?sha={commitSha}` to force fresh module evaluation).
 

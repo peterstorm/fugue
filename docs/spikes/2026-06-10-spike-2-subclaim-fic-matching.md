@@ -2,7 +2,7 @@
 
 > **Date:** 2026-06-10 · **Spec anchors:** FR-SPK-002, SC-014, US7 ·
 > **Gates:** Phase 5 Entra bridge (wave 4) — FIC subject wiring mechanism.
-> **Design:** [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+> **Design:** [team-security-and-capabilities.md](../team-security-and-capabilities.md)
 > — "Verify before building" item #2; "Mechanics (both variants)".
 
 ## Objective
@@ -135,7 +135,7 @@ necessary but not sufficient to call this PASS.
 
 ## References
 
-- Design: [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+- Design: [team-security-and-capabilities.md](../team-security-and-capabilities.md)
   — "Mechanics (both variants)" (sub-claim mapper, `entra-exchange` audience
   scope), "Verify before building" #2.
 - [Keycloak protocol mappers](https://www.keycloak.org/docs/latest/server_admin/#_protocol-mappers)

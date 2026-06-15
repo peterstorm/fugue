@@ -3,7 +3,7 @@
 > **Date:** 2026-06-10 · **Spec anchors:** FR-SPK-003, SC-014, US7 ·
 > **Gates:** Phase 5 Entra bridge (wave 4) — resource-scoping policies as the
 > Entra-side bound on the union-permission token.
-> **Design:** [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+> **Design:** [team-security-and-capabilities.md](../team-security-and-capabilities.md)
 > — "Verify before building" item #3; "Bounding the union — resource-scoping
 > policies, not more apps".
 
@@ -154,7 +154,7 @@ an unobserved result.
 
 ## References
 
-- Design: [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+- Design: [team-security-and-capabilities.md](../team-security-and-capabilities.md)
   — "Bounding the union — resource-scoping policies, not more apps",
   "Escalation path — apps per permission *tier*", "Verify before building" #3.
 - Code seam (SharePoint surfaces): `packages/adapter-ms-graph/src/index.ts`

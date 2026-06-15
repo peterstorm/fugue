@@ -12,7 +12,7 @@
 > it is a manual verification runbook plus its recorded result.
 
 Design context:
-[identity-scoped capabilities plan](../plans/2026-06-10-identity-scoped-capabilities.md)
+[team-security & capabilities](../team-security-and-capabilities.md)
 ("Verify before building" item #4) and the
 [lead-desk BFF plan](../plans/2026-06-09-lead-desk-bff-dashboard.md)
 (verified token-exchange V2 semantics: `sub` stays user, `azp` becomes agent;
@@ -328,7 +328,7 @@ report PASS/FAIL until at least a 26.6 Keycloak with a throwaway realm matching
 ## 5. References
 
 - Design — verification item #4 + broker user-initiated path:
-  [2026-06-10-identity-scoped-capabilities.md](../plans/2026-06-10-identity-scoped-capabilities.md)
+  [team-security-and-capabilities.md](../team-security-and-capabilities.md)
   (§"For user-initiated runs", §"Verify before building" #4, §"Mechanics" —
   `aud: api://AzureADTokenExchange` hardcoded-audience `entra-exchange` scope).
 - Verified V2 semantics + residual gap this gate closes:

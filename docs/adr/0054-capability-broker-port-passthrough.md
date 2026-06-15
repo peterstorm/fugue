@@ -1,5 +1,7 @@
 # ADR-0054: CapabilityBroker port + pass-through default in the framework; Keycloak/Entra impl in the host
 
+> **Consolidated reference:** the live, end-to-end team-security picture this decision feeds into lives in [`docs/team-security-and-capabilities.md`](../team-security-and-capabilities.md). This ADR remains the immutable "why".
+
 ## Status
 
 Accepted

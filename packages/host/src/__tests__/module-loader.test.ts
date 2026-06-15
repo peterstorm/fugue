@@ -69,6 +69,24 @@ export default {
 };
 `;
 
+// Nested deeper than dags/{team}/{dag} — proves discovery is depth-agnostic
+// (dags/business-sales/leads/lead-scoring/dag.ts). Team is the first folder.
+const NESTED_DAG_MODULE = `
+import { z } from "zod";
+
+const dag = {
+  id: "business-sales-leads-lead-scoring",
+  nodes: [{ id: "score", execute: async () => ({ ok: true }) }],
+  edges: [],
+};
+
+export default {
+  dag,
+  inputSchema: z.object({ leadId: z.string() }),
+  meta: { description: "Nested DAG", version: "1.0.0" },
+};
+`;
+
 // DAG + sibling fugue.yaml for merge/override tests
 const YAML_DAG_MODULE = `
 import { z } from "zod";
@@ -121,6 +139,10 @@ beforeAll(() => {
 
   mkdirSync(join(TEST_DIR, "dags", "billing", "invoice"), { recursive: true });
   writeFileSync(join(TEST_DIR, "dags", "billing", "invoice", "dag.ts"), VALID_DAG_MODULE_2);
+
+  // Deeper than the {team}/{dag} convention — discovery must still find it.
+  mkdirSync(join(TEST_DIR, "dags", "business-sales", "leads", "lead-scoring"), { recursive: true });
+  writeFileSync(join(TEST_DIR, "dags", "business-sales", "leads", "lead-scoring", "dag.ts"), NESTED_DAG_MODULE);
 
   mkdirSync(join(TEST_DIR, "dags", "broken", "bad-export"), { recursive: true });
   writeFileSync(join(TEST_DIR, "dags", "broken", "bad-export", "dag.ts"), INVALID_DAG_MODULE_NO_EXPORT);
@@ -265,10 +287,12 @@ describe("Module Loader", () => {
 
       expect(result.ok).toBe(true);
       if (result.ok) {
-        expect(result.value).toHaveLength(5);
+        expect(result.value).toHaveLength(6);
         expect(result.value.some((p) => p.includes("team-a/test-dag/dag.ts"))).toBe(true);
         expect(result.value.some((p) => p.includes("billing/invoice/dag.ts"))).toBe(true);
         expect(result.value.some((p) => p.includes("broken/bad-export/dag.ts"))).toBe(true);
+        // Depth-agnostic: a dag.ts nested under a domain folder is discovered.
+        expect(result.value.some((p) => p.includes("business-sales/leads/lead-scoring/dag.ts"))).toBe(true);
       }
     });
 
@@ -322,19 +346,20 @@ describe("Module Loader", () => {
     it("loads valid DAGs and reports errors for invalid ones", async () => {
       const result = await loadAll(TEST_DIR, gitSha("sha-bulk"));
 
-      expect(result.loaded).toHaveLength(2);
+      expect(result.loaded).toHaveLength(3);
       expect(result.errors).toHaveLength(3);
 
       const dagIds = result.loaded.map((l) => l.id as unknown as string);
       expect(dagIds).toContain("test-team-test-dag");
       expect(dagIds).toContain("billing-invoice");
+      expect(dagIds).toContain("business-sales-leads-lead-scoring");
     });
 
     it("isolates errors — one bad DAG does not affect others (NFR-010)", async () => {
       const result = await loadAll(TEST_DIR, gitSha("sha-isolation"));
 
-      // Valid DAGs load despite broken ones existing
-      expect(result.loaded).toHaveLength(2);
+      // Valid DAGs load despite broken ones existing (2 flat + 1 nested)
+      expect(result.loaded).toHaveLength(3);
       // Exactly 3 broken fixtures: syntax-error, bad-export, bad-schema
       expect(result.errors).toHaveLength(3);
 
