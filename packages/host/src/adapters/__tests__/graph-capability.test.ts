@@ -26,6 +26,10 @@ import {
 } from "../graph-capability.js";
 import { parseScope, type MailSendHandle, type SitesReadHandle, type DynamicsReadHandle } from "../../domain/capability-scope.js";
 
+/** Configured per-org Dynamics/Dataverse host (FR-042) — the handle targets
+ *  `https://<DYN_HOST>/api/data/v9.2`, never a hardcoded placeholder. */
+const DYN_HOST = "org.crm4.dynamics.com";
+
 /** A call-recording fake transport returning a scripted response per call. */
 const recordingHttp = (response: GraphResponse | (() => never)) => {
   const requests: GraphRequest[] = [];
@@ -60,7 +64,7 @@ describe("graph-capability — SC-007: only the operation is reachable, no raw c
     const { http } = recordingHttp({ status: 202, json: {} });
     const mail = buildMailSendHandle("app-only-tok", http) as unknown as Record<string, unknown>;
     const sites = buildSitesReadHandle("app-only-tok", http) as unknown as Record<string, unknown>;
-    const dyn = buildDynamicsReadHandle("app-only-tok", http) as unknown as Record<string, unknown>;
+    const dyn = buildDynamicsReadHandle("app-only-tok", http, DYN_HOST) as unknown as Record<string, unknown>;
     expect(Object.keys(mail)).toEqual(["sendMail"]);
     expect(Object.keys(sites)).toEqual(["readSite"]);
     expect(Object.keys(dyn)).toEqual(["read"]);
@@ -140,7 +144,7 @@ describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)"
 
   it("dynamics read GETs the entity with the bearer and shapes the rows", async () => {
     const { http, requests } = recordingHttp({ status: 200, json: { value: [{ id: 1 }, { id: 2 }] } });
-    const handle = buildDynamicsReadHandle("app-only-xyz", http);
+    const handle = buildDynamicsReadHandle("app-only-xyz", http, DYN_HOST);
     const r = await handle.read({ entity: "accounts" });
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("expected ok");
@@ -152,7 +156,7 @@ describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)"
 
   it("dynamics read WITH a filter encodes it as the $filter query parameter (URL-encoded, no raw OData chars)", async () => {
     const { http, requests } = recordingHttp({ status: 200, json: { value: [{ id: 1 }] } });
-    const handle = buildDynamicsReadHandle("app-only-xyz", http);
+    const handle = buildDynamicsReadHandle("app-only-xyz", http, DYN_HOST);
     const filter = "name eq 'Contoso & Sons' and revenue gt 1000";
     const r = await handle.read({ entity: "accounts", filter });
     expect(r.ok).toBe(true);
@@ -160,7 +164,7 @@ describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)"
     const url = requests[0]?.url ?? "";
     // The filter rides as $filter=, percent-encoded exactly once.
     expect(url).toBe(
-      `https://dynamics.microsoft.com/api/data/v9.2/accounts?$filter=${encodeURIComponent(filter)}`,
+      `https://${DYN_HOST}/api/data/v9.2/accounts?$filter=${encodeURIComponent(filter)}`,
     );
     expect(url).toContain("?$filter=name%20eq%20'Contoso%20%26%20Sons'%20and%20revenue%20gt%201000");
     // Raw spaces / ampersands never reach the wire un-encoded.
@@ -257,7 +261,7 @@ describe("graph-capability — malformed 2xx bodies are infra-unreachable, never
 
   it("dynamics 2xx WITHOUT a 'value' array → infra-unreachable, not zero rows", async () => {
     const { http } = recordingHttp({ status: 200, json: { notValue: [] } });
-    const handle = buildDynamicsReadHandle("tok", http);
+    const handle = buildDynamicsReadHandle("tok", http, DYN_HOST);
     const r = await handle.read({ entity: "accounts" });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected err");
@@ -272,7 +276,7 @@ describe("graph-capability — malformed 2xx bodies are infra-unreachable, never
       status: 200,
       json: { value: [{ id: 1 }, "not-a-row", null, { id: 2 }] },
     });
-    const handle = buildDynamicsReadHandle("tok", http);
+    const handle = buildDynamicsReadHandle("tok", http, DYN_HOST);
     const r = await handle.read({ entity: "accounts" });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected err");
@@ -286,7 +290,7 @@ describe("graph-capability — malformed 2xx bodies are infra-unreachable, never
 
   it("dynamics 2xx with an EMPTY 'value' array stays a legitimate zero-row success", async () => {
     const { http } = recordingHttp({ status: 200, json: { value: [] } });
-    const handle = buildDynamicsReadHandle("tok", http);
+    const handle = buildDynamicsReadHandle("tok", http, DYN_HOST);
     const r = await handle.read({ entity: "accounts" });
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error("expected ok");
@@ -306,7 +310,7 @@ describe("graph-capability — buildGraphHandle selects the handle per parsed sc
     ] as const) {
       const parsed = parseScope(name);
       if (parsed === undefined) throw new Error(`parse failed for ${name}`);
-      const handle = buildGraphHandle(parsed, "tok", http) as unknown as Record<string, unknown>;
+      const handle = buildGraphHandle(parsed, "tok", http, "org.crm4.dynamics.com") as unknown as Record<string, unknown>;
       expect(Object.keys(handle)).toEqual([op]);
       // The dispatch is exhaustive — exercise the value to keep ts-pattern honest.
       match(parsed)
@@ -315,5 +319,27 @@ describe("graph-capability — buildGraphHandle selects the handle per parsed sc
         .with({ provider: "dynamics", operation: "read" }, () => expect(op).toBe("read"))
         .exhaustive();
     }
+  });
+
+  it("msgraph builders ignore an undefined org host (their resource is the fixed Graph host)", () => {
+    const { http } = recordingHttp({ status: 202, json: {} });
+    for (const [name, op] of [
+      ["msgraph:mail.send", "sendMail"],
+      ["msgraph:sites.read", "readSite"],
+    ] as const) {
+      const parsed = parseScope(name);
+      if (parsed === undefined) throw new Error(`parse failed for ${name}`);
+      const handle = buildGraphHandle(parsed, "tok", http, undefined) as unknown as Record<string, unknown>;
+      expect(Object.keys(handle)).toEqual([op]);
+    }
+  });
+
+  it("FAILS CLOSED building a dynamics:read handle with no org host (no `https:///api/data/v9.2`)", () => {
+    const { http } = recordingHttp({ status: 200, json: { value: [] } });
+    const parsed = parseScope("dynamics:read");
+    if (parsed === undefined) throw new Error("parse failed for dynamics:read");
+    // An UNSET host must not silently synthesise an empty-host Dataverse URL.
+    expect(() => buildGraphHandle(parsed, "tok", http, undefined)).toThrow(/DYNAMICS_ORG_HOST/);
+    expect(() => buildGraphHandle(parsed, "tok", http, "")).toThrow(/DYNAMICS_ORG_HOST/);
   });
 });

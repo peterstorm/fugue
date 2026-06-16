@@ -225,15 +225,23 @@ export const buildSitesReadHandle = (token: string, http: GraphHttp): SitesReadH
   },
 });
 
-/** Build the `read`-only handle for `dynamics:read`, over the WIF token. */
-export const buildDynamicsReadHandle = (token: string, http: GraphHttp): DynamicsReadHandle => ({
+/**
+ * Build the `read`-only handle for `dynamics:read`, over the WIF token, targeting
+ * the configured per-org Dataverse host (FR-042). `orgHost` is the bare host
+ * (`DYNAMICS_ORG_HOST`, e.g. `org.crm4.dynamics.com`); the Dataverse Web API base
+ * is `https://<orgHost>/api/data/v9.2`. The caller (the broker) only ever reaches
+ * this for a `dynamics:read` scope AFTER `audienceForScope` resolved a non-undefined
+ * audience, so `orgHost` is always present here — an UNSET host fails closed at the
+ * broker (zero egress) before construction.
+ */
+export const buildDynamicsReadHandle = (
+  token: string,
+  http: GraphHttp,
+  orgHost: string,
+): DynamicsReadHandle => ({
   read: async (query: DynamicsQuery): Promise<Result<DynamicsResult, FrameworkError>> => {
-    // KNOWN LIMITATION: the Dynamics/Dataverse path is unwired in production. The
-    // correct base is the per-org Dataverse host `https://<org>.crm.dynamics.com`,
-    // NOT this placeholder — see
-    // docs/runbooks/2026-06-10-entra-fugue-agents-provisioning.md. When Dynamics is
-    // wired, the per-org Dataverse host MUST come from config, never hardcoded.
-    const base = "https://dynamics.microsoft.com/api/data/v9.2";
+    // Per-org Dataverse Web API base (FR-042): `https://<DYNAMICS_ORG_HOST>/api/data/v9.2`.
+    const base = `https://${orgHost}/api/data/v9.2`;
     const filter = query.filter !== undefined ? `?$filter=${encodeURIComponent(query.filter)}` : "";
     const url = `${base}/${encodeURIComponent(query.entity)}${filter}`;
     const ran = await runGraph(http, { method: "GET", url, bearer: token }, url);
@@ -303,13 +311,39 @@ type ScopeByName = {
  * scope→handle correspondence is checked HERE, not asserted in a comment.
  * Adding a scope to `KNOWN_SCOPES` without an entry here is also a compile
  * error (missing key).
+ *
+ * Every builder takes `(token, http, dynamicsOrgHost)`. Only the Dataverse
+ * builder consults `dynamicsOrgHost` (FR-042 — the per-org Dataverse host); the
+ * msgraph builders ignore it (their resource is the fixed Graph host). The
+ * uniform arity keeps the compile-pinned record sound while letting the one
+ * per-org-targeted builder receive its host.
+ *
+ * `dynamicsOrgHost` is `string | undefined`: the msgraph builders ignore it, and
+ * the dynamics builder FAILS CLOSED (throws an internal-invariant error) on
+ * `undefined` rather than synthesising `https:///api/data/v9.2`. The broker only
+ * reaches the dynamics builder AFTER `audienceForScope` resolved a non-undefined
+ * audience (so the host is present), so the throw is defence-in-depth against a
+ * future wiring regression — never the normal path.
  */
 const HANDLE_BUILDERS: {
-  readonly [K in keyof ScopeByName]: (token: string, http: GraphHttp) => HandleForScope<ScopeByName[K]>;
+  readonly [K in keyof ScopeByName]: (
+    token: string,
+    http: GraphHttp,
+    dynamicsOrgHost: string | undefined,
+  ) => HandleForScope<ScopeByName[K]>;
 } = {
-  "msgraph:mail.send": buildMailSendHandle,
-  "msgraph:sites.read": buildSitesReadHandle,
-  "dynamics:read": buildDynamicsReadHandle,
+  "msgraph:mail.send": (token, http) => buildMailSendHandle(token, http),
+  "msgraph:sites.read": (token, http) => buildSitesReadHandle(token, http),
+  "dynamics:read": (token, http, orgHost) => {
+    if (orgHost === undefined || orgHost === "") {
+      // Fail closed: never build a Dataverse handle against an empty host (which
+      // would produce `https:///api/data/v9.2`). The broker's `audienceForScope`
+      // gate already refuses this with zero egress; reaching here means that gate
+      // was bypassed — refuse loudly rather than emit a malformed URL.
+      throw new Error("internal-invariant-violated: dynamics:read handle built without DYNAMICS_ORG_HOST");
+    }
+    return buildDynamicsReadHandle(token, http, orgHost);
+  },
 };
 
 /**
@@ -317,16 +351,24 @@ const HANDLE_BUILDERS: {
  * token. Returns exactly `HandleForScope<S>` — a `msgraph:mail.send` scope
  * yields a `MailSendHandle` in the types, pinned by `HANDLE_BUILDERS`. The
  * returned handle exposes ONLY its operation method; the token is unreachable.
+ *
+ * `dynamicsOrgHost` is the configured per-org Dataverse host (FR-042), consumed
+ * ONLY by the `dynamics:read` builder (the msgraph builders ignore it). It is a
+ * REQUIRED `string | undefined` parameter — no empty-string default that could
+ * silently produce `https:///api/data/v9.2`. The broker only reaches the dynamics
+ * builder after `audienceForScope` resolved a non-undefined audience (so the host
+ * is present); an `undefined`/empty host fails closed inside `HANDLE_BUILDERS`.
  */
 export const buildGraphHandle = <S extends DownstreamScope>(
   scope: S,
   token: string,
   http: GraphHttp,
+  dynamicsOrgHost: string | undefined,
 ): HandleForScope<S> => {
   // The key cast is tautological: the parser is the scope ADT's only
   // constructor, so `${provider}:${operation}` is always one of the three legal
   // keys. The return cast cannot select a mismatched handle — the mapped record
   // above pins each key's builder to that scope's handle type at compile time.
   const key = `${scope.provider}:${scope.operation}` as keyof ScopeByName;
-  return HANDLE_BUILDERS[key](token, http) as HandleForScope<S>;
+  return HANDLE_BUILDERS[key](token, http, dynamicsOrgHost) as HandleForScope<S>;
 };

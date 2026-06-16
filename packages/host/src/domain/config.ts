@@ -7,9 +7,15 @@
  * Satisfies:
  * - FR-006: Redis URL required (host refuses to start if missing/unreachable)
  * - FR-013: Sensible defaults for all optional config fields
- * - FR-040: Global TTL defaults for cache and checkpoint entries
- * - FR-041: Per-DAG TTL overrides in fugue.yaml
+ * - FR-040 (host-TTL): Global TTL defaults for cache and checkpoint entries
+ * - FR-041 (host-TTL): Per-DAG TTL overrides in fugue.yaml
  * - FR-100: fugue.yaml declares team, owner, env, limit overrides
+ *
+ * NOTE: FR-040/FR-041 collide across two specs. The host-TTL spec owns the
+ * cache/checkpoint TTL fields above; the keycloak-entra-wiring spec owns the
+ * agent-client and HITL-approver fields below, which cite `FR-040
+ * (keycloak-entra-wiring)` / `FR-041 (keycloak-entra-wiring)` explicitly to
+ * disambiguate (mirroring the SC-008 disambiguation in node-context-factory.ts).
  */
 
 import { z } from "zod";
@@ -17,6 +23,22 @@ import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import { parseScope } from "./capability-scope.js";
+
+// ---------------------------------------------------------------------------
+// Sensitive config sub-shapes
+// ---------------------------------------------------------------------------
+
+/**
+ * The shape a single Keycloak agent-client credential takes inside the
+ * `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` JSON map. SENSITIVE — `clientSecret` MUST
+ * NEVER be logged (NFR-014). This is the plain config-parse shape; the
+ * domain-level `KeycloakClientCredential` port type lives in
+ * `adapters/agent-client-credentials.ts`.
+ */
+export interface KeycloakClientCredentialConfig {
+  readonly clientId: string;
+  readonly clientSecret: string;
+}
 
 // ---------------------------------------------------------------------------
 // Host Config — parsed from environment variables
@@ -68,16 +90,21 @@ export const HostConfigSchema = z.object({
    * first-class inbound mode (FR-W3-006). When unset, the JWT (`user`) path stays
    * disabled and only admin/`fug_` tokens are accepted (fail closed).
    *
-   * Setting it ALSO selects the live Keycloak capability broker at boot
-   * (`host.ts`) for per-node downstream-scope minting — currently its main
-   * observable effect, since the inbound JWT verifier is deliberately
-   * fail-closed-unwired pending the JWKS wave. Leaving it unset wires NO broker:
-   * runs use the boot-scoped static capability set unchanged (the
-   * zero-regression path).
+   * Setting it wires the inbound user JWT verification path LIVE (verifier +
+   * iss/aud/run-auth policy, see `host.ts`) AND selects the live Keycloak
+   * capability broker for per-node downstream-scope minting. Leaving it unset
+   * wires NO broker and disables the user JWT path (a JWT-shaped token 401s):
+   * runs use the boot-scoped static capability set unchanged and only
+   * admin/`fug_` tokens are accepted (the zero-regression, fail-closed path).
    */
   REALM_JWT_ISSUER: z.string().optional(),
-  /** Audience the host must appear in within an accepted realm JWT (FR-W3-006). */
-  REALM_JWT_AUDIENCE: z.string().default("fugue-host"),
+  /**
+   * Audience the host must appear in within an accepted realm JWT (FR-W3-006).
+   * Non-empty: an explicit `REALM_JWT_AUDIENCE=""` would neuter the audience
+   * check (every token's `aud` trivially "contains" the empty expectation), so
+   * it is rejected at boot rather than silently weakening verification.
+   */
+  REALM_JWT_AUDIENCE: z.string().min(1).default("fugue-host"),
   /**
    * Keycloak realm policy: the scopes assigned to each agent client, as a JSON
    * object mapping `agentClientId → ["<provider>:<operation>", …]`. This is the
@@ -89,9 +116,11 @@ export const HostConfigSchema = z.object({
    * Parsed/validated here (Zod) so a malformed policy fails at boot, never at
    * runtime. The value is `Record<string, string[]>`; absent → `{}`.
    *
-   * NOTE: until the dagId→Keycloak-client mapping lands, the broker is handed
-   * the DAG id as `agentClientId` (see `invocationOriginForIdentity`), so the
-   * keys here are DAG ids — not real Keycloak client ids.
+   * KEYS ARE REAL KEYCLOAK CLIENT IDS (FR-040 (keycloak-entra-wiring)): a DAG id is first resolved to its
+   * agent-type client id through `AGENT_CLIENT_MAP` (`agentClientIdForDag`), and
+   * the resulting REAL client id (`fugue-agent-mail`, …) is what the broker's
+   * fail-closed gate looks up here. They are NOT DAG ids — the dagId→client
+   * placeholder identity is gone.
    */
   AGENT_CLIENT_SCOPES: z
     .string()
@@ -130,6 +159,121 @@ export const HostConfigSchema = z.object({
       }
       return shape.data;
     }),
+  /**
+   * The DAG-id → REAL Keycloak agent-type client-id map (FR-040 (keycloak-entra-wiring), ADR-0056
+   * Variant A: one service-account client per agent TYPE). A JSON object mapping
+   * `dagId → "<real-keycloak-client-id>"` (e.g. `{ "lead-desk": "fugue-agent-mail" }`).
+   *
+   * This is the SINGLE migration point that replaces the dagId-identity
+   * placeholder: `agentClientIdForDag(map, dagId)` resolves a run's DAG id to the
+   * real client id on which `AGENT_CLIENT_SCOPES` and
+   * `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` are keyed. A DAG id ABSENT from this map
+   * has NO agent client — its origin resolution FAILS CLOSED (the run is refused
+   * rather than minting as the wrong/absent client; FR-040 (keycloak-entra-wiring)). Absent/empty → `{}`,
+   * so every DAG fails closed until mapped (the safe default).
+   *
+   * Parsed/validated here (Zod) so a malformed map fails at BOOT, never at
+   * runtime. The value is `Readonly<Record<string, string>>`.
+   */
+  AGENT_CLIENT_MAP: z
+    .string()
+    .optional()
+    .transform((raw, ctx): Readonly<Record<string, string>> => {
+      if (raw === undefined || raw.trim() === "") return {};
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_MAP must be valid JSON" });
+        return z.NEVER;
+      }
+      const shape = z.record(z.string(), z.string().min(1)).safeParse(parsed);
+      if (!shape.success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "AGENT_CLIENT_MAP must be a JSON object of dagId → non-empty Keycloak client id",
+        });
+        return z.NEVER;
+      }
+      return shape.data;
+    }),
+  // ── Entra / Keycloak agent-client wiring (Phase 0 — config-presence gating) ──
+  /**
+   * Microsoft Entra (Azure AD) tenant id the host's workload-identity-federation
+   * (WIF) hop targets. Validated together with ENTRA_CLIENT_ID. Under AD-3 config-
+   * presence gating, setting BOTH this and ENTRA_CLIENT_ID wires the live Entra WIF
+   * exchange + Graph transport NOW (`host.ts` `selectCapabilityBroker`); leaving
+   * them unset keeps the fail-closed unwired stubs, preserving the zero-Entra-egress
+   * baseline (SC-001). Tenant and client are an inseparable pair — one without the
+   * other is rejected at boot by the superRefine below (FR-001).
+   */
+  ENTRA_TENANT_ID: z.string().optional(),
+  /**
+   * The Entra application (client) id the host federates AS over WIF. Paired with
+   * ENTRA_TENANT_ID — see that field. One without the other fails boot (FR-001).
+   */
+  ENTRA_CLIENT_ID: z.string().optional(),
+  /**
+   * Override the Keycloak token endpoint URL the agent-client legs POST to
+   * (client-credentials mint + RFC 8693 exchange). Optional; must be https — an
+   * agent client secret is sent to this endpoint, so cleartext http is refused at
+   * boot (NFR-014). When unset the live endpoint adapter derives its URL from the
+   * realm issuer.
+   */
+  KEYCLOAK_TOKEN_URL: z.string().url().optional(),
+  /**
+   * Per-agent-client Keycloak credentials, as a JSON object mapping
+   * `agentClientId → { "clientId": "...", "clientSecret": "..." }`. KEYS ARE REAL
+   * KEYCLOAK CLIENT IDS (FR-040 (keycloak-entra-wiring) — the same ids `AGENT_CLIENT_MAP` resolves a DAG
+   * id to), not DAG ids. Parsed and
+   * validated here. Under AD-3 config-presence gating, a non-empty map wires the
+   * live Keycloak token endpoint NOW (`host.ts` `selectCapabilityBroker`); an
+   * empty/absent map keeps the fail-closed unwired endpoint, preserving SC-001.
+   *
+   * SENSITIVE (NFR-014): the values are client secrets and MUST NEVER be logged.
+   * Parsed/validated here (Zod) so a malformed map fails at boot, never at
+   * runtime. The value is `Readonly<Record<string, KeycloakClientCredential>>`;
+   * absent → `{}` (empty map → every credential lookup misses → fail-closed).
+   *
+   * The env-map adapter (`adapters/agent-client-credentials.ts`) consumes this
+   * map; a lookup miss returns `undefined` (fail-closed, FR-004) so an unknown
+   * agent client never triggers egress.
+   */
+  KEYCLOAK_AGENT_CLIENT_CREDENTIALS: z
+    .string()
+    .optional()
+    .transform((raw, ctx): Readonly<Record<string, KeycloakClientCredentialConfig>> => {
+      if (raw === undefined || raw.trim() === "") return {};
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be valid JSON" });
+        return z.NEVER;
+      }
+      const shape = z
+        .record(
+          z.string(),
+          z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) }).strict(),
+        )
+        .safeParse(parsed);
+      if (!shape.success) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be a JSON object of agentClientId → { clientId, clientSecret } (non-empty strings)",
+        });
+        return z.NEVER;
+      }
+      return shape.data;
+    }),
+  /**
+   * The Dynamics 365 organization host the host's `dynamics:*` capabilities read
+   * from (e.g. `org.crm4.dynamics.com`), used to build the per-org Graph/Dataverse
+   * audience + handle (FR-042). Optional — DAGs requiring `dynamics` fail the
+   * boot-time capability check when unset, exactly as today (SC-001).
+   */
+  DYNAMICS_ORG_HOST: z.string().optional(),
   /** OpenTelemetry OTLP exporter endpoint */
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   // ── Human-in-the-loop (ADR-0060) ───────────────────────────────────────
@@ -160,7 +304,7 @@ export const HostConfigSchema = z.object({
    * cards and the bot endpoint (`POST /teams/messages`) records decisions
    * in-place — no link-out. Takes precedence over TEAMS_WEBHOOK_URL when both
    * are set. Requires an Azure Bot resource + Teams app manifest (see
-   * docs/hitl-teams.md).
+   * ../../../../docs/runbooks/azure-bot-hitl-provisioning.md).
    */
   BOT_APP_ID: z.string().optional(),
   /** Bot Framework app password (client secret). Required when BOT_APP_ID is set. */
@@ -170,6 +314,83 @@ export const HostConfigSchema = z.object({
    * Must be https — the app password (client secret) is POSTed here.
    */
   BOT_TOKEN_URL: z.string().url().optional(),
+  /**
+   * HITL approver team membership for the in-Teams (Bot Framework) button path
+   * (FR-041 (keycloak-entra-wiring), US5, SC-006), as a JSON object mapping a Teams user's
+   * `aadObjectId → ["<team>", …]`. The Bot-card click carries only the clicker's
+   * `aadObjectId`, so — unlike the HTTP approve path which reads the approver's
+   * team off a verified token — the membership must be resolved from this config.
+   * Before recording a decision the bot path authorizes the resolved approver
+   * against the run's DAG-owning team (parity with `authorizeRunAccess`).
+   *
+   * FAIL CLOSED (SC-006): an `aadObjectId` ABSENT from this map is an unknown
+   * approver whose click authorizes nothing; absent/empty map → `{}`, so EVERY
+   * Teams click is refused until approvers are mapped. Parsed/validated here so a
+   * malformed map fails at boot, never at runtime.
+   */
+  HITL_APPROVER_TEAMS: z
+    .string()
+    .optional()
+    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
+      if (raw === undefined || raw.trim() === "") return {};
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "HITL_APPROVER_TEAMS must be valid JSON" });
+        return z.NEVER;
+      }
+      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
+      if (!shape.success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "HITL_APPROVER_TEAMS must be a JSON object of aadObjectId → string[] (team ids)",
+        });
+        return z.NEVER;
+      }
+      return shape.data;
+    }),
+  /**
+   * Per-team CHANNEL routing for the in-Teams (Bot Framework) transport
+   * (FR-041 (keycloak-entra-wiring), US5), as a JSON object mapping a Teams team's
+   * `aadGroupId → "<fugue-team>"`. A SINGLE bot account serves multiple teams; the
+   * channel→team key is the Teams `aadGroupId` carried on the inbound
+   * `conversationUpdate` activity (`channelData.team.aadGroupId`).
+   *
+   * This is a CONFIDENTIALITY measure, NOT the security control: it routes a
+   * team's review cards to that team's own channel (and reads inbound references
+   * back per team), so a team's outputs-under-review are not posted into another
+   * team's channel. The ACTION-prevention control is the authz gate
+   * `canAccessDag` on the button-click path (see HITL_APPROVER_TEAMS) — routing
+   * does NOT gate who may approve.
+   *
+   * An `aadGroupId` ABSENT from this map is an UNMAPPED team: its inbound
+   * reference is stored only as the default, and its cards fall back to the
+   * default channel. Absent/empty → `{}`. Parsed/validated here so a malformed
+   * map fails at boot, never at runtime.
+   */
+  HITL_TEAM_CHANNELS: z
+    .string()
+    .optional()
+    .transform((raw, ctx): Readonly<Record<string, string>> => {
+      if (raw === undefined || raw.trim() === "") return {};
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "HITL_TEAM_CHANNELS must be valid JSON" });
+        return z.NEVER;
+      }
+      const shape = z.record(z.string(), z.string().min(1)).safeParse(parsed);
+      if (!shape.success) {
+        ctx.addIssue({
+          code: "custom",
+          message: "HITL_TEAM_CHANNELS must be a JSON object of aadGroupId → non-empty fugue team id",
+        });
+        return z.NEVER;
+      }
+      return shape.data;
+    }),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */
@@ -225,6 +446,45 @@ export const HostConfigSchema = z.object({
   // The app password is POSTed to the token endpoint; an http override leaks it.
   if (c.BOT_TOKEN_URL !== undefined && !c.BOT_TOKEN_URL.startsWith("https://")) {
     ctx.addIssue({ code: "custom", path: ["BOT_TOKEN_URL"], message: "must be an https:// URL (the bot app password is sent to this endpoint)" });
+  }
+  // The agent client secret is POSTed to the Keycloak token endpoint (client-
+  // credentials mint + RFC 8693 exchange); an http override leaks it in cleartext.
+  if (c.KEYCLOAK_TOKEN_URL !== undefined && !c.KEYCLOAK_TOKEN_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["KEYCLOAK_TOKEN_URL"], message: "must be an https:// URL (the agent client secret is sent to this endpoint)" });
+  }
+  // NFR-014 (derived token URL): when KEYCLOAK_TOKEN_URL is UNSET the live
+  // Keycloak endpoint DERIVES its URL from REALM_JWT_ISSUER
+  // (`<issuer>/protocol/openid-connect/token`, see selectCapabilityBroker). An
+  // http:// issuer therefore yields an http:// token URL over which the agent
+  // client secret is POSTed in cleartext — the same leak we close above for the
+  // explicit override. Guard it ONLY when the secret would actually be sent:
+  // agent creds present AND no explicit (already-https-guarded) KEYCLOAK_TOKEN_URL.
+  // An http:// issuer with NO agent creds POSTs no secret (JWKS-only use, e.g.
+  // local/test) and stays allowed — no regression.
+  if (
+    Object.keys(c.KEYCLOAK_AGENT_CLIENT_CREDENTIALS).length > 0 &&
+    c.KEYCLOAK_TOKEN_URL === undefined &&
+    c.REALM_JWT_ISSUER !== undefined &&
+    !c.REALM_JWT_ISSUER.startsWith("https://")
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["REALM_JWT_ISSUER"],
+      message:
+        "must be an https:// URL when KEYCLOAK_AGENT_CLIENT_CREDENTIALS is set and KEYCLOAK_TOKEN_URL is unset (the agent client secret is POSTed to the token URL derived from this issuer)",
+    });
+  }
+  // Entra tenant and client are an inseparable pair: the WIF hop needs BOTH to
+  // federate, and either one alone is an internally-inconsistent config that
+  // would silently half-wire the Entra leg. Reject the mismatch at boot (FR-001)
+  // rather than fail-close every Entra mint at runtime. Both-unset is the valid
+  // zero-regression baseline (SC-001).
+  if ((c.ENTRA_TENANT_ID !== undefined) !== (c.ENTRA_CLIENT_ID !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: [c.ENTRA_TENANT_ID === undefined ? "ENTRA_TENANT_ID" : "ENTRA_CLIENT_ID"],
+      message: "ENTRA_TENANT_ID and ENTRA_CLIENT_ID must be set together (tenant present iff client present)",
+    });
   }
 });
 

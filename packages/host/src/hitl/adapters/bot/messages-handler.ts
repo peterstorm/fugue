@@ -8,30 +8,46 @@
  * Security: EVERY activity is verified via `VerifyBotToken` first (fail closed),
  * and the captured `serviceUrl` is allowlisted (`isTrustedBotServiceUrl`) so the
  * connector never sends its bearer token to a forged host.
+ *
+ * SECURITY — two distinct layers (FR-041, US5, SC-006):
+ *
+ *  (a) AUTHORIZATION gate (the action-prevention control): the in-Teams button
+ *      path authorizes the clicking user against the run's owning DAG team AT
+ *      PARITY with the HTTP approve path (`runs.ts#authorizeRunAccess`). The card
+ *      click carries the clicker's `from.aadObjectId`; `approverTeamIdentity`
+ *      (`hitl/identity.ts`) resolves it — fail-closed on an unknown id — to an
+ *      `AuthIdentity`, and the SAME `canAccessDag` predicate the HTTP path uses
+ *      gates the decision against the run's DAG-owning team (resolved via the
+ *      injected `resolveDagTeam`). A non-member's (or unknown user's) click is
+ *      REFUSED and `recordDecision` is NEVER called (SC-006). THIS is what stops
+ *      one team's members from acting on another team's runs — even if a card
+ *      somehow reached the wrong channel.
+ *
+ *  (b) Per-team CHANNEL routing (a confidentiality measure, not an action gate):
+ *      on `conversationUpdate` the activity's `channelData.team.aadGroupId` is
+ *      resolved through `teamChannels` (`HITL_TEAM_CHANNELS`) to a fugue team and
+ *      the conversation reference is stored PER TEAM (via
+ *      `ConversationStorePort.saveTeamReference`), so the notifier delivers that
+ *      team's review cards to that team's own channel. An unmapped team stores
+ *      only the default reference and falls back to the default channel. Routing
+ *      decides WHERE a card is delivered; it does NOT decide WHO may approve —
+ *      that is the authz gate above.
+ *
  * Behaviour by activity type:
  *   - conversationUpdate (bot added) → capture + persist the conversation
- *     reference so proactive review cards can be posted there later.
- *   - invoke `adaptiveCard/action` with our verb → map the button to a
- *     HumanAction, record the decision (resuming the run), refresh the card.
+ *     reference (default, plus per-team when the team is mapped).
+ *   - invoke `adaptiveCard/action` with our verb → authorize, then map the button
+ *     to a HumanAction, record the decision (resuming the run), refresh the card.
  *   - anything else → 200 no-op.
- *
- * SECURITY CONSTRAINT (v1, ADR-0060): unlike the HTTP approval path
- * (`runs.ts#authorizeRunAccess`, which authorizes the caller against the run's
- * owning DAG team), the in-Teams button path does NOT yet bind the clicking user
- * to the run's team — v1 keeps a single default conversation reference and there
- * is no AAD→fugue-identity→team mapping. Therefore ANYONE who can click a card
- * in the channel the bot was added to can approve/reject ANY run. The bot MUST
- * only be installed in a channel whose members are all authorised approvers for
- * every team whose runs gate through it. Per-team conversation routing +
- * click-time authorization is tracked as a follow-up (see docs/hitl-teams.md and
- * ADR-0060 Consequences).
  */
 
 import { match } from "ts-pattern";
-import type { HumanAction } from "@fuguejs/framework";
+import type { HumanAction, DagId } from "@fuguejs/framework";
 import { tryRunId, tryNodeId } from "@fuguejs/framework";
 import type { HitlRunService } from "../../service.js";
 import type { LogPort } from "../../../ports.js";
+import { canAccessDag } from "../../../domain/auth.js";
+import { approverTeamIdentity, type ApproverTeamMap } from "../../identity.js";
 import type { ConversationStorePort, VerifyBotToken, ConversationReference } from "./ports.js";
 import { REVIEW_VERB, buildResolvedCard } from "./card.js";
 import { isTrustedBotServiceUrl } from "./trusted-host.js";
@@ -40,6 +56,30 @@ export interface BotMessagesDeps {
   readonly verify: VerifyBotToken;
   readonly hitl: Pick<HitlRunService, "getRun" | "recordDecision">;
   readonly conversations: ConversationStorePort;
+  /**
+   * Resolve a run's DAG id to its OWNING team (FR-041). Wired from the live
+   * registry (the same `lookupDag` the HTTP path uses), so the bot path
+   * authorizes against the run's real team at parity. `undefined` when the DAG is
+   * no longer registered — treated as fail-closed (cannot establish the team, so
+   * the decision is refused, mirroring the HTTP path's not-found handling).
+   */
+  readonly resolveDagTeam: (dagId: DagId) => string | undefined;
+  /**
+   * Config-sourced `aadObjectId → teams` map (FR-041, `HITL_APPROVER_TEAMS`). The
+   * clicker's `from.aadObjectId` is resolved through it to the approver identity
+   * the decision is authorized with. An unknown id fails closed (SC-006).
+   */
+  readonly approverTeams: ApproverTeamMap;
+  /**
+   * Config-sourced `aadGroupId → fugue team` map (FR-041, `HITL_TEAM_CHANNELS`).
+   * On `conversationUpdate` the inbound activity's `channelData.team.aadGroupId`
+   * is resolved through it to the owning fugue team, and the conversation
+   * reference is stored PER TEAM so that team's cards route to its own channel
+   * (a confidentiality measure — not the action-prevention gate). An aadGroupId
+   * ABSENT from this map is an unmapped team: only the default reference is
+   * stored. Own-property lookup only (no prototype-pollution resolution).
+   */
+  readonly teamChannels: Readonly<Record<string, string>>;
   readonly logger?: LogPort;
 }
 
@@ -106,9 +146,27 @@ export const handleBotActivity = async (
       return { status: 200 };
     }
     if (ref) {
+      // Per-team routing (FR-041, confidentiality): if the activity carries a
+      // Teams team `aadGroupId` that maps to a fugue team, ALSO store the
+      // reference under that team so its cards route to its own channel. We
+      // STILL store the default for back-compat and as the fallback for unmapped
+      // teams. Own-property lookup only — an inherited key (`constructor`, …)
+      // must never resolve a team (mirrors identity.ts, fail-closed).
+      const aadGroupId = str(obj(obj(activity.channelData).team).aadGroupId);
+      const mappedTeam =
+        aadGroupId !== undefined && Object.prototype.hasOwnProperty.call(deps.teamChannels, aadGroupId)
+          ? deps.teamChannels[aadGroupId]
+          : undefined;
+      if (mappedTeam !== undefined) {
+        const savedTeam = await deps.conversations.saveTeamReference(mappedTeam, ref);
+        if (!savedTeam.ok) deps.logger?.error?.("hitl/bot: failed to persist team conversation reference", { team: mappedTeam, error: savedTeam.error.kind });
+        else deps.logger?.info?.("hitl/bot: captured per-team conversation reference", { team: mappedTeam });
+      } else {
+        deps.logger?.info?.("hitl/bot: conversationUpdate with no mapped team — default reference only", { aadGroupId });
+      }
       const saved = await deps.conversations.saveDefaultReference(ref);
       if (!saved.ok) deps.logger?.error?.("hitl/bot: failed to persist conversation reference", { error: saved.error.kind });
-      else deps.logger?.info?.("hitl/bot: captured conversation reference for proactive reviews");
+      else deps.logger?.info?.("hitl/bot: captured default conversation reference for proactive reviews");
     }
     return { status: 200 };
   }
@@ -136,7 +194,8 @@ export const handleBotActivity = async (
   const nodeIdParsed = tryNodeId(nodeIdRaw);
   if (!nodeIdParsed.ok) return messageInvokeResponse("Malformed review action.");
   const nodeId = nodeIdParsed.value;
-  const actor = str(obj(activity.from).name) ?? str(obj(activity.from).aadObjectId) ?? "teams-user";
+  const aadObjectId = str(obj(activity.from).aadObjectId);
+  const actor = str(obj(activity.from).name) ?? aadObjectId ?? "teams-user";
   const action = toAction(decision, str(data.reason), actor);
   if (action === null) return messageInvokeResponse(`Unknown decision '${decision}'.`);
 
@@ -167,6 +226,30 @@ export const handleBotActivity = async (
   // refresh the stale card instead.
   if (record.status.nodeId !== nodeId) {
     return cardInvokeResponse(buildResolvedCard({ runId, nodeId, outcome: "This review has moved on to a later step; use the current review card." }));
+  }
+
+  // ── Approver authorization (FR-041, US5, SC-006) — PARITY with the HTTP path ──
+  // The HTTP approve path runs `canAccessDag(identity, registered.team)` before
+  // recording (`runs.ts#authorizeRunAccess`). Mirror it EXACTLY here: resolve the
+  // run's DAG-owning team, resolve the clicker's `aadObjectId` to an approver
+  // identity (fail-closed on an unknown id), and gate on the SAME `canAccessDag`
+  // predicate. A non-member's (or unknown user's) click is REFUSED and
+  // `recordDecision` is NEVER reached (SC-006 — zero side effect on refusal).
+  const dagTeam = deps.resolveDagTeam(record.dagId);
+  if (dagTeam === undefined) {
+    // The DAG is no longer registered — its owning team can't be established, so
+    // the decision can't be authorized. Fail closed (mirrors the HTTP 404 path).
+    deps.logger?.warn?.("hitl/bot: refusing decision — run references an unregistered DAG", { runId, dagId: record.dagId });
+    return messageInvokeResponse("You are not authorized to act on this review.");
+  }
+  const approver = approverTeamIdentity(deps.approverTeams, aadObjectId);
+  if (approver === undefined || !canAccessDag(approver, dagTeam)) {
+    // Unknown approver (no aadObjectId / unmapped) OR a member of a DIFFERENT
+    // team. Refuse WITHOUT recording — one channel's members cannot approve
+    // another team's runs. Identical outcome (no decision) whether the user is
+    // unknown or merely not a member, so the refusal does not leak membership.
+    deps.logger?.warn?.("hitl/bot: refusing decision — approver not authorized for the run's team", { runId, dagTeam });
+    return messageInvokeResponse("You are not authorized to act on this review.");
   }
 
   const recorded = await deps.hitl.recordDecision(record.runId, record.status.nodeId, action);

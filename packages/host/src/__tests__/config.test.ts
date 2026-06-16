@@ -175,6 +175,107 @@ describe("HostConfigSchema", () => {
     expect(result.value.AGENT_CLIENT_SCOPES).toEqual({});
   });
 
+  // ── AGENT_CLIENT_MAP validation (FR-040) ───────────────────────────────────
+  it("parses a valid AGENT_CLIENT_MAP into a dagId → real-client map (FR-040)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      AGENT_CLIENT_MAP: JSON.stringify({ "lead-desk": "fugue-agent-mail", "crm-sync": "fugue-agent-crm" }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.AGENT_CLIENT_MAP["lead-desk"]).toBe("fugue-agent-mail");
+    expect(result.value.AGENT_CLIENT_MAP["crm-sync"]).toBe("fugue-agent-crm");
+  });
+
+  it("defaults AGENT_CLIENT_MAP to {} when unset (every DAG fails closed until mapped)", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.AGENT_CLIENT_MAP).toEqual({});
+  });
+
+  it("REJECTS at boot a non-JSON AGENT_CLIENT_MAP", () => {
+    const result = parseHostConfig({ ...validEnv, AGENT_CLIENT_MAP: "{not json" });
+    expect(result.ok).toBe(false);
+  });
+
+  it("REJECTS at boot an AGENT_CLIENT_MAP whose value is not a non-empty string", () => {
+    const result = parseHostConfig({ ...validEnv, AGENT_CLIENT_MAP: JSON.stringify({ "lead-desk": "" }) });
+    expect(result.ok).toBe(false);
+  });
+
+  // ── HITL_APPROVER_TEAMS validation (FR-041) ────────────────────────────────
+  it("parses a valid HITL_APPROVER_TEAMS into an aadObjectId → teams map (FR-041)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      HITL_APPROVER_TEAMS: JSON.stringify({ "aad-alice": ["sales", "ops"], "aad-bob": ["marketing"] }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.HITL_APPROVER_TEAMS["aad-alice"]).toEqual(["sales", "ops"]);
+  });
+
+  it("defaults HITL_APPROVER_TEAMS to {} when unset (every Teams click fails closed)", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.HITL_APPROVER_TEAMS).toEqual({});
+  });
+
+  it("REJECTS at boot a malformed HITL_APPROVER_TEAMS (not aadObjectId → string[])", () => {
+    const result = parseHostConfig({ ...validEnv, HITL_APPROVER_TEAMS: JSON.stringify({ "aad-alice": "sales" }) });
+    expect(result.ok).toBe(false);
+  });
+
+  // ── HITL_TEAM_CHANNELS validation (FR-041, confidentiality routing) ─────────
+  it("parses a valid HITL_TEAM_CHANNELS into an aadGroupId → fugue team map (FR-041)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      HITL_TEAM_CHANNELS: JSON.stringify({ "grp-sales": "sales", "grp-mkt": "marketing" }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.HITL_TEAM_CHANNELS["grp-sales"]).toBe("sales");
+    expect(result.value.HITL_TEAM_CHANNELS["grp-mkt"]).toBe("marketing");
+  });
+
+  it("defaults HITL_TEAM_CHANNELS to {} when unset (every team falls back to the default channel)", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.HITL_TEAM_CHANNELS).toEqual({});
+  });
+
+  it("REJECTS at boot a non-object HITL_TEAM_CHANNELS (aadGroupId → non-string)", () => {
+    const result = parseHostConfig({ ...validEnv, HITL_TEAM_CHANNELS: JSON.stringify({ "grp-sales": ["sales"] }) });
+    expect(result.ok).toBe(false);
+  });
+
+  it("REJECTS at boot a HITL_TEAM_CHANNELS mapping to an empty team id", () => {
+    const result = parseHostConfig({ ...validEnv, HITL_TEAM_CHANNELS: JSON.stringify({ "grp-sales": "" }) });
+    expect(result.ok).toBe(false);
+  });
+
+  it("REJECTS invalid HITL_TEAM_CHANNELS JSON at boot", () => {
+    const result = parseHostConfig({ ...validEnv, HITL_TEAM_CHANNELS: "{not json" });
+    expect(result.ok).toBe(false);
+  });
+
+  // ── DYNAMICS_ORG_HOST parse/default (FR-042) ────────────────────────────────
+  it("parses DYNAMICS_ORG_HOST when set (per-org Dataverse host)", () => {
+    const result = parseHostConfig({ ...validEnv, DYNAMICS_ORG_HOST: "org.crm4.dynamics.com" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.DYNAMICS_ORG_HOST).toBe("org.crm4.dynamics.com");
+  });
+
+  it("leaves DYNAMICS_ORG_HOST undefined when unset (dynamics:read fails closed at the broker)", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.DYNAMICS_ORG_HOST).toBeUndefined();
+  });
+
   it("REJECTS at boot an AGENT_CLIENT_SCOPES with a typo'd/unrecognised scope name (fails at boot, never at runtime)", () => {
     const result = parseHostConfig({
       ...validEnv,

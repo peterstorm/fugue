@@ -22,6 +22,7 @@ import type { HostError } from "../../domain/host-error.js";
 import type { SharedInfra, LogPort } from "../../ports.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { createNodeContextForDag } from "../../adapters/node-context-factory.js";
+import type { AgentClientMap } from "../../domain/auth.js";
 import type { RunExecutorPort, RunExecOutcome, RunExecutionRequest } from "../ports.js";
 import { toExecIdentity } from "../identity.js";
 
@@ -31,6 +32,13 @@ export interface RunExecutorDeps {
   readonly getRegisteredDag: (dagId: string) => RegisteredDag | undefined;
   /** Boot-selected per-node minting broker (undefined when no realm is configured). */
   readonly broker?: CapabilityBroker;
+  /**
+   * DAG-id → REAL Keycloak agent-client-id map (`AGENT_CLIENT_MAP`, FR-040),
+   * threaded into `createNodeContextForDag` so a resumed HITL run resolves the
+   * SAME agent client the initiating request would have. An unmapped DAG id
+   * fails closed (the slice fails) — parity with the synchronous run path.
+   */
+  readonly agentClientMap?: AgentClientMap;
   readonly logger?: LogPort;
 }
 
@@ -46,7 +54,7 @@ const toFrameworkError = (e: unknown): FrameworkError => {
 };
 
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
-  const { sharedInfra, getRegisteredDag, broker, logger } = deps;
+  const { sharedInfra, getRegisteredDag, broker, agentClientMap, logger } = deps;
 
   return {
     async seedCheckpoint(dagId, input): Promise<Result<string, HostError>> {
@@ -79,6 +87,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           req.runId,
           controller.signal,
           toExecIdentity(req.identity),
+          agentClientMap ?? {},
         );
 
         const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {

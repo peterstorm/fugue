@@ -54,7 +54,8 @@ import {
   type DownstreamScope,
   type OperationNarrowedHandle,
 } from "../domain/capability-scope.js";
-import { agentClientIdFromFrameworkOrigin, type AgentClientId } from "../domain/auth.js";
+import { agentClientIdFromFrameworkOrigin, type AgentClientId, type SubjectToken } from "../domain/auth.js";
+import type { RunId } from "@fuguejs/framework";
 // Side-channel: importing the registry augmentation keeps it in this module's
 // graph, so any consumer of the broker also sees the `"<provider>:<operation>"`
 // scope keys on `CapabilityRegistry` AND the C6 soundness assertions that make
@@ -138,20 +139,28 @@ const cacheIdentityFor = (origin: InvocationOrigin): string =>
 
 /**
  * Downstream resource/audience a scope's token is narrowed to. Graph operations
- * target the Microsoft Graph resource; Dynamics targets the Dynamics resource.
- * Exhaustive over the scope ADT.
+ * target the Microsoft Graph resource; Dynamics targets the configured per-org
+ * Dataverse host (FR-042). Exhaustive over the scope ADT.
+ *
+ * FAIL CLOSED (FR-042): the Dynamics audience requires `dynamicsOrgHost`
+ * (`DYNAMICS_ORG_HOST`). When it is UNSET, a `dynamics:read` scope resolves to
+ * `undefined` here — the broker refuses the capability locally with ZERO egress
+ * rather than minting against a placeholder/wrong audience (the documented unset
+ * behaviour, preserved). `msgraph` never depends on the org host, so it always
+ * resolves.
  */
-export const audienceForScope = (scope: DownstreamScope): string =>
+export const audienceForScope = (
+  scope: DownstreamScope,
+  dynamicsOrgHost: string | undefined,
+): string | undefined =>
   match(scope)
     .with({ provider: "msgraph" }, () => "https://graph.microsoft.com")
-    // KNOWN LIMITATION: the Dynamics/Dataverse path is unwired in production. The
-    // correct Dataverse resource is the per-org host `https://<org>.crm.dynamics.com`
-    // (its `/.default` scope), NOT this placeholder — see
-    // docs/runbooks/2026-06-10-entra-fugue-agents-provisioning.md. When Dynamics is
-    // wired, the per-org Dataverse host MUST come from config (threaded through
-    // EntraWifConfig), never hardcoded here. This stand-in is only ever reached
-    // behind the (currently unwired) Dynamics WIF exchange.
-    .with({ provider: "dynamics" }, () => "https://dynamics.microsoft.com")
+    // Dynamics/Dataverse targets the configured per-org host (FR-042):
+    // `https://<DYNAMICS_ORG_HOST>` (its `/.default` scope is requested at the WIF
+    // egress). UNSET → `undefined` → fail closed at the broker, zero egress.
+    .with({ provider: "dynamics" }, () =>
+      dynamicsOrgHost !== undefined ? `https://${dynamicsOrgHost}` : undefined,
+    )
     .exhaustive();
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -204,6 +213,26 @@ export interface KeycloakBrokerDeps {
   readonly graphHttp: GraphHttp;
   /** Realm policy: which scopes each agent client is assigned (fail-closed gate). */
   readonly assignedScopes: AssignedScopes;
+  /**
+   * The configured per-org Dynamics/Dataverse host (`DYNAMICS_ORG_HOST`, FR-042)
+   * the `dynamics:read` capability's token audience and read URL target
+   * (`https://<host>/api/data/v9.2`). UNSET (`undefined`) → a `dynamics:read`
+   * scope FAILS CLOSED with zero egress (the documented unset behaviour). `msgraph`
+   * scopes never depend on it.
+   */
+  readonly dynamicsOrgHost?: string;
+  /**
+   * Resolve the verified user `subject_token` for a run, from the HOST-SIDE
+   * side-channel the run-context factory bound at run start (FR-030/FR-032). The
+   * `user` branch of `saDispatch` calls this with `inv.runId` and presents the
+   * resolved token as the RFC 8693 `subject_token` proof. An AGENT hop never has
+   * (nor asks for) one — it mints via `client_credentials`. Returns `undefined`
+   * when no verified user token is resolvable for the run, which makes the user
+   * exchange FAIL CLOSED rather than issue a proof-less token (FR-030). The raw
+   * token reaches the broker ONLY through this resolver — never via
+   * `InvocationOrigin` (string-only, FR-032) and never on a handle (NFR-011).
+   */
+  readonly resolveSubjectToken: (runId: RunId) => SubjectToken | undefined;
   /** Shared tracer for correlated audit spans. */
   readonly tracer: Tracer;
   /** Shared logger for correlated audit records. */
@@ -256,7 +285,14 @@ const auditFields = (
 /** The downstream-mint strategy for an origin: the `via` audit witness + the
  * (lazy) endpoint thunk. Returning both as one value keeps the audited strategy a
  * WITNESS of the branch actually taken (audit integrity A1), not a parallel
- * derivation off `origin.kind` that merely happens to agree. */
+ * derivation off `origin.kind` that merely happens to agree.
+ *
+ * USER branch (FR-030): resolves the run's verified `subject_token` from the
+ * host-side side-channel and FAILS CLOSED with `policy-refusal` when none is
+ * resolvable — it NEVER calls `exchangeV2` without proof, so no proof-less token
+ * can ever be minted merely asserting a subject. The fail-closed thunk distinguishes
+ * this LOCAL refusal (no proof to present) from a `downstream-denied` (the IdP
+ * said no) and from an `infra-unreachable` (the endpoint was unreachable). */
 const saDispatch = (
   deps: KeycloakBrokerDeps,
   inv: Invocation,
@@ -271,10 +307,32 @@ const saDispatch = (
       via: "client_credentials" as const,
       mint: () => deps.endpoint.mintClientCredentials({ agentClientId: o.agentClientId, scope, audience }),
     }))
-    .with({ kind: "user" }, (o) => ({
-      via: "token-exchange-v2" as const,
-      mint: () => deps.endpoint.exchangeV2({ userSub: o.sub, agentClientId: o.agentClientId, scope, audience }),
-    }))
+    .with({ kind: "user" }, (o) => {
+      // FR-030 fail-closed: a user hop MUST present the user's actual verified
+      // JWT as the `subject_token` proof. The token lives ONLY in the host-side
+      // side-channel (never on the string-only `InvocationOrigin`, FR-032), so
+      // resolve it by `runId` here. Absent it, the exchange CANNOT proceed —
+      // refuse locally before any egress rather than fabricate a proof-less token.
+      const subjectToken = deps.resolveSubjectToken(inv.runId);
+      if (subjectToken === undefined) {
+        return {
+          via: "token-exchange-v2" as const,
+          mint: async (): Promise<Result<MintedToken, FrameworkError>> =>
+            err({ kind: "policy-refusal", scope: scopeName(scope), agentClientId: o.agentClientId }),
+        };
+      }
+      return {
+        via: "token-exchange-v2" as const,
+        mint: () =>
+          deps.endpoint.exchangeV2({
+            userSub: o.sub,
+            agentClientId: o.agentClientId,
+            scope,
+            audience,
+            subjectToken,
+          }),
+      };
+    })
     .exhaustive();
 
 /**
@@ -471,7 +529,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       const scope = parseScope(capability);
       if (scope === undefined) continue;
       const scopeStr = scopeName(scope);
-      const audience = audienceForScope(scope);
+      const audience = audienceForScope(scope, deps.dynamicsOrgHost);
 
       // 2. FAIL CLOSED — local policy gate BEFORE any egress or cache read. If the
       //    agent client was never assigned this scope, refuse here with zero
@@ -480,6 +538,15 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       //    let alone reaches an endpoint (SC-006 / FR-W3-003).
       if (!assigned.has(scopeStr)) {
         await audit.refusal(auditFields(inv, scopeStr), "scope-not-assigned");
+        return err({ kind: "policy-refusal", scope: scopeStr, agentClientId: inv.origin.agentClientId });
+      }
+
+      // 2b. FAIL CLOSED (FR-042) — a `dynamics:read` scope with no configured
+      //     per-org host (`DYNAMICS_ORG_HOST` unset) has NO resolvable audience.
+      //     Refuse here, AFTER the assigned-scope gate, with zero egress — never
+      //     mint against a placeholder/wrong audience. Audited like any refusal.
+      if (audience === undefined) {
+        await audit.refusal(auditFields(inv, scopeStr), "dynamics-org-host-unset");
         return err({ kind: "policy-refusal", scope: scopeStr, agentClientId: inv.origin.agentClientId });
       }
 
@@ -504,7 +571,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         await audit.mint(auditFields(inv, scopeStr), via, "cache-reuse");
         resolved.push({
           capability,
-          handle: buildGraphHandle(scope, cachedApp.token, deps.graphHttp),
+          handle: buildGraphHandle(scope, cachedApp.token, deps.graphHttp, deps.dynamicsOrgHost),
         });
         continue;
       }
@@ -527,7 +594,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       // operation method is the only reachable surface — the bearer is closed over.
       resolved.push({
         capability,
-        handle: buildGraphHandle(scope, acquired.value.token, deps.graphHttp),
+        handle: buildGraphHandle(scope, acquired.value.token, deps.graphHttp, deps.dynamicsOrgHost),
       });
     }
 

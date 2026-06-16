@@ -23,6 +23,7 @@
 
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
+import type { SubjectToken } from "../domain/auth.js";
 
 /**
  * A minted bearer token together with its lifetime in seconds, exactly as an
@@ -47,24 +48,22 @@ export interface ClientCredentialsRequest {
 }
 
 /**
- * Inputs for a Standard Token Exchange V2 — the user-initiated authority path.
- * The user's `sub` is preserved on the exchanged token; `azp` becomes the agent.
+ * Inputs for a Standard Token Exchange V2 — the user-initiated authority path
+ * (RFC 8693 / Keycloak Standard Token Exchange). The user's `sub` is preserved on
+ * the exchanged token; `azp` becomes the agent (FR-031).
  *
- * KNOWN GAP (deliberate, decided — see ADR-0058 Amendment 2026-06-12): this
- * request carries only `userSub`, but a REAL Token Exchange V2 (RFC 8693 /
- * Keycloak Standard Token Exchange) must present the user's actual verified
- * JWT as the `subject_token` proof — and no type in the current chain carries
- * it (the auth middleware verifies the inbound JWT and keeps only `sub`/`azp`).
- * When the JWKS wave wires the live exchange, the subject token threads in
- * HOST-SIDE (a branded ref on the run context, injected into the broker deps);
- * the framework's `InvocationOrigin` stays string-only. The live adapter MUST
- * NOT be implemented as a proof-less impersonation-style grant ("mint a token
- * claiming this sub") — that would silently discard the exact sub-preserving
- * proof this port's contract documents. Currently fail-closed unwired, so the
- * gap is unreachable.
+ * PROOF-BEARING (FR-030): `subjectToken` is the user's ACTUAL verified compact JWT
+ * (branded `SubjectToken`, produced only at the verify seam). It is REQUIRED — the
+ * compiler forces every user-path caller to present real proof, so the live
+ * exchange can NEVER be a proof-less impersonation grant ("mint a token claiming
+ * this sub"). It is threaded HOST-SIDE only: the broker resolves it from the
+ * run-context side-channel (`resolveSubjectToken`) and passes it here; it never
+ * crosses the framework `InvocationOrigin` (string-only, FR-032) and never reaches
+ * a capability handle (NFR-011). `userSub` remains for cache-keying/audit; the
+ * actual subject preserved on the wire is whatever `subjectToken` proves.
  */
 export interface ExchangeV2Request {
-  /** The end user's subject (`origin.sub`) — MUST be preserved on the exchanged token. */
+  /** The end user's subject (`origin.sub`) — used for cache-keying/audit; the wire proof is `subjectToken`. */
   readonly userSub: string;
   /** The agent client the exchanged token's `azp` becomes (`origin.agentClientId`). */
   readonly agentClientId: string;
@@ -72,6 +71,13 @@ export interface ExchangeV2Request {
   readonly scope: DownstreamScope;
   /** The downstream resource/audience the exchanged token is narrowed to. */
   readonly audience: string;
+  /**
+   * The user's verified compact JWT presented as the RFC 8693 `subject_token`
+   * (FR-030). REQUIRED: a user exchange without real proof is unrepresentable, so
+   * the broker MUST resolve the run's subject token before constructing this
+   * request — and fail closed when it cannot.
+   */
+  readonly subjectToken: SubjectToken;
 }
 
 /**

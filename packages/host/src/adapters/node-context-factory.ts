@@ -33,11 +33,12 @@ import type {
 import type { InvocationOrigin } from "@fuguejs/framework";
 import { makeNodeContext, ok } from "@fuguejs/framework";
 import type { RegisteredDag } from "../domain/registry.js";
-import type { AuthIdentity } from "../domain/auth.js";
+import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";
-import { invocationOriginForIdentity } from "../domain/run-context.js";
+import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/run-context.js";
 import type { NodeContextForDag } from "../domain/run-context.js";
+import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
 
 
@@ -229,8 +230,9 @@ export type { NodeContextForDag };
  * This is why the broker is NO LONGER consulted here: minting must happen
  * per-node (the only place the real `nodeId` and that node's `requires` are
  * known), so resolving it once at context-construction with empty `requires`
- * (the prior T8 wiring) could never reach the minting machinery and silently
- * dropped every statically-configured client on the realm path (review C1).
+ * (the rejected eager-resolution design) could never reach the minting machinery
+ * and silently dropped every statically-configured client on the realm path
+ * (review C1).
  *
  * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
  * broker, and it now moves per node, in the framework.
@@ -251,9 +253,38 @@ export const createNodeContextForDag = async (
   runId: RunId,
   signal: AbortSignal,
   identity: AuthIdentity,
+  /**
+   * The DAG-id → REAL Keycloak agent-client-id map (FR-040, `AGENT_CLIENT_MAP`),
+   * INJECTED from host config. Threaded into `invocationOriginForIdentity` so the
+   * run `origin` carries the DAG's real agent client. A DAG id with NO mapping
+   * resolves to `undefined` and FAILS CLOSED here (throws a wiring-defect error
+   * caught by both run paths) rather than minting as an absent/wrong client.
+   * Defaults to the empty map (every DAG fails closed) so an un-threaded caller is
+   * safe-by-default.
+   */
+  agentClientMap: AgentClientMap = {},
+  /**
+   * HOST-SIDE side-channel sink for a user run's verified `subject_token`
+   * (FR-030/FR-032). When the run is user-initiated, the factory binds
+   * `runId → SubjectToken` here so the broker can resolve it for the RFC 8693
+   * exchange — WITHOUT the token ever crossing the framework `InvocationOrigin`
+   * (which stays string-only) or reaching a capability handle (NFR-011). Optional:
+   * the no-broker / non-user paths pass nothing and behave byte-identically.
+   */
+  bindSubjectToken?: (runId: RunId, token: SubjectToken) => void,
 ): Promise<NodeContextForDag> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
+
+  // Thread the user's verified subject token HOST-SIDE (FR-032): read it off the
+  // identity via the pure seam (never off `InvocationOrigin`) and bind it to this
+  // run's id. An agent/team/admin run has no subject token, so nothing is bound —
+  // the broker's user exchange then fails closed for any (illegitimate) user hop
+  // claiming this runId. The raw token is carried only through this sink.
+  if (bindSubjectToken !== undefined) {
+    const subjectToken = subjectTokenForIdentity(identity);
+    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
+  }
 
   // Wrap the shared LLM client in a per-run metered decorator: every call is
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
@@ -284,7 +315,23 @@ export const createNodeContextForDag = async (
     ? { get: (name: string) => dagPrompts.get(name) ?? null }
     : shared.prompts ?? { get: () => null };
 
-  const origin: InvocationOrigin = invocationOriginForIdentity(identity, dagId);
+  // FAIL CLOSED (FR-040): resolve the DAG's REAL agent client via AGENT_CLIENT_MAP.
+  // An unmapped DAG id yields `undefined` — the run has no agent identity, so it
+  // is refused here rather than minting as a fabricated/absent client. This throw
+  // is an adapter-boundary wiring-defect surface (like `wifTokenEndpoint` /
+  // `formatToken`); both run paths (`run-dag.ts`, `run-executor.ts`) fence the
+  // `createNodeContextForDag` call, so it never escapes as an unhandled rejection.
+  const origin: InvocationOrigin | undefined = invocationOriginForIdentity(
+    agentClientMap,
+    identity,
+    dagId,
+  );
+  if (origin === undefined) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
+        `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
+    );
+  }
 
   const ctx = makeNodeContext({
     runId,

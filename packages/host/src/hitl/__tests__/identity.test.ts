@@ -11,7 +11,7 @@ import fc from "fast-check";
 import { canAccessDag } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import type { PersistedIdentity } from "../types.js";
-import { toPersistedIdentity, toExecIdentity } from "../identity.js";
+import { toPersistedIdentity, toExecIdentity, approverTeamIdentity } from "../identity.js";
 
 describe("toPersistedIdentity", () => {
   it("drops the canRunDag closure from a user identity, preserving sub/azp", () => {
@@ -65,6 +65,70 @@ describe("toExecIdentity — fail-closed reconstruction (SECURITY)", () => {
     expect(team).toEqual({ kind: "team", team: "eng", label: "Eng" });
     expect(canAccessDag(team, "eng")).toBe(true);
     expect(canAccessDag(team, "ops")).toBe(false);
+  });
+});
+
+// ── approverTeamIdentity (FR-041, US5, SC-006) ───────────────────────────────
+// Resolves a Teams approver's aadObjectId to the AuthIdentity the HITL button
+// path authorizes against — at parity with the HTTP path (`canAccessDag`).
+describe("approverTeamIdentity — HITL approver resolution (FR-041, SC-006)", () => {
+  const MAP = { "aad-alice": ["sales", "ops"], "aad-bob": ["marketing"], "aad-empty": [] };
+
+  it("resolves a mapped approver to a user identity whose canAccessDag clears ONLY their teams", () => {
+    const alice = approverTeamIdentity(MAP, "aad-alice");
+    expect(alice).toBeDefined();
+    if (alice === undefined) throw new Error("expected an identity");
+    expect(alice.kind).toBe("user");
+    expect(canAccessDag(alice, "sales")).toBe(true);
+    expect(canAccessDag(alice, "ops")).toBe(true);
+    expect(canAccessDag(alice, "marketing")).toBe(false);
+  });
+
+  it("the approver's sub is their aadObjectId (stable subject)", () => {
+    const bob = approverTeamIdentity(MAP, "aad-bob");
+    if (bob === undefined || bob.kind !== "user") throw new Error("expected a user identity");
+    expect(bob.sub).toBe("aad-bob");
+  });
+
+  it("SC-006 fail-closed: an UNKNOWN aadObjectId resolves to undefined (authorizes nothing)", () => {
+    expect(approverTeamIdentity(MAP, "aad-unknown")).toBeUndefined();
+  });
+
+  it("SC-006 fail-closed: an absent aadObjectId (no object id on the click) resolves to undefined", () => {
+    expect(approverTeamIdentity(MAP, undefined)).toBeUndefined();
+  });
+
+  it("a mapped approver with an EMPTY team set authorizes no team (fail-closed)", () => {
+    const empty = approverTeamIdentity(MAP, "aad-empty");
+    if (empty === undefined) throw new Error("expected an identity");
+    expect(canAccessDag(empty, "sales")).toBe(false);
+    expect(canAccessDag(empty, "")).toBe(false);
+  });
+
+  it("does NOT resolve inherited Object.prototype keys to a membership (fail-closed)", () => {
+    expect(approverTeamIdentity(MAP, "toString")).toBeUndefined();
+    expect(approverTeamIdentity(MAP, "constructor")).toBeUndefined();
+    expect(approverTeamIdentity(MAP, "hasOwnProperty")).toBeUndefined();
+  });
+
+  it("an empty map refuses every approver (no mappings → nothing authorized)", () => {
+    expect(approverTeamIdentity({}, "aad-alice")).toBeUndefined();
+  });
+
+  it("∀ approver, dagTeam ∉ teams ⇒ canAccessDag(resolved, dagTeam) === false (SC-006 parity property)", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string()),
+        fc.string(),
+        (teams, dagTeam) => {
+          fc.pre(!teams.includes(dagTeam));
+          const id = approverTeamIdentity({ "aad-x": teams }, "aad-x");
+          if (id === undefined) throw new Error("mapped approver must resolve");
+          return canAccessDag(id, dagTeam) === false;
+        },
+      ),
+      { numRuns: 500 },
+    );
   });
 });
 

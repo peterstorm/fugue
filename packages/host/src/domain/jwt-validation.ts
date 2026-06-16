@@ -91,10 +91,13 @@ const audienceMatches = (aud: JwtAudience, expected: string): boolean =>
  *     `malformed`; an absent `nbf` skips the check) → `not-yet-valid`;
  *  5. `exp > now` (strictly; `exp === now` is expired) → `expired`.
  *
- * On success returns a branded `AuthenticatedUser` carrying `{ sub, azp }` — the
- * only claims the run path needs, and the ONLY way to obtain that brand (so a
- * bare `{ sub, azp }` can never masquerade as an authenticated principal). Never
- * throws; all failures are `err(AuthError)`.
+ * On success returns a branded `AuthenticatedUser` carrying `{ sub, azp, teams }`
+ * — the claims the run path needs (`teams` drives FR-021 run authorization), and
+ * the ONLY way to obtain that brand (so a bare `{ sub, azp, teams }` can never
+ * masquerade as an authenticated principal). An absent `teams` claim becomes the
+ * empty list (fail-closed: no team membership ⇒ no team's DAGs); a present-but-
+ * malformed `teams` rejects the token. Never throws; all failures are
+ * `err(AuthError)`.
  *
  * Input is `SignatureVerifiedClaims` (brand from the JWKS verifier) — the type
  * makes it impossible to call this on a decoded-but-unverified payload (review
@@ -143,6 +146,27 @@ export const validateRealmJwtClaims = (
     return err({ kind: "malformed", reason: "missing or non-string 'azp'" });
   }
 
+  // `teams` (FR-020): the user's team memberships, a multi-valued claim the
+  // run-authorization policy (FR-021) tests against the DAG-owning team. Parsed
+  // defensively, mirroring the `aud`-array branch above (parse, don't trust).
+  //
+  // FAIL-CLOSED MISSING-CLAIM TREATMENT (deliberate): an ABSENT `teams` claim is
+  // treated as the EMPTY list — a user in no team, who can therefore run no
+  // team's DAGs (`authorizeUserRun` returns `[].includes(dagTeam) === false`).
+  // This is fail-closed: absence grants nothing. A PRESENT-but-malformed claim
+  // (not an array, or any element non-string/empty) is `malformed` and rejects
+  // the whole token — a wrong-typed claim is never silently coerced to "no
+  // teams", because that could mask a misconfigured realm mapper. (An empty
+  // array `[]` is well-formed and means exactly "no teams".)
+  let teams: readonly string[];
+  if (c.teams === undefined) {
+    teams = [];
+  } else if (Array.isArray(c.teams) && c.teams.every(isNonEmptyString)) {
+    teams = c.teams;
+  } else {
+    return err({ kind: "malformed", reason: "non-array or non-string 'teams'" });
+  }
+
   const iss = c.iss;
   const aud = c.aud as JwtAudience;
   const exp = c.exp;
@@ -179,7 +203,7 @@ export const validateRealmJwtClaims = (
     return err({ kind: "expired", exp, now: opts.now });
   }
 
-  return ok(markAuthenticatedUser({ sub, azp }));
+  return ok(markAuthenticatedUser({ sub, azp, teams }));
 };
 
 /** Re-export for callers that want the claim shapes by name. */

@@ -31,10 +31,23 @@ import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
 import type { NodeContextForDag } from "./domain/run-context.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
+import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
+import type { RealmJwtDeps } from "./http/middleware/auth.js";
+import type { AuthenticatedUser } from "./domain/auth.js";
 import type { CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { createKeycloakBroker } from "./adapters/keycloak-broker.js";
+import { createSubjectTokenRegistry } from "./adapters/subject-token-registry.js";
+import type { SubjectTokenRegistry } from "./adapters/subject-token-registry.js";
 import { createUnwiredTokenEndpoint } from "./adapters/unwired-token-endpoint.js";
 import { createUnwiredEntraWifExchange, createUnwiredGraphHttp } from "./adapters/unwired-entra-wif.js";
+import { createKeycloakTokenEndpoint } from "./adapters/keycloak-token-endpoint-http.js";
+import { createEntraWifExchange } from "./adapters/entra-wif.js";
+import type { EntraWifExchange, EntraWifConfig } from "./adapters/entra-wif.js";
+import type { KeycloakTokenEndpoint } from "./adapters/keycloak-token-endpoint.js";
+import type { GraphHttp } from "./adapters/graph-capability.js";
+import { createFetchHttpPost } from "./adapters/fetch-http-post.js";
+import { createFetchGraphHttp } from "./adapters/fetch-graph-http.js";
+import { createAgentClientCredentials } from "./adapters/agent-client-credentials.js";
 import { createRouter } from "./http/router.js";
 import type { RouterDeps } from "./http/router.js";
 import { getRegistry } from "./domain/host-state.js";
@@ -124,16 +137,67 @@ export interface HostInstance {
  * today (SC-005), zero regression. Pools stay boot-scoped either way
  * (FR-W2-005); only authority resolution moves behind the broker.
  *
- * The token endpoint is the unwired fail-closed default in this wave (the real
- * JWKS/HTTP adapter is a later wave): an assigned-but-not-yet-wired scope
- * surfaces `infra-unreachable` (retriable), never a silent success — mirroring
- * how the `realmJwt` group is left undefined so the JWT inbound path fails closed.
+ * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
+ * when ITS OWN config is present — there is no single global enable flag.
+ *   - live Keycloak token endpoint  ⟸ `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` present;
+ *   - live Entra WIF exchange + live Graph transport ⟸ `ENTRA_TENANT_ID` AND
+ *     `ENTRA_CLIENT_ID` present (validated as an inseparable pair at boot);
+ *   - otherwise EACH leg retains its fail-closed unwired stub.
+ * When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
+ * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
+ * `infra-unreachable` (retriable), never a silent success — and an un-granted
+ * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
  */
+/**
+ * The fail-safe default `resolveSubjectToken`: resolves NO token for any run, so
+ * a broker constructed without the live `SubjectTokenRegistry` fails the user
+ * RFC 8693 exchange CLOSED (no `subject_token` proof → no exchange) rather than
+ * minting a proof-less token. Named (not an inline literal) so `createHost` can
+ * detect when this inert default would back a LIVE broker — a wiring slip that
+ * would silently close every user hop — and warn (defense-in-depth; the
+ * fail-closed behaviour itself is unchanged).
+ */
+const inertResolveSubjectToken = (
+  _runId: import("@fuguejs/framework").RunId,
+): import("./domain/auth.js").SubjectToken | undefined => undefined;
+
+/**
+ * Run `execute`, then ALWAYS `release(runId)` from the registry — on the normal
+ * return AND when `execute` throws. This bounds a user run's in-memory subject
+ * token to its run (NFR-014): the token must not outlive the run on any exit,
+ * including a crash. `release` is a no-op for non-user runs (never bound) and for
+ * a never-bound id, so this is safe to call unconditionally at every teardown.
+ *
+ * The `finally` is the load-bearing invariant — extracted and exported so the
+ * release-on-both-paths wiring is asserted directly against the real registry,
+ * rather than re-implemented in a test that could drift from `executeDag`.
+ */
+export const withSubjectTokenRelease = async <T>(
+  registry: Pick<SubjectTokenRegistry, "release">,
+  runId: import("@fuguejs/framework").RunId,
+  execute: () => Promise<T>,
+): Promise<T> => {
+  try {
+    return await execute();
+  } finally {
+    registry.release(runId);
+  }
+};
+
 export const selectCapabilityBroker = (
   config: HostConfig,
   sharedInfra: Pick<SharedInfra, "tracer" | "logger">,
   logger: SyncLogger,
   now: () => number = Date.now,
+  /**
+   * Resolve a user run's verified `subject_token` for the RFC 8693 exchange,
+   * threaded from the host-side `SubjectTokenRegistry` the run-context factory
+   * binds at run start (FR-030/FR-032). Defaults to the inert fail-safe
+   * (`inertResolveSubjectToken`) so a broker constructed without the registry
+   * fails the user path CLOSED (no proof → no exchange) — never a proof-less
+   * token. `createHost` passes the live registry's `resolve`.
+   */
+  resolveSubjectToken: (runId: import("@fuguejs/framework").RunId) => import("./domain/auth.js").SubjectToken | undefined = inertResolveSubjectToken,
 ): CapabilityBroker | undefined => {
   if (config.REALM_JWT_ISSUER === undefined) {
     // Operability (mirror of the empty-policy warning below): a scope POLICY is
@@ -153,30 +217,92 @@ export const selectCapabilityBroker = (
   // Operability: an empty scope policy means every mint fails closed (safe but
   // surprising). Surface it once at boot so a misconfigured realm policy is
   // diagnosable from the logs rather than from a wall of per-mint refusals.
-  if (Object.keys(config.AGENT_CLIENT_SCOPES).length === 0) {
+  if (Object.keys(config.AGENT_CLIENT_SCOPES ?? {}).length === 0) {
     logger.warn(
       "live capability broker selected with empty scope policy — all mints will fail closed",
     );
   }
-  // Operability: the realm issuer is set (broker enabled) but the inbound JWT
-  // verifier is NOT yet wired into the router (a later wave). Surface it once
-  // so the half-wired state is diagnosable — the user inbound path stays
-  // fail-closed (a JWT-shaped token 401s) until the verifier lands.
-  logger.warn(
-    "live capability broker selected (REALM_JWT_ISSUER set) while the inbound JWT verifier is not wired — " +
-      "user-initiated runs are not yet acceptable; agent runs mint per-node",
-  );
+  // Operability (defense-in-depth, mirrors the warnings above): the LIVE broker
+  // is being selected but its `resolveSubjectToken` is the inert fail-safe — the
+  // host-side `SubjectTokenRegistry` was not wired in. Every USER hop's RFC 8693
+  // exchange will then fail CLOSED (no `subject_token` proof resolvable), which is
+  // safe but, if unintended, looks like an opaque per-run refusal. Surface the
+  // misconfiguration ONCE so it is diagnosable from the boot log. The fail-closed
+  // behaviour is unchanged — this only names the cause. (In normal `createHost`
+  // wiring the live registry's `resolve` is always passed, so this never fires;
+  // it guards against a future wiring regression.)
+  if (resolveSubjectToken === inertResolveSubjectToken) {
+    logger.warn(
+      "live capability broker selected without a subject-token resolver — user-initiated " +
+        "runs will FAIL CLOSED on the RFC 8693 exchange (the SubjectTokenRegistry is not wired)",
+    );
+  }
+  // ── AD-3 config-presence gating (FR-011): wire each leg LIVE only when its own
+  //    config is present. No single global enable flag — a leg without its config
+  //    keeps the fail-closed unwired stub.
+  //
+  // Keycloak SA-mint leg ⟸ KEYCLOAK_AGENT_CLIENT_CREDENTIALS present (a non-empty
+  // credential map). The token URL is the explicit KEYCLOAK_TOKEN_URL (https-
+  // validated at boot) or, when unset, derived from the realm issuer.
+  const keycloakWired = Object.keys(config.KEYCLOAK_AGENT_CLIENT_CREDENTIALS).length > 0;
+  // Entra WIF leg (+ its Graph transport) ⟸ ENTRA_TENANT_ID AND ENTRA_CLIENT_ID
+  // present (validated as an inseparable pair at boot, so either-set ⇒ both-set).
+  // Parse-don't-validate: lift the pair into ONE `EntraWifConfig | undefined` so
+  // its presence both gates the legs and carries the narrowed (non-undefined)
+  // strings — no later non-null assertion needed.
+  const entraConfig: EntraWifConfig | undefined =
+    config.ENTRA_TENANT_ID !== undefined && config.ENTRA_CLIENT_ID !== undefined
+      ? { tenantId: config.ENTRA_TENANT_ID, clientId: config.ENTRA_CLIENT_ID }
+      : undefined;
+  const entraWired = entraConfig !== undefined;
+
+  const endpoint: KeycloakTokenEndpoint = keycloakWired
+    ? createKeycloakTokenEndpoint({
+        config: {
+          tokenUrl:
+            config.KEYCLOAK_TOKEN_URL ??
+            `${config.REALM_JWT_ISSUER.replace(/\/$/, "")}/protocol/openid-connect/token`,
+        },
+        http: createFetchHttpPost(),
+        credentials: createAgentClientCredentials(config.KEYCLOAK_AGENT_CLIENT_CREDENTIALS),
+      })
+    : createUnwiredTokenEndpoint();
+
+  // The WIF exchange and the Graph transport are wired TOGETHER (the app-only
+  // token from WIF is what the Graph transport presents) — both behind the Entra
+  // config. The SA token is the only credential (SC-011): no static Entra secret.
+  const entraWif: EntraWifExchange =
+    entraConfig !== undefined
+      ? createEntraWifExchange(entraConfig, createFetchHttpPost())
+      : createUnwiredEntraWifExchange();
+  const graphHttp: GraphHttp = entraConfig !== undefined ? createFetchGraphHttp() : createUnwiredGraphHttp();
+
+  // FR-011: emit EXACTLY ONE boot warning naming the unwired leg(s), only when a
+  // leg is partially/unwired. Both wired → no warning.
+  const unwiredLegs: string[] = [];
+  if (!keycloakWired) {
+    unwiredLegs.push("Keycloak token endpoint (set KEYCLOAK_AGENT_CLIENT_CREDENTIALS)");
+  }
+  if (!entraWired) {
+    unwiredLegs.push("Entra WIF exchange + Graph transport (set ENTRA_TENANT_ID and ENTRA_CLIENT_ID)");
+  }
+  if (unwiredLegs.length > 0) {
+    logger.warn(
+      `capability authority leg(s) not wired — remain fail-closed (assigned scopes surface infra-unreachable): ${unwiredLegs.join("; ")}`,
+    );
+  }
+
   return createKeycloakBroker({
-    endpoint: createUnwiredTokenEndpoint(),
-    // The WIF exchange + Graph transport are the unwired fail-closed defaults
-    // in this wave too (awaiting the live `fugue-agents` federated credential):
-    // an assigned scope whose Keycloak mint would succeed still surfaces
-    // `infra-unreachable` at the WIF hop, never a silent success. No static
-    // Entra secret/cert is wired anywhere here (SC-011 holds trivially).
-    entraWif: createUnwiredEntraWifExchange(),
-    graphHttp: createUnwiredGraphHttp(),
+    endpoint,
+    entraWif,
+    graphHttp,
     assignedScopes: (agentClientId) =>
-      new Set(config.AGENT_CLIENT_SCOPES[agentClientId] ?? []),
+      new Set((config.AGENT_CLIENT_SCOPES ?? {})[agentClientId] ?? []),
+    // Per-org Dynamics/Dataverse host (FR-042) — the `dynamics:read` audience +
+    // read URL target `https://<host>/api/data/v9.2`. Unset → that scope fails
+    // closed at the broker (zero egress); `msgraph` scopes are unaffected.
+    ...(config.DYNAMICS_ORG_HOST !== undefined ? { dynamicsOrgHost: config.DYNAMICS_ORG_HOST } : {}),
+    resolveSubjectToken,
     tracer: sharedInfra.tracer,
     logger: sharedInfra.logger,
     now,
@@ -262,12 +388,61 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   );
 
   // ── Capability Broker selection (T8 / per-node minting, review C1) ──────────
-  // See `selectCapabilityBroker` above: live Keycloak broker when
-  // `REALM_JWT_ISSUER` is set (unwired fail-closed endpoints this wave),
-  // `undefined` otherwise (no minting authority wired — the zero-regression
-  // static path). A node declaring `requires: ["http", "msgraph:mail.send"]`
-  // keeps its static `http` client AND gets a freshly minted `mail.send` handle.
-  const broker: CapabilityBroker | undefined = selectCapabilityBroker(config, sharedInfra, logger);
+  // See `selectCapabilityBroker` above: a live Keycloak broker is returned when
+  // `REALM_JWT_ISSUER` is set, `undefined` otherwise (no minting authority wired
+  // — the zero-regression static path). When the broker IS selected, each
+  // authority leg is wired LIVE only when ITS OWN config is present (AD-3): the
+  // Keycloak token endpoint ⟸ KEYCLOAK_AGENT_CLIENT_CREDENTIALS, the Entra WIF
+  // exchange + Graph transport ⟸ ENTRA_TENANT_ID + ENTRA_CLIENT_ID; any leg
+  // lacking its config keeps its fail-closed unwired stub (assigned-but-unwired
+  // scopes surface `infra-unreachable`, never silent success). The inbound USER
+  // JWT path is wired LIVE independently of this agent per-node minting path —
+  // both are gated on `REALM_JWT_ISSUER` but selected separately (the inbound
+  // verifier group is constructed just below). A node declaring
+  // `requires: ["http", "msgraph:mail.send"]` keeps its static `http` client AND
+  // gets a freshly minted `mail.send` handle.
+  // Host-side side-channel carrying each user run's verified `subject_token` from
+  // the run-context factory (bind at run start) to the broker (resolve at per-node
+  // dispatch) — FR-030/FR-032. The raw token travels ONLY through here; it never
+  // crosses `InvocationOrigin` (string-only) nor reaches a capability handle.
+  const subjectTokens = createSubjectTokenRegistry();
+  const broker: CapabilityBroker | undefined = selectCapabilityBroker(
+    config,
+    sharedInfra,
+    logger,
+    Date.now,
+    subjectTokens.resolve,
+  );
+
+  // ── Inbound user (OIDC) JWT path (FR-020/021/022/023, SC-005) ────────────
+  // Wired LIVE as ONE inseparable group (verifier + iss/aud policy + run-auth
+  // policy) exactly when the realm issuer is configured (`REALM_JWT_ISSUER`).
+  // Grouping makes "verifier wired but user-run authorization undecided"
+  // UNREPRESENTABLE — `RealmJwtDeps.authorizeUserRun` is REQUIRED (AD-5/FR-021),
+  // so constructing the group forces the decision here.
+  //
+  // The authorization decision is STATELESS (FR-022): it tests the run's
+  // DAG-owning team against the user's VERIFIED `teams` claim — no per-request
+  // datastore lookup. A user whose `teams` does not include the DAG's team is
+  // denied (SC-005), and that denial happens in `canAccessDag` BEFORE any
+  // concurrency/slot acquisition in the run path (run-dag.ts).
+  //
+  // When `REALM_JWT_ISSUER` is unset the group is `undefined`: the JWT path is
+  // disabled and a JWT-shaped token fails closed (no signature can be verified →
+  // 401). The admin and opaque `fug_` team-token paths are untouched (FR-023).
+  const realmJwt: RealmJwtDeps | undefined =
+    config.REALM_JWT_ISSUER !== undefined
+      ? {
+          verify: createRealmJwtVerifier({ issuer: config.REALM_JWT_ISSUER }),
+          expectedIss: config.REALM_JWT_ISSUER,
+          expectedAud: config.REALM_JWT_AUDIENCE,
+          // FR-021/FR-022: stateless team-membership check against the verified
+          // token's `teams`. NOT defaultable to `() => true` (AD-5) — that would
+          // be an allow-all grant consuming any team's concurrency/budget.
+          authorizeUserRun: (user: AuthenticatedUser, dagTeam: string): boolean =>
+            user.teams.includes(dagTeam),
+        }
+      : undefined;
 
   // ── HITL durable run engine (ADR-0060) ──────────────────────────────────
   // Enabled when a notifier transport is configured (Bot Framework cards, or
@@ -283,6 +458,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   const botConfigured = config.BOT_APP_ID !== undefined && config.BOT_APP_PASSWORD !== undefined;
   let notifier: HumanReviewNotifierPort | undefined;
   let conversations: ConversationStorePort | undefined;
+  // Resolve a run's DAG id to its OWNING team off the LIVE registry (the same
+  // `lookupDag` the HTTP path uses). Shared by the notifier (confidentiality
+  // routing — FR-041) and the inbound handler (authz parity — SC-006). `undefined`
+  // when the DAG is no longer registered.
+  const resolveDagTeam = (dagId: DagId): string | undefined => {
+    const reg = getRegistry(hostState);
+    return reg ? lookupDag(reg, dagId)?.team : undefined;
+  };
   if (botConfigured) {
     conversations = createRedisConversationStore(sharedInfra.redis, sharedInfra.logger);
     const connector = createBotConnector(
@@ -293,7 +476,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       },
       sharedInfra.logger,
     );
-    notifier = createBotFrameworkNotifier({ connector, conversations });
+    notifier = createBotFrameworkNotifier({ connector, conversations, resolveDagTeam });
   } else if (config.TEAMS_WEBHOOK_URL !== undefined) {
     notifier = createWebhookNotifier(
       {
@@ -316,6 +499,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         return reg ? lookupDag(reg, id as DagId) : undefined;
       },
       broker,
+      agentClientMap: config.AGENT_CLIENT_MAP,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -343,7 +527,26 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       const svc = hitlService;
       const convs = conversations;
       teamsBotHandle = (input) =>
-        handleBotActivity({ verify, hitl: svc, conversations: convs, logger: sharedInfra.logger }, input);
+        handleBotActivity(
+          {
+            verify,
+            hitl: svc,
+            conversations: convs,
+            // FR-041: authorize the Teams approver against the run's DAG-owning
+            // team at parity with the HTTP path. The team is resolved from the
+            // live registry (same `lookupDag` the HTTP path + notifier use), and
+            // the approver's membership from `HITL_APPROVER_TEAMS`.
+            resolveDagTeam,
+            approverTeams: config.HITL_APPROVER_TEAMS,
+            // FR-041 (confidentiality routing): on `conversationUpdate` map the
+            // Teams team `aadGroupId` to a fugue team so the captured reference is
+            // stored per team and the notifier routes that team's cards to its own
+            // channel. Unmapped → default reference only.
+            teamChannels: config.HITL_TEAM_CHANNELS,
+            logger: sharedInfra.logger,
+          },
+          input,
+        );
       logger.info("HITL durable run engine enabled (Bot Framework in-Teams transport)");
     } else {
       logger.info("HITL durable run engine enabled (Teams webhook transport)");
@@ -378,7 +581,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       identity: AuthIdentity,
     ): Promise<NodeContextForDag> => {
       const rid = makeRunId(crypto.randomUUID());
-      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity);
+      // Bind the user run's verified subject token host-side (FR-030/FR-032): the
+      // factory reads it off the identity via the pure seam and stores it under
+      // `rid` so the broker can resolve it for the RFC 8693 exchange. Non-user
+      // runs bind nothing. `executeDag` releases it on completion (below).
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, subjectTokens.bind);
     },
     executeDag: async <I, O>(
       dag: DagDef,
@@ -391,9 +598,15 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       // so the framework mints each node's declared scopes PER NODE at dispatch.
       // When `broker` is undefined (no realm config) no minting authority is
       // wired and the framework skips minting — byte-identical to today.
-      return runDag<I, O>(dag, input, ctx, {
-        minting: broker !== undefined ? { broker, origin } : undefined,
-      });
+      // The teardown that releases the run's subject token (NFR-014) is the
+      // exported `withSubjectTokenRelease` seam, so the release-on-BOTH-paths
+      // wiring (resolve AND throw) is unit-testable against the real registry
+      // without copy-drift from this call site.
+      return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
+        runDag<I, O>(dag, input, ctx, {
+          minting: broker !== undefined ? { broker, origin } : undefined,
+        }),
+      );
     },
     clock: Date.now,
     circuitConfig: {
@@ -403,20 +616,18 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     },
     adminToken: config.ADMIN_TOKEN,
     tokenStore,
-    // fugue-platform OIDC (`user`) inbound path (FR-W3-006/007). The JWT path
-    // is wired as ONE grouped `realmJwt` dep (verifier + iss/aud policy,
-    // inseparable) — deliberately ABSENT here: T8 selected the broker but left
-    // the JWKS-backed verifier for a later wave, so a JWT-shaped token fails
-    // closed (no signature can be verified → 401). The iss/aud policy values
-    // live in config (`REALM_JWT_ISSUER`/`REALM_JWT_AUDIENCE`) ready for that
-    // wave.
+    // fugue-platform OIDC (`user`) inbound path (FR-020/021/022/023, SC-005),
+    // wired LIVE above as ONE grouped `realmJwt` dep (JWKS verifier + iss/aud
+    // policy + the REQUIRED `authorizeUserRun` run-authorization policy). When
+    // `REALM_JWT_ISSUER` is unset the group is `undefined` and the JWT path is
+    // disabled (fail-closed: a JWT-shaped token 401s, no signature verifiable).
     //
     // SECURITY: `RealmJwtDeps.authorizeUserRun` is a REQUIRED member of the
-    // group — constructing `realmJwt` forces deciding which users may run
-    // which teams' DAGs at this wiring site (the compiler enforces it; see
-    // middleware/auth.ts). There is no half-wired "verifier without user-run
-    // policy" state to fall into. Do NOT wire `() => true` without the realm/
-    // role check that decision deserves.
+    // group (AD-5) — constructing `realmJwt` forces the run-authorization
+    // decision in types. It is wired to a STATELESS team-membership check
+    // (`user.teams.includes(dagTeam)`, FR-022) and is NOT defaulted to an
+    // allow-all `() => true`.
+    ...(realmJwt !== undefined ? { realmJwt } : {}),
     adminHandlerDeps: {
       tokenStore,
       clock: Date.now,

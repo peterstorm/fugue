@@ -23,6 +23,7 @@ const baseClaims = (over: Partial<RealmJwtClaims> = {}): RealmJwtClaims => ({
   exp: NOW + 300,
   sub: "user-123",
   azp: "fugue-frontend",
+  teams: ["team-a", "team-b"],
   ...over,
 });
 
@@ -40,12 +41,13 @@ const validate = (claims: unknown) =>
 
 describe("validateRealmJwtClaims", () => {
   describe("valid", () => {
-    it("returns ok({sub, azp}) for valid claims (aud as string)", () => {
+    it("returns ok({sub, azp, teams}) for valid claims (aud as string)", () => {
       const res = validate(baseClaims());
       expect(res.ok).toBe(true);
       if (res.ok) {
         expect(res.value.sub).toBe("user-123");
         expect(res.value.azp).toBe("fugue-frontend");
+        expect(res.value.teams).toEqual(["team-a", "team-b"]);
       }
     });
 
@@ -97,6 +99,55 @@ describe("validateRealmJwtClaims", () => {
 
     it("rejects an aud array with a non-string element", () => {
       const res = validate(baseClaims({ aud: [EXPECTED_AUD, 42 as unknown as string] }));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("malformed");
+    });
+  });
+
+  // ── teams claim (FR-020) — defensive parse, mirrors the aud-array branch ──
+  // Fail-closed treatment: ABSENT → empty list (a user in no team runs no
+  // team's DAGs); PRESENT-but-malformed (non-array / non-string|empty element)
+  // → `malformed` (a wrong-typed claim is never silently coerced to "no teams").
+  describe("teams claim parse", () => {
+    it("carries a valid teams array through to the AuthenticatedUser", () => {
+      const res = validate(baseClaims({ teams: ["alpha", "beta"] }));
+      expect(res.ok).toBe(true);
+      if (res.ok) expect(res.value.teams).toEqual(["alpha", "beta"]);
+    });
+
+    it("accepts an empty teams array (well-formed; means 'no teams')", () => {
+      const res = validate(baseClaims({ teams: [] }));
+      expect(res.ok).toBe(true);
+      if (res.ok) expect(res.value.teams).toEqual([]);
+    });
+
+    it("treats an ABSENT teams claim as the empty list (fail-closed, not malformed)", () => {
+      const { teams: _omit, ...rest } = baseClaims();
+      const res = validate(rest);
+      expect(res.ok).toBe(true);
+      if (res.ok) expect(res.value.teams).toEqual([]);
+    });
+
+    it("rejects a non-array teams claim as malformed", () => {
+      const res = validate(baseClaims({ teams: "team-a" as unknown as string[] }));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("malformed");
+    });
+
+    it("rejects a teams array with a non-string element as malformed", () => {
+      const res = validate(baseClaims({ teams: ["team-a", 7 as unknown as string] }));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("malformed");
+    });
+
+    it("rejects a teams array with an empty-string element as malformed", () => {
+      const res = validate(baseClaims({ teams: ["team-a", ""] }));
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("malformed");
+    });
+
+    it("rejects a null teams claim as malformed (present-but-wrong-typed, not coerced)", () => {
+      const res = validate(baseClaims({ teams: null as unknown as string[] }));
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.error.kind).toBe("malformed");
     });

@@ -32,7 +32,8 @@ import {
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
-import type { AuthIdentity } from "../domain/auth.js";
+import { subjectTokenForIdentity } from "../domain/run-context.js";
+import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
 
 // Existing pass-through / wiring tests are identity-agnostic — an admin identity
 // reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
@@ -44,6 +45,11 @@ const adminIdentity: AuthIdentity = { kind: "admin" };
 const testDagId = dagId("test-dag");
 const testRunId = makeRunId("run-001");
 const testNodeId = makeNodeId("node-a");
+
+// FR-040: map the test DAG to its real agent client so the origin resolves for
+// the wiring/metering tests below (these exercise context construction, not the
+// FR-040 fail-closed path, which has its own dedicated tests).
+const FACTORY_AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
 
 const makeDag = (overrides?: Partial<RegisteredDag["config"]>): RegisteredDag => ({
   id: testDagId,
@@ -306,7 +312,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
   it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -317,7 +323,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.http).toBeNull();
   });
@@ -329,7 +335,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // migrated the clock from a factory seam to a capability without host wiring.
   it("surfaces a usable clock when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([{ name: "clock", client: systemClock }]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.clock).not.toBeNull();
     // The presence check `ctx.clock != null` is what `validateCapabilities`
@@ -340,7 +346,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves clock null when no clock handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.clock).toBeNull();
   });
@@ -375,6 +381,7 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
       testRunId,
       new AbortController().signal,
       adminIdentity,
+      FACTORY_AGENT_MAP,
     );
 
     // `extractClients([httpHandle]).http === httpHandle.client` — the factory
@@ -424,7 +431,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm } = fakeLlm(10, 5);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     // If the factory ever stops wrapping (handing the shared client through
     // unmetered), this reference check is the loudest possible regression guard.
@@ -437,7 +444,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudgetTokens: 1 }); // budget 1: call 1 is the single overshoot
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     const r1 = await ctx.llm.sendStructured(structuredReq()); // 0 < 1 → allowed, settles 15
@@ -461,7 +468,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm, calls } = fakeLlm(1_000_000, 0);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     for (let i = 0; i < 3; i++) {
@@ -480,37 +487,53 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
 // origin; these tests prove the user `sub`/`azp` actually land and that the
 // admin/team placeholder is unchanged (byte-for-byte the prior behaviour).
 
-describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () => {
-  it("a user identity produces origin { kind: 'user', sub, agentClientId: dagId } — sub lands, agent client is the DAG's, NOT the frontend azp (I3)", () => {
+describe("invocationOriginForIdentity — user sub threading + real-client resolution (FR-W3-007, FR-040)", () => {
+  // FR-040: the DAG id resolves to its REAL Keycloak agent client via the map,
+  // not the dag-id placeholder. `test-dag` → `fugue-agent-test`.
+  const AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
+
+  it("a user identity produces origin { kind: 'user', sub, agentClientId: <REAL client> } — sub lands, agent client is the mapped client, NOT the dagId nor the frontend azp (I3, FR-040)", () => {
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend", canRunDag: () => true };
 
-    const origin = invocationOriginForIdentity(userIdentity, testDagId);
+    const origin = invocationOriginForIdentity(AGENT_MAP, userIdentity, testDagId);
 
-    // agentClientId is the AGENT the user acts through (the DAG's agent-type
-    // client placeholder = dagId), NOT the inbound token's frontend `azp`. The
-    // broker gates the user hop with `assignedScopes(agentClientId)`, which must
-    // consult the AGENT's realm policy, never the frontend SSO client's (I3).
+    // agentClientId is the AGENT the user acts through — the DAG's REAL agent-type
+    // Keycloak client resolved from AGENT_CLIENT_MAP — NOT the inbound token's
+    // frontend `azp`, and NOT the dagId placeholder. The broker gates the user
+    // hop with `assignedScopes(agentClientId)`, which must consult the AGENT's
+    // realm policy keyed on the real client id (I3, FR-040).
     expect(origin).toEqual({
       kind: "user",
       sub: "user-abc-123",
-      agentClientId: testDagId,
+      agentClientId: "fugue-agent-test",
     });
-    // Guard the specific regression: the frontend azp must NOT leak into origin.
     expect((origin as { agentClientId: string }).agentClientId).not.toBe("fugue-frontend");
+    expect((origin as { agentClientId: string }).agentClientId).not.toBe(testDagId);
   });
 
-  it("a team identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
+  it("a team identity maps to the agent origin keyed on the REAL client id (FR-040)", () => {
     const teamIdentity: AuthIdentity = { kind: "team", team: "eng", label: "ci" };
 
-    const origin = invocationOriginForIdentity(teamIdentity, testDagId);
+    const origin = invocationOriginForIdentity(AGENT_MAP, teamIdentity, testDagId);
 
-    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+    expect(origin).toEqual({ kind: "agent", agentClientId: "fugue-agent-test" });
   });
 
-  it("an admin identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
-    const origin = invocationOriginForIdentity(adminIdentity, testDagId);
+  it("an admin identity maps to the agent origin keyed on the REAL client id (FR-040)", () => {
+    const origin = invocationOriginForIdentity(AGENT_MAP, adminIdentity, testDagId);
 
-    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+    expect(origin).toEqual({ kind: "agent", agentClientId: "fugue-agent-test" });
+  });
+
+  it("FR-040 fail-closed: an UNMAPPED dag id resolves to `undefined` (no identity passthrough) for EVERY identity kind", () => {
+    // Empty map → no DAG has an agent client → origin resolution is first-class
+    // ABSENCE, never the dag-id-as-client placeholder.
+    const userIdentity: AuthIdentity = { kind: "user", sub: "u", azp: "fugue-frontend", canRunDag: () => true };
+    expect(invocationOriginForIdentity({}, userIdentity, testDagId)).toBeUndefined();
+    expect(invocationOriginForIdentity({}, { kind: "team", team: "eng", label: "ci" }, testDagId)).toBeUndefined();
+    expect(invocationOriginForIdentity({}, adminIdentity, testDagId)).toBeUndefined();
+    // A map that maps a DIFFERENT dag still fails closed for the unmapped one.
+    expect(invocationOriginForIdentity({ "other-dag": "fugue-agent-other" }, adminIdentity, testDagId)).toBeUndefined();
   });
 
   it("the factory accepts a user identity and produces a usable NodeContext (sub threaded, no throw)", async () => {
@@ -532,12 +555,144 @@ describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () =>
       testRunId,
       new AbortController().signal,
       userIdentity,
+      // FR-040: map the DAG to its real agent client so the origin resolves.
+      { [testDagId as string]: "fugue-agent-test" },
     );
 
     // The run path no longer dead-ends the user identity: a base NodeContext is
     // produced and the origin the factory built from this identity carries the
-    // user's sub (threaded into per-node minting by the framework).
+    // user's sub (threaded into per-node minting by the framework) AND the REAL
+    // resolved agent client (FR-040).
     expect(ctx).toBeDefined();
-    expect(origin).toMatchObject({ kind: "user", sub: "user-xyz" });
+    expect(origin).toMatchObject({ kind: "user", sub: "user-xyz", agentClientId: "fugue-agent-test" });
+  });
+
+  it("FR-040 fail-closed: the factory REFUSES (throws) a DAG with no agent client mapping — never mints an absent identity", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const shared = baseSharedInfra();
+    // Empty map (the safe default) → the DAG has no agent client → fail closed.
+    const promise = createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      {},
+    );
+    await expect(promise).rejects.toThrow(/no agent client mapping/);
+  });
+});
+
+// ── Subject token: host-side only, never on the framework origin (T7/FR-032) ─
+//
+// The user's verified `subject_token` (FR-030 proof) MUST be threaded HOST-SIDE
+// and MUST NEVER appear on the framework `InvocationOrigin` (which stays
+// string-only). These tests pin both halves: the pure seam extracts the token off
+// the identity, and the factory binds it to the run via the side-channel sink
+// WITHOUT it ever crossing into the origin.
+
+describe("subjectTokenForIdentity — pure host-side extraction (FR-030/FR-032)", () => {
+  const proof: SubjectToken = markSubjectToken("verified.user.jwt");
+
+  it("returns the verified token for a user identity that carries one", () => {
+    const userIdentity: AuthIdentity = {
+      kind: "user",
+      sub: "user-xyz",
+      azp: "fugue-frontend",
+      canRunDag: () => true,
+      subjectToken: proof,
+    };
+    expect(subjectTokenForIdentity(userIdentity)).toBe(proof);
+  });
+
+  it("returns undefined for a user identity with no token (durable reconstruction) — broker then fails closed", () => {
+    const reconstructed: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => false };
+    expect(subjectTokenForIdentity(reconstructed)).toBeUndefined();
+  });
+
+  it("returns undefined for admin and team identities (they have no end-user subject token)", () => {
+    expect(subjectTokenForIdentity({ kind: "admin" })).toBeUndefined();
+    expect(subjectTokenForIdentity({ kind: "team", team: "eng", label: "ci" })).toBeUndefined();
+  });
+});
+
+describe("createNodeContextForDag — binds the subject token host-side, NEVER on the origin (FR-032)", () => {
+  const baseSharedInfra = (): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  it("binds runId → subject token via the sink for a user run; the token is ABSENT from the string-only origin", async () => {
+    const proof = markSubjectToken("verified.user.jwt-FR032");
+    const userIdentity: AuthIdentity = {
+      kind: "user",
+      sub: "user-xyz",
+      azp: "fugue-frontend",
+      canRunDag: () => true,
+      subjectToken: proof,
+    };
+    const bound: { runId: RunId; token: SubjectToken }[] = [];
+
+    const { origin } = await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      userIdentity,
+      FACTORY_AGENT_MAP,
+      (rid, token) => bound.push({ runId: rid, token }),
+    );
+
+    // The token went through the HOST-SIDE sink, keyed on the run id.
+    expect(bound).toEqual([{ runId: testRunId, token: proof }]);
+    // FR-032: the origin is string-only — the raw token appears NOWHERE on it.
+    expect(JSON.stringify(origin)).not.toContain("verified.user.jwt-FR032");
+    expect((origin as Record<string, unknown>).subjectToken).toBeUndefined();
+    expect((origin as Record<string, unknown>).token).toBeUndefined();
+    // The origin still carries only the string sub + the REAL resolved agent client.
+    expect(origin).toEqual({ kind: "user", sub: "user-xyz", agentClientId: "fugue-agent-test" });
+  });
+
+  it("binds NOTHING for an admin run (no subject token) — the sink is never called", async () => {
+    const bound: RunId[] = [];
+    await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+      (rid) => bound.push(rid),
+    );
+    expect(bound).toEqual([]);
+  });
+
+  it("binds NOTHING for a user run with no resolvable token (durable reconstruction)", async () => {
+    const reconstructed: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => false };
+    const bound: RunId[] = [];
+    await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      reconstructed,
+      FACTORY_AGENT_MAP,
+      (rid) => bound.push(rid),
+    );
+    // No token to bind → the broker's user exchange fails closed for this run.
+    expect(bound).toEqual([]);
   });
 });

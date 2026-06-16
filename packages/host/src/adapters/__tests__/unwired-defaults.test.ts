@@ -19,6 +19,7 @@ import { describe, it, expect } from "bun:test";
 import { createUnwiredTokenEndpoint } from "../unwired-token-endpoint.js";
 import { createUnwiredEntraWifExchange, createUnwiredGraphHttp } from "../unwired-entra-wif.js";
 import { parseScope, type DownstreamScope } from "../../domain/capability-scope.js";
+import { markSubjectToken } from "../../domain/auth.js";
 
 const mailScope = (): DownstreamScope => {
   const r = parseScope("msgraph:mail.send");
@@ -54,6 +55,7 @@ describe("unwired-token-endpoint — every method fails closed with a hop-tagged
       agentClientId: "fugue-agent-mail",
       scope: mailScope(),
       audience: "https://graph.microsoft.com",
+      subjectToken: markSubjectToken("user.jwt.proof"),
     });
 
     expect(r.ok).toBe(false);

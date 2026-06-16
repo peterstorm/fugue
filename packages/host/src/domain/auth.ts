@@ -39,12 +39,49 @@ export type TeamToken = TeamTokenShaped & { readonly __brand: "TeamToken" };
 /** SHA-256 hash of a token — this is what's stored in Redis */
 export type TokenHash = string & { readonly __brand: "TokenHash" };
 
+declare const __subjectTokenBrand: unique symbol;
+
+/**
+ * The raw, compact-serialized user JWT that was SIGNATURE-VERIFIED at the inbound
+ * boundary — the `subject_token` proof an RFC 8693 Standard Token Exchange V2
+ * presents so the exchanged downstream token keeps the user as `sub` (FR-030).
+ *
+ * Hard-branded with a `unique symbol` (like `RunId` / `SignatureVerifiedClaims`):
+ * a plain string — an attacker-supplied or merely decoded token — does NOT inhabit
+ * it. Its SOLE producer is `markSubjectToken`, which the auth middleware calls only
+ * AFTER `VerifyRealmJwt` returns `ok` (signature verified). The brand makes "this
+ * is the exact compact JWT whose signature we checked" a single, greppable seam,
+ * not a convention spread across call sites.
+ *
+ * NFR-011 / NFR-014: this raw token is NEVER placed on a capability handle, NEVER
+ * crosses the framework `InvocationOrigin` (which stays string-only, FR-032), and
+ * is threaded HOST-SIDE only (a `runId → SubjectToken` side-channel resolved at the
+ * broker). It deliberately exposes NO `toString`/`toJSON` that would surface the
+ * value — accidental logging serialises the branded string itself, which callers
+ * must never log (the brand documents that constraint; the value only ever flows
+ * into the exchange POST body).
+ */
+export type SubjectToken = string & { readonly [__subjectTokenBrand]: void };
+
+/**
+ * Brand a raw compact JWT as the verified user's `subject_token`. The trust
+ * boundary's single producer: ONLY the auth middleware calls it, and only AFTER
+ * the injected `VerifyRealmJwt` returned `ok` for THIS exact token string (so the
+ * branded value is the compact JWT whose signature was cryptographically
+ * verified). Calling it on an unverified string is a deliberate forgery of the
+ * brand — visible in review, never accidental (mirrors `markSignatureVerified`).
+ */
+export const markSubjectToken = (verifiedCompactJwt: string): SubjectToken =>
+  verifiedCompactJwt as SubjectToken;
+
 /**
  * The Keycloak client id an agent acts AS — the identity the broker's policy
  * gate (`AssignedScopes`), the token-cache identity, and the audit `azp` are
- * all keyed on. The value is currently a PLACEHOLDER: until the
- * dagId→Keycloak-client mapping lands (ADR-0056), the DAG id stands in for the
- * agent client id, produced at the inbound boundary by `agentClientIdForDag`.
+ * all keyed on. It is the REAL Keycloak agent-type client id (e.g.
+ * `fugue-agent-mail`), resolved from a DAG id through the config-mapped
+ * `AgentClientMap` by `agentClientIdForDag` (FR-040, ADR-0056). The DAG-id
+ * placeholder is gone: a DAG with no mapping fails closed (no identity
+ * passthrough), so a node can never mint as the wrong/absent client.
  *
  * The brand is LOAD-BEARING at the policy gate: `AssignedScopes` demands an
  * `AgentClientId`, so the fail-closed scope lookup cannot be called with an
@@ -55,18 +92,39 @@ export type TokenHash = string & { readonly __brand: "TokenHash" };
  * on this host-only Keycloak-client brand), so the brand is erased crossing
  * into the framework and RESTORED at the single host re-entry point by
  * `agentClientIdFromFrameworkOrigin` below. `AGENT_CLIENT_SCOPES` config keys
- * stay plain strings (JSON object keys); they are consulted only behind the
+ * are now REAL client ids (not dag ids); they are consulted only behind the
  * branded `AssignedScopes` boundary.
  */
 export type AgentClientId = string & { readonly __brand: "AgentClientId" };
 
 /**
- * THE source producer of `AgentClientId` (the inbound boundary). Today: the
- * dagId-as-client placeholder (one Keycloak client per agent type / per DAG,
- * ADR-0056 — the mapping is the identity function until the config-mapped
- * registry lands). When the real mapping arrives, change ONLY this body.
+ * The config-mapped DAG-id → real-Keycloak-agent-client-id registry (FR-040,
+ * ADR-0056 Variant A: one Keycloak service-account client per agent TYPE). Keys
+ * are DAG ids; values are the real client ids (`fugue-agent-mail`, …) on which
+ * `AGENT_CLIENT_SCOPES` and `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` are keyed. A DAG
+ * id absent from this map has NO agent client — its origin resolution fails
+ * closed (see `agentClientIdForDag`).
  */
-export const agentClientIdForDag = (dagId: string): AgentClientId => dagId as AgentClientId;
+export type AgentClientMap = Readonly<Record<string, string>>;
+
+/**
+ * THE source producer of `AgentClientId` (the inbound boundary): resolves a DAG
+ * id to its REAL Keycloak agent-type client id via the config-mapped
+ * `AgentClientMap` (FR-040, ADR-0056). The map is INJECTED (it comes from host
+ * config, `AGENT_CLIENT_MAP`), keeping this function pure.
+ *
+ * FAIL CLOSED (FR-040): a DAG id with no mapping returns `undefined` — first-
+ * class ABSENCE, not the identity-function passthrough that would silently mint
+ * as the dag-id-named (wrong/absent) client. The call site treats `undefined`
+ * as "no agent identity for this run" and refuses rather than fabricate one.
+ */
+export const agentClientIdForDag = (
+  map: AgentClientMap,
+  dagId: string,
+): AgentClientId | undefined => {
+  const clientId = map[dagId];
+  return clientId === undefined ? undefined : (clientId as AgentClientId);
+};
 
 /**
  * RESTORE the `AgentClientId` brand at the single host re-entry point — the
@@ -110,8 +168,10 @@ export interface TokenGrant {
  *   is established at the inbound boundary so the user's subject can be threaded
  *   through the run and exchanged per-hop by the capability broker (sub stays
  *   the user, azp becomes the agent — `adapters/keycloak-broker.ts`, wired at
- *   boot; the live exchange endpoint remains fail-closed-unwired pending the
- *   JWKS wave). No token exchange happens here.
+ *   boot). Inbound user JWT verification is LIVE (gated on `REALM_JWT_ISSUER`);
+ *   only the downstream per-hop token-exchange legs may be config-gated/unwired
+ *   (AD-3 config-presence gating, not a deferred wave). No token exchange
+ *   happens here.
  *
  *   `canRunDag` is the user-run AUTHORIZATION POLICY, captured at the single
  *   construction site (the auth middleware) from the REQUIRED
@@ -130,6 +190,24 @@ export type AuthIdentity =
       readonly azp: string;
       /** May this user run/see DAGs owned by `dagTeam`? Provided by `RealmJwtDeps.authorizeUserRun`. */
       readonly canRunDag: (dagTeam: string) => boolean;
+      /**
+       * The user's ACTUAL verified compact JWT — the `subject_token` proof the
+       * broker presents in the RFC 8693 Standard Token Exchange V2 so the
+       * exchanged downstream token preserves this user as `sub` (FR-030/FR-031).
+       * Branded (`markSubjectToken`), produced ONLY at the verify seam (the auth
+       * middleware, after the signature verified). It is carried on the identity
+       * so the run-context factory can thread it HOST-SIDE (`runId → SubjectToken`)
+       * — it MUST NOT cross the framework `InvocationOrigin` (FR-032) and MUST NOT
+       * reach any capability handle (NFR-011).
+       *
+       * PRESENT for an inbound live request (the middleware always sets it from
+       * the just-verified token). ABSENT only for a DURABLE-run reconstruction
+       * (`hitl/identity.ts toExecIdentity`): a raw bearer JWT is deliberately NOT
+       * persisted across the queue (NFR-014) and would be expired by the time a
+       * human approves, so a reconstructed user run carries no proof and the
+       * broker's user exchange FAILS CLOSED (FR-030) — never a proof-less token.
+       */
+      readonly subjectToken?: SubjectToken;
     };
 
 // ── Realm JWT Claims (validated fugue-platform OIDC token) ─────────────────
@@ -153,6 +231,11 @@ export type JwtAudience = string | readonly string[];
  * - `exp` — expiry as a UNIX timestamp in SECONDS (OIDC convention).
  * - `sub` — the authenticated user's subject (stable user id).
  * - `azp` — authorized party: the OIDC client id the token was minted for.
+ * - `teams` — the user's team memberships, a realm-mapped multi-valued claim
+ *   (FR-020). The host authorizes a user run by checking the run's DAG-owning
+ *   team against this list (FR-021). The decision is STATELESS — derived purely
+ *   from the verified token, never a per-request datastore lookup (FR-022). A
+ *   user with no teams (empty list) can access no team's DAGs — fail-closed.
  */
 export interface RealmJwtClaims {
   readonly iss: string;
@@ -160,6 +243,7 @@ export interface RealmJwtClaims {
   readonly exp: number;
   readonly sub: string;
   readonly azp: string;
+  readonly teams: readonly string[];
 }
 
 // ── Signature-verified claims & authenticated user (branded — review C5) ────
@@ -188,7 +272,18 @@ export type SignatureVerifiedClaims = RealmJwtClaims & { readonly [__sigVerified
  * `sub`/`azp` are read off it at the one trusted construction site (the auth
  * middleware) to build the `user` `AuthIdentity`.
  */
-export type AuthenticatedUser = { readonly sub: string; readonly azp: string } & {
+export type AuthenticatedUser = {
+  readonly sub: string;
+  readonly azp: string;
+  /**
+   * The verified user's team memberships (FR-020/FR-021). The user-run
+   * authorization policy (`RealmJwtDeps.authorizeUserRun`) tests the run's
+   * DAG-owning team against this list — STATELESS, no datastore lookup
+   * (FR-022). An empty list means the user is in no team and so can run no
+   * team's DAGs (fail-closed).
+   */
+  readonly teams: readonly string[];
+} & {
   readonly [__authUserBrand]: void;
 };
 
@@ -206,8 +301,11 @@ export const markSignatureVerified = (claims: RealmJwtClaims): SignatureVerified
  * Brand a validated principal. @internal — only `validateRealmJwtClaims`
  * constructs an `AuthenticatedUser`, AFTER the iss/aud/exp checks pass.
  */
-export const markAuthenticatedUser = (user: { readonly sub: string; readonly azp: string }): AuthenticatedUser =>
-  user as AuthenticatedUser;
+export const markAuthenticatedUser = (user: {
+  readonly sub: string;
+  readonly azp: string;
+  readonly teams: readonly string[];
+}): AuthenticatedUser => user as AuthenticatedUser;
 
 // ── Authorization (pure) ───────────────────────────────────────────────────
 

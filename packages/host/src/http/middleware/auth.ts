@@ -35,7 +35,7 @@
 
 import type { Context, Next } from "hono";
 import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims } from "../../domain/auth.js";
-import { hashToken, isTeamTokenShape } from "../../domain/auth.js";
+import { hashToken, isTeamTokenShape, markSubjectToken } from "../../domain/auth.js";
 import type { TokenGrant } from "../../domain/auth.js";
 import { validateRealmJwtClaims, describeAuthError } from "../../domain/jwt-validation.js";
 import type { TokenStorePort } from "../../ports.js";
@@ -279,11 +279,20 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
       // branded `AuthenticatedUser` is closed over, so the policy always judges
       // the principal this very token authenticated.
       const user = claimsResult.value;
+      // Brand THIS exact compact JWT as the `subject_token` proof (FR-030): we
+      // are inside the `verified.ok` branch, so the signature of `token` was
+      // cryptographically verified by the injected verifier. This is the SOLE
+      // producer site for `SubjectToken`. The raw token is carried host-side on
+      // the identity ONLY — it never crosses `InvocationOrigin` (FR-032) and is
+      // never put on a handle (NFR-011); the broker resolves it for the user
+      // exchange via the run-context side-channel.
+      const subjectToken = markSubjectToken(token);
       c.set("authIdentity", {
         kind: "user",
         sub: user.sub,
         azp: user.azp,
         canRunDag: (dagTeam: string) => realmJwt.authorizeUserRun(user, dagTeam),
+        subjectToken,
       } satisfies AuthIdentity);
       await next();
       return;

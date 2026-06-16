@@ -27,30 +27,39 @@ const ConversationReferenceSchema = z.object({
 
 export const createInMemoryConversationStore = (): ConversationStorePort => {
   let ref: ConversationReference | null = null;
+  const teamRefs = new Map<string, ConversationReference>();
   return {
     async saveDefaultReference(r) { ref = r; return ok(undefined); },
     async getDefaultReference() { return ok(ref); },
+    async saveTeamReference(team, r) { teamRefs.set(team, r); return ok(undefined); },
+    async getTeamReference(team) { return ok(teamRefs.get(team) ?? null); },
   };
 };
 
 const REF_KEY = "fugue:hitl:bot:convref:default";
+/** Per-team reference key (FR-041). The team id is the routing discriminator so
+ *  the notifier delivers a team's cards to its own channel (a confidentiality
+ *  measure). It does NOT gate who may act — the authz gate (`canAccessDag`) on the
+ *  button-click path does that, regardless of which channel the card reached. */
+const teamRefKey = (team: string): string => `fugue:hitl:bot:convref:team:${team}`;
 
 export const createRedisConversationStore = (
   redis: RedisPort,
   logger?: LogPort,
-): ConversationStorePort => ({
-  async saveDefaultReference(ref): Promise<Result<void, HostError>> {
-    // Deliberately written WITHOUT an expiry — unlike the run/decision/pending
-    // keys (bounded by a run's lifetime), the default conversation reference is
-    // the long-lived "where the bot can post" pointer captured once when the bot
-    // is added to a channel; a TTL would silently disable proactive review cards
-    // after it lapsed. v1 keeps a single such key, so it does not grow unbounded.
-    const res = await redis.set(REF_KEY, JSON.stringify(ref));
+): ConversationStorePort => {
+  // Persist a reference under `key` WITHOUT an expiry — unlike the
+  // run/decision/pending keys (bounded by a run's lifetime), a conversation
+  // reference is the long-lived "where the bot can post" pointer captured once
+  // when the bot is added to a channel; a TTL would silently disable proactive
+  // review cards after it lapsed. One key per channel (default + per team), so it
+  // does not grow unbounded.
+  const saveRef = async (key: string, ref: ConversationReference): Promise<Result<void, HostError>> => {
+    const res = await redis.set(key, JSON.stringify(ref));
     if (!res.ok) return err(res.error);
     return ok(undefined);
-  },
-  async getDefaultReference(): Promise<Result<ConversationReference | null, HostError>> {
-    const res = await redis.get(REF_KEY);
+  };
+  const getRef = async (key: string): Promise<Result<ConversationReference | null, HostError>> => {
+    const res = await redis.get(key);
     if (!res.ok) return err(res.error);
     if (res.value === null) return ok(null);
     let raw: unknown;
@@ -66,5 +75,11 @@ export const createRedisConversationStore = (
       return err({ kind: "internal-invariant-violated", message: "corrupt conversation reference", context: {} });
     }
     return ok(parsed.data);
-  },
-});
+  };
+  return {
+    saveDefaultReference: (ref) => saveRef(REF_KEY, ref),
+    getDefaultReference: () => getRef(REF_KEY),
+    saveTeamReference: (team, ref) => saveRef(teamRefKey(team), ref),
+    getTeamReference: (team) => getRef(teamRefKey(team)),
+  };
+};

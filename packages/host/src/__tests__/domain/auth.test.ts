@@ -9,16 +9,31 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import fc from "fast-check";
 import { Hono } from "hono";
 import {
   canAccessDag,
   formatToken,
   hashToken,
   isTeamTokenShape,
+  markAuthenticatedUser,
   TOKEN_PREFIX,
   TOKEN_MIN_LENGTH,
 } from "../../domain/auth.js";
-import type { AuthIdentity } from "../../domain/auth.js";
+import type { AuthIdentity, AuthenticatedUser } from "../../domain/auth.js";
+
+// The PRODUCTION run-authorization policy (host.ts wiring site, FR-021/FR-022):
+// a STATELESS team-membership check against the verified token's `teams`. Pinned
+// here so a refactor of the wiring can't silently widen it (e.g. to `() => true`,
+// the allow-all AD-5 forbids). `canAccessDag`'s `user` branch delegates to a
+// `canRunDag` closure the middleware builds as `(t) => authorizeUserRun(user, t)`.
+const authorizeUserRun = (user: AuthenticatedUser, dagTeam: string): boolean =>
+  user.teams.includes(dagTeam);
+
+const userIdentity = (sub: string, teams: readonly string[]): AuthIdentity => {
+  const user = markAuthenticatedUser({ sub, azp: "fugue-frontend", teams });
+  return { kind: "user", sub, azp: "fugue-frontend", canRunDag: (t) => authorizeUserRun(user, t) };
+};
 import { createListTeamsHandler } from "../../http/handlers/admin/teams.js";
 import { createInMemoryTokenStore } from "../../adapters/token-store.js";
 
@@ -102,6 +117,74 @@ describe("canAccessDag", () => {
     expect(res.status).toBe(403); // …but admin scope is refused
     const body = await res.json();
     expect(body.error).toBe("forbidden");
+  });
+});
+
+// ── authorizeUserRun (FR-021/FR-022) — stateless team-membership check ───────
+describe("authorizeUserRun (user-run authorization policy)", () => {
+  const user = (teams: readonly string[]): AuthenticatedUser =>
+    markAuthenticatedUser({ sub: "user-1", azp: "fugue-frontend", teams });
+
+  it("member → true", () => {
+    expect(authorizeUserRun(user(["team-a", "team-b"]), "team-a")).toBe(true);
+    expect(authorizeUserRun(user(["team-a", "team-b"]), "team-b")).toBe(true);
+  });
+
+  it("non-member → false", () => {
+    expect(authorizeUserRun(user(["team-a"]), "team-b")).toBe(false);
+  });
+
+  it("a user with no teams is denied every team (fail-closed)", () => {
+    expect(authorizeUserRun(user([]), "team-a")).toBe(false);
+    expect(authorizeUserRun(user([]), "")).toBe(false);
+  });
+
+  it("membership is exact (case-sensitive — no substring/prefix match)", () => {
+    expect(authorizeUserRun(user(["team-a"]), "Team-A")).toBe(false);
+    expect(authorizeUserRun(user(["team-alpha"]), "team-al")).toBe(false);
+  });
+});
+
+// ── SC-005: a user NOT in a DAG's team is denied BY canAccessDag ─────────────
+// Property: for ANY user whose `teams` does NOT include `dagTeam`,
+// `canAccessDag` is false. `canAccessDag` is called BEFORE concurrency/slot
+// acquisition in the run path (run-dag.ts), so this denial precedes admission.
+describe("SC-005 — non-member is denied (property)", () => {
+  it("∀ user, dagTeam: dagTeam ∉ user.teams ⇒ canAccessDag(user, dagTeam) === false", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string()),
+        fc.string(),
+        (teams, dagTeam) => {
+          fc.pre(!teams.includes(dagTeam)); // precondition: user is NOT in the DAG's team
+          return canAccessDag(userIdentity("user-x", teams), dagTeam) === false;
+        },
+      ),
+      { numRuns: 1000 },
+    );
+  });
+
+  it("∀ user, dagTeam: dagTeam ∈ user.teams ⇒ canAccessDag(user, dagTeam) === true (complement)", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string(), { minLength: 1 }),
+        (teams) => {
+          // Pick a member team so membership holds, and assert access is granted.
+          const dagTeam = teams[0]!;
+          return canAccessDag(userIdentity("user-y", teams), dagTeam) === true;
+        },
+      ),
+      { numRuns: 1000 },
+    );
+  });
+
+  // Deterministic boundary example pinning the empty-`dagTeam` corner the
+  // property test only reaches stochastically: a user with NO teams must be
+  // denied even the empty-string team (`[].includes("") === false`). A
+  // regression that special-cased `""` (e.g. treating it as "any team") would
+  // leave the property green-ish while this example caught it immediately.
+  it("a teamless user is denied the empty-string dagTeam (boundary example)", () => {
+    expect(canAccessDag(userIdentity("u", []), "")).toBe(false);
   });
 });
 

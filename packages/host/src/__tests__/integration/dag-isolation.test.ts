@@ -224,6 +224,10 @@ describe("DAG checkpoint writer isolation (integration)", () => {
 // NodeContext factory isolation
 // ---------------------------------------------------------------------------
 
+// FR-040: map every DAG these isolation tests use to a real agent client so the
+// origin resolves (the test exercises cache/checkpoint namespacing, not FR-040).
+const ISO_AGENT_MAP = { "dag-alpha": "fugue-agent-alpha", "dag-beta": "fugue-agent-beta" };
+
 describe("createNodeContextForDag isolation", () => {
   test("contexts for different DAGs use different cache namespaces", async () => {
     const { port: redis } = createMockRedis();
@@ -233,8 +237,8 @@ describe("createNodeContextForDag isolation", () => {
     const dagA = makeRegisteredDag("dag-alpha");
     const dagB = makeRegisteredDag("dag-beta");
 
-    const { ctx: ctxA } = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity);
-    const { ctx: ctxB } = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity);
+    const { ctx: ctxA } = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
+    const { ctx: ctxB } = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
 
     // Both contexts are created without error
     expect(ctxA).toBeDefined();
@@ -251,8 +255,8 @@ describe("createNodeContextForDag isolation", () => {
 
     const dag = makeRegisteredDag("dag-alpha");
 
-    const { ctx: ctx1 } = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity);
-    const { ctx: ctx2 } = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity);
+    const { ctx: ctx1 } = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
+    const { ctx: ctx2 } = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
 
     expect(ctx1).not.toBe(ctx2);
   });

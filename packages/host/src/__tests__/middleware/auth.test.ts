@@ -221,6 +221,7 @@ describe("auth middleware", () => {
       exp: NOW_SECONDS + 300,
       sub: "user-123",
       azp: "fugue-frontend",
+      teams: ["team-a"],
     };
 
     const jwtDeps = (
@@ -234,7 +235,7 @@ describe("auth middleware", () => {
       ...over,
     });
 
-    it("accepts a valid fugue-platform JWT and sets a user identity", async () => {
+    it("accepts a valid fugue-platform JWT and sets a user identity carrying the verified subject_token (FR-030)", async () => {
       const verify: VerifyRealmJwt = async () => ok(markSignatureVerified(validClaims));
       const app = createApp(jwtDeps(verify));
       const res = await app.request("/protected", {
@@ -242,7 +243,16 @@ describe("auth middleware", () => {
       });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.identity).toEqual({ kind: "user", sub: "user-123", azp: "fugue-frontend" });
+      // `canRunDag` is a function (dropped by JSON); the identity carries the
+      // string `sub`/`azp` AND the branded `subjectToken` — the EXACT raw bearer
+      // whose signature the verifier just confirmed (the FR-030 proof). The middleware
+      // is the sole producer site for the SubjectToken brand.
+      expect(body.identity).toEqual({
+        kind: "user",
+        sub: "user-123",
+        azp: "fugue-frontend",
+        subjectToken: FAKE_JWT,
+      });
     });
 
     it("rejects a wrong-aud JWT with 401 (does not fall through to team path)", async () => {
@@ -265,6 +275,37 @@ describe("auth middleware", () => {
         headers: { Authorization: `Bearer ${FAKE_JWT}` },
       });
       expect(res.status).toBe(401);
+    });
+
+    it("rejects a JWT with a PRESENT-but-non-array `teams` claim (realm-mapper misconfig boundary) — 401, never accepted", async () => {
+      // A realm `teams` mapper emitting a scalar string instead of a multivalued
+      // array is a misconfiguration that must NOT be silently coerced (to "no
+      // teams" or anything else). It threads through the REAL
+      // validateRealmJwtClaims inside the middleware and must reject with 401.
+      // The cast forges the malformed shape past the RealmJwtClaims type — the
+      // runtime parse is exactly what we're pinning.
+      const malformed = { ...validClaims, teams: "not-an-array" } as unknown as RealmJwtClaims;
+      const verify: VerifyRealmJwt = async () => ok(markSignatureVerified(malformed));
+      const app = createApp(jwtDeps(verify));
+      const res = await app.request("/protected", {
+        headers: { Authorization: `Bearer ${FAKE_JWT}` },
+      });
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body.error).toBe("unauthorized");
+      // It must NOT have been accepted as a user with surprising teams.
+      expect(body.identity).toBeUndefined();
+    });
+
+    it("rejects a JWT with a PRESENT `teams` array holding a non-string element (e.g. [123]) — 401", async () => {
+      const malformed = { ...validClaims, teams: [123] } as unknown as RealmJwtClaims;
+      const verify: VerifyRealmJwt = async () => ok(markSignatureVerified(malformed));
+      const app = createApp(jwtDeps(verify));
+      const res = await app.request("/protected", {
+        headers: { Authorization: `Bearer ${FAKE_JWT}` },
+      });
+      expect(res.status).toBe(401);
+      expect((await res.json()).error).toBe("unauthorized");
     });
 
     it("uses the wall clock in SECONDS when no `now` is injected — a long-expired JWT is rejected, a future-exp one accepted (seconds-vs-ms pin)", async () => {

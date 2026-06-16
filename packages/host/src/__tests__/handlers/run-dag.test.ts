@@ -204,6 +204,53 @@ describe("run-dag handler", () => {
     });
   });
 
+  // ── SC-005: authorization runs BEFORE concurrency acquisition ─────────────
+  // A user whose run-authorization policy denies the DAG's team must be refused
+  // (403) and must NOT have a concurrency slot acquired — the auth gate
+  // short-circuits before `acquire`. We prove the ORDERING by exhausting global
+  // concurrency (so the acquire branch would 429 if it were reached) and
+  // asserting the response is 403, not 429: the only way to get 403 is for
+  // `canAccessDag` to run first. We also assert `setConcurrency` was never
+  // called (no slot mutation happened).
+  describe("SC-005 — user denial precedes concurrency acquisition", () => {
+    it("returns 403 (not 429) for a denied user even when concurrency is exhausted, and never touches the slot counter", async () => {
+      const denied: AuthIdentity = {
+        kind: "user",
+        sub: "outsider",
+        azp: "fugue-frontend",
+        // Not a member of the DAG's team ("test-team") → denied.
+        canRunDag: (dagTeam) => ["some-other-team"].includes(dagTeam),
+      };
+      let setCalls = 0;
+      const deps = defaultDeps({
+        // Zero global slots: if acquire were reached, this would be a 429.
+        getConcurrency: () => initConcurrency(0, 10),
+        setConcurrency: () => { setCalls += 1; },
+      });
+      const app = createTestApp(deps, readyState, denied);
+      const res = await post(app, "test-dag", { query: "hi" });
+
+      // 403 proves the auth gate ran FIRST — a 429 would mean acquire ran before it.
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toBe("forbidden");
+      // No slot was acquired or released — the counter was never mutated.
+      expect(setCalls).toBe(0);
+    });
+
+    it("returns 200 for a member user (positive control — the gate admits members)", async () => {
+      const member: AuthIdentity = {
+        kind: "user",
+        sub: "insider",
+        azp: "fugue-frontend",
+        canRunDag: (dagTeam) => ["test-team"].includes(dagTeam),
+      };
+      const app = createTestApp(defaultDeps(), readyState, member);
+      const res = await post(app, "test-dag", { query: "hi" });
+      expect(res.status).toBe(200);
+    });
+  });
+
   it("returns 400 for non-JSON body", async () => {
     const app = createTestApp(defaultDeps(), readyState);
     const res = await app.request("/dags/test-dag/run", {

@@ -158,7 +158,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
   it("a known dag that COMPLETES returns ok({ kind: 'completed' }) with the output", async () => {
     const dag = singleNodeDag((async () => ok("done")) as never);
     const reg = registered(dag);
-    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok).toBe(true);
@@ -173,7 +173,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     // thrown failure onto `ok({ kind: "failed" })`, NOT the `err` channel.
     const dag = singleNodeDag((async () => { throw new Error("boom in node"); }) as never);
     const reg = registered(dag);
-    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok).toBe(true); // host infra is fine — the RUN failed, not the host
@@ -194,7 +194,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     // fallback it would emit if the cause were missing.
     const dag = singleNodeDag((async () => { throw new Error("node blew up"); }) as never);
     const reg = registered(dag);
-    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok && res.value.kind).toBe("failed");
@@ -222,7 +222,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       // surfaces as a bare (no-cause) error out of createNodeContextForDag.
       get capabilities(): never { throw new Error("infra exploded"); },
     };
-    const exec = createRunExecutor({ sharedInfra: throwingInfra, getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: throwingInfra, getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok && res.value.kind).toBe("failed");
@@ -231,6 +231,38 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       expect(e.kind).toBe("node-crash");
       if (e.kind === "node-crash") expect(e.nodeId).toBe(EXECUTOR_NODE_ID);
     }
+  });
+});
+
+describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040)", () => {
+  it("a known DAG with NO agent-client mapping resolves to `failed` (no fabricated identity), not `completed`", async () => {
+    // The DAG IS registered and the node would succeed — but the worker has no
+    // `agentClientMap` entry for it, so `createNodeContextForDag` refuses to
+    // build an origin (FR-040 fail-closed) and the slice settles as `failed`. The
+    // run never executes under a fabricated/absent agent identity.
+    const dag = singleNodeDag((async () => ok("would-succeed")) as never);
+    const reg = registered(dag);
+    // agentClientMap omitted → defaults to `{}` (every DAG unmapped → fail closed).
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+
+    // Host infra is fine (ok channel), but the RUN is refused → `failed`.
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value.kind).toBe("failed");
+      // It must NOT have silently completed under a fabricated identity.
+      expect(res.value.kind).not.toBe("completed");
+    }
+  });
+
+  it("an EMPTY agentClientMap object behaves identically to omitting it (explicit {} → fail closed)", async () => {
+    const dag = singleNodeDag((async () => ok("would-succeed")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: {} });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+    expect(res.ok && res.value.kind).toBe("failed");
   });
 });
 
@@ -251,7 +283,7 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
       return ok(undefined as unknown);
     }) as never);
     const reg = registered(dag, 5); // 5ms slice budget
-    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
     const jobLike = await seedJobLike(dag, null);
 
     const res = await exec.run(runReq(dag, jobLike, null));
@@ -263,7 +295,7 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
   it("a fast slice under config.timeout completes normally (timeout does not fire)", async () => {
     const dag = singleNodeDag((async () => ok("fast")) as never);
     const reg = registered(dag, 60_000);
-    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok && res.value.kind).toBe("completed");
