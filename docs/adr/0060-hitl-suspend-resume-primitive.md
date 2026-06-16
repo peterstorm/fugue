@@ -145,7 +145,7 @@ work with one predicate and no extra bookkeeping.
   path *does* enforce team access.) Until per-team conversation routing +
   click-time authorization land, the bot must only be installed in a channel
   whose members are authorised approvers for every team whose runs gate through
-  it. Tracked as a follow-up; documented in `packages/host/docs/hitl-teams.md`.
+  it. Tracked as a follow-up; documented in `../runbooks/azure-bot-hitl-provisioning.md`.
 - The host's run-store-backed `JobLike.appendEvent` is a **no-op**: the durable
   run record carries the latest `{state, context}` checkpoint (sufficient for
   suspend/resume correctness) but **not** the kernel's per-transition event

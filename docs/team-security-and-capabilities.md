@@ -256,7 +256,8 @@ in the design.
 - Governed as **config-as-code** (Java steps in `keycloakConfigAsCode`,
   PR-reviewed, golden-export-tested). Realm build steps:
   `RealmStep` → create realm; `AzureIdpStep` → broker Entra + map Azure groups →
-  realm roles; `ClientStep` → declare clients (BFF + per-agent service accounts);
+  realm roles (role name == team name, the namespace reserved for teams — ADR-0062);
+  `ClientStep` → declare clients (BFF + per-agent service accounts);
   `ClientScopesStep` → optional scopes mirroring downstream permissions;
   `RolesStep` + `ValidationStep` → seal the realm.
 
@@ -287,8 +288,10 @@ added to today's two-path bearer middleware, *not* a rewrite):
    precondition, not an accidental shape property):
    - Signature verified via JWKS (injected `VerifyRealmJwt` port →
      `markSignatureVerified`).
-   - Claims validated (`iss`/`aud`/`exp` against `expectedIss`/`expectedAud`) in
-     `validateRealmJwtClaims` → branded `AuthenticatedUser`.
+   - Claims validated (`iss`/`aud`/`exp` against `expectedIss`/`expectedAud`, plus
+     the `teams` claim defensively hand-parsed — array of non-empty strings, no Zod,
+     fail-closed on malformed — ADR-0063) in `validateRealmJwtClaims` → branded
+     `AuthenticatedUser`.
    - `authorizeUserRun(user, dagTeam)` → captured as `canRunDag` on the identity.
    - Result: `{ kind: "user", sub, azp, canRunDag }`.
 3. **Opaque `fug_` team path** — unchanged.
@@ -622,6 +625,12 @@ realm JWT → auth mw: createRealmJwtVerifier (signature) → validateRealmJwtCl
 - Provision Azure Bot + Entra app (out-of-band; set `BOT_APP_ID`/`BOT_APP_PASSWORD`,
   messaging endpoint → `POST /teams/messages`, install bot in a Teams channel).
 - Smoke-test suspend → card → approve → resume. **Code is ready** — ops only.
+- **Operator runbook:** [`docs/runbooks/azure-bot-hitl-provisioning.md`](runbooks/azure-bot-hitl-provisioning.md)
+  — the full operator-executed procedure (Bot/Entra provisioning, host config, the
+  suspend→card→approve→resume smoke test). **Live provisioning + smoke test are
+  DEFERRED to the operator (Peter Hansen); tracked on GitHub issue #24 and required
+  before production HITL go-live.** This is the Bot's **own** Entra app — distinct
+  from the `fugue-agents` capability-broker app in Appendix A.
 
 ### Phase 2 — User inbound path (depends on Phase 0 verifier)
 - Extend `RealmJwtClaims`/`AuthenticatedUser` with `teams` (AD-5); update
@@ -917,6 +926,8 @@ To add (Phase 0/4): `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `KEYCLOAK_TOKEN_URL?`
 - **0058** two/three-path inbound host auth (+ 2026-06-12 subject-token amendment)
 - **0059** capability failure taxonomy · **0060** HITL suspend/resume primitive
 - **0061** per-team DAG image scoping (amends **0041** separate DAGs repo → depth-agnostic discovery)
+- **0062** team modeling via realm roles (role name == team name; emit all realm roles as the access-token-only `teams` claim)
+- **0063** `teams` claim defensive parse in the pure host validator (hand-rolled, no Zod; fail-closed on malformed)
 
 ### External references
 
@@ -932,5 +943,6 @@ To add (Phase 0/4): `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `KEYCLOAK_TOKEN_URL?`
   `packages/host/src/adapters/node-context-factory.ts` (`createNodeContextForDag`),
   `packages/framework/src/types/llm.ts` (`LlmResponse.tokensIn/tokensOut`)
 - BFF/dashboard (non-security): `docs/plans/2026-06-09-lead-desk-bff-dashboard.md`
+- HITL Teams go-live (Phase 1′) operator runbook: [`docs/runbooks/azure-bot-hitl-provisioning.md`](runbooks/azure-bot-hitl-provisioning.md)
 </content>
 </invoke>
