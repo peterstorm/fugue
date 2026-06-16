@@ -29,6 +29,7 @@
  */
 
 import type { GraphHttp, GraphRequest, GraphResponse } from "./graph-capability.js";
+import { parseJsonObject } from "./parse-json-object.js";
 
 /** The minimal `fetch` surface the Graph transport uses — injected for network-free tests. */
 export type GraphFetchLike = (
@@ -42,24 +43,6 @@ export type GraphFetchLike = (
   readonly status: number;
   readonly text: () => Promise<string>;
 }>;
-
-/**
- * Parse a Graph response body as a JSON OBJECT, tolerantly — empty / non-JSON /
- * non-object bodies collapse to `{}` so the caller classifies by status. Pure.
- */
-const parseJsonObject = (body: string): Record<string, unknown> => {
-  const trimmed = body.trim();
-  if (trimmed.length === 0) return {};
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return {};
-  } catch {
-    return {};
-  }
-};
 
 /**
  * Build the live `GraphHttp` transport over an injected `fetch` (default: global

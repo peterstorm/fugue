@@ -33,6 +33,7 @@
  */
 
 import type { HttpPost, HttpPostResponse } from "./entra-wif.js";
+import { parseJsonObject } from "./parse-json-object.js";
 
 /** The minimal `fetch` surface this transport uses — injected for network-free tests. */
 export type FetchLike = (
@@ -46,26 +47,6 @@ export type FetchLike = (
   readonly status: number;
   readonly text: () => Promise<string>;
 }>;
-
-/**
- * Parse a response body string as a JSON OBJECT, tolerantly. An empty body, a
- * non-JSON body (e.g. an HTML 502 page), or a JSON non-object (array/scalar) all
- * collapse to `{}` — the caller classifies by STATUS, so a malformed body never
- * needs to become a transport reject. Pure.
- */
-const parseJsonObject = (body: string): Record<string, unknown> => {
-  const trimmed = body.trim();
-  if (trimmed.length === 0) return {};
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return {};
-  } catch {
-    return {};
-  }
-};
 
 /**
  * Build the live `HttpPost` transport over an injected `fetch`. The default is

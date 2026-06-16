@@ -56,10 +56,11 @@ declare const __subjectTokenBrand: unique symbol;
  * NFR-011 / NFR-014: this raw token is NEVER placed on a capability handle, NEVER
  * crosses the framework `InvocationOrigin` (which stays string-only, FR-032), and
  * is threaded HOST-SIDE only (a `runId → SubjectToken` side-channel resolved at the
- * broker). It deliberately exposes NO `toString`/`toJSON` that would surface the
- * value — accidental logging serialises the branded string itself, which callers
- * must never log (the brand documents that constraint; the value only ever flows
- * into the exchange POST body).
+ * broker). Being a branded STRING, it carries NO self-protection: `String()`,
+ * `JSON.stringify`, or template interpolation surface the raw JWT verbatim (unlike
+ * the object-typed `KeycloakClientCredential`, whose shape resists accidental
+ * coercion). The ONLY protections are the documented never-log constraint and the
+ * single-producer brand; the value only ever flows into the exchange POST body.
  */
 export type SubjectToken = string & { readonly [__subjectTokenBrand]: void };
 

@@ -33,7 +33,7 @@
  * would collide: a scope like `msgraph:mail.send` already contains one, so
  * `a:b` + `c` and `a` + `b:c` would otherwise alias.)
  */
-const KEY_DELIMITER = "";
+const KEY_DELIMITER = "\u001f";
 
 /**
  * Join identity/key parts into one composite key, injectively. This is the ONLY

@@ -276,16 +276,6 @@ export const createNodeContextForDag = async (
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
-  // Thread the user's verified subject token HOST-SIDE (FR-032): read it off the
-  // identity via the pure seam (never off `InvocationOrigin`) and bind it to this
-  // run's id. An agent/team/admin run has no subject token, so nothing is bound —
-  // the broker's user exchange then fails closed for any (illegitimate) user hop
-  // claiming this runId. The raw token is carried only through this sink.
-  if (bindSubjectToken !== undefined) {
-    const subjectToken = subjectTokenForIdentity(identity);
-    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
-  }
-
   // Wrap the shared LLM client in a per-run metered decorator: every call is
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
   // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
@@ -331,6 +321,20 @@ export const createNodeContextForDag = async (
       `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
         `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
     );
+  }
+
+  // Thread the user's verified subject token HOST-SIDE (FR-032), but ONLY after
+  // the fail-closed origin check above has passed — so a registered-but-unmapped
+  // DAG throws BEFORE any token is bound, and we never retain a JWT under a runId
+  // whose run will not proceed (the run-dag setup-error path does not release;
+  // only `withSubjectTokenRelease` around `executeDag` does, NFR-014). Read it
+  // off the identity via the pure seam (never off `InvocationOrigin`); an
+  // agent/team/admin run has no subject token, so nothing is bound and the
+  // broker's user exchange fails closed for any illegitimate user hop claiming
+  // this runId. The raw token is carried only through this sink.
+  if (bindSubjectToken !== undefined) {
+    const subjectToken = subjectTokenForIdentity(identity);
+    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
   }
 
   const ctx = makeNodeContext({
