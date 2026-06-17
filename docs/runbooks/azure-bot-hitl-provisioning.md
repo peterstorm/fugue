@@ -25,7 +25,8 @@ against `main` at authoring time):
 |---|---|---|
 | Inbound messaging endpoint | `packages/host/src/http/router.ts:86` mounts `app.post("/teams/messages", …)` | Registered **before** the team-token auth middleware (Teams authenticates with a Bot Framework JWT, not a `fug_` token). Only mounted when `deps.teamsBot` is wired, i.e. when `BOT_APP_ID`/`BOT_APP_PASSWORD` are set. |
 | Inbound auth (fail-closed) | `packages/host/src/hitl/adapters/bot/verify.ts` | Verifies the inbound `Authorization: Bearer <jwt>` against the Bot Framework JWKS; enforces issuer `https://api.botframework.com` and **audience = the bot's app id** (`BOT_APP_ID`), RS256 only. Any failure → 401; JWKS fetch failure → 503. |
-| Activity handling | `packages/host/src/hitl/adapters/bot/messages-handler.ts` | `conversationUpdate` (bot added) → persist conversation reference; `invoke adaptiveCard/action` with our verb → record the decision and refresh the card. |
+| Activity handling | `packages/host/src/hitl/adapters/bot/messages-handler.ts` | `conversationUpdate` (bot added) → persist conversation reference (default + per-team via `HITL_TEAM_CHANNELS`); `invoke adaptiveCard/action` with our verb → **authorize the clicker against the run's team** (see below), then record the decision and refresh the card. |
+| **In-Teams approver authz (per-team)** | `messages-handler.ts` + `hitl/identity.ts` (`approverTeamIdentity`) | The button click carries the clicker's `from.aadObjectId`; it is resolved through `HITL_APPROVER_TEAMS` (fail-closed on an unknown id) and gated on the SAME `canAccessDag` predicate the HTTP approve path uses, against the run's DAG-owning team. A non-member's (or unknown user's) click is refused and `recordDecision` is never called (SC-006). |
 | Adaptive Card | `packages/host/src/hitl/adapters/bot/card.ts` | AdaptiveCard v1.4, Approve/Reject `Action.Execute` (verb `fugue.review`) with a required reason on reject. |
 | Proactive send | `packages/host/src/hitl/adapters/bot/connector.ts` | Mints an app-only connector token via `client_credentials` using `BOT_APP_ID` + `BOT_APP_PASSWORD`; default token endpoint `https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token`, scope `https://api.botframework.com/.default`. Single-tenant bots override via `BOT_TOKEN_URL`. |
 | `serviceUrl` allowlist | `packages/host/src/hitl/adapters/bot/trusted-host.ts` | The connector only ever sends its bearer token to `*.botframework.com` / `*.skype.com` / `smba.trafficmanager.net` (SSRF / credential-leak defence). |
@@ -33,17 +34,23 @@ against `main` at authoring time):
 | Approve (HTTP parity path) | `packages/host/src/http/handlers/runs.ts` — `POST /runs/:runId/approve`, `GET /runs/:runId` | The button path mirrors this; both end in `HitlRunService.recordDecision` (`packages/host/src/hitl/service.ts`). |
 | Boot-time config pairing | `packages/host/src/domain/config.ts` (`superRefine`) | `BOT_APP_ID` set ⇒ `BOT_APP_PASSWORD` **required**; `BOT_TOKEN_URL` must be `https://`. The pair is enforced at startup, not on first review. |
 
-> **Known v1 authorization limit (security-load-bearing — read before installing the bot).**
-> The in-Teams button path does **not** yet bind the clicking user to the run's
-> owning team. The HTTP approve path authorizes the caller against the DAG's team
-> (`runs.ts#authorizeRunAccess`), but the button path does not — see the SECURITY
-> CONSTRAINT comment at `packages/host/src/hitl/adapters/bot/messages-handler.ts:18`.
-> **Therefore anyone who can click a card in the channel the bot is installed in
-> can approve/reject ANY team's run.** Install the bot **only** in a channel whose
-> members are all authorised approvers for every team whose runs gate through it.
-> Per-team conversation routing + click-time AAD→team authorization is tracked as
-> a follow-up (ADR-0060 Consequences; AD-7 in `team-security-and-capabilities.md`
-> §6). Until that lands, treat single-team-per-channel as a deployment invariant.
+> **In-Teams approver authorization (now enforced — read before installing).**
+> As of Phase 4 (commit `86f82db`), the in-Teams button path **does** bind the
+> clicking user to the run's owning team, at parity with the HTTP approve path.
+> The clicker's `from.aadObjectId` is resolved through `HITL_APPROVER_TEAMS`
+> (config map: `aadObjectId → team ids`) to an approver identity — **fail-closed on
+> an unknown id** — and gated on the same `canAccessDag` check the HTTP path uses
+> (`messages-handler.ts`; `approverTeamIdentity` in `hitl/identity.ts`). A
+> non-member's or unmapped user's click is **refused without recording** (SC-006).
+> Per-team conversation routing (`HITL_TEAM_CHANNELS`) additionally delivers each
+> team's cards to its own channel.
+>
+> **Operational requirement:** you MUST populate `HITL_APPROVER_TEAMS` with the
+> AAD object id → team mapping for every approver, or **no one** can approve (the
+> gate fails closed — an empty/absent map authorizes nothing). The old
+> "single-team-per-channel" deployment invariant is **no longer a security
+> requirement** — cross-team approval is prevented by the authz gate itself —
+> though per-team channels remain good practice for confidentiality.
 
 ---
 
@@ -110,6 +117,8 @@ Set these on the host (cross-checked against
 | `BOT_APP_PASSWORD` | the client secret (step 2.2) — SENSITIVE | **required when `BOT_APP_ID` is set** (enforced at boot, `config.ts` superRefine) |
 | `BOT_TOKEN_URL` | `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token` | **required for single-tenant bots**; omit for multi-tenant (defaults to the `botframework.com` login). Must be `https://`. |
 | `HITL_APPROVAL_BASE_URL` | your public host URL (e.g. `https://fugue.example.com`) | recommended; used to build deep-links |
+| `HITL_APPROVER_TEAMS` | JSON `aadObjectId → string[]` (team ids) for every approver, e.g. `{"<aad-oid>":["business-sales"]}` | **required for in-Teams approvals** — the button-path authz gate fails closed without it (no one can approve) |
+| `HITL_TEAM_CHANNELS` | JSON `aadGroupId → fugue team id`, e.g. `{"<aad-group-id>":"business-sales"}` | optional; routes each team's cards to its own channel (confidentiality) |
 
 Notes:
 - Setting `BOT_APP_ID`/`BOT_APP_PASSWORD` **takes precedence over** `TEAMS_WEBHOOK_URL`
@@ -139,9 +148,12 @@ to a channel.
    review cards will be posted.
 
 **Acceptance:** the bot appears in the channel, and the host logs
-`hitl/bot: captured conversation reference for proactive reviews`
-(`messages-handler.ts:111`). Re-confirm the single-team-per-channel invariant from
-§0 before relying on it for real approvals.
+`hitl/bot: captured default conversation reference for proactive reviews`
+(and `captured per-team conversation reference` when the channel's `aadGroupId` is
+mapped in `HITL_TEAM_CHANNELS`). Approval authorization is enforced per-team via
+`HITL_APPROVER_TEAMS` (§0), so a card reaching the wrong channel still cannot be
+actioned by a non-member — channel placement is now confidentiality, not the
+access gate.
 
 ---
 
@@ -199,7 +211,9 @@ do not treat any step as done until the operator ticks it.
 - [ ] **Azure Bot + Entra app created** — Microsoft App ID obtained; client secret created; Teams channel enabled (§2).
 - [ ] **Messaging endpoint set** to `https://<host>/teams/messages` (§3).
 - [ ] **`BOT_APP_ID` / `BOT_APP_PASSWORD` configured** on the host (+ `BOT_TOKEN_URL` if single-tenant); host boots clean, `/health` green (§4).
-- [ ] **Teams app manifest installed + bot added to a single, fully-authorised channel** (§5, honoring the v1 authz limit in §0).
+- [ ] **`HITL_APPROVER_TEAMS` populated** with every approver's `aadObjectId → team ids` (§4) — without it the button-path authz gate fails closed and no approval can be recorded.
+- [ ] **Teams app manifest installed + bot added to its channel(s)** (§5); set `HITL_TEAM_CHANNELS` if routing per-team cards.
+- [ ] **Cross-team refusal verified** — a click from a user NOT in `HITL_APPROVER_TEAMS` for the run's team is refused with "not authorized" and records nothing (SC-006).
 - [ ] **Smoke test PASS** — one run observed `suspend → Adaptive Card delivered → Approve → resume → completed` (§6).
 - [ ] **Result recorded** — `runId`, UTC time, and final status captured here (or in issue #24).
 

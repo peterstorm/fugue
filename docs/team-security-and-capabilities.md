@@ -464,8 +464,17 @@ into `fugue-agents` (different process → different trust boundary → its own 
 
 ## 5. Gap analysis — current state vs target
 
-Verified 2026-06-14 against `main` HEAD; branch `feat/keycloak-entra-wiring`
-exists but is **0 commits ahead** — none of the wiring below has begun.
+> **STATUS UPDATE (2026-06-17).** The wiring below **has landed.** On branch
+> `feat/keycloak-entra-wiring` (commits `86f82db` T1–T8, `2ee0009` ADRs/runbook,
+> `f2a0ed5` review remediation) **every row marked STUB / MISSING / PLACEHOLDER /
+> LIVE-UNWIRED / v1 GAP below is now IMPLEMENTED, merged, and unit/golden-tested.**
+> The table is retained as the pre-wiring baseline (file → seam map). What remains
+> is **Phase 5 only** — operator provisioning + live verification against a real
+> tenant (see the two runbooks). No host code remains to write.
+
+Baseline below verified 2026-06-14 against `main` HEAD (at that point the branch
+was 0 commits ahead). Read the State/Gap columns as the *starting* condition the
+Phase 0–4 wiring closed.
 
 | Component | File | State | Gap |
 |---|---|---|---|
@@ -485,14 +494,18 @@ exists but is **0 commits ahead** — none of the wiring below has begun.
 | HITL durable suspend/resume + stores | `hitl/**` | WIRED (Redis/BullMQ) | — |
 | HITL Bot connector / inbound verify / endpoint | `hitl/adapters/bot/**`, `http/router.ts` | WIRED | needs Azure Bot provisioned |
 | HITL Teams card builder | `hitl/adapters/bot/card.ts` (102 lines) | WIRED | AdaptiveCard v1.4, approve/reject `Action.Execute` (`fugue.review`) + required reason |
-| **HITL Teams-button per-team authz** | `hitl/adapters/bot/messages-handler.ts:18` | **v1 GAP** | any channel member can approve any team's run (`from.aadObjectId` available at `:139`) |
+| **HITL Teams-button per-team authz** | `hitl/adapters/bot/messages-handler.ts` | **IMPLEMENTED** (was v1 GAP) | clicker authorized via `HITL_APPROVER_TEAMS` at parity with HTTP path; non-member click refused (SC-006) |
 | `.env.example` HITL/Entra vars | `.env.example` | **MISSING** | only Server/Redis/MLflow/LLM/Eval vars present |
 
-**Asymmetry:** HITL is *code-complete* (needs Azure Bot provisioning + the
-Teams-button authz gap closed + `.env.example`/docs). Keycloak/Entra has its
-broker plumbing merged but **cannot yet mint a single downstream token** — the
-Keycloak token endpoint has no live HTTP adapter, the WIF adapter is unwired, the
-Graph transport is unwired, and the user inbound JWT path is verifier-less.
+**Asymmetry (RESOLVED 2026-06-17).** At the 2026-06-14 baseline HITL was
+code-complete bar the Teams-button authz gap, and Keycloak/Entra could not yet
+mint a downstream token. **Both are now wired:** the Teams-button authz gap is
+closed (`messages-handler.ts` authorizes the clicker via `HITL_APPROVER_TEAMS` at
+parity with the HTTP path), the live Keycloak token endpoint
+(`keycloak-token-endpoint-http.ts`), Entra WIF, Graph transport
+(`fetch-graph-http.ts`), and the realm JWT verifier (`realm-jwt-verifier.ts`) are
+all present and config-gated in `selectCapabilityBroker`. The only remaining
+dependency is **provisioning + live verification** (Phase 5), not code.
 
 ---
 
@@ -565,6 +578,12 @@ contract); putting the token on `InvocationOrigin` (leaks a host credential acro
 the framework seam).
 
 ### AD-7 — Close the HITL Teams-button per-team authz gap by reusing the HTTP path's check
+**Status (2026-06-17): IMPLEMENTED** (commit `86f82db`, Phase 4). `messages-handler.ts`
+resolves the clicker's `from.aadObjectId` via `HITL_APPROVER_TEAMS` to an approver
+identity (fail-closed on unknown id) and gates on the SAME `canAccessDag`
+predicate the HTTP path uses; per-team conversation routing keys on
+`HITL_TEAM_CHANNELS`. The single-team-per-channel fallback below is **no longer
+required**.
 **Choice:** in `messages-handler.ts`, before recording a button decision, resolve
 the approver's AAD identity (`from.aadObjectId` on the verified inbound activity)
 to fugue team membership and authorize against the run's DAG team — the same check
@@ -700,19 +719,26 @@ golden-export-tested realm policy.
 
 ---
 
-## 8. Open decisions (confirm before building)
+## 8. Open decisions — RESOLVED 2026-06-16 (before building)
 
-1. **`authorizeUserRun` source (AD-5):** realm-role/`teams` claim on the JWT
-   (recommended, stateless) vs a Redis-backed user→team grant store?
-2. **HITL Teams-button authz (AD-7):** deploy single-team-per-channel now
-   (document the limit) **or** build approver-AAD→team authz + per-team routing in
-   Phase 4?
-3. **Dynamics/Dataverse:** in scope, or Graph-only (`msgraph:mail.send` /
-   `msgraph:sites.read`) for now?
-4. **Agent-client secrets (AD-1):** env-map JSON acceptable for v1, or wire a
-   secret store (Vault/Azure Key Vault) from the start?
-5. **Sequencing:** is Phase 1′ (HITL go-live) the priority to land first, given
-   it's closest to working?
+All five were resolved before the Phase 0–4 wiring landed; recorded here for
+provenance:
+
+1. **`authorizeUserRun` source (AD-5):** RESOLVED → stateless `teams` claim on the
+   verified realm JWT (`(u, dagTeam) => u.teams.includes(dagTeam)`). No Redis
+   grant store. (ADR-0062/0063.)
+2. **HITL Teams-button authz (AD-7):** RESOLVED → build approver-AAD→team authz +
+   per-team routing in Phase 4 (`HITL_APPROVER_TEAMS` / `HITL_TEAM_CHANNELS`). The
+   single-team-per-channel fallback was NOT taken.
+3. **Dynamics/Dataverse:** RESOLVED → Graph-only (`msgraph:mail.send` /
+   `msgraph:sites.read`) for v1; the Dynamics leg is wired but stays config-gated
+   (`DYNAMICS_ORG_HOST`) and unassigned until needed.
+4. **Agent-client secrets (AD-1):** RESOLVED → env-map JSON
+   (`KEYCLOAK_AGENT_CLIENT_CREDENTIALS`) for v1, behind the `AgentClientCredentials`
+   port so a Vault/Key Vault adapter can replace it with no broker change.
+5. **Sequencing:** RESOLVED → all phases (0–4) landed together on
+   `feat/keycloak-entra-wiring`; HITL go-live and the Entra bridge are now both
+   gated only on operator provisioning (Phase 5).
 
 ---
 

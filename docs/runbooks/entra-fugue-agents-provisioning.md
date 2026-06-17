@@ -286,7 +286,32 @@ curl -s -H "Authorization: Bearer ${GRAPH_ADMIN_TOKEN}" \
 
 ### A.8 — Keycloak side the operator must match against (config-as-code, already golden-tested)
 
-Lives in the `fugue-platform` realm package (`~/dev/java/keycloakConfigAsCode`):
+Lives in the `fugue-platform` realm package (`~/dev/java/keycloakConfigAsCode`).
+
+**Applying it to a target environment.** The realm is applied standalone via the
+repo's runner (the selector lets you push *only* `fugue-platform`, leaving the
+shared `toolbox`/`2ndbrands` realms untouched):
+
+```sh
+cd ~/dev/java/keycloakConfigAsCode
+# Apply ONLY the fugue-platform realm to ONR (no AZURE_CLIENT_SECRET needed):
+./scripts/run-configuration.sh onr fugue-platform
+```
+
+The **inbound** Azure IdP broker (human SSO + `business-sales` group→role mapper)
+is optional (AD-8) and **reuses the shared `AZURE_*` app** — the same
+mother-company Entra registration the `toolbox` realm already brokers (both realms
+broker the `azuread` IdP against that one app). The only fugue-specific input is
+the team→group GUID: export `FUGUE_AZURE_BUSINESS_SALES_GROUP_ID` (alongside the
+existing `AZURE_CLIENT_SECRET`/`AZURE_CLIENT_ID`/`AZURE_TENANT_ID`) to include the
+broker, or leave it unset to apply the realm / team roles / client scopes / agent
+clients (the **outbound** WIF surface this runbook depends on) without it.
+
+> **Reply-URL caveat:** because the broker reuses the toolbox Azure app, that
+> app's redirect URIs must include the fugue realm callback
+> `https://<keycloak-host>/realms/fugue-platform/broker/azuread/endpoint` before
+> inbound human SSO will work. The **outbound** WIF surface (agent path) needs no
+> such change. See `scripts/README.md` in that repo.
 
 - The realm mints the federation assertion's audience via the **`entra-exchange`** optional client scope — a single hardcoded-audience protocol mapper stamping `aud: api://AzureADTokenExchange` on the **access token only** (FR-W4-003). Every FIC's `audience` must equal this.
 - Agent-type clients **`fugue-agent-mail`** / **`fugue-agent-sites`** are confidential service-account clients (client-credentials only; ROPC/standard-flow disabled), each carrying the optional scope mapping to its Entra permission. **Assigning the scope in `ClientStep` IS the policy grant (AD-5);** the broker fails closed at the Keycloak hop with zero Entra egress if unassigned.
