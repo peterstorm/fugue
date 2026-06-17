@@ -567,7 +567,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
     expect(origin).toMatchObject({ kind: "user", sub: "user-xyz", agentClientId: "fugue-agent-test" });
   });
 
-  it("FR-040 fail-closed: the factory REFUSES (throws) a DAG with no agent client mapping — never mints an absent identity", async () => {
+  it("FR-040 fail-closed: the factory REFUSES (throws) a DAG with no agent client mapping when minting is ACTIVE — never mints an absent identity", async () => {
     const baseSharedInfra = (): SharedInfra => ({
       llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
       redis: createMockRedis().redis,
@@ -578,7 +578,8 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       capabilities: [],
     });
     const shared = baseSharedInfra();
-    // Empty map (the safe default) → the DAG has no agent client → fail closed.
+    // Empty map + minting ACTIVE (broker wired) → the DAG has no agent client →
+    // fail closed (the origin WOULD be consumed by per-node minting).
     const promise = createNodeContextForDag(
       shared,
       makeDag(),
@@ -586,8 +587,69 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       new AbortController().signal,
       adminIdentity,
       {},
+      true,
     );
     await expect(promise).rejects.toThrow(/no agent client mapping/);
+  });
+
+  it("zero-regression no-realm baseline (SC-001/SC-005): an UNMAPPED dag with minting INACTIVE does NOT throw and yields origin `undefined` — a no-realm deployment must not 500 every run", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const shared = baseSharedInfra();
+    // Empty map (the default) + minting INACTIVE (no broker) → origin is never
+    // consumed, so the run proceeds on the static path with origin === undefined.
+    const { ctx, origin } = await createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      {},
+      false,
+    );
+    expect(ctx).toBeDefined();
+    expect(origin).toBeUndefined();
+  });
+
+  it("FR-040 + NFR-014 ordering: a user run carrying a subject token on an UNMAPPED dag (minting active) throws BEFORE binding the token — no JWT retained under a non-proceeding run", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const shared = baseSharedInfra();
+    const bound: RunId[] = [];
+    const userWithProof: AuthIdentity = {
+      kind: "user",
+      sub: "user-xyz",
+      azp: "fugue-frontend",
+      canRunDag: () => true,
+      subjectToken: markSubjectToken("verified.user.jwt"),
+    };
+    const promise = createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      userWithProof,
+      {},
+      true,
+      (rid) => { bound.push(rid); },
+    );
+    await expect(promise).rejects.toThrow(/no agent client mapping/);
+    // The fail-closed throw fires BEFORE the bind, so nothing is retained.
+    expect(bound).toEqual([]);
   });
 });
 
@@ -653,6 +715,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       new AbortController().signal,
       userIdentity,
       FACTORY_AGENT_MAP,
+      true,
       (rid, token) => bound.push({ runId: rid, token }),
     );
 
@@ -675,6 +738,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       new AbortController().signal,
       adminIdentity,
       FACTORY_AGENT_MAP,
+      true,
       (rid) => bound.push(rid),
     );
     expect(bound).toEqual([]);
@@ -690,6 +754,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       new AbortController().signal,
       reconstructed,
       FACTORY_AGENT_MAP,
+      true,
       (rid) => bound.push(rid),
     );
     // No token to bind → the broker's user exchange fails closed for this run.

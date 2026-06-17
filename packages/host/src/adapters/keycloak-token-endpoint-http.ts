@@ -44,7 +44,7 @@ import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
 import { agentClientIdFromFrameworkOrigin } from "../domain/auth.js";
-import type { HttpPost, HttpPostResponse } from "./entra-wif.js";
+import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
 import type {
   KeycloakTokenEndpoint,
   MintedToken,

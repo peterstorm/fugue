@@ -32,8 +32,30 @@
  *   transport fault propagates (not swallowed) for the caller's typed mapping.
  */
 
-import type { HttpPost, HttpPostResponse } from "./entra-wif.js";
 import { parseJsonObject } from "./parse-json-object.js";
+
+/**
+ * A minimal HTTP POST transport — the SHARED port behind every OAuth form-POST
+ * egress in this package (the Keycloak token endpoint AND the Entra WIF
+ * exchange). Declared here, with its one live `fetch`-backed implementation
+ * (`createFetchHttpPost`), rather than in either egress's adapter — so neither
+ * Keycloak nor Entra depends on the other for this foundational transport type.
+ */
+export interface HttpPost {
+  /**
+   * POST `body` (already URL-encoded) to `url` with `application/x-www-form-urlencoded`.
+   * Resolves to the status + parsed JSON body, or rejects on a transport-level
+   * failure (DNS/socket) which the live impl maps to `infra-unreachable`.
+   */
+  readonly post: (url: string, body: string) => Promise<HttpPostResponse>;
+}
+
+/** The response shape the live impl consumes from the transport. */
+export interface HttpPostResponse {
+  readonly status: number;
+  /** The parsed JSON body. Endpoints return `access_token`/`expires_in` on success, `error*` on denial. */
+  readonly json: Record<string, unknown>;
+}
 
 /** The minimal `fetch` surface this transport uses — injected for network-free tests. */
 export type FetchLike = (

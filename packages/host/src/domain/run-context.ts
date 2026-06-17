@@ -96,6 +96,12 @@ export interface NodeContextForDag {
    * framework builds a per-node `Invocation { origin, runId, dagId, nodeId }`
    * and mints each node's declared scopes AT DISPATCH. Built from the inbound
    * identity (FR-W3-007).
+   *
+   * `undefined` ONLY when no per-node minting is wired (no broker) AND the DAG
+   * has no `AGENT_CLIENT_MAP` entry — i.e. the zero-regression static path where
+   * `origin` is never consumed. When minting IS wired the factory fails closed
+   * on an unmapped DAG (FR-040) BEFORE returning, so a wired run always carries a
+   * defined `origin`; the minting sites additionally guard `origin !== undefined`.
    */
-  readonly origin: InvocationOrigin;
+  readonly origin: InvocationOrigin | undefined;
 }

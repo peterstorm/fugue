@@ -119,36 +119,6 @@ export interface HostInstance {
 // ── Capability Broker selection (T8 / per-node minting, review C1) ─────────
 
 /**
- * Select the capability broker for this boot — the per-invocation AUTHORITY
- * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
- * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
- * without booting a full host (review C7.5).
- *
- * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
- * returns the live Keycloak-backed broker: it fails closed on an unassigned
- * scope BEFORE any Entra call, mints narrowly-scoped operation handles PER
- * NODE (the framework calls `mintFor` at dispatch with that node's real
- * `requires`), and emits a correlated audit record for every mint and refusal.
- * The minted handles are merged OVER the boot-scoped static client set.
- *
- * When realm config is ABSENT this returns `undefined` — no minting authority
- * is wired into `runDag`, so the framework skips per-node minting entirely and
- * every node runs against the boot-scoped static client set, byte-identical to
- * today (SC-005), zero regression. Pools stay boot-scoped either way
- * (FR-W2-005); only authority resolution moves behind the broker.
- *
- * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
- * when ITS OWN config is present — there is no single global enable flag.
- *   - live Keycloak token endpoint  ⟸ `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` present;
- *   - live Entra WIF exchange + live Graph transport ⟸ `ENTRA_TENANT_ID` AND
- *     `ENTRA_CLIENT_ID` present (validated as an inseparable pair at boot);
- *   - otherwise EACH leg retains its fail-closed unwired stub.
- * When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
- * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
- * `infra-unreachable` (retriable), never a silent success — and an un-granted
- * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
- */
-/**
  * The fail-safe default `resolveSubjectToken`: resolves NO token for any run, so
  * a broker constructed without the live `SubjectTokenRegistry` fails the user
  * RFC 8693 exchange CLOSED (no `subject_token` proof → no exchange) rather than
@@ -184,6 +154,36 @@ export const withSubjectTokenRelease = async <T>(
   }
 };
 
+/**
+ * Select the capability broker for this boot — the per-invocation AUTHORITY
+ * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
+ * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
+ * without booting a full host (review C7.5).
+ *
+ * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
+ * returns the live Keycloak-backed broker: it fails closed on an unassigned
+ * scope BEFORE any Entra call, mints narrowly-scoped operation handles PER
+ * NODE (the framework calls `mintFor` at dispatch with that node's real
+ * `requires`), and emits a correlated audit record for every mint and refusal.
+ * The minted handles are merged OVER the boot-scoped static client set.
+ *
+ * When realm config is ABSENT this returns `undefined` — no minting authority
+ * is wired into `runDag`, so the framework skips per-node minting entirely and
+ * every node runs against the boot-scoped static client set, byte-identical to
+ * today (SC-005), zero regression. Pools stay boot-scoped either way
+ * (FR-W2-005); only authority resolution moves behind the broker.
+ *
+ * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
+ * when ITS OWN config is present — there is no single global enable flag.
+ *   - live Keycloak token endpoint  ⟸ `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` present;
+ *   - live Entra WIF exchange + live Graph transport ⟸ `ENTRA_TENANT_ID` AND
+ *     `ENTRA_CLIENT_ID` present (validated as an inseparable pair at boot);
+ *   - otherwise EACH leg retains its fail-closed unwired stub.
+ * When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
+ * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
+ * `infra-unreachable` (retriable), never a silent success — and an un-granted
+ * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
+ */
 export const selectCapabilityBroker = (
   config: HostConfig,
   sharedInfra: Pick<SharedInfra, "tracer" | "logger">,
@@ -296,8 +296,16 @@ export const selectCapabilityBroker = (
     endpoint,
     entraWif,
     graphHttp,
-    assignedScopes: (agentClientId) =>
-      new Set((config.AGENT_CLIENT_SCOPES ?? {})[agentClientId] ?? []),
+    assignedScopes: (agentClientId) => {
+      // Own-property lookup only — never resolve an inherited Object.prototype key
+      // (`constructor`, `toString`, …) to a scope set; an unknown agent client
+      // resolves to NO scopes (fail-closed), matching the sibling guards in
+      // `createAgentClientCredentials` / `approverTeamIdentity`.
+      const scopes = config.AGENT_CLIENT_SCOPES ?? {};
+      return new Set(
+        Object.prototype.hasOwnProperty.call(scopes, agentClientId) ? scopes[agentClientId] : [],
+      );
+    },
     // Per-org Dynamics/Dataverse host (FR-042) — the `dynamics:read` audience +
     // read URL target `https://<host>/api/data/v9.2`. Unset → that scope fails
     // closed at the broker (zero egress); `msgraph` scopes are unaffected.
@@ -585,26 +593,29 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       // factory reads it off the identity via the pure seam and stores it under
       // `rid` so the broker can resolve it for the RFC 8693 exchange. Non-user
       // runs bind nothing. `executeDag` releases it on completion (below).
-      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, subjectTokens.bind);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, broker !== undefined, subjectTokens.bind);
     },
     executeDag: async <I, O>(
       dag: DagDef,
       input: I,
       ctx: NodeContext,
-      origin: InvocationOrigin,
+      origin: InvocationOrigin | undefined,
     ): Promise<Result<O, FrameworkError>> => {
       // Inject the boot-selected broker + run origin (as one MintingAuthority —
       // the framework's option type makes broker-without-origin unrepresentable)
       // so the framework mints each node's declared scopes PER NODE at dispatch.
       // When `broker` is undefined (no realm config) no minting authority is
-      // wired and the framework skips minting — byte-identical to today.
+      // wired and the framework skips minting — byte-identical to today. `origin`
+      // is guaranteed defined whenever `broker` is wired (the factory fails closed
+      // on an unmapped DAG, FR-040); the `origin !== undefined` guard is the
+      // type-honest, fail-closed expression of that invariant.
       // The teardown that releases the run's subject token (NFR-014) is the
       // exported `withSubjectTokenRelease` seam, so the release-on-BOTH-paths
       // wiring (resolve AND throw) is unit-testable against the real registry
       // without copy-drift from this call site.
       return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
         runDag<I, O>(dag, input, ctx, {
-          minting: broker !== undefined ? { broker, origin } : undefined,
+          minting: broker !== undefined && origin !== undefined ? { broker, origin } : undefined,
         }),
       );
     },

@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { createFetchHttpPost, type FetchLike } from "../fetch-http-post.js";
-import type { HttpPost } from "../entra-wif.js";
+import type { HttpPost } from "../fetch-http-post.js";
 
 /** A recording fake `fetch` returning a scripted status + body (or throwing). */
 const recordingFetch = (

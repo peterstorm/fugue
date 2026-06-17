@@ -31,6 +31,7 @@ import type {
   NodeContext,
   NodeDef,
   LlmClient,
+  CapabilityBroker,
 } from "@fuguejs/framework";
 import type { RedisPort, SharedInfra } from "../../../ports.js";
 import type { RegisteredDag } from "../../../domain/registry.js";
@@ -235,7 +236,15 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
 });
 
 describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040)", () => {
-  it("a known DAG with NO agent-client mapping resolves to `failed` (no fabricated identity), not `completed`", async () => {
+  // A trivial broker makes per-node minting ACTIVE so the FR-040 fail-closed
+  // origin check fires. The broker itself is never reached: the factory refuses
+  // (throws) BEFORE any minting when the DAG has no agent-client mapping.
+  const mintingBroker: CapabilityBroker = {
+    mintFor: async () => { throw new Error("unreachable — fail-closed fires before minting"); },
+    provides: (c) => (c as string).includes(":"),
+  };
+
+  it("a known DAG with NO agent-client mapping (minting active) resolves to `failed` (no fabricated identity), not `completed`", async () => {
     // The DAG IS registered and the node would succeed — but the worker has no
     // `agentClientMap` entry for it, so `createNodeContextForDag` refuses to
     // build an origin (FR-040 fail-closed) and the slice settles as `failed`. The
@@ -243,7 +252,7 @@ describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040
     const dag = singleNodeDag((async () => ok("would-succeed")) as never);
     const reg = registered(dag);
     // agentClientMap omitted → defaults to `{}` (every DAG unmapped → fail closed).
-    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg });
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, broker: mintingBroker });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
 
@@ -256,13 +265,24 @@ describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040
     }
   });
 
-  it("an EMPTY agentClientMap object behaves identically to omitting it (explicit {} → fail closed)", async () => {
+  it("an EMPTY agentClientMap object behaves identically to omitting it (explicit {} → fail closed) when minting is active", async () => {
+    const dag = singleNodeDag((async () => ok("would-succeed")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: {}, broker: mintingBroker });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+    expect(res.ok && res.value.kind).toBe("failed");
+  });
+
+  it("zero-regression: with NO broker wired (minting inactive), an unmapped DAG COMPLETES — the no-realm static path must not fail closed", async () => {
+    // No broker → `origin` is never consumed → an unmapped DAG runs the static
+    // path byte-identically to today (SC-001/SC-005) instead of being refused.
     const dag = singleNodeDag((async () => ok("would-succeed")) as never);
     const reg = registered(dag);
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: {} });
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
-    expect(res.ok && res.value.kind).toBe("failed");
+    expect(res.ok && res.value.kind).toBe("completed");
   });
 });
 

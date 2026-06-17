@@ -123,7 +123,11 @@ export const agentClientIdForDag = (
   map: AgentClientMap,
   dagId: string,
 ): AgentClientId | undefined => {
-  const clientId = map[dagId];
+  // Own-property lookup only — never resolve an inherited Object.prototype key
+  // (`__proto__`, `constructor`, `toString`, …) to a client id; an unmapped DAG
+  // resolves to first-class ABSENCE (fail-closed), keeping the `AgentClientId`
+  // brand honest. Matches the sibling guard in `approverTeamIdentity`.
+  const clientId = Object.prototype.hasOwnProperty.call(map, dagId) ? map[dagId] : undefined;
   return clientId === undefined ? undefined : (clientId as AgentClientId);
 };
 

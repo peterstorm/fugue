@@ -167,25 +167,42 @@ export const createNamespacedCheckpointWriter = (
   runId: RunId,
   checkpointTtlSec: number | undefined,
   logger: LogPort,
-): CheckpointWriter => ({
-  write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
-    const fullKey = buildCheckpointKey(dagId, runId, nodeId);
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(value);
-    } catch (e) {
-      logger.warn("Checkpoint write failed — value not serializable", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
-      return; // Best-effort — don't kill the DAG execution
-    }
-    const setResult = checkpointTtlSec !== undefined
-      ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
-      : await redis.set(fullKey, serialized);
-    if (!setResult.ok) {
-      logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: setResult.error.kind });
-      // Best-effort — don't kill the DAG execution
-    }
-  },
-});
+): CheckpointWriter => {
+  let consecutiveWriteFailures = 0;
+  const FAILURE_ESCALATION_THRESHOLD = 10;
+
+  return {
+    write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
+      const fullKey = buildCheckpointKey(dagId, runId, nodeId);
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(value);
+      } catch (e) {
+        logger.warn("Checkpoint write failed — value not serializable", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
+        return; // Best-effort — don't kill the DAG execution
+      }
+      const setResult = checkpointTtlSec !== undefined
+        ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
+        : await redis.set(fullKey, serialized);
+      if (!setResult.ok) {
+        // Best-effort — don't kill the DAG execution. Escalate warn→error after a
+        // run of consecutive failures so a sustained checkpoint-write outage
+        // (Redis brownout → silent loss of resumability) is alertable, mirroring
+        // the cache adapter rather than logging a flat warn forever.
+        consecutiveWriteFailures++;
+        if (consecutiveWriteFailures >= FAILURE_ESCALATION_THRESHOLD) {
+          logger.error("Checkpoint write failures exceeded threshold — Redis may be degraded", {
+            key: fullKey, dagId, runId, nodeId: nodeId as string, consecutiveFailures: consecutiveWriteFailures,
+          });
+        } else {
+          logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: setResult.error.kind });
+        }
+      } else {
+        consecutiveWriteFailures = 0;
+      }
+    },
+  };
+};
 
 // ── Factory ────────────────────────────────────────────────────────────────
 
@@ -237,7 +254,7 @@ export type { NodeContextForDag };
  * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
  * broker, and it now moves per node, in the framework.
  *
- * @satisfies FR-030 — Cache key isolation
+ * @satisfies FR-031 — Cache key isolation
  * @satisfies FR-031 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
@@ -264,6 +281,17 @@ export const createNodeContextForDag = async (
    */
   agentClientMap: AgentClientMap = {},
   /**
+   * Whether per-node minting is wired for this boot (`broker !== undefined`).
+   * Load-bearing for the fail-closed origin check below: an unmapped DAG is
+   * REFUSED (FR-040) only when minting will actually consume the `origin`. When
+   * minting is NOT wired the `origin` is discarded by the caller, so an unmapped
+   * DAG runs the zero-regression static path (byte-identical to today, SC-005)
+   * instead of throwing — a no-realm deployment (`AGENT_CLIENT_MAP` defaults to
+   * `{}`) must NOT 500 every run. Defaults to `false` (safe: no throw) so an
+   * un-threaded caller never spuriously refuses.
+   */
+  mintingActive: boolean = false,
+  /**
    * HOST-SIDE side-channel sink for a user run's verified `subject_token`
    * (FR-030/FR-032). When the run is user-initiated, the factory binds
    * `runId → SubjectToken` here so the broker can resolve it for the RFC 8693
@@ -282,7 +310,7 @@ export const createNodeContextForDag = async (
   // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
   // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009
   // groundwork only — LLM authority is run-scoped here, not yet on the
-  // broker's mintFor seam; see capability-broker.ts)
+  // broker's mintFor seam; see keycloak-broker.ts)
   const llm = createMeteredLlm(shared.llm, {
     dagId,
     runId,
@@ -306,17 +334,21 @@ export const createNodeContextForDag = async (
     : shared.prompts ?? { get: () => null };
 
   // FAIL CLOSED (FR-040): resolve the DAG's REAL agent client via AGENT_CLIENT_MAP.
-  // An unmapped DAG id yields `undefined` — the run has no agent identity, so it
-  // is refused here rather than minting as a fabricated/absent client. This throw
-  // is an adapter-boundary wiring-defect surface (like `wifTokenEndpoint` /
-  // `formatToken`); both run paths (`run-dag.ts`, `run-executor.ts`) fence the
+  // An unmapped DAG id yields `undefined` — the run has no agent identity. When
+  // per-node minting IS wired (`mintingActive`) we refuse here rather than mint as
+  // a fabricated/absent client. When minting is NOT wired the `origin` is never
+  // consumed by the caller (the framework skips minting), so an unmapped DAG runs
+  // the zero-regression static path instead of throwing — a no-realm deployment
+  // (`AGENT_CLIENT_MAP` defaults to `{}`) must not 500 every run (SC-001/SC-005).
+  // This throw is an adapter-boundary wiring-defect surface (like `wifTokenEndpoint`
+  // / `formatToken`); both run paths (`run-dag.ts`, `run-executor.ts`) fence the
   // `createNodeContextForDag` call, so it never escapes as an unhandled rejection.
   const origin: InvocationOrigin | undefined = invocationOriginForIdentity(
     agentClientMap,
     identity,
     dagId,
   );
-  if (origin === undefined) {
+  if (origin === undefined && mintingActive) {
     throw new Error(
       `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
         `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
@@ -324,14 +356,14 @@ export const createNodeContextForDag = async (
   }
 
   // Thread the user's verified subject token HOST-SIDE (FR-032), but ONLY after
-  // the fail-closed origin check above has passed — so a registered-but-unmapped
-  // DAG throws BEFORE any token is bound, and we never retain a JWT under a runId
-  // whose run will not proceed (the run-dag setup-error path does not release;
-  // only `withSubjectTokenRelease` around `executeDag` does, NFR-014). Read it
-  // off the identity via the pure seam (never off `InvocationOrigin`); an
-  // agent/team/admin run has no subject token, so nothing is bound and the
-  // broker's user exchange fails closed for any illegitimate user hop claiming
-  // this runId. The raw token is carried only through this sink.
+  // the fail-closed origin check above has passed — so a minting-wired,
+  // registered-but-unmapped DAG throws BEFORE any token is bound, and we never
+  // retain a JWT under a runId whose run will not proceed (the run-dag setup-error
+  // path does not release; only `withSubjectTokenRelease` around `executeDag`
+  // does, NFR-014). Read it off the identity via the pure seam (never off
+  // `InvocationOrigin`); an agent/team/admin run has no subject token, so nothing
+  // is bound and the broker's user exchange fails closed for any illegitimate user
+  // hop claiming this runId. The raw token is carried only through this sink.
   if (bindSubjectToken !== undefined) {
     const subjectToken = subjectTokenForIdentity(identity);
     if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);

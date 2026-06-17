@@ -480,3 +480,43 @@ describe("auth middleware", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// isJwtShape — structural compact-serialization pre-filter (direct unit cases)
+// ---------------------------------------------------------------------------
+//
+// Exercised indirectly via the ambiguous-token routing test above; pinned
+// directly here so a regression in the shape gate (which decides JWT-vs-team
+// routing) is caught at the unit it lives in. The gate is STRUCTURAL only — a
+// `true` result still defers trust entirely to the injected signature verifier.
+describe("isJwtShape — structural JWT compact-serialization detector", () => {
+  it("accepts exactly three non-empty base64url segments (header.payload.signature)", () => {
+    expect(isJwtShape("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl")).toBe(true);
+    // base64url alphabet includes `-` and `_`, never `+`/`/`/`=`.
+    expect(isJwtShape("ab-_.cd-_.ef-_")).toBe(true);
+  });
+
+  it("rejects a token without exactly three segments (2 or 4 dots-delimited parts)", () => {
+    expect(isJwtShape("header.payload")).toBe(false);
+    expect(isJwtShape("a.b.c.d")).toBe(false);
+    expect(isJwtShape("justonesegment")).toBe(false);
+  });
+
+  it("rejects three parts when any segment is empty (leading/middle/trailing dot)", () => {
+    expect(isJwtShape(".b.c")).toBe(false);
+    expect(isJwtShape("a..c")).toBe(false);
+    expect(isJwtShape("a.b.")).toBe(false);
+    expect(isJwtShape("..")).toBe(false);
+  });
+
+  it("rejects a segment containing a non-base64url character (standard-base64 `+`/`/`/`=`, whitespace)", () => {
+    expect(isJwtShape("ab+.cd.ef")).toBe(false);
+    expect(isJwtShape("ab.cd/.ef")).toBe(false);
+    expect(isJwtShape("ab.cd.ef=")).toBe(false);
+    expect(isJwtShape("ab.cd. ef")).toBe(false);
+  });
+
+  it("rejects the empty string", () => {
+    expect(isJwtShape("")).toBe(false);
+  });
+});

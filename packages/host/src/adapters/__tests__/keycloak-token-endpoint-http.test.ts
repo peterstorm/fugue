@@ -27,7 +27,7 @@ import {
   REQUESTED_TOKEN_TYPE_ACCESS,
   SUBJECT_TOKEN_TYPE_ACCESS,
 } from "../keycloak-token-endpoint-http.js";
-import type { HttpPost, HttpPostResponse } from "../entra-wif.js";
+import type { HttpPost, HttpPostResponse } from "../fetch-http-post.js";
 import type { KeycloakClientCredential, AgentClientCredentials } from "../agent-client-credentials.js";
 import type { AgentClientId } from "../../domain/auth.js";
 import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";

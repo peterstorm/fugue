@@ -232,7 +232,7 @@ export const HostConfigSchema = z.object({
    *
    * SENSITIVE (NFR-014): the values are client secrets and MUST NEVER be logged.
    * Parsed/validated here (Zod) so a malformed map fails at boot, never at
-   * runtime. The value is `Readonly<Record<string, KeycloakClientCredential>>`;
+   * runtime. The value is `Readonly<Record<string, KeycloakClientCredentialConfig>>`;
    * absent → `{}` (empty map → every credential lookup misses → fail-closed).
    *
    * The env-map adapter (`adapters/agent-client-credentials.ts`) consumes this

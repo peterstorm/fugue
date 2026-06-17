@@ -88,13 +88,14 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           controller.signal,
           toExecIdentity(req.identity),
           agentClientMap ?? {},
+          broker !== undefined,
         );
 
         const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
           jobLike: req.jobLike,
           onHumanReview: req.onHumanReview,
           onDecisionConsumed: req.onDecisionConsumed,
-          ...(broker !== undefined ? { minting: { broker, origin } } : {}),
+          ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
         });
 
         if (outcome.kind === "suspended") {
