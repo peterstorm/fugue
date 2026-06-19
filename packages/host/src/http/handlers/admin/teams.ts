@@ -9,7 +9,7 @@
  */
 
 import type { Context } from "hono";
-import { formatToken, hashToken } from "../../../domain/auth.js";
+import { formatToken, hashToken, markTeam } from "../../../domain/auth.js";
 import type { TokenGrant, AuthIdentity } from "../../../domain/auth.js";
 import type { TokenStorePort } from "../../../ports.js";
 import { errorResponse } from "../../response.js";
@@ -88,7 +88,7 @@ export const createCreateTeamHandler = (deps: AdminHandlerDeps) => {
 
     // Build grant
     const grant: TokenGrant = {
-      team: teamName,
+      team: markTeam(teamName),
       label: teamLabel,
       createdAt: deps.clock(),
     };

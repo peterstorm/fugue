@@ -37,7 +37,7 @@ import { formatHostError } from "./domain/host-error.js";
 import { verifyTenantHeader, TENANT_HEADER_NAME } from "./domain/tenant-header.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
-import type { AuthenticatedUser } from "./domain/auth.js";
+import type { AuthenticatedUser, Team } from "./domain/auth.js";
 import type { CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { createKeycloakBroker } from "./adapters/keycloak-broker.js";
 import { createSubjectTokenRegistry } from "./adapters/subject-token-registry.js";
@@ -502,7 +502,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
           // FR-021/FR-022: stateless team-membership check against the verified
           // token's `teams`. NOT defaultable to `() => true` (AD-5) — that would
           // be an allow-all grant consuming any team's concurrency/budget.
-          authorizeUserRun: (user: AuthenticatedUser, dagTeam: string): boolean =>
+          authorizeUserRun: (user: AuthenticatedUser, dagTeam: Team): boolean =>
             user.teams.includes(dagTeam),
         }
       : undefined;
@@ -525,7 +525,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // `lookupDag` the HTTP path uses). Shared by the notifier (confidentiality
   // routing — FR-041) and the inbound handler (authz parity — SC-006). `undefined`
   // when the DAG is no longer registered.
-  const resolveDagTeam = (dagId: DagId): string | undefined => {
+  const resolveDagTeam = (dagId: DagId): Team | undefined => {
     const reg = getRegistry(hostState);
     return reg ? lookupDag(reg, dagId)?.team : undefined;
   };

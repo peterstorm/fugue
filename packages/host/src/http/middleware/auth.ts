@@ -34,7 +34,7 @@
  */
 
 import type { Context, Next } from "hono";
-import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims } from "../../domain/auth.js";
+import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims, Team } from "../../domain/auth.js";
 import { hashToken, isTeamTokenShape, markSubjectToken } from "../../domain/auth.js";
 import type { TokenGrant } from "../../domain/auth.js";
 import { validateRealmJwtClaims, describeAuthError } from "../../domain/jwt-validation.js";
@@ -116,7 +116,7 @@ export interface RealmJwtDeps {
    * middleware captures it onto the `user` identity's `canRunDag`, which
    * `canAccessDag` delegates to.
    */
-  readonly authorizeUserRun: (user: AuthenticatedUser, dagTeam: string) => boolean;
+  readonly authorizeUserRun: (user: AuthenticatedUser, dagTeam: Team) => boolean;
 }
 
 export interface AuthMiddlewareDeps {
@@ -291,7 +291,7 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
         kind: "user",
         sub: user.sub,
         azp: user.azp,
-        canRunDag: (dagTeam: string) => realmJwt.authorizeUserRun(user, dagTeam),
+        canRunDag: (dagTeam: Team) => realmJwt.authorizeUserRun(user, dagTeam),
         subjectToken,
       } satisfies AuthIdentity);
       await next();

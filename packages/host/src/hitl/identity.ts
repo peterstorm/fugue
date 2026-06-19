@@ -12,7 +12,8 @@
  */
 
 import { match } from "ts-pattern";
-import type { AuthIdentity } from "../domain/auth.js";
+import type { AuthIdentity, Team } from "../domain/auth.js";
+import { markTeam } from "../domain/auth.js";
 import type { PersistedIdentity } from "./types.js";
 
 // ── HITL approver identity (FR-041, US5, SC-006) ─────────────────────────────
@@ -64,7 +65,7 @@ export const approverTeamIdentity = (
     // transport that authenticated the click (the Teams bot path).
     sub: aadObjectId,
     azp: "teams-bot",
-    canRunDag: (dagTeam: string) => teams.includes(dagTeam),
+    canRunDag: (dagTeam: Team) => teams.includes(dagTeam),
   };
 };
 
@@ -84,7 +85,7 @@ export const toPersistedIdentity = (identity: AuthIdentity): PersistedIdentity =
 export const toExecIdentity = (identity: PersistedIdentity): AuthIdentity =>
   match(identity)
     .with({ kind: "admin" }, () => ({ kind: "admin" as const }))
-    .with({ kind: "team" }, (t) => ({ kind: "team" as const, team: t.team, label: t.label }))
+    .with({ kind: "team" }, (t) => ({ kind: "team" as const, team: markTeam(t.team), label: t.label }))
     .with({ kind: "user" }, (u) => ({
       kind: "user" as const,
       sub: u.sub,

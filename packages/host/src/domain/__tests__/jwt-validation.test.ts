@@ -12,12 +12,17 @@
 import { describe, it, expect } from "bun:test";
 import { validateRealmJwtClaims, describeAuthError } from "../jwt-validation.js";
 import type { RealmJwtClaims, SignatureVerifiedClaims } from "../jwt-validation.js";
+import { markTeam } from "../auth.js";
 
 const EXPECTED_ISS = "https://kc.example.com/realms/fugue-platform";
 const EXPECTED_AUD = "fugue-host";
 const NOW = 1_700_000_000; // UNIX seconds
 
-const baseClaims = (over: Partial<RealmJwtClaims> = {}): RealmJwtClaims => ({
+// Loosely typed (Record, not RealmJwtClaims): these tests deliberately feed
+// malformed `teams` values to exercise the value-level parse, and `validate`
+// consumes `unknown` anyway. The `teams` brand (`Team[]`) is enforced on the
+// validator's OUTPUT, asserted below.
+const baseClaims = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   iss: EXPECTED_ISS,
   aud: EXPECTED_AUD,
   exp: NOW + 300,
@@ -47,7 +52,7 @@ describe("validateRealmJwtClaims", () => {
       if (res.ok) {
         expect(res.value.sub).toBe("user-123");
         expect(res.value.azp).toBe("fugue-frontend");
-        expect(res.value.teams).toEqual(["team-a", "team-b"]);
+        expect(res.value.teams).toEqual([markTeam("team-a"), markTeam("team-b")]);
       }
     });
 
@@ -112,7 +117,7 @@ describe("validateRealmJwtClaims", () => {
     it("carries a valid teams array through to the AuthenticatedUser", () => {
       const res = validate(baseClaims({ teams: ["alpha", "beta"] }));
       expect(res.ok).toBe(true);
-      if (res.ok) expect(res.value.teams).toEqual(["alpha", "beta"]);
+      if (res.ok) expect(res.value.teams).toEqual([markTeam("alpha"), markTeam("beta")]);
     });
 
     it("accepts an empty teams array (well-formed; means 'no teams')", () => {

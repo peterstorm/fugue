@@ -43,6 +43,33 @@ export type TeamToken = TeamTokenShaped & { readonly __brand: "TeamToken" };
 /** SHA-256 hash of a token — this is what's stored in Redis */
 export type TokenHash = string & { readonly __brand: "TokenHash" };
 
+declare const __teamBrand: unique symbol;
+
+/**
+ * A team identifier — the unit the host authorizes on (`canAccessDag` keys on
+ * team equality; tokens, the JWT `teams` claim, DAG ownership, and a `Tenant`'s
+ * owning team are all teams). Branded so a team can never be confused at a type
+ * level with another identifier (a `clientId`, a `sub`, an `AgentClientId`): the
+ * load-bearing `tenant.team === dagTeam` / `canAccessDag` comparisons are now
+ * `Team === Team`, not bare-string equality a refactor could silently misalign.
+ *
+ * A PURE brand (like `SubjectToken` / `AuthenticatedUser`): `markTeam` stamps the
+ * phantom type without runtime validation — team values arrive already-trusted
+ * from their own boundaries (a verified JWT claim, a stored token grant, the
+ * registry config, a loaded DAG). The brand asserts PROVENANCE ("this string came
+ * through a team boundary"), not a shape; it carries no self-protection beyond
+ * that and erases at runtime, so it is behaviourally identical to the string.
+ */
+export type Team = string & { readonly [__teamBrand]: void };
+
+/**
+ * Brand a string as a `Team`. The single, greppable producer at each team
+ * boundary (JWT `teams` claim, team-token grant, tenant/DAG config). A pure cast —
+ * no validation — so it never changes runtime behaviour; it only records that the
+ * value crossed a team boundary so downstream authz compares like-typed values.
+ */
+export const markTeam = (s: string): Team => s as Team;
+
 declare const __subjectTokenBrand: unique symbol;
 
 /**
@@ -157,7 +184,7 @@ export const agentClientIdFromFrameworkOrigin = (agentClientId: string): AgentCl
  * Stored as JSON value in Redis keyed by the token's hash.
  */
 export interface TokenGrant {
-  readonly team: string;
+  readonly team: Team;
   readonly label: string;
   readonly createdAt: number;
 }
@@ -192,13 +219,13 @@ export interface TokenGrant {
  */
 export type AuthIdentity =
   | { readonly kind: "admin" }
-  | { readonly kind: "team"; readonly team: string; readonly label: string }
+  | { readonly kind: "team"; readonly team: Team; readonly label: string }
   | {
       readonly kind: "user";
       readonly sub: string;
       readonly azp: string;
       /** May this user run/see DAGs owned by `dagTeam`? Provided by `RealmJwtDeps.authorizeUserRun`. */
-      readonly canRunDag: (dagTeam: string) => boolean;
+      readonly canRunDag: (dagTeam: Team) => boolean;
       /**
        * The user's ACTUAL verified compact JWT — the `subject_token` proof the
        * broker presents in the RFC 8693 Standard Token Exchange V2 so the
@@ -252,7 +279,7 @@ export interface RealmJwtClaims {
   readonly exp: number;
   readonly sub: string;
   readonly azp: string;
-  readonly teams: readonly string[];
+  readonly teams: readonly Team[];
 }
 
 // ── Signature-verified claims & authenticated user (branded — review C5) ────
@@ -291,7 +318,7 @@ export type AuthenticatedUser = {
    * (FR-022). An empty list means the user is in no team and so can run no
    * team's DAGs (fail-closed).
    */
-  readonly teams: readonly string[];
+  readonly teams: readonly Team[];
 } & {
   readonly [__authUserBrand]: void;
 };
@@ -313,7 +340,7 @@ export const markSignatureVerified = (claims: RealmJwtClaims): SignatureVerified
 export const markAuthenticatedUser = (user: {
   readonly sub: string;
   readonly azp: string;
-  readonly teams: readonly string[];
+  readonly teams: readonly Team[];
 }): AuthenticatedUser => user as AuthenticatedUser;
 
 // ── Authorization (pure) ───────────────────────────────────────────────────
@@ -336,7 +363,7 @@ export const markAuthenticatedUser = (user: {
  *   (`adapters/keycloak-broker.ts`); this predicate gates DAG execution and
  *   static capabilities, which the broker's scope gate does not cover.
  */
-export const canAccessDag = (identity: AuthIdentity, dagTeam: string): boolean =>
+export const canAccessDag = (identity: AuthIdentity, dagTeam: Team): boolean =>
   match(identity)
     .with({ kind: "admin" }, () => true)
     .with({ kind: "team" }, (t) => t.team === dagTeam)
@@ -379,7 +406,7 @@ export const canAccessDag = (identity: AuthIdentity, dagTeam: string): boolean =
 export const canAccessDagForTenant = (
   tenant: Tenant,
   identity: AuthIdentity,
-  dagTeam: string,
+  dagTeam: Team,
 ): boolean => canAccessDag(identity, dagTeam) && tenant.team === dagTeam;
 
 // ── Token Generation (pure computation, randomness injected) ───────────────

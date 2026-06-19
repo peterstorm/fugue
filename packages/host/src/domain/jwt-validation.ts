@@ -20,8 +20,8 @@
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { match } from "ts-pattern";
-import type { JwtAudience, RealmJwtClaims, SignatureVerifiedClaims, AuthenticatedUser } from "./auth.js";
-import { markAuthenticatedUser } from "./auth.js";
+import type { JwtAudience, RealmJwtClaims, SignatureVerifiedClaims, AuthenticatedUser, Team } from "./auth.js";
+import { markAuthenticatedUser, markTeam } from "./auth.js";
 
 // ── AuthError ADT ──────────────────────────────────────────────────────────
 
@@ -158,11 +158,13 @@ export const validateRealmJwtClaims = (
   // the whole token — a wrong-typed claim is never silently coerced to "no
   // teams", because that could mask a misconfigured realm mapper. (An empty
   // array `[]` is well-formed and means exactly "no teams".)
-  let teams: readonly string[];
+  let teams: readonly Team[];
   if (c.teams === undefined) {
     teams = [];
   } else if (Array.isArray(c.teams) && c.teams.every(isNonEmptyString)) {
-    teams = c.teams;
+    // This is the JWT team-membership boundary: each verified, non-empty claim
+    // string becomes a branded `Team` so downstream authz compares like types.
+    teams = c.teams.map(markTeam);
   } else {
     return err({ kind: "malformed", reason: "non-array or non-string 'teams'" });
   }

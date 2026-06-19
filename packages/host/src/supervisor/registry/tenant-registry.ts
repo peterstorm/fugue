@@ -47,6 +47,7 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { tenantUnknown } from "../../domain/host-error.js";
 import type { TenantId, SecretsRef } from "../../domain/tenant.js";
+import type { Team } from "../../domain/auth.js";
 
 // ── Per-tenant config value types ────────────────────────────────────────────
 
@@ -89,7 +90,7 @@ export interface TenantLimits {
  */
 export interface TenantConfigBase {
   readonly id: TenantId;
-  readonly team: string;
+  readonly team: Team;
   readonly keycloakClientMapping: KeycloakClientMapping;
   readonly fsRoot: string;
   readonly secretsRef: SecretsRef;

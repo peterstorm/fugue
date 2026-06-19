@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "bun:test";
 import fc from "fast-check";
-import { canAccessDag } from "../../domain/auth.js";
+import { canAccessDag, markTeam } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import type { PersistedIdentity } from "../types.js";
 import { toPersistedIdentity, toExecIdentity, approverTeamIdentity } from "../identity.js";
@@ -24,7 +24,7 @@ describe("toPersistedIdentity", () => {
 
   it("preserves admin and team identities verbatim", () => {
     expect(toPersistedIdentity({ kind: "admin" })).toEqual({ kind: "admin" });
-    expect(toPersistedIdentity({ kind: "team", team: "eng", label: "Eng" })).toEqual({
+    expect(toPersistedIdentity({ kind: "team", team: markTeam("eng"), label: "Eng" })).toEqual({
       kind: "team",
       team: "eng",
       label: "Eng",
@@ -39,13 +39,13 @@ describe("toExecIdentity — fail-closed reconstruction (SECURITY)", () => {
     if (exec.kind !== "user") throw new Error("expected user");
     // Fail closed for ANY team — a regression flipping this to fail-open breaks here.
     fc.assert(
-      fc.property(fc.string(), (dagTeam) => {
+      fc.property(fc.string().map(markTeam), (dagTeam) => {
         expect(exec.canRunDag(dagTeam)).toBe(false);
       }),
     );
     // …and through the real authorization predicate the worker would consult.
-    expect(canAccessDag(exec, "eng")).toBe(false);
-    expect(canAccessDag(exec, exec.sub)).toBe(false); // not even "their own" team
+    expect(canAccessDag(exec, markTeam("eng"))).toBe(false);
+    expect(canAccessDag(exec, markTeam(exec.sub))).toBe(false); // not even "their own" team
   });
 
   it("restores the data fields (sub/azp) unchanged across the round-trip", () => {
@@ -59,12 +59,12 @@ describe("toExecIdentity — fail-closed reconstruction (SECURITY)", () => {
   it("admin and team round-trip data-identically (admin can run; team is team-scoped)", () => {
     const admin = toExecIdentity({ kind: "admin" });
     expect(admin).toEqual({ kind: "admin" });
-    expect(canAccessDag(admin, "any-team")).toBe(true);
+    expect(canAccessDag(admin, markTeam("any-team"))).toBe(true);
 
     const team = toExecIdentity({ kind: "team", team: "eng", label: "Eng" });
-    expect(team).toEqual({ kind: "team", team: "eng", label: "Eng" });
-    expect(canAccessDag(team, "eng")).toBe(true);
-    expect(canAccessDag(team, "ops")).toBe(false);
+    expect(team).toEqual({ kind: "team", team: markTeam("eng"), label: "Eng" });
+    expect(canAccessDag(team, markTeam("eng"))).toBe(true);
+    expect(canAccessDag(team, markTeam("ops"))).toBe(false);
   });
 });
 
@@ -79,9 +79,9 @@ describe("approverTeamIdentity — HITL approver resolution (FR-041, SC-006)", (
     expect(alice).toBeDefined();
     if (alice === undefined) throw new Error("expected an identity");
     expect(alice.kind).toBe("user");
-    expect(canAccessDag(alice, "sales")).toBe(true);
-    expect(canAccessDag(alice, "ops")).toBe(true);
-    expect(canAccessDag(alice, "marketing")).toBe(false);
+    expect(canAccessDag(alice, markTeam("sales"))).toBe(true);
+    expect(canAccessDag(alice, markTeam("ops"))).toBe(true);
+    expect(canAccessDag(alice, markTeam("marketing"))).toBe(false);
   });
 
   it("the approver's sub is their aadObjectId (stable subject)", () => {
@@ -101,8 +101,8 @@ describe("approverTeamIdentity — HITL approver resolution (FR-041, SC-006)", (
   it("a mapped approver with an EMPTY team set authorizes no team (fail-closed)", () => {
     const empty = approverTeamIdentity(MAP, "aad-empty");
     if (empty === undefined) throw new Error("expected an identity");
-    expect(canAccessDag(empty, "sales")).toBe(false);
-    expect(canAccessDag(empty, "")).toBe(false);
+    expect(canAccessDag(empty, markTeam("sales"))).toBe(false);
+    expect(canAccessDag(empty, markTeam(""))).toBe(false);
   });
 
   it("does NOT resolve inherited Object.prototype keys to a membership (fail-closed)", () => {
@@ -119,7 +119,7 @@ describe("approverTeamIdentity — HITL approver resolution (FR-041, SC-006)", (
     fc.assert(
       fc.property(
         fc.array(fc.string()),
-        fc.string(),
+        fc.string().map(markTeam),
         (teams, dagTeam) => {
           fc.pre(!teams.includes(dagTeam));
           const id = approverTeamIdentity({ "aad-x": teams }, "aad-x");
@@ -137,7 +137,7 @@ describe("identity round-trip — toPersisted ∘ toExec drops only the closure"
     fc.constant<AuthIdentity>({ kind: "admin" }),
     fc.record({
       kind: fc.constant("team" as const),
-      team: fc.string({ minLength: 1 }),
+      team: fc.string({ minLength: 1 }).map(markTeam),
       label: fc.string(),
     }),
     fc.record({
@@ -165,7 +165,7 @@ describe("identity round-trip — toPersisted ∘ toExec drops only the closure"
     // Even when the original live identity authorized everything, the reconstruction
     // denies everything — proving the closure is severed, not carried.
     fc.assert(
-      fc.property(fc.string({ minLength: 1 }), fc.string(), (sub, dagTeam) => {
+      fc.property(fc.string({ minLength: 1 }), fc.string().map(markTeam), (sub, dagTeam) => {
         const live: AuthIdentity = { kind: "user", sub, azp: "x", canRunDag: () => true };
         const exec = toExecIdentity(toPersistedIdentity(live));
         expect(canAccessDag(exec, dagTeam)).toBe(false);

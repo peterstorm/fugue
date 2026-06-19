@@ -43,7 +43,7 @@ import { emptyRegistry } from "../domain/registry.js";
 import { gitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { httpStatusFor, formatHostError, retryAfterSecondsFor } from "../domain/host-error.js";
-import type { AuthIdentity } from "../domain/auth.js";
+import type { AuthIdentity, Team } from "../domain/auth.js";
 import { constantTimeEqual, isJwtShape } from "../http/middleware/auth.js";
 import type { RealmJwtDeps } from "../http/middleware/auth.js";
 import { hashToken, isTeamTokenShape, markSubjectToken } from "../domain/auth.js";
@@ -215,7 +215,7 @@ export const authenticateIdentity = async (
       kind: "user",
       sub: user.sub,
       azp: user.azp,
-      canRunDag: (dagTeam: string) => realmJwt.authorizeUserRun(user, dagTeam),
+      canRunDag: (dagTeam: Team) => realmJwt.authorizeUserRun(user, dagTeam),
       subjectToken,
     });
   }

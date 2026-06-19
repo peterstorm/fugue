@@ -12,6 +12,7 @@
 
 import type { DagId, DagDef, GitSha } from "@fuguejs/framework";
 import type { z } from "zod";
+import type { Team } from "./auth.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -55,7 +56,7 @@ export type DagStatus =
  */
 export interface RegisteredDag {
   readonly id: DagId;
-  readonly team: string;
+  readonly team: Team;
   readonly route: string;
   readonly dag: DagDef;
   readonly inputSchema: z.ZodType;

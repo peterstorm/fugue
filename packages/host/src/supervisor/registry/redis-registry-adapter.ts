@@ -40,6 +40,7 @@ import { redisUnavailable } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 import { tenantId, markSecretsRef } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
+import { markTeam } from "../../domain/auth.js";
 import type { RedisPort, RedisPubSubPort, LogPort } from "../../ports.js";
 import { match } from "ts-pattern";
 import {
@@ -191,7 +192,7 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   // boundary), then promote to the deregistered variant if the record said so.
   const parsed = tenantConfig({
     id: idR.value,
-    team: String(o.team ?? ""),
+    team: markTeam(String(o.team ?? "")),
     keycloakClientMapping: {
       realm: String(km.realm ?? ""),
       clientId: String(km.clientId ?? ""),

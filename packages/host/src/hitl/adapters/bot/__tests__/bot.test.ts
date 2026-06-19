@@ -14,6 +14,8 @@ import { createInMemoryConversationStore, createRedisConversationStore } from ".
 import type { BotConnectorPort, VerifyBotToken } from "../ports.js";
 import { handleBotActivity } from "../messages-handler.js";
 import { isTrustedBotServiceUrl } from "../trusted-host.js";
+import { markTeam } from "../../../../domain/auth.js";
+import type { Team } from "../../../../domain/auth.js";
 import type { RedisPort } from "../../../../ports.js";
 import type { HostError } from "../../../../domain/host-error.js";
 import { tenantId } from "../../../../domain/tenant.js";
@@ -71,7 +73,7 @@ describe("bot card", () => {
 
 // A notifier whose `resolveDagTeam` always misses (no team routing) — exercises
 // the back-compat default-only delivery path.
-const noTeam = (): string | undefined => undefined;
+const noTeam = (): Team | undefined => undefined;
 
 describe("bot notifier", () => {
   it("posts the review activity to the stored default conversation (unmapped team)", async () => {
@@ -102,7 +104,7 @@ describe("bot notifier", () => {
     await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:default" });
     await conversations.saveTeamReference("sales", { serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:sales" });
 
-    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: () => "sales" }).notify(notification);
+    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: () => markTeam("sales") }).notify(notification);
     expect(res.ok).toBe(true);
     expect(sent).toHaveLength(1);
     // Confidentiality: the card went to the team channel, NEVER the default.
@@ -115,14 +117,14 @@ describe("bot notifier", () => {
     const conversations = createInMemoryConversationStore();
     await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:default" });
     // Team resolves, but it has no stored reference → fall back to default.
-    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: () => "sales" }).notify(notification);
+    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: () => markTeam("sales") }).notify(notification);
     expect(res.ok).toBe(true);
     expect(sent[0]!.ref.conversationId).toBe("19:default");
   });
 
   it("errs notification-failed when a team resolves but neither a team NOR a default reference exists", async () => {
     const connector: BotConnectorPort = { sendToConversation: async () => ok(undefined) };
-    const res = await createBotFrameworkNotifier({ connector, conversations: createInMemoryConversationStore(), resolveDagTeam: () => "sales" }).notify(notification);
+    const res = await createBotFrameworkNotifier({ connector, conversations: createInMemoryConversationStore(), resolveDagTeam: () => markTeam("sales") }).notify(notification);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("notification-failed");
   });
@@ -156,11 +158,11 @@ const fakeHitl = (overrides: Partial<HitlRunService> = {}): HitlRunService => ({
 // The `lead-desk` DAG (the default suspendedRecord) is owned by team "sales".
 // Alice (aadObjectId "aad-alice") is a member of "sales" → authorized. Mallory
 // ("aad-mallory") is a member of "marketing" only → a non-member, refused.
-const DAG_TEAM = "sales";
+const DAG_TEAM = markTeam("sales");
 const APPROVER_TEAMS = { "aad-alice": ["sales"], "aad-mallory": ["marketing"] };
 // The Teams team `aadGroupId` → fugue team map (HITL_TEAM_CHANNELS).
 const TEAM_CHANNELS: Record<string, string> = { "grp-sales": "sales" };
-const resolveDagTeamOk = (): string | undefined => DAG_TEAM;
+const resolveDagTeamOk = (): Team | undefined => DAG_TEAM;
 
 /** Build the bot deps with the FR-041 authz wiring (team resolver + approver map). */
 const botDeps = (
@@ -458,7 +460,7 @@ describe("bot messages handler — approver authorization (FR-041, SC-006)", () 
     // a known approver, she is not a member of THIS run's team → refused.
     const hitl = fakeHitl();
     const res = await handleBotActivity(
-      botDeps(hitl, undefined, { resolveDagTeam: () => "marketing" }),
+      botDeps(hitl, undefined, { resolveDagTeam: () => markTeam("marketing") }),
       { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Alice", aadObjectId: "aad-alice" }) },
     );
     expect(res.status).toBe(200);

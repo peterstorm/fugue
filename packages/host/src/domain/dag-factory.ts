@@ -6,6 +6,7 @@
  */
 
 import type { RegisteredDag } from "./registry.js";
+import { markTeam } from "./auth.js";
 import type { LoadResult } from "../ports.js";
 import type { DagSnapshot } from "./dag-diff.js";
 import type { GitSha } from "@fuguejs/framework";
@@ -90,8 +91,10 @@ export const loadResultToRegisteredDag = (
   hostDefaults: HostTimeoutDefaults = DEFAULT_HOST_TIMEOUT_DEFAULTS,
 ): RegisteredDag => {
   const resolved = resolveDefaults(result.registration);
-  // A fugue.yaml `team` (threaded onto the LoadResult) overrides the path-derived team.
-  const team = result.team && result.team.length > 0 ? result.team : extractTeam(result.modulePath);
+  // A fugue.yaml `team` (threaded onto the LoadResult) overrides the path-derived
+  // team. This is the DAG-ownership team boundary: brand it `Team` here so every
+  // downstream authz comparison (`canAccessDag`) is type-checked, not bare-string.
+  const team = markTeam(result.team && result.team.length > 0 ? result.team : extractTeam(result.modulePath));
   const regConfig = result.registration.config;
 
   // Apply host-level defaults and clamp

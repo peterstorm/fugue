@@ -13,6 +13,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
+import { markTeam } from "../../../domain/auth.js";
 import {
   ok,
   err,
@@ -97,7 +98,7 @@ const singleNodeDag = (run: NodeDef<unknown, unknown>["run"]): DagDef =>
 
 const registered = (dag: DagDef, timeout = 30_000): RegisteredDag => ({
   id: dag.id as DagId,
-  team: "eng",
+  team: markTeam("eng"),
   route: "/dags/exec-dag/run",
   dag,
   inputSchema: z.unknown(),

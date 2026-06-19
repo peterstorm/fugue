@@ -44,6 +44,7 @@ import { authenticateIdentity } from "../../../supervisor/supervisor.js";
 import type { AuthDeps } from "../../../supervisor/supervisor.js";
 import type { AuthIdentity } from "../../../domain/auth.js";
 import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
+import { markTeam } from "../../../domain/auth.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { tenantConfig } from "../../../supervisor/registry/tenant-registry.js";
 import type { ActiveTenantConfig, TenantConfigBase } from "../../../supervisor/registry/tenant-registry.js";
@@ -137,7 +138,7 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
   }
   const base: TenantConfigBase = {
     id,
-    team: typeof o.team === "string" ? o.team : "",
+    team: markTeam(typeof o.team === "string" ? o.team : ""),
     keycloakClientMapping: {
       realm: typeof km.realm === "string" ? km.realm : "",
       clientId: typeof km.clientId === "string" ? km.clientId : "",

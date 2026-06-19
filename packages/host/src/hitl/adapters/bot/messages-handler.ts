@@ -47,6 +47,7 @@ import { tryRunId, tryNodeId } from "@fuguejs/framework";
 import type { HitlRunService } from "../../service.js";
 import type { LogPort } from "../../../ports.js";
 import { canAccessDag } from "../../../domain/auth.js";
+import type { Team } from "../../../domain/auth.js";
 import { approverTeamIdentity, type ApproverTeamMap } from "../../identity.js";
 import type { ConversationStorePort, VerifyBotToken, ConversationReference } from "./ports.js";
 import { REVIEW_VERB, buildResolvedCard } from "./card.js";
@@ -63,7 +64,7 @@ export interface BotMessagesDeps {
    * no longer registered — treated as fail-closed (cannot establish the team, so
    * the decision is refused, mirroring the HTTP path's not-found handling).
    */
-  readonly resolveDagTeam: (dagId: DagId) => string | undefined;
+  readonly resolveDagTeam: (dagId: DagId) => Team | undefined;
   /**
    * Config-sourced `aadObjectId → teams` map (FR-041, `HITL_APPROVER_TEAMS`). The
    * clicker's `from.aadObjectId` is resolved through it to the approver identity

@@ -21,6 +21,7 @@
 
 import { ok, err } from "@fuguejs/framework";
 import type { Result, DagId } from "@fuguejs/framework";
+import type { Team } from "../../../domain/auth.js";
 import type { HostError } from "../../../domain/host-error.js";
 import type { HumanReviewNotifierPort } from "../../ports.js";
 import { buildReviewActivity } from "./card.js";
@@ -36,7 +37,7 @@ export const createBotFrameworkNotifier = (deps: {
    * then falls back to the default channel (routing is best-effort delivery, not a
    * security gate).
    */
-  readonly resolveDagTeam: (dagId: DagId) => string | undefined;
+  readonly resolveDagTeam: (dagId: DagId) => Team | undefined;
 }): HumanReviewNotifierPort => ({
   async notify(notification): Promise<Result<void, HostError>> {
     const activity = buildReviewActivity(notification);

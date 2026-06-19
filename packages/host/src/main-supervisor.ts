@@ -65,7 +65,7 @@ import type { AuditPort } from "./supervisor/audit/audit-port.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
-import type { AuthenticatedUser } from "./domain/auth.js";
+import type { AuthenticatedUser, Team } from "./domain/auth.js";
 
 // ── Logger (mirrors main.ts) ─────────────────────────────────────────────────
 
@@ -422,7 +422,7 @@ const main = async () => {
           verify: createRealmJwtVerifier({ issuer: config.REALM_JWT_ISSUER }),
           expectedIss: config.REALM_JWT_ISSUER,
           expectedAud: config.REALM_JWT_AUDIENCE,
-          authorizeUserRun: (user: AuthenticatedUser, dagTeam: string): boolean => user.teams.includes(dagTeam),
+          authorizeUserRun: (user: AuthenticatedUser, dagTeam: Team): boolean => user.teams.includes(dagTeam),
         }
       : undefined;
   const auth: AuthDeps = {

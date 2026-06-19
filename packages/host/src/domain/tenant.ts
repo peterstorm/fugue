@@ -39,7 +39,7 @@
  */
 
 import { match } from "ts-pattern";
-import type { AuthIdentity } from "./auth.js";
+import type { AuthIdentity, Team } from "./auth.js";
 import type { HostError } from "./host-error.js";
 import { tenantUnknown, internalInvariantViolated } from "./host-error.js";
 import type { Result } from "@fuguejs/framework";
@@ -82,7 +82,7 @@ export type TenantId = string & { readonly [__tenantIdBrand]: void };
  */
 export type Tenant = {
   readonly id: TenantId;
-  readonly team: string;
+  readonly team: Team;
 } & { readonly [__tenantBrand]: void };
 
 /**
@@ -126,7 +126,7 @@ export type SecretsRef = string & { readonly [__secretsRefBrand]: void };
  */
 export interface TenantRegistryView {
   /** Resolve an identity's owning team to its registered tenant, if any. */
-  readonly tenantForTeam: (team: string) => Tenant | undefined;
+  readonly tenantForTeam: (team: Team) => Tenant | undefined;
 }
 
 // ── Smart constructors ──────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ export const tenantId = (s: string): Result<TenantId, HostError> =>
  * T3 registry: a malformed id can never become a branded principal that would
  * widen its own `fugue:<tenant>:*` key / `~fugue:<tenant>:*` ACL namespace.
  */
-export const markTenant = (id: TenantId, team: string): Tenant => {
+export const markTenant = (id: TenantId, team: Team): Tenant => {
   if (!TENANT_ID_REGEX.test(id)) {
     // Thrown HostError — the error-handler middleware unwraps `internal-
     // invariant-violated` to a generic 500 and logs detail server-side; the
@@ -235,7 +235,7 @@ export const markSecretsRef = (ref: string): SecretsRef => {
  *   alone, so it is out of scope for the identity→tenant boundary parse and
  *   resolves to `tenant-unknown` here (fail-closed; never cross-tenant).
  */
-const owningTeamForIdentity = (identity: AuthIdentity): string | undefined =>
+const owningTeamForIdentity = (identity: AuthIdentity): Team | undefined =>
   match(identity)
     .with({ kind: "admin" }, () => undefined)
     .with({ kind: "team" }, (t) => t.team)
