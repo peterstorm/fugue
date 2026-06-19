@@ -99,6 +99,24 @@ const ACL_USERNAME_PREFIX = "fugue-tenant-";
  */
 export const aclUsername = (tenant: TenantId): string => `${ACL_USERNAME_PREFIX}${tenant}`;
 
+// ── Worker credential-handoff env contract ───────────────────────────────────
+
+/**
+ * The env-var NAMES the supervisor uses to hand a minted per-tenant ACL
+ * credential into the owning worker's spawn env, and the worker reads to
+ * authenticate to Redis as its OWN scoped user (ADR-0067 / AD-6). The SHARED
+ * source of truth for both sides — the supervisor (spawn injection,
+ * `worker-lifecycle-manager.ts`) and the worker (`worker-main.ts` Redis connect)
+ * MUST agree byte-for-byte, so the names live here next to the ACL spec.
+ *
+ * The credential transits ONLY the spawn env (a bounded, unretained, never-logged
+ * handoff): the supervisor passes it to `Bun.spawn` and drops the reference; it
+ * is never persisted or logged. When unset (ACL disabled), the worker falls back
+ * to the shared `REDIS_URL` credential.
+ */
+export const WORKER_REDIS_ACL_USERNAME_ENV = "FUGUE_REDIS_ACL_USERNAME" as const;
+export const WORKER_REDIS_ACL_PASSWORD_ENV = "FUGUE_REDIS_ACL_PASSWORD" as const;
+
 // ── Command scoping (data-plane only, least-privilege) ───────────────────────
 
 /**

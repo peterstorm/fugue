@@ -6,11 +6,15 @@
 
 ## Status
 
-Accepted — mechanism designed, specced, and adversarially tested. **The ACL
-data-plane wiring is NOT yet active in the runtime** (see "Implementation status"
-under Decision): the active per-tenant isolation today is the type-enforced
-application-layer key prefixing; the Redis-ACL credential mint + handoff lands in
-a later wave.
+Accepted — mechanism designed, specced, adversarially tested, AND wired into the
+runtime behind the `SUPERVISOR_REDIS_ACL_ENABLED` flag (default off; see
+"Implementation status" under Decision). With the flag on, the supervisor mints a
+per-tenant ACL credential at worker spawn and the worker authenticates as its own
+`~fugue:<tenant>:*`-scoped user, so cross-tenant reads are refused by Redis with
+NOPERM. With the flag off (default), isolation rests on the type-enforced
+application-layer key prefixing and the worker uses the shared `REDIS_URL`
+credential — enabling the ACL is a deliberate operational step (it requires an
+ACL-capable Redis whose admin credential can run `ACL SETUSER`).
 
 ## Date
 
@@ -101,19 +105,24 @@ ENUMERATION denied outright. Every host-produced key is prefixed
 compromised worker's cross-tenant read is refused by Redis with `NOPERM`, not by
 application code.**
 
-> **Implementation status (2026-06-19).** The above describes the TARGET design.
-> The pure ACL spec (`redis-acl.ts`), the provisioner (`apply`/`revoke`), and the
-> adversarial cross-tenant-read tests all exist and pass — but `apply` is **not yet
-> invoked in the runtime**: tenant registration does not provision an ACL user, and
-> a worker today connects to Redis with the inherited shared `REDIS_URL`, not a
-> per-tenant ACL credential. Only `revoke` is wired (grace-window purge). Until the
-> credential mint + handoff is wired (a later wave; tracked in
-> [`docs/migrations/tenant-key-namespacing.md`](../migrations/tenant-key-namespacing.md)),
-> the LIVE per-tenant isolation is the **application-layer key prefixing** below —
-> which IS load-bearing and type-enforced (`TenantId` is a required hard-branded
-> argument on every key builder). The ACL is defense-in-depth that hardens, but does
-> not currently provide, the cross-tenant boundary. Present-tense phrasing in the
-> rest of this section is the intended end state.
+> **Implementation status (2026-06-19).** This mechanism is WIRED into the runtime,
+> gated by `SUPERVISOR_REDIS_ACL_ENABLED` (default off):
+> - **Flag ON** — at each worker spawn the supervisor calls `apply` over its admin
+>   connection (`main-supervisor.ts` → `worker-lifecycle-manager.ts` `provisionRedisAcl`),
+>   minting a fresh 256-bit password for the per-tenant user and injecting it into the
+>   worker's spawn env (`FUGUE_REDIS_ACL_USERNAME`/`FUGUE_REDIS_ACL_PASSWORD`,
+>   `redis-acl.ts`). The worker authenticates to Redis as that scoped user
+>   (`worker-main.ts`), so the present-tense Decision below is literally true: a
+>   cross-tenant read is refused with NOPERM by Redis. The credential transits ONLY
+>   the spawn env (bounded, unretained, never-logged — AD-6); `revoke` (`ACL DELUSER`)
+>   runs in the grace-window purge.
+> - **Flag OFF (default)** — no ACL user is provisioned; the worker connects with the
+>   shared `REDIS_URL` credential and the LIVE per-tenant isolation is the
+>   application-layer key prefixing below (load-bearing and type-enforced: `TenantId`
+>   is a required hard-branded argument on every key builder). Enabling the flag is a
+>   deliberate operational step (requires an ACL-capable Redis whose admin credential
+>   can run `ACL SETUSER`); see
+>   [`docs/migrations/tenant-key-namespacing.md`](../migrations/tenant-key-namespacing.md).
 
 The mechanism is split into a pure spec and an imperative provisioner:
 
@@ -244,9 +253,10 @@ harness is enforcing the real spec, not its own logic.
 - Re-provisioning rewrites the user from a clean `reset` baseline each time; the
   password is rotated on every `apply`, so any cached connection holding an old
   credential is invalidated — correct for security, but worker reconfiguration
-  must re-pull the credential rather than reuse a stale one. (Forward-looking: per
-  the Implementation-status note above, `apply` is not yet invoked in the runtime,
-  so this rotation behaviour is the intended characteristic, not a current one.)
+  must re-pull the credential rather than reuse a stale one. (With
+  `SUPERVISOR_REDIS_ACL_ENABLED` on, `apply` runs on EVERY spawn, so a worker that
+  is evicted and later re-spawned gets a freshly rotated password automatically;
+  with the flag off, `apply` is not invoked and this rotation does not occur.)
 
 ## Related
 

@@ -49,6 +49,8 @@ import {
 import type { WorkerState } from "./worker-lifecycle.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
+import type { AppliedAclCredential } from "../secrets/redis-acl-provisioner.js";
+import { WORKER_REDIS_ACL_USERNAME_ENV, WORKER_REDIS_ACL_PASSWORD_ENV } from "../secrets/redis-acl.js";
 import type { SpawnPort, ProcManagePort, WorkerLifecyclePort, EnsuredWorker } from "./spawn-port.js";
 import type { WorkerRegistry, WorkerRecord, UdsLivenessProbe } from "./worker-registry-redis.js";
 
@@ -125,6 +127,18 @@ export interface WorkerLifecycleDeps {
   readonly probe: UdsLivenessProbe;
   /** Authoritative tenant spawn config (secretsRef + eagerPin). */
   readonly tenants: TenantSpawnConfigView;
+  /**
+   * OPTIONAL per-tenant Redis-ACL provisioner (ADR-0067, AD-6). When wired (gated
+   * by `SUPERVISOR_REDIS_ACL_ENABLED`), `lazySpawn` mints a FRESH scoped ACL
+   * credential per spawn and injects it into the worker's env so the worker
+   * authenticates to Redis as its OWN per-tenant user (`~fugue:<tenant>:*`,
+   * NOPERM-enforced) instead of the shared default user. Fail-closed: a
+   * provisioning error refuses the spawn (`worker-unavailable`). The minted
+   * password transits ONLY the spawn env — the supervisor keeps no copy and never
+   * logs it. Unset → no provisioning (worker uses the shared `REDIS_URL`
+   * credential; today's behaviour, zero regression).
+   */
+  readonly provisionRedisAcl?: (tenant: TenantId) => Promise<Result<AppliedAclCredential, HostError>>;
   /** Injected clock — NEVER Date.now (repo ban). */
   readonly clock: () => number;
   readonly config: WorkerLifecycleConfig;
@@ -136,7 +150,7 @@ export interface WorkerLifecycleDeps {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
-  const { spawn, proc, registry, probe, tenants, clock, config, logger } = deps;
+  const { spawn, proc, registry, probe, tenants, clock, config, logger, provisionRedisAcl } = deps;
 
   // Per-tenant pure ADT state. The ONLY mutable state — every entry is an
   // immutable pure `WorkerState`; we replace (never mutate) entries.
@@ -263,6 +277,29 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // FR-004: the socket is a PURE function of the TenantId, derived here.
     const udsPath = workerSocketPath(config.udsDir, tenant);
 
+    // Per-tenant Redis ACL (ADR-0067): when provisioning is wired, mint a FRESH
+    // scoped credential and inject it into the worker env so the worker connects
+    // to Redis as its own `~fugue:<tenant>:*` user. Minted BEFORE claiming the
+    // `spawning` slot so a provisioning failure fails closed with no state to
+    // unwind. The password is local to this call (and the spawn env) — never
+    // retained or logged here.
+    let extraEnv = spawnCfg.extraEnv;
+    if (provisionRedisAcl !== undefined) {
+      const cred = await provisionRedisAcl(tenant);
+      if (!cred.ok) {
+        logger.error("[worker-lifecycle] redis ACL provisioning failed — refusing spawn (fail-closed)", {
+          tenant,
+          error: formatHostError(cred.error),
+        });
+        return err(workerUnavailable(tenant));
+      }
+      extraEnv = {
+        ...(extraEnv ?? {}),
+        [WORKER_REDIS_ACL_USERNAME_ENV]: cred.value.username,
+        [WORKER_REDIS_ACL_PASSWORD_ENV]: cred.value.password,
+      };
+    }
+
     // Enter the pure `spawning` state.
     workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
 
@@ -272,7 +309,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       workerEntry: config.workerEntry,
       udsPath,
       ...(config.heapCapMb !== undefined ? { heapCapMb: config.heapCapMb } : {}),
-      ...(spawnCfg.extraEnv !== undefined ? { extraEnv: spawnCfg.extraEnv } : {}),
+      ...(extraEnv !== undefined ? { extraEnv } : {}),
     });
     if (!spawnResult.ok) {
       // Surface the UNDERLYING spawn cause (ENOMEM/ENOENT/fork-limit, in the

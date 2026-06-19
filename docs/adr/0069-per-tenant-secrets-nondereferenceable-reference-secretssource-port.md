@@ -167,11 +167,12 @@ Key invariants:
   scoped to *tenant env-file secrets resolved through this port*; the same
   isolation test asserts the minted password materializes only as a transient
   `>password` SETUSER token and is retained on no long-lived supervisor handle.
-  (Status, 2026-06-19: this handoff describes the TARGET design — see ADR-0067's
-  Implementation-status note. `apply` is not yet invoked in the runtime, so the
-  ACL credential is not currently minted or handed off; the `SecretsSource` port
-  and its non-dereferenceability guarantee, however, ARE the live design for
-  tenant env-file secrets.)
+  (Status, 2026-06-19: this handoff is WIRED behind `SUPERVISOR_REDIS_ACL_ENABLED`
+  — see ADR-0067's Implementation-status note. With the flag on, `apply` mints the
+  credential at worker spawn and it is handed into the owning worker via the spawn
+  env; with the flag off it is not minted. The `SecretsSource` port and its
+  non-dereferenceability guarantee are the live design for tenant env-file secrets
+  in both cases.)
 
 ## Consequences
 

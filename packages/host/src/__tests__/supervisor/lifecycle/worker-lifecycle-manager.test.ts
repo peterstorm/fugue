@@ -324,6 +324,64 @@ describe("createWorkerLifecycle: onCrash (FR-015, AD-8 containment)", () => {
   });
 });
 
+// ── Per-tenant Redis ACL provisioning (ADR-0067, AD-6) ──────────────────────────
+
+describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", () => {
+  test("injects the minted ACL credential into the worker spawn env (handoff)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const provisioned: TenantId[] = [];
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+      provisionRedisAcl: async (tenant) => {
+        provisioned.push(tenant);
+        return ok({ username: `fugue-tenant-${tenant}`, password: "minted-secret-256", tenant });
+      },
+    });
+    const r = await lc.ensureWorker(tid("acme"));
+    expect(r.ok).toBe(true);
+    expect(provisioned).toEqual([tid("acme")]);
+    // The minted credential reached the worker via the spawn env (the handoff).
+    const spec = spawned[0]!.spec;
+    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBe("fugue-tenant-acme");
+    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_PASSWORD"]).toBe("minted-secret-256");
+  });
+
+  test("fails closed (worker-unavailable, NEVER spawns) when ACL provisioning errors", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+      provisionRedisAcl: async () => err({ kind: "redis-unavailable", operation: "acl-apply" }),
+    });
+    const r = await lc.ensureWorker(tid("acme"));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("worker-unavailable");
+    expect(spawned.length).toBe(0); // never spawned — no worker started without its scoped credential
+    expect(lc.liveWorkerCount()).toBe(0);
+  });
+
+  test("no provisioner wired → no ACL env injected (zero-regression default)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.ensureWorker(tid("acme"));
+    const spec = spawned[0]!.spec;
+    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBeUndefined();
+  });
+});
+
 // ── reconcileReadopt: eagerPin from the registry (C3, AD-7, SC-006) ─────────────
 
 describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () => {

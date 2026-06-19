@@ -143,10 +143,24 @@ export const buildWorkerBootstrap = (
 
 // ── Redis Connectivity (mirrors main.ts) ──────────────────────────────────────
 
-const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> }, HostError>> => {
+const createRedisConnectivity = async (
+  redisUrl: string,
+  aclCredential?: { readonly username: string; readonly password: string },
+): Promise<Result<{ port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> }, HostError>> => {
   try {
     const { Redis } = await import("ioredis");
-    const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+    // ADR-0067: when the supervisor injected a per-tenant ACL credential, the
+    // worker authenticates as its OWN `~fugue:<tenant>:*`-scoped user — the
+    // explicit username/password OVERRIDE any inherited in the REDIS_URL, so a
+    // cross-tenant key access is refused by Redis with NOPERM. Absent → connect
+    // with the REDIS_URL credential (ACL disabled).
+    const client = new Redis(redisUrl, {
+      maxRetriesPerRequest: 3,
+      lazyConnect: true,
+      ...(aclCredential !== undefined
+        ? { username: aclCredential.username, password: aclCredential.password }
+        : {}),
+    });
 
     const port: RedisConnectivityPort = {
       ping: async () => {
@@ -227,8 +241,17 @@ const main = async () => {
   const { tenant, config, socketPath } = bootstrapResult.value;
   logger.info("Worker bootstrap resolved", { tenant, socketPath });
 
-  // Step 5: Redis connectivity (fail-closed).
-  const redisResult = await createRedisConnectivity(config.REDIS_URL);
+  // Step 5: Redis connectivity (fail-closed). ADR-0067: if the supervisor injected
+  // a per-tenant ACL credential, connect as that scoped user (NOPERM-enforced
+  // isolation); both env vars must be present to use it (fail-safe partial).
+  const aclCredential =
+    config.FUGUE_REDIS_ACL_USERNAME !== undefined && config.FUGUE_REDIS_ACL_PASSWORD !== undefined
+      ? { username: config.FUGUE_REDIS_ACL_USERNAME, password: config.FUGUE_REDIS_ACL_PASSWORD }
+      : undefined;
+  if (aclCredential !== undefined) {
+    logger.info("Worker connecting to Redis as per-tenant ACL user", { tenant, aclUser: aclCredential.username });
+  }
+  const redisResult = await createRedisConnectivity(config.REDIS_URL, aclCredential);
   if (!redisResult.ok) {
     logger.error(`Redis connectivity failed: ${formatHostError(redisResult.error)}`);
     process.exit(1);

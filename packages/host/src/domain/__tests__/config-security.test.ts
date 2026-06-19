@@ -34,6 +34,34 @@ describe("HostConfig — zero-regression baseline (SC-001)", () => {
   });
 });
 
+describe("HostConfig — per-tenant Redis ACL (ADR-0067)", () => {
+  it("defaults SUPERVISOR_REDIS_ACL_ENABLED to false and leaves worker ACL creds unset", () => {
+    const result = parseHostConfig(baseEnv());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.SUPERVISOR_REDIS_ACL_ENABLED).toBe(false);
+    expect(result.value.FUGUE_REDIS_ACL_USERNAME).toBeUndefined();
+    expect(result.value.FUGUE_REDIS_ACL_PASSWORD).toBeUndefined();
+  });
+
+  it("coerces the string flag 'true' to boolean true (env vars are strings)", () => {
+    const result = parseHostConfig({ ...baseEnv(), SUPERVISOR_REDIS_ACL_ENABLED: "true" });
+    expect(result.ok && result.value.SUPERVISOR_REDIS_ACL_ENABLED).toBe(true);
+  });
+
+  it("carries the worker ACL credential env vars when the supervisor injected them", () => {
+    const result = parseHostConfig({
+      ...baseEnv(),
+      FUGUE_REDIS_ACL_USERNAME: "fugue-tenant-acme",
+      FUGUE_REDIS_ACL_PASSWORD: "minted-secret-256",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.FUGUE_REDIS_ACL_USERNAME).toBe("fugue-tenant-acme");
+    expect(result.value.FUGUE_REDIS_ACL_PASSWORD).toBe("minted-secret-256");
+  });
+});
+
 describe("HostConfig — Entra tenant/client pairing (FR-001)", () => {
   it("accepts tenant + client set together", () => {
     const result = parseHostConfig({

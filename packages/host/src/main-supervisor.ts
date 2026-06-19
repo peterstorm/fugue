@@ -53,7 +53,7 @@ import {
   purgeSucceeded,
 } from "./supervisor/lifecycle/grace-window-purge.js";
 import type { GracePurgeDeps } from "./supervisor/lifecycle/grace-window-purge.js";
-import { revoke as revokeAclUser } from "./supervisor/secrets/redis-acl-provisioner.js";
+import { apply as applyAclUser, revoke as revokeAclUser } from "./supervisor/secrets/redis-acl-provisioner.js";
 import type { RedisAclAdminPort } from "./supervisor/secrets/redis-acl-provisioner.js";
 import {
   createLogAuditSink,
@@ -340,6 +340,18 @@ const main = async () => {
     probe: udsProbe,
     tenants: spawnConfigView,
     clock: () => Date.now(),
+    // ADR-0067: when per-tenant Redis ACL isolation is enabled, mint a fresh
+    // scoped credential per spawn over the admin connection and hand it to the
+    // worker (the manager injects it into the spawn env). `revoke` is already
+    // wired into the grace purge below. Randomness is the CSPRNG seam the
+    // provisioner expects (256-bit password). Off → no provisioning (the worker
+    // uses the shared REDIS_URL credential; key-prefix isolation only).
+    ...(config.SUPERVISOR_REDIS_ACL_ENABLED
+      ? {
+          provisionRedisAcl: (tenant: TenantId) =>
+            applyAclUser(aclAdmin, tenant, { generateRandomBytes: () => crypto.getRandomValues(new Uint8Array(32)) }),
+        }
+      : {}),
     config: {
       udsDir: config.WORKER_UDS_DIR,
       workerEntry,

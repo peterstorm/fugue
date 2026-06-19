@@ -439,6 +439,16 @@ export const HostConfigSchema = z.object({
    */
   FUGUE_SECRETS_REF: z.string().optional(),
   /**
+   * WORKER MODE (ADR-0067): the per-tenant Redis ACL username + password the
+   * supervisor mints and injects into this worker's spawn env (when
+   * SUPERVISOR_REDIS_ACL_ENABLED is on) so the worker authenticates to Redis as
+   * its OWN `~fugue:<tenant>:*`-scoped user. ABSENT → the worker uses the
+   * `REDIS_URL` credential (ACL disabled; today's behaviour). The password is a
+   * secret handed only via the spawn env — NEVER logged.
+   */
+  FUGUE_REDIS_ACL_USERNAME: z.string().optional(),
+  FUGUE_REDIS_ACL_PASSWORD: z.string().optional(),
+  /**
    * Directory under which per-tenant worker Unix-domain sockets live (T6/T7).
    * The supervisor reverse-proxies inbound HTTP to `<dir>/<tenant>.sock` (0600).
    * This is NOT an inbound public listener (FR-001): the single public HTTP
@@ -471,6 +481,21 @@ export const HostConfigSchema = z.object({
    * resources).
    */
   SUPERVISOR_MAX_LIVE_WORKERS: z.coerce.number().int().min(1).optional(),
+  /**
+   * Enable per-tenant Redis ACL isolation (ADR-0067). When `true`, the supervisor
+   * provisions a per-tenant `~fugue:<tenant>:*`-scoped ACL user at worker spawn and
+   * hands the minted credential into the owning worker, so a compromised worker's
+   * cross-tenant read is refused by Redis with NOPERM (data-plane enforcement, not
+   * just application-layer key prefixing). REQUIRES a Redis/Valkey server with ACL
+   * support AND that the supervisor's `REDIS_URL` credential has ACL admin rights
+   * (`+@admin` or `+acl`). Default `false`: enabling it is a deliberate operational
+   * step (see docs/migrations/tenant-key-namespacing.md) — with it off the worker
+   * uses the shared `REDIS_URL` credential and isolation rests on key prefixing.
+   */
+  SUPERVISOR_REDIS_ACL_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((v) => v === true || v === "true" || v === "1")
+    .default(false),
   /**
    * Idle duration (ms) after which the supervisor may evict a worker with no
    * in-flight work (T8). Default 15 min. Eviction is graceful (drain then stop).

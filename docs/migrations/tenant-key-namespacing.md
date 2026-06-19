@@ -192,11 +192,29 @@ behaviour (AD-8).
 
 ## Enabling the Redis ACL (after rekey)
 
-Once every key is tenant-prefixed, provision the per-tenant ACL user (plan T5):
+Once every key is tenant-prefixed, the supervisor can provision and manage the
+per-tenant ACL user AUTOMATICALLY (ADR-0067). This is no longer a manual
+`ACL SETUSER` step — set one flag:
 
 ```
-ACL SETUSER fugue-tenant-<tenant> on ><credential> ~fugue:<tenant>:* +@all
+SUPERVISOR_REDIS_ACL_ENABLED=true
 ```
+
+With the flag on, at each worker spawn the supervisor mints a fresh 256-bit
+password and runs (over its admin connection):
+
+```
+ACL SETUSER fugue-tenant-<tenant> reset on resetchannels ~fugue:<tenant>:* +@all -@admin -@dangerous -@scripting -keys -scan -randomkey -dbsize … ><minted-password>
+```
+
+then injects `FUGUE_REDIS_ACL_USERNAME`/`FUGUE_REDIS_ACL_PASSWORD` into the
+worker's env so the worker authenticates as that scoped user. `ACL DELUSER` runs
+in the grace-window purge on deregister.
+
+**Prerequisite:** the supervisor's `REDIS_URL` credential must have ACL admin
+rights (e.g. `+@admin`/`+acl`) on an ACL-capable Redis/Valkey. If it does not,
+spawns fail closed (`worker-unavailable`) — leave the flag off until the admin
+credential is provisioned.
 
 Verify isolation (SC-001): connected as `fugue-tenant-<tenantA>`, the following must
 return `NOPERM`, proving zero bytes escape the prefix:
