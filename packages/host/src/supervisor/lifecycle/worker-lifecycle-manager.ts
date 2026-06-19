@@ -47,6 +47,8 @@ import {
   occupiesSlot,
 } from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
+import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
+import type { RestartBudget } from "./thin-init.js";
 import type { SpawnPort, ProcManagePort, WorkerLifecyclePort, EnsuredWorker } from "./spawn-port.js";
 import type { WorkerRegistry, WorkerRecord, UdsLivenessProbe } from "./worker-registry-redis.js";
 
@@ -102,6 +104,17 @@ export interface WorkerLifecycleConfig {
   readonly spawnReadyTimeoutMs: number;
   /** Poll interval (ms) while waiting for UDS readiness. */
   readonly spawnReadyPollMs: number;
+  /**
+   * Per-tenant crash-loop budget: max AUTOMATIC respawns (driven by `onCrash`)
+   * for one tenant within `restartWindowMs` before the manager gives up the
+   * auto-restart. Mirrors the supervisor-process budget (`thin-init`). A tenant
+   * whose worker boots-then-crashes-fast cannot pin a core. The budget is reset
+   * once the tenant's worker reaches `live` (the loop is broken). Request-driven
+   * spawns are not budgeted (they are rate-limited by request arrival).
+   */
+  readonly maxRestartsPerWindow: number;
+  /** Sliding window (ms) for `maxRestartsPerWindow`. */
+  readonly restartWindowMs: number;
 }
 
 export interface WorkerLifecycleDeps {
@@ -137,6 +150,14 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   // concurrent callers onto ONE shared promise keyed by `TenantId`, cleared on
   // settle, so a cold tenant is spawned exactly once even under a request burst.
   const inFlightSpawns = new Map<TenantId, Promise<Result<EnsuredWorker, HostError>>>();
+
+  // Per-tenant crash-loop budget (mirrors the supervisor-process budget in
+  // thin-init). Tracks AUTOMATIC `onCrash` respawns within a SLIDING window; an
+  // exhausted budget stops the auto-restart so a boots-then-crashes-fast worker
+  // cannot pin a core. Window-based (NOT reset on `live`): a worker that reaches
+  // `live` briefly each cycle still counts toward the budget — the window sliding
+  // is the recovery path (a tenant healthy for > windowMs resets on its next crash).
+  const restartBudgets = new Map<TenantId, RestartBudget>();
 
   /** Count of workers occupying a slot (spawning/live/draining) — T9 reads this. */
   const liveWorkerCount = (): number => {
@@ -369,6 +390,27 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // callers); HITL durability is handled by existing checkpoint machinery
     // (AD-8 — no new resume engine here).
     //
+    // CRASH-LOOP BUDGET (resilience): before auto-respawning, charge this tenant's
+    // restart budget within a SLIDING window. If exhausted, GIVE UP the automatic
+    // restart — a worker that boots-then-crashes-fast would otherwise hot-loop
+    // onCrash→lazySpawn and pin a core. The tenant stays unavailable; the budget is
+    // request-independent, so a future request can still lazy-spawn (rate-limited by
+    // arrival), and the window resets once the tenant stops crashing for windowMs.
+    const now = clock();
+    const budget = restartBudgets.get(tenant) ?? initialRestartBudget(config.maxRestartsPerWindow, config.restartWindowMs, now);
+    const decision = decideSupervisorRestart(budget, now);
+    restartBudgets.set(tenant, decision.budget);
+    if (decision.action === "give-up") {
+      logger.error("[worker-lifecycle] worker crash-loop budget exhausted — NOT auto-restarting (tenant unavailable until next request)", {
+        tenant,
+        restartsInWindow: decision.budget.restartsInWindow,
+        windowMs: config.restartWindowMs,
+      });
+      // Leave the entry deleted (done below); no auto-respawn.
+      workers.delete(tenant);
+      return ok(undefined);
+    }
+
     // RESTART-AT-CAP (FR-015): we DELETE the crashed entry before respawning
     // rather than pre-setting `spawning` via `restart(...)`. lazySpawn's admission
     // check counts `spawning` (occupiesSlot) against SUPERVISOR_MAX_LIVE_WORKERS,
@@ -489,9 +531,12 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // that resolves `handle.exited` must not be misread as a crash (no respawn).
       workers.delete(tenant);
       await removeRecord(tenant);
-      // Entry + record already removed → the slot reads as reclaimed. A failed
-      // SIGTERM leaves the worker running and bound to its UDS — orphan-risk.
-      await signalWorker(tenant, pid, "SIGTERM", true);
+      // Drain then force-stop (mirrors `evict`): SIGTERM lets an idle worker exit
+      // cleanly, SIGKILL GUARANTEES the slot is reclaimed so the live-worker count
+      // (FR-033) cannot under-count a worker that ignores SIGTERM. Entry + record
+      // are already removed, so a failed SIGKILL leaves an orphan — orphan-risk.
+      await signalWorker(tenant, pid, "SIGTERM", false);
+      await signalWorker(tenant, pid, "SIGKILL", true);
       evicted.push(tenant);
     }
     return evicted;

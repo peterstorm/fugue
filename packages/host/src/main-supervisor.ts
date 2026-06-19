@@ -348,6 +348,8 @@ const main = async () => {
       ...(config.SUPERVISOR_MAX_LIVE_WORKERS !== undefined ? { maxLiveWorkers: config.SUPERVISOR_MAX_LIVE_WORKERS } : {}),
       spawnReadyTimeoutMs: 10_000,
       spawnReadyPollMs: 100,
+      maxRestartsPerWindow: config.SUPERVISOR_MAX_WORKER_RESTARTS,
+      restartWindowMs: config.SUPERVISOR_WORKER_RESTART_WINDOW_MS,
     },
     logger,
   });

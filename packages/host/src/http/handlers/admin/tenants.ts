@@ -126,6 +126,15 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
   // enumerable properties only (no prototype keys).
   const agentMapResult = parseAgentClientIdsByDag(id, km.agentClientIdsByDag);
   if (!agentMapResult.ok) return agentMapResult;
+  // Every tenant worker requires a secrets reference (FR-005; `worker-main`
+  // hard-requires `FUGUE_SECRETS_REF`). Reject a blank/absent one HERE at the
+  // trust boundary (400) rather than letting it reach the registry and surface
+  // later as a worker-spawn failure. Parse-don't-validate: a registered tenant
+  // always carries a usable, non-blank `SecretsRef`.
+  const rawSecretsRef = typeof o.secretsRef === "string" ? o.secretsRef.trim() : "";
+  if (rawSecretsRef === "") {
+    return err(tenantConfigInvalid(`tenant '${id}': secretsRef is required (where the worker resolves this tenant's secrets)`));
+  }
   const base: TenantConfigBase = {
     id,
     team: typeof o.team === "string" ? o.team : "",
@@ -135,7 +144,7 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
       agentClientIdsByDag: agentMapResult.value,
     },
     fsRoot: typeof o.fsRoot === "string" ? o.fsRoot : "",
-    secretsRef: markSecretsRef(typeof o.secretsRef === "string" ? o.secretsRef : ""),
+    secretsRef: markSecretsRef(rawSecretsRef),
     admission: {
       maxConcurrentRuns: Number(adm.maxConcurrentRuns),
       maxQueuedRuns: Number(adm.maxQueuedRuns),

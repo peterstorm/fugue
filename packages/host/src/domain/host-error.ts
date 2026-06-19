@@ -5,7 +5,7 @@
  * return Result<T, HostError> — no thrown exceptions.
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { z } from "zod";
 import type { DagId, RunId } from "@fuguejs/framework";
 // Type-only import — `TenantId` is a branded string used in the tenant error
@@ -244,4 +244,41 @@ export const retryAfterSecondsFor = (error: HostError): number | undefined =>
     .with({ kind: "global-concurrency-exceeded" }, () => 5)
     .with({ kind: "dag-concurrency-exceeded" }, () => 5)
     .with({ kind: "worker-unavailable" }, () => 5)
-    .otherwise(() => undefined);
+    // EXHAUSTIVE (not `.otherwise()`): every non-retriable kind is listed, so a
+    // NEW error kind added to the union is a COMPILE error here until its retry
+    // semantics are decided — it cannot silently default to "no Retry-After".
+    .with(
+      P.union(
+        { kind: "git-clone-failed" },
+        { kind: "git-pull-failed" },
+        { kind: "git-timeout" },
+        { kind: "git-spawn-failed" },
+        { kind: "import-failed" },
+        { kind: "validation-failed" },
+        { kind: "no-default-export" },
+        { kind: "dag-not-found" },
+        { kind: "dag-disabled" },
+        { kind: "timeout" },
+        { kind: "redis-unavailable" },
+        { kind: "bun-install-failed" },
+        { kind: "config-invalid" },
+        { kind: "tenant-config-invalid" },
+        { kind: "input-validation-failed" },
+        { kind: "dag-validation-failed" },
+        { kind: "body-parse-failed" },
+        { kind: "discovery-failed" },
+        { kind: "async-result-expired" },
+        { kind: "run-not-found" },
+        { kind: "run-not-suspended" },
+        { kind: "notification-failed" },
+        { kind: "unauthorized" },
+        { kind: "forbidden" },
+        { kind: "team-already-exists" },
+        { kind: "team-not-found" },
+        { kind: "tenant-unknown" },
+        { kind: "internal-invariant-violated" },
+        { kind: "fs-purge-failed" },
+      ),
+      () => undefined,
+    )
+    .exhaustive();

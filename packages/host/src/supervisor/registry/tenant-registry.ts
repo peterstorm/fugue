@@ -139,8 +139,15 @@ export interface TenantRegistry {
   readonly entries: ReadonlyMap<TenantId, TenantConfig>;
 }
 
-/** The empty registry — the boot-time starting point before any sync. */
-export const emptyRegistry: TenantRegistry = { entries: new Map() };
+/**
+ * The empty registry — the boot-time starting point before any sync. A FRESH
+ * instance per call (mirrors `domain/registry.ts`'s `emptyRegistry`): a shared
+ * singleton exposing a `ReadonlyMap` is only readonly at compile time, so a
+ * `(emptyRegistry.entries as Map).set(...)` cast could corrupt a value reused
+ * across every boot/test. Returning a new frozen record each call removes that
+ * shared state entirely.
+ */
+export const emptyRegistry = (): TenantRegistry => Object.freeze({ entries: new Map<TenantId, TenantConfig>() });
 
 /**
  * Build a registry from a seed of configs. Used by the adapter when hydrating
@@ -177,6 +184,15 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
   }
   if (input.fsRoot.length === 0) {
     return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be non-empty` });
+  }
+  // fsRoot is the per-tenant on-disk mount the grace-window purge RECLAIMS
+  // (deletes), so it must be a CONFINED absolute path: a relative path or any
+  // `..` traversal segment could escape the intended root and make the purge
+  // delete outside the tenant's mount. A NUL byte is rejected to defeat
+  // path-truncation tricks. Parse-don't-validate: a registered tenant always
+  // carries a confined fsRoot.
+  if (!input.fsRoot.startsWith("/") || input.fsRoot.includes("\0") || input.fsRoot.split("/").includes("..")) {
+    return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be a confined absolute path (leading '/', no '..' traversal segment)` });
   }
   if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
     return err({ kind: "config-invalid", message: `tenant '${input.id}': keycloak realm and clientId must be non-empty` });

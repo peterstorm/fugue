@@ -477,6 +477,17 @@ export const HostConfigSchema = z.object({
    */
   WORKER_IDLE_EVICT_MS: z.coerce.number().int().min(1000).default(900_000),
   /**
+   * Per-tenant crash-loop budget (T8 resilience): the max number of AUTOMATIC
+   * worker restarts the supervisor will perform for one tenant within
+   * `SUPERVISOR_WORKER_RESTART_WINDOW_MS` before giving up the auto-restart (the
+   * tenant then stays unavailable until a fresh request or the window slides).
+   * Mirrors the supervisor-process crash-loop budget (`thin-init`). A worker that
+   * boots-then-crashes-fast can otherwise pin a core. Default 5.
+   */
+  SUPERVISOR_MAX_WORKER_RESTARTS: z.coerce.number().int().min(1).default(5),
+  /** Sliding window (ms) for `SUPERVISOR_MAX_WORKER_RESTARTS`. Default 60s. */
+  SUPERVISOR_WORKER_RESTART_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
+  /**
    * Grace window (ms) a DEREGISTERED tenant's footprint (fs mount, secrets,
    * keyspace, ACL user, worker-registry record) is RETAINED before the auto-purge
    * sweep reclaims it (FR-030). Default 7 days. Deregister is an IMMEDIATE revoke

@@ -195,8 +195,26 @@ export const markTenant = (id: TenantId, team: string): Tenant => {
  * authority to dereference it; that authority lives in the worker's
  * `SecretsSource` (AD-6). Kept as a single named seam so every place a raw
  * reference becomes a `SecretsRef` is greppable.
+ *
+ * INVARIANT (enforced, not just documented): the ref is NON-BLANK. Every tenant
+ * worker requires a secrets reference (`FUGUE_SECRETS_REF`, "required iff worker
+ * mode"), so a `SecretsRef` is supposed to have passed a non-empty parse at its
+ * trust boundary (the admin register handler and `worker-main`). A blank value
+ * reaching here means a producer bypassed that check — an INTERNAL invariant
+ * violation (a registration defect that would otherwise surface only later as a
+ * worker-side dereference failure), so we THROW, mirroring `markTenant`'s
+ * post-brand regex guard. Callers that parse untrusted input must reject blank
+ * BEFORE branding (→ `tenant-config-invalid` 400), never rely on this 500.
  */
-export const markSecretsRef = (ref: string): SecretsRef => ref as SecretsRef;
+export const markSecretsRef = (ref: string): SecretsRef => {
+  if (ref.trim() === "") {
+    throw internalInvariantViolated(
+      "markSecretsRef called with a blank reference — a producer bypassed the non-empty parse at the registration/worker boundary",
+      { refLength: ref.length },
+    );
+  }
+  return ref as SecretsRef;
+};
 
 // ── Resolution (pure boundary parse) ────────────────────────────────────────
 

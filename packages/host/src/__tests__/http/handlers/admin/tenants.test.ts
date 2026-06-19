@@ -423,6 +423,23 @@ describe("malformed register/reconfigure body → 400 (not 500)", () => {
     const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: noTeam }));
     expect(res!.status).toBe(400);
   });
+
+  it("register with a missing secretsRef yields 400 (not a later worker-spawn 500) and does not mutate", async () => {
+    const h = await harness();
+    const { secretsRef: _ref, ...noRef } = validBody("acme");
+    void _ref;
+    const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: noRef }));
+    expect(res!.status).toBe(400);
+    expect(h.registry.snapshot().entries.size).toBe(0);
+  });
+
+  it("register with a blank secretsRef yields 400 and does not mutate", async () => {
+    const h = await harness();
+    const bad = { ...validBody("acme"), secretsRef: "   " };
+    const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: bad }));
+    expect(res!.status).toBe(400);
+    expect(h.registry.snapshot().entries.size).toBe(0);
+  });
 });
 
 // ── emitAudit never-throw boundary (C4, SC-008) ─────────────────────────────────

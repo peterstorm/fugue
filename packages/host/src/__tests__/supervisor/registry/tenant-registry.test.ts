@@ -70,6 +70,16 @@ describe("tenantConfig parse boundary", () => {
     expect(isErr(r)).toBe(true);
   });
 
+  it("rejects a non-absolute or traversing fsRoot (purge-confinement)", () => {
+    // Relative path, `..` traversal, and NUL byte are all refused so the grace
+    // purge can never delete outside the tenant's confined mount root.
+    expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot: "srv/a" }))).toBe(true);
+    expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/../etc" }))).toBe(true);
+    expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/a\0/etc" }))).toBe(true);
+    // A confined absolute path is accepted.
+    expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/tenant-a" }))).toBe(true);
+  });
+
   it("rejects negative or non-integer admission limits", () => {
     expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: -1, maxQueuedRuns: 0 } }))).toBe(true);
     expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: 1.5, maxQueuedRuns: 0 } }))).toBe(true);
@@ -99,7 +109,7 @@ describe("tenantConfig parse boundary", () => {
 describe("register", () => {
   it("adds a new tenant", () => {
     const cfg = makeConfig("a");
-    const r = register(emptyRegistry, cfg, 1000);
+    const r = register(emptyRegistry(), cfg, 1000);
     expect(isOk(r)).toBe(true);
     if (r.ok) {
       const look = lookup(r.value, cfg.id);
@@ -109,7 +119,7 @@ describe("register", () => {
 
   it("is idempotent — re-registering an identical config returns the SAME registry reference (SC-009)", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
     const r2 = register(r1.value, cfg, 2000);
@@ -121,7 +131,7 @@ describe("register", () => {
 
   it("replaces when the config differs", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const changed = makeConfig("a", { fsRoot: "/srv/a-new" });
     const r2 = register(r1.value, changed, 2000);
@@ -132,7 +142,7 @@ describe("register", () => {
 
   it("revives a deregistered tenant (back to status:active, no tombstone)", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const d = deregister(r1.value, cfg.id, 1500);
     if (!d.ok) throw new Error("deregister");
@@ -152,7 +162,7 @@ describe("register", () => {
 describe("deregister", () => {
   it("marks deregisteredAt and RETAINS the entry (deregistered-then-retained)", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const d = deregister(r1.value, cfg.id, 1500);
     if (!d.ok) throw new Error("deregister");
@@ -165,14 +175,15 @@ describe("deregister", () => {
   });
 
   it("deregistering an ABSENT tenant is a no-op success (not an error), same reference", () => {
-    const d = deregister(emptyRegistry, tid("ghost"), 1500);
+    const base = emptyRegistry();
+    const d = deregister(base, tid("ghost"), 1500);
     expect(d.ok).toBe(true);
-    if (d.ok) expect(d.value).toBe(emptyRegistry);
+    if (d.ok) expect(d.value).toBe(base);
   });
 
   it("is idempotent — repeating deregister preserves the ORIGINAL deregisteredAt (SC-009)", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const d1 = deregister(r1.value, cfg.id, 1500);
     if (!d1.ok) throw new Error("d1");
@@ -190,7 +201,7 @@ describe("deregister", () => {
 describe("reconfigure", () => {
   it("updates an active tenant's config (effective next spawn)", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const changed = makeConfig("a", { admission: { maxConcurrentRuns: 16, maxQueuedRuns: 32 } });
     const r2 = reconfigure(r1.value, changed, 2000);
@@ -200,14 +211,14 @@ describe("reconfigure", () => {
   });
 
   it("reconfiguring an UNKNOWN tenant fails closed (tenant-unknown)", () => {
-    const r = reconfigure(emptyRegistry, makeConfig("ghost"), 2000);
+    const r = reconfigure(emptyRegistry(), makeConfig("ghost"), 2000);
     expect(isErr(r)).toBe(true);
     if (!r.ok) expect(r.error.kind).toBe("tenant-unknown");
   });
 
   it("reconfiguring a DEREGISTERED tenant fails closed (never resurrects via reconfigure)", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const d = deregister(r1.value, cfg.id, 1500);
     if (!d.ok) throw new Error("deregister");
@@ -218,7 +229,7 @@ describe("reconfigure", () => {
 
   it("is idempotent — reconfigure with identical config returns the same reference", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const r2 = reconfigure(r1.value, cfg, 2000);
     if (!r2.ok) throw new Error("reconfigure");
@@ -230,14 +241,14 @@ describe("reconfigure", () => {
 
 describe("lookup (fail-closed)", () => {
   it("unknown tenant → tenant-unknown, never a guess", () => {
-    const r = lookup(emptyRegistry, tid("nope"));
+    const r = lookup(emptyRegistry(), tid("nope"));
     expect(isErr(r)).toBe(true);
     if (!r.ok) expect(r.error.kind).toBe("tenant-unknown");
   });
 
   it("deregistered tenant resolves as unknown", () => {
     const cfg = makeConfig("a");
-    const r1 = register(emptyRegistry, cfg, 1000);
+    const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
     const d = deregister(r1.value, cfg.id, 1500);
     if (!d.ok) throw new Error("deregister");
@@ -301,7 +312,7 @@ describe("property: idempotency (SC-009)", () => {
     fc.assert(
       fc.property(idArb, fc.constantFrom("/x", "/y"), fc.array(actionArb, { maxLength: 20 }), (id, fsRoot, prefix) => {
         // Build an arbitrary base registry.
-        let base = emptyRegistry;
+        let base = emptyRegistry();
         prefix.forEach((a, i) => { base = apply(base, a, i + 1); });
         const cfg = makeConfig(id, { fsRoot: `/srv/${id}${fsRoot}` });
         const once = register(base, cfg, 1000);
@@ -318,7 +329,7 @@ describe("property: idempotency (SC-009)", () => {
   it("repeating any deregister is a no-op — identical end state, clock not bumped", () => {
     fc.assert(
       fc.property(idArb, fc.array(actionArb, { maxLength: 20 }), (id, prefix) => {
-        let base = emptyRegistry;
+        let base = emptyRegistry();
         prefix.forEach((a, i) => { base = apply(base, a, i + 1); });
         const once = deregister(base, tid(id), 5000);
         const twice = once.ok ? deregister(once.value, tid(id), 9999) : once;
@@ -334,7 +345,7 @@ describe("property: idempotency (SC-009)", () => {
   it("transformations never mutate their input registry", () => {
     fc.assert(
       fc.property(fc.array(actionArb, { maxLength: 30 }), (actions) => {
-        let reg = emptyRegistry;
+        let reg = emptyRegistry();
         actions.forEach((a, i) => {
           const before = snapshot(reg);
           const next = apply(reg, a, i + 1);
@@ -349,7 +360,7 @@ describe("property: idempotency (SC-009)", () => {
   it("lookup is fail-closed for every deregistered tenant in any reachable state", () => {
     fc.assert(
       fc.property(fc.array(actionArb, { maxLength: 30 }), (actions) => {
-        let reg = emptyRegistry;
+        let reg = emptyRegistry();
         actions.forEach((a, i) => { reg = apply(reg, a, i + 1); });
         for (const [id, cfg] of reg.entries.entries()) {
           const look = lookup(reg, id);
@@ -366,7 +377,7 @@ describe("property: idempotency (SC-009)", () => {
   it("the active variant NEVER carries a deregisteredAt in any reachable state (illegal-state-free)", () => {
     fc.assert(
       fc.property(fc.array(actionArb, { maxLength: 30 }), (actions) => {
-        let reg = emptyRegistry;
+        let reg = emptyRegistry();
         actions.forEach((a, i) => { reg = apply(reg, a, i + 1); });
         for (const [, cfg] of reg.entries.entries()) {
           if (cfg.status === "active") {

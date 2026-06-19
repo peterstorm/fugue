@@ -125,6 +125,8 @@ const baseConfig = (over: Partial<WorkerLifecycleConfig> = {}): WorkerLifecycleC
   idleEvictMs: 900_000,
   spawnReadyTimeoutMs: 1000,
   spawnReadyPollMs: 10,
+  maxRestartsPerWindow: 5,
+  restartWindowMs: 60_000,
   ...over,
 });
 
@@ -268,6 +270,57 @@ describe("createWorkerLifecycle: onCrash (FR-015, AD-8 containment)", () => {
       tenants: tenantsView({}), clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
     });
     expect((await lc.onCrash(tid("nobody"), null)).ok).toBe(true);
+  });
+
+  test("crash-loop budget: auto-restart GIVES UP after maxRestartsPerWindow within the window", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const log = recordingLog();
+    // Fixed clock → the window never slides, so the budget is purely count-based.
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock,
+      config: baseConfig({ maxRestartsPerWindow: 2, restartWindowMs: 60_000 }),
+      logger: log,
+    });
+    await lc.ensureWorker(tid("acme")); // spawn #1 (live)
+    await lc.onCrash(tid("acme"), 1); // restart #1 → spawn #2
+    await lc.onCrash(tid("acme"), 1); // restart #2 → spawn #3
+    await lc.onCrash(tid("acme"), 1); // budget exhausted → GIVE UP, no spawn
+    expect(spawned.length).toBe(3); // 1 initial + exactly 2 auto-restarts
+    expect(lc.liveWorkerCount()).toBe(0); // gave up — tenant is unavailable
+    expect(log.errors.some((l) => l.msg.includes("crash-loop budget exhausted"))).toBe(true);
+
+    // Recovery: a REQUEST-driven spawn is NOT budgeted (rate-limited by arrival),
+    // so the tenant can still come back on the next request.
+    const back = await lc.ensureWorker(tid("acme"));
+    expect(back.ok).toBe(true);
+    expect(spawned.length).toBe(4);
+    expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("crash-loop budget: a slid window resets the count (sustained low-rate restarts never give up)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const clk = fixedClock();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: clk.clock,
+      config: baseConfig({ maxRestartsPerWindow: 2, restartWindowMs: 1000 }),
+      logger: silentLog,
+    });
+    await lc.ensureWorker(tid("acme")); // spawn #1
+    await lc.onCrash(tid("acme"), 1); // restart #1
+    clk.advance(2000); // window slides past
+    await lc.onCrash(tid("acme"), 1); // window reset → restart, not give-up
+    clk.advance(2000);
+    await lc.onCrash(tid("acme"), 1); // window reset again → restart
+    expect(spawned.length).toBe(4); // every crash restarted; budget never exhausted
+    expect(lc.liveWorkerCount()).toBe(1);
   });
 });
 
@@ -474,7 +527,7 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
     expect((orphanLine!.ctx as { error: string }).error).toContain("EPERM");
   });
 
-  test("idle-evict sweep: a failed SIGTERM after slot reclaim is logged at ERROR (orphan risk)", async () => {
+  test("idle-evict sweep: a failed SIGKILL after slot reclaim is logged at ERROR (orphan risk)", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
     const { spawn, proc } = makeSpawn({ signalFails: true });
@@ -489,9 +542,11 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
     clk.advance(10_000);
     const evicted = await lc.idleEvictSweep();
     expect(evicted).toEqual([tid("acme")]); // the eviction itself still proceeds (best-effort)
+    // Idle-evict now drains then force-stops (SIGTERM → SIGKILL). The SIGKILL is
+    // the slot-reclaiming kill, so its failure is the orphan-risk ERROR.
     const orphanLine = log.errors.find((l) => l.msg.includes("may be orphaned"));
     expect(orphanLine).toBeDefined();
-    expect(orphanLine!.ctx).toMatchObject({ tenant: tid("acme"), sig: "SIGTERM" });
+    expect(orphanLine!.ctx).toMatchObject({ tenant: tid("acme"), sig: "SIGKILL" });
   });
 
   test("drain: a failed SIGTERM (no slot reclaim) is logged at WARN", async () => {

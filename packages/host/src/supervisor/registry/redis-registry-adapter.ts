@@ -162,7 +162,11 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   if (typeof o.id !== "string") return undefined;
   const idR = tenantId(o.id);
   if (!idR.ok) return undefined;
-  if (typeof o.secretsRef !== "string") return undefined;
+  // A non-string or BLANK secretsRef is a corrupt record (skip), not a 500: every
+  // tenant carries a non-blank ref (enforced at the register boundary), and
+  // `markSecretsRef` throws on blank — so guard here rather than let a corrupt
+  // round-trip throw.
+  if (typeof o.secretsRef !== "string" || o.secretsRef.trim() === "") return undefined;
   // Fail-closed on the lifecycle discriminant: a record without a known `status`
   // is treated as corrupt (skip), consistent with every other corrupt-record
   // branch. An unknown/missing status NEVER silently round-trips as active.
@@ -172,6 +176,17 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   const km = o.keycloakClientMapping as Record<string, unknown> | undefined;
   const adm = o.admission as Record<string, unknown> | undefined;
   if (!km || !adm) return undefined;
+  // Sanitize the DAG→client map: every value must be a string. A non-string value
+  // is a corrupt record (skip), mirroring the register-boundary parse — never cast
+  // a malformed value through as a client id. Own enumerable properties only.
+  const rawAgentMap = km.agentClientIdsByDag;
+  const agentClientIdsByDag: Record<string, string> = {};
+  if (typeof rawAgentMap === "object" && rawAgentMap !== null) {
+    for (const [dag, value] of Object.entries(rawAgentMap as Record<string, unknown>)) {
+      if (typeof value !== "string") return undefined;
+      agentClientIdsByDag[dag] = value;
+    }
+  }
   // Build the validated ACTIVE config through the smart constructor (the parse
   // boundary), then promote to the deregistered variant if the record said so.
   const parsed = tenantConfig({
@@ -180,7 +195,7 @@ const deserialize = (raw: string): TenantConfig | undefined => {
     keycloakClientMapping: {
       realm: String(km.realm ?? ""),
       clientId: String(km.clientId ?? ""),
-      agentClientIdsByDag: (km.agentClientIdsByDag as Record<string, string> | undefined) ?? {},
+      agentClientIdsByDag,
     },
     fsRoot: String(o.fsRoot ?? ""),
     secretsRef: markSecretsRef(o.secretsRef),
@@ -271,7 +286,7 @@ export const createRedisTenantRegistry = (
   pubsub: RedisPubSubPort,
   hooks: RegistryDegradedHooks = {},
   logger?: LogPort,
-  seed: TenantRegistry = emptyRegistry,
+  seed: TenantRegistry = emptyRegistry(),
 ): RedisTenantRegistry => {
   let registry = seed;
   // Local mirror of the host's degraded edge, kept in lock-step with the
