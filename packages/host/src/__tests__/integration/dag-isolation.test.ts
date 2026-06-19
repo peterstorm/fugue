@@ -10,7 +10,7 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fuguejs/framework";
-import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, gitSha } from "@fuguejs/framework";
+import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, isOk, gitSha } from "@fuguejs/framework";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
 import {
@@ -24,10 +24,25 @@ import {
 } from "../../adapters/node-context-factory.js";
 import type { RedisPort, SharedInfra, LogPort } from "../../ports.js";
 import type { AuthIdentity } from "../../domain/auth.js";
+import { tenantId } from "../../domain/tenant.js";
+import type { TenantId } from "../../domain/tenant.js";
+
+/** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
+const mkTenant = (s: string): TenantId => {
+  const r = tenantId(s);
+  if (!isOk(r)) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
+  return r.value;
+};
 
 // Existing isolation tests are identity-agnostic — an admin identity preserves
 // the prior `agent`-keyed origin behaviour (admin/team → agent placeholder).
 const adminIdentity: AuthIdentity = { kind: "admin" };
+
+// All key-builder calls are now tenant-scoped. These per-DAG isolation tests run
+// within a SINGLE tenant — they prove per-DAG scoping is preserved BENEATH the
+// tenant prefix (FR-013). The cross-tenant non-collision invariant lives in
+// domain/cache-keys.test.ts.
+const TENANT = mkTenant("test");
 
 // ───────────────────────────────────────────────────────────────────────────
 // Test helpers
@@ -69,6 +84,7 @@ const makeRegisteredDag = (id: string): RegisteredDag => ({
 
 const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
   const store = new Map<string, string>();
+  const sets = new Map<string, Set<string>>();
   return {
     store,
     port: {
@@ -91,6 +107,20 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
         store.set(key, value);
         return ok(true);
       },
+      sAdd: async (key: string, member: string) => {
+        const set = sets.get(key) ?? new Set<string>();
+        const had = set.has(member);
+        set.add(member);
+        sets.set(key, set);
+        return ok(had ? 0 : 1);
+      },
+      sRem: async (key: string, member: string) => {
+        const set = sets.get(key);
+        if (!set || !set.has(member)) return ok(0);
+        set.delete(member);
+        return ok(1);
+      },
+      sMembers: async (key: string) => ok(Array.from(sets.get(key) ?? [])),
     },
   };
 };
@@ -115,38 +145,38 @@ describe("DAG cache key isolation (pure)", () => {
     const dagB = dagId("invoice-generator");
     const logicalKey = "customer:123:data";
 
-    const keyA = buildCacheKey(dagA, logicalKey);
-    const keyB = buildCacheKey(dagB, logicalKey);
+    const keyA = buildCacheKey(TENANT, dagA, logicalKey);
+    const keyB = buildCacheKey(TENANT, dagB, logicalKey);
 
     expect(keyA).not.toBe(keyB);
-    expect(keyA).toBe("fugue:order-processor:cache:customer:123:data");
-    expect(keyB).toBe("fugue:invoice-generator:cache:customer:123:data");
+    expect(keyA).toBe("fugue:test:order-processor:cache:customer:123:data");
+    expect(keyB).toBe("fugue:test:invoice-generator:cache:customer:123:data");
   });
 
   test("two DAGs with same logical key produce different cache prefixes", () => {
-    const prefixA = cacheKeyPrefix(dagId("dag-alpha"));
-    const prefixB = cacheKeyPrefix(dagId("dag-beta"));
+    const prefixA = cacheKeyPrefix(TENANT, dagId("dag-alpha"));
+    const prefixB = cacheKeyPrefix(TENANT, dagId("dag-beta"));
 
     expect(prefixA).not.toBe(prefixB);
-    expect(prefixA).toBe("fugue:dag-alpha:cache:");
-    expect(prefixB).toBe("fugue:dag-beta:cache:");
+    expect(prefixA).toBe("fugue:test:dag-alpha:cache:");
+    expect(prefixB).toBe("fugue:test:dag-beta:cache:");
   });
 
   test("two DAGs with same runId and nodeId produce different checkpoint keys", () => {
     const runIdVal = makeRunId("run-001");
     const nodeIdVal = makeNodeId("fetch-data");
 
-    const keyA = buildCheckpointKey(dagId("dag-alpha"), runIdVal, nodeIdVal);
-    const keyB = buildCheckpointKey(dagId("dag-beta"), runIdVal, nodeIdVal);
+    const keyA = buildCheckpointKey(TENANT, dagId("dag-alpha"), runIdVal, nodeIdVal);
+    const keyB = buildCheckpointKey(TENANT, dagId("dag-beta"), runIdVal, nodeIdVal);
 
     expect(keyA).not.toBe(keyB);
-    expect(keyA).toBe("fugue:dag-alpha:run-001:fetch-data");
-    expect(keyB).toBe("fugue:dag-beta:run-001:fetch-data");
+    expect(keyA).toBe("fugue:test:dag-alpha:run-001:fetch-data");
+    expect(keyB).toBe("fugue:test:dag-beta:run-001:fetch-data");
   });
 
   test("checkpoint prefixes are distinct per DAG even with same runId", () => {
-    const prefixA = checkpointKeyPrefix(dagId("dag-alpha"), makeRunId("run-xyz"));
-    const prefixB = checkpointKeyPrefix(dagId("dag-beta"), makeRunId("run-xyz"));
+    const prefixA = checkpointKeyPrefix(TENANT, dagId("dag-alpha"), makeRunId("run-xyz"));
+    const prefixB = checkpointKeyPrefix(TENANT, dagId("dag-beta"), makeRunId("run-xyz"));
 
     expect(prefixA).not.toBe(prefixB);
   });
@@ -160,8 +190,8 @@ describe("DAG cache adapter isolation (integration)", () => {
   test("two namespaced caches for different DAGs writing same key are isolated", async () => {
     const { port: redis, store } = createMockRedis();
 
-    const cacheA = createNamespacedCache(redis, dagId("dag-alpha"), undefined, noopLogger);
-    const cacheB = createNamespacedCache(redis, dagId("dag-beta"), undefined, noopLogger);
+    const cacheA = createNamespacedCache(redis, TENANT, dagId("dag-alpha"), undefined, noopLogger);
+    const cacheB = createNamespacedCache(redis, TENANT, dagId("dag-beta"), undefined, noopLogger);
 
     // Both write to the same logical key
     await cacheA.set("shared-key", { source: "alpha" });
@@ -178,15 +208,15 @@ describe("DAG cache adapter isolation (integration)", () => {
 
     // Underlying store has two distinct keys
     expect(store.size).toBe(2);
-    expect(store.has("fugue:dag-alpha:cache:shared-key")).toBe(true);
-    expect(store.has("fugue:dag-beta:cache:shared-key")).toBe(true);
+    expect(store.has("fugue:test:dag-alpha:cache:shared-key")).toBe(true);
+    expect(store.has("fugue:test:dag-beta:cache:shared-key")).toBe(true);
   });
 
   test("cache miss in one DAG does not affect another DAG's cache", async () => {
     const { port: redis } = createMockRedis();
 
-    const cacheA = createNamespacedCache(redis, dagId("dag-alpha"), undefined, noopLogger);
-    const cacheB = createNamespacedCache(redis, dagId("dag-beta"), undefined, noopLogger);
+    const cacheA = createNamespacedCache(redis, TENANT, dagId("dag-alpha"), undefined, noopLogger);
+    const cacheB = createNamespacedCache(redis, TENANT, dagId("dag-beta"), undefined, noopLogger);
 
     await cacheA.set("only-in-alpha", { data: 42 });
 
@@ -207,16 +237,16 @@ describe("DAG checkpoint writer isolation (integration)", () => {
     const { port: redis, store } = createMockRedis();
     const runIdVal = makeRunId("run-shared");
 
-    const writerA = createNamespacedCheckpointWriter(redis, dagId("dag-alpha"), runIdVal, undefined, noopLogger);
-    const writerB = createNamespacedCheckpointWriter(redis, dagId("dag-beta"), runIdVal, undefined, noopLogger);
+    const writerA = createNamespacedCheckpointWriter(redis, TENANT, dagId("dag-alpha"), runIdVal, undefined, noopLogger);
+    const writerB = createNamespacedCheckpointWriter(redis, TENANT, dagId("dag-beta"), runIdVal, undefined, noopLogger);
 
     await writerA.write(runIdVal, makeNodeId("node-1"), { output: "from-alpha" });
     await writerB.write(runIdVal, makeNodeId("node-1"), { output: "from-beta" });
 
     // Both wrote to distinct keys
     expect(store.size).toBe(2);
-    expect(store.get("fugue:dag-alpha:run-shared:node-1")).toBe(JSON.stringify({ output: "from-alpha" }));
-    expect(store.get("fugue:dag-beta:run-shared:node-1")).toBe(JSON.stringify({ output: "from-beta" }));
+    expect(store.get("fugue:test:dag-alpha:run-shared:node-1")).toBe(JSON.stringify({ output: "from-alpha" }));
+    expect(store.get("fugue:test:dag-beta:run-shared:node-1")).toBe(JSON.stringify({ output: "from-beta" }));
   });
 });
 

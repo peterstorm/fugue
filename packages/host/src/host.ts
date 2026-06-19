@@ -31,6 +31,10 @@ import type { RedisConnectivityPort } from "./ports.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
 import type { NodeContextForDag } from "./domain/run-context.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
+import { tenantId } from "./domain/tenant.js";
+import type { TenantId } from "./domain/tenant.js";
+import { formatHostError } from "./domain/host-error.js";
+import { verifyTenantHeader, TENANT_HEADER_NAME } from "./domain/tenant-header.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser } from "./domain/auth.js";
@@ -80,6 +84,31 @@ import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
 import { topoSortHandles, connectAll, closeAll } from "./domain/capability-manager.js";
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/**
+ * The UNSET-tenant fallback. When `createHost` is called WITHOUT a `tenant`
+ * (the single-tenant entrypoint / main.ts, FR-035), every per-tenant key is
+ * scoped under this one constant tenant, `default`, so all keys live
+ * consistently under `fugue:default:`. A worker (T6) passes its resolved
+ * `Tenant.id`, which then becomes `routedTenant` instead of this fallback.
+ *
+ * Built once through the canonical `tenantId` smart constructor (the SINGLE
+ * `TenantId` source, `domain/tenant.ts`). `"default"` trivially satisfies
+ * `TENANT_ID_REGEX` (`{1,64}`, no `:`/glob), so the `Left` branch is unreachable
+ * — we throw on it as an internal invariant rather than widen the API with an
+ * unsafe constructor just for this constant.
+ */
+const DEFAULT_TENANT_ID: TenantId = (() => {
+  const r = tenantId("default");
+  if (!r.ok) {
+    throw new Error(
+      `unreachable: the constant default tenant id failed validation: ${formatHostError(r.error)}`,
+    );
+  }
+  return r.value;
+})();
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
@@ -102,6 +131,27 @@ export interface HostDeps {
   readonly queueBackend?: QueueBackend;
   /** Called during graceful shutdown to clean up infrastructure (e.g., close Redis). */
   readonly onShutdown?: () => Promise<void>;
+  /**
+   * The tenant this host is bound to (T6, FR-007). When provided, every
+   * per-tenant Redis key/ACL namespace (`fugue:<tenant>:*`) is scoped to THIS
+   * tenant instead of the constant `default`. The worker entrypoint
+   * (`worker-main.ts`) passes its resolved `Tenant.id`.
+   *
+   * OPTIONAL — UNSET preserves the legacy single-tenant `createHost` behaviour
+   * (FR-035 extend-not-replace): keys live under `fugue:default:` exactly as
+   * before. main.ts does not pass it.
+   */
+  readonly tenant?: TenantId;
+  /**
+   * HTTP listener bind mode (T6). DEFAULT (unset) = bind a TCP port
+   * (`config.PORT`) — the legacy `createHost`/main.ts path, unchanged.
+   *
+   * `{ unix: path }` = bind a Unix-domain socket instead (the worker path,
+   * FR-001/FR-007): the worker serves on its per-tenant socket and the
+   * supervisor reverse-proxies inbound HTTP to it. After bind the socket is
+   * chmod'd 0600 so only the supervisor + worker (same uid) can reach it.
+   */
+  readonly bind?: { readonly unix: string };
 }
 
 /**
@@ -328,6 +378,11 @@ export const selectCapabilityBroker = (
 export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, import("./domain/host-error.js").HostError>> => {
   const { config, git, loader, redis, sharedInfra, logger } = deps;
 
+  // The tenant every per-tenant Redis key/ACL namespace is scoped under. T6: a
+  // worker passes its resolved `Tenant.id`; the legacy single-tenant entrypoint
+  // (and main.ts) omit it and keep the constant `default` namespace (FR-035).
+  const routedTenant: TenantId = deps.tenant ?? DEFAULT_TENANT_ID;
+
   // ── Mutable State ────────────────────────────────────────────────────────
   let hostState: HostState = booting(Date.now());
   let concurrency: ConcurrencyState = initConcurrency(
@@ -475,7 +530,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     return reg ? lookupDag(reg, dagId)?.team : undefined;
   };
   if (botConfigured) {
-    conversations = createRedisConversationStore(sharedInfra.redis, sharedInfra.logger);
+    // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
+    // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
+    // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
+    // when one is injected, falling back to the constant `default` only in the
+    // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
+    conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
     const connector = createBotConnector(
       {
         appId: config.BOT_APP_ID!,
@@ -498,8 +558,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   }
 
   if (notifier !== undefined && deps.queueBackend !== undefined) {
-    const runStore = createRedisRunStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
-    const decisions = createRedisDecisionStore(sharedInfra.redis, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    // FR-013 / SC-001: bind the durable HITL stores to the `routedTenant` so
+    // every `fugue:<tenant>:hitl:*` key stays under that tenant's Redis ACL.
+    // `routedTenant` is the worker's resolved `Tenant.id`, or the constant
+    // `default` fallback in the single-tenant path where no tenant is injected.
+    const runStore = createRedisRunStore(sharedInfra.redis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const decisions = createRedisDecisionStore(sharedInfra.redis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
     const executor = createRunExecutor({
       sharedInfra,
       getRegisteredDag: (id) => {
@@ -513,6 +577,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     const runQueue = createRunQueue({
       backend: deps.queueBackend,
       redis: sharedInfra.redis,
+      // FR-013 / SC-001: scope the single-flight lock key to the `routedTenant`
+      // (`fugue:<tenant>:hitl:lock:*`) — the worker's resolved `Tenant.id`, or the
+      // constant `default` fallback in the single-tenant path.
+      tenant: routedTenant,
       lockTtlSec: config.HITL_LOCK_TTL_SEC,
       logger: sharedInfra.logger,
     });
@@ -564,7 +632,13 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   }
 
   // ── Router Dependencies ──────────────────────────────────────────────────
-  const tokenStore = createRedisTokenStore(sharedInfra.redis, sharedInfra.logger);
+  // SECURITY (FR-013 / US2 / SC-001): the token store is bound to the
+  // `routedTenant` so every `fugue:<tenant>:tokens:*` / `fugue:<tenant>:teams:*`
+  // key is scoped under that tenant's Redis ACL. `routedTenant` is the worker's
+  // resolved `Tenant.id` when injected, falling back to the constant `default`
+  // only in the single-tenant `createHost`/main.ts path (FR-035) where all keys
+  // then live consistently under `fugue:default:`.
+  const tokenStore = createRedisTokenStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
 
   const routerDeps: RouterDeps = {
     hitl: hitlService,
@@ -648,14 +722,78 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   };
 
   // ── HTTP Server ──────────────────────────────────────────────────────────
+  // Two bind modes (FR-001/FR-035 extend-not-replace):
+  //   - DEFAULT (deps.bind unset): bind a TCP port — the legacy main.ts path.
+  //   - `{ unix }`: bind a per-tenant Unix-domain socket (the worker, T6). It is
+  //     NOT an inbound public listener; the supervisor reverse-proxies inbound
+  //     HTTP to it. After bind the socket is chmod'd 0600 so only the supervisor
+  //     + worker (same uid) can reach it (FR-007 socket isolation).
   const app = createRouter(routerDeps);
-  let bunServer;
+  const unixPath = deps.bind?.unix;
+  const bindDesc = unixPath !== undefined ? `unix socket ${unixPath}` : `port ${config.PORT}`;
+
+  // ── Worker-side tenant-header verification (defense-in-depth, FR-007) ──────
+  // The PRIMARY per-tenant boundary is the 0600 socket: a request arriving on
+  // this worker's UDS is, by construction, for this worker's tenant. As a cheap
+  // SECONDARY check, when the platform-internal `FUGUE_SUPERVISOR_HMAC_KEY` is set
+  // AND this host is in UDS/worker mode, verify the supervisor-signed
+  // `X-Fugue-Tenant` header against the routed tenant before dispatch and REJECT
+  // every non-`ok` outcome (absent / malformed / tenant-mismatch / bad-signature)
+  // fail-CLOSED. The supervisor is the sole signer (it strips any client value),
+  // so a request reaching here without a valid header for THIS tenant did not
+  // transit the supervisor and must not be served.
+  //
+  // When the key is UNSET we skip verification entirely and serve `app.fetch`
+  // unchanged — preserving the legacy single-tenant/TCP path (FR-035). The
+  // verification is also skipped on the TCP path even if a key is set, since the
+  // signed-header contract only applies to the supervisor→worker UDS hop.
+  const headerVerificationActive = unixPath !== undefined && config.FUGUE_SUPERVISOR_HMAC_KEY !== undefined;
+  const hmacKey = config.FUGUE_SUPERVISOR_HMAC_KEY;
+  const fetchHandler: (req: Request) => Response | Promise<Response> =
+    headerVerificationActive && hmacKey !== undefined
+      ? (req: Request): Response | Promise<Response> => {
+          const outcome = verifyTenantHeader(hmacKey, routedTenant, req.headers.get(TENANT_HEADER_NAME) ?? undefined);
+          if (outcome.kind !== "ok") {
+            // 401 for absent/malformed (no usable principal proof); 403 for a
+            // present-but-wrong principal (tenant-mismatch / bad-signature) —
+            // the request authenticated as the wrong/forged tenant. Never name
+            // another tenant; the worker only knows its own routed tenant.
+            const status = outcome.kind === "absent" || outcome.kind === "malformed" ? 401 : 403;
+            logger.warn("[worker] rejected request — tenant-header verification failed (fail-closed)", {
+              tenant: routedTenant,
+              reason: outcome.kind,
+            });
+            return new Response(
+              JSON.stringify({ error: "tenant principal verification failed", reason: outcome.kind }),
+              { status, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return app.fetch(req);
+        }
+      : app.fetch;
+
+  let bunServer: { stop: () => void; port?: number };
   try {
-    bunServer = Bun.serve({
-      fetch: app.fetch,
-      port: config.PORT,
-      maxRequestBodySize: 10 * 1024 * 1024, // 10MB — prevents request body DoS
-    });
+    bunServer =
+      unixPath !== undefined
+        ? Bun.serve({
+            fetch: fetchHandler,
+            unix: unixPath,
+            maxRequestBodySize: 10 * 1024 * 1024, // 10MB — prevents request body DoS
+          })
+        : Bun.serve({
+            fetch: fetchHandler,
+            port: config.PORT,
+            maxRequestBodySize: 10 * 1024 * 1024, // 10MB — prevents request body DoS
+          });
+    // Lock the socket down to the owning uid BEFORE announcing readiness, so the
+    // socket is never reachable by another uid even for a window. A chmod
+    // failure is a fail-closed boot abort: an un-restricted tenant socket is
+    // worse than a clean boot failure (FR-007).
+    if (unixPath !== undefined) {
+      const { chmodSync } = await import("node:fs");
+      chmodSync(unixPath, 0o600);
+    }
   } catch (e) {
     // Clean up resources acquired during boot before returning error.
     // Close connected capabilities first (reverse topological order), then
@@ -663,22 +801,35 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
     if (deps.onShutdown) {
       await deps.onShutdown().catch((cleanupErr) => {
-        logger.error("Failed to clean up resources after port bind failure", {
+        logger.error("Failed to clean up resources after server bind failure", {
           error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
         });
       });
     }
     return err({
       kind: "internal-invariant-violated",
-      message: `Failed to bind HTTP server on port ${config.PORT}: ${e instanceof Error ? e.message : String(e)}`,
-      context: { port: config.PORT },
+      message: `Failed to bind HTTP server on ${bindDesc}: ${e instanceof Error ? e.message : String(e)}`,
+      context: unixPath !== undefined ? { unix: unixPath } : { port: config.PORT },
     });
   }
   server = {
-    port: bunServer.port ?? config.PORT,
+    // A UDS server has no TCP port; report 0 so the handle stays well-typed
+    // without claiming a port the worker is not listening on.
+    port: bunServer.port ?? (unixPath !== undefined ? 0 : config.PORT),
     stop: () => bunServer.stop(),
   };
-  logger.info(`HTTP server listening on port ${bunServer.port}`);
+  logger.info(`HTTP server listening on ${bindDesc}`);
+  // Make the security posture observable at boot: whether the worker-side
+  // tenant-header check is enforcing (key set + UDS mode) or relying on socket
+  // isolation alone (FR-007 defense-in-depth).
+  if (unixPath !== undefined) {
+    logger.info(
+      headerVerificationActive
+        ? "Worker tenant-header verification ACTIVE (fail-closed) — supervisor-signed X-Fugue-Tenant required and bound to this tenant"
+        : "Worker tenant-header verification INACTIVE (no FUGUE_SUPERVISOR_HMAC_KEY) — relying on 0600 socket isolation alone",
+      { tenant: routedTenant },
+    );
+  }
 
   // ── Sync Loop ────────────────────────────────────────────────────────────
   const syncCallbacks = createSyncCallbacks({

@@ -3,24 +3,54 @@
  *
  * Implements TokenStorePort for team token persistence.
  *
- * Redis key layout:
- *   fugue:tokens:<hash>   →  JSON TokenGrant  (lookup by hash — hot path)
- *   fugue:teams:<team>    →  JSON { hash, grant }  (reverse index for revocation/listing)
+ * SECURITY INVARIANT (load-bearing for AD-4 / US2 / SC-001):
+ *   EVERY key is tenant-prefixed `fugue:<tenant>:…`. A per-tenant Redis ACL user
+ *   is scoped to `~fugue:<tenant>:*`; that scoping is only SOUND if no key here
+ *   escapes the tenant prefix. The Redis store is constructed bound to ONE
+ *   `TenantId`, so a single store instance can only ever read/write its own
+ *   tenant's token & team keys — a compromised worker holding tenant A's store
+ *   physically cannot name tenant B's keys.
+ *
+ * Redis key layout (per tenant):
+ *   fugue:<tenant>:tokens:<hash>   →  JSON TokenGrant  (lookup by hash — hot path)
+ *   fugue:<tenant>:teams:<team>    →  JSON { hash, grant }  (reverse index)
+ *   fugue:<tenant>:teams-index     →  SET of team names   (enumeration index)
+ *
+ * WHY A TEAM-INDEX SET (and NOT `SCAN fugue:<tenant>:teams:*`):
+ *   The per-tenant Redis ACL DENIES `scan`/`randomkey`/`dbsize`/`keys`. Key-pattern
+ *   ACLs do NOT reliably scope keyspace-enumeration commands across Redis/Valkey
+ *   versions, so a scoped `SCAN` could leak other tenants' key names (see
+ *   `supervisor/secrets/redis-acl.ts`). `listTeams` instead reads ONE key — the
+ *   per-tenant index SET `fugue:<tenant>:teams-index` via `SMEMBERS` — which the
+ *   key ACL DOES constrain (it is under `~fugue:<tenant>:*`). The index is kept in
+ *   sync: `SADD` on store, `SREM` on revoke.
  */
 
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { redisUnavailable, teamAlreadyExists } from "../domain/host-error.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
+import type { TenantId } from "../domain/cache-keys.js";
 import type { TokenStorePort, RedisPort, LogPort } from "../ports.js";
 
-// ── Redis Key Prefixes ─────────────────────────────────────────────────────
+// ── Redis Key Prefixes (tenant-scoped) ──────────────────────────────────────
+//
+// The prefixes are derived from the bound `TenantId`, so every key a store
+// instance emits is forced under `fugue:<tenant>:`. There is no code path that
+// builds a token/team key without a tenant.
 
-const TOKEN_KEY_PREFIX = "fugue:tokens:";
-const TEAM_KEY_PREFIX = "fugue:teams:";
+const tokenKeyPrefix = (tenant: TenantId): string => `fugue:${tenant}:tokens:`;
+const teamKeyPrefix = (tenant: TenantId): string => `fugue:${tenant}:teams:`;
 
-const tokenKey = (hash: TokenHash): string => `${TOKEN_KEY_PREFIX}${hash}`;
-const teamKey = (team: string): string => `${TEAM_KEY_PREFIX}${team}`;
+const tokenKey = (tenant: TenantId, hash: TokenHash): string => `${tokenKeyPrefix(tenant)}${hash}`;
+const teamKey = (tenant: TenantId, team: string): string => `${teamKeyPrefix(tenant)}${team}`;
+
+/**
+ * The per-tenant team-index SET key. A single key (under `~fugue:<tenant>:*`, so
+ * the ACL scopes it) holding every provisioned team name — read with `SMEMBERS`
+ * so `listTeams` never needs a denied keyspace-enumeration command.
+ */
+const teamsIndexKey = (tenant: TenantId): string => `fugue:${tenant}:teams-index`;
 
 // ── In-Memory Adapter (tests) ──────────────────────────────────────────────
 
@@ -72,15 +102,21 @@ export const createInMemoryTokenStore = (
 
 /**
  * Redis-backed token store for production.
- * Uses RedisPort for get/set/del/scan/setNx operations.
+ * Uses RedisPort for get/set/del/setNx + sAdd/sRem/sMembers operations.
  *
- * listTeams uses cursor-based SCAN — production-safe, non-blocking.
- * store uses SETNX for atomic team claim — race-free under concurrency.
+ * listTeams reads the per-tenant team-index SET (`SMEMBERS`) — NOT `SCAN`, which
+ * the per-tenant ACL denies (keyspace enumeration is not reliably ACL-scoped).
+ * store uses SETNX for atomic team claim — race-free under concurrency — then
+ * adds the team to the index SET; revoke removes it.
  */
-export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): TokenStorePort => {
+export const createRedisTokenStore = (
+  redis: RedisPort,
+  tenant: TenantId,
+  logger?: LogPort,
+): TokenStorePort => {
   return {
     resolve: async (hash) => {
-      const result = await redis.get(tokenKey(hash));
+      const result = await redis.get(tokenKey(tenant, hash));
       if (!result.ok) {
         return err(redisUnavailable("token-resolve"));
       }
@@ -100,7 +136,7 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
       // Atomic check-and-set: claim the team slot via SETNX to prevent races.
       // Two concurrent store() calls for the same team: exactly one wins.
       const teamJson = JSON.stringify({ hash, grant });
-      const claimResult = await redis.setNx(teamKey(team), teamJson);
+      const claimResult = await redis.setNx(teamKey(tenant, team), teamJson);
       if (!claimResult.ok) {
         return err(redisUnavailable("token-store-claim"));
       }
@@ -111,10 +147,10 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
 
       // Team slot claimed — now store token → grant mapping
       const grantJson = JSON.stringify(grant);
-      const tokenSetResult = await redis.set(tokenKey(hash), grantJson);
+      const tokenSetResult = await redis.set(tokenKey(tenant, hash), grantJson);
       if (!tokenSetResult.ok) {
         // Rollback: delete the team index we just claimed
-        const rollbackResult = await redis.del(teamKey(team));
+        const rollbackResult = await redis.del(teamKey(tenant, team));
         if (!rollbackResult.ok) {
           logger?.error("[token-store] CRITICAL: Failed to rollback team claim — team slot is occupied but token is not stored", {
             team,
@@ -124,35 +160,48 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
         return err(redisUnavailable("token-store-set"));
       }
 
+      // Add the team to the enumeration index SET so listTeams() (SMEMBERS) sees
+      // it without a denied SCAN. Done AFTER the durable writes so the index never
+      // names a team whose keys do not exist. A failure here rolls back both keys
+      // to keep the index, team key, and token key consistent (fail-closed).
+      const indexResult = await redis.sAdd(teamsIndexKey(tenant), team);
+      if (!indexResult.ok) {
+        const tokenRollback = await redis.del(tokenKey(tenant, hash));
+        const teamRollback = await redis.del(teamKey(tenant, team));
+        if (!tokenRollback.ok || !teamRollback.ok) {
+          logger?.error("[token-store] CRITICAL: Failed to rollback after team-index SADD failure — token/team keys may be orphaned", {
+            team,
+            hashPrefix: String(hash).slice(0, 8),
+          });
+        }
+        return err(redisUnavailable("token-store-index"));
+      }
+
       return ok(undefined);
     },
 
     listTeams: async () => {
-      // Cursor-based SCAN — production-safe, non-blocking alternative to KEYS.
-      const pattern = `${TEAM_KEY_PREFIX}*`;
-      const allKeys: string[] = [];
-      let cursor = "0";
-
-      do {
-        const scanResult = await redis.scan(pattern, cursor);
-        if (!scanResult.ok) {
-          return err(redisUnavailable("token-list-teams"));
-        }
-        allKeys.push(...scanResult.value.keys);
-        cursor = scanResult.value.cursor;
-      } while (cursor !== "0");
+      // Read the per-tenant team-index SET (ONE key the ACL scopes) — NOT SCAN,
+      // which the per-tenant ACL denies. SMEMBERS gives every provisioned team
+      // name; we then read each team key to recover its grant.
+      const indexResult = await redis.sMembers(teamsIndexKey(tenant));
+      if (!indexResult.ok) {
+        return err(redisUnavailable("token-list-teams"));
+      }
 
       const grants: TokenGrant[] = [];
-      for (const key of allKeys) {
-        const valueResult = await redis.get(key);
+      for (const team of indexResult.value) {
+        const valueResult = await redis.get(teamKey(tenant, team));
         if (!valueResult.ok || valueResult.value === null || valueResult.value === "") {
-          continue; // Skip unreadable entries — best effort
+          // Index names a team whose key is gone/unreadable — best-effort skip.
+          // (Self-heals on next revoke, which SREMs the stale member.)
+          continue;
         }
         try {
           const parsed = JSON.parse(valueResult.value) as { hash: string; grant: TokenGrant };
           grants.push(parsed.grant);
         } catch {
-          logger?.warn("[token-store] Skipping corrupt team index entry", { key });
+          logger?.warn("[token-store] Skipping corrupt team index entry", { team });
         }
       }
 
@@ -161,12 +210,18 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
 
     revoke: async (team) => {
       // Look up the team's hash from the reverse index
-      const teamResult = await redis.get(teamKey(team));
+      const teamResult = await redis.get(teamKey(tenant, team));
       if (!teamResult.ok) {
         return err(redisUnavailable("token-revoke-lookup"));
       }
       if (teamResult.value === null || teamResult.value === "") {
-        // Idempotent — revoking non-existent team is fine
+        // Idempotent — revoking a non-existent team is fine. Still SREM the
+        // enumeration index so a stale member (e.g. left by a prior partial
+        // failure) self-heals and never reappears in listTeams().
+        const indexResult = await redis.sRem(teamsIndexKey(tenant), team);
+        if (!indexResult.ok) {
+          return err(redisUnavailable("token-revoke-index"));
+        }
         return ok(undefined);
       }
 
@@ -182,14 +237,22 @@ export const createRedisTokenStore = (redis: RedisPort, logger?: LogPort): Token
         return err(redisUnavailable(`token-revoke: corrupt team index for '${team}' — manual cleanup required`));
       }
 
+      // Remove the team from the enumeration index FIRST so listTeams() stops
+      // reporting it even if a subsequent key delete fails (fail toward "not
+      // listed" rather than leaving a dangling index member).
+      const indexResult = await redis.sRem(teamsIndexKey(tenant), team);
+      if (!indexResult.ok) {
+        return err(redisUnavailable("token-revoke-index"));
+      }
+
       // Delete token hash key
-      const tokenDelResult = await redis.del(tokenKey(hash as TokenHash));
+      const tokenDelResult = await redis.del(tokenKey(tenant, hash as TokenHash));
       if (!tokenDelResult.ok) {
         return err(redisUnavailable("token-revoke-hash-delete"));
       }
 
       // Delete team reverse index key
-      const teamDelResult = await redis.del(teamKey(team));
+      const teamDelResult = await redis.del(teamKey(tenant, team));
       if (!teamDelResult.ok) {
         return err(redisUnavailable("token-revoke-team-delete"));
       }

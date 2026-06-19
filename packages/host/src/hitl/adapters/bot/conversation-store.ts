@@ -3,12 +3,19 @@
  * (production). Persists the Teams conversation reference the bot was added to,
  * so proactive review cards can be posted there. v1 stores a single default
  * reference under one key.
+ *
+ * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001): the Redis store
+ * is constructed bound to ONE `TenantId`, so every key is forced under
+ * `fugue:<tenant>:hitl:bot:`. Under the per-tenant Redis ACL (`~fugue:<tenant>:*`)
+ * a store for tenant A can never name tenant B's conversation references — making
+ * a flat cross-tenant convref key unrepresentable.
  */
 
 import { z } from "zod";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../../domain/host-error.js";
+import type { TenantId } from "../../../domain/tenant.js";
 import type { RedisPort, LogPort } from "../../../ports.js";
 import type { ConversationStorePort, ConversationReference } from "./ports.js";
 
@@ -36,15 +43,19 @@ export const createInMemoryConversationStore = (): ConversationStorePort => {
   };
 };
 
-const REF_KEY = "fugue:hitl:bot:convref:default";
+// The keys are derived from the bound `TenantId`, so every key a store instance
+// emits is forced under `fugue:<tenant>:hitl:bot:`. There is no code path that
+// builds a convref key without a tenant.
+const refKey = (tenant: TenantId): string => `fugue:${tenant}:hitl:bot:convref:default`;
 /** Per-team reference key (FR-041). The team id is the routing discriminator so
  *  the notifier delivers a team's cards to its own channel (a confidentiality
  *  measure). It does NOT gate who may act — the authz gate (`canAccessDag`) on the
  *  button-click path does that, regardless of which channel the card reached. */
-const teamRefKey = (team: string): string => `fugue:hitl:bot:convref:team:${team}`;
+const teamRefKey = (tenant: TenantId, team: string): string => `fugue:${tenant}:hitl:bot:convref:team:${team}`;
 
 export const createRedisConversationStore = (
   redis: RedisPort,
+  tenant: TenantId,
   logger?: LogPort,
 ): ConversationStorePort => {
   // Persist a reference under `key` WITHOUT an expiry — unlike the
@@ -77,9 +88,9 @@ export const createRedisConversationStore = (
     return ok(parsed.data);
   };
   return {
-    saveDefaultReference: (ref) => saveRef(REF_KEY, ref),
-    getDefaultReference: () => getRef(REF_KEY),
-    saveTeamReference: (team, ref) => saveRef(teamRefKey(team), ref),
-    getTeamReference: (team) => getRef(teamRefKey(team)),
+    saveDefaultReference: (ref) => saveRef(refKey(tenant), ref),
+    getDefaultReference: () => getRef(refKey(tenant)),
+    saveTeamReference: (team, ref) => saveRef(teamRefKey(tenant, team), ref),
+    getTeamReference: (team) => getRef(teamRefKey(tenant, team)),
   };
 };

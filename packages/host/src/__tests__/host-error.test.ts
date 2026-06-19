@@ -2,10 +2,12 @@ import { describe, it, expect } from "bun:test";
 import { formatHostError, httpStatusFor } from "../domain/host-error.js";
 import type { HostError } from "../domain/host-error.js";
 import type { DagId, RunId } from "@fuguejs/framework";
+import type { TenantId } from "../domain/tenant.js";
 
 // Test helpers for branded types
 const did = (s: string) => s as unknown as DagId;
 const rid = (s: string) => s as unknown as RunId;
+const tid = (s: string) => s as unknown as TenantId;
 
 describe("HostError", () => {
   describe("formatHostError", () => {
@@ -94,6 +96,10 @@ describe("HostError", () => {
         error: { kind: "async-result-expired", runId: rid("run-456") },
         expected: "async result for run 'run-456' has expired",
       },
+      {
+        error: { kind: "fs-purge-failed", message: "EPERM: operation not permitted" },
+        expected: "filesystem purge failed: EPERM: operation not permitted",
+      },
     ];
 
     for (const { error, expected } of cases) {
@@ -128,9 +134,13 @@ describe("HostError", () => {
         "forbidden",
         "team-already-exists",
         "team-not-found",
+        "tenant-unknown",
+        "tenant-over-quota",
+        "worker-unavailable",
         "internal-invariant-violated",
+        "fs-purge-failed",
       ];
-      expect(allKinds).toHaveLength(25);
+      expect(allKinds).toHaveLength(29);
     });
   });
 
@@ -154,6 +164,19 @@ describe("HostError", () => {
       { error: { kind: "config-invalid", message: "m" }, status: 500 },
       { error: { kind: "discovery-failed", dagsRoot: "/x", message: "m" }, status: 500 },
       { error: { kind: "body-parse-failed", dagId: did("x"), message: "m" }, status: 400 },
+      { error: { kind: "git-spawn-failed", operation: "clone", message: "m" }, status: 500 },
+      { error: { kind: "run-not-found", runId: rid("r") }, status: 404 },
+      { error: { kind: "run-not-suspended", runId: rid("r"), status: "completed" }, status: 409 },
+      { error: { kind: "notification-failed", operation: "notify" }, status: 502 },
+      { error: { kind: "unauthorized", reason: "missing token" }, status: 401 },
+      { error: { kind: "forbidden", dagId: did("x"), callerTeam: "a", dagTeam: "b" }, status: 403 },
+      { error: { kind: "team-already-exists", team: "a" }, status: 409 },
+      { error: { kind: "team-not-found", team: "a" }, status: 404 },
+      { error: { kind: "internal-invariant-violated", message: "m", context: {} }, status: 500 },
+      { error: { kind: "tenant-unknown" }, status: 404 },
+      { error: { kind: "tenant-over-quota", tenant: tid("acme"), retryAfterSeconds: 12 }, status: 429 },
+      { error: { kind: "worker-unavailable", tenant: tid("acme") }, status: 503 },
+      { error: { kind: "fs-purge-failed", message: "EBUSY" }, status: 500 },
     ];
 
     for (const { error, status } of statusCases) {

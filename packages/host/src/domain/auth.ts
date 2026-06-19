@@ -15,6 +15,10 @@
  */
 
 import { match } from "ts-pattern";
+// Type-only import of the branded `Tenant` principal for the tenant-aware authz
+// extension below. `tenant.ts` imports `AuthIdentity` (a type) from this module;
+// keeping THIS import type-only means no runtime import cycle.
+import type { Tenant } from "./tenant.js";
 
 // ── Branded Types ──────────────────────────────────────────────────────────
 
@@ -338,6 +342,45 @@ export const canAccessDag = (identity: AuthIdentity, dagTeam: string): boolean =
     .with({ kind: "team" }, (t) => t.team === dagTeam)
     .with({ kind: "user" }, (u) => u.canRunDag(dagTeam))
     .exhaustive();
+
+// ── Tenant-aware authorization (multi-tenant supervisor, AD-10) ──────────────
+
+/**
+ * Tenant-scoped DAG authorization — the EXTENSION of `canAccessDag` for the
+ * multi-tenant supervisor (FR-003, US3). It does NOT replace `canAccessDag`:
+ * the existing identity→team decision still runs and still gates single-tenant
+ * deployments unchanged (FR-035). This adds a SECOND, conjunctive gate so that
+ * once an identity has been resolved to a `Tenant` principal at the boundary,
+ * every authz decision is made AGAINST THAT TENANT'S principal and can never
+ * reach another tenant's DAG (US3, FR-041).
+ *
+ * Both conditions must hold (logical AND — fail-closed):
+ *   1. The existing identity→team authorization (`canAccessDag`) permits the
+ *      DAG's owning team. This preserves the established admin / team / user
+ *      semantics verbatim.
+ *   2. The DAG's owning team is THIS resolved tenant's own team. The supervisor
+ *      resolved the caller to exactly one `Tenant`; a DAG owned by a different
+ *      team belongs to a different tenant, so even an over-broad identity
+ *      decision (e.g. a multi-team user) cannot cross the tenant boundary. The
+ *      branded `Tenant` makes this check unforgeable: the second operand is the
+ *      principal resolved at the boundary, never an attacker-supplied string.
+ *
+ * Pure — like `canAccessDag`, a boolean decision over already-resolved inputs.
+ *
+ * @param tenant   The `Tenant` principal resolved at the supervisor boundary.
+ * @param identity The inbound identity (admin / team / user).
+ * @param dagTeam  The owning team of the DAG under authorization.
+ *
+ * NOTE: `Tenant` is imported as a TYPE only — `auth.ts` stays free of the
+ * tenant module's runtime (`tenant.ts` depends on `auth.ts` for `AuthIdentity`,
+ * so a value import would cycle). The brand still applies at the type level, so
+ * the second operand cannot be a bare string.
+ */
+export const canAccessDagForTenant = (
+  tenant: Tenant,
+  identity: AuthIdentity,
+  dagTeam: string,
+): boolean => canAccessDag(identity, dagTeam) && tenant.team === dagTeam;
 
 // ── Token Generation (pure computation, randomness injected) ───────────────
 

@@ -7,15 +7,23 @@
  * survives queue retention and resumes from here.
  *
  * Redis key layout (checkpoint split from metadata so per-transition checkpoint
- * writes never race the status writes):
- *   fugue:hitl:run:<runId>   →  JSON RunMeta (record minus checkpoint)
- *   fugue:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`)
+ * writes never race the status writes), tenant-prefixed (AD-4 / FR-013 / SC-001):
+ *   fugue:<tenant>:hitl:run:<runId>   →  JSON RunMeta (record minus checkpoint)
+ *   fugue:<tenant>:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`)
+ *
+ * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001):
+ *   The Redis store is constructed bound to ONE `TenantId`, so a single store
+ *   instance can only ever read/write its own tenant's run & checkpoint keys.
+ *   Under the per-tenant Redis ACL (`~fugue:<tenant>:*`) a store holding tenant
+ *   A's id physically cannot name tenant B's runs/checkpoints — making a flat,
+ *   cross-tenant HITL key unrepresentable.
  */
 
 import { z } from "zod";
 import { ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
 import type { Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import type { TenantId } from "../../domain/tenant.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { RunStorePort } from "../ports.js";
 import type { RunRecord, RunStatus } from "../types.js";
@@ -108,11 +116,11 @@ export const createInMemoryRunStore = (
 
 // ── Redis Adapter (production) ───────────────────────────────────────────────
 
-const RUN_KEY_PREFIX = "fugue:hitl:run:";
-const CKPT_KEY_PREFIX = "fugue:hitl:ckpt:";
-
-const runKey = (runId: RunId): string => `${RUN_KEY_PREFIX}${runId}`;
-const ckptKey = (runId: RunId): string => `${CKPT_KEY_PREFIX}${runId}`;
+// The prefixes are derived from the bound `TenantId`, so every key a store
+// instance emits is forced under `fugue:<tenant>:hitl:`. There is no code path
+// that builds a run/checkpoint key without a tenant.
+const runKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:run:${runId}`;
+const ckptKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:ckpt:${runId}`;
 
 /** The metadata half of a `RunRecord` (everything except the checkpoint string). */
 type RunMeta = Omit<RunRecord, "checkpoint">;
@@ -126,6 +134,7 @@ export interface RedisRunStoreConfig {
 
 export const createRedisRunStore = (
   redis: RedisPort,
+  tenant: TenantId,
   config: RedisRunStoreConfig,
   logger?: LogPort,
 ): RunStorePort => {
@@ -133,13 +142,13 @@ export const createRedisRunStore = (
   const now = config.now ?? Date.now;
 
   const writeMeta = async (runId: RunId, meta: RunMeta): Promise<Result<void, HostError>> => {
-    const res = await redis.set(runKey(runId), JSON.stringify(meta), expiry);
+    const res = await redis.set(runKey(tenant, runId), JSON.stringify(meta), expiry);
     if (!res.ok) return err(res.error);
     return ok(undefined);
   };
 
   const readMeta = async (runId: RunId): Promise<Result<RunMeta | null, HostError>> => {
-    const res = await redis.get(runKey(runId));
+    const res = await redis.get(runKey(tenant, runId));
     if (!res.ok) return err(res.error);
     if (res.value === null) return ok(null);
     let raw: unknown;
@@ -163,12 +172,12 @@ export const createRedisRunStore = (
       // Atomic create-once WITH TTL (SET NX EX): enforces create-once (a
       // duplicate run id is a caller bug) and never leaves a TTL-less meta key
       // if the process crashes between acquisition and expiry.
-      const set = await redis.setNx(runKey(record.runId), JSON.stringify(meta), expiry);
+      const set = await redis.setNx(runKey(tenant, record.runId), JSON.stringify(meta), expiry);
       if (!set.ok) return err(set.error);
       if (!set.value) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
-      const ckpt = await redis.set(ckptKey(record.runId), checkpoint, expiry);
+      const ckpt = await redis.set(ckptKey(tenant, record.runId), checkpoint, expiry);
       if (!ckpt.ok) return err(ckpt.error);
       return ok(undefined);
     },
@@ -177,7 +186,7 @@ export const createRedisRunStore = (
       const metaRes = await readMeta(runId);
       if (!metaRes.ok) return err(metaRes.error);
       if (metaRes.value === null) return ok(null);
-      const ckptRes = await redis.get(ckptKey(runId));
+      const ckptRes = await redis.get(ckptKey(tenant, runId));
       if (!ckptRes.ok) return err(ckptRes.error);
       if (ckptRes.value === null) {
         // Metadata without a checkpoint is a torn/expired record — surface it
@@ -188,7 +197,7 @@ export const createRedisRunStore = (
     },
 
     async saveCheckpoint(runId, checkpoint) {
-      const res = await redis.set(ckptKey(runId), checkpoint, expiry);
+      const res = await redis.set(ckptKey(tenant, runId), checkpoint, expiry);
       if (!res.ok) return err(res.error);
       return ok(undefined);
     },

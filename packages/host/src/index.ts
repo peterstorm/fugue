@@ -43,7 +43,13 @@ export type { HostError, HostErrorKind } from "./domain/host-error.js";
 export { httpStatusFor, formatHostError } from "./domain/host-error.js";
 
 export type { HostConfig, FugueYaml } from "./domain/config.js";
-export { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema } from "./domain/config.js";
+export { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema, workerSocketPath } from "./domain/config.js";
+
+// ── Multi-tenant: tenant + worker UDS + supervisor header contract ──────────
+export type { TenantId, Tenant, SecretsRef, TenantRegistryView } from "./domain/tenant.js";
+export { tenantId, markTenant, markSecretsRef, resolveTenant, TENANT_ID_REGEX } from "./domain/tenant.js";
+export type { TenantHeaderVerification } from "./domain/tenant-header.js";
+export { TENANT_HEADER_NAME, signTenantHeader, verifyTenantHeader } from "./domain/tenant-header.js";
 
 // ── Host Factory ───────────────────────────────────────────────────────────
 

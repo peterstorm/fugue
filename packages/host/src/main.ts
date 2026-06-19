@@ -115,6 +115,30 @@ const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port:
           return err({ kind: "redis-unavailable" as const, operation: `SETNX ${key}: ${e instanceof Error ? e.message : String(e)}` });
         }
       },
+      sAdd: async (key, member) => {
+        try {
+          const added = await client.sadd(key, member);
+          return ok(added);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `SADD ${key}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
+      sRem: async (key, member) => {
+        try {
+          const removed = await client.srem(key, member);
+          return ok(removed);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `SREM ${key}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
+      sMembers: async (key) => {
+        try {
+          const members = await client.smembers(key);
+          return ok(members);
+        } catch (e) {
+          return err({ kind: "redis-unavailable" as const, operation: `SMEMBERS ${key}: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
     };
 
     return ok({ port, redis, disconnect: () => client.quit() });

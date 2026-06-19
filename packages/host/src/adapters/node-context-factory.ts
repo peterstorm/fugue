@@ -2,13 +2,13 @@
  * NodeContext Factory — constructs per-request NodeContext instances.
  *
  * Key responsibilities:
- * - DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-030, FR-031)
+ * - Tenant-and-DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-030, FR-031, FR-013)
  * - Fresh runId + independent AbortSignal per request (FR-032)
  * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
  * - Shared infrastructure (LLM, tracer) passed through without per-request init
  *
- * @satisfies FR-031 — Cache keys prefixed fugue:<dagId>:cache:<key>
- * @satisfies FR-031 — Checkpoint keys prefixed fugue:<dagId>:<runId>:<nodeId>
+ * @satisfies FR-031 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
+ * @satisfies FR-031 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
  * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
  * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
@@ -31,7 +31,7 @@ import type {
   FrameworkError,
 } from "@fuguejs/framework";
 import type { InvocationOrigin } from "@fuguejs/framework";
-import { makeNodeContext, ok } from "@fuguejs/framework";
+import { makeNodeContext, ok, isErr } from "@fuguejs/framework";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
@@ -57,18 +57,22 @@ export interface ResolvedTtl {
 
 export { cacheKeyPrefix, buildCacheKey, checkpointKeyPrefix, buildCheckpointKey } from "../domain/cache-keys.js";
 import { buildCacheKey, buildCheckpointKey } from "../domain/cache-keys.js";
+import type { TenantId } from "../domain/cache-keys.js";
+import { tenantId } from "../domain/tenant.js";
+import { formatHostError } from "../domain/host-error.js";
 
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
 
 /**
- * Create a ContextCacheAdapter that prefixes all keys with DAG namespace.
- * Applies per-DAG TTL override when set is called without an explicit TTL.
+ * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
+ * namespace. Applies per-DAG TTL override when set is called without an explicit TTL.
  *
- * @satisfies FR-031 — Keys prefixed with DAG namespace
+ * @satisfies FR-031 — Keys prefixed with tenant + DAG namespace
  * @satisfies FR-041 — Per-DAG TTL override applied
  */
 export const createNamespacedCache = (
   redis: RedisPort,
+  tenant: TenantId,
   dagId: DagId,
   defaultTtlSec: number | undefined,
   logger: LogPort,
@@ -79,7 +83,7 @@ export const createNamespacedCache = (
 
   return {
     get: async (key: string): Promise<CacheLookup> => {
-      const fullKey = buildCacheKey(dagId, key);
+      const fullKey = buildCacheKey(tenant, dagId, key);
       const result = await redis.get(fullKey);
       if (!result.ok) {
         consecutiveGetFailures++;
@@ -125,7 +129,7 @@ export const createNamespacedCache = (
       value: unknown,
       ttlSec?: number,
     ): Promise<Result<void, FrameworkError>> => {
-      const fullKey = buildCacheKey(dagId, key);
+      const fullKey = buildCacheKey(tenant, dagId, key);
       let serialized: string;
       try {
         serialized = JSON.stringify(value);
@@ -155,14 +159,15 @@ export const createNamespacedCache = (
 };
 
 /**
- * Create a CheckpointWriter that prefixes all keys with DAG + run namespace.
- * Applies per-DAG checkpoint TTL.
+ * Create a CheckpointWriter that prefixes all keys with the tenant + DAG + run
+ * namespace. Applies per-DAG checkpoint TTL.
  *
- * @satisfies FR-031 — Keys prefixed with DAG + run namespace
+ * @satisfies FR-031 — Keys prefixed with tenant + DAG + run namespace
  * @satisfies FR-041 — Per-DAG checkpoint TTL applied
  */
 export const createNamespacedCheckpointWriter = (
   redis: RedisPort,
+  tenant: TenantId,
   dagId: DagId,
   runId: RunId,
   checkpointTtlSec: number | undefined,
@@ -173,7 +178,7 @@ export const createNamespacedCheckpointWriter = (
 
   return {
     write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
-      const fullKey = buildCheckpointKey(dagId, runId, nodeId);
+      const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId);
       let serialized: string;
       try {
         serialized = JSON.stringify(value);
@@ -304,6 +309,30 @@ export const createNodeContextForDag = async (
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
+  // SECURITY (FR-013 / US2 / SC-001): derive the tenant for EVERY Redis key this
+  // context produces. Until the supervisor's resolved `Tenant` principal (T1/T6)
+  // is threaded down to this seam, the tenant is derived from the DAG's owning
+  // `team` — every RegisteredDag already carries one — and parsed through the
+  // canonical `tenantId` smart constructor (`domain/tenant.ts`): the SINGLE
+  // source of the `fugue:<tenant>:*` key-namespace invariant (`:` and glob
+  // metacharacters rejected, so no key/ACL-namespace escape). This is the one
+  // point where the tenant axis enters the key builders; T6 replaces this
+  // derivation with the routed `Tenant.id` without changing the builders.
+  //
+  // FAIL-CLOSED: `dag.team` is path-/config-derived data, not a known-good
+  // literal, so a `Left` is possible (e.g. a team segment with a `:` or over 64
+  // chars). We REFUSE rather than emit an unscoped key — same fail-closed throw
+  // discipline as the unmapped-agent-client check below; a malformed team is a
+  // registration defect, never a value that should silently widen a namespace.
+  const tenantResult = tenantId(dag.team);
+  if (isErr(tenantResult)) {
+    throw new Error(
+      `createNodeContextForDag: DAG "${dagId}" has an invalid owning team ` +
+        `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(tenantResult.error)}`,
+    );
+  }
+  const tenant: TenantId = tenantResult.value;
+
   // Wrap the shared LLM client in a per-run metered decorator: every call is
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
   // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
@@ -318,9 +347,10 @@ export const createNodeContextForDag = async (
     logger: shared.logger,
   });
 
-  const cache = createNamespacedCache(shared.redis, dagId, ttl.cacheTtlSec, shared.logger);
+  const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
     shared.redis,
+    tenant,
     dagId,
     runId,
     ttl.checkpointTtlSec,

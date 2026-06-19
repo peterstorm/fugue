@@ -12,6 +12,7 @@ Start with these to understand the runtime as it stands today:
 4. [ADR 0017](0017-derive-deps-from-edges.md) — DAG topology model.
 5. [ADR 0016](0016-structural-match-predicates.md) — conditional-edge predicates.
 6. [ADR 0008](0008-event-envelope-and-time.md) + [ADR 0014](0014-idempotent-appendevent.md) — durability invariants.
+7. [ADR 0064](0064-supervisor-process-per-tenant-http-over-uds.md) — entry point for the multi-tenant single-host architecture.
 
 ## Index
 
@@ -80,6 +81,16 @@ Start with these to understand the runtime as it stands today:
 | [0061](0061-per-team-dag-image-scoping.md) | Per-team DAG image scoping — shared monorepo, one image per team (trust boundary) | Accepted |
 | [0062](0062-team-modeling-via-realm-roles.md) | Team modeling via realm roles (role name == team name) | Accepted |
 | [0063](0063-teams-claim-defensive-parse.md) | `teams` claim defensive parse in the pure validator (no Zod) | Accepted |
+| [0064](0064-supervisor-process-per-tenant-http-over-uds.md) | Supervisor + process-per-tenant workers, HTTP-over-UDS (A3 hybrid) | Accepted |
+| [0065](0065-thin-init-supervisor-readopt-via-redis-registry.md) | Thin init (PID 1) + supervisor re-adoption via Redis worker-registry | Accepted |
+| [0066](0066-ipc-unix-domain-socket-carrying-http.md) | IPC — Unix domain socket carrying HTTP between supervisor and worker | Accepted |
+| [0067](0067-per-tenant-redis-acl-isolation.md) | Per-tenant Redis isolation — one ACL user per tenant, tenant-prefixed keys | Accepted |
+| [0068](0068-tenant-registry-redis-pubsub-fail-closed.md) | Tenant registry — Redis-backed metadata, pub/sub propagation, fail-closed | Accepted |
+| [0069](0069-per-tenant-secrets-nondereferenceable-reference-secretssource-port.md) | Per-tenant secrets — spawn-time env from non-dereferenceable reference, `SecretsSource` port | Accepted |
+| [0070](0070-worker-lifecycle-lazy-spawn-idle-evict-eager-pin.md) | Worker lifecycle — lazy spawn + idle-evict, eager-pin | Accepted |
+| [0071](0071-crash-policy-sync-fail-fast-hitl-durable-resume.md) | Crash policy — sync runs fail fast, HITL runs resume from durable checkpoint | Accepted |
+| [0072](0072-resource-enforcement-single-pod-admission-heap-cap.md) | Resource enforcement — single pod + supervisor admission + per-worker heap cap | Accepted |
+| [0073](0073-tenant-branded-principal-extended-error-taxonomy.md) | Tenant as first-class branded principal + extended per-tenant error taxonomy | Accepted |
 
 ## Conventions
 
@@ -91,6 +102,6 @@ Start with these to understand the runtime as it stands today:
 
 ## Numbering integrity
 
-Verified 2026-06-16: all 63 ADRs present (0001–0063), contiguous, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing). ADRs 0044–0050 cover multi-backend observability / Azure AI Foundry (thin exporter factories, composite exporter fault isolation, Foundry SDKs, domain events, native eval path, backend selection). ADRs 0051–0059 cover the capability registry + identity-scoped capabilities (extensible registry, document-source capability, per-invocation `mintFor` axis, `CapabilityBroker` port, Entra/Keycloak app and FIC topology, optional-scope mirroring, two-path inbound auth, failure taxonomy). ADR 0060 covers durable HITL suspend/resume. ADR 0061 covers per-team DAG image scoping (shared monorepo, one image per team; amends 0041's discovery to be depth-agnostic). ADRs 0062–0063 cover team-security wiring (team modeling via realm roles with role name == team name; defensive `teams`-claim parse in the pure host validator, no Zod).
+Verified 2026-06-19: all 73 ADRs present (0001–0073), contiguous, no gaps, no duplicates. 0002 and 0007 are correctly marked `Superseded by 0021`. Cross-references (`git grep "ADR 00"`) all resolve. ADRs 0030–0043 cover `@fuguejs/host` architectural decisions (state machines, registry, git adapter, HTTP server, error handling, concurrency, circuit breaker, config, tracing). ADRs 0044–0050 cover multi-backend observability / Azure AI Foundry (thin exporter factories, composite exporter fault isolation, Foundry SDKs, domain events, native eval path, backend selection). ADRs 0051–0059 cover the capability registry + identity-scoped capabilities (extensible registry, document-source capability, per-invocation `mintFor` axis, `CapabilityBroker` port, Entra/Keycloak app and FIC topology, optional-scope mirroring, two-path inbound auth, failure taxonomy). ADR 0060 covers durable HITL suspend/resume. ADR 0061 covers per-team DAG image scoping (shared monorepo, one image per team; amends 0041's discovery to be depth-agnostic). ADRs 0062–0063 cover team-security wiring (team modeling via realm roles with role name == team name; defensive `teams`-claim parse in the pure host validator, no Zod). ADRs 0064–0073 cover the multi-tenant single-host runtime (supervisor + process-per-tenant workers over HTTP-over-UDS, thin-init supervisor re-adoption via a Redis worker-registry, per-tenant Redis ACL isolation, Redis-backed tenant registry, per-tenant spawn-time secrets behind a `SecretsSource` port, worker lifecycle with lazy spawn / idle-evict / eager-pin, crash policy, single-pod resource enforcement, and the tenant branded principal + extended error taxonomy).
 
 A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

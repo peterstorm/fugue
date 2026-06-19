@@ -115,6 +115,7 @@ const createFakeModuleLoader = (dags: LoadResult[]): ModuleLoaderPort => ({
 
 const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivityPort; redis: RedisPort } => {
   const store = new Map<string, string>();
+  const sets = new Map<string, Set<string>>();
 
   return {
     port: {
@@ -144,6 +145,20 @@ const createFakeRedis = (opts?: { failPing?: boolean }): { port: RedisConnectivi
         store.set(key, value);
         return ok(true);
       },
+      sAdd: async (key, member) => {
+        const set = sets.get(key) ?? new Set<string>();
+        const had = set.has(member);
+        set.add(member);
+        sets.set(key, set);
+        return ok(had ? 0 : 1);
+      },
+      sRem: async (key, member) => {
+        const set = sets.get(key);
+        if (!set || !set.has(member)) return ok(0);
+        set.delete(member);
+        return ok(1);
+      },
+      sMembers: async (key) => ok(Array.from(sets.get(key) ?? [])),
     },
   };
 };
@@ -272,6 +287,9 @@ describe("Full Host Lifecycle", () => {
       keys: async () => ok([]),
       scan: async () => ok({ cursor: "0", keys: [] }),
       setNx: async (k, v) => { if (store.has(k)) return ok(false); store.set(k, v); return ok(true); },
+      sAdd: async () => ok(1),
+      sRem: async () => ok(1),
+      sMembers: async () => ok([]),
     };
     const logger = createTestLogger();
 

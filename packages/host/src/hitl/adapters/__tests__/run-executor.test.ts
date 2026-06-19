@@ -50,6 +50,9 @@ const stubRedis = (): RedisPort => {
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async sAdd() { return ok(1); },
+    async sRem() { return ok(1); },
+    async sMembers() { return ok([]); },
   } as RedisPort;
 };
 

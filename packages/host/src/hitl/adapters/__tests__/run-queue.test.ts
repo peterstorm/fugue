@@ -14,10 +14,24 @@ import { ok, err } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, JobLike, WorkerHandle, EnqueueOpts, QueueOpts } from "@fuguejs/framework";
 import type { RedisPort } from "../../../ports.js";
 import type { HostError } from "../../../domain/host-error.js";
+import { tenantId } from "../../../domain/tenant.js";
+import type { TenantId } from "../../../domain/tenant.js";
 import { createRunQueue } from "../run-queue.js";
 
+/** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
+const mkTenant = (s: string): TenantId => {
+  const r = tenantId(s);
+  if (!r.ok) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
+  return r.value;
+};
+
+const TENANT = mkTenant("tenant-a");
+const OTHER_TENANT = mkTenant("tenant-b");
+
 const RUN = "run-1" as RunId;
-const lockKey = (runId: string) => `fugue:hitl:lock:${runId}`;
+// The lock key is tenant-prefixed (AD-4 / FR-013 / SC-001) — assertions target
+// the bound tenant's namespace.
+const lockKey = (runId: string, tenant: TenantId = TENANT) => `fugue:${tenant}:hitl:lock:${runId}`;
 
 // ── recording fake RedisPort ──────────────────────────────────────────────────
 const fakeRedis = (preset: Record<string, string> = {}) => {
@@ -29,6 +43,9 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     async del(k) { calls.del.push(k); const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts) { calls.setNx.push({ key: k, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async sAdd() { return ok(1); },
+    async sRem() { return ok(1); },
+    async sMembers() { return ok([]); },
   };
   return { redis, calls, m };
 };
@@ -63,7 +80,7 @@ describe("createRunQueue — single-flight lock", () => {
   it("C2: acquires the lock atomically with its TTL (SET NX EX), not setNx-then-set", async () => {
     const { redis, calls } = fakeRedis();
     const fb = fakeBackend();
-    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
     q.startWorker(okProcess, { concurrency: 2 });
 
     await fb.getWorker()(fb.job(RUN));
@@ -81,7 +98,7 @@ describe("createRunQueue — single-flight lock", () => {
     // Lock already held by another worker.
     const { redis } = fakeRedis({ [lockKey(RUN)]: "1" });
     const fb = fakeBackend();
-    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300, lockContentionDelayMs: 1500 });
+    const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300, lockContentionDelayMs: 1500 });
     q.startWorker(async () => { processed++; return ok(undefined); }, { concurrency: 2 });
 
     await fb.getWorker()(fb.job(RUN));
@@ -94,7 +111,7 @@ describe("createRunQueue — single-flight lock", () => {
     let processed = 0;
     const { redis, m } = fakeRedis({ [lockKey(RUN)]: "1" });
     const fb = fakeBackend();
-    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
     q.startWorker(async () => { processed++; return ok(undefined); }, { concurrency: 2 });
 
     await fb.getWorker()(fb.job(RUN)); // contention → deferred
@@ -109,7 +126,7 @@ describe("createRunQueue — single-flight lock", () => {
   it("A1: throws on a host-infra processRun error (so the queue retries) and releases the lock first", async () => {
     const { redis, calls } = fakeRedis();
     const fb = fakeBackend();
-    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
     q.startWorker(async () => err({ kind: "redis-unavailable", operation: "run-store get" }), { concurrency: 2 });
 
     await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/processRun failed for run-1/);
@@ -120,7 +137,7 @@ describe("createRunQueue — single-flight lock", () => {
   it("A1: configures the queue with a retry budget (defaultAttempts > 1)", () => {
     const { redis } = fakeRedis();
     const fb = fakeBackend();
-    createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300, maxAttempts: 7 });
+    createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300, maxAttempts: 7 });
     expect(fb.getQueueOpts()?.defaultAttempts).toBe(7);
   });
 
@@ -128,9 +145,33 @@ describe("createRunQueue — single-flight lock", () => {
     const base = fakeRedis();
     const redis: RedisPort = { ...base.redis, async setNx() { return err({ kind: "redis-unavailable", operation: "SETNX" }); } };
     const fb = fakeBackend();
-    const q = createRunQueue({ backend: fb.backend, redis, lockTtlSec: 300 });
+    const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
     q.startWorker(okProcess, { concurrency: 2 });
 
     await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/lock acquire failed/);
+  });
+});
+
+describe("createRunQueue — cross-tenant lock isolation (SECURITY: AD-4 / FR-013 / SC-001)", () => {
+  it("two queues bound to different tenants do NOT contend on the same runId's lock", async () => {
+    // ONE shared Redis, two queues for different tenants. Tenant A holds its lock
+    // for RUN; tenant B's worker must NOT see it as contended — its lock key lives
+    // under a DIFFERENT tenant prefix, so it acquires and runs its own slice.
+    const { redis, calls, m } = fakeRedis({ [lockKey(RUN, TENANT)]: "1" });
+    const fb = fakeBackend();
+    let bProcessed = 0;
+    const qB = createRunQueue({ backend: fb.backend, redis, tenant: OTHER_TENANT, lockTtlSec: 300 });
+    qB.startWorker(async () => { bProcessed++; return ok(undefined); }, { concurrency: 2 });
+
+    await fb.getWorker()(fb.job(RUN));
+
+    // Tenant B ran its slice (no false contention against tenant A's lock)…
+    expect(bProcessed).toBe(1);
+    // …acquiring and releasing ONLY its own tenant-prefixed lock key.
+    expect(calls.setNx).toEqual([{ key: lockKey(RUN, OTHER_TENANT), opts: { expiresInSec: 300 } }]);
+    expect(calls.del).toEqual([lockKey(RUN, OTHER_TENANT)]);
+    // Tenant A's lock key is untouched (B physically cannot name it).
+    expect(m.get(lockKey(RUN, TENANT))).toBe("1");
+    expect(calls.del).not.toContain(lockKey(RUN, TENANT));
   });
 });

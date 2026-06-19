@@ -1,0 +1,492 @@
+/**
+ * Worker lifecycle MANAGER — the imperative-shell ORCHESTRATOR that composes the
+ * pure lifecycle ADT (`worker-lifecycle.ts`), the `SpawnPort` / `ProcManagePort`
+ * (`bun-spawn-adapter.ts`), the Redis `WorkerRegistry` (`worker-registry-redis.ts`),
+ * a UDS liveness probe, and the tenant registry into a single
+ * `WorkerLifecyclePort` the supervisor injects (FR-014/015/019/020, SC-006).
+ *
+ * DESIGN (functional core / imperative shell):
+ *   - ALL state-transition DECISIONS live in the pure ADT (`requestWorker`,
+ *     `workerLive`, `touch`, `idleEvict`, `beginDrain`, `crash`,
+ *     `adoptLive`, the `isIdleEvictable` / `occupiesSlot` queries). This module
+ *     only performs the I/O (spawn / signal / probe / Redis write) and threads the
+ *     resulting pure states through a per-tenant `Map<TenantId, WorkerState>`.
+ *     (NOTE: the ADT's `restart` transition EXISTS but is deliberately NOT used
+ *     here — see RESTART-AT-CAP in `onCrash` below: we delete the crashed entry
+ *     and re-enter via `requestWorker` so the cap admission check runs first.)
+ *   - It NEVER calls `Date.now()` (repo ban) — every transition is fed the
+ *     injected `clock()`.
+ *   - It is FAIL-CLOSED + per-tenant CONTAINED: any spawn/probe/registry failure
+ *     for one tenant surfaces as that tenant's `worker-unavailable` (503) and
+ *     never touches another tenant's entry (FR-015, AD-8).
+ *
+ * SECURITY (FR-004 one-tenant-one-socket): the udsPath a worker binds is a PURE
+ * function of its `TenantId` (`workerSocketPath(udsDir, tenant)`), derived HERE —
+ * never taken from arbitrary input — so a worker can only ever own its own socket.
+ *
+ * SECURITY (FR-005 reference-only): the spawn forwards the tenant's `secretsRef`
+ * REFERENCE only; this module never dereferences a secret.
+ */
+
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import { workerUnavailable, formatHostError } from "../../domain/host-error.js";
+import type { HostError } from "../../domain/host-error.js";
+import type { TenantId, SecretsRef } from "../../domain/tenant.js";
+import type { LogPort } from "../../ports.js";
+import { workerSocketPath } from "../../domain/config.js";
+import {
+  requestWorker,
+  workerLive,
+  adoptLive,
+  touch,
+  idleEvict,
+  isIdleEvictable,
+  beginDrain,
+  crash,
+  occupiesSlot,
+} from "./worker-lifecycle.js";
+import type { WorkerState } from "./worker-lifecycle.js";
+import type { SpawnPort, ProcManagePort, WorkerLifecyclePort, EnsuredWorker } from "./spawn-port.js";
+import type { WorkerRegistry, WorkerRecord, UdsLivenessProbe } from "./worker-registry-redis.js";
+
+// ── Tenant config view the lifecycle needs ──────────────────────────────────
+
+/**
+ * The per-tenant spawn inputs the lifecycle sources from the tenant registry.
+ * This is the AUTHORITATIVE source of `eagerPin` (AD-7, C3) — never defaulted.
+ * Kept as a narrow injected view so the manager depends only on what it needs
+ * (and can be faked without the whole Redis registry).
+ */
+export interface TenantSpawnConfig {
+  readonly secretsRef: SecretsRef;
+  readonly eagerPin: boolean;
+  /**
+   * Optional per-tenant extra env forwarded to the worker.
+   *
+   * NOTE (A1): platform-wide config (REDIS_URL, REALM_JWT_ISSUER, …) is NOT
+   * carried here — the Bun spawn adapter is constructed with the supervisor's
+   * `process.env` as its `inheritedEnv`, and `buildWorkerSpawn` merges that whole
+   * inherited env into every child, so workers inherit REDIS_URL / issuer / etc.
+   * AUTOMATICALLY. `extraEnv` is reserved for genuinely PER-TENANT overrides (it
+   * is applied before — and so cannot override — the mandatory TENANT_ID /
+   * FUGUE_SECRETS_REF / WORKER_UDS_DIR bindings). Today no per-tenant override is
+   * sourced, so `spawnConfigFor` leaves it unset.
+   */
+  readonly extraEnv?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Read-only view over the tenant registry the lifecycle consults for spawn config
+ * + the authoritative `eagerPin`. Returns `undefined` for an unknown/deregistered
+ * tenant (fail-closed: the lifecycle refuses to spawn one it cannot configure).
+ */
+export interface TenantSpawnConfigView {
+  readonly spawnConfigFor: (tenant: TenantId) => TenantSpawnConfig | undefined;
+}
+
+// ── Manager config + deps ────────────────────────────────────────────────────
+
+export interface WorkerLifecycleConfig {
+  /** Directory under which `<tenant>.sock` lives (`WORKER_UDS_DIR`). */
+  readonly udsDir: string;
+  /** Absolute path to the worker entrypoint (`worker-main.ts`). */
+  readonly workerEntry: string;
+  /** Idle TTL (ms) after which a non-pinned live worker is idle-evictable. */
+  readonly idleEvictMs: number;
+  /** Per-worker V8 heap cap (MB), AD-9. Unset → no explicit cap. */
+  readonly heapCapMb?: number;
+  /** Upper bound on simultaneously-slotted workers (spawning/live/draining). Unset → no cap. */
+  readonly maxLiveWorkers?: number;
+  /** Bounded wait (ms) for a freshly-spawned worker's UDS to become reachable. */
+  readonly spawnReadyTimeoutMs: number;
+  /** Poll interval (ms) while waiting for UDS readiness. */
+  readonly spawnReadyPollMs: number;
+}
+
+export interface WorkerLifecycleDeps {
+  readonly spawn: SpawnPort;
+  readonly proc: ProcManagePort;
+  readonly registry: WorkerRegistry;
+  /** UDS liveness probe — "is the worker bound to `udsPath` answering?". */
+  readonly probe: UdsLivenessProbe;
+  /** Authoritative tenant spawn config (secretsRef + eagerPin). */
+  readonly tenants: TenantSpawnConfigView;
+  /** Injected clock — NEVER Date.now (repo ban). */
+  readonly clock: () => number;
+  readonly config: WorkerLifecycleConfig;
+  readonly logger: LogPort;
+}
+
+// ── Manager ──────────────────────────────────────────────────────────────────
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
+  const { spawn, proc, registry, probe, tenants, clock, config, logger } = deps;
+
+  // Per-tenant pure ADT state. The ONLY mutable state — every entry is an
+  // immutable pure `WorkerState`; we replace (never mutate) entries.
+  const workers = new Map<TenantId, WorkerState>();
+
+  /** Count of workers occupying a slot (spawning/live/draining) — T9 reads this. */
+  const liveWorkerCount = (): number => {
+    let n = 0;
+    for (const s of workers.values()) if (occupiesSlot(s)) n++;
+    return n;
+  };
+
+  /**
+   * Best-effort signal a worker pid, surfacing GENUINE kill failures.
+   *
+   * `proc.signal` returns `ok` for ESRCH (already-dead) — the Bun adapter treats a
+   * vanished pid as success — so a `!ok` here is a REAL failure (EPERM, invalid
+   * signal, unexpected throw). The kill itself stays best-effort (we never abort
+   * control flow), but a failure MUST be observable:
+   *  - `orphanRisk: true` → the caller has already removed the map entry + registry
+   *    record, so a failed SIGKILL leaves an orphaned worker still bound to its UDS
+   *    while the supervisor believes the slot is reclaimed (corrupts the FR-033
+   *    live-worker count). Logged at `error`.
+   *  - `orphanRisk: false` → the slot is not yet considered reclaimed (e.g. SIGTERM
+   *    during drain); logged at `warn`.
+   */
+  const signalWorker = async (
+    tenant: TenantId,
+    pid: number,
+    sig: "SIGTERM" | "SIGKILL",
+    orphanRisk: boolean,
+  ): Promise<void> => {
+    const r = await proc.signal(pid, sig);
+    if (r.ok) return;
+    const ctx = { tenant, pid, sig, error: formatHostError(r.error) };
+    if (orphanRisk) {
+      logger.error(
+        "[worker-lifecycle] kill failed AFTER slot reclaim — worker may be orphaned (still bound to its UDS); live-worker count may be inaccurate",
+        ctx,
+      );
+    } else {
+      logger.warn("[worker-lifecycle] signal failed (best-effort)", ctx);
+    }
+  };
+
+  /** Persist a record derived from a live/draining pure state (best-effort fail-closed). */
+  const persistRecord = async (state: WorkerState): Promise<void> => {
+    let record: WorkerRecord | undefined;
+    if (state.phase === "live") {
+      record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.startedAt, health: "live", eagerPin: state.eagerPin };
+    } else if (state.phase === "draining") {
+      record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.drainStartedAt, health: "draining", eagerPin: state.eagerPin };
+    }
+    if (record === undefined) return;
+    const r = await registry.put(record);
+    if (!r.ok) {
+      logger.warn("[worker-lifecycle] registry put failed (continuing — routing uses in-memory state)", { tenant: state.tenant });
+    }
+  };
+
+  /** Remove a tenant's registry record (best-effort). */
+  const removeRecord = async (tenant: TenantId): Promise<void> => {
+    const r = await registry.remove(tenant);
+    if (!r.ok) logger.warn("[worker-lifecycle] registry remove failed (continuing)", { tenant });
+  };
+
+  /** Wait, bounded, for a worker's UDS to become reachable via the probe. */
+  const waitForUds = async (record: WorkerRecord): Promise<boolean> => {
+    const deadline = clock() + config.spawnReadyTimeoutMs;
+    // Always probe at least once.
+    for (;;) {
+      let alive = false;
+      try {
+        alive = await probe(record);
+      } catch (e) {
+        logger.warn("[worker-lifecycle] UDS probe threw during spawn-wait — treating as not-ready", {
+          tenant: record.tenant,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        alive = false;
+      }
+      if (alive) return true;
+      if (clock() >= deadline) return false;
+      await sleep(config.spawnReadyPollMs);
+    }
+  };
+
+  /**
+   * Lazy-spawn a tenant's worker to `live` (AD-7). Fail-closed + contained:
+   * returns a `worker-unavailable(tenant)` HostError on any failure and leaves
+   * the map either empty or with a terminal entry for THIS tenant only.
+   */
+  const lazySpawn = async (tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> => {
+    // Admission: refuse if at the live-worker ceiling (T9 count primitive).
+    if (config.maxLiveWorkers !== undefined && liveWorkerCount() >= config.maxLiveWorkers) {
+      logger.warn("[worker-lifecycle] at SUPERVISOR_MAX_LIVE_WORKERS — refusing new worker", { tenant, cap: config.maxLiveWorkers });
+      return err(workerUnavailable(tenant));
+    }
+
+    const spawnCfg = tenants.spawnConfigFor(tenant);
+    if (spawnCfg === undefined) {
+      // No active config → cannot configure a worker. Fail closed.
+      logger.warn("[worker-lifecycle] no spawn config for tenant — refusing", { tenant });
+      return err(workerUnavailable(tenant));
+    }
+
+    // FR-004: the socket is a PURE function of the TenantId, derived here.
+    const udsPath = workerSocketPath(config.udsDir, tenant);
+
+    // Enter the pure `spawning` state.
+    workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
+
+    const spawnResult = await spawn.spawn({
+      tenant,
+      secretsRef: spawnCfg.secretsRef, // REFERENCE only (FR-005).
+      workerEntry: config.workerEntry,
+      udsPath,
+      ...(config.heapCapMb !== undefined ? { heapCapMb: config.heapCapMb } : {}),
+      ...(spawnCfg.extraEnv !== undefined ? { extraEnv: spawnCfg.extraEnv } : {}),
+    });
+    if (!spawnResult.ok) {
+      // Surface the UNDERLYING spawn cause (ENOMEM/ENOENT/fork-limit, in the
+      // adapter's HostError) so an operator can see WHY a worker won't start —
+      // the returned worker-unavailable (503) mapping is unchanged.
+      logger.error("[worker-lifecycle] spawn failed — worker-unavailable (contained)", {
+        tenant,
+        error: formatHostError(spawnResult.error),
+      });
+      workers.delete(tenant);
+      return err(workerUnavailable(tenant));
+    }
+    const handle = spawnResult.value;
+
+    // Wait (bounded) for the worker's UDS to come up.
+    const probeRecord: WorkerRecord = {
+      tenant,
+      pid: handle.pid,
+      udsPath,
+      startedAt: clock(),
+      health: "live",
+      eagerPin: spawnCfg.eagerPin,
+    };
+    const ready = await waitForUds(probeRecord);
+    if (!ready) {
+      logger.warn("[worker-lifecycle] worker UDS did not become ready in time — killing + worker-unavailable", { tenant, pid: handle.pid });
+      workers.delete(tenant);
+      // No live slot/registry record was ever taken for this incarnation, but a
+      // failed kill still leaks the spawned process — surface it (warn).
+      await signalWorker(tenant, handle.pid, "SIGKILL", false);
+      return err(workerUnavailable(tenant));
+    }
+
+    // Pure transition spawning → live.
+    const current = workers.get(tenant);
+    if (current === undefined || current.phase !== "spawning") {
+      // The entry was concurrently replaced (e.g. an evict) — fail closed for
+      // this request rather than resurrect a stale spawn.
+      logger.warn("[worker-lifecycle] spawning state vanished before workerLive — refusing", { tenant });
+      await signalWorker(tenant, handle.pid, "SIGKILL", false);
+      return err(workerUnavailable(tenant));
+    }
+    const liveResult = workerLive(current, handle.pid, udsPath, clock());
+    if (!liveResult.ok) {
+      logger.error("[worker-lifecycle] workerLive transition rejected (invariant)", { tenant });
+      workers.delete(tenant);
+      await signalWorker(tenant, handle.pid, "SIGKILL", false);
+      return err(workerUnavailable(tenant));
+    }
+    workers.set(tenant, liveResult.value);
+    await persistRecord(liveResult.value);
+
+    // CRASH-EXIT WATCHER (FR-014/FR-015/AD-8): `handle.exited` is the ONLY crash
+    // signal. When it resolves, drive `onCrash` — but ONLY if the current map
+    // entry is still THIS incarnation (same pid, still live/draining). The
+    // pid+phase guard is REQUIRED so a deliberate evict/drain SIGKILL (which
+    // removes/changes the entry BEFORE signalling) is not misread as a crash and
+    // does not trigger a spurious restart.
+    void handle.exited.then((code) => {
+      const cur = workers.get(tenant);
+      if (cur !== undefined && (cur.phase === "live" || cur.phase === "draining") && cur.pid === handle.pid) {
+        void onCrash(tenant, code).catch((e) =>
+          logger.error("[worker-lifecycle] onCrash threw", { tenant, error: e instanceof Error ? e.message : String(e) }),
+        );
+      }
+    });
+
+    return ok({ udsPath });
+  };
+
+  const ensureWorker = async (tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> => {
+    const existing = workers.get(tenant);
+    if (existing !== undefined && existing.phase === "live") {
+      // Touch (refresh idle clock) and route to the existing socket.
+      const touched = touch(existing, clock());
+      if (touched.ok) workers.set(tenant, touched.value);
+      return ok({ udsPath: existing.udsPath });
+    }
+    // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
+    // not routable; lazySpawn re-enters spawning for it).
+    return lazySpawn(tenant);
+  };
+
+  const onCrash = async (tenant: TenantId, exitCode: number | null): Promise<Result<void, HostError>> => {
+    const current = workers.get(tenant);
+    if (current === undefined) {
+      // Nothing to crash (already gone). Idempotent no-op success — contained.
+      return ok(undefined);
+    }
+    // Pure crash transition (valid from live/draining). Contained to THIS tenant.
+    const crashed = crash(current, exitCode, clock());
+    if (!crashed.ok) {
+      // Not in a crashable phase (spawning/crashed/evicted) — drop the entry so a
+      // fresh request lazy-spawns. Still contained to this tenant.
+      logger.warn("[worker-lifecycle] crash from non-crashable phase — dropping entry", { tenant, phase: current.phase });
+      workers.delete(tenant);
+      await removeRecord(tenant);
+      return ok(undefined);
+    }
+    workers.set(tenant, crashed.value);
+    await removeRecord(tenant);
+
+    // Restart ONLY this tenant's worker (AD-8/FR-015): re-run the spawn path.
+    // Sync runs fail-fast (the crash already surfaced as 503 to in-flight
+    // callers); HITL durability is handled by existing checkpoint machinery
+    // (AD-8 — no new resume engine here).
+    //
+    // RESTART-AT-CAP (FR-015): we DELETE the crashed entry before respawning
+    // rather than pre-setting `spawning` via `restart(...)`. lazySpawn's admission
+    // check counts `spawning` (occupiesSlot) against SUPERVISOR_MAX_LIVE_WORKERS,
+    // so a pre-set `spawning` would make the crashing tenant count its OWN
+    // restarting slot and get refused at the cap — exactly when containment
+    // matters. By removing the record first, lazySpawn re-enters `spawning` via
+    // `requestWorker` AFTER the admission check passes. The crashed tenant is
+    // replacing itself, so its restart must not be blocked by the cap.
+    workers.delete(tenant);
+    const respawn = await lazySpawn(tenant);
+    if (!respawn.ok) {
+      logger.warn("[worker-lifecycle] restart respawn failed — tenant remains unavailable until next request", { tenant });
+      // lazySpawn already cleaned up the entry; a subsequent request retries.
+    }
+    return ok(undefined);
+  };
+
+  const drain = async (tenant: TenantId): Promise<Result<void, HostError>> => {
+    const current = workers.get(tenant);
+    if (current === undefined || current.phase !== "live") {
+      // Nothing live to drain — idempotent no-op success.
+      return ok(undefined);
+    }
+    // `current` was just confirmed `phase === "live"`, so `beginDrain` MUST yield a
+    // `draining` state. A rejection (or unexpected phase) here is a real ADT
+    // INVARIANT VIOLATION — NOT the legitimate "nothing live to drain" no-op above
+    // — so it must surface loudly rather than masquerade as success (mirrors the
+    // `workerLive` "transition rejected (invariant)" logging).
+    const draining = beginDrain(current, clock());
+    if (!draining.ok || draining.value.phase !== "draining") {
+      logger.error("[worker-lifecycle] beginDrain rejected for a confirmed-live worker (invariant)", {
+        tenant,
+        ...(draining.ok ? { phase: draining.value.phase } : { error: draining.error.message }),
+      });
+      // A confirmed-live worker that cannot begin draining is a real invariant
+      // violation — surface it as a worker-unavailable rather than silent success.
+      return draining.ok ? ok(undefined) : err(workerUnavailable(tenant));
+    }
+    const next = draining.value;
+    workers.set(tenant, next);
+    await persistRecord(next);
+    // Signal the worker to stop accepting new work (SIGTERM). In-flight work
+    // finishes; the crash/exit path drives the terminal transition.
+    await signalWorker(tenant, next.pid, "SIGTERM", false);
+    return ok(undefined);
+  };
+
+  const evict = async (tenant: TenantId): Promise<Result<void, HostError>> => {
+    const current = workers.get(tenant);
+    if (current === undefined) return ok(undefined);
+    // Capture the pid (in the narrowed branch so the union widening never loses
+    // the field) for the deliberate stop signals.
+    let pid: number | undefined;
+    if (current.phase === "live" || current.phase === "draining") pid = current.pid;
+    // CRITICAL: remove the entry BEFORE signalling. The crash-exit watcher's
+    // guard keys on "is the map entry still THIS live/draining incarnation?";
+    // deleting first guarantees a deliberate evict SIGKILL — which resolves the
+    // worker's `handle.exited` — is NOT misread as a crash (no spurious restart).
+    workers.delete(tenant);
+    await removeRecord(tenant);
+    if (pid !== undefined) {
+      // Drain then force-stop: SIGTERM lets in-flight work wind down, SIGKILL
+      // reclaims the slot if it doesn't exit. Both are idempotent on a dead pid.
+      // The entry + registry record were ALREADY removed above, so a failed
+      // SIGKILL leaves an orphan still bound to the UDS while the slot reads as
+      // reclaimed — orphan-risk (error).
+      await signalWorker(tenant, pid, "SIGTERM", false);
+      await signalWorker(tenant, pid, "SIGKILL", true);
+    }
+    return ok(undefined);
+  };
+
+  const reconcileReadopt = async (): Promise<Result<{ readonly adopted: readonly TenantId[]; readonly pruned: readonly TenantId[] }, HostError>> => {
+    const result = await registry.reconcileReadopt();
+    if (!result.ok) return err(result.error);
+    const adoptedTenants: TenantId[] = [];
+    for (const { record } of result.value.adopted) {
+      // C3 / AD-7: source eagerPin from the AUTHORITATIVE tenant registry config;
+      // fall back to the persisted record value (belt-and-suspenders), NEVER
+      // default to false.
+      const spawnCfg = tenants.spawnConfigFor(record.tenant);
+      const eagerPin = spawnCfg !== undefined ? spawnCfg.eagerPin : record.eagerPin;
+      const state = adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
+      workers.set(record.tenant, state);
+      adoptedTenants.push(record.tenant);
+    }
+    // Prune dead in-memory entries the registry pruned (defensive — the map is
+    // freshly empty on a supervisor restart, but a re-run must drop stale ones).
+    for (const tenant of result.value.pruned) {
+      const cur = workers.get(tenant);
+      if (cur !== undefined && cur.phase !== "live" && cur.phase !== "draining") workers.delete(tenant);
+    }
+    return ok({ adopted: adoptedTenants, pruned: result.value.pruned });
+  };
+
+  /**
+   * Idle-evict sweep (AD-7): evict every idle-evictable live worker, RESPECTING
+   * eager-pin (the pure `isIdleEvictable` query is false for pinned workers).
+   * Exposed for the supervisor to call on a timer. Returns the evicted tenants.
+   */
+  const idleEvictSweep = async (): Promise<readonly TenantId[]> => {
+    const now = clock();
+    const candidates: TenantId[] = [];
+    for (const [tenant, state] of workers) {
+      if (isIdleEvictable(state, config.idleEvictMs, now)) candidates.push(tenant);
+    }
+    const evicted: TenantId[] = [];
+    for (const tenant of candidates) {
+      const state = workers.get(tenant);
+      if (state === undefined || state.phase !== "live") continue;
+      // Re-confirm via the pure transition (it re-checks eager-pin + TTL); a
+      // pinned worker returns err here and is skipped (AD-7).
+      const result = idleEvict(state, config.idleEvictMs, clock());
+      if (!result.ok) continue;
+      const pid = state.pid;
+      // Remove the entry BEFORE signalling so the crash-exit watcher's guard sees
+      // this is no longer the live incarnation — a deliberate idle-evict SIGTERM
+      // that resolves `handle.exited` must not be misread as a crash (no respawn).
+      workers.delete(tenant);
+      await removeRecord(tenant);
+      // Entry + record already removed → the slot reads as reclaimed. A failed
+      // SIGTERM leaves the worker running and bound to its UDS — orphan-risk.
+      await signalWorker(tenant, pid, "SIGTERM", true);
+      evicted.push(tenant);
+    }
+    return evicted;
+  };
+
+  return {
+    ensureWorker,
+    drain,
+    evict,
+    onCrash,
+    reconcileReadopt,
+    liveWorkerCount,
+    // `idleEvictSweep` is part of the typed WorkerLifecyclePort (spawn-port.ts) —
+    // the supervisor binary drives it on a timer. No structural cast needed.
+    idleEvictSweep,
+  };
+};

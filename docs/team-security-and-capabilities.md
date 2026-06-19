@@ -65,6 +65,25 @@ team's config.
 > budgets, scoped downstream tokens) — that is what the capability broker
 > (§4, §7) addresses.
 
+> **Terminology — "agent" ≠ LLM node.** Throughout this doc and the Keycloak/Entra
+> config, **"agent" means an autonomous *service identity*, not an LLM/agentic
+> node.** The naming (`fugue-agent-*` clients, `agentClientId`, "agent path") is
+> historical and routinely misread. Two orthogonal axes are involved:
+>
+> - **Node kind** (`framework/.../node.ts` — `"fetch" | "transform" | "llm" |
+>   "guardrail" | "eval-judge"`): what a node *does*. A `fetch`/`transform` node
+>   is plain deterministic code — no LLM, no reasoning.
+> - **Invocation origin** (`framework/.../capability-broker.ts`): *who* triggered
+>   the run. `{ kind: "agent" }` = **autonomous / no human in the loop** (cron or
+>   system-initiated, authenticated via `client_credentials` → app-only token).
+>   `{ kind: "user" }` = user-initiated (token exchange preserving `sub`).
+>
+> These axes are independent. **A deterministic, programmatic data-gathering DAG
+> that never touches an LLM is an `"agent"`-origin run** — that is the *normal*,
+> intended case, not an edge case. "Agent path" = "app-only service-account path",
+> nothing more. See [§4.4 — Programmatic nodes reading Graph/Dynamics](#programmatic-nodes-reading-graphdynamics)
+> for the two ways to wire SharePoint/Dynamics reads from a plain node.
+
 The published `@fuguejs` packages never reference Keycloak or Entra. The
 `fugue-platform` realm, the `fugue-agents` Entra app, the scope mirror, and the
 FIC entries are **deployment artifacts of our host instance**, not framework
@@ -352,6 +371,55 @@ token lifetime (SC-008) — per-invocation *authority* must not mean per-invocat
 For **user-initiated runs**, step 1 becomes Standard Token Exchange V2 of the
 user's token (`sub` stays user, `azp` becomes agent), same scope/audience
 narrowing.
+
+<a id="programmatic-nodes-reading-graphdynamics"></a>
+#### Programmatic nodes reading Graph/Dynamics (the non-agentic, no-LLM case)
+
+A very common need: **a plain deterministic node gathers data from SharePoint
+(`msgraph:sites.read`) or Dynamics (`dynamics:read`) programmatically — no LLM,
+no agentic reasoning.** This is fully supported and is the *primary* shape, not an
+edge case. Recall the terminology note in §1: a `fetch`/`transform` node with an
+`{ kind: "agent" }` origin is exactly "autonomous run authenticating as a service
+account" — the word "agent" carries no LLM connotation.
+
+Capabilities are decoupled from node kind entirely. Any node declares what it
+needs in `requires`, and the runtime hands it a typed, **operation-narrowed**
+handle on its `NodeContext` — identical ergonomics to using `db` or `http`:
+
+```ts
+const fetchSites = createFetchNode({
+  requires: ["msgraph:sites.read"],            // or "dynamics:read"
+  run: async (ctx) => {
+    const res = await ctx["msgraph:sites.read"].read(/* … */);  // app-only, zero LLM
+    // … deterministic transform of the rows …
+  },
+});
+```
+
+The handle exposes only `read` — no token, no raw Graph/Dataverse client, no
+agent loop (SC-007). There are **two ways to wire the underlying identity**,
+pick by whether you need per-run scoping:
+
+| | **Option A — static, boot-scoped** | **Option B — per-invocation broker** |
+|---|---|---|
+| When | One fixed app identity reads the same Graph/Dynamics for every run | Per-DAG/per-team scoping, user-initiated reads (`sub` preserved), per-invocation audit |
+| Wiring | Register a normal boot-scoped `CapabilityHandle` (like the `db`/`http` adapters); **no broker** — `runDag` without a `minting` option skips minting (zero-regression default, §3.3) | The Keycloak-backed broker; origin `{ kind: "agent", agentClientId }` → `client_credentials` → WIF → app-only token (the §4.4 flow) |
+| Per-run identity | None — one app identity | Scoped per invocation, audited on `(runId, dagId, nodeId)` |
+
+For most "we just pull data programmatically on a schedule" pipelines, **Option A
+is the simplest correct choice** — you don't need the broker/minting machinery at
+all.
+
+**Provisioning is the same either way** (it's an Entra-side requirement, not a
+code one): SharePoint needs `Sites.Selected` on `fugue-agents` with the target
+site(s) explicitly added (never `Sites.Read.All`); Dynamics needs `fugue-agents`
+registered as a **Dataverse application user** with a read security role plus
+`DYNAMICS_ORG_HOST` set (else the `dynamics:read` audience resolves to `undefined`
+and the capability **fails closed with zero egress** — `audienceForScope` in
+`adapters/keycloak-broker.ts` resolves the Dynamics audience only when the host
+is set). For Option B you additionally assign the
+`msgraph:sites.read` / `dynamics:read` optional scope to that DAG's Keycloak
+service-account client (§4.4).
 
 ### 4.5 The hard constraint (why two origins, not one chain)
 

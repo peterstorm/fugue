@@ -9,7 +9,7 @@
 import { match } from "ts-pattern";
 import type { Context } from "hono";
 import type { HostError } from "../../domain/host-error.js";
-import { httpStatusFor, formatHostError } from "../../domain/host-error.js";
+import { httpStatusFor, formatHostError, retryAfterSecondsFor } from "../../domain/host-error.js";
 import { errorResponse } from "../response.js";
 
 /**
@@ -52,6 +52,7 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "redis-unavailable" }, () => undefined)
     .with({ kind: "bun-install-failed" }, () => undefined)
     .with({ kind: "config-invalid" }, () => undefined)
+    .with({ kind: "tenant-config-invalid" }, () => undefined)
     .with({ kind: "dag-validation-failed" }, () => undefined)
     .with({ kind: "discovery-failed" }, () => undefined)
     .with({ kind: "async-result-expired" }, () => undefined)
@@ -61,7 +62,14 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "unauthorized" }, () => undefined)
     .with({ kind: "team-already-exists" }, () => undefined)
     .with({ kind: "team-not-found" }, () => undefined)
+    // NON-LEAKING (FR-040): tenant-unknown exposes NO details — no tenant id,
+    // no "available", nothing that could confirm another tenant's existence.
+    .with({ kind: "tenant-unknown" }, () => undefined)
+    // Names only the caller's OWN tenant (FR-041) — never another tenant's.
+    .with({ kind: "tenant-over-quota" }, (e) => ({ scope: "tenant", tenant: e.tenant }))
+    .with({ kind: "worker-unavailable" }, (e) => ({ scope: "tenant", tenant: e.tenant }))
     .with({ kind: "internal-invariant-violated" }, () => undefined)
+    .with({ kind: "fs-purge-failed" }, () => undefined)
     .exhaustive();
 
 /**
@@ -88,10 +96,65 @@ const runIdFor = (error: HostError): string | undefined => {
  * Headers to include based on error kind.
  */
 const headersFor = (error: HostError): Record<string, string> | undefined => {
-  if (error.kind === "global-concurrency-exceeded" || error.kind === "dag-concurrency-exceeded") {
-    return { "Retry-After": "5" };
+  // Single authoritative source for the backoff (host-error.ts): coarse
+  // concurrency limits keep their 5s; tenant-over-quota advertises its own
+  // per-tenant `retryAfterSeconds` (SC-012). Reading it from one place keeps
+  // the 429 header in lockstep with the error's declared backoff.
+  const retryAfter = retryAfterSecondsFor(error);
+  return retryAfter === undefined ? undefined : { "Retry-After": String(retryAfter) };
+};
+
+/**
+ * Render a HostError to a client response, applying the 4xx/5xx disclosure
+ * discipline.
+ *
+ * SECURITY (information disclosure — OWASP A09/A05):
+ *   - 5xx-class HostErrors (worker-unavailable 503, internal-invariant-violated
+ *     500, git/import/config/etc 500) are SERVER faults. Their `formatHostError`
+ *     text can interpolate raw internal state (e.g. `internal-invariant-violated`
+ *     splices `e.message`, and the markTenant invariant carries a forged id in
+ *     `context`). We therefore return a GENERIC client message and log the
+ *     detailed `formatHostError` output + any `context` server-side — matching
+ *     the discipline of the generic unhandled-error path, which never leaks
+ *     internals and always logs.
+ *   - 4xx-class HostErrors are deliberate, caller-facing outcomes whose messages
+ *     are already curated to be safe (tenant-unknown is tenant-agnostic;
+ *     tenant-over-quota names only the caller's OWN tenant; validation echoes the
+ *     caller's own input). These keep their existing precise messages + details
+ *     and are NOT logged (they are expected, caller-driven outcomes, not faults).
+ */
+const respondWithHostError = (
+  logger: ErrorHandlerLogger,
+  c: Context,
+  hostErr: HostError,
+): Response => {
+  const status = httpStatusFor(hostErr);
+
+  if (status >= 500) {
+    // Log full detail server-side; return a generic message to the client.
+    logger.error("Host error in request handler", {
+      kind: hostErr.kind,
+      detail: formatHostError(hostErr),
+      ...("context" in hostErr ? { context: hostErr.context } : {}),
+      dagId: dagIdFor(hostErr),
+      runId: runIdFor(hostErr),
+    });
+    return errorResponse(c, status, hostErr.kind, "An unexpected error occurred", {
+      // No `details` — the 5xx body must not echo internal state. Headers (e.g.
+      // Retry-After for worker-unavailable 503) are still safe to advertise.
+      dagId: dagIdFor(hostErr),
+      runId: runIdFor(hostErr),
+      headers: headersFor(hostErr),
+    });
   }
-  return undefined;
+
+  // 4xx — curated, safe, caller-facing messages + details.
+  return errorResponse(c, status, hostErr.kind, formatHostError(hostErr), {
+    details: detailsFor(hostErr),
+    dagId: dagIdFor(hostErr),
+    runId: runIdFor(hostErr),
+    headers: headersFor(hostErr),
+  });
 };
 
 /**
@@ -101,27 +164,12 @@ const headersFor = (error: HostError): Record<string, string> | undefined => {
 export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error | HostError, c: Context): Response => {
   // If it's a HostError (thrown directly or wrapped)
   if (isHostError(thrown)) {
-    const status = httpStatusFor(thrown);
-    const message = formatHostError(thrown);
-    return errorResponse(c, status, thrown.kind, message, {
-      details: detailsFor(thrown),
-      dagId: dagIdFor(thrown),
-      runId: runIdFor(thrown),
-      headers: headersFor(thrown),
-    });
+    return respondWithHostError(logger, c, thrown);
   }
 
   // Check if the Error has a HostError as cause
   if (thrown instanceof Error && isHostError(thrown.cause)) {
-    const hostErr = thrown.cause;
-    const status = httpStatusFor(hostErr);
-    const message = formatHostError(hostErr);
-    return errorResponse(c, status, hostErr.kind, message, {
-      details: detailsFor(hostErr),
-      dagId: dagIdFor(hostErr),
-      runId: runIdFor(hostErr),
-      headers: headersFor(hostErr),
-    });
+    return respondWithHostError(logger, c, thrown.cause);
   }
 
   // Check for FrameworkError (has `kind` field from the framework)

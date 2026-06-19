@@ -415,6 +415,80 @@ export const HostConfigSchema = z.object({
   DOCUMENTS_ADAPTER: z.enum(["fs"]).optional(),
   /** Root directory for the fs documents adapter — required when DOCUMENTS_ADAPTER=fs */
   DOCUMENTS_FS_ROOT: z.string().optional(),
+  // ── Multi-tenant single-host: worker + supervisor wiring (AD-1, AD-3) ──────
+  /**
+   * WORKER MODE selector (T6, FR-007): the tenant id this worker process is
+   * bound to. A worker runs EXACTLY ONE tenant's DAGs and holds exactly one
+   * tenant's config/secrets/fs/state. Set together with FUGUE_SECRETS_REF (the
+   * superRefine below rejects one without the other). UNSET = the legacy
+   * single-tenant / supervisor process (FR-035 extend-not-replace): nothing here
+   * changes the existing `createHost` port-bind path.
+   *
+   * Shape is validated structurally here (a string) AND re-parsed through the
+   * `tenantId` smart constructor in `worker-main.ts` — the brand + Redis-key/ACL
+   * safety (no `:`/glob) is owned by `domain/tenant.ts`, not duplicated here.
+   */
+  TENANT_ID: z.string().optional(),
+  /**
+   * WORKER MODE (T6, FR-031): the OPAQUE secrets reference this worker resolves
+   * inside its own process (env-file path today, Vault key later). Held only by
+   * the worker — never dereferenced supervisor-side (FR-005/FR-006, SC-002). A
+   * string here; branded via `markSecretsRef` in `worker-main.ts`. Required iff
+   * TENANT_ID is set (worker mode).
+   */
+  FUGUE_SECRETS_REF: z.string().optional(),
+  /**
+   * Directory under which per-tenant worker Unix-domain sockets live (T6/T7).
+   * The supervisor reverse-proxies inbound HTTP to `<dir>/<tenant>.sock` (0600).
+   * This is NOT an inbound public listener (FR-001): the single public HTTP
+   * listener is the supervisor's; the UDS is the internal transport behind it.
+   */
+  WORKER_UDS_DIR: z.string().default("/run/fugue"),
+  /**
+   * Per-worker V8 heap cap (MB), applied by the supervisor (T8) at worker spawn
+   * (`--max-old-space-size`). Optional — unset means no explicit cap. Bounds a
+   * single tenant's memory blast radius on the shared host.
+   */
+  WORKER_HEAP_CAP_MB: z.coerce.number().int().min(1).optional(),
+  /**
+   * Internal HMAC signing key the SUPERVISOR uses to stamp the `X-Fugue-Tenant`
+   * header on requests it reverse-proxies to a worker, and which a worker MAY
+   * verify defensively (T7). This is NOT a tenant secret and NOT the Redis ACL
+   * credential — it is a platform-internal integrity key. Optional: when unset,
+   * the worker relies solely on 0600 socket isolation and skips header
+   * verification (the socket is only reachable by the supervisor + worker).
+   *
+   * CONTRACT (T7 signer must match EXACTLY): header value =
+   *   `<tenantId>.<hmac>` where
+   *   `hmac = hex( HMAC-SHA256(key=FUGUE_SUPERVISOR_HMAC_KEY, message=tenantId) )`.
+   */
+  FUGUE_SUPERVISOR_HMAC_KEY: z.string().min(1).optional(),
+  /**
+   * SUPERVISOR upper bound on simultaneously-live workers (T8/T9). When the
+   * bound is reached the supervisor evicts an idle worker before admitting a new
+   * tenant (LRU). Optional — unset means no explicit cap (bounded only by host
+   * resources).
+   */
+  SUPERVISOR_MAX_LIVE_WORKERS: z.coerce.number().int().min(1).optional(),
+  /**
+   * Idle duration (ms) after which the supervisor may evict a worker with no
+   * in-flight work (T8). Default 15 min. Eviction is graceful (drain then stop).
+   */
+  WORKER_IDLE_EVICT_MS: z.coerce.number().int().min(1000).default(900_000),
+  /**
+   * Grace window (ms) a DEREGISTERED tenant's footprint (fs mount, secrets,
+   * keyspace, ACL user, worker-registry record) is RETAINED before the auto-purge
+   * sweep reclaims it (FR-030). Default 7 days. Deregister is an IMMEDIATE revoke
+   * (FR-029) — this only delays the destructive footprint reclamation.
+   */
+  SUPERVISOR_GRACE_WINDOW_MS: z.coerce.number().int().min(1000).default(7 * 24 * 60 * 60 * 1000),
+  /**
+   * Cadence (ms) of the grace-window auto-purge sweep (FR-030). Each tick selects
+   * deregistered tenants whose grace window has elapsed and purges their
+   * footprint. Default hourly. The sweep is idempotent, so a coarse cadence only
+   * delays reclamation; it never risks a double-purge.
+   */
+  SUPERVISOR_GRACE_PURGE_INTERVAL_MS: z.coerce.number().int().min(1000).default(60 * 60 * 1000),
 }).refine(
   (c) => c.DEFAULT_DAG_TIMEOUT_MS <= c.MAX_DAG_TIMEOUT_MS,
   { message: "DEFAULT_DAG_TIMEOUT_MS must not exceed MAX_DAG_TIMEOUT_MS" },
@@ -486,7 +560,42 @@ export const HostConfigSchema = z.object({
       message: "ENTRA_TENANT_ID and ENTRA_CLIENT_ID must be set together (tenant present iff client present)",
     });
   }
+  // WORKER MODE (FR-007): a worker is bound to exactly one tenant AND must know
+  // where to resolve that tenant's secrets. TENANT_ID without FUGUE_SECRETS_REF
+  // is a half-wired worker that could boot with no secrets (fail-open); the
+  // reverse is a secrets ref with no tenant to scope keys/ACL under. Reject the
+  // mismatch at boot rather than fail at first resolution. Both-unset is the
+  // valid legacy single-tenant / supervisor process (FR-035).
+  if ((c.TENANT_ID !== undefined) !== (c.FUGUE_SECRETS_REF !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: [c.TENANT_ID === undefined ? "TENANT_ID" : "FUGUE_SECRETS_REF"],
+      message:
+        "TENANT_ID and FUGUE_SECRETS_REF must be set together (worker mode requires both: the bound tenant and where to resolve its secrets)",
+    });
+  }
 });
+
+// ---------------------------------------------------------------------------
+// Worker UDS path — pure helper (SHARED CONTRACT, T7 imports this)
+// ---------------------------------------------------------------------------
+
+/**
+ * The per-tenant worker Unix-domain socket path: `<udsDir>/<tenant>.sock`.
+ *
+ * SHARED CONTRACT (do not change the shape — the T7 supervisor derives the same
+ * path to reverse-proxy inbound HTTP to the worker): `udsDir` defaults to
+ * `WORKER_UDS_DIR` (`/run/fugue`). The socket is bound by the worker and
+ * chmod'd 0600 so only the supervisor + worker (same uid) can reach it — that
+ * 0600 socket isolation is the primary per-tenant boundary (FR-007); the
+ * `X-Fugue-Tenant` HMAC header is a defensive secondary check.
+ *
+ * Pure: no I/O, deterministic — trivially testable. `tenant` is a branded
+ * `TenantId`, so it is already known to be `:`/glob-free (`TENANT_ID_REGEX`),
+ * meaning the interpolation can never escape `udsDir`.
+ */
+export const workerSocketPath = (udsDir: string, tenant: string): string =>
+  `${udsDir.replace(/\/+$/, "")}/${tenant}.sock`;
 
 export type HostConfig = z.infer<typeof HostConfigSchema>;
 

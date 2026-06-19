@@ -16,6 +16,17 @@ import { handleBotActivity } from "../messages-handler.js";
 import { isTrustedBotServiceUrl } from "../trusted-host.js";
 import type { RedisPort } from "../../../../ports.js";
 import type { HostError } from "../../../../domain/host-error.js";
+import { tenantId } from "../../../../domain/tenant.js";
+import type { TenantId } from "../../../../domain/tenant.js";
+
+/** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
+const mkTenant = (s: string): TenantId => {
+  const r = tenantId(s);
+  if (!r.ok) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
+  return r.value;
+};
+const TENANT = mkTenant("tenant-a");
+const OTHER_TENANT = mkTenant("tenant-b");
 
 /** A trusted Teams channel serviceUrl (matches the Bot Framework allowlist). */
 const TRUSTED_SERVICE_URL = "https://smba.trafficmanager.net/amer/";
@@ -488,24 +499,36 @@ const fakeRedis = (): RedisPort & { _set: (k: string, v: string) => void } => {
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async sAdd() { return ok(1); },
+    async sRem() { return ok(1); },
+    async sMembers() { return ok([]); },
   } as RedisPort & { _set: (k: string, v: string) => void };
 };
 
 describe("createRedisConversationStore", () => {
-  const REF_KEY = "fugue:hitl:bot:convref:default";
+  // Tenant-prefixed key (AD-4 / FR-013 / SC-001).
+  const REF_KEY = "fugue:tenant-a:hitl:bot:convref:default";
 
   it("round-trips the default reference and returns null when unset", async () => {
-    const store = createRedisConversationStore(fakeRedis());
+    const store = createRedisConversationStore(fakeRedis(), TENANT);
     expect((await store.getDefaultReference())).toEqual(ok(null));
     await store.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:abc" });
     const got = await store.getDefaultReference();
     expect(got.ok && got.value?.conversationId).toBe("19:abc");
   });
 
+  it("writes the default reference under the bound tenant's prefix", async () => {
+    const redis = fakeRedis();
+    const store = createRedisConversationStore(redis, TENANT);
+    await store.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:abc" });
+    const keys = (await redis.scan("", "0"));
+    expect(keys.ok && keys.value.keys).toEqual([REF_KEY]);
+  });
+
   it("errs internal-invariant-violated on a corrupt (non-JSON) stored reference", async () => {
     const redis = fakeRedis();
     redis._set(REF_KEY, "{not json");
-    const store = createRedisConversationStore(redis);
+    const store = createRedisConversationStore(redis, TENANT);
     const got = await store.getDefaultReference();
     expect(got.ok).toBe(false);
     if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
@@ -513,7 +536,7 @@ describe("createRedisConversationStore", () => {
 
   it("propagates a Redis get failure", async () => {
     const broken: RedisPort = { ...fakeRedis(), async get(): Promise<Result<string | null, HostError>> { return err({ kind: "redis-unavailable", operation: "GET" }); } };
-    const store = createRedisConversationStore(broken);
+    const store = createRedisConversationStore(broken, TENANT);
     const got = await store.getDefaultReference();
     expect(got.ok).toBe(false);
     if (!got.ok) expect(got.error.kind).toBe("redis-unavailable");
@@ -521,7 +544,7 @@ describe("createRedisConversationStore", () => {
 
   // ── Per-team conversation routing (FR-041) ──────────────────────────────────
   it("round-trips PER-TEAM references under distinct keys; one team's ref does not leak to another", async () => {
-    const store = createRedisConversationStore(fakeRedis());
+    const store = createRedisConversationStore(fakeRedis(), TENANT);
     // A team with no reference returns null (caller falls back to default).
     expect(await store.getTeamReference("sales")).toEqual(ok(null));
 
@@ -544,5 +567,42 @@ describe("createRedisConversationStore", () => {
     expect(got.ok && got.value?.conversationId).toBe("19:sales");
     // A different team still has no reference — no cross-team leakage.
     expect(await store.getTeamReference("marketing")).toEqual(ok(null));
+  });
+
+  // ── Cross-tenant isolation (SECURITY: AD-4 / FR-013 / SC-001) ───────────────
+  it("two conversation stores over one Redis never collide on default OR per-team refs (SAME team name)", async () => {
+    const redis = fakeRedis();
+    const a = createRedisConversationStore(redis, TENANT);
+    const b = createRedisConversationStore(redis, OTHER_TENANT);
+
+    await a.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:a-default" });
+    await b.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:b-default" });
+    // SAME team name "sales" in both tenants — only the tenant prefix separates them.
+    await a.saveTeamReference("sales", { serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:a-sales" });
+    await b.saveTeamReference("sales", { serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:b-sales" });
+
+    // Each store reads back ONLY its own tenant's references — never the other's.
+    const aDef = await a.getDefaultReference();
+    const bDef = await b.getDefaultReference();
+    const aSales = await a.getTeamReference("sales");
+    const bSales = await b.getTeamReference("sales");
+    expect(aDef.ok && aDef.value?.conversationId).toBe("19:a-default");
+    expect(bDef.ok && bDef.value?.conversationId).toBe("19:b-default");
+    expect(aSales.ok && aSales.value?.conversationId).toBe("19:a-sales");
+    expect(bSales.ok && bSales.value?.conversationId).toBe("19:b-sales");
+
+    // Every persisted key is under its OWN tenant prefix; the two sets are disjoint.
+    const scan = await redis.scan("", "0");
+    if (!scan.ok) throw new Error("scan failed");
+    const keys = scan.value.keys;
+    expect(keys.every((k) => k.startsWith("fugue:tenant-a:hitl:bot:") || k.startsWith("fugue:tenant-b:hitl:bot:"))).toBe(true);
+    expect(keys.filter((k) => k.startsWith("fugue:tenant-a:hitl:bot:")).length).toBe(2);
+    expect(keys.filter((k) => k.startsWith("fugue:tenant-b:hitl:bot:")).length).toBe(2);
+    // Pin the EXACT per-team key builder output (teamRefKey, conversation-store.ts:54):
+    // tenant prefix + namespace + team discriminator, fully literal. A regression
+    // that dropped the tenant segment or changed the namespace would slip past the
+    // prefix/disjointness checks above but not this exact-literal assertion.
+    expect(keys).toContain("fugue:tenant-a:hitl:bot:convref:team:sales");
+    expect(keys).toContain("fugue:tenant-b:hitl:bot:convref:team:sales");
   });
 });

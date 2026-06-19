@@ -1,0 +1,383 @@
+/**
+ * Pure-core tests for the tenant registry ADT (FR-022, FR-024, FR-027, SC-009).
+ *
+ * These exercise the functional core only — no Redis, no clock. Idempotency is
+ * pinned both with hand-written cases AND with fast-check property tests over
+ * arbitrary action sequences (SC-009 requires identical end state in 100% of
+ * repeated register/deregister).
+ */
+
+import { describe, it, expect } from "bun:test";
+import * as fc from "fast-check";
+import { isOk, isErr } from "@fuguejs/framework";
+import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
+import type { TenantId } from "../../../domain/tenant.js";
+import {
+  emptyRegistry,
+  registryOf,
+  tenantConfig,
+  register,
+  deregister,
+  reconfigure,
+  lookup,
+  retainedEntry,
+  activeTenants,
+  isActive,
+} from "../../../supervisor/registry/tenant-registry.js";
+import type {
+  ActiveTenantConfig,
+  TenantConfigBase,
+  TenantRegistry,
+} from "../../../supervisor/registry/tenant-registry.js";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const tid = (s: string): TenantId => {
+  const r = tenantId(s);
+  if (!r.ok) throw new Error(`bad test tenant id ${s}`);
+  return r.value;
+};
+
+const makeConfig = (id: string, overrides: Partial<TenantConfigBase> = {}): ActiveTenantConfig => {
+  const r = tenantConfig({
+    id: tid(id),
+    team: `${id}-team`,
+    keycloakClientMapping: {
+      realm: "fugue",
+      clientId: `${id}-client`,
+      agentClientIdsByDag: { "lead-desk": `${id}-agent` },
+    },
+    fsRoot: `/srv/${id}`,
+    secretsRef: markSecretsRef(`vault://${id}`),
+    admission: { maxConcurrentRuns: 4, maxQueuedRuns: 8 },
+    eagerPin: false,
+    ...overrides,
+  });
+  if (!r.ok) throw new Error(`bad test config: ${JSON.stringify(r.error)}`);
+  return r.value;
+};
+
+// ── Smart constructor (parse-don't-validate) ─────────────────────────────────
+
+describe("tenantConfig parse boundary", () => {
+  it("rejects empty team", () => {
+    const r = tenantConfig({ ...makeConfig("a"), team: "" });
+    expect(isErr(r)).toBe(true);
+  });
+
+  it("rejects empty fsRoot", () => {
+    const r = tenantConfig({ ...makeConfig("a"), fsRoot: "" });
+    expect(isErr(r)).toBe(true);
+  });
+
+  it("rejects negative or non-integer admission limits", () => {
+    expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: -1, maxQueuedRuns: 0 } }))).toBe(true);
+    expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: 1.5, maxQueuedRuns: 0 } }))).toBe(true);
+  });
+
+  it("produces an ACTIVE config — status:active, and the active variant carries no tombstone", () => {
+    const r = tenantConfig({
+      id: tid("a"),
+      team: "a-team",
+      keycloakClientMapping: { realm: "fugue", clientId: "a-client", agentClientIdsByDag: {} },
+      fsRoot: "/srv/a",
+      secretsRef: markSecretsRef("vault://a"),
+      admission: { maxConcurrentRuns: 1, maxQueuedRuns: 1 },
+      eagerPin: false,
+    });
+    expect(isOk(r)).toBe(true);
+    if (r.ok) {
+      expect(r.value.status).toBe("active");
+      // The active variant has no deregisteredAt field at all (illegal-state-free).
+      expect("deregisteredAt" in r.value).toBe(false);
+    }
+  });
+});
+
+// ── register ─────────────────────────────────────────────────────────────────
+
+describe("register", () => {
+  it("adds a new tenant", () => {
+    const cfg = makeConfig("a");
+    const r = register(emptyRegistry, cfg, 1000);
+    expect(isOk(r)).toBe(true);
+    if (r.ok) {
+      const look = lookup(r.value, cfg.id);
+      expect(isOk(look)).toBe(true);
+    }
+  });
+
+  it("is idempotent — re-registering an identical config returns the SAME registry reference (SC-009)", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = register(r1.value, cfg, 2000);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    // Same reference — identical end state, no churn.
+    expect(r2.value).toBe(r1.value);
+  });
+
+  it("replaces when the config differs", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const changed = makeConfig("a", { fsRoot: "/srv/a-new" });
+    const r2 = register(r1.value, changed, 2000);
+    if (!r2.ok) throw new Error("register");
+    const look = lookup(r2.value, cfg.id);
+    expect(look.ok && look.value.fsRoot).toBe("/srv/a-new");
+  });
+
+  it("revives a deregistered tenant (back to status:active, no tombstone)", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const d = deregister(r1.value, cfg.id, 1500);
+    if (!d.ok) throw new Error("deregister");
+    const tomb = retainedEntry(d.value, cfg.id);
+    expect(tomb?.status).toBe("deregistered");
+    if (tomb?.status === "deregistered") expect(tomb.deregisteredAt).toBe(1500);
+    const r2 = register(d.value, cfg, 2000);
+    if (!r2.ok) throw new Error("revive");
+    const revived = retainedEntry(r2.value, cfg.id);
+    expect(revived?.status).toBe("active");
+    expect(lookup(r2.value, cfg.id).ok).toBe(true);
+  });
+});
+
+// ── deregister ───────────────────────────────────────────────────────────────
+
+describe("deregister", () => {
+  it("marks deregisteredAt and RETAINS the entry (deregistered-then-retained)", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const d = deregister(r1.value, cfg.id, 1500);
+    if (!d.ok) throw new Error("deregister");
+    // lookup hides it (fail-closed)…
+    expect(isErr(lookup(d.value, cfg.id))).toBe(true);
+    // …but the retained entry is still there as the deregistered variant.
+    const tomb = retainedEntry(d.value, cfg.id);
+    expect(tomb?.status).toBe("deregistered");
+    if (tomb?.status === "deregistered") expect(tomb.deregisteredAt).toBe(1500);
+  });
+
+  it("deregistering an ABSENT tenant is a no-op success (not an error), same reference", () => {
+    const d = deregister(emptyRegistry, tid("ghost"), 1500);
+    expect(d.ok).toBe(true);
+    if (d.ok) expect(d.value).toBe(emptyRegistry);
+  });
+
+  it("is idempotent — repeating deregister preserves the ORIGINAL deregisteredAt (SC-009)", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const d1 = deregister(r1.value, cfg.id, 1500);
+    if (!d1.ok) throw new Error("d1");
+    const d2 = deregister(d1.value, cfg.id, 9999);
+    if (!d2.ok) throw new Error("d2");
+    // Same reference, and the clock was NOT bumped to 9999.
+    expect(d2.value).toBe(d1.value);
+    const tomb = retainedEntry(d2.value, cfg.id);
+    expect(tomb?.status === "deregistered" && tomb.deregisteredAt).toBe(1500);
+  });
+});
+
+// ── reconfigure (takes effect on next spawn — registry state only) ───────────
+
+describe("reconfigure", () => {
+  it("updates an active tenant's config (effective next spawn)", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const changed = makeConfig("a", { admission: { maxConcurrentRuns: 16, maxQueuedRuns: 32 } });
+    const r2 = reconfigure(r1.value, changed, 2000);
+    if (!r2.ok) throw new Error("reconfigure");
+    const look = lookup(r2.value, cfg.id);
+    expect(look.ok && look.value.admission.maxConcurrentRuns).toBe(16);
+  });
+
+  it("reconfiguring an UNKNOWN tenant fails closed (tenant-unknown)", () => {
+    const r = reconfigure(emptyRegistry, makeConfig("ghost"), 2000);
+    expect(isErr(r)).toBe(true);
+    if (!r.ok) expect(r.error.kind).toBe("tenant-unknown");
+  });
+
+  it("reconfiguring a DEREGISTERED tenant fails closed (never resurrects via reconfigure)", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const d = deregister(r1.value, cfg.id, 1500);
+    if (!d.ok) throw new Error("deregister");
+    const r = reconfigure(d.value, makeConfig("a", { fsRoot: "/srv/new" }), 2000);
+    expect(isErr(r)).toBe(true);
+    if (!r.ok) expect(r.error.kind).toBe("tenant-unknown");
+  });
+
+  it("is idempotent — reconfigure with identical config returns the same reference", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const r2 = reconfigure(r1.value, cfg, 2000);
+    if (!r2.ok) throw new Error("reconfigure");
+    expect(r2.value).toBe(r1.value);
+  });
+});
+
+// ── lookup fail-closed ───────────────────────────────────────────────────────
+
+describe("lookup (fail-closed)", () => {
+  it("unknown tenant → tenant-unknown, never a guess", () => {
+    const r = lookup(emptyRegistry, tid("nope"));
+    expect(isErr(r)).toBe(true);
+    if (!r.ok) expect(r.error.kind).toBe("tenant-unknown");
+  });
+
+  it("deregistered tenant resolves as unknown", () => {
+    const cfg = makeConfig("a");
+    const r1 = register(emptyRegistry, cfg, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const d = deregister(r1.value, cfg.id, 1500);
+    if (!d.ok) throw new Error("deregister");
+    expect(isErr(lookup(d.value, cfg.id))).toBe(true);
+  });
+
+  it("activeTenants / isActive exclude deregistered entries", () => {
+    let reg = registryOf([makeConfig("a"), makeConfig("b")]);
+    expect(activeTenants(reg).length).toBe(2);
+    const d = deregister(reg, tid("a"), 1500);
+    if (!d.ok) throw new Error("deregister");
+    reg = d.value;
+    expect(activeTenants(reg).length).toBe(1);
+    expect(isActive(reg, tid("a"))).toBe(false);
+    expect(isActive(reg, tid("b"))).toBe(true);
+  });
+});
+
+// ── PROPERTY TESTS — idempotency invariants (SC-009) ─────────────────────────
+
+type Action =
+  | { kind: "register"; id: string; fsRoot: string }
+  | { kind: "deregister"; id: string; now: number }
+  | { kind: "reconfigure"; id: string; fsRoot: string };
+
+const idArb = fc.constantFrom("a", "b", "c");
+
+const actionArb: fc.Arbitrary<Action> = fc.oneof(
+  fc.record({ kind: fc.constant("register" as const), id: idArb, fsRoot: fc.constantFrom("/r1", "/r2", "/r3") }),
+  fc.record({ kind: fc.constant("deregister" as const), id: idArb, now: fc.integer({ min: 1, max: 10_000 }) }),
+  fc.record({ kind: fc.constant("reconfigure" as const), id: idArb, fsRoot: fc.constantFrom("/r1", "/r2", "/r3") }),
+);
+
+const apply = (reg: TenantRegistry, a: Action, step: number): TenantRegistry => {
+  switch (a.kind) {
+    case "register": {
+      const r = register(reg, makeConfig(a.id, { fsRoot: `/srv/${a.id}${a.fsRoot}` }), step);
+      return r.ok ? r.value : reg;
+    }
+    case "deregister": {
+      const r = deregister(reg, tid(a.id), a.now);
+      return r.ok ? r.value : reg;
+    }
+    case "reconfigure": {
+      const r = reconfigure(reg, makeConfig(a.id, { fsRoot: `/srv/${a.id}${a.fsRoot}` }), step);
+      return r.ok ? r.value : reg;
+    }
+  }
+};
+
+/** Canonical snapshot of registry state for structural-equality comparison. */
+const snapshot = (reg: TenantRegistry): string =>
+  JSON.stringify(
+    Array.from(reg.entries.entries())
+      .sort(([x], [y]) => x.localeCompare(y))
+      .map(([id, c]) => [id, c.fsRoot, c.status, c.status === "deregistered" ? c.deregisteredAt : null]),
+  );
+
+describe("property: idempotency (SC-009)", () => {
+  it("repeating any register is a no-op — identical end state", () => {
+    fc.assert(
+      fc.property(idArb, fc.constantFrom("/x", "/y"), fc.array(actionArb, { maxLength: 20 }), (id, fsRoot, prefix) => {
+        // Build an arbitrary base registry.
+        let base = emptyRegistry;
+        prefix.forEach((a, i) => { base = apply(base, a, i + 1); });
+        const cfg = makeConfig(id, { fsRoot: `/srv/${id}${fsRoot}` });
+        const once = register(base, cfg, 1000);
+        const twice = once.ok ? register(once.value, cfg, 2000) : once;
+        expect(once.ok).toBe(true);
+        expect(twice.ok).toBe(true);
+        if (once.ok && twice.ok) {
+          expect(snapshot(twice.value)).toBe(snapshot(once.value));
+        }
+      }),
+    );
+  });
+
+  it("repeating any deregister is a no-op — identical end state, clock not bumped", () => {
+    fc.assert(
+      fc.property(idArb, fc.array(actionArb, { maxLength: 20 }), (id, prefix) => {
+        let base = emptyRegistry;
+        prefix.forEach((a, i) => { base = apply(base, a, i + 1); });
+        const once = deregister(base, tid(id), 5000);
+        const twice = once.ok ? deregister(once.value, tid(id), 9999) : once;
+        expect(once.ok).toBe(true);
+        expect(twice.ok).toBe(true);
+        if (once.ok && twice.ok) {
+          expect(snapshot(twice.value)).toBe(snapshot(once.value));
+        }
+      }),
+    );
+  });
+
+  it("transformations never mutate their input registry", () => {
+    fc.assert(
+      fc.property(fc.array(actionArb, { maxLength: 30 }), (actions) => {
+        let reg = emptyRegistry;
+        actions.forEach((a, i) => {
+          const before = snapshot(reg);
+          const next = apply(reg, a, i + 1);
+          // input registry is unchanged regardless of what the action returned
+          expect(snapshot(reg)).toBe(before);
+          reg = next;
+        });
+      }),
+    );
+  });
+
+  it("lookup is fail-closed for every deregistered tenant in any reachable state", () => {
+    fc.assert(
+      fc.property(fc.array(actionArb, { maxLength: 30 }), (actions) => {
+        let reg = emptyRegistry;
+        actions.forEach((a, i) => { reg = apply(reg, a, i + 1); });
+        for (const [id, cfg] of reg.entries.entries()) {
+          const look = lookup(reg, id);
+          if (cfg.status === "deregistered") {
+            expect(isErr(look)).toBe(true);
+          } else {
+            expect(isOk(look)).toBe(true);
+          }
+        }
+      }),
+    );
+  });
+
+  it("the active variant NEVER carries a deregisteredAt in any reachable state (illegal-state-free)", () => {
+    fc.assert(
+      fc.property(fc.array(actionArb, { maxLength: 30 }), (actions) => {
+        let reg = emptyRegistry;
+        actions.forEach((a, i) => { reg = apply(reg, a, i + 1); });
+        for (const [, cfg] of reg.entries.entries()) {
+          if (cfg.status === "active") {
+            // No deregisteredAt key exists on an active entry at all.
+            expect("deregisteredAt" in cfg).toBe(false);
+          } else {
+            // The deregistered variant always carries its instant.
+            expect(typeof cfg.deregisteredAt).toBe("number");
+          }
+        }
+      }),
+    );
+  });
+});

@@ -43,6 +43,8 @@
 
 import { match, P } from "ts-pattern";
 import type { FrameworkError, FrameworkErrorKind } from "@fuguejs/framework";
+import type { HostError } from "./host-error.js";
+import { httpStatusFor, retryAfterSecondsFor } from "./host-error.js";
 
 export interface FrameworkErrorHttp {
   /** HTTP status to return to the client. */
@@ -105,6 +107,81 @@ const classifyRootKind = (
     .with("llm-budget-exceeded", () => BUDGET_LIMIT)
     .with("infra-unreachable", () => INFRA_OUTAGE)
     .with(P.union(...EXECUTION_FAILURE_KINDS), () => EXECUTION_FAILURE)
+    .exhaustive();
+
+/**
+ * The set of supervisor-boundary `HostError` kinds whose classification this
+ * module owns (AD-10). These are the multi-tenant errors the supervisor raises
+ * BEFORE/around dispatching to a worker — they are NOT execution outcomes, so
+ * the same 403-vs-500 + breaker-trip reasoning that governs `FrameworkError`
+ * applies: a tenant-quota refusal or an unknown-tenant rejection is the host
+ * doing its job correctly, so it must NEVER count toward a circuit breaker, and
+ * a transient worker outage is an infra-flavoured 503.
+ */
+export type SupervisorHostErrorKind =
+  | "tenant-unknown"
+  | "tenant-over-quota"
+  | "worker-unavailable";
+
+/** Narrow a `HostError` to the supervisor-boundary kinds this module classifies. */
+export const isSupervisorHostError = (
+  error: HostError,
+): error is HostError & { readonly kind: SupervisorHostErrorKind } =>
+  error.kind === "tenant-unknown" ||
+  error.kind === "tenant-over-quota" ||
+  error.kind === "worker-unavailable";
+
+/**
+ * Classify a supervisor-boundary tenant `HostError` for HTTP + circuit-breaker
+ * purposes — the `HostError` analogue of `classifyFrameworkError` (AD-10).
+ *
+ * The status is sourced from the SINGLE authoritative `httpStatusFor` mapping
+ * (404 / 429 / 503 respectively) so it can never drift from the rest of the
+ * host's status taxonomy. The breaker decision is the load-bearing part:
+ *
+ *   - `tenant-unknown` (404) and `tenant-over-quota` (429) are SETTLED, correct
+ *     host behaviour — a rejection at admission/resolution, not a malfunction —
+ *     so `countsAsCircuitFailure: false`. A burst of unknown-tenant probes or
+ *     one tenant hammering its own quota must NOT open a breaker (and certainly
+ *     must not affect any OTHER tenant — FR-041, the I4 regression class).
+ *   - `worker-unavailable` (503) is a TRANSIENT outage of THIS tenant's worker
+ *     — retriable and a real infra signal — so it DOES count, mirroring
+ *     `infra-unreachable`. The breaker it would feed is per-tenant/per-DAG, so
+ *     this never bleeds into another tenant's path (FR-041, SC-012).
+ *
+ * Retry-After is read from the error's own declared backoff
+ * (`retryAfterSecondsFor`) so it stays in lockstep with the HTTP layer.
+ *
+ * `.exhaustive()` over the supervisor kinds: adding a future supervisor error
+ * kind without classifying it here is a compile error — the same drift guard
+ * `classifyFrameworkError` enforces.
+ */
+export const classifyHostError = (
+  error: HostError & { readonly kind: SupervisorHostErrorKind },
+): FrameworkErrorHttp =>
+  match(error)
+    .with({ kind: "tenant-unknown" }, (e) => ({
+      status: httpStatusFor(e),
+      countsAsCircuitFailure: false,
+    }))
+    .with({ kind: "tenant-over-quota" }, (e) => {
+      const ra = retryAfterSecondsFor(e);
+      return {
+        status: httpStatusFor(e),
+        countsAsCircuitFailure: false,
+        ...(ra !== undefined ? { retryAfterSeconds: ra } : {}),
+      };
+    })
+    .with({ kind: "worker-unavailable" }, (e) => {
+      // Single-sourced from the authoritative backoff (host-error.ts) so the
+      // classifier and the live error-handler middleware can never diverge.
+      const ra = retryAfterSecondsFor(e);
+      return {
+        status: httpStatusFor(e),
+        countsAsCircuitFailure: true,
+        ...(ra !== undefined ? { retryAfterSeconds: ra } : {}),
+      };
+    })
     .exhaustive();
 
 export const classifyFrameworkError = (error: FrameworkError): FrameworkErrorHttp =>
