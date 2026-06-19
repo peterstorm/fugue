@@ -371,8 +371,19 @@ const main = async () => {
   // SC-006 / FR-020: re-adopt still-live workers BEFORE serving.
   const readopt = await lifecycle.reconcileReadopt();
   if (!readopt.ok) {
-    logger.warn(`[supervisor] worker re-adoption failed (continuing — workers lazy-spawn): ${formatHostError(readopt.error)}`);
-  } else if (readopt.value.adopted.length > 0 || readopt.value.pruned.length > 0) {
+    // FAIL-CLOSED (consistent with the `registry.hydrate()` guard above, which
+    // exits on Redis-down). A failed re-adoption means we do NOT know which
+    // workers survived the restart. Serving with an empty in-memory map would let
+    // the first per-tenant request lazy-spawn a NEW worker that binds the SAME
+    // 0600 UDS a still-live re-parented worker already holds — split-brain that
+    // abandons in-flight runs (violating SC-006's survival intent). Exit instead:
+    // thin-init restarts the supervisor and retries the readopt once Redis is
+    // healthy again, bounded by the supervisor restart budget.
+    logger.error(`[supervisor] worker re-adoption failed — exiting fail-closed (thin-init will restart and retry): ${formatHostError(readopt.error)}`);
+    await disconnect();
+    process.exit(1);
+  }
+  if (readopt.value.adopted.length > 0 || readopt.value.pruned.length > 0) {
     logger.info("[supervisor] worker re-adoption complete", {
       adopted: readopt.value.adopted.length,
       pruned: readopt.value.pruned.length,

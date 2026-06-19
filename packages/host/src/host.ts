@@ -572,6 +572,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       },
       broker,
       agentClientMap: config.AGENT_CLIENT_MAP,
+      tenant: routedTenant,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -667,7 +668,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       // factory reads it off the identity via the pure seam and stores it under
       // `rid` so the broker can resolve it for the RFC 8693 exchange. Non-user
       // runs bind nothing. `executeDag` releases it on completion (below).
-      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, broker !== undefined, subjectTokens.bind);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, broker !== undefined, subjectTokens.bind, routedTenant);
     },
     executeDag: async <I, O>(
       dag: DagDef,

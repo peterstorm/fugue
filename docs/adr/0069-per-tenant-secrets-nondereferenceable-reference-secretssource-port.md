@@ -167,6 +167,11 @@ Key invariants:
   scoped to *tenant env-file secrets resolved through this port*; the same
   isolation test asserts the minted password materializes only as a transient
   `>password` SETUSER token and is retained on no long-lived supervisor handle.
+  (Status, 2026-06-19: this handoff describes the TARGET design — see ADR-0067's
+  Implementation-status note. `apply` is not yet invoked in the runtime, so the
+  ACL credential is not currently minted or handed off; the `SecretsSource` port
+  and its non-dereferenceability guarantee, however, ARE the live design for
+  tenant env-file secrets.)
 
 ## Consequences
 

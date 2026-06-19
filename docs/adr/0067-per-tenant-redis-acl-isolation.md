@@ -6,7 +6,11 @@
 
 ## Status
 
-Accepted
+Accepted — mechanism designed, specced, and adversarially tested. **The ACL
+data-plane wiring is NOT yet active in the runtime** (see "Implementation status"
+under Decision): the active per-tenant isolation today is the type-enforced
+application-layer key prefixing; the Redis-ACL credential mint + handoff lands in
+a later wave.
 
 ## Date
 
@@ -96,6 +100,20 @@ ENUMERATION denied outright. Every host-produced key is prefixed
 `fugue:<tenant>:`, so the ACL pattern contains the worker completely. A
 compromised worker's cross-tenant read is refused by Redis with `NOPERM`, not by
 application code.**
+
+> **Implementation status (2026-06-19).** The above describes the TARGET design.
+> The pure ACL spec (`redis-acl.ts`), the provisioner (`apply`/`revoke`), and the
+> adversarial cross-tenant-read tests all exist and pass — but `apply` is **not yet
+> invoked in the runtime**: tenant registration does not provision an ACL user, and
+> a worker today connects to Redis with the inherited shared `REDIS_URL`, not a
+> per-tenant ACL credential. Only `revoke` is wired (grace-window purge). Until the
+> credential mint + handoff is wired (a later wave; tracked in
+> [`docs/migrations/tenant-key-namespacing.md`](../migrations/tenant-key-namespacing.md)),
+> the LIVE per-tenant isolation is the **application-layer key prefixing** below —
+> which IS load-bearing and type-enforced (`TenantId` is a required hard-branded
+> argument on every key builder). The ACL is defense-in-depth that hardens, but does
+> not currently provide, the cross-tenant boundary. Present-tense phrasing in the
+> rest of this section is the intended end state.
 
 The mechanism is split into a pure spec and an imperative provisioner:
 
@@ -226,7 +244,9 @@ harness is enforcing the real spec, not its own logic.
 - Re-provisioning rewrites the user from a clean `reset` baseline each time; the
   password is rotated on every `apply`, so any cached connection holding an old
   credential is invalidated — correct for security, but worker reconfiguration
-  must re-pull the credential rather than reuse a stale one.
+  must re-pull the credential rather than reuse a stale one. (Forward-looking: per
+  the Implementation-status note above, `apply` is not yet invoked in the runtime,
+  so this rotation behaviour is the intended characteristic, not a current one.)
 
 ## Related
 

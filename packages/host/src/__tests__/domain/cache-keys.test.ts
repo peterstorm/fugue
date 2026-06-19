@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import * as fc from "fast-check";
 import { dagId, runId as makeRunId, nodeId as makeNodeId, isOk } from "@fuguejs/framework";
 import {
   cacheKeyPrefix,
@@ -103,5 +104,60 @@ describe("no cross-tenant collision (the ACL precondition)", () => {
     expect(a).not.toBe(b);
     expect(a).toBe("fugue:tenant-a:dag-alpha:cache:k");
     expect(b).toBe("fugue:tenant-a:dag-beta:cache:k");
+  });
+});
+
+// ── Property: the load-bearing invariant over ARBITRARY tenants ─────────────
+//
+// The hardcoded cases above spot-check two literal tenants. The isolation model
+// rests on the prefix-containment + cross-tenant-disjointness holding for EVERY
+// valid `TenantId` pair, so prove it over the whole input space.
+
+describe("cache key builders — prefix-containment property (SECURITY: AD-4 / SC-001)", () => {
+  // Any string matching TENANT_ID_REGEX is a valid id — by construction it
+  // contains no `:` (the segment delimiter) or glob metacharacter.
+  const tenantArb = fc.stringMatching(/^[A-Za-z0-9_-]{1,64}$/).map(mkTenant);
+  // DAG / run / node ids are validated by the framework smart constructors,
+  // which throw on a bad shape (and `dagId` additionally forbids `:`). Use the
+  // colon-free intersection that all three accept.
+  const idArb = fc.stringMatching(/^[A-Za-z0-9_-]{1,64}$/);
+  // The cache KEY is the genuinely-untrusted segment — ANY non-empty string,
+  // including one containing `:` (e.g. "customer:123"). It must NOT be able to
+  // break out of the tenant prefix.
+  const keyArb = fc.string({ minLength: 1 });
+
+  it("EVERY builder output is prefixed `fugue:<tenant>:` for any tenant + inputs", () => {
+    fc.assert(
+      fc.property(tenantArb, idArb, idArb, idArb, keyArb, (t, d, r, n, k) => {
+        const prefix = `fugue:${t}:`;
+        const keys = [
+          cacheKeyPrefix(t, dagId(d)),
+          buildCacheKey(t, dagId(d), k),
+          checkpointKeyPrefix(t, dagId(d), makeRunId(r)),
+          buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n)),
+        ];
+        return keys.every((key) => key.startsWith(prefix));
+      }),
+    );
+  });
+
+  it("two DISTINCT tenants have prefix-disjoint, non-colliding namespaces for identical inputs", () => {
+    fc.assert(
+      fc.property(tenantArb, tenantArb, idArb, idArb, idArb, keyArb, (tA, tB, d, r, n, k) => {
+        fc.pre(tA !== tB);
+        const prefixA = `fugue:${tA}:`;
+        const prefixB = `fugue:${tB}:`;
+        // The trailing `:` delimiter (impossible inside a TenantId) makes the two
+        // prefixes mutually non-prefixed, so a SCAN ~fugue:<tA>:* can never surface
+        // a <tB> key — the precondition for per-tenant Redis ACL scoping.
+        const disjoint = !prefixA.startsWith(prefixB) && !prefixB.startsWith(prefixA);
+        const cacheDiffers =
+          buildCacheKey(tA, dagId(d), k) !== buildCacheKey(tB, dagId(d), k);
+        const ckptDiffers =
+          buildCheckpointKey(tA, dagId(d), makeRunId(r), makeNodeId(n)) !==
+          buildCheckpointKey(tB, dagId(d), makeRunId(r), makeNodeId(n));
+        return disjoint && cacheDiffers && ckptDiffers;
+      }),
+    );
   });
 });

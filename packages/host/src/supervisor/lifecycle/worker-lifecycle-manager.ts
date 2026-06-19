@@ -129,6 +129,15 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   // immutable pure `WorkerState`; we replace (never mutate) entries.
   const workers = new Map<TenantId, WorkerState>();
 
+  // In-flight cold-spawn coalescing (single-flight per tenant). `lazySpawn` sets
+  // the `spawning` entry synchronously but then `await`s the spawn; two concurrent
+  // first-requests for the same cold tenant would BOTH pass the no-live-worker
+  // check and BOTH spawn a process onto the same `workerSocketPath` (UDS bind
+  // contention, double-charged slot, an orphaned process). `ensureWorker` dedupes
+  // concurrent callers onto ONE shared promise keyed by `TenantId`, cleared on
+  // settle, so a cold tenant is spawned exactly once even under a request burst.
+  const inFlightSpawns = new Map<TenantId, Promise<Result<EnsuredWorker, HostError>>>();
+
   /** Count of workers occupying a slot (spawning/live/draining) — T9 reads this. */
   const liveWorkerCount = (): number => {
     let n = 0;
@@ -322,8 +331,18 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok({ udsPath: existing.udsPath });
     }
     // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
-    // not routable; lazySpawn re-enters spawning for it).
-    return lazySpawn(tenant);
+    // not routable; lazySpawn re-enters spawning for it). SINGLE-FLIGHT: coalesce
+    // concurrent callers for the same cold tenant onto one in-flight spawn so the
+    // worker is started exactly once (no double-spawn on the shared UDS). The
+    // synchronous read-then-set below has no `await` between the lookup and the
+    // `inFlightSpawns.set`, so on Bun's single thread it is atomic per tenant.
+    const pending = inFlightSpawns.get(tenant);
+    if (pending !== undefined) return pending;
+    const spawnPromise = lazySpawn(tenant).finally(() => {
+      inFlightSpawns.delete(tenant);
+    });
+    inFlightSpawns.set(tenant, spawnPromise);
+    return spawnPromise;
   };
 
   const onCrash = async (tenant: TenantId, exitCode: number | null): Promise<Result<void, HostError>> => {

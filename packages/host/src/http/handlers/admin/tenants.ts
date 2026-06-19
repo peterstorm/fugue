@@ -38,7 +38,7 @@
  */
 
 import { match } from "ts-pattern";
-import { err } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { authenticateIdentity } from "../../../supervisor/supervisor.js";
 import type { AuthDeps } from "../../../supervisor/supervisor.js";
@@ -86,6 +86,33 @@ export interface AdminTenantsDeps {
  * `ActiveTenantConfig` via the registry's smart constructor — illegal configs are
  * rejected at the boundary, so downstream code only ever sees valid configs.
  */
+/**
+ * Parse the optional `agentClientIdsByDag` map from an untrusted request body.
+ * Fail-closed: a non-object resolves to an empty map (the registry's smart
+ * constructor is the authority on whether an empty map is acceptable for the
+ * tenant's realm), but a present map with ANY non-string value is REJECTED — a
+ * malformed value must never be cast through as a client id. Iterates OWN
+ * enumerable properties only, so a prototype key cannot smuggle a value in.
+ */
+const parseAgentClientIdsByDag = (
+  id: TenantId,
+  raw: unknown,
+): Result<Record<string, string>, HostError> => {
+  if (typeof raw !== "object" || raw === null) return ok({});
+  const out: Record<string, string> = {};
+  for (const [dag, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== "string") {
+      return err(
+        tenantConfigInvalid(
+          `tenant '${id}': keycloakClientMapping.agentClientIdsByDag['${dag}'] must be a string client id`,
+        ),
+      );
+    }
+    out[dag] = value;
+  }
+  return ok(out);
+};
+
 const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenantConfig, HostError> => {
   if (typeof body !== "object" || body === null) {
     return err(tenantConfigInvalid(`tenant '${id}': request body must be a JSON object`));
@@ -93,16 +120,19 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
   const o = body as Record<string, unknown>;
   const km = (o.keycloakClientMapping ?? {}) as Record<string, unknown>;
   const adm = (o.admission ?? {}) as Record<string, unknown>;
+  // Parse-don't-validate the DAG→client map at this trust boundary: every value
+  // MUST be a string (a real agent client id). A non-string value is rejected
+  // (400) rather than cast through into the registry as a malformed map. Own
+  // enumerable properties only (no prototype keys).
+  const agentMapResult = parseAgentClientIdsByDag(id, km.agentClientIdsByDag);
+  if (!agentMapResult.ok) return agentMapResult;
   const base: TenantConfigBase = {
     id,
     team: typeof o.team === "string" ? o.team : "",
     keycloakClientMapping: {
       realm: typeof km.realm === "string" ? km.realm : "",
       clientId: typeof km.clientId === "string" ? km.clientId : "",
-      agentClientIdsByDag:
-        typeof km.agentClientIdsByDag === "object" && km.agentClientIdsByDag !== null
-          ? (km.agentClientIdsByDag as Record<string, string>)
-          : {},
+      agentClientIdsByDag: agentMapResult.value,
     },
     fsRoot: typeof o.fsRoot === "string" ? o.fsRoot : "",
     secretsRef: markSecretsRef(typeof o.secretsRef === "string" ? o.secretsRef : ""),

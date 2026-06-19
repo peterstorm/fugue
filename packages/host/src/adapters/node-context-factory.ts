@@ -305,33 +305,51 @@ export const createNodeContextForDag = async (
    * the no-broker / non-user paths pass nothing and behave byte-identically.
    */
   bindSubjectToken?: (runId: RunId, token: SubjectToken) => void,
+  /**
+   * The worker's resolved routed `Tenant.id` (FR-013 / SC-001 / ADR-0067). When
+   * provided it is the AUTHORITATIVE tenant axis for EVERY Redis key this context
+   * produces — the SAME `routedTenant` the token / HITL / run-lock stores key on
+   * (`host.ts`), so all of a tenant's keys share ONE `fugue:<tenant>:` namespace.
+   * Already a branded `TenantId` (shape-validated at the supervisor boundary), so
+   * no re-derivation/parse is needed. When OMITTED (the single-tenant `main.ts`
+   * path and unit tests that exercise the derivation directly) the tenant falls
+   * back to the `dag.team` derivation below — byte-identical to the prior
+   * behaviour for those callers.
+   */
+  routedTenant?: TenantId,
 ): Promise<NodeContextForDag> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
-  // SECURITY (FR-013 / US2 / SC-001): derive the tenant for EVERY Redis key this
-  // context produces. Until the supervisor's resolved `Tenant` principal (T1/T6)
-  // is threaded down to this seam, the tenant is derived from the DAG's owning
-  // `team` — every RegisteredDag already carries one — and parsed through the
-  // canonical `tenantId` smart constructor (`domain/tenant.ts`): the SINGLE
-  // source of the `fugue:<tenant>:*` key-namespace invariant (`:` and glob
-  // metacharacters rejected, so no key/ACL-namespace escape). This is the one
-  // point where the tenant axis enters the key builders; T6 replaces this
-  // derivation with the routed `Tenant.id` without changing the builders.
+  // SECURITY (FR-013 / US2 / SC-001 / ADR-0067): the tenant axis for EVERY Redis
+  // key this context produces. The supervisor resolves the routed `Tenant`
+  // principal at the request boundary and threads its already-branded `id` here
+  // as `routedTenant` (the SAME value the token / HITL / run-lock stores key on
+  // in `host.ts`), so every host-produced key shares ONE `fugue:<tenant>:`
+  // namespace. A branded `TenantId` is shape-validated by construction, so no
+  // re-parse is needed.
   //
-  // FAIL-CLOSED: `dag.team` is path-/config-derived data, not a known-good
-  // literal, so a `Left` is possible (e.g. a team segment with a `:` or over 64
-  // chars). We REFUSE rather than emit an unscoped key — same fail-closed throw
-  // discipline as the unmapped-agent-client check below; a malformed team is a
-  // registration defect, never a value that should silently widen a namespace.
-  const tenantResult = tenantId(dag.team);
-  if (isErr(tenantResult)) {
-    throw new Error(
-      `createNodeContextForDag: DAG "${dagId}" has an invalid owning team ` +
-        `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(tenantResult.error)}`,
-    );
+  // FALLBACK (no `routedTenant`): the single-tenant `main.ts` entrypoint and the
+  // derivation unit tests omit it; the tenant is then derived from the DAG's
+  // owning `team` and parsed through the canonical `tenantId` smart constructor —
+  // the SINGLE source of the namespace invariant (`:` and glob metacharacters
+  // rejected, so no key/ACL-namespace escape). FAIL-CLOSED: `dag.team` is
+  // path-/config-derived data, not a known-good literal, so a `Left` is possible
+  // (a team segment with a `:` or over 64 chars); we REFUSE rather than emit an
+  // unscoped key — same discipline as the unmapped-agent-client check below.
+  let tenant: TenantId;
+  if (routedTenant !== undefined) {
+    tenant = routedTenant;
+  } else {
+    const tenantResult = tenantId(dag.team);
+    if (isErr(tenantResult)) {
+      throw new Error(
+        `createNodeContextForDag: DAG "${dagId}" has an invalid owning team ` +
+          `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(tenantResult.error)}`,
+      );
+    }
+    tenant = tenantResult.value;
   }
-  const tenant: TenantId = tenantResult.value;
 
   // Wrap the shared LLM client in a per-run metered decorator: every call is
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process

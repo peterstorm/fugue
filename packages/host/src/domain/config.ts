@@ -22,6 +22,7 @@ import { z } from "zod";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
+import type { TenantId } from "./tenant.js";
 import { parseScope } from "./capability-scope.js";
 
 // ---------------------------------------------------------------------------
@@ -594,7 +595,7 @@ export const HostConfigSchema = z.object({
  * `TenantId`, so it is already known to be `:`/glob-free (`TENANT_ID_REGEX`),
  * meaning the interpolation can never escape `udsDir`.
  */
-export const workerSocketPath = (udsDir: string, tenant: string): string =>
+export const workerSocketPath = (udsDir: string, tenant: TenantId): string =>
   `${udsDir.replace(/\/+$/, "")}/${tenant}.sock`;
 
 export type HostConfig = z.infer<typeof HostConfigSchema>;

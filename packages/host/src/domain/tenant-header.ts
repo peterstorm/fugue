@@ -32,6 +32,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { TenantId } from "./tenant.js";
 
 /** The canonical header NAME. Both signer and verifier use this exact string. */
 export const TENANT_HEADER_NAME = "X-Fugue-Tenant" as const;
@@ -40,14 +41,20 @@ export const TENANT_HEADER_NAME = "X-Fugue-Tenant" as const;
  * Compute the hex HMAC-SHA256 of a tenant id under the internal supervisor key.
  * Pure given its inputs. The SOLE place the algorithm is defined.
  */
-const tenantHmacHex = (hmacKey: string, tenantId: string): string =>
+const tenantHmacHex = (hmacKey: string, tenantId: TenantId): string =>
   createHmac("sha256", hmacKey).update(tenantId, "utf8").digest("hex");
 
 /**
  * SUPERVISOR side (T7): build the `X-Fugue-Tenant` header value for a routed
  * tenant. `<tenantId>.<hmacHex>`.
+ *
+ * `tenantId` is a branded `TenantId` (the type, not just the name): the
+ * `<tenantId>.<hmacHex>` wire format is parsed by the FIRST `.` on the verify
+ * side, which is unambiguous ONLY because `TENANT_ID_REGEX` forbids `.`. Taking
+ * the brand makes that parse-safety invariant a requirement of the type rather
+ * than a convention a caller could violate with a raw string.
  */
-export const signTenantHeader = (hmacKey: string, tenantId: string): string =>
+export const signTenantHeader = (hmacKey: string, tenantId: TenantId): string =>
   `${tenantId}.${tenantHmacHex(hmacKey, tenantId)}`;
 
 /**
@@ -83,7 +90,7 @@ export type TenantHeaderVerification =
  */
 export const verifyTenantHeader = (
   hmacKey: string,
-  boundTenantId: string,
+  boundTenantId: TenantId,
   headerValue: string | undefined,
 ): TenantHeaderVerification => {
   if (headerValue === undefined) return { kind: "absent" };

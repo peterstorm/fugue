@@ -409,6 +409,70 @@ describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 
   });
 });
 
+// ── Routed-tenant key namespacing (ADR-0067 / SC-001) ───────────────────────
+//
+// When the supervisor threads the resolved `Tenant.id` as `routedTenant`, it —
+// NOT the DAG's owning `team` — is the authoritative tenant axis for EVERY Redis
+// key the context produces, so cache/checkpoint keys share the SAME
+// `fugue:<tenant>:` namespace as the token / HITL / run-lock stores (`host.ts`).
+// A tenant whose `id` differs from a DAG's `team` must NOT split its keys across
+// two namespaces. The `dag.team` derivation remains as a fallback for the
+// single-tenant entrypoint that omits `routedTenant`.
+
+describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / SC-001)", () => {
+  const sharedWithStore = (store: Map<string, string>): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis(store).redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  it("namespaces cache keys under `routedTenant` — never the DAG's owning team (id != team)", async () => {
+    // DAG owned by team "eng"; worker routed for tenant "acme-prod" (id != team).
+    const store = new Map<string, string>();
+    const routed = mkTenant("acme-prod");
+    const dag = makeDag(); // team: "eng"
+    const { ctx } = await createNodeContextForDag(
+      sharedWithStore(store),
+      dag,
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+      false,
+      undefined,
+      routed,
+    );
+
+    const writeResult = await ctx.cache.set("k", { v: 1 });
+    expect(writeResult.ok).toBe(true);
+
+    // The exact key is under the routed tenant; nothing leaks under the team.
+    expect(store.has(buildCacheKey(routed, dag.id, "k"))).toBe(true);
+    expect([...store.keys()].every((key) => key.startsWith(`fugue:${routed}:`))).toBe(true);
+    expect([...store.keys()].some((key) => key.startsWith("fugue:eng:"))).toBe(false);
+  });
+
+  it("falls back to the `dag.team` derivation when `routedTenant` is omitted (single-tenant path)", async () => {
+    const store = new Map<string, string>();
+    const dag = makeDag(); // team: "eng"
+    const { ctx } = await createNodeContextForDag(
+      sharedWithStore(store),
+      dag,
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+
+    await ctx.cache.set("k", { v: 1 });
+    expect([...store.keys()].some((key) => key.startsWith("fugue:eng:"))).toBe(true);
+  });
+});
+
 // ── Static client wiring (SC-005 zero-regression) ───────────────────────────
 
 describe("createNodeContextForDag — static client wiring (SC-005)", () => {
