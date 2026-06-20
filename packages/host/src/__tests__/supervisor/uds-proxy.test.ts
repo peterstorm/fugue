@@ -16,6 +16,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   buildForwardRequest,
+  buildProbeRequest,
   proxyToWorker,
   TENANT_HEADER,
 } from "../../supervisor/uds-proxy.js";
@@ -38,6 +39,33 @@ const makeTenant = (id: string, team = `${id}-team`): Tenant => {
 describe("TENANT_HEADER re-export", () => {
   it("is the canonical header name (no second definition)", () => {
     expect(TENANT_HEADER).toBe(TENANT_HEADER_NAME);
+  });
+});
+
+describe("buildProbeRequest — UDS liveness probe (path + signed header)", () => {
+  const tid = (id: string) => {
+    const r = tenantId(id);
+    if (!r.ok) throw new Error(`bad id ${id}`);
+    return r.value;
+  };
+
+  it("GETs the worker's /health route (NOT /healthz — a wrong path 404s every live worker)", () => {
+    const req = buildProbeRequest(KEY, tid("acme"));
+    expect(req.method).toBe("GET");
+    expect(new URL(req.url).pathname).toBe("/health");
+  });
+
+  it("signs X-Fugue-Tenant so the worker's fail-closed verification passes (else 401 → worker reads as dead)", () => {
+    const t = tid("acme");
+    const req = buildProbeRequest(KEY, t);
+    const header = req.headers.get(TENANT_HEADER_NAME) ?? undefined;
+    // The SAME canonical verifier the worker runs in its Bun.serve wrapper.
+    expect(verifyTenantHeader(KEY, t, header)).toEqual({ kind: "ok" });
+  });
+
+  it("omits the header when no HMAC key is configured (worker then skips verification)", () => {
+    const req = buildProbeRequest(undefined, tid("acme"));
+    expect(req.headers.get(TENANT_HEADER_NAME)).toBeNull();
   });
 });
 

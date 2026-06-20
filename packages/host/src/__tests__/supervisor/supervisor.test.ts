@@ -277,6 +277,46 @@ describe("authenticateIdentity — JWT user path (FR-W3-006) + auth-infra failur
 
 // ── End-to-end pipeline via createSupervisor().handle ──────────────────────────
 
+describe("createSupervisor — unauthenticated health probes (Docker HEALTHCHECK / k8s)", () => {
+  it("GET /health returns 200 with NO Authorization header (handled before auth)", async () => {
+    const sup = await createSupervisor(buildDeps({}));
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    try {
+      const res = await sup.value.handle(new Request("http://host/health", { method: "GET" }));
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { status: string }).toEqual({ status: "ok" });
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+
+  it("GET /readiness returns 200 when the supervisor can serve", async () => {
+    const sup = await createSupervisor(buildDeps({}));
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    try {
+      const res = await sup.value.handle(new Request("http://host/readiness", { method: "GET" }));
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { ready: boolean }).ready).toBe(true);
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+
+  it("a non-GET /health is NOT short-circuited (falls through to auth → 401)", async () => {
+    const sup = await createSupervisor(buildDeps({}));
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    try {
+      const res = await sup.value.handle(new Request("http://host/health", { method: "POST", body: "{}" }));
+      expect(res.status).toBe(401);
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+});
+
 describe("createSupervisor — routing + proxy with fakes", () => {
   it("authenticated KNOWN tenant routes + proxies, attaching a verifiable signed header", async () => {
     // team token 'fug_acme' → team 'acme-team' → tenant 'acme'

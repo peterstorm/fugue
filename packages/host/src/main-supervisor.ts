@@ -48,7 +48,7 @@ import { createBunSpawnAdapter } from "./supervisor/lifecycle/bun-spawn-adapter.
 import { createWorkerRegistry } from "./supervisor/lifecycle/worker-registry-redis.js";
 import type { UdsLivenessProbe } from "./supervisor/lifecycle/worker-registry-redis.js";
 import { purgeTenantKeyspace } from "./supervisor/lifecycle/purge-keyspace.js";
-import { bunUdsTransport } from "./supervisor/uds-proxy.js";
+import { bunUdsTransport, buildProbeRequest } from "./supervisor/uds-proxy.js";
 import type { AdminTenantsDeps } from "./http/handlers/admin/tenants.js";
 import {
   runGracePurgeSweep,
@@ -324,10 +324,14 @@ const main = async () => {
   };
 
   // ── Worker lifecycle (T8): compose the real createWorkerLifecycle ──────────
-  // The UDS liveness probe: an HTTP GET to the worker's /healthz over its socket.
-  // Any non-2xx / transport failure → not live (fail-closed).
+  // The UDS liveness probe: an HTTP GET to the worker's `/health` route over its
+  // socket, carrying the SIGNED tenant header (when an HMAC key is set) — the path
+  // and the signature are BOTH load-bearing (see buildProbeRequest): a wrong path
+  // 404s and an unsigned probe is rejected 401, either of which would make every
+  // live worker read as dead → SIGKILL → 503. Any non-2xx / transport failure →
+  // not live (fail-closed).
   const udsProbe: UdsLivenessProbe = async (record) => {
-    const req = new Request("http://uds.fugue.internal/healthz", { method: "GET" });
+    const req = buildProbeRequest(config.FUGUE_SUPERVISOR_HMAC_KEY, record.tenant);
     const r = await bunUdsTransport(record.udsPath, req);
     return r.ok && r.value.status >= 200 && r.value.status < 300;
   };

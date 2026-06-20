@@ -260,6 +260,32 @@ export const createSupervisor = async (
 
   // ── Request handler ────────────────────────────────────────────────────────
   const handle = async (request: Request): Promise<Response> => {
+    // 0a. LIVENESS / READINESS (unauthenticated — k8s probes + Docker HEALTHCHECK).
+    //     The supervisor owns the single inbound listener (FR-001) and there is no
+    //     Hono router in this path, so these MUST be served HERE, and BEFORE admin
+    //     dispatch / auth / tenant-resolution — otherwise an unauthenticated GET
+    //     /health is rejected 401 and the container is reported permanently
+    //     unhealthy. Mirrors the worker's /health + /readiness (router.ts): /health
+    //     is liveness (always 200 while the listener is up; "degraded" still 200 so
+    //     a Redis outage alerts WITHOUT a restart), /readiness gates on canServeRequests.
+    if (request.method === "GET") {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/health") {
+        const health = state.phase === "degraded" ? "degraded" : "ok";
+        return new Response(JSON.stringify({ status: health }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (pathname === "/readiness") {
+        const ready = canServeRequests(state);
+        return new Response(JSON.stringify({ ready, phase: state.phase }), {
+          status: ready ? 200 : 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
     // 0. ADMIN TENANT LIFECYCLE API (FR-025). Dispatch `/admin/tenants(/:id)` to
     //    the admin handler BEFORE any tenant-resolution/proxy logic, so an admin
     //    request is NEVER resolved as a tenant or reverse-proxied. The handler

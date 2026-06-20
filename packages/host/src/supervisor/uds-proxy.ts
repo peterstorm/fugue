@@ -35,7 +35,7 @@
 
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
-import type { Tenant } from "../domain/tenant.js";
+import type { Tenant, TenantId } from "../domain/tenant.js";
 import type { HostError } from "../domain/host-error.js";
 import { workerUnavailable } from "../domain/host-error.js";
 // CANONICAL contract — the SINGLE source of truth for how the tenant principal
@@ -90,6 +90,32 @@ export const bunUdsTransport: UdsTransport = async (socketPath, request) => {
   } catch (e) {
     return err({ reason: e instanceof Error ? e.message : String(e) });
   }
+};
+
+/**
+ * Build the supervisor→worker UDS LIVENESS probe request: a GET to the worker's
+ * unauthenticated `/health` route, carrying the SIGNED `X-Fugue-Tenant` header for
+ * `tenant` when an HMAC key is configured.
+ *
+ * Two invariants this encodes (both are fail-closed traps the worker enforces):
+ *   1. PATH — the worker serves `/health` (http/router.ts), NOT `/healthz`; a wrong
+ *      path 404s and the probe reads every LIVE worker as dead → SIGKILL → 503.
+ *   2. SIGNED HEADER — when `FUGUE_SUPERVISOR_HMAC_KEY` is set (the production
+ *      multi-tenant config), the worker's Bun.serve fetch wrapper verifies the
+ *      tenant header on EVERY request including `/health` (host.ts) and rejects an
+ *      unsigned probe 401. So the probe MUST sign, exactly as `buildForwardRequest`
+ *      does for the data path. When the key is unset, no header is sent (the worker
+ *      skips verification on the UDS hop).
+ *
+ * Exported so the path + signed-header contract is unit-testable without a transport
+ * (the data-plane outage these two bugs caused was masked by fake probes in tests).
+ */
+export const buildProbeRequest = (hmacKey: string | undefined, tenant: TenantId): Request => {
+  const headers = new Headers();
+  if (hmacKey !== undefined) {
+    headers.set(TENANT_HEADER, signTenantHeader(hmacKey, tenant));
+  }
+  return new Request("http://uds.fugue.internal/health", { method: "GET", headers });
 };
 
 // ── Proxy ────────────────────────────────────────────────────────────────────
