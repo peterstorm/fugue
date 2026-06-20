@@ -43,6 +43,7 @@ import {
   idleEvict,
   isIdleEvictable,
   beginDrain,
+  drainComplete,
   crash,
   occupiesSlot,
 } from "./worker-lifecycle.js";
@@ -308,12 +309,23 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // FR-004: the socket is a PURE function of the TenantId, derived here.
     const udsPath = workerSocketPath(config.udsDir, tenant);
 
+    // CLAIM THE `spawning` SLOT NOW (FR-033) — synchronously, AFTER the admission
+    // check above and BEFORE any `await`. `requestWorker` yields a `spawning` state
+    // that `occupiesSlot` counts, so the check-then-reserve pair is atomic on Bun's
+    // single thread. The single-flight only dedupes the SAME tenant; concurrent
+    // FIRST requests for DISTINCT cold tenants each run their own `lazySpawn`, so if
+    // the slot were claimed only AFTER the awaited ACL provisioning below, all of
+    // them would read the same pre-commit `liveWorkerCount()`, all pass the cap and
+    // all overshoot it (`liveWorkerCount()` is the SOLE FR-033 enforcer). Reserving
+    // here closes that TOCTOU; every failure path below unwinds this entry
+    // (`workers.delete`) so the slot is released fail-closed.
+    workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
+
     // Per-tenant Redis ACL (ADR-0067): when provisioning is wired, mint a FRESH
     // scoped credential and inject it into the worker env so the worker connects
-    // to Redis as its own `~fugue:<tenant>:*` user. Minted BEFORE claiming the
-    // `spawning` slot so a provisioning failure fails closed with no state to
-    // unwind. The password is local to this call (and the spawn env) — never
-    // retained or logged here.
+    // to Redis as its own `~fugue:<tenant>:*` user. The password is local to this
+    // call (and the spawn env) — never retained or logged here. On a provisioning
+    // failure we RELEASE the reserved slot and fail closed (no worker spawned).
     let extraEnv = spawnCfg.extraEnv;
     if (provisionRedisAcl !== undefined) {
       const cred = await provisionRedisAcl(tenant);
@@ -322,6 +334,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
           tenant,
           error: formatHostError(cred.error),
         });
+        workers.delete(tenant);
         return err(workerUnavailable(tenant));
       }
       extraEnv = {
@@ -338,9 +351,6 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     if (spawnCfg.maxQueuedRuns !== undefined) {
       extraEnv = { ...(extraEnv ?? {}), FUGUE_MAX_QUEUED_RUNS: String(spawnCfg.maxQueuedRuns) };
     }
-
-    // Enter the pure `spawning` state.
-    workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
 
     const spawnResult = await spawn.spawn({
       tenant,
@@ -401,16 +411,35 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     workers.set(tenant, liveResult.value);
     await persistRecord(liveResult.value);
 
-    // CRASH-EXIT WATCHER (FR-014/FR-015/AD-8): `handle.exited` is the ONLY crash
-    // signal. When it resolves, drive `onCrash` — but ONLY if the current map
-    // entry is still THIS incarnation (same pid, still live/draining). The
-    // pid+phase guard is REQUIRED so a deliberate evict/drain SIGKILL (which
-    // removes/changes the entry BEFORE signalling) is not misread as a crash and
-    // does not trigger a spurious restart.
+    // EXIT WATCHER (FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
+    // signal for a worker THIS process spawned. When it resolves, react ONLY if the
+    // map entry is still THIS incarnation (same pid), then branch on phase:
+    //   - `live`     → an UNEXPECTED exit is a crash; drive `onCrash` (respawn, AD-8).
+    //   - `draining` → the worker was SIGTERM'd by `drain` and has now stopped; that
+    //     is the EXPECTED end of a graceful drain (FR-017), NOT a crash — drive the
+    //     pure `drainComplete` transition (→ terminal `evicted`), free the slot and
+    //     remove the record. It must NOT be misread as a crash and respawned.
+    // The pid+phase guard is REQUIRED so a deliberate evict/idle-evict (which DELETES
+    // the entry BEFORE its SIGKILL) is seen here as `undefined`/non-matching and so
+    // triggers NEITHER path (no spurious restart). NOTE: `drain` (unlike evict) keeps
+    // the entry as `draining` so the slot stays counted until the worker truly exits;
+    // the drainComplete branch here is what frees it.
     watchedTenants.add(tenant); // this incarnation is watcher-covered (see set docs).
     void handle.exited.then((code) => {
       const cur = workers.get(tenant);
-      if (cur !== undefined && (cur.phase === "live" || cur.phase === "draining") && cur.pid === handle.pid) {
+      if (cur === undefined) return;
+      if (cur.phase === "draining" && cur.pid === handle.pid) {
+        // Graceful drain completed (FR-017): land the pure draining → evicted
+        // transition, then drop the entry + record to release the slot. No respawn.
+        const done = drainComplete(cur, clock());
+        if (!done.ok) {
+          logger.error("[worker-lifecycle] drainComplete rejected on draining exit (invariant)", { tenant });
+        }
+        workers.delete(tenant);
+        void removeRecord(tenant);
+        return;
+      }
+      if (cur.phase === "live" && cur.pid === handle.pid) {
         void onCrash(tenant, code).catch((e) =>
           logger.error("[worker-lifecycle] onCrash threw", { tenant, error: e instanceof Error ? e.message : String(e) }),
         );

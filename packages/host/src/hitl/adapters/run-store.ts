@@ -80,6 +80,24 @@ const RunMetaSchema = z.object({
 const isTerminalStatus = (status: RunStatus): boolean =>
   status.kind === "completed" || status.kind === "failed";
 
+/**
+ * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive and
+ * TOTAL: returns false on any parse/shape failure, so a corrupt member is never
+ * pruned (it stays counted, exactly as before) — fixing the terminal-index leak must
+ * NOT introduce a new "one corrupt record blocks the whole gate" failure mode. Used
+ * only by the active-index self-heal to spot a terminal run whose settle-time `sRem`
+ * never landed.
+ */
+const persistedStatusIsTerminal = (raw: string): boolean => {
+  try {
+    const obj = JSON.parse(raw) as { status?: { kind?: unknown } };
+    const kind = obj?.status?.kind;
+    return kind === "completed" || kind === "failed";
+  } catch {
+    return false;
+  }
+};
+
 // ── In-Memory Adapter (tests/dev) ───────────────────────────────────────────
 
 /**
@@ -257,14 +275,23 @@ export const createRedisRunStore = (
       if (!members.ok) return err(members.error);
       let live = 0;
       for (const id of members.value) {
-        // SELF-HEAL: a member whose run record no longer exists (TTL-expired /
-        // hard-deleted) is a leaked index entry — prune it and exclude it, so the
-        // count never inflates beyond the runs that actually exist. A prune failure
-        // is non-fatal (we simply don't count the stale id); a read failure IS
-        // surfaced (fail-closed) so the gate never admits on a bad count.
-        const exists = await redis.get(runKey(tenant, id as RunId));
-        if (!exists.ok) return err(exists.error);
-        if (exists.value === null) {
+        // SELF-HEAL of leaked index entries so the count never inflates beyond the
+        // runs that ACTUALLY occupy a slot. A read failure IS surfaced (fail-closed)
+        // so the gate never admits on a bad count; a prune failure is non-fatal.
+        const raw = await redis.get(runKey(tenant, id as RunId));
+        if (!raw.ok) return err(raw.error);
+        if (raw.value === null) {
+          // Meta absent (TTL-expired / hard-deleted) → leaked index entry; prune it.
+          await redis.sRem(activeKey(tenant), id);
+          continue;
+        }
+        if (persistedStatusIsTerminal(raw.value)) {
+          // TERMINAL but still indexed: the settle-time `sRem` did not land (a
+          // transient Redis blip AFTER the terminal meta write). The meta key still
+          // EXISTS, so the missing-meta prune above cannot catch it — `processRun`'s
+          // terminal guard never re-issues the `sRem` either, so without pruning here
+          // the run would leak a `maxQueuedRuns` slot for up to the run TTL (days).
+          // Prune authoritatively on the persisted status. Idempotent.
           await redis.sRem(activeKey(tenant), id);
           continue;
         }

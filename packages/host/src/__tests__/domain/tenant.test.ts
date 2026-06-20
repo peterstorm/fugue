@@ -252,6 +252,23 @@ describe("markSecretsRef", () => {
     const ref = markSecretsRef("vault://acme/secrets");
     expect(ref).toBe("vault://acme/secrets" as ReturnType<typeof markSecretsRef>);
   });
+
+  it("THROWS on a blank/whitespace-only reference — closes the fail-open gate at the registration/worker boundary", () => {
+    // A blank ref means a producer bypassed the non-empty parse at its trust
+    // boundary; markSecretsRef must refuse to brand it (mirroring markTenant).
+    expect(() => markSecretsRef("")).toThrow();
+    expect(() => markSecretsRef("   ")).toThrow();
+    // The thrown value is the internal-invariant HostError (greppable kind),
+    // for both the empty and the whitespace-only case.
+    for (const blank of ["", "   "]) {
+      try {
+        markSecretsRef(blank);
+        throw new Error("expected markSecretsRef to throw");
+      } catch (e) {
+        expect((e as { kind?: string }).kind).toBe("internal-invariant-violated");
+      }
+    }
+  });
 });
 
 // ── canAccessDagForTenant (tenant-aware authz extension, US3) ─────────────────

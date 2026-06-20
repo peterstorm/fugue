@@ -10,8 +10,9 @@
  *      NOPERM, and it cannot enumerate the keyspace to discover other tenants).
  *   2. Provisioner (`redis-acl-provisioner.ts`): apply issues the correct
  *      `ACL SETUSER`, revoke issues `ACL DELUSER`, both fail closed on a `!ok`
- *      admin response, and the minted credential is RETURNED (for SecretsSource
- *      handoff) but never retained/logged by the provisioner.
+ *      admin response, and the minted credential is RETURNED (for spawn-env handoff
+ *      to the owning worker — a channel SEPARATE from the SecretsSource port) but
+ *      never retained/logged by the provisioner.
  *
  * @satisfies FR-009 — a worker MUST NOT read another tenant's secrets/data/state.
  * @satisfies FR-010 — a worker compromise MUST NOT yield another tenant's material.
@@ -346,7 +347,7 @@ describe("apply — provisions the scoped ACL user over the admin connection", (
     expect(pwTokens).toHaveLength(1);
   });
 
-  it("RETURNS the credential (username + password + tenant) for SecretsSource handoff", async () => {
+  it("RETURNS the credential (username + password + tenant) for spawn-env handoff to the owning worker", async () => {
     const admin = createFakeAclAdmin();
     const result = await apply(admin, mkTenant("acme"), fixedRandomBytes());
 

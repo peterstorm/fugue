@@ -297,28 +297,40 @@ export const createSupervisor = async (
     //    nothing freed — so we can call `release` unconditionally in the finally.
     const admission: AdmissionOutcome = deps.admission.admit(tenant);
 
-    // 4. Ensure the owning worker is live (T8 seam) and derive its presence.
-    //    The socket on a live presence is ALWAYS the resolved tenant's own
-    //    socket (FR-004) — re-derived here defensively so a lifecycle that
-    //    returned a mismatched socket cannot cause cross-tenant routing.
+    // 4. Ensure the owning worker is live (T8 seam) and derive its presence — but
+    //    ONLY when admission ADMITTED the request. The socket on a live presence is
+    //    ALWAYS the resolved tenant's own socket (FR-004) — re-derived defensively so
+    //    a lifecycle that returned a mismatched socket cannot cause cross-tenant routing.
     let presence: WorkerPresence;
-    try {
-      presence = presenceFromEnsure(await deps.lifecycle.ensureWorker(tenant.id));
-    } catch (e) {
-      logger.warn("[supervisor] ensureWorker threw — worker unavailable", {
-        tenant: tenant.id,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    if (admission.decision.kind !== "admitted") {
+      // Admission already refused this request (unknown / over-quota / unavailable),
+      // and `routeRequest` folds the admission decision FIRST — it refuses regardless
+      // of presence. So DO NOT ensure (cold-spawn) a worker here: it is wasted work
+      // for a request that will be refused anyway, and during a Redis outage — where
+      // `resolveForNewRun` fails closed to `unknown` for every active tenant — it
+      // would cold-spawn a worker PER request that then cannot reach Redis at boot and
+      // is SIGKILLed (fault amplification under the exact condition the box is already
+      // stressed). Mark unavailable; the pure router produces the correct refusal.
       presence = { kind: "unavailable" };
-    }
-    // Defensive re-pin: a `live` presence MUST point at THIS tenant's own socket.
-    if (presence.kind === "live") {
-      const expected = workerSocketForTenant(config.WORKER_UDS_DIR, tenant);
-      if (presence.socketPath !== expected) {
-        logger.error("[supervisor] lifecycle returned a non-owning socket — refusing (FR-004)", {
+    } else {
+      try {
+        presence = presenceFromEnsure(await deps.lifecycle.ensureWorker(tenant.id));
+      } catch (e) {
+        logger.warn("[supervisor] ensureWorker threw — worker unavailable", {
           tenant: tenant.id,
+          error: e instanceof Error ? e.message : String(e),
         });
         presence = { kind: "unavailable" };
+      }
+      // Defensive re-pin: a `live` presence MUST point at THIS tenant's own socket.
+      if (presence.kind === "live") {
+        const expected = workerSocketForTenant(config.WORKER_UDS_DIR, tenant);
+        if (presence.socketPath !== expected) {
+          logger.error("[supervisor] lifecycle returned a non-owning socket — refusing (FR-004)", {
+            tenant: tenant.id,
+          });
+          presence = { kind: "unavailable" };
+        }
       }
     }
 

@@ -779,7 +779,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         }
       : app.fetch;
 
-  let bunServer: { stop: () => void; port?: number };
+  // `| undefined` is type-honest: `Bun.serve` may throw before assigning (a bind
+  // failure), and the catch below must be able to ask "did we bind?" via `?.`.
+  let bunServer: { stop: () => void; port?: number } | undefined;
   try {
     bunServer =
       unixPath !== undefined
@@ -805,9 +807,27 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       chmodSync(unixPath, 0o600);
     }
   } catch (e) {
-    // Clean up resources acquired during boot before returning error.
-    // Close connected capabilities first (reverse topological order), then
-    // infrastructure — mirrors the happy-path shutdown ordering.
+    // Boot abort. Tear down everything already acquired before returning error,
+    // mirroring the happy-path shutdown ORDER (server → HITL worker → capabilities).
+    // CRITICAL (FR-007): `Bun.serve` binds the socket as soon as it returns, so a
+    // chmod failure AFTER a successful bind reaches here with the server LISTENING at
+    // the default umask. Stop it (and the already-started HITL worker) explicitly —
+    // depending only on the OPTIONAL `onShutdown` would otherwise leave a
+    // mis-permissioned tenant socket listening, worse than a clean boot failure.
+    try {
+      bunServer?.stop();
+    } catch {
+      // never fully bound / already stopped — nothing to reclaim
+    }
+    if (hitlWorker) {
+      await hitlWorker.close().catch((closeErr) => {
+        logger.error("Failed to close HITL worker after server bind failure", {
+          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
+        });
+      });
+      hitlWorker = undefined;
+    }
+    // Close connected capabilities (reverse topological order), then infrastructure.
     if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
     if (deps.onShutdown) {
       await deps.onShutdown().catch((cleanupErr) => {
@@ -822,11 +842,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       context: unixPath !== undefined ? { unix: unixPath } : { port: config.PORT },
     });
   }
+  // The catch above returns on any bind/chmod failure, so reaching here means the
+  // server is bound and `bunServer` is assigned.
+  const listening = bunServer;
   server = {
     // A UDS server has no TCP port; report 0 so the handle stays well-typed
     // without claiming a port the worker is not listening on.
-    port: bunServer.port ?? (unixPath !== undefined ? 0 : config.PORT),
-    stop: () => bunServer.stop(),
+    port: listening?.port ?? (unixPath !== undefined ? 0 : config.PORT),
+    stop: () => listening?.stop(),
   };
   logger.info(`HTTP server listening on ${bindDesc}`);
   // Make the security posture observable at boot: whether the worker-side

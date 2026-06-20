@@ -103,6 +103,27 @@ const lifecycleLive = (udsPath: string): WorkerLifecyclePort => ({
   liveWorkerCount: () => 1,
 });
 
+// Records every tenant id passed to `ensureWorker`, while delegating to a live
+// lifecycle (always-ok spawn) so the admitted path still proxies. Lets a test
+// prove the supervisor does NOT cold-spawn a worker on a refused admission
+// (no spawn storm during a Redis outage where admission fails closed).
+const lifecycleRecording = (
+  udsPath: string,
+): { port: WorkerLifecyclePort; ensureCalls: () => readonly TenantId[] } => {
+  const base = lifecycleLive(udsPath);
+  const calls: TenantId[] = [];
+  return {
+    port: {
+      ...base,
+      ensureWorker: async (t) => {
+        calls.push(t);
+        return base.ensureWorker(t);
+      },
+    },
+    ensureCalls: () => calls,
+  };
+};
+
 const lifecycleDown: WorkerLifecyclePort = {
   ensureWorker: async (t) => err(workerUnavailable(t)),
   drain: async () => ok(undefined),
@@ -505,6 +526,107 @@ describe("createSupervisor — routing + proxy with fakes", () => {
       // The over-quota refusal acquired NO slot, so its release is a genuine
       // no-op; the supervisor calling it on the refuse path frees nothing.
       expect(tracked.releases()).toBe(0);
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+
+  // ── REGRESSION: refused admission MUST NOT cold-spawn a worker ────────────────
+  // A spawn-on-refuse would, during a Redis outage (resolveForNewRun fails closed
+  // to `unknown` for EVERY active tenant), cold-spawn one worker per request — each
+  // unable to reach Redis at boot and SIGKILLed — amplifying the fault under the
+  // exact condition the box is already stressed. The supervisor must call
+  // `ensureWorker` ONLY for an ADMITTED request; a refused admit (unknown /
+  // over-quota / unavailable) sets presence=unavailable and lets the pure router
+  // produce the refusal WITHOUT spawning.
+
+  it("admission unknown (degraded registry) → 404 WITHOUT cold-spawning a worker (no spawn storm)", async () => {
+    const { hashToken } = await import("../../domain/auth.js");
+    const hash = (await hashToken("fug_acme")) as unknown as string;
+    const tenant = makeTenant("acme");
+    const recording = lifecycleRecording("/run/fugue/acme.sock");
+    const deps = buildDeps({
+      auth: { adminToken: "admin-secret", tokenStore: fakeTokenStore({ [hash]: { team: "acme-team", label: "acme" } }), logger: silentLog },
+      registryView: registryViewOf([tenant]),
+      // resolveForNewRun fails closed while degraded → admission 'unknown'
+      admission: admissionAlways({ kind: "unknown" }),
+      lifecycle: recording.port,
+    });
+    const sup = await createSupervisor(deps);
+    if (!sup.ok) throw new Error("supervisor boot failed");
+    try {
+      const res = await sup.value.handle(new Request("http://host/runs/dag1", { method: "POST", headers: { Authorization: "Bearer fug_acme" }, body: "{}" }));
+      expect(res.status).toBe(404); // tenant-unknown, non-leaking
+      // The pivotal assertion: a refused admit NEVER cold-spawns the worker.
+      expect(recording.ensureCalls()).toEqual([]);
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+
+  it("over-quota admission → 429 WITHOUT cold-spawning a worker", async () => {
+    const { hashToken } = await import("../../domain/auth.js");
+    const hash = (await hashToken("fug_acme")) as unknown as string;
+    const tenant = makeTenant("acme");
+    const recording = lifecycleRecording("/run/fugue/acme.sock");
+    const deps = buildDeps({
+      auth: { adminToken: "admin-secret", tokenStore: fakeTokenStore({ [hash]: { team: "acme-team", label: "acme" } }), logger: silentLog },
+      registryView: registryViewOf([tenant]),
+      admission: admissionAlways({ kind: "over-quota", retryAfterSeconds: 12 }),
+      lifecycle: recording.port,
+    });
+    const sup = await createSupervisor(deps);
+    if (!sup.ok) throw new Error("supervisor boot failed");
+    try {
+      const res = await sup.value.handle(new Request("http://host/runs/dag1", { method: "POST", headers: { Authorization: "Bearer fug_acme" }, body: "{}" }));
+      expect(res.status).toBe(429);
+      expect(recording.ensureCalls()).toEqual([]); // refused before any spawn
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+
+  it("admission unavailable → refused WITHOUT cold-spawning a worker", async () => {
+    const { hashToken } = await import("../../domain/auth.js");
+    const hash = (await hashToken("fug_acme")) as unknown as string;
+    const tenant = makeTenant("acme");
+    const recording = lifecycleRecording("/run/fugue/acme.sock");
+    const deps = buildDeps({
+      auth: { adminToken: "admin-secret", tokenStore: fakeTokenStore({ [hash]: { team: "acme-team", label: "acme" } }), logger: silentLog },
+      registryView: registryViewOf([tenant]),
+      admission: admissionAlways({ kind: "unavailable" }),
+      lifecycle: recording.port,
+    });
+    const sup = await createSupervisor(deps);
+    if (!sup.ok) throw new Error("supervisor boot failed");
+    try {
+      const res = await sup.value.handle(new Request("http://host/runs/dag1", { method: "POST", headers: { Authorization: "Bearer fug_acme" }, body: "{}" }));
+      expect(res.status).not.toBe(200); // a refusal, not a proxied success
+      expect(recording.ensureCalls()).toEqual([]); // never spawned on refuse
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+
+  it("ADMITTED request DOES cold-spawn the worker exactly once and routes (sanity for the refuse-path guard)", async () => {
+    const { hashToken } = await import("../../domain/auth.js");
+    const hash = (await hashToken("fug_acme")) as unknown as string;
+    const tenant = makeTenant("acme");
+    const recording = lifecycleRecording("/run/fugue/acme.sock");
+    const deps = buildDeps({
+      auth: { adminToken: "admin-secret", tokenStore: fakeTokenStore({ [hash]: { team: "acme-team", label: "acme" } }), logger: silentLog },
+      registryView: registryViewOf([tenant]),
+      admission: admissionAlways({ kind: "admitted" }),
+      lifecycle: recording.port,
+      transport: async () => ok(new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } })),
+    });
+    const sup = await createSupervisor(deps);
+    if (!sup.ok) throw new Error("supervisor boot failed");
+    try {
+      const res = await sup.value.handle(new Request("http://host/runs/dag1", { method: "POST", headers: { Authorization: "Bearer fug_acme" }, body: "{}" }));
+      expect(res.status).toBe(200);
+      // Admitted → ensureWorker invoked exactly once, for THIS tenant only.
+      expect(recording.ensureCalls()).toEqual([tenant.id]);
     } finally {
       await sup.value.shutdown();
     }

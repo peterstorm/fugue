@@ -487,3 +487,194 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     await expectSkipped("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
   });
 });
+
+describe("redis tenant registry — probe-recovery clears the write-leg latch (FR-022 regression)", () => {
+  it("markRedisDegraded(false) re-opens resolveForNewRun even with NO intervening successful write", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    // Healthy baseline: a NEW run resolves.
+    expect(reg.resolveForNewRun(tid("acme")).ok).toBe(true);
+
+    // Force a WRITE failure → latches `writeDegraded` (the write leg of the gate).
+    fake.setFail(true);
+    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    expect(down.ok).toBe(false);
+    if (!down.ok) expect(down.error.kind).toBe("redis-unavailable");
+    // The write-leg latch now fails NEW-run resolution closed.
+    const stillDown = reg.resolveForNewRun(tid("acme"));
+    expect(stillDown.ok).toBe(false);
+    if (!stillDown.ok) expect(stillDown.error.kind).toBe("redis-unavailable");
+
+    // SIMULATE PROBE RECOVERY with NO successful write in between — the fake is
+    // still failing, so no write can have cleared `writeDegraded`. Against the old
+    // code (where a probe-recovery did NOT touch the write leg) this would STAY err
+    // forever; the fix clears BOTH legs on a probe-confirmed recovery.
+    reg.markRedisDegraded(false);
+    const recovered = reg.resolveForNewRun(tid("acme"));
+    expect(recovered.ok).toBe(true);
+    // It still serves the last-known in-memory config (the write that failed never
+    // advanced memory, so fsRoot is the original).
+    if (recovered.ok) expect(recovered.value.fsRoot).toBe("/srv/acme");
+  });
+
+  it("markRedisDegraded(true) re-closes the new-run gate", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    expect(reg.resolveForNewRun(tid("acme")).ok).toBe(true);
+
+    // A probe-asserted outage closes the gate without any registry write.
+    reg.markRedisDegraded(true);
+    const closed = reg.resolveForNewRun(tid("acme"));
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) expect(closed.error.kind).toBe("redis-unavailable");
+
+    // …and a probe-confirmed recovery re-opens it.
+    reg.markRedisDegraded(false);
+    expect(reg.resolveForNewRun(tid("acme")).ok).toBe(true);
+  });
+});
+
+describe("redis tenant registry — concurrent cross-tenant register both survive (RMW race fix)", () => {
+  it("two concurrent register() for DIFFERENT tenants both land in the snapshot", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+
+    // Fire both registers concurrently. Each register is a read-modify-write of the
+    // shared in-memory `registry`; the `serializeMutation` chain must make the second
+    // commit read the FIRST's committed map so neither tenant is dropped. The fake's
+    // `set`/`publish` are async (microtask boundaries at each `await` in
+    // `persistAndAnnounce`), so without serialization both would snapshot the same
+    // empty base and the second commit would clobber the first.
+    const [a, b] = await Promise.all([
+      reg.register(makeConfig("acme"), 1000),
+      reg.register(makeConfig("globex"), 1000),
+    ]);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+
+    // BOTH tenants survive in the in-memory view and resolve.
+    const snap = reg.snapshot();
+    expect(snap.entries.has(tid("acme"))).toBe(true);
+    expect(snap.entries.has(tid("globex"))).toBe(true);
+    expect(reg.lookup(tid("acme")).ok).toBe(true);
+    expect(reg.lookup(tid("globex")).ok).toBe(true);
+
+    // …and both were persisted + announced.
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(true);
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}globex`)).toBe(true);
+    expect(fake.published.length).toBe(2);
+  });
+});
+
+describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", () => {
+  it("(a) hardDelete on an ABSENT tenant is an idempotent no-op (no del/publish)", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    const res = await reg.hardDelete(tid("ghost"));
+    expect(res.ok).toBe(true);
+    // Nothing written, nothing announced — the early-return short-circuits all I/O.
+    expect(fake.store.size).toBe(0);
+    expect(fake.published.length).toBe(0);
+    expect(reg.snapshot().entries.has(tid("ghost"))).toBe(false);
+  });
+
+  it("(b) hardDelete on a PRESENT tenant removes the key, publishes deregistered, drops it from memory", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(true);
+    fake.published.length = 0;
+
+    const res = await reg.hardDelete(tid("acme"));
+    expect(res.ok).toBe(true);
+    // The fugue:tenants:<id> key is removed from the backing store.
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(false);
+    // A `deregistered` event is announced so subscribers re-read and observe absence.
+    expect(fake.published.length).toBe(1);
+    expect(fake.published[0].channel).toBe(TENANT_EVENTS_CHANNEL);
+    expect(JSON.parse(fake.published[0].message)).toEqual({ kind: "deregistered", tenant: "acme" });
+    // Gone from the in-memory view entirely (NOT a tombstone — hard delete).
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(false);
+    expect(reg.lookup(tid("acme")).ok).toBe(false);
+  });
+
+  it("(c) a del failure fails closed and does NOT advance the in-memory view", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+
+    // Force Redis down AFTER a successful register; the del now fails.
+    fake.setFail(true);
+    const res = await reg.hardDelete(tid("acme"));
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+    // Memory NOT advanced — the tenant is still present (mirrors the register/
+    // deregister "in-memory view NOT advanced on failure" assertions).
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+    expect(reg.lookup(tid("acme")).ok).toBe(true);
+  });
+
+  it("(c') a publish failure (del landed, event did not) also fails closed, memory NOT advanced", async () => {
+    const fake = createInMemoryRedisFake();
+    // Seed a PRESENT tenant through a working registry first (so register's own
+    // publish succeeds), then build the registry-under-test with a pubsub whose
+    // publish ALWAYS fails — and hydrate it from the seeded store so the tenant is
+    // present in memory. This isolates the hardDelete publish-failure leg (del lands
+    // against the shared fake store, the announce does not). Mirrors the register
+    // publish-failure test's flaky-pubsub wrapper.
+    const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await seedReg.register(makeConfig("acme"), 1000);
+
+    const flakyPubsub = {
+      publish: async () => ({ ok: false as const, error: { kind: "redis-unavailable" as const, operation: "publish" } }),
+      subscribe: fake.pubsub.subscribe,
+    };
+    const reg = createRedisTenantRegistry(fake.redis, flakyPubsub);
+    const hydrated = await reg.hydrate();
+    expect(hydrated.ok).toBe(true);
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+
+    const res = await reg.hardDelete(tid("acme"));
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+    // The in-memory view is NOT advanced even though the del landed — fail-closed
+    // keeps memory consistent with a delete that didn't fully announce.
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+    expect(reg.lookup(tid("acme")).ok).toBe(true);
+  });
+
+  it("(d) a Redis client that THROWS on del is caught and converted to fail-closed (never propagates)", async () => {
+    // A backing fake to seed a present tenant, then a throwing del to drive the
+    // catch branch (mirrors the throwing-client pattern used for register).
+    const seedFake = createInMemoryRedisFake();
+    const seedReg = createRedisTenantRegistry(seedFake.redis, seedFake.pubsub);
+    await seedReg.register(makeConfig("acme"), 1000);
+
+    const throwingRedis = {
+      get: seedFake.redis.get,
+      set: seedFake.redis.set,
+      del: async () => { throw new Error("ECONNRESET"); },
+      scan: seedFake.redis.scan,
+      setNx: seedFake.redis.setNx,
+      sAdd: seedFake.redis.sAdd,
+      sRem: seedFake.redis.sRem,
+      sMembers: seedFake.redis.sMembers,
+    };
+    let dead = 0;
+    // Re-hydrate a registry from the seeded store so the tenant is PRESENT in memory,
+    // then point its del at the throwing client.
+    const reg = createRedisTenantRegistry(throwingRedis, seedFake.pubsub, { onRedisDead: () => { dead += 1; } });
+    const hydrated = await reg.hydrate();
+    expect(hydrated.ok).toBe(true);
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+
+    const res = await reg.hardDelete(tid("acme"));
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+    expect(dead).toBe(1);
+    // Memory NOT advanced — the throw is caught, converted, and the tenant remains.
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+  });
+});

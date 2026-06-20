@@ -521,6 +521,32 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect([...(sets.get("fugue:tenant-a:hitl:active") ?? [])]).toEqual(["r2"]);
   });
 
+  it("self-heals a TERMINAL-but-indexed member whose settle-time sRem failed — pruned and excluded", async () => {
+    // CONTRAST with the meta-absent case above: here the run is settled (terminal)
+    // and its run-meta key is still PRESENT (status completed). The settle-time
+    // `sRem` failed (a transient Redis blip after the terminal meta write), so r1
+    // remains in the active SET. The missing-meta prune cannot catch this (the meta
+    // key exists), so without pruning on the persisted terminal status r1 would leak
+    // a `maxQueuedRuns` slot for up to the run TTL.
+    const { redis, sets } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.create(record({ runId: "r2" as RunId }));
+
+    // Settle r1: writes the terminal meta AND issues the `sRem` (which lands here).
+    await store.setStatus("r1" as RunId, { kind: "completed", output: 1 });
+    // Model the leak: the settle-time `sRem` having NO-OPped — re-add r1 to the
+    // active SET while its terminal meta key is still PRESENT in `kv`.
+    await redis.sAdd("fugue:tenant-a:hitl:active", "r1");
+    // Precondition: the leaked terminal member is in the SET.
+    expect([...(sets.get("fugue:tenant-a:hitl:active") ?? [])].sort()).toEqual(["r1", "r2"]);
+
+    const c = await store.countActiveRuns();
+    expect(c.ok && c.value).toBe(1); // r1 is terminal → excluded; only r2 is live
+    // The terminal member was pruned from the SET (not merely skipped).
+    expect([...(sets.get("fugue:tenant-a:hitl:active") ?? [])]).toEqual(["r2"]);
+  });
+
   it("the active index is tenant-scoped — one tenant's count never sees another's runs (SC-001)", async () => {
     const { redis } = setBackedRedis();
     const a = createRedisRunStore(redis, TENANT, cfg);

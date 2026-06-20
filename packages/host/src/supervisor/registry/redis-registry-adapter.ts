@@ -214,6 +214,13 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   if (typeof rawMaxConcurrentRuns !== "number" || typeof rawMaxQueuedRuns !== "number") {
     return undefined;
   }
+  // `eagerPin` MUST round-trip as a boolean. A non-boolean is a corrupt record
+  // (skip), mirroring the string/number guards above — never TRUTHY-coerce
+  // (`Boolean("false")` → true) a malformed value into a valid-looking keep-hot flag
+  // that would silently pin a worker against idle eviction (it is the AUTHORITATIVE
+  // pin source, AD-7). Parse-don't-validate boundary, consistent with the strict
+  // `o.eagerPin === true` read in worker-registry-redis.ts / admin/tenants.ts.
+  if (typeof o.eagerPin !== "boolean") return undefined;
   // Build the validated ACTIVE config through the smart constructor (the parse
   // boundary), then promote to the deregistered variant if the record said so.
   const parsed = tenantConfig({
@@ -230,7 +237,7 @@ const deserialize = (raw: string): TenantConfig | undefined => {
       maxConcurrentRuns: rawMaxConcurrentRuns,
       maxQueuedRuns: rawMaxQueuedRuns,
     },
-    eagerPin: Boolean(o.eagerPin),
+    eagerPin: o.eagerPin,
   });
   if (!parsed.ok) return undefined;
   if (o.status === "active") return parsed.value;
@@ -317,15 +324,20 @@ export const createRedisTenantRegistry = (
 ): RedisTenantRegistry => {
   let registry = seed;
   // The host's degraded edge, mirrored here so `resolveForNewRun` can fail closed
-  // (FR-022) WITHOUT reaching back into host-state.ts. It is split by SIGNAL SOURCE
-  // so the two independent writers never fight:
-  //   - `writeDegraded` is owned by the write/hydrate path (`dead()`/`alive()`),
-  //     kept in lock-step with the onRedisDead/onRedisAlive hooks.
-  //   - `probeDegraded` is owned by the liveness-probe edge (`markRedisDegraded`).
-  // `resolveForNewRun` gates on EITHER. Each source clears only its OWN flag, so a
-  // successful write can no longer clear a probe-asserted outage (nor vice-versa):
-  // the fail-closed state stays monotonic until the responsible signal recovers,
-  // closing the narrow fail-OPEN window a single shared flag left open.
+  // (FR-022) WITHOUT reaching back into host-state.ts. It is split by SIGNAL SOURCE:
+  //   - `writeDegraded` is SET by the write/hydrate path (`dead()`) on a Redis write
+  //     failure and cleared by `alive()` on the next SUCCESSFUL write/hydrate.
+  //   - `probeDegraded` is owned by the liveness-probe edge (`markRedisDegraded`),
+  //     which flips continuously every probe tick.
+  // `resolveForNewRun` gates on EITHER. The clearing rules are ASYMMETRIC ON PURPOSE:
+  //   - A successful WRITE clears only `writeDegraded` — it must NOT clear a
+  //     probe-asserted outage (a write can momentarily succeed mid-outage).
+  //   - A probe-confirmed RECOVERY (`markRedisDegraded(false)`) clears BOTH flags:
+  //     the liveness probe is the authoritative CONTINUOUS Redis-health signal, so a
+  //     confirmed-alive Redis re-opens the new-run gate regardless of which leg
+  //     latched it. Without this, a transient write blip with no subsequent write
+  //     would wedge `writeDegraded` set forever (it has no other continuous clearer),
+  //     refusing every tenant's NEW runs indefinitely while liveness shows green.
   let writeDegraded = false;
   let probeDegraded = false;
 
@@ -380,6 +392,26 @@ export const createRedisTenantRegistry = (
     return ok(undefined);
   };
 
+  // Serialize every in-memory `registry` mutation onto a single promise chain. Each
+  // mutator is a read-modify-write — snapshot `registry`, `await` Redis I/O, then
+  // commit `registry = next` — so two concurrent mutations for DIFFERENT tenants
+  // would otherwise both snapshot the same base map and the second commit would drop
+  // the first's tenant from the in-memory view (the supervisor's new-run admission
+  // source) until the next process restart. Chaining guarantees each mutator reads
+  // `registry` only AFTER the prior one has committed. Admin mutations are infrequent,
+  // so the serialization is effectively free; correctness is the point. A failing op
+  // does not break the chain (its outcome is swallowed for the NEXT link only — the
+  // caller still receives the real Result).
+  let mutationGate: Promise<unknown> = Promise.resolve();
+  const serializeMutation = <T>(op: () => Promise<T>): Promise<T> => {
+    const result = mutationGate.then(op, op);
+    mutationGate = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
   return {
     snapshot: () => registry,
 
@@ -397,96 +429,106 @@ export const createRedisTenantRegistry = (
       // so the supervisor's liveness probe gates NEW-run admission (FR-022) without a
       // registry write. We do NOT fire the onRedisDead/onRedisAlive hooks here:
       // those drive the host-state degraded MACHINE, which the supervisor's probe
-      // already drives directly (avoiding a double-transition). This only flips the
-      // probe leg of the new-run gate; the write path owns its own `writeDegraded`.
+      // already drives directly (avoiding a double-transition).
       probeDegraded = isDead;
+      // A probe-confirmed RECOVERY also clears the write leg: the liveness probe is
+      // the authoritative CONTINUOUS Redis-health signal, whereas `writeDegraded` is
+      // otherwise cleared ONLY by a successful write/hydrate (event-driven). A
+      // transient write blip followed by no further writes would otherwise wedge the
+      // new-run gate fail-closed for ALL tenants indefinitely even after Redis heals.
+      // If writes are in fact still failing, the next write re-latches `writeDegraded`.
+      if (!isDead) writeDegraded = false;
     },
 
-    register: async (cfg, now) => {
-      // Pure core: validate + idempotent transition.
-      const next = coreRegister(registry, cfg, now);
-      if (!next.ok) return err(next.error);
-      // Idempotent no-op: the core returned the SAME registry reference (identical
-      // end state), so there is nothing new to persist. Suppress the redundant
-      // re-persist + duplicate `registered` event — mirrors how the absent-tenant
-      // deregister suppresses its no-op event. State stays idempotent.
-      if (next.value === registry) return ok(undefined);
-      // Persist the entry the core actually COMMITTED (always the active variant),
-      // never the raw caller input — so what lands in Redis is exactly the
-      // core-normalized record.
-      const committed = next.value.entries.get(cfg.id)!;
-      const persisted = await persistAndAnnounce(committed, { kind: "registered", tenant: cfg.id }, "tenant-register");
-      if (!persisted.ok) return persisted; // fail closed — memory NOT advanced
-      registry = next.value;
-      return ok(undefined);
-    },
+    register: (cfg, now) =>
+      serializeMutation(async () => {
+        // Pure core: validate + idempotent transition.
+        const next = coreRegister(registry, cfg, now);
+        if (!next.ok) return err(next.error);
+        // Idempotent no-op: the core returned the SAME registry reference (identical
+        // end state), so there is nothing new to persist. Suppress the redundant
+        // re-persist + duplicate `registered` event — mirrors how the absent-tenant
+        // deregister suppresses its no-op event. State stays idempotent.
+        if (next.value === registry) return ok(undefined);
+        // Persist the entry the core actually COMMITTED (always the active variant),
+        // never the raw caller input — so what lands in Redis is exactly the
+        // core-normalized record.
+        const committed = next.value.entries.get(cfg.id)!;
+        const persisted = await persistAndAnnounce(committed, { kind: "registered", tenant: cfg.id }, "tenant-register");
+        if (!persisted.ok) return persisted; // fail closed — memory NOT advanced
+        registry = next.value;
+        return ok(undefined);
+      }),
 
-    deregister: async (id, now) => {
-      const next = coreDeregister(registry, id, now);
-      if (!next.ok) return err(next.error);
-      // Same-reference return covers BOTH no-op cases (absent tenant, and
-      // already-deregistered): nothing changed, so no write and no event — there
-      // is nothing to persist or announce, and announcing a no-op would be noise.
-      if (next.value === registry) return ok(undefined);
-      // Persist the entry the core committed — the deregistered (tombstoned) variant.
-      const committed = next.value.entries.get(id)!;
-      const persisted = await persistAndAnnounce(committed, { kind: "deregistered", tenant: id }, "tenant-deregister");
-      if (!persisted.ok) return persisted;
-      registry = next.value;
-      return ok(undefined);
-    },
+    deregister: (id, now) =>
+      serializeMutation(async () => {
+        const next = coreDeregister(registry, id, now);
+        if (!next.ok) return err(next.error);
+        // Same-reference return covers BOTH no-op cases (absent tenant, and
+        // already-deregistered): nothing changed, so no write and no event — there
+        // is nothing to persist or announce, and announcing a no-op would be noise.
+        if (next.value === registry) return ok(undefined);
+        // Persist the entry the core committed — the deregistered (tombstoned) variant.
+        const committed = next.value.entries.get(id)!;
+        const persisted = await persistAndAnnounce(committed, { kind: "deregistered", tenant: id }, "tenant-deregister");
+        if (!persisted.ok) return persisted;
+        registry = next.value;
+        return ok(undefined);
+      }),
 
-    reconfigure: async (cfg, now) => {
-      const next = coreReconfigure(registry, cfg, now);
-      if (!next.ok) return err(next.error); // tenant-unknown (fail-closed) etc.
-      // Idempotent no-op: identical config → same reference → suppress re-persist
-      // + duplicate `reconfigured` event.
-      if (next.value === registry) return ok(undefined);
-      // Persist the committed (active) entry, not the raw input.
-      const committed = next.value.entries.get(cfg.id)!;
-      const persisted = await persistAndAnnounce(committed, { kind: "reconfigured", tenant: cfg.id }, "tenant-reconfigure");
-      if (!persisted.ok) return persisted;
-      registry = next.value;
-      return ok(undefined);
-    },
+    reconfigure: (cfg, now) =>
+      serializeMutation(async () => {
+        const next = coreReconfigure(registry, cfg, now);
+        if (!next.ok) return err(next.error); // tenant-unknown (fail-closed) etc.
+        // Idempotent no-op: identical config → same reference → suppress re-persist
+        // + duplicate `reconfigured` event.
+        if (next.value === registry) return ok(undefined);
+        // Persist the committed (active) entry, not the raw input.
+        const committed = next.value.entries.get(cfg.id)!;
+        const persisted = await persistAndAnnounce(committed, { kind: "reconfigured", tenant: cfg.id }, "tenant-reconfigure");
+        if (!persisted.ok) return persisted;
+        registry = next.value;
+        return ok(undefined);
+      }),
 
-    hardDelete: async (id) => {
-      const existing = registry.entries.get(id);
-      // Idempotent no-op: nothing to delete → success, no write, no event.
-      if (existing === undefined) return ok(undefined);
-      // Delete the persisted record FIRST; fail closed (do NOT advance memory) on
-      // any Redis failure so the in-memory view never diverges from a delete that
-      // did not land.
-      let delResult: Result<number, HostError>;
-      try {
-        delResult = await redis.del(tenantKey(id));
-      } catch (e) {
-        logger?.warn("[tenant-registry] Redis del threw during hardDelete — treating as disconnected", {
-          tenant: id,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return err(dead("tenant-hard-delete"));
-      }
-      if (!delResult.ok) return err(dead("tenant-hard-delete"));
-      // Announce the absence so subscribers re-read (and observe the tenant gone).
-      let pubResult: Result<void, HostError>;
-      try {
-        pubResult = await pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "deregistered", tenant: id }));
-      } catch (e) {
-        logger?.warn("[tenant-registry] Redis publish threw during hardDelete — treating as disconnected", {
-          tenant: id,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return err(dead("tenant-hard-delete"));
-      }
-      if (!pubResult.ok) return err(dead("tenant-hard-delete"));
-      // Advance the in-memory view: drop the entry entirely.
-      const next = new Map(registry.entries);
-      next.delete(id);
-      registry = { entries: next };
-      alive();
-      return ok(undefined);
-    },
+    hardDelete: (id) =>
+      serializeMutation(async () => {
+        const existing = registry.entries.get(id);
+        // Idempotent no-op: nothing to delete → success, no write, no event.
+        if (existing === undefined) return ok(undefined);
+        // Delete the persisted record FIRST; fail closed (do NOT advance memory) on
+        // any Redis failure so the in-memory view never diverges from a delete that
+        // did not land.
+        let delResult: Result<number, HostError>;
+        try {
+          delResult = await redis.del(tenantKey(id));
+        } catch (e) {
+          logger?.warn("[tenant-registry] Redis del threw during hardDelete — treating as disconnected", {
+            tenant: id,
+            error: e instanceof Error ? e.message : String(e),
+          });
+          return err(dead("tenant-hard-delete"));
+        }
+        if (!delResult.ok) return err(dead("tenant-hard-delete"));
+        // Announce the absence so subscribers re-read (and observe the tenant gone).
+        let pubResult: Result<void, HostError>;
+        try {
+          pubResult = await pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "deregistered", tenant: id }));
+        } catch (e) {
+          logger?.warn("[tenant-registry] Redis publish threw during hardDelete — treating as disconnected", {
+            tenant: id,
+            error: e instanceof Error ? e.message : String(e),
+          });
+          return err(dead("tenant-hard-delete"));
+        }
+        if (!pubResult.ok) return err(dead("tenant-hard-delete"));
+        // Advance the in-memory view: drop the entry entirely.
+        const next = new Map(registry.entries);
+        next.delete(id);
+        registry = { entries: next };
+        alive();
+        return ok(undefined);
+      }),
 
     hydrate: async () => {
       const configs: TenantConfig[] = [];

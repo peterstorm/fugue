@@ -404,6 +404,55 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
     const spec = spawned[0]!.spec;
     expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBeUndefined();
   });
+
+  // ── FR-033 TOCTOU: the cap holds across the ACL-provisioning await window ──────
+  //
+  // The fix RESERVES the `spawning` slot SYNCHRONOUSLY (via `requestWorker`, counted
+  // by `occupiesSlot`) right after the admission check and BEFORE `await
+  // provisionRedisAcl`. Distinct cold tenants each run their OWN `lazySpawn` (the
+  // single-flight only dedupes the SAME tenant), so under the OLD order — claim the
+  // slot only AFTER the awaited provisioning — every concurrent caller would read the
+  // same pre-commit `liveWorkerCount()`, all pass the cap, and all overshoot it
+  // (`liveWorkerCount()` is the SOLE FR-033 enforcer). This test makes provisioning
+  // GENUINELY yield the event loop so the await window is real, fires N = K + 2
+  // concurrent DISTINCT-tenant cold spawns, and asserts the cap is never exceeded.
+  test("FR-033 TOCTOU: concurrent DISTINCT-tenant cold spawns never overshoot maxLiveWorkers across the ACL await", async () => {
+    const K = 2;
+    const tenantNames = ["a", "b", "c", "d"]; // N = K + 2 = 4 distinct cold tenants
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView(Object.fromEntries(tenantNames.map((n) => [n, { eagerPin: false }]))),
+      clock: fixedClock().clock, config: baseConfig({ maxLiveWorkers: K }), logger: silentLog,
+      // GENUINELY yields the event loop before resolving ok: under the OLD order
+      // (slot claimed after this await) every caller would clear the cap check during
+      // these microtasks before any committed a slot.
+      provisionRedisAcl: async (tenant) => {
+        await Promise.resolve();
+        await Promise.resolve();
+        return ok({ username: `fugue-tenant-${tenant}`, password: "minted-secret-256", tenant });
+      },
+    });
+
+    const results = await Promise.all(tenantNames.map((n) => lc.ensureWorker(tid(n))));
+    const okCount = results.filter((r) => r.ok).length;
+    const refused = results.filter((r) => !r.ok);
+
+    // At most K admitted; the rest fail closed as worker-unavailable.
+    expect(okCount).toBeLessThanOrEqual(K);
+    expect(refused.length).toBe(tenantNames.length - okCount);
+    for (const r of refused) {
+      if (!r.ok) expect(r.error.kind).toBe("worker-unavailable");
+    }
+    // The live/spawning count never exceeds the cap after settling, and exactly the
+    // admitted callers actually spawned a process (the synchronous slot reservation
+    // closed the TOCTOU — no overshoot).
+    expect(lc.liveWorkerCount()).toBeLessThanOrEqual(K);
+    expect(lc.liveWorkerCount()).toBe(okCount);
+    expect(spawned.length).toBe(okCount);
+  });
 });
 
 // ── reconcileReadopt: eagerPin from the registry (C3, AD-7, SC-006) ─────────────
@@ -537,6 +586,50 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
     await flushMicrotasks();
     expect(spawned.length).toBe(1); // no respawn
     expect(lc.liveWorkerCount()).toBe(0);
+  });
+
+  // ── FR-017: a DRAINING worker's exit is a completed drain, NOT a crash ─────────
+  //
+  // After `drain` moves a live worker to `draining` + SIGTERM, the entry STAYS
+  // tracked (so the slot keeps counting until the worker truly exits — unlike evict,
+  // which deletes the entry up front). When that draining worker's `handle.exited`
+  // resolves, the exit watcher must route through `drainComplete` (terminal evicted)
+  // and DROP the entry — the expected end of a graceful drain — and must NOT misread
+  // it as a `live` crash and respawn it. Mirrors the "deliberate evict … does NOT
+  // trigger a respawn" assertions: no new spawn, entry gone (not live/spawning).
+  test("a draining worker's exit completes the drain and is NOT respawned (FR-017)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    // Bring acme to live (spawned → its handle.exited watcher is attached).
+    await lc.ensureWorker(tid("acme"));
+    expect(spawned.length).toBe(1);
+    expect(lc.liveWorkerCount()).toBe(1);
+
+    // Drain → draining + SIGTERM. The entry stays tracked (slot still counted).
+    const d = await lc.drain(tid("acme"));
+    expect(d.ok).toBe(true);
+    expect(lc.liveWorkerCount()).toBe(1); // still slotted while draining
+
+    // The worker stops in response to the SIGTERM — resolving handle.exited.
+    spawned[0]!.exit(0); // clean drain exit
+    await flushMicrotasks();
+
+    // Routed through drainComplete → terminal evicted → entry dropped, slot freed.
+    // NOT respawned (the draining exit is the expected end of a drain, not a crash).
+    expect(spawned.length).toBe(1); // no respawn — still exactly one spawn
+    expect(lc.liveWorkerCount()).toBe(0); // slot released; entry is no longer live/spawning
+    // A subsequent request lazy-spawns a FRESH worker (proves the entry was dropped,
+    // not left as a stale draining/live entry the router would reuse).
+    const back = await lc.ensureWorker(tid("acme"));
+    expect(back.ok).toBe(true);
+    expect(spawned.length).toBe(2); // the only respawn is request-driven, not exit-driven
+    expect(lc.liveWorkerCount()).toBe(1);
   });
 });
 

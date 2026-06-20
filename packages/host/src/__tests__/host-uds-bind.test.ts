@@ -23,7 +23,7 @@
  * the OS temp dir and is cleaned up after each test.
  */
 
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach, mock } from "bun:test";
 import { ok, err, noopTracer, gitSha } from "@fuguejs/framework";
 import type { DagId } from "@fuguejs/framework";
 import { tmpdir } from "node:os";
@@ -286,5 +286,90 @@ describe("createHost — UDS bind + chmod 0600 (FR-007)", () => {
     }
     // The boot-abort cleanup path ran onShutdown (no leaked resources).
     expect(onShutdownCalled).toBe(true);
+  });
+
+  test("a chmod failure AFTER a successful bind aborts boot AND leaves no listener (FR-007)", async () => {
+    // REGRESSION: `Bun.serve` binds the UDS the instant it returns; if the
+    // subsequent `chmodSync(unixPath, 0o600)` throws, the catch must `bunServer.stop()`
+    // the already-bound server. The old catch only closed capabilities + onShutdown,
+    // leaving a mis-permissioned socket LISTENING. The earlier bind-failure test
+    // double-binds, which makes `Bun.serve` ITSELF throw BEFORE assignment — it does
+    // NOT exercise this chmod-after-bind branch. This test forces chmod to fail.
+    sock = join(tmpdir(), `fugue-bind-${crypto.randomUUID()}.sock`);
+
+    // Mock ONLY chmodSync to throw; every other `node:fs` export stays real so the
+    // module mock is harmless to the rest of the file. `await import("node:fs")` in
+    // host.ts resolves through this mock; we restore it in `finally` so no leakage.
+    const actualFs = (await import("node:fs")) as typeof import("node:fs");
+    const realChmodSync = actualFs.chmodSync;
+    mock.module("node:fs", () => ({
+      ...actualFs,
+      default: actualFs,
+      chmodSync: () => {
+        throw new Error("EPERM chmod test");
+      },
+    }));
+
+    let onShutdownCalled = false;
+    try {
+      const { port, redis } = fakeRedis();
+      const result = await createHost({
+        config: makeConfig(),
+        git: fakeGit(),
+        loader: fakeLoader(),
+        redis: port,
+        sharedInfra: fakeInfra(redis),
+        logger: testLogger(),
+        tenant: mkTenant("acme"),
+        bind: { unix: sock },
+        onShutdown: async () => {
+          onShutdownCalled = true;
+        },
+      });
+
+      // (1) Boot is a fail-closed abort, not a half-booted host.
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("internal-invariant-violated");
+      }
+      // The boot-abort cleanup path ran onShutdown (mirrors the bind-failure test).
+      expect(onShutdownCalled).toBe(true);
+    } finally {
+      // Restore the REAL `node:fs` before any other test runs (the harness's
+      // top-level statSync/existsSync/rmSync bindings, and any later
+      // `await import("node:fs")` in host.ts, must point at the real impl).
+      // NOTE: in Bun 1.3.x `mock.restore()` does NOT clear a `mock.module`
+      // override — you must re-mock with the real exports, and the throwing
+      // `chmodSync` must be replaced EXPLICITLY with the captured real fn.
+      mock.module("node:fs", () => ({ ...actualFs, default: actualFs, chmodSync: realChmodSync }));
+    }
+
+    // (2) NO server remains listening on the socket. The bug left the bound server
+    // up; the fix's `bunServer.stop()` tears it down. Proven two ways:
+    //   (a) a fresh request over the socket FAILS to connect (nothing is listening), and
+    //   (b) a SECOND createHost on the SAME path now binds cleanly — only possible
+    //       if the first boot released the socket.
+    await expect(fetchOverUds(sock, "/health")).rejects.toThrow();
+
+    const { port, redis } = fakeRedis();
+    const second = await createHost({
+      config: makeConfig(),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: port,
+      sharedInfra: fakeInfra(redis),
+      logger: testLogger(),
+      tenant: mkTenant("acme"),
+      bind: { unix: sock },
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    host = second.value; // afterEach shuts it down + removes the socket.
+
+    // With chmod restored, the second boot fully succeeded: socket is 0600 and serves.
+    expect(existsSync(sock)).toBe(true);
+    expect(statSync(sock).mode & 0o777).toBe(0o600);
+    const res = await fetchOverUds(sock, "/health");
+    expect(res.status).toBe(200);
   });
 });
