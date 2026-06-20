@@ -516,6 +516,96 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
   });
 });
 
+// ── liveness sweep: crash-detection SAFETY NET for RE-ADOPTED workers ────────────
+//
+// A worker SPAWNED by this process carries a `handle.exited` crash watcher. A
+// worker RE-ADOPTED across a supervisor restart (`adoptLive`) does NOT — its
+// process was re-parented, so this process never owns its handle and has no
+// `exited` promise to await. `livenessSweep` is its ONLY crash signal: it polls
+// `proc.isAlive` for non-watcher-covered workers and drives `onCrash` for any that
+// died, so a re-adopted worker that crashes is RESTARTED rather than wedging its
+// tenant at 503 forever (an eager-pinned one is never idle-evicted either).
+
+describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, FR-014/FR-015)", () => {
+  const seed = (fake: ReturnType<typeof createInMemoryWorkerRedisFake>, rec: WorkerRecord) => {
+    fake.store.set(`${WORKER_KEY_PREFIX}${rec.tenant}`, JSON.stringify({
+      pid: rec.pid, udsPath: rec.udsPath, startedAt: rec.startedAt, health: rec.health, eagerPin: rec.eagerPin,
+    }));
+  };
+
+  /** Wrap a base proc so liveness is controllable per-pid (default: alive). */
+  const controllableProc = (base: ProcManagePort) => {
+    const dead = new Set<number>();
+    const proc: ProcManagePort = {
+      signal: base.signal,
+      isAlive: async (pid) => !dead.has(pid),
+    };
+    return { proc, kill: (pid: number) => dead.add(pid) };
+  };
+
+  test("a re-adopted worker whose pid died is DETECTED and restarted (no permanent 503)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const base = makeSpawn();
+    const { proc, kill } = controllableProc(base.proc);
+    // Eager-pinned: also proves the never-idle-evicted wedge case recovers.
+    seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: true });
+    const lc = createWorkerLifecycle({
+      spawn: base.spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: true } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.reconcileReadopt();
+    expect(lc.liveWorkerCount()).toBe(1);
+    expect(base.spawned.length).toBe(0); // adopted — never spawned by THIS process
+
+    // The re-parented worker dies. There is NO exited watcher for it.
+    kill(5);
+    const dead = await lc.livenessSweep();
+    expect(dead).toEqual([tid("acme")]);
+    // Detected → onCrash → respawned via the normal spawn path (now watcher-covered).
+    expect(base.spawned.filter((s) => (s.spec.tenant as unknown as string) === "acme").length).toBe(1);
+    expect(lc.liveWorkerCount()).toBe(1); // restored, not wedged at 503
+  });
+
+  test("a re-adopted worker that is still ALIVE is left untouched", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const base = makeSpawn();
+    const { proc } = controllableProc(base.proc); // nothing killed → all alive
+    seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
+    const lc = createWorkerLifecycle({
+      spawn: base.spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.reconcileReadopt();
+    const dead = await lc.livenessSweep();
+    expect(dead).toEqual([]);
+    expect(base.spawned.length).toBe(0); // no respawn
+    expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("a SPAWNED (watcher-covered) worker is NOT swept even if its pid reads dead (no double-fire)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const base = makeSpawn();
+    const { proc, kill } = controllableProc(base.proc);
+    const lc = createWorkerLifecycle({
+      spawn: base.spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.ensureWorker(tid("acme")); // spawned → watcher-covered
+    const pid = base.spawned[0]!.pid;
+    kill(pid); // even if a poll WOULD read it dead...
+    const dead = await lc.livenessSweep();
+    expect(dead).toEqual([]); // ...the sweep skips watched tenants (the exited watcher owns crash detection)
+    expect(base.spawned.length).toBe(1); // no sweep-driven respawn
+    expect(lc.liveWorkerCount()).toBe(1);
+  });
+});
+
 // ── restart-at-cap: a crashing tenant at the cap must respawn (FR-015) ───────────
 
 describe("createWorkerLifecycle: restart at SUPERVISOR_MAX_LIVE_WORKERS (FR-015)", () => {

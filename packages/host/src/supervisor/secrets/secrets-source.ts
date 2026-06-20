@@ -31,11 +31,12 @@
  *     through this port*. It is NOT a claim that NO secret ever materializes
  *     supervisor-side. The Redis ACL credential is a separate, deliberately
  *     transient supervisor-side mint+handoff: `redis-acl-provisioner.ts` mints a
- *     per-tenant ACL password on the supervisor's admin connection and hands it
- *     straight to the SecretsSource channel for the owning worker (see that
- *     file's CREDENTIAL HANDOFF CONTRACT). The two narratives are complementary,
- *     not contradictory — this port carries no value supervisor-side; the ACL
- *     mint is a bounded, unretained, never-logged handoff.
+ *     per-tenant ACL password on the supervisor's admin connection and the
+ *     worker-lifecycle manager injects it into the owning worker's SPAWN ENV
+ *     (`FUGUE_REDIS_ACL_USERNAME`/`PASSWORD`) — a SEPARATE channel from this
+ *     `SecretsSource` port (see that file's CREDENTIAL HANDOFF CONTRACT). The two
+ *     narratives are complementary, not contradictory — this port carries no value
+ *     supervisor-side; the ACL mint is a bounded, unretained, never-logged handoff.
  *
  *   - The WORKER bootstrap (T6, a later wave) is the SOLE wiring site: it
  *     constructs a concrete `SecretsSource` and resolves the owning tenant's

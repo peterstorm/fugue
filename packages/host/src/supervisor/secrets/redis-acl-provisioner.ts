@@ -7,8 +7,10 @@
  *     per-tenant ACL user. It does NOT keep that admin connection's reach inside
  *     any worker — the worker only ever gets its OWN scoped credential.
  *   - The generated CREDENTIAL (username + minted password) is a SECRET. `apply`
- *     RETURNS it to the caller, who hands it straight to the SecretsSource
- *     channel (AD-6, T4) so it flows ONLY into the owning worker. The provisioner
+ *     RETURNS it to the caller (the worker-lifecycle manager), who injects it into
+ *     the owning worker's SPAWN ENV (AD-6, T4) so it flows ONLY into that worker.
+ *     (This is the spawn-env channel, distinct from the `SecretsSource` env-file
+ *     port that resolves `vault://` refs inside the worker.) The provisioner
  *     NEVER persists it, NEVER stores it on any returned handle, and NEVER logs
  *     it. The password exists in process memory only for the duration of the
  *     `apply` call and the caller's immediate handoff. (See `AppliedAclCredential`

@@ -142,6 +142,23 @@ Concretely:
   not block it at the cap. Containment is structural: a crashed state names only its
   own tenant; `onCrash` touches no other entry.
 
+  **Re-adopted workers (ADR-0065) have no `handle.exited` signal** — their process
+  was re-parented across the supervisor restart, so the new supervisor never owns
+  the handle. For them, crash detection falls to a periodic **liveness sweep**
+  (`livenessSweep`, `WORKER_LIVENESS_SWEEP_MS`): it polls `proc.isAlive(pid)` for
+  every live/draining worker NOT covered by an exited-watcher and drives the same
+  `onCrash` path for any that died. Without it, a re-adopted worker that crashed
+  would wedge its tenant at 503 (the entry stays `live`, routing keeps hitting a
+  dead socket, and an eager-pinned worker is never idle-evicted). Once such a worker
+  is respawned by the live supervisor it becomes watcher-covered and the sweep skips
+  it — so the two mechanisms never both fire for one crash.
+
+- **Drain is modelled but driven via `evict`, not `drainComplete`.** `beginDrain` /
+  `drainComplete` (`live → draining → evicted`) are part of the ADT, but the wired
+  call sites (deregister FR-029, idle-evict) use `evict` (SIGTERM then SIGKILL).
+  The graceful `drainComplete` path is reserved for a future reconfigure-triggered
+  drain; today no orchestrator drives it.
+
 - **Cold-start SLA — bench then set (FR-018, NFR-003).** The *policy* above is
   locked. The latency *number* is deliberately **not** invented in this ADR: it is
   to be derived from a measured worker boot under the single-pod profile
@@ -214,8 +231,10 @@ Key invariants:
   (SC-006, FR-019/FR-020) reuses this lifecycle's `live` state via `adoptLive`
   rather than re-spawning.
 - ADR-0068 — tenant registry (Redis-backed metadata, pub/sub propagation). Sources
-  the authoritative per-tenant config under `fugue:tenants:<id>` from which the
-  `eagerPin` flag (and `secretsRef`) carried on every `WorkerState` is read.
+  the authoritative per-tenant spawn config (`eagerPin`, `secretsRef`) under
+  `fugue:tenants:<id>`. `eagerPin` is the only one of those carried on every
+  `WorkerState`; `secretsRef` lives in the registry's `TenantSpawnConfig` and is
+  read at spawn time (it is a worker-side reference, not lifecycle state).
 - ADR-0071 — crash policy (sync fail-fast / HITL resume). Defines what the
   `crashed → restart` transition recorded here *means* for in-flight runs.
 - ADR-0072 — per-worker heap cap. The memory enforcement (`--max-old-space-size`

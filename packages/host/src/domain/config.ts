@@ -502,6 +502,15 @@ export const HostConfigSchema = z.object({
    */
   WORKER_IDLE_EVICT_MS: z.coerce.number().int().min(1000).default(900_000),
   /**
+   * Interval (ms) at which the supervisor probes the liveness of RE-ADOPTED
+   * workers (SC-006). A worker re-adopted across a supervisor restart has no
+   * `handle.exited` crash watcher (its process was re-parented), so this poll is
+   * its ONLY crash signal — a dead re-adopted worker is detected and restarted
+   * rather than wedging the tenant at 503. Workers spawned by the live supervisor
+   * are watcher-covered and skipped. Default 5s (liveness is not latency-critical).
+   */
+  WORKER_LIVENESS_SWEEP_MS: z.coerce.number().int().min(1000).default(5_000),
+  /**
    * Per-tenant crash-loop budget (T8 resilience): the max number of AUTOMATIC
    * worker restarts the supervisor will perform for one tenant within
    * `SUPERVISOR_WORKER_RESTART_WINDOW_MS` before giving up the auto-restart (the

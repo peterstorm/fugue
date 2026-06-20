@@ -152,6 +152,7 @@ describe("Integration — runtime onboarding e2e (SC-004, FR-036, US1)", () => {
       reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
       liveWorkerCount: () => activeTeams().size,
       idleEvictSweep: async () => [],
+      livenessSweep: async () => [],
     };
 
     // NEW-run admission bound to resolveForNewRun (registry seam).

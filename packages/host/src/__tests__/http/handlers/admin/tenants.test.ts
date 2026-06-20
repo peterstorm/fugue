@@ -54,6 +54,7 @@ const recordingLifecycle = (opts: { failEvict?: boolean } = {}): RecordingLifecy
     reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
     liveWorkerCount: () => 0,
     idleEvictSweep: async () => [],
+    livenessSweep: async () => [],
   };
 };
 

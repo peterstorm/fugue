@@ -74,6 +74,7 @@ const lifecycleAlwaysLive: WorkerLifecyclePort = {
   reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
   liveWorkerCount: () => 0,
   idleEvictSweep: async () => [],
+  livenessSweep: async () => [],
 };
 
 const tokenStoreFor = async (tenants: readonly Tenant[]): Promise<TokenStorePort> => {

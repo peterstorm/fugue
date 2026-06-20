@@ -382,6 +382,23 @@ const main = async () => {
   if (typeof idleSweepTimer.unref === "function") idleSweepTimer.unref();
   logger.info("[supervisor] idle-evict sweep started", { intervalMs: sweepIntervalMs });
 
+  // ── Liveness sweep timer (SC-006, FR-014/FR-015) ───────────────────────────
+  // Crash-detection SAFETY NET for RE-ADOPTED workers. A worker spawned by THIS
+  // supervisor carries a `handle.exited` crash watcher; a worker re-adopted across
+  // a restart (reconcileReadopt below) does NOT — its process was re-parented to
+  // thin-init, so this process has no exit handle to await. Without this poll a
+  // re-adopted worker that later crashes (OOM, AD-9) would wedge its tenant at 503
+  // forever. The policy (who is watcher-covered) lives in the lifecycle; the binary
+  // owns the schedule. Watcher-covered workers are skipped, so this is a no-op once
+  // every adopted worker has been replaced by a spawned (watched) one.
+  const livenessSweepTimer = setInterval(() => {
+    void lifecycle.livenessSweep().catch((e) => {
+      logger.error("[supervisor] liveness sweep threw", { error: e instanceof Error ? e.message : String(e) });
+    });
+  }, config.WORKER_LIVENESS_SWEEP_MS);
+  if (typeof livenessSweepTimer.unref === "function") livenessSweepTimer.unref();
+  logger.info("[supervisor] liveness sweep started", { intervalMs: config.WORKER_LIVENESS_SWEEP_MS });
+
   // SC-006 / FR-020: re-adopt still-live workers BEFORE serving.
   const readopt = await lifecycle.reconcileReadopt();
   if (!readopt.ok) {
@@ -476,17 +493,27 @@ const main = async () => {
         const pattern = `fugue:${tenant}:*`;
         let cursor = "0";
         let deleted = 0;
+        // BEST-EFFORT per key: a single failing `del` must NOT abort the whole
+        // enumeration — that would leave the rest of the tenant's keys unreclaimed
+        // and let one persistently-bad key wedge reclamation of all the others.
+        // Keep the FIRST failure and return it AFTER attempting every key, so the
+        // grace-purge sweep still marks the step failed (idempotent retry) while
+        // every reclaimable key is actually reclaimed this pass.
+        let firstError: HostError | undefined;
         do {
           const scanR = await redis.scan(pattern, cursor);
           if (!scanR.ok) return err(scanR.error);
           for (const key of scanR.value.keys) {
             const delR = await redis.del(key);
-            if (!delR.ok) return err(delR.error);
+            if (!delR.ok) {
+              if (firstError === undefined) firstError = delR.error;
+              continue;
+            }
             deleted += delR.value;
           }
           cursor = scanR.value.cursor;
         } while (cursor !== "0");
-        return ok(deleted);
+        return firstError !== undefined ? err(firstError) : ok(deleted);
       },
     },
     // Filesystem mount removal — recursive + force (idempotent: removing an
@@ -567,6 +594,7 @@ const main = async () => {
     // on shutdown is clear the sweep timer (stop reclaiming) + release Redis.
     onShutdown: async () => {
       clearInterval(idleSweepTimer);
+      clearInterval(livenessSweepTimer);
       clearInterval(gracePurgeTimer);
       await disconnect();
     },

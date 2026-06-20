@@ -147,4 +147,15 @@ export interface WorkerLifecyclePort {
    * the sweep without an `as`-cast — a missing implementation is a type error.
    */
   readonly idleEvictSweep: () => Promise<readonly TenantId[]>;
+  /**
+   * Liveness sweep (FR-014/FR-015, SC-006): crash-detection SAFETY NET for
+   * RE-ADOPTED workers. A worker spawned by this process carries a `handle.exited`
+   * crash watcher; a worker re-adopted across a supervisor restart does NOT (its
+   * process was re-parented — no handle to await). This sweep probes such workers'
+   * liveness and drives `onCrash` for any that died, so a re-adopted worker's crash
+   * is detected and restarted rather than wedging the tenant at 503. Driven by the
+   * supervisor binary on a timer (the binary owns the interval). Returns the
+   * tenants detected dead this sweep.
+   */
+  readonly livenessSweep: () => Promise<readonly TenantId[]>;
 }

@@ -787,10 +787,13 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
             port: config.PORT,
             maxRequestBodySize: 10 * 1024 * 1024, // 10MB — prevents request body DoS
           });
-    // Lock the socket down to the owning uid BEFORE announcing readiness, so the
-    // socket is never reachable by another uid even for a window. A chmod
-    // failure is a fail-closed boot abort: an un-restricted tenant socket is
-    // worse than a clean boot failure (FR-007).
+    // Lock the socket down to the owning uid BEFORE announcing readiness. NOTE:
+    // `Bun.serve` binds the socket as soon as it returns, so there is a brief
+    // window between bind and this chmod where the path exists at the default
+    // umask — the chmod closes it before readiness is announced, and the parent
+    // `WORKER_UDS_DIR` perms + the HMAC `X-Fugue-Tenant` check (when configured)
+    // backstop that window. A chmod failure is a fail-closed boot abort: an
+    // un-restricted tenant socket is worse than a clean boot failure (FR-007).
     if (unixPath !== undefined) {
       const { chmodSync } = await import("node:fs");
       chmodSync(unixPath, 0o600);

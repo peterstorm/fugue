@@ -82,9 +82,10 @@ live under `fugue:<tenant>:…`, and **no** host-produced key escapes the prefix
   key under `fugue:<tenant>:hitl:…`. A store instance can only ever name its own
   tenant's HITL keys.
 - **`packages/host/src/adapters/node-context-factory.ts`** — threads the tenant
-  into the namespaced cache/checkpoint adapters. Until the supervisor's resolved
-  `Tenant` principal is wired (plan T6), the tenant is derived from the DAG's
-  owning `team` and branded at this single seam.
+  into the namespaced cache/checkpoint adapters. The supervisor's resolved
+  `routedTenant` principal is now wired and used authoritatively when present; the
+  DAG-`team`-derived tenant (branded at this single seam) remains only as the
+  fallback for the single-tenant (`main.ts`) path that has no resolved principal.
 - **`packages/host/src/host.ts`** — the single-tenant `createHost` entrypoint
   binds the token store to the constant `default` tenant, so all keys live under
   `fugue:default:`.

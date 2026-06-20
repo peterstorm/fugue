@@ -154,6 +154,7 @@ describe("Integration — per-tenant error taxonomy under concurrency (SC-012)",
       reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
       liveWorkerCount: () => registered.length,
       idleEvictSweep: async () => [],
+      livenessSweep: async () => [],
     };
 
     const registryView: TenantRegistryView = {

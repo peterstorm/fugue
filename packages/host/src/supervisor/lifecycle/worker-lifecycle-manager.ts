@@ -110,9 +110,11 @@ export interface WorkerLifecycleConfig {
    * Per-tenant crash-loop budget: max AUTOMATIC respawns (driven by `onCrash`)
    * for one tenant within `restartWindowMs` before the manager gives up the
    * auto-restart. Mirrors the supervisor-process budget (`thin-init`). A tenant
-   * whose worker boots-then-crashes-fast cannot pin a core. The budget is reset
-   * once the tenant's worker reaches `live` (the loop is broken). Request-driven
-   * spawns are not budgeted (they are rate-limited by request arrival).
+   * whose worker boots-then-crashes-fast cannot pin a core. The budget is
+   * WINDOW-based (NOT reset when the worker reaches `live`): a worker that reaches
+   * `live` briefly each cycle still counts toward the budget — recovery happens by
+   * the sliding window expiring (a tenant healthy for > `restartWindowMs` resets on
+   * its next crash). Request-driven spawns are not budgeted (rate-limited by arrival).
    */
   readonly maxRestartsPerWindow: number;
   /** Sliding window (ms) for `maxRestartsPerWindow`. */
@@ -164,6 +166,27 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   // concurrent callers onto ONE shared promise keyed by `TenantId`, cleared on
   // settle, so a cold tenant is spawned exactly once even under a request burst.
   const inFlightSpawns = new Map<TenantId, Promise<Result<EnsuredWorker, HostError>>>();
+
+  // Tenants whose CURRENT incarnation was SPAWNED by this manager and therefore
+  // carries a `handle.exited` crash watcher (attached in `lazySpawn`). Crash
+  // detection for these tenants flows through that watcher.
+  //
+  // RE-ADOPTED workers (`reconcileReadopt` → `adoptLive`) are NOT in this set: the
+  // worker was re-parented across a supervisor restart, so this process never owns
+  // its `WorkerHandle` and has no `exited` promise to await. Their ONLY crash
+  // signal is `livenessSweep` (poll `proc.isAlive`). The set is what lets the sweep
+  // skip watched tenants so it never double-fires `onCrash` against a worker the
+  // exited-watcher already covers. Membership is sticky: once a tenant is spawned
+  // by this process, every later incarnation is also spawned (respawn re-enters
+  // `lazySpawn`), so it stays watcher-covered for this process's lifetime.
+  const watchedTenants = new Set<TenantId>();
+
+  // Single-flight guard for `livenessSweep`: serialize sweeps so two overlapping
+  // ticks cannot both detect the same dead adopted worker and drive `onCrash`
+  // twice (the second `crash` from a `spawning`/`crashed` phase would drop the
+  // respawning entry). One sweep at a time; a tick that overlaps a slow sweep is
+  // skipped (liveness detection is not latency-critical).
+  let livenessSweepRunning = false;
 
   // Per-tenant crash-loop budget (mirrors the supervisor-process budget in
   // thin-init). Tracks AUTOMATIC `onCrash` respawns within a SLIDING window; an
@@ -368,6 +391,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // pid+phase guard is REQUIRED so a deliberate evict/drain SIGKILL (which
     // removes/changes the entry BEFORE signalling) is not misread as a crash and
     // does not trigger a spurious restart.
+    watchedTenants.add(tenant); // this incarnation is watcher-covered (see set docs).
     void handle.exited.then((code) => {
       const cur = workers.get(tenant);
       if (cur !== undefined && (cur.phase === "live" || cur.phase === "draining") && cur.pid === handle.pid) {
@@ -380,6 +404,26 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     return ok({ udsPath });
   };
 
+  /**
+   * SINGLE-FLIGHT spawn: coalesce concurrent spawn intents for the SAME tenant
+   * onto one in-flight `lazySpawn` so the worker is started exactly once (no
+   * double-spawn on the shared UDS — bind contention, double-charged slot, an
+   * orphan). The single-flight lives at the SPAWN SEAM (not in one caller) so EVERY
+   * spawn source shares it: a cold first request (`ensureWorker`) and a crash
+   * auto-restart (`onCrash`) racing for the same tenant collapse to one spawn. The
+   * synchronous read-then-set has no `await` between the lookup and the
+   * `inFlightSpawns.set`, so on Bun's single thread it is atomic per tenant.
+   */
+  const spawnSingleFlight = (tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> => {
+    const pending = inFlightSpawns.get(tenant);
+    if (pending !== undefined) return pending;
+    const spawnPromise = lazySpawn(tenant).finally(() => {
+      inFlightSpawns.delete(tenant);
+    });
+    inFlightSpawns.set(tenant, spawnPromise);
+    return spawnPromise;
+  };
+
   const ensureWorker = async (tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> => {
     const existing = workers.get(tenant);
     if (existing !== undefined && existing.phase === "live") {
@@ -389,18 +433,8 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok({ udsPath: existing.udsPath });
     }
     // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
-    // not routable; lazySpawn re-enters spawning for it). SINGLE-FLIGHT: coalesce
-    // concurrent callers for the same cold tenant onto one in-flight spawn so the
-    // worker is started exactly once (no double-spawn on the shared UDS). The
-    // synchronous read-then-set below has no `await` between the lookup and the
-    // `inFlightSpawns.set`, so on Bun's single thread it is atomic per tenant.
-    const pending = inFlightSpawns.get(tenant);
-    if (pending !== undefined) return pending;
-    const spawnPromise = lazySpawn(tenant).finally(() => {
-      inFlightSpawns.delete(tenant);
-    });
-    inFlightSpawns.set(tenant, spawnPromise);
-    return spawnPromise;
+    // not routable; lazySpawn re-enters spawning for it), coalesced single-flight.
+    return spawnSingleFlight(tenant);
   };
 
   const onCrash = async (tenant: TenantId, exitCode: number | null): Promise<Result<void, HostError>> => {
@@ -457,7 +491,10 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // `requestWorker` AFTER the admission check passes. The crashed tenant is
     // replacing itself, so its restart must not be blocked by the cap.
     workers.delete(tenant);
-    const respawn = await lazySpawn(tenant);
+    // Respawn via the SAME single-flight as `ensureWorker` so a crash racing a
+    // concurrent inbound request for this tenant collapses to ONE spawn (no
+    // double-spawn on the shared UDS).
+    const respawn = await spawnSingleFlight(tenant);
     if (!respawn.ok) {
       logger.warn("[worker-lifecycle] restart respawn failed — tenant remains unavailable until next request", { tenant });
       // lazySpawn already cleaned up the entry; a subsequent request retries.
@@ -579,6 +616,66 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     return evicted;
   };
 
+  /**
+   * Liveness sweep (FR-014/FR-015, SC-006): the crash-detection SAFETY NET for
+   * RE-ADOPTED workers. A worker spawned by THIS process carries a `handle.exited`
+   * crash watcher (`watchedTenants`); a worker re-adopted across a supervisor
+   * restart (`adoptLive`) does NOT — its process was re-parented, so we never own
+   * its handle and have no `exited` promise to await. Without this sweep a
+   * re-adopted worker that later crashes (OOM, AD-9) would go undetected: the entry
+   * stays `live`, `ensureWorker` keeps routing to the dead socket, and the tenant
+   * is wedged at 503 forever (an eager-pinned re-adopted worker is never
+   * idle-evicted either, so it never recovers).
+   *
+   * For every `live`/`draining` worker NOT covered by an exited watcher, probe
+   * `proc.isAlive(pid)`; a dead pid drives the normal `onCrash` path (contained
+   * crash → budgeted auto-restart). Watched tenants are skipped so this never
+   * double-fires `onCrash` against a crash the watcher already handles. Serialized
+   * via `livenessSweepRunning` so overlapping ticks cannot both drive `onCrash`.
+   * Exposed for the supervisor to drive on a timer (the binary owns the schedule).
+   * Returns the tenants detected dead (and handed to `onCrash`) this sweep.
+   */
+  const livenessSweep = async (): Promise<readonly TenantId[]> => {
+    if (livenessSweepRunning) return [];
+    livenessSweepRunning = true;
+    try {
+      // Snapshot candidates first: only adopted (non-watched) live/draining workers.
+      const candidates: Array<{ tenant: TenantId; pid: number }> = [];
+      for (const [tenant, state] of workers) {
+        if (watchedTenants.has(tenant)) continue;
+        if (state.phase === "live" || state.phase === "draining") candidates.push({ tenant, pid: state.pid });
+      }
+      const dead: TenantId[] = [];
+      for (const { tenant, pid } of candidates) {
+        let alive: boolean;
+        try {
+          alive = await proc.isAlive(pid);
+        } catch (e) {
+          // A probe that throws is inconclusive — do NOT synthesize a crash off a
+          // failed liveness check (that could kill a healthy worker). Skip; the
+          // next tick re-checks.
+          logger.warn("[worker-lifecycle] liveness probe threw — skipping this tick", {
+            tenant,
+            pid,
+            error: e instanceof Error ? e.message : String(e),
+          });
+          continue;
+        }
+        if (alive) continue;
+        logger.warn("[worker-lifecycle] re-adopted worker is dead (no exited watcher) — driving crash/restart", { tenant, pid });
+        // `null` exit code: a re-parented worker has no observable exit code.
+        const r = await onCrash(tenant, null);
+        if (!r.ok) {
+          logger.error("[worker-lifecycle] onCrash for dead re-adopted worker failed", { tenant, error: formatHostError(r.error) });
+        }
+        dead.push(tenant);
+      }
+      return dead;
+    } finally {
+      livenessSweepRunning = false;
+    }
+  };
+
   return {
     ensureWorker,
     drain,
@@ -586,8 +683,9 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     onCrash,
     reconcileReadopt,
     liveWorkerCount,
-    // `idleEvictSweep` is part of the typed WorkerLifecyclePort (spawn-port.ts) —
-    // the supervisor binary drives it on a timer. No structural cast needed.
+    // `idleEvictSweep` / `livenessSweep` are part of the typed WorkerLifecyclePort
+    // (spawn-port.ts) — the supervisor binary drives each on a timer. No cast needed.
     idleEvictSweep,
+    livenessSweep,
   };
 };

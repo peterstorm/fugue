@@ -200,6 +200,14 @@ Key invariants:
   guarantee (and the unreachable-branch 500 it justifies) holds only while the
   sum of per-tenant ceilings stays well under that headroom; configuring ceilings
   into the hundreds of thousands would require revisiting it.
+- Admission counters are **process-local** and reset on supervisor restart, while
+  in-flight runs survive on re-adopted workers (ADR-0065). For the window after a
+  restart a tenant's surviving in-flight runs are not re-counted against its
+  ceiling, so it can transiently exceed `maxConcurrentRuns` until those runs drain.
+  The over-admission is bounded and per-tenant (it never starves *other* tenants,
+  so SC-011's anti-starvation property is preserved); FR-032's exact bound is
+  briefly soft. Accepted: reconstructing per-tenant `current` from the registry at
+  re-adoption would add coupling for a transient, self-scoped relaxation.
 
 ## Related
 

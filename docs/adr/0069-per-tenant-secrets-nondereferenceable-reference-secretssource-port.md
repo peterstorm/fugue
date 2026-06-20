@@ -158,11 +158,14 @@ Key invariants:
   only a `vault://`-style ref and **never** the actual secret bytes, and that a
   `SecretsRef` fed to the env-file source for a non-existent path fails closed
   with zero secret bytes.
-- **ACL credential handoff flows through this same channel.** The per-tenant
-  Redis ACL credential (ADR-0067) is the *one* secret deliberately minted
-  supervisor-side, but it is never *retained*: `apply` mints it on the admin
-  connection and hands it straight into this `SecretsSource` channel for the
-  owning worker, keeping no copy. That bounded, unretained, never-logged handoff
+- **ACL credential handoff is a distinct channel — the spawn env, NOT this port.**
+  The per-tenant Redis ACL credential (ADR-0067) is the *one* secret deliberately
+  minted supervisor-side, but it is never *retained*: `apply` mints it on the admin
+  connection and the worker-lifecycle manager injects it into the owning worker's
+  **spawn env** (`FUGUE_REDIS_ACL_USERNAME`/`PASSWORD`), keeping no copy. (This is
+  separate from the `SecretsSource` port, which resolves a `vault://`-style
+  `SecretsRef` to env-file bytes *inside* the worker — the ACL credential does not
+  transit that port.) That bounded, unretained, never-logged handoff
   is complementary to — not a violation of — the zero-secrets guarantee, which is
   scoped to *tenant env-file secrets resolved through this port*; the same
   isolation test asserts the minted password materializes only as a transient
