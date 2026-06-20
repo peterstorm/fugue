@@ -76,9 +76,7 @@ const lifecycleLiveByTenant = (sockOf: (t: TenantId) => string): WorkerLifecycle
  * state, but the binding itself is verbatim production logic.
  */
 const buildRealAdmission = (registry: ReturnType<typeof createRedisTenantRegistry>): AdmissionPort => {
-  let tenantConc: TenantConcurrencyState = initTenantConcurrency({
-    maxLiveWorkers: Number.MAX_SAFE_INTEGER,
-  });
+  let tenantConc: TenantConcurrencyState = initTenantConcurrency();
   const noopRelease = (): void => {};
   return {
     admit: (tenant: Tenant): AdmissionOutcome => {

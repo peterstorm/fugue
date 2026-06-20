@@ -64,6 +64,21 @@ export const buildWorkerSpawn = (
   spec: WorkerSpawnSpec,
   inheritedEnv: Readonly<Record<string, string | undefined>>,
 ): WorkerSpawnPlan => {
+  // INHERITED ENV IS REQUIRED, NOT A LEAK (A1): the worker is `createHost` bound
+  // to one tenant (worker-main.ts), so it `parseHostConfig`s the SAME schema as
+  // the supervisor and genuinely CONSUMES platform-wide config from this env:
+  //   - REDIS_URL          — the worker's Redis connection TARGET (host:port). The
+  //                          per-tenant ACL credential (FUGUE_REDIS_ACL_*) only
+  //                          OVERRIDES the embedded username/password; the URL
+  //                          itself is still needed (worker-main.ts createRedisConnectivity).
+  //   - ADMIN_TOKEN        — required by the schema AND used: createHost wires it
+  //                          into the worker's auth middleware (host.ts) to validate
+  //                          admin-authenticated runs the supervisor proxies over UDS.
+  //   - REALM_JWT_ISSUER, … — broker / JWT verification config the worker needs.
+  // Scrubbing these would break the worker (config-parse failure + rejected admin
+  // runs), so the whole-env inheritance is deliberate. The supervisor and its
+  // workers share a uid/trust domain (AD-2/AD-9); per-tenant ISOLATION rests on the
+  // Redis ACL key-scope + signed tenant header, not on withholding platform config.
   // Start from inherited env (drop undefined values for a clean string record).
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(inheritedEnv)) {

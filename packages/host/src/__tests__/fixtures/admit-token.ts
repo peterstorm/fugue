@@ -12,9 +12,8 @@ import { unsafeTestToken } from "./concurrency-token.js";
  */
 export const unsafeTestAdmitToken = (
   tenant: TenantId,
-  claimedWorker: boolean,
   admittedAt: number,
 ): AdmitToken => {
   const innerToken: AcquireToken<TenantId> = unsafeTestToken<TenantId>(tenant, admittedAt);
-  return { tenant, innerToken, claimedWorker, admittedAt } as unknown as AdmitToken;
+  return { tenant, innerToken, admittedAt } as unknown as AdmitToken;
 };

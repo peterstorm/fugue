@@ -1,21 +1,22 @@
 /**
  * Per-tenant admission — a PURE extension of the `domain/concurrency.ts`
- * `ConcurrencyState` ADT with a per-tenant axis and a global live-worker upper
- * bound.
+ * `ConcurrencyState` ADT with a per-tenant concurrency axis.
  *
  * This module does NOT fork the concurrency limiter: a `TenantConcurrencyState`
  * COMPOSES an inner `ConcurrencyState` (reused verbatim for the
- * global-execution + per-DAG limits) and layers two additional, independent
- * axes on top:
+ * global-execution + per-DAG limits) and layers ONE additional axis on top:
  *
- *   1. per-tenant concurrency ceiling — each tenant gets its OWN `{current,max}`
- *      slot count, so one tenant saturating its ceiling can NEVER consume
- *      another tenant's slots (FR-032, SC-011, US8). Rejection is the caller's
- *      OWN `tenant-over-quota` (429 + per-tenant Retry-After, FR-038).
- *   2. global live-worker upper bound — a hard cap on how many workers may be
- *      live at once across ALL tenants (FR-033). A tenant that has no live
- *      worker yet AND would push the box past the bound is refused with
- *      `worker-unavailable` (503, scoped to that tenant only — FR-039).
+ *   - per-tenant concurrency ceiling — each tenant gets its OWN `{current,max}`
+ *     slot count, so one tenant saturating its ceiling can NEVER consume
+ *     another tenant's slots (FR-032, SC-011, US8). Rejection is the caller's
+ *     OWN `tenant-over-quota` (429 + per-tenant Retry-After, FR-038).
+ *
+ * LIVE-WORKER BOUND (FR-033) lives ELSEWHERE: the worker-lifecycle manager's
+ * `liveWorkerCount()` is the SOLE authoritative enforcement point (it refuses a
+ * new spawn at `SUPERVISOR_MAX_LIVE_WORKERS` → `worker-unavailable` 503).
+ * Admission deliberately does NOT mirror that count — a second counter here
+ * would be a dead, drift-prone duplicate of the lifecycle's authoritative one
+ * (it was previously carried sized-to-never-bind, and removed for that reason).
  *
  * PURITY: every function here is pure — no timers, no async, no `Date.now()`.
  * The clock is injected as `now: number`, mirroring `acquire`/`release` in
@@ -24,13 +25,11 @@
  *
  * AD-9: admission is pure supervisor state. The per-tenant MEMORY ceiling
  * (FR-034) is enforced elsewhere — via the per-worker heap flag at spawn
- * (T6/T8). Here we model only the admission/concurrency axis: how many
- * concurrent runs a tenant may have in flight, and the live-worker bound.
+ * (T6/T8). Here we model only the per-tenant admission/concurrency axis: how
+ * many concurrent runs a tenant may have in flight.
  *
  * @satisfies FR-032 — per-tenant resource admission replaces the single global limit.
- * @satisfies FR-033 — configurable upper bound on live workers, never exceeded.
  * @satisfies FR-038 — over-quota → 429 + Retry-After, scoped to the offending tenant.
- * @satisfies FR-039 — unhealthy/unavailable worker → 503, scoped to that tenant.
  * @satisfies SC-011 / US8 — anti-starvation: a heavy tenant cannot reject others.
  */
 
@@ -40,7 +39,6 @@ import type { TenantId } from "../domain/tenant.js";
 import type { HostError } from "../domain/host-error.js";
 import {
   tenantOverQuota,
-  workerUnavailable,
   internalInvariantViolated,
 } from "../domain/host-error.js";
 import {
@@ -74,44 +72,21 @@ export interface TenantConcurrency {
 }
 
 /**
- * Global live-worker counters. The supervisor tracks how many workers are live
- * across ALL tenants; `max` is the configurable upper bound (FR-033). Admitting
- * a tenant that has no live worker yet must not push `current` past `max`.
- *
- * INVARIANT: `0 <= current <= max`. Unlike `TenantConcurrency`, `max` here is
- * not reconfigured below `current` by any transition in this module, so the
- * upper bound holds at every step. The bound is upheld by `admitTenant` (refuses
- * a new-worker admit at the bound) and `releaseTenant` (clamps at 0), NOT by a
- * constructor.
- *
- * NOTE (wired supervisor): the supervisor configures this axis NON-BINDING (max
- * set well above any reachable live-worker count) so the worker-lifecycle manager's
- * `liveWorkerCount()` is the SOLE authoritative FR-033 enforcement point. The two
- * are therefore NOT competing counters — admission's `LiveWorkers` is a pure-state
- * mirror, and the lifecycle manager is where the live-worker cap actually binds.
- */
-export interface LiveWorkers {
-  readonly current: number;
-  readonly max: number;
-}
-
-/**
  * Tenant-aware concurrency state. COMPOSES (does not fork) the existing
  * `ConcurrencyState` for the global-execution + per-DAG axes, and adds:
  *   - `perTenant`         — per-tenant concurrency ceilings (FR-032).
  *   - `defaultTenantMax`  — ceiling applied to a tenant with no explicit limit.
- *   - `liveWorkers`       — the global live-worker bound (FR-033).
  *
- * Spec shape (plan): `ConcurrencyState & { perTenant; liveWorkers }`. We model
- * the "& ConcurrencyState" by EMBEDDING it as `inner` rather than spreading, so
- * the inner ADT's invariants stay owned by `domain/concurrency.ts` and cannot
- * drift here.
+ * Spec shape (plan): `ConcurrencyState & { perTenant }`. We model the
+ * "& ConcurrencyState" by EMBEDDING it as `inner` rather than spreading, so the
+ * inner ADT's invariants stay owned by `domain/concurrency.ts` and cannot drift
+ * here. The global live-worker bound (FR-033) is NOT modelled here — the
+ * worker-lifecycle manager is its sole authoritative enforcer (see module doc).
  */
 export interface TenantConcurrencyState {
   readonly inner: ConcurrencyState<TenantId>;
   readonly perTenant: ReadonlyMap<TenantId, TenantConcurrency>;
   readonly defaultTenantMax: number;
-  readonly liveWorkers: LiveWorkers;
   /**
    * Retry-After (seconds) advertised when a tenant is over its OWN ceiling
    * (FR-038). Carried on state (config), surfaced on the `tenant-over-quota`
@@ -124,23 +99,15 @@ export interface TenantConcurrencyState {
 declare const __admitTokenBrand: unique symbol;
 
 /**
- * Opaque proof that a tenant slot (and, when newly minted, a live-worker slot)
- * was acquired through `admitTenant`. Wraps the inner `AcquireToken` so a single
- * release reverses BOTH the inner concurrency slot and the tenant/live-worker
- * counters atomically. Branded so only `admitTenant` can produce one — mirrors
- * the `AcquireToken` discipline (no minting in this production module; the
- * test-only forger lives under `__tests__`).
+ * Opaque proof that a tenant slot was acquired through `admitTenant`. Wraps the
+ * inner `AcquireToken` so a single release reverses BOTH the inner concurrency
+ * slot and the per-tenant counter atomically. Branded so only `admitTenant` can
+ * produce one — mirrors the `AcquireToken` discipline (no minting in this
+ * production module; the test-only forger lives under `__tests__`).
  */
 export interface AdmitToken {
   readonly tenant: TenantId;
   readonly innerToken: AcquireToken<TenantId>;
-  /**
-   * Whether THIS admission caused a live-worker slot to be claimed (the tenant
-   * had no live worker before this admission). On release, only tokens that
-   * claimed a worker decrement `liveWorkers.current`, so the count tracks
-   * distinct live tenants, not in-flight runs.
-   */
-  readonly claimedWorker: boolean;
   /**
    * The injected clock value (`now`) at admission. Reserved for future staleness
    * diagnostics (e.g. detecting tokens held open far longer than a run should
@@ -158,8 +125,6 @@ export interface AdmitToken {
 export interface AdmissionConfig {
   /** Default per-tenant concurrency ceiling (FR-032). */
   readonly defaultTenantMax?: number;
-  /** Upper bound on live workers across all tenants (FR-033). */
-  readonly maxLiveWorkers?: number;
   /** Retry-After (seconds) advertised on `tenant-over-quota` (FR-038). */
   readonly retryAfterSeconds?: number;
 }
@@ -178,20 +143,20 @@ export interface AdmissionConfig {
  * and SC-011 requires that one tenant saturating the box never rejects another.
  * If the inner global limit could bind first, a heavy tenant filling it would
  * starve others — exactly the failure SC-011 forbids. So the inner global is
- * sized so it can NEVER bind before the per-tenant ceilings and the live-worker
- * bound do: the box-wide hard cap is `liveWorkers.max` (FR-033), not a shared
- * inner execution counter. `INNER_GLOBAL_HEADROOM` makes the inner global a
- * non-binding safety net rather than a starvation vector.
+ * sized so it can NEVER bind before the per-tenant ceilings do: the box-wide
+ * hard cap is the worker-lifecycle manager's live-worker bound (FR-033, enforced
+ * there), not a shared inner execution counter. `INNER_GLOBAL_HEADROOM` makes
+ * the inner global a non-binding safety net rather than a starvation vector.
  */
 
 /**
- * Sizes the inner global limit as a large multiple of the live-worker bound so
- * it never binds before per-tenant ceilings / the live-worker cap. The true
- * box-wide cap is the live-worker bound (FR-033); this is just a non-binding
- * upper safety net inherited from the inner ADT.
+ * Sizes the inner global limit large enough that it never binds before the
+ * per-tenant ceilings. The true box-wide cap is the lifecycle manager's
+ * live-worker bound (FR-033); this is just a non-binding upper safety net
+ * inherited from the inner ADT.
  *
  * PRECONDITION: the "inner global never binds" guarantee (and the unreachable-branch
- * 500 in `admitTenant` step 3 that rests on it) holds PROVIDED the sum of per-tenant
+ * 500 in `admitTenant` step 2 that rests on it) holds PROVIDED the sum of per-tenant
  * ceilings stays well under `INNER_GLOBAL_HEADROOM`; revisit if ceilings are ever
  * configured into the hundreds of thousands.
  */
@@ -199,12 +164,12 @@ const INNER_GLOBAL_HEADROOM = 1_000_000;
 
 /**
  * Create initial tenant-aware concurrency state. The per-tenant ceilings
- * (FR-032) and the live-worker bound (FR-033) are the binding admission axes;
- * the inner `ConcurrencyState`'s global limit is deliberately sized so it never
- * binds first (see `INNER_GLOBAL_HEADROOM`), because FR-032 REPLACES the single
- * global concurrency limit with per-tenant quotas.
+ * (FR-032) are the binding admission axis here; the inner `ConcurrencyState`'s
+ * global limit is deliberately sized so it never binds first (see
+ * `INNER_GLOBAL_HEADROOM`), because FR-032 REPLACES the single global
+ * concurrency limit with per-tenant quotas. The live-worker bound (FR-033) is
+ * enforced by the worker-lifecycle manager, not here.
  *
- * @param config.maxLiveWorkers the hard ceiling of FR-033 (default 50).
  * @param config.defaultTenantMax the per-tenant ceiling for unconfigured tenants.
  */
 export const initTenantConcurrency = (
@@ -215,7 +180,6 @@ export const initTenantConcurrency = (
     inner: initConcurrency<TenantId>(INNER_GLOBAL_HEADROOM, defaultTenantMax),
     perTenant: new Map(),
     defaultTenantMax,
-    liveWorkers: { current: 0, max: config.maxLiveWorkers ?? 50 },
     retryAfterSeconds: config.retryAfterSeconds ?? 5,
   };
 };
@@ -242,23 +206,20 @@ export const withTenantLimit = (
 // ---------------------------------------------------------------------------
 
 /**
- * Admit a tenant for a NEW run (FR-032/033/038/039). The gate, in order:
+ * Admit a tenant for a NEW run (FR-032/038). The gate, in order:
  *
  *   1. PER-TENANT CEILING — if THIS tenant is at its own ceiling, refuse with
  *      `tenant-over-quota` (429 + per-tenant Retry-After). This check is scoped
  *      entirely to the caller's own counters, so it can never be triggered by
  *      another tenant's load (FR-032, SC-011).
- *   2. LIVE-WORKER BOUND — if admitting would require a NEW live worker (the
- *      tenant has no in-flight runs yet, so `current === 0`) and the box is
- *      already at the live-worker bound, refuse with `worker-unavailable`
- *      (503, this tenant only — FR-033/FR-039). A tenant that ALREADY has a
- *      live worker (current > 0) does NOT consume a new worker slot, so it is
- *      never blocked by the live-worker bound.
- *   3. INNER CONCURRENCY — defer to the existing `acquire` for the global +
+ *   2. INNER CONCURRENCY — defer to the existing `acquire` for the global +
  *      per-DAG limits, using the tenant id as the inner key. An inner rejection
  *      (global-at-capacity / dag-at-capacity) is mapped to the tenant's own
  *      `tenant-over-quota` so the box-wide global limit also surfaces as a
  *      retriable, tenant-scoped 429 rather than leaking a global signal.
+ *
+ * The global live-worker bound (FR-033) is NOT checked here — the worker-lifecycle
+ * manager is its sole enforcer (see module doc).
  *
  * Returns the new state + an `AdmitToken` on success, or a `HostError`.
  *
@@ -277,14 +238,7 @@ export const admitTenant = (
     return err(tenantOverQuota(tenant, state.retryAfterSeconds));
   }
 
-  // 2. Live-worker bound (FR-033 / FR-039). Only a tenant with no in-flight
-  //    run yet needs a NEW worker slot; one already-live tenant never blocks.
-  const needsWorker = tenantState.current === 0;
-  if (needsWorker && state.liveWorkers.current >= state.liveWorkers.max) {
-    return err(workerUnavailable(tenant));
-  }
-
-  // 3. Inner per-tenant slot accounting, reusing the existing pure ADT verbatim.
+  // 2. Inner per-tenant slot accounting, reusing the existing pure ADT verbatim.
   //    The tenant id is the inner key; its inner per-key max equals the tenant
   //    ceiling (default or explicit via `withTenantLimit`), so the inner per-key
   //    counter and our `perTenant` counter move in lockstep. The inner GLOBAL
@@ -311,21 +265,15 @@ export const admitTenant = (
   const perTenant = new Map(state.perTenant);
   perTenant.set(tenant, { current: tenantState.current + 1, max: tenantState.max });
 
-  const liveWorkers: LiveWorkers = needsWorker
-    ? { ...state.liveWorkers, current: state.liveWorkers.current + 1 }
-    : state.liveWorkers;
-
   const newState: TenantConcurrencyState = {
     ...state,
     inner: innerResult.value.state,
     perTenant,
-    liveWorkers,
   };
 
   const token: AdmitToken = {
     tenant,
     innerToken: innerResult.value.token,
-    claimedWorker: needsWorker,
     admittedAt: now,
   } as unknown as AdmitToken;
 
@@ -334,10 +282,9 @@ export const admitTenant = (
 
 /**
  * Release a previously admitted slot. Always succeeds — reverses the inner
- * concurrency slot, decrements the per-tenant counter (clamped at 0), and, when
- * the token claimed a live worker, decrements the live-worker count (clamped at
- * 0). Idempotency note: like `release` in `domain/concurrency.ts`, calling this
- * more than once with the same token clamps rather than going negative.
+ * concurrency slot and decrements the per-tenant counter (clamped at 0).
+ * Idempotency note: like `release` in `domain/concurrency.ts`, calling this more
+ * than once with the same token clamps rather than going negative.
  */
 export const releaseTenant = (
   state: TenantConcurrencyState,
@@ -354,11 +301,7 @@ export const releaseTenant = (
     });
   }
 
-  const liveWorkers: LiveWorkers = token.claimedWorker
-    ? { ...state.liveWorkers, current: Math.max(0, state.liveWorkers.current - 1) }
-    : state.liveWorkers;
-
-  return { ...state, inner: innerState, perTenant, liveWorkers };
+  return { ...state, inner: innerState, perTenant };
 };
 
 // ---------------------------------------------------------------------------
@@ -376,17 +319,14 @@ export const tenantMax = (state: TenantConcurrencyState, tenant: TenantId): numb
 /**
  * Whether `admitTenant` would succeed RIGHT NOW for this tenant, without
  * mutating state. Consistent with `admitTenant`: false iff the tenant is at its
- * ceiling OR it needs a new worker the box cannot grant OR the inner limiter is
- * exhausted.
+ * ceiling OR the inner limiter is exhausted.
  */
 export const canAdmit = (state: TenantConcurrencyState, tenant: TenantId): boolean => {
   const tenantState =
     state.perTenant.get(tenant) ?? { current: 0, max: state.defaultTenantMax };
   if (tenantState.current >= tenantState.max) return false;
-  const needsWorker = tenantState.current === 0;
-  if (needsWorker && state.liveWorkers.current >= state.liveWorkers.max) return false;
   // Inner global is a non-binding safety net (see INNER_GLOBAL_HEADROOM); checked
-  // for total consistency with `admitTenant`'s step 3, never the binding axis.
+  // for total consistency with `admitTenant`'s step 2, never the binding axis.
   if (state.inner.global.current >= state.inner.global.max) return false;
   return true;
 };

@@ -255,9 +255,9 @@ const main = async () => {
   //
   // SINGLE LIVE-WORKER COUNTER (no double-count): the worker-lifecycle manager
   // is the SOLE live-worker enforcement point (FR-033, via its own
-  // maxLiveWorkers → 503 worker-unavailable). Admission therefore sizes its
-  // live-worker bound effectively unbounded so it NEVER returns
-  // worker-unavailable — admission adds ONLY the per-tenant ceiling (429).
+  // maxLiveWorkers → 503 worker-unavailable). Admission does NOT model a
+  // live-worker bound at all — it adds ONLY the per-tenant ceiling (429), so
+  // there is no second, drift-prone counter to keep in sync.
   //
   // CEILING READ LIVE PER ADMIT: each admit refreshes the tenant's ceiling from
   // the ACTIVE registry config (`admission.maxConcurrentRuns`) via
@@ -271,13 +271,8 @@ const main = async () => {
   // the lifecycle's `clock: () => Date.now()`).
   // Every resolved tenant carries an explicit `admission.maxConcurrentRuns`,
   // refreshed onto state via `withTenantLimit` before each `admitTenant`, so the
-  // `defaultTenantMax` fallback is never the binding ceiling here. The
-  // live-worker bound is sized effectively non-binding so the lifecycle manager
-  // stays the SOLE live-worker enforcement point (FR-033) — admission adds only
-  // the per-tenant ceiling (FR-032).
-  let tenantConc: TenantConcurrencyState = initTenantConcurrency({
-    maxLiveWorkers: Number.MAX_SAFE_INTEGER,
-  });
+  // `defaultTenantMax` fallback is never the binding ceiling here.
+  let tenantConc: TenantConcurrencyState = initTenantConcurrency();
   const noopRelease = (): void => {};
   const admission: AdmissionPort = {
     admit: (tenant: Tenant): AdmissionOutcome => {
@@ -311,8 +306,9 @@ const main = async () => {
           release: noopRelease,
         };
       }
-      // worker-unavailable should not occur given the non-binding live-worker
-      // bound (constraint 2), but handle exhaustively/defensively → 503.
+      // admitTenant only returns tenant-over-quota (above) or, defensively, an
+      // internal-invariant-violated if the non-binding inner global ever rejected
+      // (it cannot in practice). Map that residual to a 503 unavailable.
       return { decision: { kind: "unavailable" }, release: noopRelease };
     },
   };
@@ -340,7 +336,9 @@ const main = async () => {
       // there is no need to materialize + scan the active list on every spawn.
       const cfg = registry.snapshot().entries.get(tenant);
       if (cfg === undefined || cfg.status !== "active") return undefined;
-      return { secretsRef: cfg.secretsRef, eagerPin: cfg.eagerPin };
+      // ADR-0074: carry the tenant's HITL queue-depth ceiling so the lifecycle
+      // manager injects FUGUE_MAX_QUEUED_RUNS into the worker spawn env.
+      return { secretsRef: cfg.secretsRef, eagerPin: cfg.eagerPin, maxQueuedRuns: cfg.admission.maxQueuedRuns };
     },
   };
 

@@ -91,6 +91,7 @@ Start with these to understand the runtime as it stands today:
 | [0071](0071-crash-policy-sync-fail-fast-hitl-durable-resume.md) | Crash policy — sync runs fail fast, HITL runs resume from durable checkpoint | Accepted |
 | [0072](0072-resource-enforcement-single-pod-admission-heap-cap.md) | Resource enforcement — single pod + supervisor admission + per-worker heap cap | Accepted |
 | [0073](0073-tenant-branded-principal-extended-error-taxonomy.md) | Tenant as first-class branded principal + extended per-tenant error taxonomy | Accepted |
+| [0074](0074-per-tenant-hitl-queue-depth-enforcement.md) | Per-tenant HITL queue-depth enforcement via a durable active-run index SET | Accepted |
 
 ## Conventions
 

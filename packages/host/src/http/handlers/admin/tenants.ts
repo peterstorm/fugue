@@ -136,6 +136,15 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
   if (rawSecretsRef === "") {
     return err(tenantConfigInvalid(`tenant '${id}': secretsRef is required (where the worker resolves this tenant's secrets)`));
   }
+  // Parse-don't-validate the admission limits at this trust boundary: both MUST be
+  // numbers. A non-number (`"5"`, `true`, `[]`, `null`) is REJECTED (400) rather
+  // than coerced via `Number(...)` into a valid-looking limit (`Number("5")` → 5,
+  // `Number(true)` → 1) — mirroring the agent-map and secretsRef guards. The
+  // registry smart constructor (`tenantConfig`) is the final non-negative-integer
+  // assertion over these already-typed numbers.
+  if (typeof adm.maxConcurrentRuns !== "number" || typeof adm.maxQueuedRuns !== "number") {
+    return err(tenantConfigInvalid(`tenant '${id}': admission.maxConcurrentRuns and admission.maxQueuedRuns are required and must be numbers`));
+  }
   const base: TenantConfigBase = {
     id,
     team: markTeam(typeof o.team === "string" ? o.team : ""),
@@ -147,8 +156,8 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
     fsRoot: typeof o.fsRoot === "string" ? o.fsRoot : "",
     secretsRef: markSecretsRef(rawSecretsRef),
     admission: {
-      maxConcurrentRuns: Number(adm.maxConcurrentRuns),
-      maxQueuedRuns: Number(adm.maxQueuedRuns),
+      maxConcurrentRuns: adm.maxConcurrentRuns,
+      maxQueuedRuns: adm.maxQueuedRuns,
     },
     eagerPin: o.eagerPin === true,
   };

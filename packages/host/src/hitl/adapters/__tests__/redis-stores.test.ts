@@ -441,3 +441,96 @@ describe("HITL stores — cross-tenant isolation (SECURITY: AD-4 / FR-013 / SC-0
     expect(after.length).toBeGreaterThan(0);
   });
 });
+
+// ── Active-run index + countActiveRuns (ADR-0074) ────────────────────────────
+//
+// A SET-backed RedisPort fake (the suite's other fakes stub set ops) so the real
+// `createRedisRunStore` exercises SADD-on-create / SREM-on-terminal / the
+// self-healing `sMembers`-based count — proving `maxQueuedRuns` can be enforced
+// without `scan` (denied by the per-tenant ACL, ADR-0067).
+const setBackedRedis = () => {
+  const kv = new Map<string, string>();
+  const sets = new Map<string, Set<string>>();
+  const redis: RedisPort = {
+    async get(k) { return ok(kv.get(k) ?? null); },
+    async set(k, v) { kv.set(k, v); return ok("OK"); },
+    async del(k) { const had = kv.delete(k); return ok(had ? 1 : 0); },
+    async scan() { return ok({ cursor: "0", keys: [...kv.keys()] }); },
+    async setNx(k, v) { if (kv.has(k)) return ok(false); kv.set(k, v); return ok(true); },
+    async sAdd(k, m) { const s = sets.get(k) ?? new Set<string>(); const had = s.has(m); s.add(m); sets.set(k, s); return ok(had ? 0 : 1); },
+    async sRem(k, m) { const s = sets.get(k); if (!s || !s.has(m)) return ok(0); s.delete(m); if (s.size === 0) sets.delete(k); return ok(1); },
+    async sMembers(k) { return ok([...(sets.get(k) ?? [])]); },
+  };
+  // `expireRunKey` simulates a TTL-expired / hard-deleted run record while leaving
+  // a stale entry in the active SET — the leak the self-heal must prune.
+  return { redis, kv, sets, expireRunKey: (tenant: string, runId: string) => kv.delete(`fugue:${tenant}:hitl:run:${runId}`) };
+};
+
+describe("RedisRunStore — active-run index (ADR-0074)", () => {
+  const cfg = { ttlSec: 3600 };
+
+  it("create joins the active index; countActiveRuns reflects it", async () => {
+    const { redis } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    const c0 = await store.countActiveRuns();
+    expect(c0.ok && c0.value).toBe(0);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.create(record({ runId: "r2" as RunId }));
+    const c = await store.countActiveRuns();
+    expect(c.ok && c.value).toBe(2);
+  });
+
+  it("a terminal status (completed/failed) leaves the index; a non-terminal status does not", async () => {
+    const { redis } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.create(record({ runId: "r2" as RunId }));
+    await store.create(record({ runId: "r3" as RunId }));
+
+    // suspended is NON-terminal — still occupies a slot.
+    await store.setStatus("r1" as RunId, { kind: "suspended", nodeId: "g" as NodeId, prompt: "p" });
+    const cSusp = await store.countActiveRuns();
+    expect(cSusp.ok && cSusp.value).toBe(3);
+
+    await store.setStatus("r2" as RunId, { kind: "completed", output: 1 });
+    await store.setStatus("r3" as RunId, { kind: "failed", error: { kind: "node-crash", retriability: "retriable", nodeId: "n" as NodeId, message: "x" } });
+    const c = await store.countActiveRuns();
+    expect(c.ok && c.value).toBe(1); // only the suspended r1 remains
+  });
+
+  it("re-settling a terminal run is idempotent — the count never goes negative or drifts", async () => {
+    const { redis } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.setStatus("r1" as RunId, { kind: "completed", output: 1 });
+    await store.setStatus("r1" as RunId, { kind: "completed", output: 1 }); // duplicate settle
+    const c = await store.countActiveRuns();
+    expect(c.ok && c.value).toBe(0);
+  });
+
+  it("self-heals a leaked index member whose run record expired (TTL) — pruned and excluded", async () => {
+    const { redis, expireRunKey, sets } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.create(record({ runId: "r2" as RunId }));
+    // r1's run record TTLs out but its id is still in the active SET (the leak).
+    expireRunKey("tenant-a", "r1");
+    const c = await store.countActiveRuns();
+    expect(c.ok && c.value).toBe(1); // only r2 is backed by a live record
+    // The stale member was pruned from the SET (not merely skipped).
+    expect([...(sets.get("fugue:tenant-a:hitl:active") ?? [])]).toEqual(["r2"]);
+  });
+
+  it("the active index is tenant-scoped — one tenant's count never sees another's runs (SC-001)", async () => {
+    const { redis } = setBackedRedis();
+    const a = createRedisRunStore(redis, TENANT, cfg);
+    const b = createRedisRunStore(redis, OTHER_TENANT, cfg);
+    await a.create(record({ runId: "r1" as RunId }));
+    await b.create(record({ runId: "r2" as RunId }));
+    await b.create(record({ runId: "r3" as RunId }));
+    const ca = await a.countActiveRuns();
+    const cb = await b.countActiveRuns();
+    expect(ca.ok && ca.value).toBe(1);
+    expect(cb.ok && cb.value).toBe(2);
+  });
+});

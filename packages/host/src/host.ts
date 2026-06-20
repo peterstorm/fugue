@@ -593,6 +593,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       executor,
       clock: Date.now,
       newRunId: () => makeRunId(crypto.randomUUID()),
+      // ADR-0074: gate per-tenant outstanding HITL runs at `startRun`. `tenant` is
+      // the worker's resolved id (names its OWN over-quota error); `maxQueuedRuns`
+      // arrives via the spawn env from the tenant registry config. Unset → unlimited
+      // (single-tenant `main.ts` path, or a worker spawned before the field is set).
+      tenant: routedTenant,
+      ...(config.FUGUE_MAX_QUEUED_RUNS !== undefined ? { maxQueuedRuns: config.FUGUE_MAX_QUEUED_RUNS } : {}),
       logger: sharedInfra.logger,
     });
     hitlWorker = runQueue.startWorker(hitlService.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });

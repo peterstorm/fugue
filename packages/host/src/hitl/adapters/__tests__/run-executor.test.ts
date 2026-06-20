@@ -325,3 +325,97 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
     expect(res.ok && res.value.kind).toBe("completed");
   });
 });
+
+// ── Routed-tenant forwarding on the HITL resume path (ADR-0067 / SC-001) ──────
+//
+// The factory's routedTenant→namespace precedence is proven in
+// node-context-factory.test.ts; THESE tests prove the executor actually FORWARDS
+// its `deps.tenant` into the factory's `routedTenant` (a regression dropping it
+// would silently namespace a resumed run's cache/checkpoint keys under the
+// dag.team fallback — an SC-001 escape when the tenant id != the DAG's team).
+
+import { tenantId } from "../../../domain/tenant.js";
+
+const mkTenant = (s: string) => {
+  const r = tenantId(s);
+  if (!r.ok) throw new Error(`bad test tenant: ${s}`);
+  return r.value;
+};
+
+/** A Map-backed RedisPort that RECORDS every key written, for namespace assertions. */
+const capturingRedis = (store: Map<string, string>): RedisPort => ({
+  async get(k) { return ok(store.get(k) ?? null); },
+  async set(k, v) { store.set(k, v); return ok("OK"); },
+  async del(k) { const had = store.delete(k); return ok(had ? 1 : 0); },
+  async scan() { return ok({ cursor: "0", keys: [...store.keys()] }); },
+  async setNx(k, v) { if (store.has(k)) return ok(false); store.set(k, v); return ok(true); },
+  async sAdd() { return ok(1); },
+  async sRem() { return ok(1); },
+  async sMembers() { return ok([]); },
+});
+
+describe("createRunExecutor — forwards deps.tenant as routedTenant (SC-001)", () => {
+  it("namespaces a resumed run's keys under deps.tenant, NEVER the DAG's owning team (id != team)", async () => {
+    // The DAG is owned by team "eng" (see `registered`); the worker is routed for
+    // tenant "acme-prod". A node writes a cache key during the run — it must land
+    // under fugue:acme-prod:, proving deps.tenant flowed into the node context.
+    const store = new Map<string, string>();
+    const infra: SharedInfra = { ...sharedInfra(), redis: capturingRedis(store) };
+    const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
+      if (!ctx.cache) throw new Error("expected a namespaced cache on the node context");
+      await ctx.cache.set("probe", { v: 1 });
+      return ok("done");
+    }) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({
+      sharedInfra: infra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+      tenant: mkTenant("acme-prod"),
+    });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+    expect(res.ok && res.value.kind).toBe("completed");
+
+    const keys = [...store.keys()];
+    const namespaced = keys.filter((k) => k.startsWith("fugue:"));
+    expect(namespaced.length).toBeGreaterThan(0); // non-vacuous: the node DID write
+    expect(namespaced.every((k) => k.startsWith("fugue:acme-prod:"))).toBe(true);
+    expect(keys.some((k) => k.startsWith("fugue:eng:"))).toBe(false);
+  });
+
+  it("OMITTING deps.tenant falls back to the dag.team derivation (single-tenant parity)", async () => {
+    const store = new Map<string, string>();
+    const infra: SharedInfra = { ...sharedInfra(), redis: capturingRedis(store) };
+    const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
+      if (!ctx.cache) throw new Error("expected a namespaced cache on the node context");
+      await ctx.cache.set("probe", { v: 1 });
+      return ok("done");
+    }) as never);
+    const reg = registered(dag);
+    // No `tenant` → the factory derives the namespace from dag.team ("eng").
+    const exec = createRunExecutor({ sharedInfra: infra, getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+    expect(res.ok && res.value.kind).toBe("completed");
+    expect([...store.keys()].some((k) => k.startsWith("fugue:eng:"))).toBe(true);
+  });
+});
+
+describe("createRunExecutor — resume does not depend on a re-presented subject token", () => {
+  it("a USER-identity run resumes and completes on the no-broker static path (no subject token rebound)", async () => {
+    // The executor passes `bindSubjectToken: undefined` on resume: a user run's
+    // verified subject_token is bound at INITIATION, never re-presented across a
+    // park/resume. With no broker wired, the run completes on the static path —
+    // proving resume needs no subject token (and so cannot reuse a stale one). A
+    // regression that started REQUIRING a re-presented token on resume would break
+    // this user-path completion.
+    const user: PersistedIdentity = { kind: "user", sub: "user-123", azp: "fugue-platform" };
+    const dag = singleNodeDag((async () => ok("done")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run({ ...runReq(dag, jobLike, null), identity: user });
+    expect(res.ok && res.value.kind).toBe("completed");
+  });
+});

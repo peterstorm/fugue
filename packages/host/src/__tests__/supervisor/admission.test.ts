@@ -1,14 +1,15 @@
 /**
- * Tests for per-tenant admission + the global live-worker upper bound
- * (T9, FR-032/033/038/039, SC-011, US8).
+ * Tests for per-tenant admission (T9, FR-032/038, SC-011, US8).
  *
  * Unit tests cover: per-tenant ceiling → tenant-over-quota with the right
- * retry-after; live-worker bound → worker-unavailable; releaseTenant decrements
- * tenant + live-worker counters correctly; an already-live tenant is not
- * blocked by the live-worker bound. The property test proves anti-starvation
- * (SC-011): a heavy tenant saturating its OWN ceiling NEVER causes another
- * tenant's admitTenant to be rejected, and the live-worker bound is NEVER
- * exceeded.
+ * retry-after; releaseTenant decrements the per-tenant counter correctly and
+ * clamps at 0; the documented reconfigure-down (transient over-capacity) drain.
+ * The property test proves anti-starvation (SC-011): a heavy tenant saturating
+ * its OWN ceiling NEVER causes another tenant's admitTenant to be rejected.
+ *
+ * NOTE: the global live-worker bound (FR-033) is NOT modelled by admission — the
+ * worker-lifecycle manager is its sole enforcer — so it is tested there
+ * (worker-lifecycle-manager.test.ts), not here.
  */
 
 import { describe, test, expect } from "bun:test";
@@ -50,7 +51,7 @@ const admitOrThrow = (
 
 describe("admitTenant — per-tenant ceiling", () => {
   test("admits up to the ceiling, then refuses with tenant-over-quota", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 3, maxLiveWorkers: 50, retryAfterSeconds: 7 });
+    let state = initTenantConcurrency({ defaultTenantMax: 3, retryAfterSeconds: 7 });
     const t = tid("acme");
 
     for (let i = 0; i < 3; i++) {
@@ -72,7 +73,7 @@ describe("admitTenant — per-tenant ceiling", () => {
   });
 
   test("explicit withTenantLimit overrides the default ceiling", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 10, maxLiveWorkers: 50 });
+    let state = initTenantConcurrency({ defaultTenantMax: 10 });
     const t = tid("small");
     state = withTenantLimit(state, t, 1);
 
@@ -114,7 +115,7 @@ describe("admitTenant — per-tenant ceiling", () => {
 describe("withTenantLimit lowering max below in-flight current (drain-down)", () => {
   test("documented transient over-capacity: state stays consistent, new admits gated until drained, release clamps at 0", () => {
     // Fill a tenant to 3 in-flight.
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 50 });
+    let state = initTenantConcurrency({ defaultTenantMax: 5 });
     const t = tid("acme");
     const tokens: AdmitToken[] = [];
     for (let i = 0; i < 3; i++) {
@@ -162,114 +163,64 @@ describe("withTenantLimit lowering max below in-flight current (drain-down)", ()
   });
 
   test("release clamps current at 0 (never negative) — invariant 0 <= current", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 2 });
+    let state = initTenantConcurrency({ defaultTenantMax: 5 });
     const a = tid("a");
     const { state: s1, token } = admitOrThrow(state, a, 0);
     state = s1;
     state = releaseTenant(state, token);
     expect(tenantCurrent(state, a)).toBe(0);
     // Over-release with a forged equivalent token must clamp, never go negative.
-    const forged = unsafeTestAdmitToken(a, true, 0);
+    const forged = unsafeTestAdmitToken(a, 0);
     state = releaseTenant(state, forged);
     state = releaseTenant(state, forged);
     expect(tenantCurrent(state, a)).toBe(0);
-    expect(state.liveWorkers.current).toBe(0);
   });
 });
 
-// ── live-worker upper bound (FR-033 / FR-039) ─────────────────────────────────
-
-describe("admitTenant — live-worker upper bound", () => {
-  test("never exceeds maxLiveWorkers; a tenant needing a new worker is refused 503", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 2 });
-    const a = tid("a");
-    const b = tid("b");
-    const c = tid("c");
-
-    state = admitOrThrow(state, a, 0).state; // claims worker 1
-    state = admitOrThrow(state, b, 0).state; // claims worker 2 (at bound)
-    expect(state.liveWorkers.current).toBe(2);
-
-    // c has no live worker and the box is at the bound → worker-unavailable.
-    const refused = admitTenant(state, c, 0);
-    expect(isErr(refused)).toBe(true);
-    if (!refused.ok) {
-      expect(refused.error.kind).toBe("worker-unavailable");
-      if (refused.error.kind === "worker-unavailable") expect(refused.error.tenant).toBe(c);
-    }
-    expect(state.liveWorkers.current).toBeLessThanOrEqual(state.liveWorkers.max);
-  });
-
-  test("a tenant that ALREADY has a live worker is not blocked by the bound", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 1 });
-    const a = tid("a");
-
-    // a claims the only worker slot.
-    state = admitOrThrow(state, a, 0).state;
-    expect(state.liveWorkers.current).toBe(1);
-
-    // a's second run does NOT need a new worker → admitted despite bound==1.
-    const second = admitTenant(state, a, 1);
-    expect(isOk(second)).toBe(true);
-    if (second.ok) {
-      expect(second.value.state.liveWorkers.current).toBe(1);
-      expect(tenantCurrent(second.value.state, a)).toBe(2);
-    }
-  });
-});
-
-// ── release (FR-032/033) ───────────────────────────────────────────────────────
+// ── release (FR-032) ───────────────────────────────────────────────────────────
 
 describe("releaseTenant", () => {
-  test("decrements the per-tenant counter and frees the live-worker slot", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 1 });
+  test("decrements the per-tenant counter; a released slot is re-admittable", () => {
+    let state = initTenantConcurrency({ defaultTenantMax: 1 });
     const a = tid("a");
     const { state: s1, token } = admitOrThrow(state, a, 0);
     state = s1;
-    expect(state.liveWorkers.current).toBe(1);
+    expect(tenantCurrent(state, a)).toBe(1);
+    // At the ceiling of 1 — a second admit is refused.
+    expect(admitTenant(state, a, 1).ok).toBe(false);
 
     state = releaseTenant(state, token);
     expect(tenantCurrent(state, a)).toBe(0);
-    // The single live-worker slot is freed so a different tenant can claim it.
-    expect(state.liveWorkers.current).toBe(0);
-
-    const b = tid("b");
-    const r = admitTenant(state, b, 1);
-    expect(isOk(r)).toBe(true);
+    // The freed slot is admittable again.
+    expect(admitTenant(state, a, 2).ok).toBe(true);
   });
 
-  test("only the worker-claiming token frees a worker slot (multi-run tenant)", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 1 });
+  test("releasing one of a tenant's runs leaves the others in flight", () => {
+    let state = initTenantConcurrency({ defaultTenantMax: 5 });
     const a = tid("a");
-    const first = admitOrThrow(state, a, 0); // claimedWorker = true
+    const first = admitOrThrow(state, a, 0);
     state = first.state;
-    const second = admitOrThrow(state, a, 1); // claimedWorker = false
+    const second = admitOrThrow(state, a, 1);
     state = second.state;
-    expect(state.liveWorkers.current).toBe(1);
+    expect(tenantCurrent(state, a)).toBe(2);
 
-    // Releasing the SECOND (non-claiming) run leaves the worker live.
     state = releaseTenant(state, second.token);
-    expect(state.liveWorkers.current).toBe(1);
     expect(tenantCurrent(state, a)).toBe(1);
-
-    // Releasing the FIRST (claiming) run frees the worker.
     state = releaseTenant(state, first.token);
-    expect(state.liveWorkers.current).toBe(0);
     expect(tenantCurrent(state, a)).toBe(0);
   });
 
   test("idempotent over-release clamps at zero (forged token)", () => {
-    let state = initTenantConcurrency({ defaultTenantMax: 5, maxLiveWorkers: 2 });
+    let state = initTenantConcurrency({ defaultTenantMax: 5 });
     const a = tid("a");
     const { state: s1, token } = admitOrThrow(state, a, 0);
     state = s1;
     state = releaseTenant(state, token);
     // Over-release with a forged equivalent token must not go negative.
-    const forged = unsafeTestAdmitToken(a, true, 0);
+    const forged = unsafeTestAdmitToken(a, 0);
     state = releaseTenant(state, forged);
     state = releaseTenant(state, forged);
     expect(tenantCurrent(state, a)).toBe(0);
-    expect(state.liveWorkers.current).toBe(0);
   });
 });
 
@@ -279,7 +230,7 @@ describe("canAdmit", () => {
   test("predicts admitTenant success/failure for a tenant at various fills", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 8 }), fc.integer({ min: 0, max: 8 }), (max, fills) => {
-        let state = initTenantConcurrency({ defaultTenantMax: max, maxLiveWorkers: 50 });
+        let state = initTenantConcurrency({ defaultTenantMax: max });
         const t = tid("t");
         const effective = Math.min(fills, max);
         for (let i = 0; i < effective; i++) {
@@ -297,18 +248,14 @@ describe("canAdmit", () => {
 // ── SC-011: anti-starvation property ──────────────────────────────────────────
 
 describe("SC-011 anti-starvation", () => {
-  test("a heavy tenant's per-tenant fill NEVER causes the victim's rejection; the victim is gated ONLY by the live-worker bound, and only legitimately", () => {
+  test("a heavy tenant's per-tenant fill NEVER causes a victim's rejection; the victim admits up to its OWN ceiling regardless of the heavy tenant's load", () => {
     fc.assert(
       fc.property(
         fc.integer({ min: 1, max: 6 }), // heavy tenant ceiling
         fc.integer({ min: 1, max: 6 }), // victim tenant ceiling
-        // maxLiveWorkers includes 1: with a bound of 1 and the heavy tenant
-        // holding the only worker slot, the victim genuinely CANNOT get a fresh
-        // worker — this is the live-worker-slot contention C1 demands we exercise.
-        fc.integer({ min: 1, max: 8 }),
         fc.integer({ min: 1, max: 30 }), // heavy admit attempts
-        (heavyMax, victimMax, maxLiveWorkers, heavyAttempts) => {
-          let state = initTenantConcurrency({ maxLiveWorkers });
+        (heavyMax, victimMax, heavyAttempts) => {
+          let state = initTenantConcurrency();
           const heavy = tid("heavy");
           const victim = tid("victim");
           state = withTenantLimit(state, heavy, heavyMax);
@@ -318,53 +265,36 @@ describe("SC-011 anti-starvation", () => {
           for (let i = 0; i < heavyAttempts; i++) {
             const r = admitTenant(state, heavy, i);
             if (r.ok) state = r.value.state;
-            // Invariant: live-worker bound never exceeded.
-            expect(state.liveWorkers.current).toBeLessThanOrEqual(state.liveWorkers.max);
             // Invariant: heavy tenant never exceeds its OWN ceiling.
             expect(tenantCurrent(state, heavy)).toBeLessThanOrEqual(heavyMax);
           }
 
-          // Now drive the victim up to its own ceiling. The heavy tenant's
-          // per-tenant saturation must contribute ZERO rejections (SC-011/US8):
-          // the ONLY thing that may legitimately gate a victim admit is the
-          // live-worker bound, and that only when the victim needs a FRESH
-          // worker (its current === 0) and no free slot exists. So the victim is
-          // admittable IFF it already holds a slot (current > 0) OR a free worker
-          // slot exists. This is the full FR-032/FR-033/SC-011 contract.
+          // The victim must be admittable up to its OWN ceiling, UNAFFECTED by the
+          // heavy tenant's saturation (SC-011 / US8): the only thing that may gate a
+          // victim admit is the victim's own ceiling — never another tenant's load.
           for (let i = 0; i < victimMax; i++) {
-            const before = tenantCurrent(state, victim);
-            const holdsSlot = before > 0;
-            const freeWorkerSlot = state.liveWorkers.current < state.liveWorkers.max;
-            const shouldAdmit = holdsSlot || freeWorkerSlot;
-
             const r = admitTenant(state, victim, i);
+            expect(isOk(r)).toBe(true);
+            if (r.ok) state = r.value.state;
+          }
+          expect(tenantCurrent(state, victim)).toBe(victimMax);
 
-            if (shouldAdmit) {
-              expect(isOk(r)).toBe(true);
-              if (r.ok) state = r.value.state;
-            } else {
-              // The ONLY legitimate gate is the live-worker bound — and it must
-              // surface as worker-unavailable for the victim, NOT tenant-over-quota
-              // (the victim is nowhere near its own ceiling).
-              expect(isErr(r)).toBe(true);
-              if (!r.ok) {
-                expect(r.error.kind).toBe("worker-unavailable");
-                if (r.error.kind === "worker-unavailable") expect(r.error.tenant).toBe(victim);
-              }
-              // A blocked fresh-worker admit cannot have advanced the victim.
-              expect(tenantCurrent(state, victim)).toBe(before);
-            }
-            expect(state.liveWorkers.current).toBeLessThanOrEqual(state.liveWorkers.max);
+          // At its own ceiling, the NEXT victim admit is its own over-quota — and
+          // it names the VICTIM, never a cross-tenant signal.
+          const over = admitTenant(state, victim, 999);
+          expect(isErr(over)).toBe(true);
+          if (!over.ok) {
+            expect(over.error.kind).toBe("tenant-over-quota");
+            if (over.error.kind === "tenant-over-quota") expect(over.error.tenant).toBe(victim);
           }
         },
       ),
     );
   });
 
-  test("global live-worker invariant holds across arbitrary interleaved admit/release; every worker-unavailable rejection is correct (box at bound AND tenant had current===0)", () => {
+  test("per-tenant counters stay within [0, max] across arbitrary interleaved admit/release", () => {
     fc.assert(
       fc.property(
-        fc.integer({ min: 1, max: 10 }), // maxLiveWorkers
         fc.array(
           fc.record({
             tenant: fc.constantFrom("a", "b", "c", "d", "e"),
@@ -372,8 +302,8 @@ describe("SC-011 anti-starvation", () => {
           }),
           { maxLength: 80 },
         ),
-        (maxLiveWorkers, ops) => {
-          let state = initTenantConcurrency({ defaultTenantMax: 4, maxLiveWorkers });
+        (ops) => {
+          let state = initTenantConcurrency({ defaultTenantMax: 4 });
           const live: AdmitToken[] = [];
           let clock = 0;
 
@@ -383,26 +313,17 @@ describe("SC-011 anti-starvation", () => {
               const tok = live.pop()!;
               state = releaseTenant(state, tok);
             } else {
-              const beforeCurrent = tenantCurrent(state, t);
-              const beforeWorkers = state.liveWorkers.current;
               const r = admitTenant(state, t, clock++);
               if (r.ok) {
                 state = r.value.state;
                 live.push(r.value.token);
-              } else if (r.error.kind === "worker-unavailable") {
-                // Rejection-correctness, not just safety: a worker-unavailable
-                // is legitimate ONLY when the box was genuinely at the live-worker
-                // bound AND this tenant needed a fresh worker (current === 0).
-                expect(beforeWorkers).toBe(state.liveWorkers.max);
-                expect(beforeCurrent).toBe(0);
-                expect(r.error.tenant).toBe(t);
+              } else {
+                // The only rejection is the tenant's own ceiling (no live-worker axis).
+                expect(r.error.kind).toBe("tenant-over-quota");
               }
             }
-            // Hard invariants at every step.
-            expect(state.liveWorkers.current).toBeLessThanOrEqual(state.liveWorkers.max);
-            expect(state.liveWorkers.current).toBeGreaterThanOrEqual(0);
-            // No reconfigure-down happens in this property, so the steady-state
-            // bound also holds: 0 <= current <= max for every tenant.
+            // Hard invariant at every step: 0 <= current <= max for every tenant
+            // (no reconfigure-down happens in this property).
             for (const [, ts] of state.perTenant) {
               expect(ts.current).toBeGreaterThanOrEqual(0);
               expect(ts.current).toBeLessThanOrEqual(ts.max);

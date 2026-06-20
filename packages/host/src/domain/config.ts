@@ -449,6 +449,16 @@ export const HostConfigSchema = z.object({
   FUGUE_REDIS_ACL_USERNAME: z.string().optional(),
   FUGUE_REDIS_ACL_PASSWORD: z.string().optional(),
   /**
+   * WORKER MODE (ADR-0074): the per-tenant ceiling on outstanding (non-terminal)
+   * HITL runs, injected by the supervisor into this worker's spawn env from the
+   * tenant registry's `admission.maxQueuedRuns`. The worker's `HitlRunService`
+   * refuses `startRun` with `tenant-over-quota` (429) when the active-run count is
+   * already at this limit — the durable-path counterpart to the supervisor's
+   * request-scoped `maxConcurrentRuns` gate. ABSENT → unlimited (single-tenant
+   * `main.ts` path, or a worker spawned before the field is configured).
+   */
+  FUGUE_MAX_QUEUED_RUNS: z.coerce.number().int().min(0).optional(),
+  /**
    * Directory under which per-tenant worker Unix-domain sockets live (T6/T7).
    * The supervisor reverse-proxies inbound HTTP to `<dir>/<tenant>.sock` (0600).
    * This is NOT an inbound public listener (FR-001): the single public HTTP

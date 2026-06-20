@@ -474,4 +474,16 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     });
     await expectSkipped("num-root", { ...validRaw("num-root"), fsRoot: 7 });
   });
+
+  it("skips a record whose admission limits are non-numbers (never coerce via Number(...))", async () => {
+    // A non-number admission limit must skip-as-corrupt, NOT coerce: `Number("5")`
+    // → 5, `Number(true)` → 1, `Number(null)` → 0 would silently round-trip a
+    // malformed value as a valid-looking ceiling. Parity with the string-field
+    // guards above (parse-don't-validate boundary).
+    await expectSkipped("str-conc", { ...validRaw("str-conc"), admission: { maxConcurrentRuns: "5", maxQueuedRuns: 8 } });
+    await expectSkipped("bool-conc", { ...validRaw("bool-conc"), admission: { maxConcurrentRuns: true, maxQueuedRuns: 8 } });
+    await expectSkipped("null-queue", { ...validRaw("null-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: null } });
+    await expectSkipped("arr-queue", { ...validRaw("arr-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: [] } });
+    await expectSkipped("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
+  });
 });

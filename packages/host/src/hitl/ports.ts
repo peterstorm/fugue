@@ -28,14 +28,31 @@ import type { RunRecord, RunStatus, PersistedIdentity } from "./types.js";
  * from the last persisted state.
  */
 export interface RunStorePort {
-  /** Create a fresh run record. Errs if the run id already exists. */
+  /**
+   * Create a fresh run record. Errs if the run id already exists. Also joins the
+   * run to the per-tenant active-run index (ADR-0074) — a fresh run is non-terminal.
+   */
   create(record: RunRecord): Promise<Result<void, HostError>>;
   /** Fetch a run, or `ok(null)` if unknown. */
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
   /** Persist the serialized `{state, context}` checkpoint (per-transition). */
   saveCheckpoint(runId: RunId, checkpoint: string): Promise<Result<void, HostError>>;
-  /** Update the run's lifecycle status. */
+  /**
+   * Update the run's lifecycle status. A TERMINAL status (`completed`/`failed`)
+   * also removes the run from the per-tenant active-run index (ADR-0074); a
+   * non-terminal status leaves the index untouched.
+   */
   setStatus(runId: RunId, status: RunStatus): Promise<Result<void, HostError>>;
+  /**
+   * Count this tenant's NON-terminal (queued / running / suspended) runs — the
+   * `maxQueuedRuns` admission axis (ADR-0074). Read from the per-tenant active-run
+   * index SET (`fugue:<tenant>:hitl:active`) via `sMembers`, NOT `scan` (which the
+   * per-tenant ACL denies, ADR-0067). SELF-HEALING: a member whose run record no
+   * longer exists (TTL-expired / hard-deleted) is pruned and excluded, so the
+   * count never inflates from leaked indices. Bounded O(N) in the set size (which
+   * `maxQueuedRuns` itself bounds).
+   */
+  countActiveRuns(): Promise<Result<number, HostError>>;
 }
 
 /**

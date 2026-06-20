@@ -204,6 +204,16 @@ const deserialize = (raw: string): TenantConfig | undefined => {
       agentClientIdsByDag[dag] = value;
     }
   }
+  // Admission limits MUST round-trip as numbers. A non-number persisted value is a
+  // corrupt record (skip) — never coerce (`Number(true)` → 1, `Number(null)` → 0,
+  // `Number("5")` → 5) a malformed value into a valid-looking limit, mirroring the
+  // string-field guards above. `tenantConfig` is then the final non-negative-integer
+  // assertion over already-typed numbers. Parse-don't-validate boundary.
+  const rawMaxConcurrentRuns = adm.maxConcurrentRuns;
+  const rawMaxQueuedRuns = adm.maxQueuedRuns;
+  if (typeof rawMaxConcurrentRuns !== "number" || typeof rawMaxQueuedRuns !== "number") {
+    return undefined;
+  }
   // Build the validated ACTIVE config through the smart constructor (the parse
   // boundary), then promote to the deregistered variant if the record said so.
   const parsed = tenantConfig({
@@ -217,8 +227,8 @@ const deserialize = (raw: string): TenantConfig | undefined => {
     fsRoot: rawFsRoot,
     secretsRef: markSecretsRef(o.secretsRef),
     admission: {
-      maxConcurrentRuns: Number(adm.maxConcurrentRuns),
-      maxQueuedRuns: Number(adm.maxQueuedRuns),
+      maxConcurrentRuns: rawMaxConcurrentRuns,
+      maxQueuedRuns: rawMaxQueuedRuns,
     },
     eagerPin: Boolean(o.eagerPin),
   });

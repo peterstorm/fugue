@@ -74,26 +74,37 @@ const RunMetaSchema = z.object({
   updatedAtMs: z.number(),
 });
 
+// ── Active-run index (ADR-0074) ──────────────────────────────────────────────
+
+/** A terminal run has left the active set; a non-terminal run still occupies a slot. */
+const isTerminalStatus = (status: RunStatus): boolean =>
+  status.kind === "completed" || status.kind === "failed";
+
 // ── In-Memory Adapter (tests/dev) ───────────────────────────────────────────
 
 /**
  * In-memory run store. No Redis required. Exposes `_runs` for assertions.
  * Semantics match the Redis adapter (create is single-shot; checkpoint/status
- * are independent updates).
+ * are independent updates; an `active` index mirrors the non-terminal runs).
  */
 export const createInMemoryRunStore = (
   now: () => number = Date.now,
 ): RunStorePort & {
   readonly _runs: ReadonlyMap<string, RunRecord>;
+  readonly _active: ReadonlySet<string>;
 } => {
   const runs = new Map<string, RunRecord>();
+  // Mirrors the Redis active-run index SET (ADR-0074): run ids of non-terminal runs.
+  const active = new Set<string>();
   return {
     _runs: runs,
+    _active: active,
     async create(record) {
       if (runs.has(record.runId)) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
       runs.set(record.runId, record);
+      active.add(record.runId); // a fresh run is non-terminal — join the index
       return ok(undefined);
     },
     async get(runId) {
@@ -109,7 +120,16 @@ export const createInMemoryRunStore = (
       const r = runs.get(runId);
       if (!r) return err({ kind: "run-not-found", runId });
       runs.set(runId, { ...r, status, updatedAtMs: now() });
+      if (isTerminalStatus(status)) active.delete(runId); // settled → leave the index
       return ok(undefined);
+    },
+    async countActiveRuns() {
+      // Self-heal (parity with the Redis adapter): drop any indexed id whose run
+      // record no longer exists, then count the live remainder.
+      for (const id of [...active]) {
+        if (!runs.has(id)) active.delete(id);
+      }
+      return ok(active.size);
     },
   };
 };
@@ -121,6 +141,13 @@ export const createInMemoryRunStore = (
 // that builds a run/checkpoint key without a tenant.
 const runKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:run:${runId}`;
 const ckptKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:ckpt:${runId}`;
+/**
+ * The per-tenant active-run index SET (ADR-0074). Holds the run ids of all
+ * non-terminal runs. Read via `sMembers` (NOT `scan`, which the per-tenant ACL
+ * denies — ADR-0067) to count outstanding runs for the `maxQueuedRuns` gate. ONE
+ * key under `~fugue:<tenant>:*`, so the ACL scopes it like every other run key.
+ */
+const activeKey = (tenant: TenantId): string => `fugue:${tenant}:hitl:active`;
 
 /** The metadata half of a `RunRecord` (everything except the checkpoint string). */
 type RunMeta = Omit<RunRecord, "checkpoint">;
@@ -179,6 +206,12 @@ export const createRedisRunStore = (
       }
       const ckpt = await redis.set(ckptKey(tenant, record.runId), checkpoint, expiry);
       if (!ckpt.ok) return err(ckpt.error);
+      // Join the per-tenant active-run index (ADR-0074): a fresh run is non-terminal.
+      // Idempotent (SADD of a present member is a no-op). Fail-closed on a Redis
+      // error — consistent with the meta/ckpt writes above (the meta key's TTL
+      // self-cleans any orphan if this is the op that fails).
+      const idx = await redis.sAdd(activeKey(tenant), record.runId);
+      if (!idx.ok) return err(idx.error);
       return ok(undefined);
     },
 
@@ -206,7 +239,38 @@ export const createRedisRunStore = (
       const metaRes = await readMeta(runId);
       if (!metaRes.ok) return err(metaRes.error);
       if (metaRes.value === null) return err({ kind: "run-not-found", runId });
-      return writeMeta(runId, { ...metaRes.value, status, updatedAtMs: now() });
+      const written = await writeMeta(runId, { ...metaRes.value, status, updatedAtMs: now() });
+      if (!written.ok) return written;
+      if (isTerminalStatus(status)) {
+        // Settled → leave the active-run index (ADR-0074). Idempotent (SREM of an
+        // absent member is a no-op), so a re-settle never drifts the count.
+        const idx = await redis.sRem(activeKey(tenant), runId);
+        if (!idx.ok) return err(idx.error);
+      }
+      return ok(undefined);
+    },
+
+    async countActiveRuns() {
+      // Read the per-tenant active-run index SET (ADR-0074) — `sMembers`, NOT
+      // `scan` (the per-tenant ACL denies enumeration, ADR-0067).
+      const members = await redis.sMembers(activeKey(tenant));
+      if (!members.ok) return err(members.error);
+      let live = 0;
+      for (const id of members.value) {
+        // SELF-HEAL: a member whose run record no longer exists (TTL-expired /
+        // hard-deleted) is a leaked index entry — prune it and exclude it, so the
+        // count never inflates beyond the runs that actually exist. A prune failure
+        // is non-fatal (we simply don't count the stale id); a read failure IS
+        // surfaced (fail-closed) so the gate never admits on a bad count.
+        const exists = await redis.get(runKey(tenant, id as RunId));
+        if (!exists.ok) return err(exists.error);
+        if (exists.value === null) {
+          await redis.sRem(activeKey(tenant), id);
+          continue;
+        }
+        live++;
+      }
+      return ok(live);
     },
   };
 };

@@ -104,7 +104,6 @@ describe("Integration — per-tenant error taxonomy under concurrency (SC-012)",
     let now = 0;
     let admissionState: TenantConcurrencyState = initTenantConcurrency({
       defaultTenantMax: 1000,
-      maxLiveWorkers: 1000,
       retryAfterSeconds: 17, // distinctive per-tenant backoff to assert on
     });
     admissionState = withTenantLimit(admissionState, over.id, 1);

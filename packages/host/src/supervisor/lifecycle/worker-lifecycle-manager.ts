@@ -66,6 +66,14 @@ export interface TenantSpawnConfig {
   readonly secretsRef: SecretsRef;
   readonly eagerPin: boolean;
   /**
+   * Per-tenant ceiling on outstanding HITL runs (ADR-0074, `admission.maxQueuedRuns`).
+   * Injected into the worker's spawn env as `FUGUE_MAX_QUEUED_RUNS` so the worker's
+   * `HitlRunService` enforces it at `startRun`. Sourced from the active tenant
+   * registry config (authoritative, like `eagerPin`); unset only on the
+   * single-tenant path.
+   */
+  readonly maxQueuedRuns?: number;
+  /**
    * Optional per-tenant extra env forwarded to the worker.
    *
    * NOTE (A1): platform-wide config (REDIS_URL, REALM_JWT_ISSUER, …) is NOT
@@ -321,6 +329,14 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
         [WORKER_REDIS_ACL_USERNAME_ENV]: cred.value.username,
         [WORKER_REDIS_ACL_PASSWORD_ENV]: cred.value.password,
       };
+    }
+
+    // Per-tenant HITL queue-depth ceiling (ADR-0074): forward the registry's
+    // `maxQueuedRuns` so the worker's HITL service gates `startRun`. Applied via
+    // `extraEnv` (which `buildWorkerSpawn` merges over the inherited env), so a
+    // stray inherited value can never override this tenant's configured ceiling.
+    if (spawnCfg.maxQueuedRuns !== undefined) {
+      extraEnv = { ...(extraEnv ?? {}), FUGUE_MAX_QUEUED_RUNS: String(spawnCfg.maxQueuedRuns) };
     }
 
     // Enter the pure `spawning` state.

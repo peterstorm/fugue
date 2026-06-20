@@ -441,6 +441,23 @@ describe("malformed register/reconfigure body → 400 (not 500)", () => {
     expect(res!.status).toBe(400);
     expect(h.registry.snapshot().entries.size).toBe(0);
   });
+
+  it("register with a NON-NUMBER admission limit yields 400 (never coerced via Number(...)) and does not mutate", async () => {
+    // `Number("5")` → 5, `Number(true)` → 1 would silently accept a malformed limit
+    // as a valid-looking ceiling. The boundary rejects a non-number with 400 rather
+    // than coercing it (parse-don't-validate parity with the registry deserialize).
+    for (const bad of [
+      { ...validBody("acme"), admission: { maxConcurrentRuns: "5", maxQueuedRuns: 4 } },
+      { ...validBody("acme"), admission: { maxConcurrentRuns: true, maxQueuedRuns: 4 } },
+      { ...validBody("acme"), admission: { maxConcurrentRuns: 2, maxQueuedRuns: null } },
+      { ...validBody("acme"), admission: { maxConcurrentRuns: 2 } }, // missing → not a number
+    ]) {
+      const h = await harness();
+      const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: bad }));
+      expect(res!.status).toBe(400);
+      expect(h.registry.snapshot().entries.size).toBe(0);
+    }
+  });
 });
 
 // ── emitAudit never-throw boundary (C4, SC-008) ─────────────────────────────────

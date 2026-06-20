@@ -10,7 +10,8 @@
  *     RETURNS it to the caller (the worker-lifecycle manager), who injects it into
  *     the owning worker's SPAWN ENV (AD-6, T4) so it flows ONLY into that worker.
  *     (This is the spawn-env channel, distinct from the `SecretsSource` env-file
- *     port that resolves `vault://` refs inside the worker.) The provisioner
+ *     port that dereferences a tenant's secrets ref — an env-file path today,
+ *     Vault later — inside the worker.) The provisioner
  *     NEVER persists it, NEVER stores it on any returned handle, and NEVER logs
  *     it. The password exists in process memory only for the duration of the
  *     `apply` call and the caller's immediate handoff. (See `AppliedAclCredential`
@@ -175,8 +176,9 @@ export const apply = async (
     return err(redisUnavailable("redis-acl-apply"));
   }
 
-  // (5) Hand the credential back for the caller to push to the SecretsSource
-  // channel. The provisioner retains nothing.
+  // (5) Hand the credential back for the caller to inject into the owning
+  // worker's spawn-env channel (distinct from the `SecretsSource` port). The
+  // provisioner retains nothing.
   return ok({ username: spec.username, password, tenant });
 };
 
