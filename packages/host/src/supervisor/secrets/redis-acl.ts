@@ -28,8 +28,9 @@
  * This file is PURE and TOTAL: `buildAclSpec(TenantId)` is a deterministic
  * function of its argument with no I/O, no clock, no randomness. The SECRET
  * (the user's password) is NOT part of the spec — it is minted at apply time by
- * the provisioner and handed straight to the SecretsSource channel, never
- * retained. The spec describes WHAT the user may do, never the credential.
+ * the provisioner and handed straight to the owning worker's spawn-env channel
+ * (distinct from the `SecretsSource` port), never retained. The spec describes
+ * WHAT the user may do, never the credential.
  *
  * SCOPE-ONLY GUARANTEE (the load-bearing invariant):
  *   - EXACTLY ONE key pattern: `~fugue:<tenant>:*`. No `~*`, no `allkeys`, no

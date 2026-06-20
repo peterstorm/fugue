@@ -225,8 +225,8 @@ Key invariants:
 - ADR-0064 — multi-tenant single-host supervisor/worker split: the overall
   approach this secrets decision serves.
 - ADR-0067 — per-tenant Redis ACL: the ACL credential is minted at apply time and
-  handed off to the owning worker through this same `SecretsSource` channel,
-  never retained supervisor-side.
+  handed off to the owning worker through the spawn-env channel (SEPARATE from the
+  `SecretsSource` env-file port), never retained supervisor-side.
 - ADR-0042 — config via Zod env/YAML: establishes the config boundary, keeping
   non-secret configuration parsing separate from the secret-value channel this
   ADR defines.

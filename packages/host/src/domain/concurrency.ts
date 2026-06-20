@@ -181,6 +181,11 @@ export const acquire = <K = DagId>(
     perDag: newPerDag,
   };
 
+  // SOLE production mint seam for the branded token. The `as unknown as` is
+  // required (not laziness): `AcquireToken` carries a `[__acquireTokenBrand]`
+  // symbol property the literal cannot supply, so a single `as` will not compile.
+  // `acquire()` is the only producer (see the brand contract below), which is what
+  // makes the brand an unforgeable proof-of-acquisition outside this module.
   const token = { dagId, acquiredAt: now } as unknown as AcquireToken<K>;
 
   return ok({ state: newState, token });

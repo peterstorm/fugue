@@ -66,12 +66,13 @@ export type RedisAclAdminPort = {
 // ── Credential handoff types ─────────────────────────────────────────────────
 
 /**
- * The SECRET credential `apply` returns for handoff to the SecretsSource channel.
+ * The SECRET credential `apply` returns for handoff to the worker spawn-env channel.
  *
  * CREDENTIAL HANDOFF CONTRACT (AD-6, FR-005/FR-006, SC-002):
  *   - This value is the ONLY place the minted password ever materializes.
- *   - The caller MUST hand it to the SecretsSource channel for the owning worker
- *     and then drop the reference. The supervisor MUST NOT persist it, attach it
+ *   - The caller MUST hand it to the owning worker's spawn-env channel (SEPARATE
+ *     from the `SecretsSource` env-file port) and then drop the reference. The
+ *     supervisor MUST NOT persist it, attach it
  *     to long-lived state, or log it.
  *   - The provisioner itself retains NOTHING: `apply` constructs this object,
  *     issues the ACL command, and returns it. No module-level cache, no logger
@@ -132,7 +133,7 @@ const formatAclPassword = (randomBytes: Uint8Array): string => {
 /**
  * PROVISION (create or update) the per-tenant ACL user over the admin
  * connection, minting a fresh password, and RETURN the credential for handoff to
- * the SecretsSource channel.
+ * the owning worker's spawn-env channel (distinct from the `SecretsSource` port).
  *
  * Steps:
  *   1. Build the PURE spec (`buildAclSpec`) — the scope-only key pattern + the

@@ -224,12 +224,26 @@ const main = async () => {
   // Tenant principal. Own-property safe (the registry is a Map keyed by id, and
   // we scan ACTIVE entries by team). Mints the principal via `markTenant` — the
   // single producer — at the trust seam (registry construction view).
+  // Team→Tenant index, reference-memoized on the registry snapshot. Registry
+  // transitions are immutable (a NEW snapshot reference on every change, the SAME
+  // reference on an idempotent no-op), so caching by snapshot identity makes the
+  // boundary team lookup amortized O(1) instead of an O(N-tenants) rescan +
+  // fresh-array allocation on every inbound request. The principal is minted via
+  // `markTenant` (the single producer) at index-build time; first-writer-wins
+  // preserves the prior `.find` semantics if two active tenants ever shared a team.
+  let teamIndex: { snap: ReturnType<typeof registry.snapshot>; map: Map<string, Tenant> } | undefined;
+  const teamToTenant = (): Map<string, Tenant> => {
+    const snap = registry.snapshot();
+    if (teamIndex && teamIndex.snap === snap) return teamIndex.map;
+    const map = new Map<string, Tenant>();
+    for (const cfg of activeTenants(snap)) {
+      if (!map.has(cfg.team)) map.set(cfg.team, markTenant(cfg.id, cfg.team));
+    }
+    teamIndex = { snap, map };
+    return map;
+  };
   const registryView: TenantRegistryView = {
-    tenantForTeam: (team: string): Tenant | undefined => {
-      const active = activeTenants(registry.snapshot());
-      const cfg = active.find((c) => c.team === team);
-      return cfg ? markTenant(cfg.id, cfg.team) : undefined;
-    },
+    tenantForTeam: (team: string): Tenant | undefined => teamToTenant().get(team),
   };
 
   // NEW-run admission gate (FR-022 + FR-032/FR-038, AD-9): registry
@@ -322,9 +336,10 @@ const main = async () => {
   // sourced from the ACTIVE tenant registry — eagerPin is NEVER defaulted.
   const spawnConfigView: TenantSpawnConfigView = {
     spawnConfigFor: (tenant: TenantId): TenantSpawnConfig | undefined => {
-      const active = activeTenants(registry.snapshot());
-      const cfg = active.find((c) => c.id === tenant);
-      if (cfg === undefined) return undefined;
+      // Direct id-keyed lookup (O(1)): the registry map is keyed by tenant id, so
+      // there is no need to materialize + scan the active list on every spawn.
+      const cfg = registry.snapshot().entries.get(tenant);
+      if (cfg === undefined || cfg.status !== "active") return undefined;
       return { secretsRef: cfg.secretsRef, eagerPin: cfg.eagerPin };
     },
   };

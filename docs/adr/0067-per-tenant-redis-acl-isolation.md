@@ -143,7 +143,8 @@ The mechanism is split into a pure spec and an imperative provisioner:
   on any non-ok admin response it returns `err(redis-unavailable)` and returns
   *no* credential for a user that may not exist. The minted credential
   (`AppliedAclCredential`) is returned to the caller for immediate handoff to the
-  SecretsSource channel (AD-6 / ADR-0069); the provisioner **never** persists or
+  owning worker's spawn-env channel (SEPARATE from the `SecretsSource` env-file
+  port; AD-6 / ADR-0069); the provisioner **never** persists or
   logs it, so it flows only into the owning worker and never lodges in the
   supervisor (FR-005, FR-006).
 

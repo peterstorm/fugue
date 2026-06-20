@@ -40,8 +40,8 @@
 import { match } from "ts-pattern";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
-import { authenticateIdentity } from "../../../supervisor/supervisor.js";
-import type { AuthDeps } from "../../../supervisor/supervisor.js";
+import { authenticateIdentity } from "../../authenticate-identity.js";
+import type { AuthDeps } from "../../authenticate-identity.js";
 import type { AuthIdentity } from "../../../domain/auth.js";
 import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
 import { markTeam } from "../../../domain/auth.js";

@@ -43,17 +43,13 @@ import { emptyRegistry } from "../domain/registry.js";
 import { gitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { httpStatusFor, formatHostError, retryAfterSecondsFor } from "../domain/host-error.js";
-import type { AuthIdentity, Team } from "../domain/auth.js";
-import { constantTimeEqual, isJwtShape } from "../http/middleware/auth.js";
-import type { RealmJwtDeps } from "../http/middleware/auth.js";
-import { hashToken, isTeamTokenShape, markSubjectToken } from "../domain/auth.js";
-import type { SignatureVerifiedClaims } from "../domain/auth.js";
-import type { JwtVerifyError } from "../http/middleware/auth.js";
-import { validateRealmJwtClaims } from "../domain/jwt-validation.js";
+import type { AuthIdentity } from "../domain/auth.js";
+import { authenticateIdentity } from "../http/authenticate-identity.js";
+import type { AuthDeps } from "../http/authenticate-identity.js";
 import type { Tenant, TenantRegistryView } from "../domain/tenant.js";
 import { resolveTenant } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
-import type { RedisConnectivityPort, TokenStorePort, LogPort } from "../ports.js";
+import type { RedisConnectivityPort, LogPort } from "../ports.js";
 import { startRedisProbe } from "../lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "../lifecycle/redis-probe.js";
 import { routeRequest, workerSocketForTenant } from "./routing.js";
@@ -131,115 +127,14 @@ export interface AdmissionPort {
   readonly admit: (tenant: Tenant) => AdmissionOutcome;
 }
 
-// ── Inbound identity authentication (framework-agnostic) ─────────────────────
-
-/**
- * Authenticate an inbound bearer token to an `AuthIdentity`, REUSING the exact
- * primitives the Hono `auth.ts` middleware uses (constant-time admin compare,
- * JWT-shape pre-filter + injected verifier + claim validation, hashed team-token
- * lookup) — but without a Hono context, because the supervisor's listener is a
- * raw `Bun.serve` fetch handler. Same resolution ORDER and same fail-closed
- * semantics as the middleware:
- *   1. admin token (constant-time) → admin
- *   2. JWT-shaped + verifier configured → verify signature + validate claims → user
- *   3. team token (`fug_`) → hash → store lookup → team
- *   4. otherwise → unauthorized
- *
- * Returns `Result<AuthIdentity, HostError>` so the listener maps the error to a
- * status uniformly. An auth-infrastructure failure (JWKS/store outage) surfaces
- * as `redis-unavailable` (503) — the closest existing 503 host error — mirroring
- * the middleware's "auth-service-unavailable" branch, never a 401 that would
- * imply a bad credential.
- */
-export interface AuthDeps {
-  readonly adminToken: string;
-  readonly tokenStore: TokenStorePort;
-  readonly realmJwt?: RealmJwtDeps;
-  readonly logger?: LogPort;
-  /** UNIX-seconds clock for `exp` checks (testability); defaults to wall clock. */
-  readonly now?: () => number;
-}
-
-export const authenticateIdentity = async (
-  deps: AuthDeps,
-  authHeader: string | undefined,
-): Promise<Result<AuthIdentity, HostError>> => {
-  if (authHeader === undefined || !authHeader.startsWith("Bearer ")) {
-    return err({ kind: "unauthorized", reason: "missing or malformed Authorization header" });
-  }
-  const token = authHeader.slice(7);
-  if (token.length === 0) {
-    return err({ kind: "unauthorized", reason: "empty bearer token" });
-  }
-
-  // Path 1: admin token (constant-time, no I/O).
-  if (constantTimeEqual(token, deps.adminToken)) {
-    return ok({ kind: "admin" });
-  }
-
-  // Path 2: fugue-platform OIDC JWT. Only when a verifier is wired AND the token
-  // is JWT-shaped and NOT `fug_`-shaped. FAIL CLOSED — never falls through to the
-  // team path on a verification/claim failure.
-  if (deps.realmJwt && !isTeamTokenShape(token) && isJwtShape(token)) {
-    const realmJwt = deps.realmJwt;
-    let verified: Result<SignatureVerifiedClaims, JwtVerifyError>;
-    try {
-      verified = await realmJwt.verify(token);
-    } catch (e) {
-      deps.logger?.error("[supervisor] JWT verifier threw unexpectedly", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return err({ kind: "redis-unavailable", operation: "jwt-verify" });
-    }
-    if (!verified.ok) {
-      if (verified.error.kind === "unavailable") {
-        deps.logger?.error("[supervisor] JWT signature verification unavailable", { reason: verified.error.reason });
-        return err({ kind: "redis-unavailable", operation: "jwt-verify" });
-      }
-      deps.logger?.warn("[supervisor] JWT signature verification rejected token", { reason: verified.error.reason });
-      return err({ kind: "unauthorized", reason: "invalid token" });
-    }
-    const nowSeconds = deps.now ? deps.now() : Math.floor(Date.now() / 1000);
-    const claimsResult = validateRealmJwtClaims(verified.value, {
-      expectedIss: realmJwt.expectedIss,
-      expectedAud: realmJwt.expectedAud,
-      now: nowSeconds,
-    });
-    if (!claimsResult.ok) {
-      deps.logger?.warn("[supervisor] JWT claim validation failed");
-      return err({ kind: "unauthorized", reason: "invalid token" });
-    }
-    const user = claimsResult.value;
-    const subjectToken = markSubjectToken(token);
-    return ok({
-      kind: "user",
-      sub: user.sub,
-      azp: user.azp,
-      canRunDag: (dagTeam: Team) => realmJwt.authorizeUserRun(user, dagTeam),
-      subjectToken,
-    });
-  }
-
-  // Path 3: team token — hash and look up.
-  try {
-    const hash = await hashToken(token);
-    const resolveResult = await deps.tokenStore.resolve(hash);
-    if (!resolveResult.ok) {
-      deps.logger?.error("[supervisor] Token store unavailable", { errorKind: resolveResult.error.kind });
-      return err({ kind: "redis-unavailable", operation: "token-resolve" });
-    }
-    const grant = resolveResult.value;
-    if (!grant) {
-      return err({ kind: "unauthorized", reason: "invalid token" });
-    }
-    return ok({ kind: "team", team: grant.team, label: grant.label });
-  } catch (e) {
-    deps.logger?.error("[supervisor] Token resolution failed unexpectedly", {
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return err({ kind: "redis-unavailable", operation: "token-resolve" });
-  }
-};
+// ── Inbound identity authentication ──────────────────────────────────────────
+// `authenticateIdentity` + `AuthDeps` were extracted to a shared leaf
+// (`http/authenticate-identity.ts`) so the admin tenants handler can reuse the
+// auth path WITHOUT importing this supervisor module (removing a handler→supervisor
+// back-edge). Imported above for the listener's own use; re-exported here for the
+// composition root and the tests that still import them from the supervisor.
+export { authenticateIdentity };
+export type { AuthDeps };
 
 // ── Supervisor deps + instance ───────────────────────────────────────────────
 

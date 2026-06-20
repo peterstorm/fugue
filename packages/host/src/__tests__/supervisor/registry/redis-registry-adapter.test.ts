@@ -411,4 +411,67 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     expect(entry?.status).toBe("deregistered");
     if (entry?.status === "deregistered") expect(entry.deregisteredAt).toBe(1500);
   });
+
+  // ── per-field corrupt-record skip branches (parse-don't-validate boundary) ──
+  // Each persisted field that is the wrong shape must make the WHOLE record a
+  // skip (not a 500, not a coerced round-trip). A structurally-valid sibling must
+  // still hydrate, and no Redis-outage hook may fire — corruption is not an outage.
+  const validRaw = (id: string): Record<string, unknown> => ({
+    status: "active",
+    id,
+    team: `${id}-team`,
+    keycloakClientMapping: { realm: "fugue", clientId: `${id}-client`, agentClientIdsByDag: { "lead-desk": `${id}-agent` } },
+    fsRoot: `/srv/${id}`,
+    secretsRef: `vault://${id}/secrets`,
+    admission: { maxConcurrentRuns: 4, maxQueuedRuns: 8 },
+    eagerPin: false,
+  });
+
+  const expectSkipped = async (key: string, raw: unknown): Promise<void> => {
+    const fake = createInMemoryRedisFake();
+    const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await seedReg.register(makeConfig("good"), 1000);
+    fake.store.set(`${TENANT_KEY_PREFIX}${key}`, JSON.stringify(raw));
+
+    let dead = 0;
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub, { onRedisDead: () => { dead += 1; } });
+    const hydrated = await reg.hydrate();
+    expect(hydrated.ok).toBe(true);
+    expect(dead).toBe(0); // corrupt record is a skip, NOT a Redis outage
+    expect(reg.lookup(tid("good")).ok).toBe(true); // valid sibling still loads
+    expect(reg.snapshot().entries.has(tid(key))).toBe(false); // corrupt one skipped
+  };
+
+  it("skips a record whose secretsRef is blank or non-string", async () => {
+    await expectSkipped("blank-ref", { ...validRaw("blank-ref"), secretsRef: "   " });
+    await expectSkipped("num-ref", { ...validRaw("num-ref"), secretsRef: 42 });
+  });
+
+  it("skips a deregistered record missing its numeric deregisteredAt tombstone", async () => {
+    // status:deregistered with no `deregisteredAt` (or a non-numeric one) is corrupt.
+    await expectSkipped("no-tomb", { ...validRaw("no-tomb"), status: "deregistered" });
+    await expectSkipped("str-tomb", { ...validRaw("str-tomb"), status: "deregistered", deregisteredAt: "soon" });
+  });
+
+  it("skips a record with a non-string value in agentClientIdsByDag", async () => {
+    await expectSkipped("bad-agent", {
+      ...validRaw("bad-agent"),
+      keycloakClientMapping: { realm: "fugue", clientId: "c", agentClientIdsByDag: { "lead-desk": 99 } },
+    });
+  });
+
+  it("skips a record that coerces a non-string team / realm / clientId / fsRoot", async () => {
+    // Guards the boundary against `String(42)` → "42" silently round-tripping a
+    // malformed scalar as a valid-looking field.
+    await expectSkipped("num-team", { ...validRaw("num-team"), team: 7 });
+    await expectSkipped("num-realm", {
+      ...validRaw("num-realm"),
+      keycloakClientMapping: { realm: 7, clientId: "c", agentClientIdsByDag: {} },
+    });
+    await expectSkipped("num-client", {
+      ...validRaw("num-client"),
+      keycloakClientMapping: { realm: "fugue", clientId: 7, agentClientIdsByDag: {} },
+    });
+    await expectSkipped("num-root", { ...validRaw("num-root"), fsRoot: 7 });
+  });
 });

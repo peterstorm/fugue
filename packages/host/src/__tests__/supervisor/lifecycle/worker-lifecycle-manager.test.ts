@@ -175,6 +175,30 @@ describe("createWorkerLifecycle: ensureWorker (FR-014, AD-7, FR-004)", () => {
     expect(spawned.length).toBe(1); // reused, not respawned
   });
 
+  test("concurrent cold ensureWorker for the SAME tenant coalesces to ONE spawn (single-flight)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+
+    // Two requests race for a cold tenant before either spawn completes. The
+    // spawn-seam single-flight (`inFlightSpawns`) must collapse them onto ONE
+    // `lazySpawn` — else both bind the same UDS (contention, double-charged slot,
+    // an orphan). Both callers still get the SAME live socket.
+    const [r1, r2] = await Promise.all([lc.ensureWorker(tid("acme")), lc.ensureWorker(tid("acme"))]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    expect(spawned.length).toBe(1); // coalesced — exactly one process
+    const sock = workerSocketPath("/run/fugue", "acme");
+    if (r1.ok) expect(r1.value.udsPath).toBe(sock);
+    if (r2.ok) expect(r2.value.udsPath).toBe(sock);
+    expect(lc.liveWorkerCount()).toBe(1); // slot charged once
+  });
+
   test("spawn failure is contained → worker-unavailable for THIS tenant", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
@@ -602,6 +626,46 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
     const dead = await lc.livenessSweep();
     expect(dead).toEqual([]); // ...the sweep skips watched tenants (the exited watcher owns crash detection)
     expect(base.spawned.length).toBe(1); // no sweep-driven respawn
+    expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("overlapping sweep ticks do not double-fire onCrash (re-entrancy guard)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const base = makeSpawn();
+    // A liveness probe that BLOCKS on its first call until released, so a second
+    // tick can start while the first is mid-flight (and still holds the guard).
+    let releaseProbe!: () => void;
+    const probeGate = new Promise<void>((r) => { releaseProbe = r; });
+    let isAliveCalls = 0;
+    const proc: ProcManagePort = {
+      signal: base.proc.signal,
+      isAlive: async (_pid) => {
+        isAliveCalls += 1;
+        await probeGate;
+        return false; // the re-parented pid is dead
+      },
+    };
+    seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: true });
+    const lc = createWorkerLifecycle({
+      spawn: base.spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: true } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.reconcileReadopt();
+
+    // Tick 1 starts and parks on the probe gate while holding `livenessSweepRunning`.
+    // Tick 2 starts WHILE tick 1 is in-flight: the guard must early-return [] WITHOUT
+    // probing or driving a second onCrash for the same dead worker.
+    const tick1 = lc.livenessSweep();
+    const tick2 = lc.livenessSweep();
+    expect(await tick2).toEqual([]); // re-entrancy guard: skipped
+    expect(isAliveCalls).toBe(1); // tick 2 never reached the probe
+
+    releaseProbe();
+    expect(await tick1).toEqual([tid("acme")]);
+    // onCrash fired exactly ONCE → exactly one respawn, the slot restored once.
+    expect(base.spawned.filter((s) => (s.spec.tenant as unknown as string) === "acme").length).toBe(1);
     expect(lc.liveWorkerCount()).toBe(1);
   });
 });

@@ -177,6 +177,22 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   const km = o.keycloakClientMapping as Record<string, unknown> | undefined;
   const adm = o.admission as Record<string, unknown> | undefined;
   if (!km || !adm) return undefined;
+  // String-typed persisted fields MUST round-trip as strings. A non-string value
+  // is a corrupt record (skip), mirroring the id / secretsRef / agent-map branches
+  // above — never coerce (`String(42)` → "42") a malformed value into a
+  // valid-looking team / realm / clientId / fsRoot. Parse-don't-validate boundary.
+  const rawTeam = o.team;
+  const rawRealm = km.realm;
+  const rawClientId = km.clientId;
+  const rawFsRoot = o.fsRoot;
+  if (
+    typeof rawTeam !== "string" ||
+    typeof rawRealm !== "string" ||
+    typeof rawClientId !== "string" ||
+    typeof rawFsRoot !== "string"
+  ) {
+    return undefined;
+  }
   // Sanitize the DAG→client map: every value must be a string. A non-string value
   // is a corrupt record (skip), mirroring the register-boundary parse — never cast
   // a malformed value through as a client id. Own enumerable properties only.
@@ -192,13 +208,13 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   // boundary), then promote to the deregistered variant if the record said so.
   const parsed = tenantConfig({
     id: idR.value,
-    team: markTeam(String(o.team ?? "")),
+    team: markTeam(rawTeam),
     keycloakClientMapping: {
-      realm: String(km.realm ?? ""),
-      clientId: String(km.clientId ?? ""),
+      realm: rawRealm,
+      clientId: rawClientId,
       agentClientIdsByDag,
     },
-    fsRoot: String(o.fsRoot ?? ""),
+    fsRoot: rawFsRoot,
     secretsRef: markSecretsRef(o.secretsRef),
     admission: {
       maxConcurrentRuns: Number(adm.maxConcurrentRuns),
@@ -290,19 +306,26 @@ export const createRedisTenantRegistry = (
   seed: TenantRegistry = emptyRegistry(),
 ): RedisTenantRegistry => {
   let registry = seed;
-  // Local mirror of the host's degraded edge, kept in lock-step with the
-  // onRedisDead/onRedisAlive hooks. This is what `resolveForNewRun` consults to
-  // fail closed (FR-022) WITHOUT reaching back into host-state.ts — the adapter
-  // owns the seam the supervisor's NEW-run admission gate consumes.
-  let degraded = false;
+  // The host's degraded edge, mirrored here so `resolveForNewRun` can fail closed
+  // (FR-022) WITHOUT reaching back into host-state.ts. It is split by SIGNAL SOURCE
+  // so the two independent writers never fight:
+  //   - `writeDegraded` is owned by the write/hydrate path (`dead()`/`alive()`),
+  //     kept in lock-step with the onRedisDead/onRedisAlive hooks.
+  //   - `probeDegraded` is owned by the liveness-probe edge (`markRedisDegraded`).
+  // `resolveForNewRun` gates on EITHER. Each source clears only its OWN flag, so a
+  // successful write can no longer clear a probe-asserted outage (nor vice-versa):
+  // the fail-closed state stays monotonic until the responsible signal recovers,
+  // closing the narrow fail-OPEN window a single shared flag left open.
+  let writeDegraded = false;
+  let probeDegraded = false;
 
   const dead = (operation: string): HostError => {
-    degraded = true;
+    writeDegraded = true;
     hooks.onRedisDead?.();
     return redisUnavailable(operation);
   };
   const alive = (): void => {
-    degraded = false;
+    writeDegraded = false;
     hooks.onRedisAlive?.();
   };
 
@@ -354,17 +377,19 @@ export const createRedisTenantRegistry = (
 
     resolveForNewRun: (id) =>
       // FR-022 fail-closed: refuse to resolve a NEW run on possibly-stale config
-      // while Redis is down; otherwise delegate to the fail-closed core lookup.
-      degraded ? err(redisUnavailable("tenant-resolve")) : coreLookup(registry, id),
+      // while Redis is down (per EITHER signal); else delegate to the core lookup.
+      writeDegraded || probeDegraded
+        ? err(redisUnavailable("tenant-resolve"))
+        : coreLookup(registry, id),
 
     markRedisDegraded: (isDead) => {
-      // Drive the SAME `degraded` flag `resolveForNewRun` consults, so the
-      // supervisor's liveness probe gates NEW-run admission (FR-022) without a
+      // Drive the probe-owned `probeDegraded` flag `resolveForNewRun` also consults,
+      // so the supervisor's liveness probe gates NEW-run admission (FR-022) without a
       // registry write. We do NOT fire the onRedisDead/onRedisAlive hooks here:
       // those drive the host-state degraded MACHINE, which the supervisor's probe
-      // already drives directly (avoiding a double-transition). This only flips
-      // the new-run gate.
-      degraded = isDead;
+      // already drives directly (avoiding a double-transition). This only flips the
+      // probe leg of the new-run gate; the write path owns its own `writeDegraded`.
+      probeDegraded = isDead;
     },
 
     register: async (cfg, now) => {
