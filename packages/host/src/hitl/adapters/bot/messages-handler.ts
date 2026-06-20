@@ -200,12 +200,53 @@ export const handleBotActivity = async (
   const action = toAction(decision, str(data.reason), actor);
   if (action === null) return messageInvokeResponse(`Unknown decision '${decision}'.`);
 
-  // 4. The gate must still be open. If the run already resolved, refresh the
-  // card to say so rather than recording a stale decision.
+  // 4. Load the run, then AUTHORIZE BEFORE disclosing ANY run state — PARITY with
+  //    the HTTP approve path (`runs.ts#createApproveRunHandler`: getRun → authorize
+  //    → only then reveal status). The card `data` (runId/nodeId) is client-supplied
+  //    and a Bot-Framework token only proves the request came from Bot Framework,
+  //    NOT that this clicker is authorized for this run's team. Checking run
+  //    existence/status BEFORE authz (as this handler previously did) lets any
+  //    mapped approver of ANY team probe arbitrary runIds and learn whether a run
+  //    exists and its lifecycle stage for OTHER teams' runs. So every not-authorized
+  //    / unknown-run outcome returns the SAME generic refusal — no existence or
+  //    status detail leaks to an unauthorized clicker.
   const fetched = await deps.hitl.getRun(runId);
   if (!fetched.ok) return messageInvokeResponse("Could not load the run.");
   const record = fetched.value;
-  if (record === null) return messageInvokeResponse(`Run '${runId}' not found.`);
+  if (record === null) {
+    // No record → no owning team to authorize against. By design indistinguishable
+    // from an unauthorized click: return the generic refusal so a missing run is
+    // not an existence oracle for an unauthorized prober.
+    return messageInvokeResponse("You are not authorized to act on this review.");
+  }
+
+  // ── Approver authorization (FR-041, US5, SC-006) — BEFORE any state disclosure ──
+  // Resolve the run's DAG-owning team, resolve the clicker's `aadObjectId` to an
+  // approver identity (fail-closed on an unknown id), and gate on the SAME
+  // `canAccessDag` predicate the HTTP path uses. A non-member's (or unknown user's)
+  // click is REFUSED with NO run detail and `recordDecision` is NEVER reached
+  // (SC-006 — zero side effect on refusal).
+  const dagTeam = deps.resolveDagTeam(record.dagId);
+  if (dagTeam === undefined) {
+    // The DAG is no longer registered — its owning team can't be established, so
+    // the decision can't be authorized. Fail closed.
+    deps.logger?.warn?.("hitl/bot: refusing decision — run references an unregistered DAG", { runId, dagId: record.dagId });
+    return messageInvokeResponse("You are not authorized to act on this review.");
+  }
+  const approver = approverTeamIdentity(deps.approverTeams, aadObjectId);
+  if (approver === undefined || !canAccessDag(approver, dagTeam)) {
+    // Unknown approver (no aadObjectId / unmapped) OR a member of a DIFFERENT
+    // team. Refuse WITHOUT recording — one channel's members cannot approve
+    // another team's runs. Identical outcome (no decision, no detail) whether the
+    // user is unknown or merely not a member, so the refusal leaks neither
+    // membership nor run state.
+    deps.logger?.warn?.("hitl/bot: refusing decision — approver not authorized for the run's team", { runId, dagTeam });
+    return messageInvokeResponse("You are not authorized to act on this review.");
+  }
+
+  // 5. AUTHORIZED. Only now may run state be disclosed. The gate must still be
+  //    open; if the run already resolved, refresh the card to say so rather than
+  //    recording a stale decision.
   if (record.status.kind !== "suspended") {
     // `queued`/`running` are TRANSIENT, not terminal: the run may be mid-slice
     // with its `suspended` status not yet folded back into the store (the notify
@@ -227,30 +268,6 @@ export const handleBotActivity = async (
   // refresh the stale card instead.
   if (record.status.nodeId !== nodeId) {
     return cardInvokeResponse(buildResolvedCard({ runId, nodeId, outcome: "This review has moved on to a later step; use the current review card." }));
-  }
-
-  // ── Approver authorization (FR-041, US5, SC-006) — PARITY with the HTTP path ──
-  // The HTTP approve path runs `canAccessDag(identity, registered.team)` before
-  // recording (`runs.ts#authorizeRunAccess`). Mirror it EXACTLY here: resolve the
-  // run's DAG-owning team, resolve the clicker's `aadObjectId` to an approver
-  // identity (fail-closed on an unknown id), and gate on the SAME `canAccessDag`
-  // predicate. A non-member's (or unknown user's) click is REFUSED and
-  // `recordDecision` is NEVER reached (SC-006 — zero side effect on refusal).
-  const dagTeam = deps.resolveDagTeam(record.dagId);
-  if (dagTeam === undefined) {
-    // The DAG is no longer registered — its owning team can't be established, so
-    // the decision can't be authorized. Fail closed (mirrors the HTTP 404 path).
-    deps.logger?.warn?.("hitl/bot: refusing decision — run references an unregistered DAG", { runId, dagId: record.dagId });
-    return messageInvokeResponse("You are not authorized to act on this review.");
-  }
-  const approver = approverTeamIdentity(deps.approverTeams, aadObjectId);
-  if (approver === undefined || !canAccessDag(approver, dagTeam)) {
-    // Unknown approver (no aadObjectId / unmapped) OR a member of a DIFFERENT
-    // team. Refuse WITHOUT recording — one channel's members cannot approve
-    // another team's runs. Identical outcome (no decision) whether the user is
-    // unknown or merely not a member, so the refusal does not leak membership.
-    deps.logger?.warn?.("hitl/bot: refusing decision — approver not authorized for the run's team", { runId, dagTeam });
-    return messageInvokeResponse("You are not authorized to act on this review.");
   }
 
   const recorded = await deps.hitl.recordDecision(record.runId, record.status.nodeId, action);

@@ -154,6 +154,34 @@ export const adoptLive = (
 });
 
 /**
+ * Re-adoption of a DRAINING worker (SC-006, FR-017/FR-019/FR-020): a supervisor
+ * restart found this tenant's worker still alive AND its persisted record carried
+ * `health: "draining"` — i.e. it had been SIGTERM'd to drain and is finishing its
+ * in-flight work. It MUST be re-adopted as `draining`, NOT `live`: `canServe` is
+ * false for `draining`, so the supervisor never routes NEW work to a worker that
+ * was deliberately drained (re-adopting it as `live` would defeat the drain). It
+ * still `occupiesSlot` (the process + socket survive), so the slot stays counted
+ * until the worker truly exits — at which point the liveness sweep lands the
+ * pure `drainComplete` transition (terminal `evicted`), mirroring the spawned-
+ * worker exit watcher. `drainStartedAt` is the persisted record's `startedAt`
+ * (which `persistRecord` stores as the drain-start instant for a draining record).
+ */
+export const adoptDraining = (
+  tenant: TenantId,
+  eagerPin: boolean,
+  pid: number,
+  udsPath: string,
+  drainStartedAt: number,
+): WorkerState => ({
+  phase: "draining",
+  tenant,
+  eagerPin,
+  pid,
+  udsPath,
+  drainStartedAt,
+});
+
+/**
  * Record activity on a live worker — refreshes the idle clock. Pure: returns a
  * new state with `lastActivityAt` advanced. Valid from: live. (Used so idle-evict
  * measures from the LAST request, not from spawn.)

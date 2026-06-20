@@ -68,6 +68,8 @@ const lifecycleLiveByTenant = (sockOf: (t: TenantId) => string): WorkerLifecycle
   onCrash: async () => ok(undefined),
   reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
   liveWorkerCount: () => 1,
+  idleEvictSweep: async () => [],
+  livenessSweep: async () => [],
 });
 
 /**

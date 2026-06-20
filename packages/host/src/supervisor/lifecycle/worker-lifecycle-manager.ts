@@ -39,6 +39,7 @@ import {
   requestWorker,
   workerLive,
   adoptLive,
+  adoptDraining,
   touch,
   idleEvict,
   isIdleEvictable,
@@ -612,7 +613,18 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // default to false.
       const spawnCfg = tenants.spawnConfigFor(record.tenant);
       const eagerPin = spawnCfg !== undefined ? spawnCfg.eagerPin : record.eagerPin;
-      const state = adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
+      // FR-017 fidelity: a record persisted as `draining` (it had been SIGTERM'd to
+      // drain) that still answers its UDS MUST be re-adopted as `draining`, NOT
+      // forced to `live`. `adoptLive` would set `canServe` true and `ensureWorker`
+      // would route NEW traffic to a worker we deliberately drained. `adoptDraining`
+      // keeps `canServe` false (no new routing) while still counting the slot
+      // (`occupiesSlot`) and letting the liveness sweep finalise it via
+      // `drainComplete` when it exits. `record.startedAt` is the drain-start instant
+      // for a draining record (see `persistRecord`).
+      const state =
+        record.health === "draining"
+          ? adoptDraining(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt)
+          : adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
       workers.set(record.tenant, state);
       adoptedTenants.push(record.tenant);
     }
@@ -707,6 +719,26 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
           continue;
         }
         if (alive) continue;
+        // Re-fetch the CURRENT state to branch on phase AND guard against a
+        // concurrent transition/replacement: only finalise THIS dead incarnation.
+        const cur = workers.get(tenant);
+        if (cur === undefined || (cur.phase !== "live" && cur.phase !== "draining") || cur.pid !== pid) continue;
+        if (cur.phase === "draining") {
+          // A RE-ADOPTED draining worker (no exited watcher) has now exited — that
+          // is the EXPECTED end of a graceful drain (FR-017), NOT a crash. Mirror
+          // the spawned-worker exit watcher: land the pure `drainComplete` (→
+          // terminal `evicted`), free the slot + record, and DO NOT restart it
+          // (a worker SIGTERM'd to drain must not be resurrected).
+          logger.info("[worker-lifecycle] re-adopted draining worker has exited — drain complete (no restart)", { tenant, pid });
+          const done = drainComplete(cur, clock());
+          if (!done.ok) {
+            logger.error("[worker-lifecycle] drainComplete rejected on draining liveness-death (invariant)", { tenant });
+          }
+          workers.delete(tenant);
+          await removeRecord(tenant);
+          dead.push(tenant);
+          continue;
+        }
         logger.warn("[worker-lifecycle] re-adopted worker is dead (no exited watcher) — driving crash/restart", { tenant, pid });
         // `null` exit code: a re-parented worker has no observable exit code.
         const r = await onCrash(tenant, null);

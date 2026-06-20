@@ -15,6 +15,7 @@ import {
   requestWorker,
   workerLive,
   adoptLive,
+  adoptDraining,
   touch,
   idleEvict,
   isIdleEvictable,
@@ -66,6 +67,28 @@ describe("worker-lifecycle: lazy spawn → live", () => {
       expect(live.eagerPin).toBe(true);
     }
     expect(canServe(live)).toBe(true);
+  });
+
+  test("adoptDraining re-adopts a draining worker as draining — NOT live (FR-017, SC-006)", () => {
+    // A worker persisted as `draining` (SIGTERM'd to drain) that survived a
+    // supervisor restart must be re-adopted as DRAINING, never resurrected as
+    // `live` — otherwise `canServe` would be true and the supervisor would route
+    // NEW traffic to a worker we deliberately drained.
+    const draining = adoptDraining(T, false, 999, "/run/fugue/acme.sock", 500);
+    expect(draining.phase).toBe("draining");
+    if (draining.phase === "draining") {
+      expect(draining.pid).toBe(999);
+      expect(draining.udsPath).toBe("/run/fugue/acme.sock");
+      expect(draining.drainStartedAt).toBe(500); // the persisted drain-start instant
+      expect(draining.eagerPin).toBe(false);
+    }
+    expect(canServe(draining)).toBe(false); // NOT served new traffic
+    expect(occupiesSlot(draining)).toBe(true); // still counts against the live cap
+    expect(udsPathOf(draining)).toBe("/run/fugue/acme.sock");
+    // The drain can still complete from a re-adopted draining state (no new spawn).
+    const evicted = unwrap(drainComplete(draining, 600));
+    expect(evicted.phase).toBe("evicted");
+    expect(occupiesSlot(evicted)).toBe(false);
   });
 });
 

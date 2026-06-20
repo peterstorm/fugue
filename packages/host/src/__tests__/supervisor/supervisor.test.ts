@@ -101,6 +101,8 @@ const lifecycleLive = (udsPath: string): WorkerLifecyclePort => ({
   onCrash: async () => ok(undefined),
   reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
   liveWorkerCount: () => 1,
+  idleEvictSweep: async () => [],
+  livenessSweep: async () => [],
 });
 
 // Records every tenant id passed to `ensureWorker`, while delegating to a live
@@ -131,6 +133,8 @@ const lifecycleDown: WorkerLifecyclePort = {
   onCrash: async () => ok(undefined),
   reconcileReadopt: async () => ok({ adopted: [], pruned: [] }),
   liveWorkerCount: () => 0,
+  idleEvictSweep: async () => [],
+  livenessSweep: async () => [],
 };
 
 const aliveRedis: RedisConnectivityPort = { ping: async () => ok(undefined) };

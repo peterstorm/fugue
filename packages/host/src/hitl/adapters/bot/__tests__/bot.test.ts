@@ -467,6 +467,60 @@ describe("bot messages handler — approver authorization (FR-041, SC-006)", () 
     expect((res.body as { type: string; value: string }).value).toBe("You are not authorized to act on this review.");
     expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
   });
+
+  // ── Authz-before-disclosure: no run existence/status oracle for the unauthorized ──
+  // Authorization runs BEFORE any run-state check (PARITY with the HTTP path,
+  // which authorizes before revealing `run-not-suspended`). So an unauthorized
+  // clicker — a verified Bot-Framework user who is a mapped approver of ANOTHER
+  // team — must receive the SAME generic refusal regardless of whether the probed
+  // run is completed, moved-on, or non-existent: they learn neither that the run
+  // exists nor its lifecycle stage. Mallory (∈ "marketing") is not on the
+  // lead-desk team "sales".
+  it("oracle-close: an unauthorized clicker probing an ALREADY-COMPLETED run gets the generic refusal, not its status", async () => {
+    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "completed", output: 1 } })) });
+    const res = await handleBotActivity(
+      botDeps(hitl),
+      { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Mallory", aadObjectId: "aad-mallory" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { type: string; value: string }).value).toBe("You are not authorized to act on this review.");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+  });
+
+  it("oracle-close: an unauthorized clicker probing a MOVED-ON run gets the generic refusal, not 'moved on'", async () => {
+    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: "ok?" } })) });
+    const res = await handleBotActivity(
+      botDeps(hitl),
+      { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Mallory", aadObjectId: "aad-mallory" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { type: string; value: string }).value).toBe("You are not authorized to act on this review.");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+  });
+
+  it("oracle-close: a probe for a NON-EXISTENT run returns the generic refusal, not 'not found' (no existence oracle)", async () => {
+    const hitl = fakeHitl({ getRun: async () => ok(null) });
+    const res = await handleBotActivity(
+      botDeps(hitl),
+      { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Mallory", aadObjectId: "aad-mallory" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { type: string; value: string }).value).toBe("You are not authorized to act on this review.");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+  });
+
+  it("an AUTHORIZED member STILL sees run status after authz (reorder preserves legitimate disclosure)", async () => {
+    // Authorized users keep getting the informative resolved card — the reorder
+    // gates disclosure on authz, it does not suppress it for members.
+    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "completed", output: 1 } })) });
+    const res = await handleBotActivity(
+      botDeps(hitl),
+      { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Alice", aadObjectId: "aad-alice" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { type: string }).type).toBe("application/vnd.microsoft.card.adaptive");
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+  });
 });
 
 // ── serviceUrl allowlist ───────────────────────────────────────────────────

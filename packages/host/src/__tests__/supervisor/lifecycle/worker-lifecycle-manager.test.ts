@@ -515,6 +515,33 @@ describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () =>
     expect(evicted).toEqual([tid("acme")]);
     expect(lc.liveWorkerCount()).toBe(0);
   });
+
+  test("re-adopts a DRAINING record as draining (NOT live) so it is not served new traffic (FR-017)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const base = makeSpawn();
+    // Persisted as DRAINING (SIGTERM'd to drain before the supervisor restart) and
+    // still answering its UDS (probe true) → it is re-adopted.
+    await seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "draining", eagerPin: false });
+    const lc = createWorkerLifecycle({
+      spawn: base.spawn, proc: base.proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    const r = await lc.reconcileReadopt();
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.adopted).toEqual([tid("acme")]);
+    expect(lc.liveWorkerCount()).toBe(1); // a draining worker still occupies a slot
+    expect(base.spawned.length).toBe(0); // adopted — never spawned by THIS process
+
+    // THE FIX: a re-adopted draining worker is NOT `live`, so `ensureWorker` must
+    // NOT route NEW traffic to it — it lazy-spawns a FRESH worker instead. Had it
+    // been wrongly adopted as `live` (the bug), `ensureWorker` would return the
+    // drained worker's socket with NO new spawn, defeating the drain.
+    const routed = await lc.ensureWorker(tid("acme"));
+    expect(routed.ok).toBe(true);
+    expect(base.spawned.length).toBe(1); // fresh spawn — the drained worker is not reused
+  });
 });
 
 // ── crash-exit watcher: handle.exited drives onCrash (FR-014/FR-015, AD-8) ──────
@@ -760,6 +787,33 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
     // onCrash fired exactly ONCE → exactly one respawn, the slot restored once.
     expect(base.spawned.filter((s) => (s.spec.tenant as unknown as string) === "acme").length).toBe(1);
     expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("a re-adopted DRAINING worker that exits is finalised via drainComplete — NOT restarted (FR-017)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const base = makeSpawn();
+    const { proc, kill } = controllableProc(base.proc);
+    // Re-adopted as DRAINING (a worker SIGTERM'd to drain that survived the restart).
+    seed(fake, { tenant: tid("acme"), pid: 7, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "draining", eagerPin: false });
+    const lc = createWorkerLifecycle({
+      spawn: base.spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.reconcileReadopt();
+    expect(lc.liveWorkerCount()).toBe(1); // draining slot counted
+
+    // The drained, re-parented worker finishes its in-flight work and exits.
+    kill(7);
+    const finalised = await lc.livenessSweep();
+    expect(finalised).toEqual([tid("acme")]);
+    // drainComplete path (mirrors the spawned-worker exit watcher): slot freed,
+    // record removed, and NOT respawned — a worker SIGTERM'd to drain must not be
+    // resurrected, UNLIKE a LIVE re-adopted crash (which the prior test restarts).
+    expect(base.spawned.length).toBe(0); // NO restart
+    expect(lc.liveWorkerCount()).toBe(0); // slot released
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false); // record removed
   });
 });
 
