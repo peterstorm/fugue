@@ -59,6 +59,25 @@ describe("env-file SecretsSource", () => {
       expect(r.value).toEqual({ PEM: "line1\nline2", Q: 'a"b' });
     });
 
+    it("fails closed on an unterminated value whose final quote is escaped", () => {
+      // File content K="abc\"  — opening quote, abc, an ESCAPED \", and NO real
+      // closing quote. The trailing `"` is escaped, so the value is unterminated:
+      // it must be config-invalid, never a silently-truncated `abc\`.
+      const r = parseEnvFile("/ref", 'K="abc\\"\n');
+      expect(isErr(r)).toBe(true);
+      if (!isErr(r)) return;
+      expect(r.error.kind).toBe("config-invalid");
+    });
+
+    it("treats an escaped trailing backslash as a real terminator", () => {
+      // File content K="abc\\"  — the final `"` IS a terminator (the backslash
+      // before it is itself escaped), so the value is the 4 chars `abc\`.
+      const r = parseEnvFile("/ref", 'K="abc\\\\"\n');
+      expect(isOk(r)).toBe(true);
+      if (!isOk(r)) return;
+      expect(r.value).toEqual({ K: "abc\\" });
+    });
+
     it("handles single-quoted values literally (no escape processing)", () => {
       const r = parseEnvFile("/ref", "LIT='a\\nb'\n");
       expect(isOk(r)).toBe(true);

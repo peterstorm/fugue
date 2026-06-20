@@ -100,6 +100,17 @@ describe("buildWorkerBootstrap — fail closed", () => {
     expect((result.error as { message: string }).message).toContain("rebind");
   });
 
+  it("does not let a secrets file move the worker socket (WORKER_UDS_DIR)", () => {
+    const env = { ...baseEnv, TENANT_ID: "tenant-a", FUGUE_SECRETS_REF: "/x.env", WORKER_UDS_DIR: "/run/fugue" };
+    // The secrets file tries to redirect the bound socket off the supervisor's
+    // proxy/probe target — must be refused (fail-closed), not silently honored.
+    const result = buildWorkerBootstrap(env, fixedSource({ ANTHROPIC_API_KEY: "k", WORKER_UDS_DIR: "/tmp/evil" }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    expect((result.error as { message: string }).message).toContain("WORKER_UDS_DIR");
+  });
+
   it("never leaks a resolved secret value in an error message", () => {
     const env = { ...baseEnv, TENANT_ID: "t1", FUGUE_SECRETS_REF: "/x.env" };
     // Force a downstream config failure while a secret value is present.

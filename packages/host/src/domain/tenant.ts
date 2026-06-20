@@ -6,10 +6,13 @@
  * `Tenant` EXTENDS the existing identity→team auth model (`domain/auth.ts`),
  * it does NOT replace it: an `AuthIdentity` (admin / team / user) is still the
  * thing that arrives at the boundary; `resolveTenant` maps that identity to the
- * registered `Tenant` it owns. Authorization (`canAccessDag`) continues to run,
- * now additionally scoped to the resolved tenant's principal (see
- * `canAccessDagForTenant` in `auth.ts`) so an authz decision is ALWAYS made
- * against the caller's own tenant, never another tenant's data (FR-003, US3).
+ * registered `Tenant` it owns, and that branded principal scopes routing, the
+ * `fugue:<tenant>:*` keyspace, and the per-tenant Redis ACL (ADR-0067).
+ * Authorization (`canAccessDag`) continues to run unchanged. In the shipped
+ * single-host slice, tenant isolation for DAG execution is STRUCTURAL: the
+ * supervisor routes each caller to its OWN tenant's worker, and a worker serves
+ * exactly one tenant's DAGs, so a cross-tenant DAG is unreachable by
+ * construction rather than by a second per-request authz conjunct (FR-003, US3).
  *
  * All functions here are PURE — no I/O, no Redis, no clock. The registry is
  * passed in as an injected, read-only VIEW (`TenantRegistryView`) whose entries

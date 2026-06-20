@@ -22,6 +22,7 @@ import {
   withTenantLimit,
   admitTenant,
   releaseTenant,
+  forgetTenant,
   canAdmit,
   tenantCurrent,
   type TenantConcurrencyState,
@@ -221,6 +222,46 @@ describe("releaseTenant", () => {
     state = releaseTenant(state, forged);
     state = releaseTenant(state, forged);
     expect(tenantCurrent(state, a)).toBe(0);
+  });
+});
+
+// ── forgetTenant (admission-state reclamation on final removal) ───────────────
+
+describe("forgetTenant", () => {
+  test("drops a fully-released tenant's per-tenant AND inner per-key entries", () => {
+    const a = tid("a");
+    let state = withTenantLimit(initTenantConcurrency({ defaultTenantMax: 3 }), a, 3);
+    const { state: s1, token } = admitOrThrow(state, a, 0);
+    state = releaseTenant(s1, token);
+    expect(state.perTenant.has(a)).toBe(true);
+    expect(state.inner.perDag.has(a)).toBe(true);
+
+    const reclaimed = forgetTenant(state, a);
+    expect(reclaimed.perTenant.has(a)).toBe(false);
+    expect(reclaimed.inner.perDag.has(a)).toBe(false);
+  });
+
+  test("preserves a tenant with in-flight runs (same reference, drain-down intact)", () => {
+    const a = tid("a");
+    const state = withTenantLimit(initTenantConcurrency({ defaultTenantMax: 3 }), a, 3);
+    const { state: live } = admitOrThrow(state, a, 0);
+    const reclaimed = forgetTenant(live, a);
+    expect(reclaimed).toBe(live);
+    expect(tenantCurrent(reclaimed, a)).toBe(1);
+  });
+
+  test("is a same-reference no-op for a never-admitted tenant", () => {
+    const state = initTenantConcurrency({ defaultTenantMax: 3 });
+    expect(forgetTenant(state, tid("ghost"))).toBe(state);
+  });
+
+  test("a tenant re-admitted after forget starts from a clean counter", () => {
+    const a = tid("a");
+    let state = withTenantLimit(initTenantConcurrency({ defaultTenantMax: 2 }), a, 2);
+    const { state: s1, token } = admitOrThrow(state, a, 0);
+    state = forgetTenant(releaseTenant(s1, token), a);
+    const { state: s2 } = admitOrThrow(state, a, 1);
+    expect(tenantCurrent(s2, a)).toBe(1);
   });
 });
 

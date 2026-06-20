@@ -105,6 +105,28 @@ export const withDagLimit = <K = DagId>(
 };
 
 /**
+ * Drop a per-key entry entirely (reclamation), but ONLY when it has no in-flight
+ * work (`current === 0`). A LIVE entry is preserved unchanged so a pending
+ * `release()` still finds its slot to decrement — the same in-flight-retention
+ * invariant `reconcileDagLimits` upholds. Returns the SAME state when the key is
+ * absent or still live, so this is a safe idempotent no-op off the steady path.
+ *
+ * Unlike `reconcileDagLimits` (which rebuilds `perDag` from a registry snapshot),
+ * this targets ONE key — used when a key is permanently retired (e.g. a tenant's
+ * final removal) and its admission counter should be reclaimed rather than leaked.
+ */
+export const forgetDagLimit = <K = DagId>(
+  state: ConcurrencyState<K>,
+  dagId: K,
+): ConcurrencyState<K> => {
+  const existing = state.perDag.get(dagId);
+  if (existing === undefined || existing.current > 0) return state;
+  const newPerDag = new Map(state.perDag);
+  newPerDag.delete(dagId);
+  return { ...state, perDag: newPerDag };
+};
+
+/**
  * Reconcile per-DAG limits against a registry snapshot.
  *
  * Rebuilds `perDag` from `limits`, preserving in-flight `current` counts for DAGs that

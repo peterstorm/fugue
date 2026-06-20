@@ -47,6 +47,7 @@ import {
   acquire as acquireInner,
   release as releaseInner,
   withDagLimit,
+  forgetDagLimit,
   initConcurrency,
 } from "../domain/concurrency.js";
 
@@ -199,6 +200,35 @@ export const withTenantLimit = (
   const perTenant = new Map(state.perTenant);
   perTenant.set(tenant, { current: existing?.current ?? 0, max });
   return { ...state, perTenant, inner: withDagLimit(state.inner, tenant, max) };
+};
+
+/**
+ * Reclaim a tenant's admission state on its FINAL removal (the grace-window
+ * hard-delete). Drops the per-tenant ceiling entry AND the mirrored inner
+ * per-key entry, but ONLY when the tenant has no in-flight runs (`current === 0`);
+ * a tenant with live runs is preserved unchanged so a pending `releaseTenant`
+ * still finds its counter to decrement (mirrors the in-flight retention in
+ * `reconcileDagLimits` / `forgetDagLimit`). Idempotent: forgetting an absent or
+ * still-live tenant returns the SAME state reference.
+ *
+ * WHY: without this, `perTenant` (and the mirrored inner `perDag`) accumulate one
+ * permanent entry per distinct tenant id ever admitted — a slow unbounded leak
+ * reclaimed only by a process restart. Bound to the registry's terminal
+ * hard-delete (post-grace, tenant fully retired), admission state is released in
+ * lockstep with final tenant removal. The `current > 0` guard keeps the
+ * transient over-capacity / clamp-at-0 invariants intact for any edge case.
+ */
+export const forgetTenant = (
+  state: TenantConcurrencyState,
+  tenant: TenantId,
+): TenantConcurrencyState => {
+  const existing = state.perTenant.get(tenant);
+  if (existing !== undefined && existing.current > 0) return state; // preserve drain-down
+  const inner = forgetDagLimit(state.inner, tenant);
+  if (existing === undefined && inner === state.inner) return state; // nothing to reclaim
+  const perTenant = new Map(state.perTenant);
+  perTenant.delete(tenant);
+  return { ...state, perTenant, inner };
 };
 
 // ---------------------------------------------------------------------------

@@ -486,6 +486,16 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     await expectSkipped("arr-queue", { ...validRaw("arr-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: [] } });
     await expectSkipped("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
   });
+
+  it("skips a record whose eagerPin is a non-boolean (never truthy-coerce)", async () => {
+    // eagerPin is the authoritative pin source (AD-7): idleEvict/isIdleEvictable
+    // consume it TRUTHILY, so a coercion like `Boolean(o.eagerPin)` would turn the
+    // string "false" into a pinned-forever worker. The guard must skip-as-corrupt,
+    // not coerce. The "false" case specifically pins the dangerous Boolean("false")
+    // → true regression.
+    await expectSkipped("str-pin", { ...validRaw("str-pin"), eagerPin: "false" });
+    await expectSkipped("num-pin", { ...validRaw("num-pin"), eagerPin: 1 });
+  });
 });
 
 describe("redis tenant registry — probe-recovery clears the write-leg latch (FR-022 regression)", () => {

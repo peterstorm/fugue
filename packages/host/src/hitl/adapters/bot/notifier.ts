@@ -32,9 +32,11 @@ export const createBotFrameworkNotifier = (deps: {
   readonly conversations: ConversationStorePort;
   /**
    * Resolve a notification's `dagId` to its OWNING fugue team (FR-041). Wired from
-   * the live registry (the same `lookupDag` the inbound handler uses). `undefined`
-   * when the DAG is unregistered or the team has no configured channel — the card
-   * then falls back to the default channel (routing is best-effort delivery, not a
+   * the live registry (the same `lookupDag` the inbound handler uses) — a PURE
+   * registry lookup. `undefined` ONLY when the DAG is no longer registered (or the
+   * registry is absent); it does NOT consult channel configuration. A resolved
+   * team that has no stored conversation reference falls back to the default
+   * channel separately, in `notify` below (routing is best-effort delivery, not a
    * security gate).
    */
   readonly resolveDagTeam: (dagId: DagId) => Team | undefined;

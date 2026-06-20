@@ -157,6 +157,56 @@ describe("register", () => {
   });
 });
 
+// ── team uniqueness (1:1 team↔tenant routing invariant) ──────────────────────
+
+describe("team uniqueness (team↔tenant is 1:1)", () => {
+  it("rejects a second ACTIVE tenant claiming a team already owned by another", () => {
+    const a = makeConfig("a", { team: "shared" });
+    const b = makeConfig("b", { team: "shared" });
+    const r1 = register(emptyRegistry(), a, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const r2 = register(r1.value, b, 2000);
+    expect(isErr(r2)).toBe(true);
+    if (!isErr(r2)) return;
+    expect(r2.error.kind).toBe("config-invalid");
+  });
+
+  it("does not treat a tenant's OWN team as a conflict (re-register self)", () => {
+    const a = makeConfig("a", { team: "shared" });
+    const r1 = register(emptyRegistry(), a, 1000);
+    if (!r1.ok) throw new Error("setup");
+    // Same id + team, a different config field — must still succeed.
+    const changed = makeConfig("a", { team: "shared", fsRoot: "/srv/a2" });
+    const r2 = register(r1.value, changed, 2000);
+    expect(isOk(r2)).toBe(true);
+  });
+
+  it("allows reusing a team once its previous owner is deregistered", () => {
+    const a = makeConfig("a", { team: "shared" });
+    const r1 = register(emptyRegistry(), a, 1000);
+    if (!r1.ok) throw new Error("setup");
+    const d = deregister(r1.value, a.id, 1500);
+    if (!d.ok) throw new Error("deregister");
+    const b = makeConfig("b", { team: "shared" });
+    const r2 = register(d.value, b, 2000);
+    expect(isOk(r2)).toBe(true);
+  });
+
+  it("reconfigure cannot move a tenant onto a team owned by another active tenant", () => {
+    const a = makeConfig("a", { team: "team-a" });
+    const b = makeConfig("b", { team: "team-b" });
+    let reg = register(emptyRegistry(), a, 1000);
+    if (!reg.ok) throw new Error("setup a");
+    reg = register(reg.value, b, 1100);
+    if (!reg.ok) throw new Error("setup b");
+    const bMoved = makeConfig("b", { team: "team-a" }); // collide with a's team
+    const r = reconfigure(reg.value, bMoved, 2000);
+    expect(isErr(r)).toBe(true);
+    if (!isErr(r)) return;
+    expect(r.error.kind).toBe("config-invalid");
+  });
+});
+
 // ── deregister ───────────────────────────────────────────────────────────────
 
 describe("deregister", () => {

@@ -35,6 +35,7 @@ import {
   withTenantLimit,
   admitTenant,
   releaseTenant,
+  forgetTenant,
 } from "./supervisor/admission.js";
 import type { TenantConcurrencyState } from "./supervisor/admission.js";
 import { createRedisTenantRegistry } from "./supervisor/registry/redis-registry-adapter.js";
@@ -530,8 +531,19 @@ const main = async () => {
         }
       },
     },
-    // Registry hard-delete — the FINAL step (tombstone → fully removed).
-    registry: { hardDelete: (tenant) => registry.hardDelete(tenant) },
+    // Registry hard-delete — the FINAL step (tombstone → fully removed). On
+    // success, reclaim the tenant's admission state in lockstep (FR-032): the
+    // hard-delete runs only post-grace with the tenant fully retired, so its
+    // in-flight count is 0 and `forgetTenant`'s guard passes; the guard makes any
+    // residual open slot a safe no-op the next sweep retries. Without this, the
+    // per-tenant admission counters would leak one entry per purged tenant id.
+    registry: {
+      hardDelete: async (tenant) => {
+        const r = await registry.hardDelete(tenant);
+        if (r.ok) tenantConc = forgetTenant(tenantConc, tenant);
+        return r;
+      },
+    },
   };
 
   // ── Grace-window auto-purge sweep timer (FR-030, SC-010) ───────────────────

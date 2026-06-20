@@ -10,9 +10,6 @@
  *   - forgery-resistance: `tenantId` rejects ids that could widen a Redis
  *     key/ACL namespace (`:` or glob metacharacters), which is load-bearing for
  *     AD-4 / SC-001.
- *   - tenant-aware authz extension (`canAccessDagForTenant`): conjunctive with
- *     the existing `canAccessDag`, so a resolved tenant can never reach another
- *     tenant's DAG (US3, FR-041) while single-tenant behaviour is unchanged.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -28,7 +25,7 @@ import {
   type TenantId,
   type TenantRegistryView,
 } from "../../domain/tenant.js";
-import { canAccessDag, canAccessDagForTenant, type AuthIdentity } from "../../domain/auth.js";
+import { type AuthIdentity } from "../../domain/auth.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -271,59 +268,10 @@ describe("markSecretsRef", () => {
   });
 });
 
-// ── canAccessDagForTenant (tenant-aware authz extension, US3) ─────────────────
-
-describe("canAccessDagForTenant", () => {
-  const acme = mkTenant("acme", "acme");
-  const globex = mkTenant("globex", "globex");
-
-  it("admin within its tenant can access that tenant's DAG", () => {
-    expect(canAccessDagForTenant(acme, adminIdentity, "acme")).toBe(true);
-  });
-
-  it("admin CANNOT reach another tenant's DAG once scoped to a tenant principal (FR-041)", () => {
-    // canAccessDag(admin, *) is true, but the tenant gate blocks cross-tenant.
-    expect(canAccessDag(adminIdentity, "globex")).toBe(true);
-    expect(canAccessDagForTenant(acme, adminIdentity, "globex")).toBe(false);
-  });
-
-  it("team identity can access its own tenant's DAG", () => {
-    expect(canAccessDagForTenant(acme, teamIdentity("acme"), "acme")).toBe(true);
-  });
-
-  it("a multi-team user CANNOT cross the tenant boundary even if the policy permits the other team", () => {
-    const user = userIdentity(["acme", "globex"]);
-    // The identity policy would permit globex…
-    expect(canAccessDag(user, "globex")).toBe(true);
-    // …but the resolved tenant is acme, so the conjunctive gate refuses.
-    expect(canAccessDagForTenant(acme, user, "globex")).toBe(false);
-    // Within its own tenant it still works.
-    expect(canAccessDagForTenant(acme, user, "acme")).toBe(true);
-  });
-
-  it("is the conjunction of canAccessDag AND tenant ownership (fail-closed)", () => {
-    // identity denies → false regardless of tenant match
-    expect(canAccessDagForTenant(acme, teamIdentity("other"), "acme")).toBe(false);
-    // tenant mismatch → false regardless of identity
-    expect(canAccessDagForTenant(globex, teamIdentity("acme"), "acme")).toBe(false);
-  });
-
-  it("property: canAccessDagForTenant ⟹ canAccessDag AND dagTeam === tenant.team", () => {
-    const idArb: fc.Arbitrary<AuthIdentity> = fc.oneof(
-      fc.constant(adminIdentity),
-      fc.stringMatching(/^[a-z]{1,8}$/).map((t) => teamIdentity(t)),
-      fc.array(fc.stringMatching(/^[a-z]{1,8}$/)).map((a) => userIdentity(a)),
-    );
-    const teamArb = fc.stringMatching(/^[a-z]{1,8}$/);
-    fc.assert(
-      fc.property(idArb, teamArb, teamArb, (identity, tenantTeam, dagTeam) => {
-        const tenant = mkTenant(tenantTeam, tenantTeam);
-        const got = canAccessDagForTenant(tenant, identity, dagTeam);
-        const expected = canAccessDag(identity, dagTeam) && tenantTeam === dagTeam;
-        expect(got).toBe(expected);
-        // The extension NEVER widens access beyond the base predicate.
-        if (got) expect(canAccessDag(identity, dagTeam)).toBe(true);
-      }),
-    );
-  });
-});
+// NOTE: the ADR-0073 `canAccessDagForTenant` conjunctive gate was removed (pass 9)
+// — it had zero production callers because tenant isolation for DAG execution is
+// STRUCTURAL in this slice (the supervisor routes each caller to its own tenant's
+// worker; a worker serves exactly one tenant's DAGs). DAG authz is exercised by
+// the `canAccessDag` tests in `auth.test.ts`. Re-add a tenant-scoped conjunct here
+// if a future shared-worker / multi-DAG-per-worker topology needs per-request
+// tenant scoping.

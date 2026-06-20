@@ -117,6 +117,19 @@ export const buildWorkerBootstrap = (
   const resolved = secrets(secretsRef);
   if (!resolved.ok) return resolved;
 
+  // Defense-in-depth (mirrors the TENANT_ID rebind guard below): a secrets source
+  // MUST NOT set WORKER_UDS_DIR. The supervisor force-injects it (bun-spawn-adapter)
+  // to the directory it proxies/probes, so a secrets file that overrode it would
+  // move the worker's bound socket off the supervisor's target — `waitForUds`
+  // times out, the worker is SIGKILLed, and the tenant goes 503 (self-DoS). Reject
+  // such a file outright rather than silently honour a forbidden override.
+  if (Object.prototype.hasOwnProperty.call(resolved.value, "WORKER_UDS_DIR")) {
+    return err({
+      kind: "config-invalid",
+      message: "worker bootstrap: a secrets source must not set WORKER_UDS_DIR (it must not move the worker socket off the supervisor-chosen path)",
+    });
+  }
+
   // Merge resolved secrets OVER the base env. `parseHostConfig` then validates
   // the union. A resolved secret VALUE never escapes into an error message here.
   const merged: Record<string, string | undefined> = { ...env, ...(resolved.value as ResolvedSecrets) };

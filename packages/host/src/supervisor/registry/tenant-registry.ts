@@ -271,6 +271,28 @@ const withEntry = (registry: TenantRegistry, cfg: TenantConfig): TenantRegistry 
   return { entries: next };
 };
 
+/**
+ * The id of a DIFFERENT active tenant that already owns `team`, or `undefined`
+ * if the team is free. team→tenant is 1:1 (ADR-0061/0064): the supervisor's
+ * team→tenant routing index is security-load-bearing and resolves a team token
+ * by registry order, so two active tenants sharing a team would route that
+ * token NONDETERMINISTICALLY (first-writer-wins, silently denying the other).
+ * The registration boundary enforces the 1:1 invariant here so the index can
+ * never face an ambiguous team. A DEREGISTERED tenant holding the team does not
+ * block reuse — only active owners count (so deregister-then-register a fresh
+ * tenant on the same team is allowed).
+ */
+const teamOwnedByOther = (
+  registry: TenantRegistry,
+  team: Team,
+  selfId: TenantId,
+): TenantId | undefined => {
+  for (const cfg of activeTenants(registry)) {
+    if (cfg.team === team && cfg.id !== selfId) return cfg.id;
+  }
+  return undefined;
+};
+
 // ── Transitions (pure, total, idempotent) ────────────────────────────────────
 
 /**
@@ -298,6 +320,13 @@ export const register = (
   if (existing !== undefined && configEquals(existing, cfg)) {
     // No-op: identical end state. Return the same reference (SC-009).
     return ok(registry);
+  }
+  // Enforce team↔tenant 1:1 (fail-closed) so the supervisor's team→tenant routing
+  // index is never ambiguous. A re-register of THIS same tenant (selfId) never
+  // conflicts with itself.
+  const conflict = teamOwnedByOther(registry, cfg.team, cfg.id);
+  if (conflict !== undefined) {
+    return err({ kind: "config-invalid", message: `tenant '${cfg.id}': team '${cfg.team}' is already owned by active tenant '${conflict}'` });
   }
   return ok(withEntry(registry, cfg));
 };
@@ -375,11 +404,16 @@ export const reconfigure = (
       // Never resurrect a deregistered tenant via reconfigure — fail closed.
       err(tenantUnknown()),
     )
-    .with({ status: "active" }, (active) =>
-      configEquals(active, cfg)
-        ? ok(registry)
-        : ok(withEntry(registry, cfg)),
-    )
+    .with({ status: "active" }, (active) => {
+      if (configEquals(active, cfg)) return ok(registry);
+      // A reconfigure that MOVES this tenant onto a team owned by a different
+      // active tenant would break the 1:1 routing invariant — fail closed.
+      const conflict = teamOwnedByOther(registry, cfg.team, cfg.id);
+      if (conflict !== undefined) {
+        return err({ kind: "config-invalid", message: `tenant '${cfg.id}': team '${cfg.team}' is already owned by active tenant '${conflict}'` });
+      }
+      return ok(withEntry(registry, cfg));
+    })
     .exhaustive();
 };
 

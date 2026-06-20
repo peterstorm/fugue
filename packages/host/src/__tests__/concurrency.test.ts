@@ -8,6 +8,7 @@ import {
   acquire,
   release,
   withDagLimit,
+  forgetDagLimit,
   reconcileDagLimits,
   hasCapacity,
   globalUtilization,
@@ -186,6 +187,35 @@ describe("Concurrency Limiter", () => {
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.kind).toBe("dag-at-capacity");
+    });
+  });
+
+  describe("forgetDagLimit", () => {
+    test("drops an idle per-key entry (current === 0)", () => {
+      const state = withDagLimit(initConcurrency(50, 10), DAG_A, 5);
+      expect(state.perDag.has(DAG_A)).toBe(true);
+      const forgotten = forgetDagLimit(state, DAG_A);
+      expect(forgotten.perDag.has(DAG_A)).toBe(false);
+    });
+
+    test("preserves a LIVE entry (current > 0) so a pending release still finds its slot", () => {
+      const state = withDagLimit(initConcurrency(50, 10), DAG_A, 5);
+      const { state: live } = acquireN(state, DAG_A, 1);
+      const forgotten = forgetDagLimit(live, DAG_A);
+      // Same reference — nothing reclaimed while in-flight.
+      expect(forgotten).toBe(live);
+      expect(forgotten.perDag.get(DAG_A)!.current).toBe(1);
+    });
+
+    test("is a same-reference no-op for an absent key", () => {
+      const state = initConcurrency(50, 10);
+      expect(forgetDagLimit(state, DAG_A)).toBe(state);
+    });
+
+    test("does not touch the global counter", () => {
+      const seeded = withDagLimit(initConcurrency(50, 10), DAG_A, 5);
+      const forgotten = forgetDagLimit(seeded, DAG_A);
+      expect(forgotten.global).toEqual(seeded.global);
     });
   });
 

@@ -70,6 +70,14 @@ const parseError = (refPath: string, reason: string): Result<never, HostError> =
 const unquote = (raw: string): { readonly value: string } | undefined => {
   if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
     const inner = raw.slice(1, -1);
+    // The trailing `"` is only a real terminator if it is NOT itself escaped. If
+    // `inner` ends in an ODD run of backslashes, the apparent closing quote was
+    // an escaped `\"` and the value is actually UNTERMINATED (e.g. `"abc\"`) —
+    // fail closed rather than emit a silently-truncated secret. (An even run,
+    // e.g. `"abc\\"`, is a real closing quote after an escaped backslash.)
+    let trailingBackslashes = 0;
+    for (let i = inner.length - 1; i >= 0 && inner[i] === "\\"; i--) trailingBackslashes++;
+    if (trailingBackslashes % 2 === 1) return undefined;
     let out = "";
     for (let i = 0; i < inner.length; i++) {
       const c = inner[i];

@@ -6,6 +6,22 @@
 
 Accepted
 
+> **Amendment (2026-06-20, pass 9):** the `canAccessDagForTenant` authorization
+> *extension* described below was designed but is **NOT wired** in the shipped
+> single-host slice — it had zero production callers and has been removed. Tenant
+> isolation for DAG execution is enforced **structurally** instead: the supervisor
+> routes each caller to its OWN tenant's worker, and a worker serves exactly one
+> tenant's DAGs, so a cross-tenant DAG is unreachable by construction; the
+> per-request `canAccessDag` (identity→team) remains the operative DAG gate. The
+> **error-taxonomy** half of this ADR (`tenant-unknown` / `tenant-over-quota` /
+> `worker-unavailable`, their HTTP statuses, no-breaker-trip, and non-leaking
+> bodies) ships and is used exactly as written. The branded `Tenant` principal
+> itself is still load-bearing — for routing, the `fugue:<tenant>:*` keyspace, and
+> the per-tenant Redis ACL (ADR-0067). Reintroduce a tenant-scoped conjunct if a
+> future shared-worker / multi-DAG-per-worker topology needs per-request tenant
+> scoping. References to `canAccessDagForTenant` below are retained as the original
+> design rationale; read them subject to this amendment.
+
 ## Date
 
 2026-06-19
@@ -122,8 +138,10 @@ system, and keep status/breaker/leakage decisions in one authoritative taxonomy.
 
 **Model `Tenant` (with `TenantId` and `SecretsRef`) as hard-branded principals
 with smart constructors and a strict `TENANT_ID_REGEX`, resolve an
-`AuthIdentity` to a `Tenant` at the supervisor boundary and thread it alongside
-the existing auth into a tenant-aware `canAccessDagForTenant` *extension*; and
+`AuthIdentity` to a `Tenant` at the supervisor boundary and thread it through
+routing / keyspace / ACL alongside the existing `canAccessDag` auth (a
+tenant-aware `canAccessDagForTenant` *extension* was designed but not wired — see
+Amendment); and
 extend the single `HostError` taxonomy with `tenant-unknown` (404/401),
 `tenant-over-quota` (429 + retry-after), and `worker-unavailable` (503),
 classified so over-quota/unknown never trip the breaker and all bodies are
@@ -141,12 +159,13 @@ Concretely:
   is a pure boundary lookup that returns an already-branded principal or a uniform
   `tenant-unknown`. `markSecretsRef` mints the opaque reference the supervisor
   holds but cannot dereference.
-- **`packages/host/src/domain/auth.ts`** — `canAccessDagForTenant(tenant, identity, dagTeam)`
-  is the extension: it runs the existing `canAccessDag(identity, dagTeam)` AND
-  additionally requires `tenant.team === dagTeam`. The branded `Tenant` is
-  imported type-only; the identity→team decision is never removed, only further
-  scoped, so even an over-broad identity (e.g. a multi-team user) cannot reach
-  another tenant's DAG.
+- **`packages/host/src/domain/auth.ts`** — *(superseded — see Amendment.)* As
+  originally designed, `canAccessDagForTenant(tenant, identity, dagTeam)` was the
+  extension: it ran the existing `canAccessDag(identity, dagTeam)` AND additionally
+  required `tenant.team === dagTeam`. In the shipped slice this conjunct is
+  unnecessary — a worker only ever holds its own tenant's DAGs, so `canAccessDag`
+  alone is the operative per-request gate — and the primitive was removed to avoid
+  dead, ADR-blessed-but-unexercised code. The identity→team decision is unchanged.
 - **`packages/host/src/domain/host-error.ts`** — the three variants live in the
   *same* `HostError` union. `httpStatusFor` maps `tenant-unknown`→404 (chosen
   over 401 so a response never confirms a tenant exists), `tenant-over-quota`→429,
@@ -199,13 +218,15 @@ Key invariants:
 
 - The strongest isolation invariant in the system — "this is a tenant the
   supervisor resolved at the boundary" — is enforced by the type system, not by
-  reviewer vigilance. Routing, authz, key-namespacing, and ACL scoping all
-  consume the *same* unforgeable `Tenant`, and the brand is greppable to its
-  single producer.
-- The tenant boundary is purely additive: `canAccessDagForTenant` calls
-  `canAccessDag` and tightens it, so single-tenant authz behaviour (ADR-0058,
-  ADR-0063) is unchanged and a tenant scope can only ever *narrow*, never widen,
-  an authorization decision.
+  reviewer vigilance. Routing, key-namespacing, and ACL scoping all consume the
+  *same* unforgeable `Tenant`, and the brand is greppable to its single producer.
+  (DAG-execution authz is *structural* in this slice — per-tenant worker routing —
+  rather than a per-request tenant conjunct; see Amendment.)
+- The tenant boundary stays additive by design: the identity→team `canAccessDag`
+  decision (ADR-0058, ADR-0063) is unchanged and a tenant scope can only ever
+  *narrow*, never widen, an authorization decision. (The `canAccessDagForTenant`
+  conjunct that would have made this explicit per-request was not wired — see
+  Amendment.)
 - Status truth stays in one exhaustive mapping, so the per-tenant taxonomy can
   never drift from the rest of the host's HTTP behaviour, and the breaker
   decision for tenant-boundary outcomes is made in lockstep with framework
@@ -243,9 +264,10 @@ Key invariants:
 ## Related
 
 - ADR-0058 — two-path inbound host auth: produces the `AuthIdentity` (admin /
-  team / user) that `resolveTenant` consumes and that `canAccessDagForTenant`
-  threads the resolved `Tenant` *alongside* (the auth this decision extends, not
-  replaces).
+  team / user) that `resolveTenant` consumes and that `canAccessDag` gates DAG
+  access for (the auth this decision extends, not replaces; the designed-but-unwired
+  tenant conjunct would have threaded the resolved `Tenant` alongside — see
+  Amendment).
 - ADR-0059 — capability failure taxonomy: the sibling fail-closed,
   distinct-typed error taxonomy whose 403-vs-500 + no-breaker-trip reasoning this
   ADR mirrors for the tenant boundary.
@@ -268,8 +290,9 @@ Key invariants:
   `httpStatusFor` / `formatHostError` / `retryAfterSecondsFor`.
 - `packages/host/src/domain/framework-error-http.ts` — `classifyHostError`
   (no breaker trip for over-quota/unknown; 503 + breaker for worker-unavailable).
-- `packages/host/src/domain/auth.ts` — `canAccessDagForTenant`, the tenant-aware
-  authz extension.
+- `packages/host/src/domain/auth.ts` — `canAccessDag`, the identity→team authz
+  decision (the operative DAG gate; the `canAccessDagForTenant` extension was
+  designed here but removed — see Amendment).
 - `packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts` —
   SC-012: 429/503/404 under concurrent load, zero cross-tenant bleed,
   non-leaking bodies.
