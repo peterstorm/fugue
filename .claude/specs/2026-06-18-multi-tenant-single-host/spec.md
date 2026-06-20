@@ -64,7 +64,7 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 - Given a request for a registered tenant with no live worker, When the supervisor needs to serve it, Then it spawns a worker scoped to exactly that tenant.
 - Given a tenant worker crashes mid-run, When the supervisor detects the crash, Then no other tenant's worker or runs are affected, and the supervisor restarts the crashed tenant's worker.
 - Given a worker crashed mid-run, When the worker is restarted, Then the crashed tenant's in-flight run resumes from its last checkpoint on a best-effort basis (durable HITL runs survive). [DEFERRED TO ARCHITECTURE: run-resume vs fail-fast mechanism]
-- Given an operator initiates a graceful drain of a worker, When drain is requested, Then in-flight runs are allowed to complete (or checkpoint) before the worker is shut down.
+- Given an operator initiates a graceful drain of a worker, When drain is requested, Then in-flight runs are allowed to complete (or checkpoint) before the worker is shut down. [DEFERRED TO ARCHITECTURE: operator drain trigger — the drain state machine (SIGTERM-only, drainComplete-on-exit) is implemented and unit-tested, but no operator-facing trigger is wired in this slice; reserved for the reconfigure-driven drain+respawn path (ADR-0070)]
 
 ### US5: [P1] Runtime tenant registry and admin lifecycle API
 

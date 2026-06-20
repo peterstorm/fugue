@@ -592,11 +592,15 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     workers.delete(tenant);
     await removeRecord(tenant);
     if (pid !== undefined) {
-      // Drain then force-stop: SIGTERM lets in-flight work wind down, SIGKILL
-      // reclaims the slot if it doesn't exit. Both are idempotent on a dead pid.
-      // The entry + registry record were ALREADY removed above, so a failed
-      // SIGKILL leaves an orphan still bound to the UDS while the slot reads as
-      // reclaimed — orphan-risk (error).
+      // Immediate revoke (FR-029 / NFR-012), NOT a graceful drain: SIGTERM and
+      // SIGKILL fire back-to-back with NO intervening wait — `signalWorker` returns
+      // once the signal is delivered, it does not await `exited` — so this is a HARD
+      // kill. (Graceful "let in-flight work finish" is `drain()`'s job: SIGTERM only,
+      // terminal cleanup deferred to `drainComplete` on actual exit.) SIGTERM is the
+      // polite first signal; SIGKILL guarantees the slot is reclaimed if the worker
+      // ignores it. Both are idempotent on a dead pid. The entry + registry record
+      // were ALREADY removed above, so a failed SIGKILL leaves an orphan still bound
+      // to the UDS while the slot reads as reclaimed — orphan-risk (error).
       await signalWorker(tenant, pid, "SIGTERM", false);
       await signalWorker(tenant, pid, "SIGKILL", true);
     }

@@ -59,6 +59,15 @@
 - **Why deferred:** genuine latent defect in the published `WorkerLifecyclePort.drain` contract, but **UNREACHABLE today** — the sole producer of a `draining` entry/record is `lifecycle.drain()`, which has zero production callers (deregister uses `evict()`; ADR-0070:156-160 documents drain as modelled-but-not-driven). Fixing it also requires overriding `worker-lifecycle-manager.test.ts:560-585`, which currently asserts the fresh-spawn behavior as intended.
 - **Condition:** land the `ensureWorker` draining-phase guard alongside any future wiring of `lifecycle.drain()` (reconfigure-triggered drain).
 
+### Follow-up: is `drain()` being unwired itself a bug? (investigated 2026-06-20)
+**No — deliberate, ADR-0070-documented deferral, not silently-missing required behavior.** Decisive test: no shipped FR/NFR/SC mandates an *active* graceful drain that nothing provides.
+- **FR-017** ("On graceful drain, allow in-flight runs to complete…") is *conditional* on a drain being initiated, and that *behavior* IS implemented (`drain()` → `draining` phase, SIGTERM-only, `drainComplete` on actual exit, never SIGKILLs). Only the **trigger** is absent — and no operator drain endpoint is spec'd (admin lifecycle API US5 = register/deregister/reconfigure).
+- **Deregister** is spec'd as *immediate kill* (FR-029/NFR-012) and correctly uses `evict()` (SIGTERM→SIGKILL, no grace). Using `drain()` there would *violate* the spec.
+- **Reconfigure** is spec'd *lazy* (AD-5/spec.md:81 — new config applies on next spawn); AD-5 explicitly names "immediate apply = drain+respawn" as the road **not** taken.
+- Unlike `canAccessDagForTenant` (deleted because isolation was already structural — pure redundancy), `drain()`'s "let in-flight finish" semantic has **no structural equivalent** (`evict` force-kills), so deleting it would discard a tested state machine with a *named* future trigger. Kept as scaffolding.
+- **Two genuine soft spots closed** (doc/comment accuracy, not behavior): the `evict()` comment overstated SIGTERM grace (worker-lifecycle-manager.ts:595); the US4 graceful-drain acceptance scenario lacked a `[DEFERRED]` marker (spec.md:67).
+- **Wiring drain now is NOT recommended:** it is a large, unspecified *feature* (drain+respawn orchestration + `ensureWorker` draining guard + `drainComplete`/timeout handling + tests) implementing behavior no shipped requirement demands — it belongs in the reconfigure feature's own spec, not a remediation pass.
+
 ## Validation Commands
 
 ```bash
