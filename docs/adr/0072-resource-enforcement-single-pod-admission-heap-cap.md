@@ -44,11 +44,11 @@ a single pod and a cgroup/container per tenant is not available?**
 ## Options Considered
 
 1. **Two software layers: supervisor admission control + per-worker heap cap (chosen).**
-   Enforce fairness and the live-worker bound in the supervisor's *admission*
-   path — a pure ADT extending the existing concurrency limiter with a per-tenant
-   ceiling and a global live-worker bound — and bound memory with a per-worker V8
-   heap cap applied at spawn time. Everything stays in one pod; no cgroups, no
-   per-tenant containers.
+   Enforce per-tenant fairness in the supervisor's *admission* path — a pure ADT
+   extending the existing concurrency limiter with a per-tenant ceiling — enforce
+   the box-wide live-worker bound (FR-033) separately in the worker-lifecycle
+   manager (ADR-0070), and bound memory with a per-worker V8 heap cap applied at
+   spawn time. Everything stays in one pod; no cgroups, no per-tenant containers.
    - Pros: The fairness axis is a *pure state machine* (`admitTenant`), so
      SC-011 anti-starvation is provable by a deterministic property test rather
      than measured against kernel scheduling. Reuses the already-property-tested
@@ -231,7 +231,7 @@ Key invariants:
 - ADR-0064 — overall multi-tenant single-host approach: fixes the single-pod /
   process-per-tenant deployment model this decision enforces within.
 - `packages/host/src/supervisor/admission.ts` — `admitTenant` / `releaseTenant`
-  (admission ADT: per-tenant ceiling + global live-worker bound, this decision in
+  (admission ADT: per-tenant ceiling + inner concurrency, this decision in
   code).
 - `packages/host/src/supervisor/lifecycle/spawn-port.ts` /
   `bun-spawn-adapter.ts` — `WorkerSpawnSpec.heapCapMb` →

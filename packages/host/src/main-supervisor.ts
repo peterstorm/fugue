@@ -46,6 +46,7 @@ import type { TenantSpawnConfig, TenantSpawnConfigView } from "./supervisor/life
 import { createBunSpawnAdapter } from "./supervisor/lifecycle/bun-spawn-adapter.js";
 import { createWorkerRegistry } from "./supervisor/lifecycle/worker-registry-redis.js";
 import type { UdsLivenessProbe } from "./supervisor/lifecycle/worker-registry-redis.js";
+import { purgeTenantKeyspace } from "./supervisor/lifecycle/purge-keyspace.js";
 import { bunUdsTransport } from "./supervisor/uds-proxy.js";
 import type { AdminTenantsDeps } from "./http/handlers/admin/tenants.js";
 import {
@@ -502,32 +503,10 @@ const main = async () => {
     // Tenant keyspace purge — scan + delete every `fugue:<tenant>:*` key over the
     // admin connection (the scoped tenant user is being revoked alongside).
     keyspace: {
-      purgeKeyspace: async (tenant) => {
-        const pattern = `fugue:${tenant}:*`;
-        let cursor = "0";
-        let deleted = 0;
-        // BEST-EFFORT per key: a single failing `del` must NOT abort the whole
-        // enumeration — that would leave the rest of the tenant's keys unreclaimed
-        // and let one persistently-bad key wedge reclamation of all the others.
-        // Keep the FIRST failure and return it AFTER attempting every key, so the
-        // grace-purge sweep still marks the step failed (idempotent retry) while
-        // every reclaimable key is actually reclaimed this pass.
-        let firstError: HostError | undefined;
-        do {
-          const scanR = await redis.scan(pattern, cursor);
-          if (!scanR.ok) return err(scanR.error);
-          for (const key of scanR.value.keys) {
-            const delR = await redis.del(key);
-            if (!delR.ok) {
-              if (firstError === undefined) firstError = delR.error;
-              continue;
-            }
-            deleted += delR.value;
-          }
-          cursor = scanR.value.cursor;
-        } while (cursor !== "0");
-        return firstError !== undefined ? err(firstError) : ok(deleted);
-      },
+      // Scan + delete every `fugue:<tenant>:*` key over the admin connection. The
+      // best-effort enumeration invariant (one failing `del` must not abort the
+      // rest) lives in the unit-tested `purgeTenantKeyspace` leaf.
+      purgeKeyspace: (tenant) => purgeTenantKeyspace(redis, tenant),
     },
     // Filesystem mount removal — recursive + force (idempotent: removing an
     // absent path is a no-op success).

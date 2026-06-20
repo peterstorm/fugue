@@ -198,6 +198,16 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
   if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
     return err({ kind: "config-invalid", message: `tenant '${input.id}': keycloak realm and clientId must be non-empty` });
   }
+  // Per-DAG agent-client ids must be non-empty — same invariant the env-side
+  // `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`: "dagId →
+  // non-empty Keycloak client id"). Carried here so the registration/hydration
+  // parse boundary rejects `""` BEFORE the worker-side minting consumer is wired,
+  // rather than letting a blank client id surface as a fail-open later.
+  for (const [dagId, clientId] of Object.entries(input.keycloakClientMapping.agentClientIdsByDag)) {
+    if (clientId.length === 0) {
+      return err({ kind: "config-invalid", message: `tenant '${input.id}': agentClientIdsByDag['${dagId}'] must be a non-empty client id` });
+    }
+  }
   const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
   if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 0 || !Number.isInteger(maxQueuedRuns) || maxQueuedRuns < 0) {
     return err({ kind: "config-invalid", message: `tenant '${input.id}': admission limits must be non-negative integers` });
