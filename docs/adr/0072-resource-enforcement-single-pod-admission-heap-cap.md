@@ -97,9 +97,10 @@ deterministic property rather than a kernel-behaviour approximation.
 ## Decision
 
 **Enforce resource fairness and limits at two software layers inside the single
-pod — supervisor admission control (per-tenant concurrency ceiling + global
-live-worker bound) and a per-worker V8 heap cap at spawn time — and NOT via
-per-tenant cgroups or containers.**
+pod — supervisor admission control (per-tenant concurrency ceiling) and a
+per-worker V8 heap cap at spawn time — and NOT via per-tenant cgroups or
+containers. The box-wide live-worker bound (FR-033) is enforced separately by the
+worker-lifecycle manager (ADR-0070), NOT by admission.**
 
 **Layer 1 — Admission control** lives in
 `packages/host/src/supervisor/admission.ts` as a pure ADT,
@@ -112,25 +113,27 @@ tenant, now)` is the gate, checked in this order:
    refuse with `tenant-over-quota` carrying a per-tenant `retryAfterSeconds`.
    This check reads *only the caller's own counters*, so it can never be
    triggered by another tenant's load.
-2. **Global live-worker bound (FR-033).** If admitting would require a *new* live
-   worker (the tenant has `current === 0`) and the box is already at the
-   live-worker bound, refuse with `worker-unavailable`. A tenant that already has
-   a live worker (`current > 0`) consumes no new worker slot and is never blocked
-   by this bound.
-3. **Inner concurrency.** Defer to the reused `acquire` for the global + per-DAG
-   axes. The inner global limit is sized via `INNER_GLOBAL_HEADROOM` so it can
-   *never* bind before the per-tenant ceilings and live-worker bound — because
-   FR-032 *replaces* the single global limit, a binding inner global would
-   reintroduce the exact starvation SC-011 forbids. An inner rejection at this
-   step is therefore unreachable and is surfaced as a 500
-   `internal-invariant-violated` rather than mislabelled.
+2. **Inner concurrency.** Defer to the reused `acquire` for the global + per-DAG
+   axes (the tenant id is the inner key; its inner per-key max equals the tenant
+   ceiling, so the inner per-key counter and the `perTenant` counter move in
+   lockstep). The inner global limit is sized via `INNER_GLOBAL_HEADROOM` so it
+   can *never* bind before the per-tenant ceilings — because FR-032 *replaces* the
+   single global limit, a binding inner global would reintroduce the exact
+   starvation SC-011 forbids. An inner rejection at this step is therefore
+   unreachable and is surfaced as a 500 `internal-invariant-violated` (carrying
+   the inner error in `context`) rather than mislabelled as the tenant's quota
+   error.
 
 `admitTenant` returns a branded `AdmitToken`; `releaseTenant` reverses the inner
-slot, the per-tenant counter, and (only for tokens that claimed a worker) the
-live-worker count — all clamped at 0. The supervisor configures the admission
-`liveWorkers` axis non-binding and treats the worker-lifecycle manager's
-`liveWorkerCount()` (ADR-0070) as the sole authoritative FR-033 enforcement
-point, so the two are a mirror and a binding counter, not competing counters.
+slot and the per-tenant counter — both clamped at 0. Admission deliberately does
+NOT model the live-worker bound: a counter here would be a dead, drift-prone
+duplicate of the lifecycle manager's authoritative one (it was previously carried
+sized-to-never-bind, and removed for that reason). The worker-lifecycle manager's
+`liveWorkerCount()` (ADR-0070) is the SOLE authoritative FR-033 enforcement point —
+it refuses a new spawn at `SUPERVISOR_MAX_LIVE_WORKERS` → `worker-unavailable`
+(503). `main-supervisor.ts` wires the two so admission gates per-tenant fairness
+while the lifecycle manager gates the box-wide worker count, with no competing
+counters.
 
 **Layer 2 — Per-worker heap cap (FR-034)** is applied at spawn time. The
 `WorkerSpawnSpec.heapCapMb` field (`spawn-port.ts`) carries the configurable
@@ -148,8 +151,10 @@ Key invariants:
   saturating its ceiling never consumes another tenant's slots; the live-worker
   bound is an exact integer cap that is never exceeded (FR-032, FR-033).
 - **Anti-starvation (SC-011).** A heavy tenant's per-tenant fill *never* causes a
-  peer's rejection; a peer is gated only by the live-worker bound, and only
-  legitimately. This is proved by the `admitTenant` property test.
+  peer's rejection — `admitTenant` reads only the caller's own counters, proved by
+  its anti-starvation property test. A peer can be gated only by the box-wide
+  live-worker bound (enforced in the lifecycle manager, ADR-0070), and only
+  legitimately.
 - **Tenant-scoped, retriable error signals.** Over-quota →
   `tenant-over-quota` → **429 + Retry-After** (the Retry-After comes from the
   error, never a hardcoded header); capacity-exhausted →

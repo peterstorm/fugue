@@ -111,11 +111,17 @@ const flushMicrotasks = async (): Promise<void> => {
   await new Promise<void>((r) => setTimeout(r, 0));
 };
 
-const tenantsView = (entries: Record<string, { eagerPin: boolean }>): TenantSpawnConfigView => ({
+const tenantsView = (
+  entries: Record<string, { eagerPin: boolean; maxQueuedRuns?: number }>,
+): TenantSpawnConfigView => ({
   spawnConfigFor: (tenant) => {
     const e = entries[tenant as unknown as string];
     if (!e) return undefined;
-    return { secretsRef: markSecretsRef(`vault://${tenant}/env`), eagerPin: e.eagerPin };
+    return {
+      secretsRef: markSecretsRef(`vault://${tenant}/env`),
+      eagerPin: e.eagerPin,
+      ...(e.maxQueuedRuns !== undefined ? { maxQueuedRuns: e.maxQueuedRuns } : {}),
+    };
   },
 });
 
@@ -349,6 +355,41 @@ describe("createWorkerLifecycle: onCrash (FR-015, AD-8 containment)", () => {
 });
 
 // ── Per-tenant Redis ACL provisioning (ADR-0067, AD-6) ──────────────────────────
+
+describe("createWorkerLifecycle: per-tenant HITL queue-depth env (ADR-0074)", () => {
+  test("forwards the registry maxQueuedRuns into the worker spawn env (handoff)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false, maxQueuedRuns: 7 } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    const r = await lc.ensureWorker(tid("acme"));
+    expect(r.ok).toBe(true);
+    // The configured ceiling reached the worker via the spawn env (the handoff),
+    // STRINGIFIED. A regression dropping or mis-stringifying it would silently make
+    // the worker fall back to "unlimited", defeating ADR-0074's durable-path
+    // queue-depth admission — with no other failing test.
+    const spec = spawned[0]!.spec;
+    expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBe("7");
+  });
+
+  test("no maxQueuedRuns configured → env absent (zero-regression default)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.ensureWorker(tid("acme"));
+    const spec = spawned[0]!.spec;
+    expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBeUndefined();
+  });
+});
 
 describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", () => {
   test("injects the minted ACL credential into the worker spawn env (handoff)", async () => {
