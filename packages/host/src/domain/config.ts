@@ -486,9 +486,11 @@ export const HostConfigSchema = z.object({
   FUGUE_SUPERVISOR_HMAC_KEY: z.string().min(1).optional(),
   /**
    * SUPERVISOR upper bound on simultaneously-live workers (T8/T9). When the
-   * bound is reached the supervisor evicts an idle worker before admitting a new
-   * tenant (LRU). Optional — unset means no explicit cap (bounded only by host
-   * resources).
+   * bound is reached the supervisor REFUSES a new tenant's worker with
+   * `worker-unavailable` (503) rather than evicting to make room
+   * (`worker-lifecycle-manager.ts` `lazySpawn`); idle workers are reclaimed
+   * separately by the TTL-based idle-evict sweep, not on-demand at the cap.
+   * Optional — unset means no explicit cap (bounded only by host resources).
    */
   SUPERVISOR_MAX_LIVE_WORKERS: z.coerce.number().int().min(1).optional(),
   /**

@@ -97,6 +97,17 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     // unknown DAG still 404s) and BEFORE the run is created (so a refused run
     // consumes no slot). Refuse with the tenant's OWN `tenant-over-quota` (429 +
     // Retry-After). UNSET limit → unlimited (backwards compatible).
+    //
+    // SOFT CEILING (by design): this is a non-atomic check-then-create over the
+    // active-run SET — the per-tenant Redis ACL denies `eval`/Lua (ADR-0067), so
+    // there is no atomic check-and-reserve. Two concurrent durable starts can each
+    // read `active < maxQueuedRuns` before either creates, transiently overshooting
+    // the bound by the in-flight `startRun` concurrency. The overshoot is small and
+    // bounded (single-threaded worker event loop), self-heals as runs settle and
+    // `countActiveRuns` prunes, and is acceptable: a counter-based hard ceiling
+    // (`INCR`/`DECR`) would add a counter-vs-SET consistency invariant that drifts
+    // on crashes. Non-durable load is bounded separately by the supervisor's
+    // request-scoped `maxConcurrentRuns` gate.
     if (maxQueuedRuns !== undefined) {
       const active = await runStore.countActiveRuns();
       if (!active.ok) return active;

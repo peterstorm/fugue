@@ -282,7 +282,15 @@ export const createRedisRunStore = (
         if (!raw.ok) return err(raw.error);
         if (raw.value === null) {
           // Meta absent (TTL-expired / hard-deleted) → leaked index entry; prune it.
-          await redis.sRem(activeKey(tenant), id);
+          // Best-effort: a failed prune leaves the entry counted (conservative
+          // over-count, never under-count, so no slot is wrongly freed) — but log
+          // it, matching the house best-effort-with-log style. A persistently
+          // failing prune would otherwise silently inflate the count toward
+          // `maxQueuedRuns` and 429 legitimate startRun calls with no trail.
+          const pruned = await redis.sRem(activeKey(tenant), id);
+          if (!pruned.ok) {
+            logger?.warn?.("hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", { runId: id, error: pruned.error.kind });
+          }
           continue;
         }
         if (persistedStatusIsTerminal(raw.value)) {
@@ -291,8 +299,12 @@ export const createRedisRunStore = (
           // EXISTS, so the missing-meta prune above cannot catch it — `processRun`'s
           // terminal guard never re-issues the `sRem` either, so without pruning here
           // the run would leak a `maxQueuedRuns` slot for up to the run TTL (days).
-          // Prune authoritatively on the persisted status. Idempotent.
-          await redis.sRem(activeKey(tenant), id);
+          // Prune authoritatively on the persisted status. Idempotent. Best-effort
+          // (a failed prune over-counts, never under-counts) but logged, as above.
+          const pruned = await redis.sRem(activeKey(tenant), id);
+          if (!pruned.ok) {
+            logger?.warn?.("hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", { runId: id, error: pruned.error.kind });
+          }
           continue;
         }
         live++;

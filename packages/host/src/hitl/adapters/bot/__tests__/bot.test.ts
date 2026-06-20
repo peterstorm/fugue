@@ -347,6 +347,27 @@ describe("bot messages handler", () => {
     expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
   });
 
+  it("does NOT record while the run is still transient (queued/running) — bot-side lost-wakeup window", async () => {
+    // The card's notify fires from INSIDE the slice while status is still `running`
+    // (the `suspended` status not yet folded back into the store — see
+    // service.ts recordDecision). An authorized click in that window must NOT
+    // render a resolved card (which would hide the still-open, re-approvable gate
+    // and stop re-notification) and must NOT record a decision: it gets a plain
+    // "still being prepared" MESSAGE activity, not an adaptive card.
+    for (const transient of [{ kind: "running" } as const, { kind: "queued" } as const]) {
+      const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: transient })) });
+      const res = await handleBotActivity(
+        botDeps(hitl),
+        { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, runId: "run-1", nodeId: "review", decision: "approve" }) },
+      );
+      expect(res.status).toBe(200);
+      const body = res.body as { type: string; value: string };
+      expect(body.type).toBe("application/vnd.microsoft.activity.message");
+      expect(body.value).toBe("This review is still being prepared; please try again in a moment.");
+      expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+    }
+  });
+
   it("does NOT record when a stale card's gate differs from the run's current gate", async () => {
     // The run has resumed and re-parked at a LATER gate ("review-2"); the click
     // arrives from the old card-A ("review"). Recording now would silently

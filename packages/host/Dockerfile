@@ -53,5 +53,9 @@ EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/health || exit 1
 
-# Run the host entry point
+# Run the host entry point.
+# NOTE: this runs the SINGLE-TENANT entrypoint (main.ts, a supported topology per
+# FR-035). The multi-tenant pod topology (thin-init PID 1 → supervisor → per-tenant
+# workers) is NOT yet wired as a production binary — see
+# src/supervisor/lifecycle/thin-init.ts "DEPLOYMENT STATUS" for the remaining step.
 CMD ["bun", "run", "packages/host/src/main.ts"]

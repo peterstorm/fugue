@@ -27,6 +27,24 @@
  * I restart it, and have I exceeded the restart budget?" — is factored into
  * `decideSupervisorRestart` so it is unit-testable without spawning processes.
  *
+ * DEPLOYMENT STATUS — NOT YET WIRED AS A PRODUCTION BINARY (deferred):
+ *   This module is the *policy* (the pure `decideSupervisorRestart` + the
+ *   `runThinInit` loop over an injected `InitProcessPort`) and is fake-tested. What
+ *   is NOT in this slice: a production binary that constructs a REAL
+ *   `InitProcessPort` and runs as PID 1. `package.json` `bin` and the Dockerfile
+ *   `CMD` still run the single-tenant `main.ts` (a supported entrypoint, FR-035).
+ *   Until the binary below exists, the AD-2 survive-restart property is verified
+ *   only against fakes, and the multi-tenant pod is not deployable.
+ *
+ *   TO WIRE IT (follow-up — validate against a REAL multi-process pod, not unit
+ *   tests): add `src/main-thin-init.ts` that builds an `InitProcessPort` where
+ *   `spawnSupervisor` → `Bun.spawn(["bun","run","main-supervisor.ts"])`, and
+ *   `onSigchld`/`reapZombies` drive a SIGCHLD-driven reap loop for re-parented
+ *   workers; call `runThinInit`; then repoint the multi-tenant Dockerfile `CMD` /
+ *   `bin` at it. (Kept out of the review-fix pass: a wrong PID-1 reaper — zombie
+ *   leak or worker-kill — is worse than this explicit, documented gap, and it
+ *   cannot be validated without a real pod.)
+ *
  * @satisfies AD-2  — thin init is PID 1; supervisor restart does NOT kill workers.
  * @satisfies FR-019 — live workers continue serving across a supervisor restart.
  * @satisfies FR-021 — in-flight runs survive a supervisor restart (workers persist).

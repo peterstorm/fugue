@@ -173,8 +173,10 @@ export interface SupervisorDeps {
    * admission gate (`registry.markRedisDegraded`). The supervisor's data path is
    * read-only, so without this the registry's `degraded` flag would only flip on
    * a registry WRITE — and NEW runs would be admitted on stale config while Redis
-   * is down. Wired here so new-run admission fails closed (503) the moment the
-   * probe sees Redis die, and recovers when it sees Redis return. In-flight/status
+   * is down. Wired here so new-run admission fails closed (→ tenant-unknown, 404)
+   * the moment the probe sees Redis die (the admission port collapses
+   * `resolveForNewRun`'s error to `unknown`; see main-supervisor.ts), and recovers
+   * when it sees Redis return. In-flight/status
    * (`lookup`) and `canServeRequests` are intentionally unaffected (FR-023).
    */
   readonly onRedisProbeEdge?: (dead: boolean) => void;
