@@ -10,7 +10,8 @@
  *   In a naive single-process topology, workers would be children of the
  *   supervisor and would die (SIGHUP/orphan-reap) when the supervisor exits. The
  *   thin-init fixes this by being the long-lived PID 1 that:
- *     1. PARENTS the supervisor (spawns it, restarts it if it exits non-zero), and
+ *     1. PARENTS the supervisor (spawns it, restarts it on ANY exit — clean exit
+ *        and crash alike, subject to a crash-loop budget; see `decideSupervisorRestart`), and
  *     2. RE-PARENTS orphaned workers to itself — when the supervisor exits, the
  *        OS re-parents its worker children to PID 1 (standard Unix orphan
  *        re-parenting). Because thin-init is PID 1 and does NOT kill its inherited

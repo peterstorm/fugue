@@ -2,13 +2,13 @@
  * NodeContext Factory — constructs per-request NodeContext instances.
  *
  * Key responsibilities:
- * - Tenant-and-DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-030, FR-031, FR-013)
+ * - Tenant-and-DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-013)
  * - Fresh runId + independent AbortSignal per request (FR-032)
  * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
  * - Shared infrastructure (LLM, tracer) passed through without per-request init
  *
- * @satisfies FR-031 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
- * @satisfies FR-031 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
+ * @satisfies FR-013 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
+ * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
  * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
  * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
@@ -67,7 +67,7 @@ import { formatHostError } from "../domain/host-error.js";
  * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
  * namespace. Applies per-DAG TTL override when set is called without an explicit TTL.
  *
- * @satisfies FR-031 — Keys prefixed with tenant + DAG namespace
+ * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
  * @satisfies FR-041 — Per-DAG TTL override applied
  */
 export const createNamespacedCache = (
@@ -162,7 +162,7 @@ export const createNamespacedCache = (
  * Create a CheckpointWriter that prefixes all keys with the tenant + DAG + run
  * namespace. Applies per-DAG checkpoint TTL.
  *
- * @satisfies FR-031 — Keys prefixed with tenant + DAG + run namespace
+ * @satisfies FR-013 — Keys prefixed with tenant + DAG + run namespace
  * @satisfies FR-041 — Per-DAG checkpoint TTL applied
  */
 export const createNamespacedCheckpointWriter = (
@@ -259,8 +259,8 @@ export type { NodeContextForDag };
  * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
  * broker, and it now moves per node, in the framework.
  *
- * @satisfies FR-031 — Cache key isolation
- * @satisfies FR-031 — Checkpoint key isolation
+ * @satisfies FR-013 — Cache key isolation
+ * @satisfies FR-013 — Checkpoint key isolation
  * @satisfies FR-032 — Per-request runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the

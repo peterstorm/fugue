@@ -1,8 +1,9 @@
 /**
  * ConversationStore adapters (ADR-0060) — in-memory (tests/dev) and Redis
  * (production). Persists the Teams conversation reference the bot was added to,
- * so proactive review cards can be posted there. v1 stores a single default
- * reference under one key.
+ * so proactive review cards can be posted there. It stores a per-team reference
+ * (FR-041, so a team's cards reach its own channel) and a single default
+ * reference as fallback.
  *
  * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001): the Redis store
  * is constructed bound to ONE `TenantId`, so every key is forced under

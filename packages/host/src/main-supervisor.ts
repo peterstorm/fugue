@@ -221,6 +221,14 @@ const main = async () => {
     process.exit(1);
   }
 
+  // NOTE (single-supervisor topology, ADR-0064): we hydrate the registry once at
+  // boot but deliberately do NOT call `subscribeTenantEvents`. In a single-pod /
+  // single-supervisor model the sole supervisor mutates its own in-memory snapshot
+  // in-process via the admin handler, and workers re-read config on next spawn — so
+  // there is no peer whose mutations we'd need to learn about over pub/sub. The
+  // `fugue:tenants:events` publish + `subscribeTenantEvents` are forward-infra for a
+  // future multi-supervisor topology.
+
   // Boundary registry VIEW: resolve an identity's owning team → its branded
   // Tenant principal. Own-property safe (the registry is a Map keyed by id, and
   // we scan ACTIVE entries by team). Mints the principal via `markTenant` — the

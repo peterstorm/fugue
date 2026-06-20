@@ -46,7 +46,7 @@ const HumanActionSchema = z.discriminatedUnion("kind", [
 /**
  * Composite-key separator between `runId` and `nodeId`. The unit separator
  * (U+001F) is chosen deliberately: it is OUTSIDE the id alphabet
- * (`ID_REGEX = /^[A-Za-z0-9_:-]+$/`) so the two-part key is injective — unlike
+ * (`ID_REGEX = /^[A-Za-z0-9_:-]{1,128}$/`) so the two-part key is injective — unlike
  * a `:` separator, which collides because `:` is a legal id character
  * (`(runId="a:b", nodeId="c")` and `(runId="a", nodeId="b:c")` would otherwise
  * map to the same key). Unlike a NUL byte (also outside the alphabet) it keeps
