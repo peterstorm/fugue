@@ -115,6 +115,35 @@ describe("createFetchGraphHttp — response mapping (NFR-020)", () => {
   });
 });
 
+describe("createFetchGraphHttp — request deadline (no unbounded hang, NFR-020)", () => {
+  it("passes an AbortSignal deadline on both GET and POST", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const fetchImpl: GraphFetchLike = async (_url, init) => {
+      seen.push(init.signal);
+      return { status: 200, text: async () => "{}" };
+    };
+    const http = createFetchGraphHttp(fetchImpl);
+    await http.request({ method: "GET", url: "https://graph.microsoft.com/v1.0/x", bearer: "t" });
+    await http.request({ method: "POST", url: "https://graph.microsoft.com/v1.0/x", bearer: "t", body: { a: 1 } });
+    expect(seen.length).toBe(2);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[1]).toBeInstanceOf(AbortSignal);
+  });
+
+  it("a hung Graph endpoint REJECTS once the timeout elapses (caller maps abort → infra-unreachable)", async () => {
+    const fetchImpl: GraphFetchLike = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation timed out.", "TimeoutError")),
+        );
+      });
+    const http = createFetchGraphHttp(fetchImpl, 1);
+    await expect(
+      http.request({ method: "GET", url: "https://black-hole/v1.0/x", bearer: "t" }),
+    ).rejects.toThrow();
+  });
+});
+
 describe("createFetchGraphHttp — transport-unreachable propagates (NFR-020)", () => {
   it("a transport-level reject PROPAGATES (runGraph maps it to infra-unreachable)", async () => {
     const { fetchImpl } = recordingFetch(() => {

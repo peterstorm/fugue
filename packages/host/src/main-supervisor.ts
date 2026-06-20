@@ -357,6 +357,10 @@ const main = async () => {
   const workerEntry = path.join(path.dirname(process.argv[1] ?? ""), "worker-main.ts");
 
   const lifecycle = createWorkerLifecycle({
+    // `spawn` and `proc` are TWO narrow ports (the testing seam — a test can inject
+    // a fake `proc` whose `isAlive` disagrees with `spawn`), but in production they
+    // are the SAME `createBunSpawnAdapter` instance: one Bun adapter naturally owns
+    // both spawn and signal/liveness capabilities.
     spawn: spawnAdapter,
     proc: spawnAdapter,
     registry: workerRegistry,

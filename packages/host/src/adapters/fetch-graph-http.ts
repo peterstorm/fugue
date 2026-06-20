@@ -38,6 +38,9 @@ export type GraphFetchLike = (
     readonly method: "GET" | "POST";
     readonly headers: Record<string, string>;
     readonly body?: string;
+    // A request-deadline signal. Optional so a recording fake can ignore it; the
+    // live impl always passes `AbortSignal.timeout(...)` (see `createFetchGraphHttp`).
+    readonly signal?: AbortSignal;
   },
 ) => Promise<{
   readonly status: number;
@@ -45,19 +48,32 @@ export type GraphFetchLike = (
 }>;
 
 /**
+ * The default request deadline (ms) for a downstream Graph call. Bounds the
+ * `await` so a hung Graph endpoint can never wedge the broker indefinitely; the
+ * resulting `AbortError` rejection is mapped by `runGraph`'s `try/catch` to the
+ * retriable `infra-unreachable` (NFR-020) — same channel as a DNS/socket fault.
+ */
+export const DEFAULT_GRAPH_HTTP_TIMEOUT_MS = 30_000;
+
+/**
  * Build the live `GraphHttp` transport over an injected `fetch` (default: global
  * `fetch`). The bearer is presented as `Authorization: Bearer <token>`; a POST
  * carries its JSON body with `Content-Type: application/json`; a GET sends no
- * body. RESOLVES on any settled response, REJECTS only on a transport fault.
+ * body. RESOLVES on any settled response, REJECTS only on a transport fault (or a
+ * `timeoutMs` deadline abort, mapped to `infra-unreachable`).
  */
 export const createFetchGraphHttp = (
   fetchImpl: GraphFetchLike = globalThis.fetch as GraphFetchLike,
+  timeoutMs: number = DEFAULT_GRAPH_HTTP_TIMEOUT_MS,
 ): GraphHttp => ({
   request: async (req: GraphRequest): Promise<GraphResponse> => {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${req.bearer}`,
       Accept: "application/json",
     };
+    // A request-deadline signal bounds every Graph call (success path is unchanged;
+    // a hung endpoint aborts and propagates as `infra-unreachable`).
+    const signal = AbortSignal.timeout(timeoutMs);
     // Only a POST carries a body; encode it as JSON with the matching content
     // type. A GET sends none (Graph rejects a GET with a body on some paths).
     const init =
@@ -66,11 +82,12 @@ export const createFetchGraphHttp = (
             method: req.method,
             headers: { ...headers, "Content-Type": "application/json" },
             body: JSON.stringify(req.body),
+            signal,
           }
-        : { method: req.method, headers };
+        : { method: req.method, headers, signal };
 
-    // Transport-level fault propagates untouched — `runGraph` owns the
-    // `infra-unreachable` mapping (NFR-020).
+    // Transport-level fault (or timeout abort) propagates untouched — `runGraph`
+    // owns the `infra-unreachable` mapping (NFR-020).
     const res = await fetchImpl(req.url, init);
     const text = await res.text();
     return { status: res.status, json: parseJsonObject(text) };

@@ -197,15 +197,18 @@ identity (`AuthIdentity`) has **three variants**; two are live today:
 |---|---|---|
 | `admin` | `ADMIN_TOKEN` env var, constant-time compare, no Redis, full access. Used to provision teams. | ✅ live |
 | `team` | Opaque `fug_<base64url>` bearer token → SHA-256 hash → Redis lookup → `{ team, label }`. | ✅ live |
-| `user` | A human via a `fugue-platform` realm OIDC JWT → `{ sub, azp, canRunDag }`. | ⚠️ type + middleware exist; **JWKS verifier is a stub** — JWT-shaped tokens 401 today (fail-closed by omission). |
+| `user` | A human via a `fugue-platform` realm OIDC JWT → `{ sub, azp, canRunDag }`. | ✅ live when `REALM_JWT_ISSUER` is set — the JWKS verifier (`createRealmJwtVerifier`, jose `createRemoteJWKSet`) and the `authorizeUserRun` policy are wired as one group (`host.ts:496`); unset ⇒ JWT path disabled-by-omission, JWT-shaped tokens 401 (fail-closed). |
 
 **Token model (live):**
 - Team tokens are minted with `crypto.getRandomValues()` (32 bytes), formatted
   as `fug_<base64url>` by `formatToken` (which *enforces* 32 bytes — the
   `TeamToken` brand means "carries full entropy").
-- Stored hashed (SHA-256, no salt — tokens are high-entropy) in Redis:
-  `fugue:tokens:<hash>` (hot-path lookup) and `fugue:teams:<team>` (reverse index
-  for revocation).
+- Stored hashed (SHA-256, no salt — tokens are high-entropy) in Redis, every key
+  tenant-prefixed (`token-store.ts`): `fugue:<tenant>:tokens:<hash>` (hot-path
+  lookup) and `fugue:<tenant>:teams:<team>` (reverse index for revocation), plus a
+  `fugue:<tenant>:teams-index` SET for enumeration (the per-tenant ACL denies
+  `SCAN`, so a SET is the only sound listing path — see
+  `docs/migrations/tenant-key-namespacing.md`).
 - `isTeamTokenShape` narrows an inbound string to `TeamTokenShaped` (prefix +
   ≥43 chars). Shape is *all* it asserts — a forged `fug_aaaa…` resolves to
   nothing because resolution is hash-based. This is parse-don't-validate: the
@@ -320,9 +323,9 @@ The brilliant invariant: a `user` identity **cannot exist** without a wired
 `authorizeUserRun` policy (a *required* member of `RealmJwtDeps`). So "verifier
 wired but authorization undecided" is **unrepresentable in the types** — wiring
 the JWKS verifier *forces* the authz decision at the same construction site, in
-types rather than mirrored SECURITY comments. The JWT path is
-**disabled-by-omission** until the JWKS adapter lands (fail-closed; JWT-shaped
-tokens 401 until then).
+types rather than mirrored SECURITY comments. The JWKS verifier itself is live
+(`createRealmJwtVerifier`); the JWT path is **disabled-by-omission** until
+`REALM_JWT_ISSUER` is configured (fail-closed; JWT-shaped tokens 401 until then).
 
 `fug_` tokens remain for bootstrap, local dev, and callers outside the realm;
 deprecate only if they end up unused.
@@ -550,11 +553,11 @@ Phase 0–4 wiring closed.
 | Auth domain + JWT validation (pure) | `domain/auth.ts`, `domain/jwt-validation.ts` | WIRED | — |
 | Token cache, audit, scope-narrow (pure) | `domain/token-cache.ts`, `adapters/broker-audit.ts`, `domain/capability-scope.ts` | WIRED | — |
 | Auth middleware (accepts `RealmJwtDeps`) | `http/middleware/auth.ts` | WIRED | `realmJwt` left `undefined` at boot (`host.ts:130`) |
-| Keycloak token endpoint | `adapters/keycloak-token-endpoint.ts` (port) + `unwired-token-endpoint.ts` | **STUB ONLY** | no live HTTP adapter (`host.ts:170`) |
-| Entra WIF exchange | `adapters/entra-wif.ts` (`createEntraWifExchange`) | **LIVE, UNWIRED** | never called outside tests; boot uses `createUnwiredEntraWifExchange` (`host.ts:176`) |
-| Graph HTTP transport | `adapters/graph-capability.ts` (`GraphHttp` port + builders) | **STUB ONLY** | boot uses `createUnwiredGraphHttp` (`host.ts:177`, stub lives in `adapters/unwired-entra-wif.ts`) |
-| Realm JWT JWKS verifier (`VerifyRealmJwt`) | port in `http/middleware/auth.ts` | **MISSING** | no JWKS adapter; only fakes |
-| `authorizeUserRun` policy | `RealmJwtDeps.authorizeUserRun` | **MISSING** | no decision wired |
+| Keycloak token endpoint | `adapters/keycloak-token-endpoint-http.ts` (`createKeycloakTokenEndpoint`) + `unwired-token-endpoint.ts` | **WIRED (on config)** | live `createKeycloakTokenEndpoint` when `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` is set, else `createUnwiredTokenEndpoint` (`host.ts:309`) |
+| Entra WIF exchange | `adapters/entra-wif.ts` (`createEntraWifExchange`) | **WIRED (on config)** | live when `ENTRA_TENANT_ID`+`ENTRA_CLIENT_ID` are set, else `createUnwiredEntraWifExchange` (`host.ts:324`) |
+| Graph HTTP transport | `adapters/fetch-graph-http.ts` (`createFetchGraphHttp`) | **WIRED (on config)** | live when Entra config present, else `createUnwiredGraphHttp` (`host.ts:328`) |
+| Realm JWT JWKS verifier (`VerifyRealmJwt`) | `adapters/realm-jwt-verifier.ts` (`createRealmJwtVerifier`, jose) | **WIRED (on config)** | live when `REALM_JWT_ISSUER` is set (`host.ts:499`) |
+| `authorizeUserRun` policy | `RealmJwtDeps.authorizeUserRun` | **WIRED (on config)** | stateless `user.teams.includes(dagTeam)`, built with the verifier group (`host.ts:505`) |
 | Subject-token threading (user exchange) | n/a | **MISSING** | `ExchangeV2Request` carries only `userSub` (ADR-0058 amendment gap) |
 | dagId→Keycloak client mapping | `domain/auth.ts` `agentClientIdForDag` | **PLACEHOLDER** | identity function (ADR-0056) |
 | Dynamics/Dataverse | `keycloak-broker.ts:154`, `graph-capability.ts:236` | **PLACEHOLDER** | hardcoded host |

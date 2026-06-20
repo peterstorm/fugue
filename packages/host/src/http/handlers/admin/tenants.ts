@@ -147,7 +147,15 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
   }
   const base: TenantConfigBase = {
     id,
-    team: markTeam(typeof o.team === "string" ? o.team : ""),
+    // Canonicalize the team to its `.trim().toLowerCase()` form at THIS trust
+    // boundary — exactly as team-TOKEN provisioning does (`admin/teams.ts`). The
+    // canonical team is load-bearing: `canAccessDag` compares `Team` with strict
+    // `===`, and `handleDeregister` revokes the token by the registry's team
+    // against a token store keyed lowercase. Branding a verbatim `"Foo"` here
+    // would route/authorize against `"Foo"` while the token lives under `"foo"`,
+    // so the deregister revoke would silently MISS (idempotent no-op) yet report
+    // `revokeComplete: true`. Canonicalizing keeps both admin write-paths in lockstep.
+    team: markTeam(typeof o.team === "string" ? o.team.trim().toLowerCase() : ""),
     keycloakClientMapping: {
       realm: typeof km.realm === "string" ? km.realm : "",
       clientId: typeof km.clientId === "string" ? km.clientId : "",

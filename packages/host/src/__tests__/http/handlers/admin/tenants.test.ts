@@ -406,6 +406,54 @@ describe("reconfigure PATCH boundary (SC-009, US5)", () => {
   });
 });
 
+// ── Team↔tenant 1:1 conflict → 400 (not 500) ────────────────────────────────────
+
+describe("team conflict is a CALLER error → 400 (not a 500 config-LOAD fault)", () => {
+  it("a second tenant claiming an owned team yields 400 (tenant-config-invalid), not 500", async () => {
+    const h = await harness();
+    const first = { ...validBody("a"), team: "shared" };
+    const second = { ...validBody("b"), team: "shared" };
+    const r1 = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/a", { token: ADMIN_TOKEN, body: first }));
+    expect(r1!.status).toBe(200);
+    const r2 = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/b", { token: ADMIN_TOKEN, body: second }));
+    expect(r2!.status).toBe(400);
+    // The conflicting tenant was NOT registered.
+    expect(h.registry.snapshot().entries.has(tid("b"))).toBe(false);
+  });
+
+  it("a reconfigure MOVING a tenant onto an owned team yields 400, not 500", async () => {
+    const h = await harness();
+    await handleAdminTenants(h.deps, req("POST", "/admin/tenants/a", { token: ADMIN_TOKEN, body: { ...validBody("a"), team: "team-a" } }));
+    await handleAdminTenants(h.deps, req("POST", "/admin/tenants/b", { token: ADMIN_TOKEN, body: { ...validBody("b"), team: "team-b" } }));
+    const moved = { ...validBody("b"), team: "team-a" };
+    const res = await handleAdminTenants(h.deps, req("PATCH", "/admin/tenants/b", { token: ADMIN_TOKEN, body: moved }));
+    expect(res!.status).toBe(400);
+  });
+});
+
+// ── Team name is canonicalized (lowercase) at the registration boundary ──────────
+
+describe("team is canonicalized to lowercase so deregister revoke can't silently miss", () => {
+  it("stores the team lowercased and revokes the LOWERCASE token key on deregister", async () => {
+    const h = await harness();
+    // Register with a mixed-case team — the canonical form is `.trim().toLowerCase()`,
+    // exactly as team-token provisioning stores it.
+    const body = { ...validBody("acme"), team: "  Foo-Bar  " };
+    const reg = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body }));
+    expect(reg!.status).toBe(200);
+    // The registry holds the CANONICAL team, not the verbatim mixed-case input.
+    expect(h.registry.snapshot().entries.get(tid("acme"))?.team).toBe("foo-bar");
+
+    // Deregister → the token revoke must target the SAME lowercase key the token
+    // store is keyed under; otherwise the revoke is an idempotent no-op (silent skip).
+    const der = await handleAdminTenants(h.deps, req("DELETE", "/admin/tenants/acme", { token: ADMIN_TOKEN }));
+    const derBody = (await der!.json()) as { revokeComplete: boolean };
+    expect(h.tokenStore.revoked).toContain("foo-bar");
+    expect(h.tokenStore.revoked).not.toContain("Foo-Bar");
+    expect(derBody.revokeComplete).toBe(true);
+  });
+});
+
 // ── Malformed body → 400 (advisory: API-correctness) ────────────────────────────
 
 describe("malformed register/reconfigure body → 400 (not 500)", () => {

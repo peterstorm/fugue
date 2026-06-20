@@ -64,6 +64,9 @@ export type FetchLike = (
     readonly method: "POST";
     readonly headers: Record<string, string>;
     readonly body: string;
+    // A request-deadline signal. Optional so a recording fake can ignore it; the
+    // live impl always passes `AbortSignal.timeout(...)` (see `createFetchHttpPost`).
+    readonly signal?: AbortSignal;
   },
 ) => Promise<{
   readonly status: number;
@@ -71,21 +74,35 @@ export type FetchLike = (
 }>;
 
 /**
+ * The default request deadline (ms) for an OAuth form-POST egress. Bounds the
+ * `await` so a black-holed Keycloak/Entra endpoint can never wedge the broker
+ * indefinitely (and stall every single-flight waiter behind it). The resulting
+ * `AbortError` rejection is mapped by the caller's `try/catch` to the retriable
+ * `infra-unreachable` — the same channel a DNS/socket fault uses (NFR-020).
+ */
+export const DEFAULT_HTTP_POST_TIMEOUT_MS = 30_000;
+
+/**
  * Build the live `HttpPost` transport over an injected `fetch`. The default is
  * the global `fetch`; tests pass a recording fake so no socket is opened. The
  * returned `post` RESOLVES on any settled HTTP response (mapping the body to a
  * JSON object) and REJECTS only on a transport-level fault — exactly the contract
- * `createEntraWifExchange` / the Keycloak exchange rely on.
+ * `createEntraWifExchange` / the Keycloak exchange rely on. A hung endpoint REJECTS
+ * with an `AbortError` once `timeoutMs` elapses (mapped to `infra-unreachable`).
  */
-export const createFetchHttpPost = (fetchImpl: FetchLike = globalThis.fetch as FetchLike): HttpPost => ({
+export const createFetchHttpPost = (
+  fetchImpl: FetchLike = globalThis.fetch as FetchLike,
+  timeoutMs: number = DEFAULT_HTTP_POST_TIMEOUT_MS,
+): HttpPost => ({
   post: async (url: string, body: string): Promise<HttpPostResponse> => {
-    // A transport-level fault (DNS/socket/reject) propagates untouched — the
-    // caller's `try/catch` owns the `infra-unreachable` mapping (it knows its
-    // hop). Swallowing it here would erase the distinction (NFR-020).
+    // A transport-level fault (DNS/socket/reject) OR a timeout abort propagates
+    // untouched — the caller's `try/catch` owns the `infra-unreachable` mapping
+    // (it knows its hop). Swallowing it here would erase the distinction (NFR-020).
     const res = await fetchImpl(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
     return { status: res.status, json: parseJsonObject(text) };

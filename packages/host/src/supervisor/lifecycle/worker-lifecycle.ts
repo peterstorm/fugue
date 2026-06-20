@@ -294,6 +294,14 @@ export const crash = (
  * last durable checkpoint is the WORKER's job on boot (existing processRun
  * idempotency + SET NX EX lock, FR-016) — this transition only re-enters the
  * spawn path. Valid from: crashed.
+ *
+ * NOT USED IN PRODUCTION (kept for the ADT's completeness + transition tests).
+ * `WorkerLifecycleManager` does NOT call `restart`: it implements RESTART-AT-CAP
+ * (`worker-lifecycle-manager.ts`) by `workers.delete(tenant)` on crash and
+ * re-entering via `requestWorker`, so the `maxLiveWorkers` admission check runs
+ * FIRST. Wiring `restart` here would bypass that check and reintroduce the
+ * crash-loop-at-cap bug the delete-and-re-request path exists to avoid — do not
+ * call it from the orchestrator without preserving the admission gate.
  */
 export const restart = (
   state: WorkerState,

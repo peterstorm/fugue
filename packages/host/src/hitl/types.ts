@@ -19,6 +19,11 @@ import type { DagId, RunId, NodeId, FrameworkError } from "@fuguejs/framework";
  * once, at submission/approval, at the HTTP boundary). So we persist only the
  * execution-relevant fields; the worker reconstructs the `AuthIdentity` it needs
  * to derive the run `origin` (which uses `sub`/`kind`, never `canRunDag`).
+ *
+ * `team` is a plain `string`, NOT the branded `Team`: the brand is deliberately
+ * ERASED at this JSON persistence boundary and RESTORED via `markTeam` on the way
+ * back (`identity.ts` `toExecIdentity`). Do not "fix" it to `Team` — the brand is
+ * a phantom property that cannot round-trip through JSON.
  */
 export type PersistedIdentity =
   | { readonly kind: "admin" }

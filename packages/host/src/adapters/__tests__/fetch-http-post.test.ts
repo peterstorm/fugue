@@ -98,6 +98,33 @@ describe("createFetchHttpPost — response mapping surfaces status + json (NFR-0
   });
 });
 
+describe("createFetchHttpPost — request deadline (no unbounded hang, NFR-020)", () => {
+  it("passes an AbortSignal deadline on every request", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const fetchImpl: FetchLike = async (_url, init) => {
+      seenSignal = init.signal;
+      return { status: 200, text: async () => "{}" };
+    };
+    await createFetchHttpPost(fetchImpl).post("https://x/token", "a=b");
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+    // Fast success → the deadline has not fired.
+    expect(seenSignal?.aborted).toBe(false);
+  });
+
+  it("a hung endpoint REJECTS once the timeout elapses (caller maps abort → infra-unreachable)", async () => {
+    // A fetch that never settles on its own — it only rejects when the injected
+    // deadline aborts. With timeoutMs=1 the AbortSignal.timeout fires deterministically.
+    const fetchImpl: FetchLike = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation timed out.", "TimeoutError")),
+        );
+      });
+    const http = createFetchHttpPost(fetchImpl, 1);
+    await expect(http.post("https://black-hole/token", "a=b")).rejects.toThrow();
+  });
+});
+
 describe("createFetchHttpPost — transport-unreachable propagates (NFR-020)", () => {
   it("a transport-level reject PROPAGATES (the caller's try/catch maps to infra-unreachable)", async () => {
     const { fetchImpl } = recordingFetch(() => {

@@ -168,7 +168,9 @@ describe("team uniqueness (team↔tenant is 1:1)", () => {
     const r2 = register(r1.value, b, 2000);
     expect(isErr(r2)).toBe(true);
     if (!isErr(r2)) return;
-    expect(r2.error.kind).toBe("config-invalid");
+    // A caller-side team conflict is a 400 (tenant-config-invalid), not a 500
+    // (config-invalid, which is reserved for host config-LOAD faults).
+    expect(r2.error.kind).toBe("tenant-config-invalid");
   });
 
   it("does not treat a tenant's OWN team as a conflict (re-register self)", () => {
@@ -203,7 +205,8 @@ describe("team uniqueness (team↔tenant is 1:1)", () => {
     const r = reconfigure(reg.value, bMoved, 2000);
     expect(isErr(r)).toBe(true);
     if (!isErr(r)) return;
-    expect(r.error.kind).toBe("config-invalid");
+    // Caller-side team conflict → 400 (tenant-config-invalid), not 500.
+    expect(r.error.kind).toBe("tenant-config-invalid");
   });
 });
 

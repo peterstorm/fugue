@@ -45,7 +45,7 @@ import { match } from "ts-pattern";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
-import { tenantUnknown } from "../../domain/host-error.js";
+import { tenantUnknown, tenantConfigInvalid } from "../../domain/host-error.js";
 import type { TenantId, SecretsRef } from "../../domain/tenant.js";
 import type { Team } from "../../domain/auth.js";
 
@@ -159,7 +159,9 @@ export const emptyRegistry = (): TenantRegistry => Object.freeze({ entries: new 
 export const registryOf = (seed: readonly TenantConfig[] = []): TenantRegistry => {
   const entries = new Map<TenantId, TenantConfig>();
   for (const cfg of seed) entries.set(cfg.id, cfg);
-  return { entries };
+  // Freeze the record (as `emptyRegistry` does) so every producer upholds the
+  // same runtime-immutability guard, not only compile-time `ReadonlyMap`.
+  return Object.freeze({ entries });
 };
 
 // ── Smart constructor (parse-don't-validate) ────────────────────────────────
@@ -268,12 +270,15 @@ const agentMapEquals = (
 const withEntry = (registry: TenantRegistry, cfg: TenantConfig): TenantRegistry => {
   const next = new Map(registry.entries);
   next.set(cfg.id, cfg);
-  return { entries: next };
+  // Freeze the record consistently with `emptyRegistry`/`registryOf` (uniform
+  // runtime-immutability guard atop the compile-time `ReadonlyMap`).
+  return Object.freeze({ entries: next });
 };
 
 /**
  * The id of a DIFFERENT active tenant that already owns `team`, or `undefined`
- * if the team is free. team→tenant is 1:1 (ADR-0061/0064): the supervisor's
+ * if the team is free. team→tenant is 1:1 (ADR-0064/0068 — the supervisor +
+ * tenant-registry decision): the supervisor's
  * team→tenant routing index is security-load-bearing and resolves a team token
  * by registry order, so two active tenants sharing a team would route that
  * token NONDETERMINISTICALLY (first-writer-wins, silently denying the other).
@@ -326,7 +331,9 @@ export const register = (
   // conflicts with itself.
   const conflict = teamOwnedByOther(registry, cfg.team, cfg.id);
   if (conflict !== undefined) {
-    return err({ kind: "config-invalid", message: `tenant '${cfg.id}': team '${cfg.team}' is already owned by active tenant '${conflict}'` });
+    // A team conflict is a CALLER error (a bad register body), not a host
+    // config-LOAD fault: `tenant-config-invalid` → 400, never `config-invalid` → 500.
+    return err(tenantConfigInvalid(`tenant '${cfg.id}': team '${cfg.team}' is already owned by active tenant '${conflict}'`));
   }
   return ok(withEntry(registry, cfg));
 };
@@ -410,7 +417,9 @@ export const reconfigure = (
       // active tenant would break the 1:1 routing invariant — fail closed.
       const conflict = teamOwnedByOther(registry, cfg.team, cfg.id);
       if (conflict !== undefined) {
-        return err({ kind: "config-invalid", message: `tenant '${cfg.id}': team '${cfg.team}' is already owned by active tenant '${conflict}'` });
+        // Caller error (a bad reconfigure body), not a host config-LOAD fault:
+        // `tenant-config-invalid` → 400, never `config-invalid` → 500.
+        return err(tenantConfigInvalid(`tenant '${cfg.id}': team '${cfg.team}' is already owned by active tenant '${conflict}'`));
       }
       return ok(withEntry(registry, cfg));
     })
