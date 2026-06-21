@@ -367,6 +367,19 @@ describe("createSupervisor — unauthenticated health probes (Docker HEALTHCHECK
       await sup.value.shutdown();
     }
   });
+
+  it("GET /readiness returns 503 once the supervisor is draining/stopped (kept OUT of the load-balancer)", async () => {
+    const sup = await createSupervisor(buildDeps({}));
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    // Drive the REAL shutdown transition (ready → draining → stopped); the handle
+    // closure still answers probes off the now-unready state. This exercises the 503
+    // branch THROUGH `handle` (not just the pure builder), pinning the status wiring.
+    await sup.value.shutdown();
+    const res = await sup.value.handle(new Request("http://host/readiness", { method: "GET" }));
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { ready: boolean }).ready).toBe(false);
+  });
 });
 
 describe("createSupervisor — routing + proxy with fakes", () => {

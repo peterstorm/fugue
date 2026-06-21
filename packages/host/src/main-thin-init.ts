@@ -46,7 +46,12 @@ export interface ThinInitEnvConfig extends ThinInitConfig {
 }
 
 const parseIntEnv = (raw: string | undefined, fallback: number, min: number): number => {
-  if (raw === undefined) return fallback;
+  // An unset OR empty/whitespace-only var → the default. `Number("")` and
+  // `Number("   ")` are BOTH 0, which would otherwise pass `>= min 0` and silently
+  // yield 0 (e.g. THIN_INIT_SHUTDOWN_GRACE_MS="" → a 0ms drain window instead of
+  // the 10s default) — an empty env var is common in k8s/compose and must mean
+  // "use the default", not "0".
+  if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   return Number.isInteger(n) && n >= min ? n : fallback;
 };
@@ -131,30 +136,48 @@ export const createShutdownHandler = (deps: ShutdownDeps): ShutdownHandler => {
   };
 };
 
+// ── Last-resort PID-1 error nets (testable: no exit seam ⇒ cannot exit) ───────────
+
+export interface GlobalErrorHandlers {
+  readonly onUncaughtException: (e: unknown) => void;
+  readonly onUnhandledRejection: (reason: unknown) => void;
+}
+
+/**
+ * Build PID 1's last-resort error handlers. A stray throw in a signal handler /
+ * timer callback (i.e. OUTSIDE the awaited startup chain `main().catch` already
+ * covers) would otherwise CRASH PID 1 and take the whole pod down. These LOG the
+ * fault with full context and KEEP SUPERVISING — the supervise loop + grace timer
+ * carry on. This is an INTENTIONAL survive, not a swallow: the error is logged at
+ * `error` so it stays diagnosable. Crucially they have NO exit seam, so "PID 1
+ * stays up on a stray async fault" is a STRUCTURAL property (the handler cannot
+ * exit), not a comment — and it is unit-tested as such. (The reaper is already
+ * throw-safe via `drainReap`; this covers everything else.)
+ */
+export const createGlobalErrorHandlers = (logger: LogPort): GlobalErrorHandlers => ({
+  onUncaughtException: (e) =>
+    logger.error("[thin-init] uncaught exception (PID 1 surviving — pod stays up)", {
+      error: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
+    }),
+  onUnhandledRejection: (reason) =>
+    logger.error("[thin-init] unhandled rejection (PID 1 surviving — pod stays up)", {
+      reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    }),
+});
+
 // ── Imperative shell: the binary ────────────────────────────────────────────────
 
 const main = async (): Promise<void> => {
   const logger = createLogger();
 
-  // LAST-RESORT net for PID 1: a stray throw in a signal handler / timer callback
-  // (i.e. OUTSIDE the awaited startup chain that `main().catch` already covers)
-  // would otherwise CRASH PID 1 and take the whole pod down. Log it with full
-  // context and KEEP SUPERVISING — a non-fatal async fault must not kill the pod;
-  // the supervise loop + grace timer carry on. (The reaper is already throw-safe
-  // via `drainReap`; this covers everything else.) This is an INTENTIONAL survive,
-  // not a swallow: the error is logged loudly so it stays diagnosable.
-  process.on("uncaughtException", (e: unknown) => {
-    logger.error("[thin-init] uncaught exception (PID 1 surviving — pod stays up)", {
-      error: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
-    });
-  });
-  process.on("unhandledRejection", (reason: unknown) => {
-    logger.error("[thin-init] unhandled rejection (PID 1 surviving — pod stays up)", {
-      reason: reason instanceof Error ? reason.message : String(reason),
-      stack: reason instanceof Error ? reason.stack : undefined,
-    });
-  });
+  // LAST-RESORT nets for PID 1 (see `createGlobalErrorHandlers`): a stray throw in a
+  // signal handler / timer callback — OUTSIDE the awaited startup chain that
+  // `main().catch` already covers — must NOT crash PID 1 and take the whole pod down.
+  const errorHandlers = createGlobalErrorHandlers(logger);
+  process.on("uncaughtException", errorHandlers.onUncaughtException);
+  process.on("unhandledRejection", errorHandlers.onUnhandledRejection);
 
   const cfg = parseThinInitEnv(process.env);
   // The supervisor binary is a sibling of this file (src/ in dev, dist/ in build),

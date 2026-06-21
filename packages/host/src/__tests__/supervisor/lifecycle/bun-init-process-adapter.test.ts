@@ -20,7 +20,13 @@ import {
   broadcastSignalToWorkers,
   createBunInitProcessAdapter,
 } from "../../../supervisor/lifecycle/bun-init-process-adapter.js";
-import { parseThinInitEnv, createShutdownHandler, decidePostLoopExit } from "../../../main-thin-init.js";
+import {
+  parseThinInitEnv,
+  createShutdownHandler,
+  decidePostLoopExit,
+  createGlobalErrorHandlers,
+} from "../../../main-thin-init.js";
+import { runThinInit } from "../../../supervisor/lifecycle/thin-init.js";
 import type { LogPort } from "../../../ports.js";
 
 const noopLogger: LogPort = { info: () => {}, warn: () => {}, error: () => {} };
@@ -64,6 +70,15 @@ describe("parseThinInitEnv (pure)", () => {
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "0", // below min 1
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "500", // below min 1000
       THIN_INIT_SHUTDOWN_GRACE_MS: "abc", // not a number
+    });
+    expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+  });
+
+  test("empty / whitespace-only values mean 'use the default', NOT 0 (Number('')===0 would otherwise disable the grace window)", () => {
+    const cfg = parseThinInitEnv({
+      THIN_INIT_MAX_SUPERVISOR_RESTARTS: "",
+      THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "   ",
+      THIN_INIT_SHUTDOWN_GRACE_MS: "", // must NOT become a 0ms drain window
     });
     expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
   });
@@ -276,6 +291,39 @@ describe("createShutdownHandler (grace sequencing + idempotency)", () => {
   });
 });
 
+// ── createGlobalErrorHandlers: PID-1 survive-don't-exit nets ─────────────────────
+
+describe("createGlobalErrorHandlers (PID 1 survives stray async faults)", () => {
+  test("uncaughtException is LOGGED at error with message + stack — and the handler has no way to exit", () => {
+    const { logger, logs } = capturingLogger();
+    const h = createGlobalErrorHandlers(logger);
+    const boom = new Error("stray throw from a timer callback");
+    h.onUncaughtException(boom);
+    const errLog = logs.find((l) => l.level === "error");
+    expect(errLog?.msg).toContain("uncaught exception");
+    expect(errLog?.msg).toContain("PID 1 surviving");
+    expect(errLog?.data).toMatchObject({ error: "stray throw from a timer callback" });
+    expect(typeof errLog?.data?.stack).toBe("string");
+    // Structural survival: the handler returns normally (no throw, no exit seam to call).
+  });
+
+  test("unhandledRejection is LOGGED at error; a non-Error reason is stringified, not dropped", () => {
+    const { logger, logs } = capturingLogger();
+    const h = createGlobalErrorHandlers(logger);
+    h.onUnhandledRejection("plain string rejection");
+    const errLog = logs.find((l) => l.level === "error");
+    expect(errLog?.msg).toContain("unhandled rejection");
+    expect(errLog?.data).toMatchObject({ reason: "plain string rejection", stack: undefined });
+  });
+
+  test("both handlers return normally (never throw) so a faulty fault-handler can't itself crash PID 1", () => {
+    const { logger } = capturingLogger();
+    const h = createGlobalErrorHandlers(logger);
+    expect(() => h.onUncaughtException(null)).not.toThrow();
+    expect(() => h.onUnhandledRejection(undefined)).not.toThrow();
+  });
+});
+
 // ── Real adapter behavior (spawns real `bun run` subprocesses) ───────────────────
 
 describe("createBunInitProcessAdapter (real spawn/exit/terminate)", () => {
@@ -375,6 +423,66 @@ describe("createBunInitProcessAdapter (real spawn/exit/terminate)", () => {
     ]);
     expect(race).toBe("parked");
   });
+});
+
+// ── Fork-failure resilience: a synchronous spawn throw must NOT crash PID 1 ───────
+
+describe("createBunInitProcessAdapter (fork-failure resilience)", () => {
+  test("a synchronous spawn throw (EAGAIN/ENOMEM) becomes a -1 synthetic exit — the crash-loop budget governs, PID 1 does NOT crash", async () => {
+    const { logger, logs } = capturingLogger();
+    const adapter = createBunInitProcessAdapter(
+      {
+        supervisorEntry: "/irrelevant/main-supervisor.ts",
+        spawn: () => {
+          const e: NodeJS.ErrnoException = new Error("spawn EAGAIN");
+          e.code = "EAGAIN";
+          throw e;
+        },
+      },
+      logger,
+    );
+    // MUST NOT throw: a throw would escape runThinInit → main().catch → process.exit(1),
+    // tearing down the PID namespace and SIGKILLing every live worker with no drain.
+    // Instead it resolves a synthetic crash exit so `decideSupervisorRestart` retries /
+    // gives up cleanly within the budget.
+    const code = await adapter.spawnSupervisor().exited;
+    expect(code).toBe(-1);
+    const errLog = logs.find((l) => l.level === "error");
+    expect(errLog?.msg).toContain("supervisor spawn failed");
+    expect(errLog?.data).toMatchObject({ error: "spawn EAGAIN", supervisorEntry: "/irrelevant/main-supervisor.ts" });
+  });
+
+  test("after a spawn failure the adapter stays in a safe state — beginTermination forwards no stale pid and does not throw", async () => {
+    const adapter = createBunInitProcessAdapter({
+      supervisorEntry: "/irrelevant/main-supervisor.ts",
+      spawn: () => {
+        throw new Error("ENOMEM: cannot fork");
+      },
+    });
+    expect(await adapter.spawnSupervisor().exited).toBe(-1); // currentPid stays undefined
+    // No current supervisor pid → nothing to forward; the test runner is not PID 1 so
+    // the worker broadcast is skipped. The guard must never throw or signal a stale pid.
+    expect(() => adapter.beginTermination("SIGTERM")).not.toThrow();
+  });
+
+  test("a persistent spawn failure drives the supervise loop to a clean crash-loop give-up (never hangs, never throws)", async () => {
+    // INTEGRATION: the adapter's -1 synthetic exit must compose with runThinInit's
+    // pure budget so a node that can NEVER fork ends the pod cleanly (give-up) rather
+    // than hanging or crashing PID 1.
+    const adapter = createBunInitProcessAdapter({
+      supervisorEntry: "/irrelevant/main-supervisor.ts",
+      spawn: () => {
+        throw new Error("spawn EAGAIN");
+      },
+    });
+    const result = await runThinInit(
+      adapter,
+      { maxRestartsPerWindow: 3, windowMs: 60_000 },
+      () => 1000, // frozen clock → all retries fall inside one window, budget exhausts
+      noopLogger,
+    );
+    expect(result.stoppedReason).toBe("crash-loop");
+  }, 10_000);
 });
 
 // ── End-to-end PID-1 reaping (gated on PID-namespace support) ────────────────────

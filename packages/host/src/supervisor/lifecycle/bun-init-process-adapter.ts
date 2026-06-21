@@ -210,6 +210,22 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
 
 // ── Adapter ─────────────────────────────────────────────────────────────────────
 
+/** What the adapter needs from a spawned supervisor: its pid + a promise of its exit code. */
+export interface SpawnedSupervisorProcess {
+  readonly pid?: number;
+  readonly exited: Promise<number | null>;
+}
+
+/**
+ * Spawn seam: start the supervisor process. Injected so the SYNCHRONOUS fork-failure
+ * path (`Bun.spawn` throwing on EAGAIN/ENOMEM/EMFILE/ENOENT) is unit-testable without
+ * a real resource-exhaustion fork. Production defaults to `Bun.spawn`.
+ */
+export type SpawnSupervisorFn = (
+  command: readonly string[],
+  options: { readonly env: Record<string, string>; readonly stdout: "inherit"; readonly stderr: "inherit" },
+) => SpawnedSupervisorProcess;
+
 export interface BunInitAdapterConfig {
   /** Absolute path to the supervisor binary (`main-supervisor.ts`) to spawn. */
   readonly supervisorEntry: string;
@@ -217,6 +233,11 @@ export interface BunInitAdapterConfig {
   readonly env?: Readonly<Record<string, string | undefined>>;
   /** Safety-net reap interval (ms) backing SIGCHLD. Default 30_000. */
   readonly reapIntervalMs?: number;
+  /**
+   * Spawn seam (injected for tests; production defaults to `Bun.spawn`). Lets the
+   * fork-failure branch be exercised without a real resource-exhaustion fork.
+   */
+  readonly spawn?: SpawnSupervisorFn;
 }
 
 /**
@@ -247,6 +268,7 @@ export const createBunInitProcessAdapter = (
   logger?: LogPort,
 ): BunInitProcessAdapter => {
   const reap = resolveReaper(libcCandidates(process.platform, process.arch));
+  const spawn: SpawnSupervisorFn = cfg.spawn ?? ((command, options) => Bun.spawn([...command], options));
   let terminating = false;
   let currentPid: number | undefined;
 
@@ -265,16 +287,38 @@ export const createBunInitProcessAdapter = (
         // PID-namespace teardown SIGKILLs anything still running).
         return { exited: new Promise<number | null>(() => {}) };
       }
-      const proc = Bun.spawn(["bun", "run", cfg.supervisorEntry], {
-        env: buildEnv(),
-        stdout: "inherit",
-        stderr: "inherit",
+      try {
         // No custom process group: workers inherit PID 1's group and re-parent to
         // PID 1 (this process) on supervisor exit — they are NOT killed (AD-2).
-      });
-      currentPid = typeof proc.pid === "number" ? proc.pid : undefined;
-      logger?.info?.("[thin-init] supervisor spawned", { pid: currentPid });
-      return { exited: proc.exited };
+        const proc = spawn(["bun", "run", cfg.supervisorEntry], {
+          env: buildEnv(),
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        currentPid = typeof proc.pid === "number" ? proc.pid : undefined;
+        logger?.info?.("[thin-init] supervisor spawned", { pid: currentPid });
+        return { exited: proc.exited };
+      } catch (e) {
+        // A SYNCHRONOUS fork failure (EAGAIN/ENOMEM under memory pressure, EMFILE on
+        // fd exhaustion, ENOENT if the entry vanished) is a supervisor NON-START, not
+        // a PID-1 crash. Hand the supervise loop a synthetic failed exit (-1, the
+        // signal/abnormal-exit convention) so `decideSupervisorRestart` applies the
+        // crash-loop budget + the pod's give-up/grace-drain path — exactly as it does
+        // for a supervisor that starts then crashes. Letting it THROW would escape the
+        // loop to `main().catch` → `process.exit(1)`, tearing down the PID namespace and
+        // SIGKILLing every live worker mid-flight with NO drain (AD-2/FR-019/FR-021
+        // violated) — the worst outcome at precisely the moment (memory pressure) a
+        // fork failure is most likely AND most likely to be transient/self-healing.
+        // Clear `currentPid` so a subsequent `beginTermination` never signals a stale
+        // pid. Logged at `error` (not swallowed): a non-start that burns restart budget
+        // must be diagnosable.
+        currentPid = undefined;
+        logger?.error?.("[thin-init] supervisor spawn failed; treating as a crash for the restart budget", {
+          supervisorEntry: cfg.supervisorEntry,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return { exited: Promise.resolve(-1) };
+      }
     },
 
     reapZombies: reap,

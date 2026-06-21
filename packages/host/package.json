@@ -9,7 +9,7 @@
   "main": "src/index.ts",
   "bin": {
     "host": "src/main.ts",
-    "fugue-supervisor": "src/main-thin-init.ts"
+    "fugue-thin-init": "src/main-thin-init.ts"
   },
   "exports": {
     ".": "./src/index.ts",
