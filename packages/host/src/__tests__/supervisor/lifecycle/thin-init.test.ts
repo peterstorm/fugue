@@ -43,6 +43,19 @@ describe("decideSupervisorRestart (pure)", () => {
       expect(d.budget.windowStartedAt).toBe(5_000);
     }
   });
+
+  test("the exact window edge (now - windowStartedAt === windowMs) is a reset, not a give-up", () => {
+    // The `>=` boundary: a restart landing PRECISELY on windowStartedAt + windowMs
+    // opens a FRESH window rather than counting against the old one. Pins the
+    // off-by-one-prone edge the comfortably-inside/comfortably-past cases above skip.
+    const b = initialRestartBudget(1, 1_000, 0); // window [0, 1000)
+    const d = decideSupervisorRestart(b, 1_000); // exactly at the edge
+    expect(d.action).toBe("restart");
+    if (d.action === "restart") {
+      expect(d.budget.restartsInWindow).toBe(1);
+      expect(d.budget.windowStartedAt).toBe(1_000);
+    }
+  });
 });
 
 describe("runThinInit (faked process seams)", () => {
@@ -70,21 +83,20 @@ describe("runThinInit (faked process seams)", () => {
     expect(killed).toBe(false);
   });
 
-  test("installs and uninstalls a SIGCHLD reap handler", async () => {
-    let installed = false;
-    let uninstalled = false;
+  test("does NOT own the SIGCHLD reaper lifecycle — only boundary-reaps (the always-on reaper is the binary's concern)", async () => {
+    // Regression guard for the grace-window zombie gap: a loop-scoped reaper torn down
+    // on give-up would stop reaping while PID 1 lives on through the shutdown grace
+    // window. runThinInit must leave SIGCHLD ownership to the binary
+    // (`installProcessLifetimeReaper`) and only reap at the per-supervisor-exit boundary.
+    let sigchldCalls = 0;
+    let reapCount = 0;
     const proc: InitProcessPort = {
       spawnSupervisor: () => ({ exited: Promise.resolve(1) }),
-      reapZombies: () => {},
-      onSigchld: (handler) => {
-        installed = true;
-        // Driving the handler must reap — no throw.
-        handler();
-        return () => { uninstalled = true; };
-      },
+      reapZombies: () => { reapCount++; },
+      onSigchld: () => { sigchldCalls++; return () => {}; },
     };
     await runThinInit(proc, { maxRestartsPerWindow: 0, windowMs: 60_000 }, () => 0);
-    expect(installed).toBe(true);
-    expect(uninstalled).toBe(true);
+    expect(sigchldCalls).toBe(0); // never installs/uninstalls a loop-scoped reaper
+    expect(reapCount).toBeGreaterThanOrEqual(1); // but still does the boundary reap
   });
 });

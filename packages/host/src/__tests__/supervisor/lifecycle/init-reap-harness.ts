@@ -26,6 +26,11 @@ writeFileSync(fakeSupervisor, `Bun.spawn(["sleep", "0.5"]); process.exit(7);\n`)
 // Budget 2 → spawn #1 (initial) + 2 restarts, then give up: 3 fake supervisors,
 // 3 orphan workers to reap.
 const adapter = createBunInitProcessAdapter({ supervisorEntry: fakeSupervisor });
+// Mirror the production binary: install the always-on SIGCHLD reaper for the process
+// lifetime (the binary does this via `installProcessLifetimeReaper`, not `runThinInit`)
+// so this harness still exercises the SIGCHLD-driven reap path, not only the explicit
+// final reap below.
+adapter.onSigchld(() => adapter.reapZombies());
 const result = await runThinInit(adapter, { maxRestartsPerWindow: 2, windowMs: 60_000 }, () => Date.now());
 
 console.info("RESULT pid=" + process.pid); // 1 inside the namespace

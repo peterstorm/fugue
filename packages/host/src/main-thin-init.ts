@@ -22,7 +22,7 @@
 
 import path from "node:path";
 import { runThinInit } from "./supervisor/lifecycle/thin-init.js";
-import type { ThinInitConfig } from "./supervisor/lifecycle/thin-init.js";
+import type { ThinInitConfig, InitProcessPort } from "./supervisor/lifecycle/thin-init.js";
 import { createBunInitProcessAdapter } from "./supervisor/lifecycle/bun-init-process-adapter.js";
 import type { LogPort } from "./ports.js";
 
@@ -167,6 +167,29 @@ export const createGlobalErrorHandlers = (logger: LogPort): GlobalErrorHandlers 
     }),
 });
 
+// ── PID-1 zombie reaper (PROCESS lifetime — never uninstalled) ────────────────────
+
+/**
+ * Install the always-on SIGCHLD zombie-reaper for the WHOLE process lifetime and
+ * deliberately DISCARD the uninstaller. The reaper MUST outlive the supervise loop:
+ *   - while the loop is PARKED on shutdown (terminating) it never iterates, so its
+ *     per-iteration boundary reap never runs; and
+ *   - on a shutdown-driven give-up the loop RETURNS but PID 1 lives on through the
+ *     grace window (`decidePostLoopExit` defers to the grace timer) while the workers
+ *     it just broadcast SIGTERM to drain and exit.
+ * In both windows a re-parented worker that exits would become a zombie with NO reaper
+ * if teardown were loop-scoped (a zombie still answers `kill(pid,0)` → reads as ALIVE).
+ * Owning it here — like `createGlobalErrorHandlers` — makes "PID 1 always reaps, start
+ * to exit" a STRUCTURAL property, not the loop's concern; `runThinInit` only does the
+ * prompt boundary reaps, this is the continuous one. No exit/teardown seam by design.
+ */
+export const installProcessLifetimeReaper = (
+  proc: Pick<InitProcessPort, "onSigchld" | "reapZombies">,
+): void => {
+  // Discard the uninstaller on purpose: this handler lives until `process.exit`.
+  proc.onSigchld(() => proc.reapZombies());
+};
+
 // ── Imperative shell: the binary ────────────────────────────────────────────────
 
 const main = async (): Promise<void> => {
@@ -185,6 +208,12 @@ const main = async (): Promise<void> => {
   const supervisorEntry = path.join(path.dirname(process.argv[1] ?? ""), "main-supervisor.ts");
 
   const adapter = createBunInitProcessAdapter({ supervisorEntry }, logger);
+
+  // Install the always-on PID-1 zombie reaper for the PROCESS lifetime (never
+  // uninstalled) BEFORE the supervise loop. It must keep reaping re-parented workers
+  // that exit while the loop is parked on shutdown OR during the post-give-up grace
+  // window — see `installProcessLifetimeReaper`. `runThinInit` itself only boundary-reaps.
+  installProcessLifetimeReaper(adapter);
 
   // PID 1 does NOT receive default signal dispositions — without an explicit
   // handler, SIGTERM is IGNORED and the pod never terminates gracefully (k8s then

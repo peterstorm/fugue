@@ -25,6 +25,7 @@ import {
   createShutdownHandler,
   decidePostLoopExit,
   createGlobalErrorHandlers,
+  installProcessLifetimeReaper,
 } from "../../../main-thin-init.js";
 import { runThinInit } from "../../../supervisor/lifecycle/thin-init.js";
 import type { LogPort } from "../../../ports.js";
@@ -81,6 +82,12 @@ describe("parseThinInitEnv (pure)", () => {
       THIN_INIT_SHUTDOWN_GRACE_MS: "", // must NOT become a 0ms drain window
     });
     expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+  });
+
+  test('a finite but non-integer value ("3.5") is rejected by the integer guard → default (no silent parseInt truncation)', () => {
+    // Number("3.5")=3.5 passes `>= min` but `Number.isInteger` rejects it; a future
+    // swap to parseInt would silently truncate to a 3ms grace — this pins the fallback.
+    expect(parseThinInitEnv({ THIN_INIT_SHUTDOWN_GRACE_MS: "3.5" }).shutdownGraceMs).toBe(10_000);
   });
 });
 
@@ -324,6 +331,29 @@ describe("createGlobalErrorHandlers (PID 1 survives stray async faults)", () => 
   });
 });
 
+// ── installProcessLifetimeReaper: always-on PID-1 reaper (never uninstalled) ──────
+
+describe("installProcessLifetimeReaper (process-lifetime reaper)", () => {
+  test("installs a SIGCHLD handler that drives reapZombies and DISCARDS the uninstaller (survives the parked loop + grace window)", () => {
+    let installed = 0;
+    let uninstalled = 0;
+    let reaped = 0;
+    let driver: (() => void) | undefined;
+    installProcessLifetimeReaper({
+      onSigchld: (handler) => {
+        installed++;
+        driver = handler; // capture the installed handler to prove it reaps
+        return () => { uninstalled++; };
+      },
+      reapZombies: () => { reaped++; },
+    });
+    expect(installed).toBe(1);
+    expect(uninstalled).toBe(0); // structural: the uninstaller is deliberately never called
+    driver?.();
+    expect(reaped).toBe(1); // the installed handler drives reapZombies
+  });
+});
+
 // ── Real adapter behavior (spawns real `bun run` subprocesses) ───────────────────
 
 describe("createBunInitProcessAdapter (real spawn/exit/terminate)", () => {
@@ -388,6 +418,24 @@ describe("createBunInitProcessAdapter (real spawn/exit/terminate)", () => {
     expect(process.listenerCount("SIGCHLD")).toBe(before); // listener removed
     await Bun.sleep(60);
     expect(calls).toBe(atUninstall); // interval cleared — no further calls
+  }, 10_000);
+
+  test("a real delivered SIGCHLD drives the reaper (the SIGNAL path, with the safety-net interval disabled)", async () => {
+    // The test above proves the interval safety net; this isolates the SIGNAL path —
+    // a huge reapIntervalMs ensures ONLY a delivered SIGCHLD (not the timer) can fire
+    // the handler. This is the primary reaping trigger in production.
+    const adapter = createBunInitProcessAdapter({ supervisorEntry: fakeExit7, reapIntervalMs: 10_000_000 });
+    let calls = 0;
+    const uninstall = adapter.onSigchld(() => { calls++; });
+    try {
+      process.kill(process.pid, "SIGCHLD"); // deliver a real SIGCHLD to ourselves
+      // Signal delivery to the JS listener is async — poll briefly rather than guess a sleep.
+      const deadline = Date.now() + 500;
+      while (calls === 0 && Date.now() < deadline) await Bun.sleep(10);
+      expect(calls).toBeGreaterThan(0);
+    } finally {
+      uninstall();
+    }
   }, 10_000);
 
   test("beginTermination forwards SIGTERM to the current supervisor — it is DELIVERED + handled", async () => {

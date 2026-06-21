@@ -123,7 +123,14 @@ export interface InitProcessPort {
    * zombies. No-op for children we already awaited.
    */
   readonly reapZombies: () => void;
-  /** Install a SIGCHLD handler driving `reapZombies`. Returns an uninstaller. */
+  /**
+   * Install a SIGCHLD handler driving `reapZombies`, returning an uninstaller.
+   * Installed ONCE by the binary for the PROCESS lifetime (never uninstalled) — see
+   * `installProcessLifetimeReaper` in main-thin-init.ts — so the reaper outlives both
+   * the parked supervise loop and the post-give-up shutdown grace window. `runThinInit`
+   * deliberately does NOT own this lifecycle: a loop-scoped teardown would leave
+   * re-parented workers that exit mid-drain unreaped during the grace window.
+   */
   readonly onSigchld: (handler: () => void) => () => void;
 }
 
@@ -135,8 +142,16 @@ export interface ThinInitConfig {
 /**
  * Run the thin-init supervise loop: keep the supervisor alive across crashes
  * (within the crash-loop budget) while NEVER taking down the workers (they are
- * re-parented to this PID-1 process and reaped here, not killed). Resolves only
- * when the crash-loop budget is exhausted (caller then exits the pod).
+ * re-parented to this PID-1 process and reaped, not killed). Resolves only when the
+ * crash-loop budget is exhausted (caller then exits the pod).
+ *
+ * The always-on SIGCHLD zombie-reaper is NOT installed here — it is a PROCESS-lifetime
+ * concern the binary owns (`installProcessLifetimeReaper` in main-thin-init.ts), so it
+ * survives both this loop parking on shutdown AND the post-give-up grace window. A
+ * loop-scoped reaper torn down on return would leave re-parented workers that exit
+ * mid-drain unreaped until the grace timer's `exit(0)`. This loop only performs a
+ * prompt BOUNDARY reap right after each supervisor exit (before the next spawn); the
+ * continuous reaping is the binary's always-on handler.
  *
  * IMPERATIVE SHELL — all the restart POLICY is the pure `decideSupervisorRestart`
  * above; this function only spawns, waits, reaps, and applies the decision.
@@ -147,43 +162,40 @@ export const runThinInit = async (
   now: () => number,
   logger?: LogPort,
 ): Promise<{ readonly stoppedReason: "crash-loop" }> => {
-  const uninstall = proc.onSigchld(() => proc.reapZombies());
   let budget = initialRestartBudget(config.maxRestartsPerWindow, config.windowMs, now());
 
-  try {
-    // eslint-disable-next-line no-constant-condition
-    for (;;) {
-      const child = proc.spawnSupervisor();
-      const code = await child.exited;
-      // Reap any orphaned workers that exited while the supervisor was down. The
-      // LIVE workers stay running and are re-adopted by the next supervisor.
-      proc.reapZombies();
+  // eslint-disable-next-line no-constant-condition
+  for (;;) {
+    const child = proc.spawnSupervisor();
+    const code = await child.exited;
+    // Prompt BOUNDARY reap: clear any orphaned workers that exited while the
+    // supervisor was down, before respawning. The LIVE workers stay running and are
+    // re-adopted by the next supervisor. (Continuous reaping between boundaries is the
+    // binary's always-on SIGCHLD handler — see `installProcessLifetimeReaper`.)
+    proc.reapZombies();
 
-      const decision = decideSupervisorRestart(budget, now());
-      budget = decision.budget;
+    const decision = decideSupervisorRestart(budget, now());
+    budget = decision.budget;
 
-      const stop = match(decision)
-        .with({ action: "restart" }, (d) => {
-          logger?.warn("[thin-init] supervisor exited; restarting (workers preserved)", {
-            exitCode: code,
-            restartsInWindow: d.budget.restartsInWindow,
-          });
-          return false;
-        })
-        .with({ action: "give-up" }, () => {
-          logger?.error("[thin-init] supervisor crash-loop budget exhausted; exiting pod", {
-            exitCode: code,
-            maxRestartsPerWindow: config.maxRestartsPerWindow,
-            windowMs: config.windowMs,
-          });
-          return true;
-        })
-        .exhaustive();
+    const stop = match(decision)
+      .with({ action: "restart" }, (d) => {
+        logger?.warn("[thin-init] supervisor exited; restarting (workers preserved)", {
+          exitCode: code,
+          restartsInWindow: d.budget.restartsInWindow,
+        });
+        return false;
+      })
+      .with({ action: "give-up" }, () => {
+        logger?.error("[thin-init] supervisor crash-loop budget exhausted; exiting pod", {
+          exitCode: code,
+          maxRestartsPerWindow: config.maxRestartsPerWindow,
+          windowMs: config.windowMs,
+        });
+        return true;
+      })
+      .exhaustive();
 
-      if (stop) break;
-    }
-  } finally {
-    uninstall();
+    if (stop) break;
   }
 
   return { stoppedReason: "crash-loop" };
