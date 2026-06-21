@@ -65,6 +65,38 @@ const WNOHANG = 1;
 export type ReapFn = () => void;
 
 /**
+ * PURE drain loop for the reaper: invoke `reapOne` (one non-blocking `waitpid`)
+ * until it reports nothing left to reap. `reapOne` returns the waitpid result:
+ * r > 0 reaped a pid (keep draining a burst of coalesced exits); r === 0 children
+ * exist but none have exited; r < 0 ECHILD / no children. Stops on r <= 0.
+ *
+ * NEVER THROWS: a throw from the underlying FFI call is caught and ends THIS drain
+ * cycle. The reaper runs inside a SIGCHLD handler AND an unref'd safety-net
+ * interval — an uncaught throw there would escape into PID 1 (worst case: a bad
+ * reap takes out PID 1 from a signal handler). On a fault we stop the cycle; the
+ * next SIGCHLD / the interval retries.
+ *
+ * EINTR: a `waitpid(-1, WNOHANG)` that returns -1 on EINTR (extremely rare —
+ * WNOHANG does not block, so the interrupt window is tiny) is indistinguishable
+ * from ECHILD here and breaks early. That merely defers one orphan's reap to the
+ * next cycle, bounded by the safety-net interval — never a persistent zombie leak.
+ *
+ * Exported so the multi-reap drain + the throw-safety are unit-testable without a
+ * real PID namespace.
+ */
+export const drainReap = (reapOne: () => number): void => {
+  for (;;) {
+    let r: number;
+    try {
+      r = reapOne();
+    } catch {
+      break; // FFI call-time fault — stop this cycle; SIGCHLD / the interval retries.
+    }
+    if (r <= 0) break;
+  }
+};
+
+/**
  * Try to bind a reaper to libc's `waitpid` via ONE candidate shared object.
  * Returns the reaper closure, or `null` if this candidate can't provide `waitpid`
  * (wrong libc for the image / dlopen failure). Injectable into `resolveReaper` so
@@ -81,14 +113,9 @@ export const loadWaitpidReaper = (candidate: string): ReapFn | null => {
     // closure keeps `status` (and `lib`) referenced — never GC'd out from under a
     // live native pointer.
     const status = new Int32Array(1);
-    return () => {
-      for (;;) {
-        // -1 = wait for ANY child (incl. re-parented orphans). r > 0 → reaped a
-        // pid; 0 → children exist but none exited; -1 → ECHILD (no children).
-        const r = lib.symbols.waitpid(-1, ptr(status), WNOHANG);
-        if (r <= 0) break;
-      }
-    };
+    // -1 = wait for ANY child (incl. re-parented orphans). Drained (and made
+    // throw-safe) by `drainReap`.
+    return () => drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number);
   } catch {
     return null;
   }
@@ -114,6 +141,73 @@ export const resolveReaper = (
   );
 };
 
+// ── Pod-shutdown worker broadcast (PID-1 only; injected OS seams) ────────────────
+
+/** OS seams for the worker-drain broadcast — injected so the PID-1-only path is testable. */
+export interface WorkerBroadcastSeams {
+  /** This process's PID. The broadcast is a NO-OP unless this is 1 (genuine pod PID 1). */
+  readonly selfPid: number;
+  /** Enumerate `/proc` entries (pid dir names). MAY throw (no `/proc` / EACCES). */
+  readonly enumerate: () => readonly string[];
+  /** Send `sig` to `pid`. MAY throw (ESRCH gone / EPERM not permitted). */
+  readonly kill: (pid: number, sig: "SIGTERM" | "SIGINT") => void;
+  readonly logger?: LogPort;
+}
+
+/**
+ * POD SHUTDOWN: broadcast `sig` to every per-tenant WORKER in the pod's PID
+ * namespace so they drain gracefully (FR-017) — the supervisor deliberately does
+ * NOT propagate shutdown to workers (AD-2), so PID 1 must, else they are
+ * hard-SIGKILLed by namespace teardown. GUARDED on `selfPid === 1`: only as the
+ * pod's genuine PID 1 (its own PID namespace) is enumerating + signalling every
+ * process safe; as a normal child (tests/dev) it would signal UNRELATED host
+ * processes.
+ *
+ * FULLY OBSERVABLE (this is the single most load-bearing action PID 1 takes on
+ * shutdown):
+ *   - a `/proc` enumeration failure is LOGGED at `error`, not swallowed — without
+ *     the broadcast the caller's grace-timer `exit(0)` SIGKILLs the workers
+ *     mid-drain, so a dropped broadcast MUST be diagnosable.
+ *   - a summary (`enumerated`/`signalled`) is logged so a systematic EPERM that
+ *     signals ZERO workers is distinguishable from a clean broadcast. Each per-pid
+ *     `kill` failure is swallowed (the pid is gone / not ours) but counted.
+ *
+ * Exported with injected seams so this PID-1-only path is unit-testable without a
+ * real PID namespace (production passes `readdirSync("/proc")` + `process.kill`).
+ */
+export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: WorkerBroadcastSeams): void => {
+  if (seams.selfPid !== 1) return; // only safe as the pod's genuine PID 1
+  let entries: readonly string[];
+  try {
+    entries = seams.enumerate();
+  } catch (e) {
+    seams.logger?.error?.(
+      "[thin-init] pod shutdown: cannot enumerate /proc — workers will NOT receive the drain signal; the grace-timer exit will SIGKILL them mid-drain",
+      { sig, error: e instanceof Error ? e.message : String(e) },
+    );
+    return;
+  }
+  let enumerated = 0;
+  let signalled = 0;
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (pid === 1) continue; // never signal ourselves (PID 1 has no default disposition)
+    enumerated++;
+    try {
+      seams.kill(pid, sig);
+      signalled++;
+    } catch {
+      // gone (ESRCH) / not permitted (EPERM) — best-effort drain broadcast.
+    }
+  }
+  seams.logger?.info?.("[thin-init] pod shutdown: broadcast drain signal to workers", {
+    sig,
+    enumerated,
+    signalled,
+  });
+};
+
 // ── Adapter ─────────────────────────────────────────────────────────────────────
 
 export interface BunInitAdapterConfig {
@@ -135,7 +229,7 @@ export interface BunInitProcessAdapter extends InitProcessPort {
   /**
    * Pod shutdown: forward `sig` to the CURRENT supervisor child AND (when we are
    * actually PID 1) to every per-tenant WORKER in the pod so they drain gracefully
-   * (FR-017/FR-060) — the supervisor deliberately does NOT propagate shutdown to
+   * (FR-017) — the supervisor deliberately does NOT propagate shutdown to
    * workers (AD-2), so without this they would be hard-SIGKILLed by namespace
    * teardown. Latches a flag so the supervise loop PARKS instead of respawning;
    * the binary then `process.exit`s after a bounded grace.
@@ -202,7 +296,10 @@ export const createBunInitProcessAdapter = (
 
     beginTermination: (sig) => {
       terminating = true;
-      // Signal the current supervisor (its handler drains its own state + exits).
+      // Signal the current supervisor explicitly. This is the ONLY drain signal it
+      // gets on the non-PID-1 dev/test path (the broadcast below is skipped there);
+      // when we ARE pid 1 the broadcast also re-signals it — benign, the
+      // supervisor's drain handler is idempotent.
       if (currentPid !== undefined) {
         try {
           process.kill(currentPid, sig);
@@ -210,29 +307,15 @@ export const createBunInitProcessAdapter = (
           // Already gone — the supervisor exited on its own; nothing to forward.
         }
       }
-      // POD SHUTDOWN: broadcast to the per-tenant WORKERS so they drain too. GUARDED
-      // on pid===1 — only when we are genuinely the pod's PID 1 (its own PID
-      // namespace) is enumerating + signalling every process safe; running as a
-      // normal child (tests/dev) it would signal UNRELATED host processes, so we
-      // never broadcast there (the supervisor signal above still works).
-      if (process.pid === 1) {
-        let pids: string[];
-        try {
-          pids = readdirSync("/proc");
-        } catch {
-          return; // no /proc — cannot enumerate; supervisor was already signalled.
-        }
-        for (const entry of pids) {
-          if (!/^\d+$/.test(entry)) continue;
-          const pid = Number(entry);
-          if (pid === 1) continue; // never signal ourselves (PID 1 has no default disposition)
-          try {
-            process.kill(pid, sig);
-          } catch {
-            // gone / not permitted — best-effort drain broadcast.
-          }
-        }
-      }
+      // POD SHUTDOWN: broadcast to the per-tenant WORKERS so they drain too (PID-1
+      // only; a /proc-read failure and the signalled count are logged, never
+      // swallowed — a dropped broadcast means the grace-timer exit SIGKILLs them).
+      broadcastSignalToWorkers(sig, {
+        selfPid: process.pid,
+        enumerate: () => readdirSync("/proc"),
+        kill: (pid, s) => process.kill(pid, s),
+        logger,
+      });
     },
   };
 };

@@ -223,6 +223,36 @@ const errorToResponse = (error: HostError): Response => {
   return new Response(JSON.stringify({ error: formatHostError(error) }), { status, headers });
 };
 
+const JSON_HEADERS = { "Content-Type": "application/json" } as const;
+
+/**
+ * PURE: the unauthenticated `/health` LIVENESS response. ALWAYS 200 while the
+ * listener is up — `"degraded"` (e.g. a Redis outage) still reports 200 so it
+ * ALERTS via the body status WITHOUT triggering a restart-storm; every other phase
+ * is `"ok"` because the listener being up IS liveness. Mirrors the worker's
+ * `/health` (router.ts). Pure + exported so the degraded-vs-ok mapping is tested
+ * across the full `HostState` ADT without booting a real supervisor.
+ */
+export const buildLivenessResponse = (state: HostState): Response =>
+  new Response(JSON.stringify({ status: state.phase === "degraded" ? "degraded" : "ok" }), {
+    status: 200,
+    headers: JSON_HEADERS,
+  });
+
+/**
+ * PURE: the unauthenticated `/readiness` response that gates k8s traffic. 200 iff
+ * the supervisor `canServeRequests` (ready/degraded/syncing), else 503 (booting/
+ * draining/stopped) so an unready pod is kept OUT of the load-balancer. Pure +
+ * exported so the 503 branch — the operationally critical one — is tested directly.
+ */
+export const buildReadinessResponse = (state: HostState): Response => {
+  const ready = canServeRequests(state);
+  return new Response(JSON.stringify({ ready, phase: state.phase }), {
+    status: ready ? 200 : 503,
+    headers: JSON_HEADERS,
+  });
+};
+
 // ── Supervisor factory ───────────────────────────────────────────────────────
 
 /**
@@ -270,20 +300,8 @@ export const createSupervisor = async (
     //     a Redis outage alerts WITHOUT a restart), /readiness gates on canServeRequests.
     if (request.method === "GET") {
       const pathname = new URL(request.url).pathname;
-      if (pathname === "/health") {
-        const health = state.phase === "degraded" ? "degraded" : "ok";
-        return new Response(JSON.stringify({ status: health }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (pathname === "/readiness") {
-        const ready = canServeRequests(state);
-        return new Response(JSON.stringify({ ready, phase: state.phase }), {
-          status: ready ? 200 : 503,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
+      if (pathname === "/health") return buildLivenessResponse(state);
+      if (pathname === "/readiness") return buildReadinessResponse(state);
     }
 
     // 0. ADMIN TENANT LIFECYCLE API (FR-025). Dispatch `/admin/tenants(/:id)` to

@@ -16,12 +16,32 @@ import {
   muslArchName,
   libcCandidates,
   resolveReaper,
+  drainReap,
+  broadcastSignalToWorkers,
   createBunInitProcessAdapter,
 } from "../../../supervisor/lifecycle/bun-init-process-adapter.js";
 import { parseThinInitEnv, createShutdownHandler, decidePostLoopExit } from "../../../main-thin-init.js";
 import type { LogPort } from "../../../ports.js";
 
 const noopLogger: LogPort = { info: () => {}, warn: () => {}, error: () => {} };
+
+/** A LogPort that records every call so tests can assert observability. */
+interface CapturedLog {
+  readonly level: "info" | "warn" | "error";
+  readonly msg: string;
+  readonly data?: Record<string, unknown>;
+}
+const capturingLogger = (): { logger: LogPort; logs: CapturedLog[] } => {
+  const logs: CapturedLog[] = [];
+  return {
+    logs,
+    logger: {
+      info: (msg, data) => logs.push({ level: "info", msg, data }),
+      warn: (msg, data) => logs.push({ level: "warn", msg, data }),
+      error: (msg, data) => logs.push({ level: "error", msg, data }),
+    },
+  };
+};
 
 // ── Pure: parseThinInitEnv ──────────────────────────────────────────────────────
 
@@ -95,6 +115,114 @@ describe("resolveReaper (candidate resolution + fail-fast)", () => {
     const reap = resolveReaper(libcCandidates(process.platform, process.arch));
     expect(typeof reap).toBe("function");
     expect(() => reap()).not.toThrow(); // callable against the real libc
+  });
+});
+
+// ── drainReap: multi-reap drain loop + throw-safety (no real PID namespace) ──────
+
+describe("drainReap (pure drain loop)", () => {
+  test("drains a burst of coalesced exits, stopping when waitpid reports nothing left (r=0)", () => {
+    // r>0 reaped a pid; r===0 children exist but none exited → stop. 2 reaps + stop.
+    const results = [10, 11, 0];
+    let i = 0;
+    let calls = 0;
+    drainReap(() => {
+      calls++;
+      return results[i++] ?? 0;
+    });
+    expect(calls).toBe(3); // 10 → reap, 11 → reap, 0 → stop
+  });
+
+  test("stops immediately on ECHILD (r<0 — no children)", () => {
+    let calls = 0;
+    drainReap(() => {
+      calls++;
+      return -1;
+    });
+    expect(calls).toBe(1);
+  });
+
+  test("a throw from the FFI call is CAUGHT — never escapes into the SIGCHLD handler / interval (would kill PID 1)", () => {
+    let calls = 0;
+    expect(() =>
+      drainReap(() => {
+        calls++;
+        throw new Error("simulated ffi marshalling fault");
+      }),
+    ).not.toThrow();
+    expect(calls).toBe(1); // faulted once, then ended the cycle (no infinite loop)
+  });
+});
+
+// ── broadcastSignalToWorkers: PID-1-only drain broadcast + observability ──────────
+
+describe("broadcastSignalToWorkers (pod-shutdown worker drain)", () => {
+  test("off PID 1 (selfPid !== 1) is a NO-OP — never enumerates or signals host processes", () => {
+    let enumerated = false;
+    const killed: number[] = [];
+    const { logger, logs } = capturingLogger();
+    broadcastSignalToWorkers("SIGTERM", {
+      selfPid: 4242,
+      enumerate: () => {
+        enumerated = true;
+        return [];
+      },
+      kill: (pid) => killed.push(pid),
+      logger,
+    });
+    expect(enumerated).toBe(false);
+    expect(killed).toEqual([]);
+    expect(logs).toEqual([]);
+  });
+
+  test("as PID 1: signals every numeric pid except self, skipping non-numeric entries, and logs a summary", () => {
+    const killed: Array<{ pid: number; sig: string }> = [];
+    const { logger, logs } = capturingLogger();
+    broadcastSignalToWorkers("SIGTERM", {
+      selfPid: 1,
+      enumerate: () => ["1", "2", "3", "42", "cpuinfo", "self"],
+      kill: (pid, sig) => killed.push({ pid, sig }),
+      logger,
+    });
+    expect(killed).toEqual([
+      { pid: 2, sig: "SIGTERM" },
+      { pid: 3, sig: "SIGTERM" },
+      { pid: 42, sig: "SIGTERM" },
+    ]); // pid 1 (self) and non-numeric entries skipped
+    const summary = logs.find((l) => l.level === "info");
+    expect(summary?.data).toMatchObject({ sig: "SIGTERM", enumerated: 3, signalled: 3 });
+  });
+
+  test("a /proc enumeration failure is LOGGED at error (not swallowed) — a dropped broadcast must be diagnosable, since the grace timer then SIGKILLs workers", () => {
+    const killed: number[] = [];
+    const { logger, logs } = capturingLogger();
+    broadcastSignalToWorkers("SIGTERM", {
+      selfPid: 1,
+      enumerate: () => {
+        throw new Error("EACCES: /proc not readable");
+      },
+      kill: (pid) => killed.push(pid),
+      logger,
+    });
+    expect(killed).toEqual([]); // could not enumerate → no workers signalled
+    const errLog = logs.find((l) => l.level === "error");
+    expect(errLog).toBeDefined();
+    expect(errLog?.msg).toContain("cannot enumerate /proc");
+    expect(errLog?.data).toMatchObject({ error: "EACCES: /proc not readable" });
+  });
+
+  test("a systematic kill failure (EPERM) signals ZERO workers but is distinguishable from success via the summary (signalled=0)", () => {
+    const { logger, logs } = capturingLogger();
+    broadcastSignalToWorkers("SIGINT", {
+      selfPid: 1,
+      enumerate: () => ["2", "3"],
+      kill: () => {
+        throw new Error("EPERM");
+      },
+      logger,
+    });
+    const summary = logs.find((l) => l.level === "info");
+    expect(summary?.data).toMatchObject({ sig: "SIGINT", enumerated: 2, signalled: 0 });
   });
 });
 

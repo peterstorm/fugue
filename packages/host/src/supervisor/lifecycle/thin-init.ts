@@ -34,7 +34,8 @@
  *   `waitpid(-1, WNOHANG)` reaper for re-parented orphan workers) and runs this
  *   loop. The multi-tenant Dockerfile `CMD` runs that binary; `package.json`
  *   exposes it as the `fugue-supervisor` bin. (`main.ts` remains the supported
- *   SINGLE-tenant entrypoint, FR-035, selectable by overriding the CMD.)
+ *   SINGLE-tenant entrypoint — a deployment choice, selectable by overriding the
+ *   CMD — not a spec requirement.)
  *   The spawn/restart loop AND orphan reaping are validated against a REAL PID
  *   namespace (zero zombies; `proc.exited` never hangs despite the reaper racing
  *   Bun for the same children) in

@@ -20,7 +20,13 @@ import {
   authenticateIdentity,
   presenceFromEnsure,
   assertNoTenantSecrets,
+  buildLivenessResponse,
+  buildReadinessResponse,
 } from "../../supervisor/supervisor.js";
+import { booting, bootComplete, redisDied, beginDrain, drainComplete, syncStarted } from "../../domain/host-state.js";
+import type { HostState } from "../../domain/host-state.js";
+import { emptyRegistry } from "../../domain/registry.js";
+import { gitSha } from "@fuguejs/framework";
 import type { AuthDeps, AdmissionPort, SupervisorDeps } from "../../supervisor/supervisor.js";
 import type { WorkerLifecyclePort, EnsuredWorker } from "../../supervisor/lifecycle/spawn-port.js";
 import { createSupervisor } from "../../supervisor/supervisor.js";
@@ -272,6 +278,52 @@ describe("authenticateIdentity — JWT user path (FR-W3-006) + auth-infra failur
     const r = await authenticateIdentity(auth, "Bearer fug_sometoken");
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.kind).toBe("redis-unavailable");
+  });
+});
+
+// ── Pure health/readiness response builders (full HostState ADT coverage) ──────
+
+describe("buildLivenessResponse / buildReadinessResponse (pure, all phases)", () => {
+  const unwrap = <T,>(r: { ok: true; value: T } | { ok: false; error: unknown }): T => {
+    if (!r.ok) throw new Error(`transition failed: ${JSON.stringify(r.error)}`);
+    return r.value;
+  };
+  // Build one representative of every reachable phase via the pure transitions.
+  const bootingState: HostState = booting(0);
+  const ready = unwrap(bootComplete(bootingState, emptyRegistry(), gitSha("test"), 1));
+  const degraded = unwrap(redisDied(ready, 2)); // ready → degraded (redis-disconnected)
+  const syncing = unwrap(syncStarted(ready, 3)); // ready → syncing
+  const draining = unwrap(beginDrain(ready, 0, 4)); // ready → draining
+  const stopped = unwrap(drainComplete(draining)); // draining → stopped
+
+  it("/health is ALWAYS 200 (liveness): degraded reports status:degraded, every other phase status:ok", async () => {
+    // degraded must still be 200 — a Redis outage ALERTS via the body, it must NOT
+    // trigger a restart (the restart-storm the design avoids).
+    const degradedRes = buildLivenessResponse(degraded);
+    expect(degradedRes.status).toBe(200);
+    expect((await degradedRes.json()) as { status: string }).toEqual({ status: "degraded" });
+
+    for (const s of [ready, syncing, bootingState, draining, stopped]) {
+      const res = buildLivenessResponse(s);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { status: string }).toEqual({ status: "ok" });
+    }
+  });
+
+  it("/readiness gates traffic: 200 when canServeRequests (ready/degraded/syncing), 503 otherwise (booting/draining/stopped)", async () => {
+    for (const s of [ready, degraded, syncing]) {
+      const res = buildReadinessResponse(s);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { ready: boolean }).ready).toBe(true);
+    }
+    // The operationally critical negative branch: an unready pod is kept OUT of the LB.
+    for (const s of [bootingState, draining, stopped]) {
+      const res = buildReadinessResponse(s);
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { ready: boolean; phase: string };
+      expect(body.ready).toBe(false);
+      expect(body.phase).toBe(s.phase);
+    }
   });
 });
 

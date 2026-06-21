@@ -50,6 +50,22 @@ import { signTenantHeader, TENANT_HEADER_NAME } from "../domain/tenant-header.js
  */
 export const TENANT_HEADER = TENANT_HEADER_NAME;
 
+/**
+ * Attach the supervisor's signed tenant header to `headers` IFF an HMAC key is
+ * configured, via the canonical `signTenantHeader`. The SINGLE decision point for
+ * the "sign iff key present" branch shared by the data path (`buildForwardRequest`)
+ * and the liveness probe (`buildProbeRequest`) — the canonical-contract module
+ * keeps SIGNING in one place, so the optional-signing branch lives in one place
+ * too and the two paths cannot drift. When no key: no header (the worker skips
+ * verification on the UDS hop). Mutates + returns `headers`.
+ */
+const applySignedTenantHeader = (headers: Headers, hmacKey: string | undefined, tenant: TenantId): Headers => {
+  if (hmacKey !== undefined) {
+    headers.set(TENANT_HEADER, signTenantHeader(hmacKey, tenant));
+  }
+  return headers;
+};
+
 // ── Transport seam (injected — keeps the proxy testable without a real UDS) ──
 
 /**
@@ -111,10 +127,7 @@ export const bunUdsTransport: UdsTransport = async (socketPath, request) => {
  * (the data-plane outage these two bugs caused was masked by fake probes in tests).
  */
 export const buildProbeRequest = (hmacKey: string | undefined, tenant: TenantId): Request => {
-  const headers = new Headers();
-  if (hmacKey !== undefined) {
-    headers.set(TENANT_HEADER, signTenantHeader(hmacKey, tenant));
-  }
+  const headers = applySignedTenantHeader(new Headers(), hmacKey, tenant);
   return new Request("http://uds.fugue.internal/health", { method: "GET", headers });
 };
 
@@ -156,10 +169,9 @@ export const buildForwardRequest = (
   // `Headers.delete` is case-insensitive, so a `x-fugue-tenant` / `X-FUGUE-TENANT`
   // smuggling attempt is removed too before the supervisor stamps its own value.
   headers.delete(TENANT_HEADER);
-  if (hmacKey !== undefined) {
-    // Canonical synchronous signer (node:crypto) — no async crypto round-trip.
-    headers.set(TENANT_HEADER, signTenantHeader(hmacKey, tenant.id));
-  }
+  // Stamp the supervisor's freshly-signed header (canonical synchronous signer,
+  // node:crypto) — shared sign-iff-key-present branch with the liveness probe.
+  applySignedTenantHeader(headers, hmacKey, tenant.id);
   // Preserve method/body/url; only headers change. A GET/HEAD has no body.
   const hasBody = inbound.method !== "GET" && inbound.method !== "HEAD";
   return new Request(inbound.url, {

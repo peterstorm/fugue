@@ -57,6 +57,13 @@ const parseIntEnv = (raw: string | undefined, fallback: number, min: number): nu
  *   - THIN_INIT_MAX_SUPERVISOR_RESTARTS      (default 5, min 1)
  *   - THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS (default 60_000, min 1000)
  *   - THIN_INIT_SHUTDOWN_GRACE_MS            (default 10_000, min 0)
+ *
+ * `min 0` for the grace is deliberate: 0 is a VALID (if rarely wanted) choice
+ * meaning "exit the pod immediately on SIGTERM". The CONSEQUENCE is that draining
+ * workers are hard-SIGKILLed by PID-namespace teardown with no drain window — so
+ * leave it at the safe 10s default unless you explicitly want fast, ungraceful
+ * pod exit. (This is config, not the old unref'd-timer BUG, which exited
+ * immediately regardless of the configured grace.)
  */
 export const parseThinInitEnv = (env: Readonly<Record<string, string | undefined>>): ThinInitEnvConfig => ({
   maxRestartsPerWindow: parseIntEnv(env.THIN_INIT_MAX_SUPERVISOR_RESTARTS, 5, 1),
@@ -104,6 +111,10 @@ export interface ShutdownHandler {
  * regress: an unref'd grace timer let PID 1 exit immediately, SIGKILLing workers).
  */
 export const createShutdownHandler = (deps: ShutdownDeps): ShutdownHandler => {
+  // `terminated` here and the adapter's `terminating` flag model the SAME fact
+  // ("the pod is shutting down"); they are intentionally separate so each layer is
+  // independently testable (the handler owns idempotency; the adapter owns parking
+  // `spawnSupervisor`) and are set together via `beginTermination`. Keep them in sync.
   let terminated = false;
   return {
     onSignal: (sig) => {
@@ -124,6 +135,27 @@ export const createShutdownHandler = (deps: ShutdownDeps): ShutdownHandler => {
 
 const main = async (): Promise<void> => {
   const logger = createLogger();
+
+  // LAST-RESORT net for PID 1: a stray throw in a signal handler / timer callback
+  // (i.e. OUTSIDE the awaited startup chain that `main().catch` already covers)
+  // would otherwise CRASH PID 1 and take the whole pod down. Log it with full
+  // context and KEEP SUPERVISING — a non-fatal async fault must not kill the pod;
+  // the supervise loop + grace timer carry on. (The reaper is already throw-safe
+  // via `drainReap`; this covers everything else.) This is an INTENTIONAL survive,
+  // not a swallow: the error is logged loudly so it stays diagnosable.
+  process.on("uncaughtException", (e: unknown) => {
+    logger.error("[thin-init] uncaught exception (PID 1 surviving — pod stays up)", {
+      error: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
+    });
+  });
+  process.on("unhandledRejection", (reason: unknown) => {
+    logger.error("[thin-init] unhandled rejection (PID 1 surviving — pod stays up)", {
+      reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
+
   const cfg = parseThinInitEnv(process.env);
   // The supervisor binary is a sibling of this file (src/ in dev, dist/ in build),
   // mirroring how main-supervisor resolves the worker entrypoint.

@@ -3,7 +3,7 @@
  * `bun-init-process-adapter.test.ts` invokes it under `unshare -rpf --mount-proc`
  * so it runs as PID 1 in a throwaway PID namespace, proving the pod-shutdown WORKER
  * BROADCAST: when running as PID 1, `beginTermination` SIGTERMs every OTHER process
- * in the pod's namespace, so the per-tenant workers drain gracefully (FR-017/FR-060)
+ * in the pod's namespace, so the per-tenant workers drain gracefully (FR-017)
  * instead of being hard-SIGKILLed by namespace teardown. The supervisor deliberately
  * does NOT propagate shutdown to workers (AD-2), so PID 1 must.
  *
