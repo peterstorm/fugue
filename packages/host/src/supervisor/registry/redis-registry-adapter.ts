@@ -130,6 +130,7 @@ const serialize = (cfg: TenantConfig): string => {
     team: cfg.team,
     keycloakClientMapping: cfg.keycloakClientMapping,
     fsRoot: cfg.fsRoot,
+    dagsRoot: cfg.dagsRoot,
     secretsRef: cfg.secretsRef, // REFERENCE only
     admission: cfg.admission,
     eagerPin: cfg.eagerPin,
@@ -185,11 +186,13 @@ const deserialize = (raw: string): TenantConfig | undefined => {
   const rawRealm = km.realm;
   const rawClientId = km.clientId;
   const rawFsRoot = o.fsRoot;
+  const rawDagsRoot = o.dagsRoot;
   if (
     typeof rawTeam !== "string" ||
     typeof rawRealm !== "string" ||
     typeof rawClientId !== "string" ||
-    typeof rawFsRoot !== "string"
+    typeof rawFsRoot !== "string" ||
+    typeof rawDagsRoot !== "string"
   ) {
     return undefined;
   }
@@ -232,6 +235,7 @@ const deserialize = (raw: string): TenantConfig | undefined => {
       agentClientIdsByDag,
     },
     fsRoot: rawFsRoot,
+    dagsRoot: rawDagsRoot,
     secretsRef: markSecretsRef(o.secretsRef),
     admission: {
       maxConcurrentRuns: rawMaxConcurrentRuns,

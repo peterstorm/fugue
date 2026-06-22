@@ -246,6 +246,7 @@ describe("Integration — runtime onboarding e2e (SC-004, FR-036, US1)", () => {
             // when it loads the tenant's DAGs from its (reused) mount.
             keycloakClientMapping: { realm: "platform", clientId: "newco-client", agentClientIdsByDag: { dag1: "agent-dag1" } },
             fsRoot: `/srv/${NEW_ID}`,
+            dagsRoot: `/dags/${NEW_ID}`,
             secretsRef: `vault://${NEW_ID}/env`,
             admission: { maxConcurrentRuns: 10, maxQueuedRuns: 10 },
             eagerPin: false,

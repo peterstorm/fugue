@@ -136,6 +136,17 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
   if (rawSecretsRef === "") {
     return err(tenantConfigInvalid(`tenant '${id}': secretsRef is required (where the worker resolves this tenant's secrets)`));
   }
+  // Every tenant worker requires a DAG root — it becomes the worker's
+  // DAGS_LOCAL_PATH (the per-tenant directory it globs `dags/**​/dag.ts` under, so
+  // the worker discovers ONLY this team's DAGs). Reject a blank/absent one HERE at
+  // the trust boundary (400) rather than letting it reach the registry; the
+  // registry smart constructor (`tenantConfig`) is the final confined-absolute-path
+  // assertion. Parse-don't-validate: a registered tenant always carries a usable
+  // dagsRoot.
+  const rawDagsRoot = typeof o.dagsRoot === "string" ? o.dagsRoot.trim() : "";
+  if (rawDagsRoot === "") {
+    return err(tenantConfigInvalid(`tenant '${id}': dagsRoot is required (the per-tenant directory the worker discovers DAGs under)`));
+  }
   // Parse-don't-validate the admission limits at this trust boundary: both MUST be
   // numbers. A non-number (`"5"`, `true`, `[]`, `null`) is REJECTED (400) rather
   // than coerced via `Number(...)` into a valid-looking limit (`Number("5")` → 5,
@@ -162,6 +173,7 @@ const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenant
       agentClientIdsByDag: agentMapResult.value,
     },
     fsRoot: typeof o.fsRoot === "string" ? o.fsRoot : "",
+    dagsRoot: rawDagsRoot,
     secretsRef: markSecretsRef(rawSecretsRef),
     admission: {
       maxConcurrentRuns: adm.maxConcurrentRuns,

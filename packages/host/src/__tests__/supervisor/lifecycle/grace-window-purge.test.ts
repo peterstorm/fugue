@@ -44,6 +44,7 @@ const makeActive = (id: string): ActiveTenantConfig => {
     team: `${id}-team`,
     keycloakClientMapping: { realm: "fugue", clientId: `${id}-c`, agentClientIdsByDag: {} },
     fsRoot: `/srv/${id}`,
+    dagsRoot: `/dags/${id}`,
     secretsRef: markSecretsRef(`vault://${id}`),
     admission: { maxConcurrentRuns: 1, maxQueuedRuns: 1 },
     eagerPin: false,

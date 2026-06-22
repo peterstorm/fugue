@@ -48,6 +48,7 @@ const makeConfig = (id: string, overrides: Partial<TenantConfigBase> = {}): Acti
       agentClientIdsByDag: { "lead-desk": `${id}-agent` },
     },
     fsRoot: `/srv/${id}`,
+    dagsRoot: `/dags/${id}`,
     secretsRef: markSecretsRef(`vault://${id}`),
     admission: { maxConcurrentRuns: 4, maxQueuedRuns: 8 },
     eagerPin: false,
@@ -80,6 +81,41 @@ describe("tenantConfig parse boundary", () => {
     expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/tenant-a" }))).toBe(true);
   });
 
+  it("rejects empty dagsRoot", () => {
+    const r = tenantConfig({ ...makeConfig("a"), dagsRoot: "" });
+    expect(isErr(r)).toBe(true);
+  });
+
+  it("rejects a non-absolute or traversing dagsRoot (DAG-isolation confinement)", () => {
+    // dagsRoot becomes the worker's DAGS_LOCAL_PATH; a relative path, `..`
+    // traversal, or NUL byte could point DAG discovery outside the tenant's
+    // staged bundle and read another team's code/prompts — refuse all three.
+    expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot: "dags/a" }))).toBe(true);
+    expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/../etc" }))).toBe(true);
+    expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/a\0/etc" }))).toBe(true);
+    // A confined absolute path is accepted.
+    expect(isOk(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/tenant-a" }))).toBe(true);
+  });
+
+  it("carries dagsRoot onto the constructed active config", () => {
+    const r = tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/tenant-a" });
+    expect(isOk(r)).toBe(true);
+    if (r.ok) expect(r.value.dagsRoot).toBe("/dags/tenant-a");
+  });
+
+  it("treats dagsRoot as identity-config — a changed dagsRoot is NOT idempotent", () => {
+    // configEquals drives register/reconfigure idempotency; dagsRoot must be part
+    // of it, else moving a tenant onto a different DAG bundle would be a silent
+    // no-op (the worker would keep serving the old team's DAGs).
+    const reg = register(emptyRegistry(), makeConfig("a", { dagsRoot: "/dags/a1" }), 1000);
+    expect(isOk(reg)).toBe(true);
+    if (!reg.ok) return;
+    const same = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a1" }), 1000);
+    expect(same.ok && same.value === reg.value).toBe(true); // identical → same reference
+    const moved = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a2" }), 1000);
+    expect(moved.ok && moved.value !== reg.value).toBe(true); // changed → new registry
+  });
+
   it("rejects negative or non-integer admission limits", () => {
     expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: -1, maxQueuedRuns: 0 } }))).toBe(true);
     expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: 1.5, maxQueuedRuns: 0 } }))).toBe(true);
@@ -91,6 +127,7 @@ describe("tenantConfig parse boundary", () => {
       team: "a-team",
       keycloakClientMapping: { realm: "fugue", clientId: "a-client", agentClientIdsByDag: {} },
       fsRoot: "/srv/a",
+      dagsRoot: "/dags/a",
       secretsRef: markSecretsRef("vault://a"),
       admission: { maxConcurrentRuns: 1, maxQueuedRuns: 1 },
       eagerPin: false,

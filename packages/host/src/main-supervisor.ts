@@ -351,8 +351,15 @@ const main = async () => {
       const cfg = registry.snapshot().entries.get(tenant);
       if (cfg === undefined || cfg.status !== "active") return undefined;
       // ADR-0074: carry the tenant's HITL queue-depth ceiling so the lifecycle
-      // manager injects FUGUE_MAX_QUEUED_RUNS into the worker spawn env.
-      return { secretsRef: cfg.secretsRef, eagerPin: cfg.eagerPin, maxQueuedRuns: cfg.admission.maxQueuedRuns };
+      // manager injects FUGUE_MAX_QUEUED_RUNS into the worker spawn env. ADR-0061:
+      // carry the tenant's DAG root so the manager injects DAGS_LOCAL_PATH — the
+      // worker discovers ONLY this team's staged DAG bundle (at-rest isolation).
+      return {
+        secretsRef: cfg.secretsRef,
+        eagerPin: cfg.eagerPin,
+        maxQueuedRuns: cfg.admission.maxQueuedRuns,
+        dagsRoot: cfg.dagsRoot,
+      };
     },
   };
 

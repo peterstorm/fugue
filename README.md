@@ -79,7 +79,8 @@ A production container image is at [`packages/host/Dockerfile`](packages/host/Do
 
 **Operating the host**
 - **[Host README](packages/host/README.md)** — architecture, configuration, HTTP API reference
-- **[Deployment Guide](packages/host/docs/deployment.md)** — container + Redis + OpenShift deployment
+- **[Deployment Guide](packages/host/docs/deployment.md)** — one-host-per-team container + Redis + OpenShift deployment
+- **[Multi-Tenant Deployment](packages/host/docs/multi-tenant-deployment.md)** — one pod, many teams: supervisor + process-per-tenant workers, per-tenant DAG/secret isolation
 - **[Authentication](packages/host/docs/auth.md)** — admin / team-token / OIDC auth and team isolation
 - **[Human-in-the-Loop in Teams](packages/host/docs/hitl-teams.md)** — approval transports (webhook + Bot Framework)
 

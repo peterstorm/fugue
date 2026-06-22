@@ -112,7 +112,7 @@ const flushMicrotasks = async (): Promise<void> => {
 };
 
 const tenantsView = (
-  entries: Record<string, { eagerPin: boolean; maxQueuedRuns?: number }>,
+  entries: Record<string, { eagerPin: boolean; maxQueuedRuns?: number; dagsRoot?: string }>,
 ): TenantSpawnConfigView => ({
   spawnConfigFor: (tenant) => {
     const e = entries[tenant as unknown as string];
@@ -121,6 +121,7 @@ const tenantsView = (
       secretsRef: markSecretsRef(`vault://${tenant}/env`),
       eagerPin: e.eagerPin,
       ...(e.maxQueuedRuns !== undefined ? { maxQueuedRuns: e.maxQueuedRuns } : {}),
+      ...(e.dagsRoot !== undefined ? { dagsRoot: e.dagsRoot } : {}),
     };
   },
 });
@@ -388,6 +389,42 @@ describe("createWorkerLifecycle: per-tenant HITL queue-depth env (ADR-0074)", ()
     await lc.ensureWorker(tid("acme"));
     const spec = spawned[0]!.spec;
     expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBeUndefined();
+  });
+});
+
+describe("createWorkerLifecycle: per-tenant DAG root env (ADR-0061 at-rest isolation)", () => {
+  test("forwards the registry dagsRoot into the worker spawn env as DAGS_LOCAL_PATH", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false, dagsRoot: "/dags/acme" } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    const r = await lc.ensureWorker(tid("acme"));
+    expect(r.ok).toBe(true);
+    // The tenant's DAG root reached the worker via the spawn env: the worker runs
+    // the LocalGitAdapter rooted HERE and globs ONLY this team's staged bundle. A
+    // regression dropping it would make the worker inherit the pod-wide
+    // DAGS_LOCAL_PATH (the whole multi-team tree), collapsing the at-rest isolation
+    // boundary this field exists to enforce — with no other failing test.
+    const spec = spawned[0]!.spec;
+    expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBe("/dags/acme");
+  });
+
+  test("no dagsRoot configured → env absent (the inherited DAGS_LOCAL_PATH stands)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned } = makeSpawn();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+    });
+    await lc.ensureWorker(tid("acme"));
+    const spec = spawned[0]!.spec;
+    expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBeUndefined();
   });
 });
 

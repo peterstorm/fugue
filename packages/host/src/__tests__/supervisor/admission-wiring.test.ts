@@ -136,6 +136,7 @@ describe("admission wiring — REAL admitTenant enforces per-tenant ceiling (T9)
         team,
         keycloakClientMapping: { realm: "r", clientId: "c", agentClientIdsByDag: {} },
         fsRoot: `/srv/${id}`,
+        dagsRoot: `/dags/${id}`,
         secretsRef: markSecretsRef(`vault://${id}/env`),
         admission: { maxConcurrentRuns: maxRuns, maxQueuedRuns: 10 },
         eagerPin: false,

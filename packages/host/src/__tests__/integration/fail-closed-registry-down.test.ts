@@ -111,6 +111,7 @@ describe("Integration — registry-down fail-closed (SC-007, NFR-022)", () => {
         team: t.team,
         keycloakClientMapping: { realm: "r", clientId: "c", agentClientIdsByDag: {} },
         fsRoot: `/srv/${t.id}`,
+        dagsRoot: `/dags/${t.id}`,
         secretsRef: markSecretsRef(`vault://${t.id}/env`),
         admission: { maxConcurrentRuns: 100, maxQueuedRuns: 100 },
         eagerPin: false,

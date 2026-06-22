@@ -39,6 +39,7 @@
   "files": [
     "src",
     "docs",
+    "deploy",
     "!src/**/__tests__"
   ]
 }

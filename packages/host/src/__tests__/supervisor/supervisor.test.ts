@@ -761,6 +761,7 @@ describe("FR-022 — probe→registry degraded gate (real registry + in-memory R
       team: "acme-team",
       keycloakClientMapping: { realm: "r", clientId: "c", agentClientIdsByDag: {} },
       fsRoot: "/srv/acme",
+      dagsRoot: "/dags/acme",
       secretsRef: markSecretsRef("vault://acme/env"),
       admission: { maxConcurrentRuns: 10, maxQueuedRuns: 10 },
       eagerPin: false,

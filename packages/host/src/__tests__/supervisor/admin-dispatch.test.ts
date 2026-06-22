@@ -83,6 +83,7 @@ const validBody = (id: string) => ({
   team: `${id}-team`,
   keycloakClientMapping: { realm: "fugue", clientId: `${id}-c`, agentClientIdsByDag: {} },
   fsRoot: `/srv/${id}`,
+  dagsRoot: `/dags/${id}`,
   secretsRef: `vault://${id}`,
   admission: { maxConcurrentRuns: 2, maxQueuedRuns: 4 },
   eagerPin: false,

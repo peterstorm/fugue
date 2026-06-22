@@ -131,6 +131,7 @@ const validBody = (id: string) => ({
   team: `${id}-team`,
   keycloakClientMapping: { realm: "fugue", clientId: `${id}-c`, agentClientIdsByDag: {} },
   fsRoot: `/srv/${id}`,
+  dagsRoot: `/dags/${id}`,
   secretsRef: `vault://${id}`,
   admission: { maxConcurrentRuns: 2, maxQueuedRuns: 4 },
   eagerPin: false,
@@ -490,6 +491,31 @@ describe("malformed register/reconfigure body → 400 (not 500)", () => {
     expect(h.registry.snapshot().entries.size).toBe(0);
   });
 
+  it("register with a missing dagsRoot yields 400 (not a later worker-spawn fallback) and does not mutate", async () => {
+    const h = await harness();
+    const { dagsRoot: _root, ...noRoot } = validBody("acme");
+    void _root;
+    const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: noRoot }));
+    expect(res!.status).toBe(400);
+    expect(h.registry.snapshot().entries.size).toBe(0);
+  });
+
+  it("register with a blank dagsRoot yields 400 and does not mutate", async () => {
+    const h = await harness();
+    const bad = { ...validBody("acme"), dagsRoot: "   " };
+    const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: bad }));
+    expect(res!.status).toBe(400);
+    expect(h.registry.snapshot().entries.size).toBe(0);
+  });
+
+  it("register with a traversing dagsRoot yields 400 (confinement) and does not mutate", async () => {
+    const h = await harness();
+    const bad = { ...validBody("acme"), dagsRoot: "/dags/../etc" };
+    const res = await handleAdminTenants(h.deps, req("POST", "/admin/tenants/acme", { token: ADMIN_TOKEN, body: bad }));
+    expect(res!.status).toBe(400);
+    expect(h.registry.snapshot().entries.size).toBe(0);
+  });
+
   it("register with a NON-NUMBER admission limit yields 400 (never coerced via Number(...)) and does not mutate", async () => {
     // `Number("5")` → 5, `Number(true)` → 1 would silently accept a malformed limit
     // as a valid-looking ceiling. The boundary rejects a non-number with 400 rather
@@ -553,6 +579,7 @@ describe("deregister tombstone-team invariant (FR-029, SC-008)", () => {
       team: "", // <- the invariant-violating empty team on the tombstone
       keycloakClientMapping: { realm: "fugue", clientId: "c", agentClientIdsByDag: {} },
       fsRoot: "/srv/x",
+      dagsRoot: "/dags/x",
       secretsRef: "vault://x",
       admission: { maxConcurrentRuns: 1, maxQueuedRuns: 1 },
       eagerPin: false,

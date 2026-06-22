@@ -1,0 +1,226 @@
+# Fugue Host — MULTI-TENANT single-host Deployment (OpenShift / k8s).
+#
+# ONE pod, ONE shared fugue-host image, MANY tenants (one tenant = one team,
+# ADR-0064). The container's default entrypoint is the thin-init PID-1
+# (`main-thin-init.ts`): it spawns + supervises the supervisor, which lazy-spawns
+# ONE worker process per tenant and reverse-proxies inbound HTTP to each worker's
+# per-tenant Unix-domain socket. This manifest wires the four things that topology
+# needs and that a plain single-tenant Deployment does NOT provide:
+#
+#   1. A `/run/fugue` shared volume for the per-tenant UDS sockets the supervisor
+#      proxies to (`<tenant>.sock`, bound 0600 by each worker).
+#   2. A `/dags` shared volume into which one PER-TEAM baked `fugue-dags-<team>`
+#      initContainer stages EACH tenant's DAGs into its OWN subdir `/dags/<tenant>`.
+#      That subdir is the tenant's registered `dagsRoot` → injected as the worker's
+#      `DAGS_LOCAL_PATH`, so each worker globs ONLY its own team's DAGs at rest
+#      (ADR-0061 / team-security-and-capabilities.md §2 — the at-rest isolation
+#      boundary a single shared DAG tree would collapse).
+#   3. Per-tenant env-file Secrets mounted read-only at each tenant's `secretsRef`
+#      path. The SECRET (LLM keys, …) is resolved INSIDE the owning worker by its
+#      env-file `SecretsSource`; the supervisor structurally never dereferences it
+#      (AD-6 / FR-005).
+#   4. A `terminationGracePeriodSeconds` that covers the host's in-flight drain
+#      (`DRAIN_TIMEOUT_MS`) plus the thin-init forward-SIGTERM grace
+#      (`THIN_INIT_SHUTDOWN_GRACE_MS`).
+#
+# Tenants are NOT defined here — they are provisioned at runtime via
+# `POST /admin/tenants` AFTER the pod is up (see docs/multi-tenant-deployment.md).
+# This manifest only stages the per-team DAG bundles + secrets the registered
+# tenants will reference. Adding a team = add its initContainer + secret + a
+# `POST /admin/tenants`. The example below runs two teams: `cx` and `leads`.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-host-mt
+  labels:
+    app: fugue-host
+    topology: multi-tenant
+spec:
+  # Single instance: the supervisor holds the authoritative in-process worker
+  # table and binds host-local UDS sockets — it is NOT horizontally shardable by
+  # simply bumping replicas (that would double-spawn a tenant's worker against the
+  # same Redis registry). Scale by tenant COUNT within the pod (AD-9 heap cap +
+  # SUPERVISOR_MAX_LIVE_WORKERS), or run additional pods with DISJOINT tenant sets.
+  replicas: 1
+  strategy:
+    # Recreate (not RollingUpdate): two supervisors briefly co-existing would both
+    # try to adopt the same tenants' workers from the Redis registry. Drain the old
+    # pod fully before the new one binds the sockets.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: fugue-host
+      topology: multi-tenant
+  template:
+    metadata:
+      labels:
+        app: fugue-host
+        topology: multi-tenant
+    spec:
+      # Bounded shutdown: must exceed DRAIN_TIMEOUT_MS (30s) + THIN_INIT_SHUTDOWN_GRACE_MS
+      # (10s) below so the supervisor finishes draining in-flight runs before the
+      # kubelet SIGKILLs the pod. 30 + 10 + 5s slack = 45s.
+      terminationGracePeriodSeconds: 45
+
+      # ── initContainers: stage EACH team's baked DAG bundle into its own subdir ──
+      # One per team. Each `fugue-dags-<team>` image bakes ONLY that team's
+      # dags/<team>/ + node_modules (ADR-0061, built in the fugue-dags repo). The
+      # override command copies it into `/dags/<tenant>` so the host worker — pointed
+      # at DAGS_LOCAL_PATH=/dags/<tenant> via the tenant registry — discovers ONLY
+      # this team's DAGs. NEVER stage two teams into the same subdir.
+      initContainers:
+        - name: stage-dags-cx
+          image: quay.example.com/fugue/fugue-dags-cx:0.2.0
+          command: ["sh", "-c", "mkdir -p /staging/cx && cp -a /dags/. /staging/cx/"]
+          volumeMounts:
+            - name: dags
+              mountPath: /staging
+        - name: stage-dags-leads
+          image: quay.example.com/fugue/fugue-dags-leads:0.2.0
+          command: ["sh", "-c", "mkdir -p /staging/leads && cp -a /dags/. /staging/leads/"]
+          volumeMounts:
+            - name: dags
+              mountPath: /staging
+
+      containers:
+        - name: fugue-host
+          image: quay.example.com/fugue/host:0.2.0
+          # Default CMD is `bun run packages/host/src/main-thin-init.ts` (the
+          # multi-tenant PID-1). Do NOT override it here — overriding to main.ts
+          # selects the SINGLE-tenant path and ignores everything below.
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            # ── Platform-wide config (inherited by every worker, A1) ──────────────
+            # The supervisor parses the full HostConfig and every worker inherits this
+            # env, so REDIS_URL / ADMIN_TOKEN / issuer / etc. reach the workers
+            # AUTOMATICALLY. Per-tenant overrides (DAGS_LOCAL_PATH, secrets, ACL creds)
+            # are injected by the supervisor into each worker's spawn env — never set
+            # them pod-wide here.
+            - name: PORT
+              value: "3000"
+            # DAGS_REPO_URL is a REQUIRED HostConfig field, but in the multi-tenant
+            # pod the workers run in LOCAL mode (DAGS_LOCAL_PATH, injected per tenant),
+            # so no git sync happens and this value is never dialed. A literal "local"
+            # documents that. Do NOT set a pod-wide DAGS_LOCAL_PATH — each worker gets
+            # its own per-tenant root from the registry (a pod-wide value would be a
+            # footgun; the per-tenant injection overrides it, but omit it for clarity).
+            - name: DAGS_REPO_URL
+              value: "local"
+            # Where the supervisor proxies to / workers bind their per-tenant sockets.
+            # MUST match the /run/fugue volumeMount below (FR-004 / C7).
+            - name: WORKER_UDS_DIR
+              value: "/run/fugue"
+            # In-flight drain budget on shutdown; paired with terminationGracePeriod.
+            - name: DRAIN_TIMEOUT_MS
+              value: "30000"
+            # thin-init forwards SIGTERM to the supervisor then waits this long before
+            # exiting the pod. Keep < terminationGracePeriod − DRAIN_TIMEOUT_MS.
+            - name: THIN_INIT_SHUTDOWN_GRACE_MS
+              value: "10000"
+            # Per-worker V8 heap cap (AD-9) — bounds one tenant's blast radius so it
+            # cannot OOM the whole pod. Size against the container memory limit ÷
+            # expected concurrent workers.
+            - name: WORKER_HEAP_CAP_MB
+              value: "512"
+            # Upper bound on simultaneously-live workers in this pod (FR-033). Cap it
+            # to what the memory limit can hold at WORKER_HEAP_CAP_MB each.
+            - name: SUPERVISOR_MAX_LIVE_WORKERS
+              value: "12"
+            # Idle TTL (ms) after which a non-eagerPinned worker is evicted to free a
+            # slot. 15 min default; lower it for spikier, many-tenant pods.
+            - name: WORKER_IDLE_EVICT_MS
+              value: "900000"
+            # Signs the X-Fugue-Tenant header on the supervisor↔worker UDS hop so a
+            # worker only accepts requests stamped for ITS tenant. Strongly recommended
+            # (defense-in-depth on the loopback socket). From a Secret.
+            - name: FUGUE_SUPERVISOR_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: fugue-mt-platform
+                  key: SUPERVISOR_HMAC_KEY
+            # Per-tenant Redis ACL isolation (ADR-0067). When "true", the supervisor's
+            # REDIS_URL credential MUST have ACL-admin rights so it can mint a scoped
+            # `~fugue:<tenant>:*` user per worker. Leave "false" for key-prefix-only
+            # isolation.
+            - name: SUPERVISOR_REDIS_ACL_ENABLED
+              value: "false"
+          envFrom:
+            # Platform secrets shared by the supervisor + all workers: REDIS_URL and
+            # ADMIN_TOKEN (and, if a provider is shared pod-wide rather than per-tenant,
+            # the LLM keys). Per-TENANT secrets do NOT live here — they are the env-file
+            # Secrets mounted below and resolved inside each worker.
+            - secretRef:
+                name: fugue-mt-platform
+          volumeMounts:
+            - name: dags
+              mountPath: /dags
+              readOnly: true
+            - name: run-fugue
+              mountPath: /run/fugue
+            # Per-tenant env-file secrets — each mounted at the path the tenant's
+            # `secretsRef` names. The worker for tenant <t> reads FUGUE_SECRETS_REF =
+            # /run/secrets/fugue-tenants/<t>.env and parses it INSIDE its own process.
+            - name: tenant-secrets-cx
+              mountPath: /run/secrets/fugue-tenants/cx.env
+              subPath: cx.env
+              readOnly: true
+            - name: tenant-secrets-leads
+              mountPath: /run/secrets/fugue-tenants/leads.env
+              subPath: leads.env
+              readOnly: true
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              # Headroom for the supervisor + SUPERVISOR_MAX_LIVE_WORKERS workers at
+              # WORKER_HEAP_CAP_MB each (12 × 512Mi ≈ 6Gi + supervisor + slack).
+              memory: "8Gi"
+              cpu: "4000m"
+          # Liveness/readiness hit the supervisor's UNAUTHENTICATED routes (it owns the
+          # single inbound TCP listener; probes are served before auth, never 401'd).
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+      volumes:
+        # Staged per-team DAG bundles (written by initContainers, read by workers).
+        - name: dags
+          emptyDir: {}
+        # Per-tenant UDS sockets. `medium: Memory` keeps the loopback IPC off disk.
+        - name: run-fugue
+          emptyDir:
+            medium: Memory
+        # One Secret per tenant, each holding a single `<tenant>.env` key whose VALUE
+        # is the KEY=VALUE env-file the worker's SecretsSource parses.
+        - name: tenant-secrets-cx
+          secret:
+            secretName: fugue-tenant-cx
+            defaultMode: 0400
+        - name: tenant-secrets-leads
+          secret:
+            secretName: fugue-tenant-leads
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fugue-host-mt
+spec:
+  selector:
+    app: fugue-host
+    topology: multi-tenant
+  ports:
+    - port: 3000
+      targetPort: 3000

@@ -93,6 +93,20 @@ export interface TenantConfigBase {
   readonly team: Team;
   readonly keycloakClientMapping: KeycloakClientMapping;
   readonly fsRoot: string;
+  /**
+   * The per-tenant DAG root the worker discovers graphs under (FR-002). Injected
+   * into the worker's spawn env as `DAGS_LOCAL_PATH`, so the worker runs the
+   * LocalGitAdapter rooted HERE and globs `dags/**​/dag.ts` under it alone.
+   *
+   * This is the load-bearing fix for the multi-tenant DAG-isolation boundary
+   * (ADR-0061 / team-security-and-capabilities.md §2): a single multi-tenant pod
+   * serves many teams, and EACH tenant's worker must see ONLY its own team's DAG
+   * code/prompts at rest — not the whole baked tree. Each per-team baked
+   * `fugue-dags-<team>` image is staged by an initContainer into a DISTINCT
+   * subdir (e.g. `/dags/<tenant>`), and that subdir is this tenant's `dagsRoot`.
+   * Like `fsRoot`, it is a CONFINED absolute path.
+   */
+  readonly dagsRoot: string;
   readonly secretsRef: SecretsRef;
   readonly admission: TenantLimits;
   readonly eagerPin: boolean;
@@ -164,6 +178,16 @@ export const registryOf = (seed: readonly TenantConfig[] = []): TenantRegistry =
   return Object.freeze({ entries });
 };
 
+/**
+ * A CONFINED absolute path: a leading `/`, no NUL byte (defeats path-truncation
+ * tricks), and no `..` traversal segment (so a consumer that deletes or reads
+ * under it cannot escape the intended mount). Shared by the `fsRoot` (purge
+ * target) and `dagsRoot` (DAG discovery root) checks so both uphold the SAME
+ * invariant from one definition.
+ */
+const isConfinedAbsolutePath = (p: string): boolean =>
+  p.startsWith("/") && !p.includes("\0") && !p.split("/").includes("..");
+
 // ── Smart constructor (parse-don't-validate) ────────────────────────────────
 
 /**
@@ -194,8 +218,21 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
   // delete outside the tenant's mount. A NUL byte is rejected to defeat
   // path-truncation tricks. Parse-don't-validate: a registered tenant always
   // carries a confined fsRoot.
-  if (!input.fsRoot.startsWith("/") || input.fsRoot.includes("\0") || input.fsRoot.split("/").includes("..")) {
+  if (!isConfinedAbsolutePath(input.fsRoot)) {
     return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be a confined absolute path (leading '/', no '..' traversal segment)` });
+  }
+  if (input.dagsRoot.length === 0) {
+    return err({ kind: "config-invalid", message: `tenant '${input.id}': dagsRoot must be non-empty` });
+  }
+  // dagsRoot becomes the worker's DAGS_LOCAL_PATH — the directory it globs
+  // `dags/**​/dag.ts` under. It is a per-tenant mount (the team's staged DAG
+  // bundle), so it must be a CONFINED absolute path for the same reason fsRoot is:
+  // a relative path or `..` segment could point discovery outside the tenant's
+  // intended bundle, defeating the at-rest DAG-isolation boundary this field
+  // exists to enforce. Parse-don't-validate: a registered tenant always carries a
+  // confined dagsRoot.
+  if (!isConfinedAbsolutePath(input.dagsRoot)) {
+    return err({ kind: "config-invalid", message: `tenant '${input.id}': dagsRoot must be a confined absolute path (leading '/', no '..' traversal segment)` });
   }
   if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
     return err({ kind: "config-invalid", message: `tenant '${input.id}': keycloak realm and clientId must be non-empty` });
@@ -224,6 +261,7 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
       agentClientIdsByDag: { ...input.keycloakClientMapping.agentClientIdsByDag },
     },
     fsRoot: input.fsRoot,
+    dagsRoot: input.dagsRoot,
     secretsRef: input.secretsRef,
     admission: { maxConcurrentRuns, maxQueuedRuns },
     eagerPin: input.eagerPin,
@@ -245,6 +283,7 @@ const configEquals = (a: TenantConfig, b: TenantConfig): boolean =>
   a.id === b.id &&
   a.team === b.team &&
   a.fsRoot === b.fsRoot &&
+  a.dagsRoot === b.dagsRoot &&
   a.secretsRef === b.secretsRef &&
   a.eagerPin === b.eagerPin &&
   a.admission.maxConcurrentRuns === b.admission.maxConcurrentRuns &&

@@ -68,6 +68,17 @@ export interface TenantSpawnConfig {
   readonly secretsRef: SecretsRef;
   readonly eagerPin: boolean;
   /**
+   * The tenant's DAG root (`TenantConfigBase.dagsRoot`). Injected into the worker's
+   * spawn env as `DAGS_LOCAL_PATH` so the worker runs the LocalGitAdapter rooted
+   * HERE and discovers ONLY this team's DAGs — the at-rest DAG-isolation boundary
+   * for a multi-tenant pod (ADR-0061). Applied via `extraEnv`, which `buildWorkerSpawn`
+   * merges OVER the inherited env, so it deterministically overrides any pod-wide
+   * `DAGS_LOCAL_PATH` the supervisor itself may carry. Sourced from the active
+   * tenant registry (authoritative, like `eagerPin`); unset only on paths that do
+   * not spawn from the registry.
+   */
+  readonly dagsRoot?: string;
+  /**
    * Per-tenant ceiling on outstanding HITL runs (ADR-0074, `admission.maxQueuedRuns`).
    * Injected into the worker's spawn env as `FUGUE_MAX_QUEUED_RUNS` so the worker's
    * `HitlRunService` enforces it at `startRun`. Sourced from the active tenant
@@ -351,6 +362,15 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // stray inherited value can never override this tenant's configured ceiling.
     if (spawnCfg.maxQueuedRuns !== undefined) {
       extraEnv = { ...(extraEnv ?? {}), FUGUE_MAX_QUEUED_RUNS: String(spawnCfg.maxQueuedRuns) };
+    }
+
+    // Per-tenant DAG root (ADR-0061 at-rest isolation): forward the registry's
+    // `dagsRoot` as DAGS_LOCAL_PATH so THIS worker globs `dags/**​/dag.ts` under its
+    // own team's staged bundle alone — never the whole multi-team tree. Applied via
+    // `extraEnv` (merged OVER the inherited env by `buildWorkerSpawn`), so a pod-wide
+    // inherited DAGS_LOCAL_PATH can never override this tenant's configured root.
+    if (spawnCfg.dagsRoot !== undefined) {
+      extraEnv = { ...(extraEnv ?? {}), DAGS_LOCAL_PATH: spawnCfg.dagsRoot };
     }
 
     const spawnResult = await spawn.spawn({

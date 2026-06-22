@@ -37,6 +37,7 @@ const makeConfig = (id: string, overrides: Partial<TenantConfigBase> = {}): Acti
     team: `${id}-team`,
     keycloakClientMapping: { realm: "fugue", clientId: `${id}-client`, agentClientIdsByDag: { "lead-desk": `${id}-agent` } },
     fsRoot: `/srv/${id}`,
+    dagsRoot: `/dags/${id}`,
     secretsRef: markSecretsRef(`vault://${id}/secrets`),
     admission: { maxConcurrentRuns: 4, maxQueuedRuns: 8 },
     eagerPin: false,
@@ -63,6 +64,8 @@ describe("redis tenant registry — round-trip persistence", () => {
     const parsed = JSON.parse(raw);
     expect(parsed.secretsRef).toBe("vault://acme/secrets");
     expect(parsed.id).toBe("acme");
+    // dagsRoot is persisted (it is load-bearing config the worker spawns with).
+    expect(parsed.dagsRoot).toBe("/dags/acme");
 
     // Fresh adapter hydrates the same config from Redis.
     const reg2 = createRedisTenantRegistry(fake.redis, fake.pubsub);
@@ -70,6 +73,9 @@ describe("redis tenant registry — round-trip persistence", () => {
     expect(hydrated.ok).toBe(true);
     const look = reg2.lookup(tid("acme"));
     expect(look.ok && look.value.fsRoot).toBe("/srv/acme");
+    // dagsRoot survives the round-trip — without it the rehydrated worker would
+    // fall back to the inherited pod-wide DAGS_LOCAL_PATH (the whole tree).
+    expect(look.ok && look.value.dagsRoot).toBe("/dags/acme");
   });
 
   it("in-memory lookup is fail-closed for unknown tenant", () => {
@@ -384,6 +390,7 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
         team: "t",
         keycloakClientMapping: { realm: "fugue", clientId: "c", agentClientIdsByDag: {} },
         fsRoot: "/srv/weird",
+        dagsRoot: "/dags/weird",
         secretsRef: "vault://weird",
         admission: { maxConcurrentRuns: 1, maxQueuedRuns: 1 },
         eagerPin: false,
@@ -422,6 +429,7 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     team: `${id}-team`,
     keycloakClientMapping: { realm: "fugue", clientId: `${id}-client`, agentClientIdsByDag: { "lead-desk": `${id}-agent` } },
     fsRoot: `/srv/${id}`,
+    dagsRoot: `/dags/${id}`,
     secretsRef: `vault://${id}/secrets`,
     admission: { maxConcurrentRuns: 4, maxQueuedRuns: 8 },
     eagerPin: false,
@@ -473,6 +481,7 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
       keycloakClientMapping: { realm: "fugue", clientId: 7, agentClientIdsByDag: {} },
     });
     await expectSkipped("num-root", { ...validRaw("num-root"), fsRoot: 7 });
+    await expectSkipped("num-dags-root", { ...validRaw("num-dags-root"), dagsRoot: 7 });
   });
 
   it("skips a record whose admission limits are non-numbers (never coerce via Number(...))", async () => {
