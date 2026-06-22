@@ -1,12 +1,15 @@
 /**
  * Regression: real-world exports (Dynamics 365, BI tools) save date-grouped
- * table autofilters as `<dateGroupItem/>` nodes that ExcelJS's table parser
- * crashes on ("Unexpected xml node in parseOpen"). parseWorkbook must strip
- * the UI-only nodes and retry — they never carry cell data.
+ * table autofilters as `<dateGroupItem/>` nodes that ExcelJS's FULL-LOAD table
+ * parser crashes on ("Unexpected xml node in parseOpen"). parseWorkbook now uses
+ * the STREAMING reader, which never parses `xl/tables/*.xml`, so it reads these
+ * workbooks natively — the nodes only describe a UI filter, never cell data.
  *
  * The fixture is built by writing a normal workbook with an Excel table, then
  * injecting a dateGroupItem filter into the table XML at the zip level —
- * byte-faithful to what Dynamics emits.
+ * byte-faithful to what Dynamics emits. The first test still asserts the raw
+ * full-load crash (the motivation for streaming); the second asserts parseWorkbook
+ * reads it cleanly.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -66,7 +69,7 @@ describe("dateGroupItem table autofilters", () => {
     ).rejects.toThrow(/dateGroupItem/);
   });
 
-  test("parseWorkbook strips the filter nodes and returns the rows", async () => {
+  test("parseWorkbook reads dateGroupItem workbooks natively (streaming skips table XML)", async () => {
     const bytes = await buildFixture();
     const result = await parseWorkbook(bytes, RowSchema);
     expect(result.ok).toBe(true);
@@ -75,23 +78,17 @@ describe("dateGroupItem table autofilters", () => {
     expect(result.value.rows[0]!.Topic).toBe("Nysalg");
   });
 
-  test("returns node-crash when the workbook still fails to load after stripping", async () => {
-    // First load crashes on the self-closing dateGroupItem (triggering the strip
-    // + retry path); the strip removes only that node, leaving an undefined XML
-    // entity (`&nope;`) that makes the retry load itself fail — exercising the
-    // `catch (e2)` branch that returns a fresh node-crash. The entity is a
-    // parser-level well-formedness error, so this does not depend on ExcelJS's
-    // tolerance of any particular element.
+  test("malformed table XML does not affect row extraction (tables are never parsed)", async () => {
+    // A broken XML entity (`&nope;`) injected into the table part would crash the
+    // old full-load + strip path. The streaming reader never reads `xl/tables`, so
+    // row extraction from the worksheet is unaffected — proving the table part is
+    // out of the parse path entirely.
     const bytes = await buildFixture(
       '<dateGroupItem year="2023" dateTimeGrouping="year"/>&nope;',
     );
     const result = await parseWorkbook(bytes, RowSchema);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("node-crash");
-    if (result.error.kind === "node-crash") {
-      expect(result.error.message).toContain("failed to parse workbook");
-      expect(result.error.retriability).toBe("non-retriable");
-    }
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.rows).toHaveLength(2);
   });
 });
