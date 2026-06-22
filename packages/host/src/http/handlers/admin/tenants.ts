@@ -38,22 +38,18 @@
  */
 
 import { match } from "ts-pattern";
-import { ok, err } from "@fuguejs/framework";
-import type { Result } from "@fuguejs/framework";
 import { authenticateIdentity } from "../../authenticate-identity.js";
 import type { AuthDeps } from "../../authenticate-identity.js";
 import type { AuthIdentity } from "../../../domain/auth.js";
-import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
-import { markTeam } from "../../../domain/auth.js";
+import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
-import { tenantConfig } from "../../../supervisor/registry/tenant-registry.js";
-import type { ActiveTenantConfig, TenantConfigBase } from "../../../supervisor/registry/tenant-registry.js";
+import { parseTenantConfigBody } from "../../../supervisor/registry/parse-tenant-config.js";
 import type { RedisTenantRegistry } from "../../../supervisor/registry/redis-registry-adapter.js";
 import type { WorkerLifecyclePort } from "../../../supervisor/lifecycle/spawn-port.js";
 import type { TokenStorePort, LogPort } from "../../../ports.js";
 import type { AuditPort, AuditAction, AuditActor, AuditOutcome } from "../../../supervisor/audit/audit-port.js";
 import { auditRecord } from "../../../supervisor/audit/audit-port.js";
-import { httpStatusFor, formatHostError, tenantConfigInvalid } from "../../../domain/host-error.js";
+import { httpStatusFor, formatHostError } from "../../../domain/host-error.js";
 import type { HostError } from "../../../domain/host-error.js";
 
 // ── Dependencies ──────────────────────────────────────────────────────────────
@@ -82,116 +78,9 @@ export interface AdminTenantsDeps {
 
 // ── Request body parsing (parse-don't-validate) ───────────────────────────────
 
-/**
- * The accepted register/reconfigure body. Parsed into a validated
- * `ActiveTenantConfig` via the registry's smart constructor — illegal configs are
- * rejected at the boundary, so downstream code only ever sees valid configs.
- */
-/**
- * Parse the optional `agentClientIdsByDag` map from an untrusted request body.
- * Fail-closed: a non-object resolves to an empty map (the registry's smart
- * constructor is the authority on whether an empty map is acceptable for the
- * tenant's realm), but a present map with ANY non-string value is REJECTED — a
- * malformed value must never be cast through as a client id. Iterates OWN
- * enumerable properties only, so a prototype key cannot smuggle a value in.
- */
-const parseAgentClientIdsByDag = (
-  id: TenantId,
-  raw: unknown,
-): Result<Record<string, string>, HostError> => {
-  if (typeof raw !== "object" || raw === null) return ok({});
-  const out: Record<string, string> = {};
-  for (const [dag, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value !== "string") {
-      return err(
-        tenantConfigInvalid(
-          `tenant '${id}': keycloakClientMapping.agentClientIdsByDag['${dag}'] must be a string client id`,
-        ),
-      );
-    }
-    out[dag] = value;
-  }
-  return ok(out);
-};
-
-const parseTenantConfigBody = (id: TenantId, body: unknown): Result<ActiveTenantConfig, HostError> => {
-  if (typeof body !== "object" || body === null) {
-    return err(tenantConfigInvalid(`tenant '${id}': request body must be a JSON object`));
-  }
-  const o = body as Record<string, unknown>;
-  const km = (o.keycloakClientMapping ?? {}) as Record<string, unknown>;
-  const adm = (o.admission ?? {}) as Record<string, unknown>;
-  // Parse-don't-validate the DAG→client map at this trust boundary: every value
-  // MUST be a string (a real agent client id). A non-string value is rejected
-  // (400) rather than cast through into the registry as a malformed map. Own
-  // enumerable properties only (no prototype keys).
-  const agentMapResult = parseAgentClientIdsByDag(id, km.agentClientIdsByDag);
-  if (!agentMapResult.ok) return agentMapResult;
-  // Every tenant worker requires a secrets reference (FR-005; `worker-main`
-  // hard-requires `FUGUE_SECRETS_REF`). Reject a blank/absent one HERE at the
-  // trust boundary (400) rather than letting it reach the registry and surface
-  // later as a worker-spawn failure. Parse-don't-validate: a registered tenant
-  // always carries a usable, non-blank `SecretsRef`.
-  const rawSecretsRef = typeof o.secretsRef === "string" ? o.secretsRef.trim() : "";
-  if (rawSecretsRef === "") {
-    return err(tenantConfigInvalid(`tenant '${id}': secretsRef is required (where the worker resolves this tenant's secrets)`));
-  }
-  // Every tenant worker requires a DAG root — it becomes the worker's
-  // DAGS_LOCAL_PATH (the per-tenant directory it globs `dags/**​/dag.ts` under, so
-  // the worker discovers ONLY this team's DAGs). Reject a blank/absent one HERE at
-  // the trust boundary (400) rather than letting it reach the registry; the
-  // registry smart constructor (`tenantConfig`) is the final confined-absolute-path
-  // assertion. Parse-don't-validate: a registered tenant always carries a usable
-  // dagsRoot.
-  const rawDagsRoot = typeof o.dagsRoot === "string" ? o.dagsRoot.trim() : "";
-  if (rawDagsRoot === "") {
-    return err(tenantConfigInvalid(`tenant '${id}': dagsRoot is required (the per-tenant directory the worker discovers DAGs under)`));
-  }
-  // Parse-don't-validate the admission limits at this trust boundary: both MUST be
-  // numbers. A non-number (`"5"`, `true`, `[]`, `null`) is REJECTED (400) rather
-  // than coerced via `Number(...)` into a valid-looking limit (`Number("5")` → 5,
-  // `Number(true)` → 1) — mirroring the agent-map and secretsRef guards. The
-  // registry smart constructor (`tenantConfig`) is the final non-negative-integer
-  // assertion over these already-typed numbers.
-  if (typeof adm.maxConcurrentRuns !== "number" || typeof adm.maxQueuedRuns !== "number") {
-    return err(tenantConfigInvalid(`tenant '${id}': admission.maxConcurrentRuns and admission.maxQueuedRuns are required and must be numbers`));
-  }
-  const base: TenantConfigBase = {
-    id,
-    // Canonicalize the team to its `.trim().toLowerCase()` form at THIS trust
-    // boundary — exactly as team-TOKEN provisioning does (`admin/teams.ts`). The
-    // canonical team is load-bearing: `canAccessDag` compares `Team` with strict
-    // `===`, and `handleDeregister` revokes the token by the registry's team
-    // against a token store keyed lowercase. Branding a verbatim `"Foo"` here
-    // would route/authorize against `"Foo"` while the token lives under `"foo"`,
-    // so the deregister revoke would silently MISS (idempotent no-op) yet report
-    // `revokeComplete: true`. Canonicalizing keeps both admin write-paths in lockstep.
-    team: markTeam(typeof o.team === "string" ? o.team.trim().toLowerCase() : ""),
-    keycloakClientMapping: {
-      realm: typeof km.realm === "string" ? km.realm : "",
-      clientId: typeof km.clientId === "string" ? km.clientId : "",
-      agentClientIdsByDag: agentMapResult.value,
-    },
-    fsRoot: typeof o.fsRoot === "string" ? o.fsRoot : "",
-    dagsRoot: rawDagsRoot,
-    secretsRef: markSecretsRef(rawSecretsRef),
-    admission: {
-      maxConcurrentRuns: adm.maxConcurrentRuns,
-      maxQueuedRuns: adm.maxQueuedRuns,
-    },
-    eagerPin: o.eagerPin === true,
-  };
-  // The registry smart constructor validates the parsed body. A semantic
-  // rejection is a CLIENT error here (a bad request body), so translate its
-  // `config-invalid` (→ 500, reserved for host config-LOAD faults) into
-  // `tenant-config-invalid` (→ 400) at this boundary. Any other error kind is
-  // passed through unchanged.
-  const built = tenantConfig(base);
-  if (!built.ok && built.error.kind === "config-invalid") {
-    return err(tenantConfigInvalid(built.error.message));
-  }
-  return built;
-};
+// The register/reconfigure body parser lives in the SHARED
+// `parse-tenant-config.ts` (imported above) so the admin HTTP path and the
+// declarative bootstrap path validate identically.
 
 // ── Response helpers ──────────────────────────────────────────────────────────
 

@@ -170,7 +170,29 @@ comes up. No exec ever needed again.
 - `hansen142` is effectively **read-only** in `dk-secondbrands` (no exec/portforward/delete/create). All cluster changes go through ArgoCD (commit → sync).
 
 ## 7. Remaining checklist
-- [ ] Implement declarative bootstrap (§4) in `agentic/fugue` (+ tests + docs).
+- [x] Implement declarative bootstrap (§4) in `agentic/fugue` (+ tests + docs).
+      Shipped on `feat/multi-tenant-single-host`:
+      - `packages/host/src/supervisor/registry/parse-tenant-config.ts` — the
+        body→`ActiveTenantConfig` parser EXTRACTED from `admin/tenants.ts` and now
+        SHARED by the admin path + bootstrap (single validated parser).
+      - `packages/host/src/supervisor/bootstrap/parse-bootstrap.ts` — pure parsers
+        for the tenants array + the `team→fug_token` map (fail-closed; never logs token).
+      - `packages/host/src/supervisor/bootstrap/run-bootstrap.ts` — the I/O shell:
+        file read (injected, fail-closed) + idempotent apply (`registry.register`;
+        token reconcile: no-op / upsert-on-rotation / cross-team-reuse error /
+        team-must-own-active-tenant check).
+      - Config: `TENANTS_BOOTSTRAP_PATH` / `TEAM_TOKENS_BOOTSTRAP_PATH` (+ inline
+        `TENANTS_BOOTSTRAP` / `TEAM_TOKENS_BOOTSTRAP` for tests) in `domain/config.ts`.
+      - Wiring: `main-supervisor.ts` runs `runBootstrap` after the platform token
+        store is built; a failure exits non-zero (pod restarts).
+      - Tests: `__tests__/supervisor/bootstrap/{parse-bootstrap,run-bootstrap}.test.ts`.
+        Docs: `packages/host/docs/multi-tenant-deployment.md` §"Declarative bootstrap".
+      > NOTE discovered while implementing: the multi-tenant SUPERVISOR has **no
+      > `POST /admin/teams` endpoint at all** (only the per-worker Hono router in
+      > `http/router.ts` does). So for the stage topology the team-token bootstrap is
+      > the ONLY way to create a team token — §3's `oc exec … /admin/teams` would 404
+      > on the supervisor. Tenants still have `POST /admin/tenants` (dispatched in
+      > `supervisor.ts`), but bootstrap is the GitOps-friendly path for both.
 - [ ] Rebuild fugue-host amd64 → Quay; bump tag in deployment.yaml.
 - [ ] Add tenants ConfigMap + team-token sealed secret (+ mounts) to `fugue-host/stage`.
 - [ ] Seal a chosen team token into BOTH the host bootstrap secret AND `lead-desk-secret`.

@@ -547,6 +547,41 @@ export const HostConfigSchema = z.object({
    * delays reclamation; it never risks a double-purge.
    */
   SUPERVISOR_GRACE_PURGE_INTERVAL_MS: z.coerce.number().int().min(1000).default(60 * 60 * 1000),
+  // ── Declarative bootstrap (ADR-0064 single-host; GitOps, no admin API) ─────
+  /**
+   * Path to a mounted TENANTS bootstrap file: a JSON ARRAY of tenant config
+   * objects (each an `/admin/tenants` register body plus a top-level `id`). At
+   * supervisor startup every entry is registered IDEMPOTENTLY into the tenant
+   * registry, so a multi-tenant host seeds its tenants from a ConfigMap with no
+   * `POST /admin/tenants` call (the Route-less, exec-less deployment blocker).
+   * NON-SECRET (team, dagsRoot, secretsRef PATH, fsRoot, keycloak mapping,
+   * admission, eagerPin) → ships as a ConfigMap; per-tenant secrets stay in the
+   * sealed env-file at each entry's `secretsRef`. A FILE (not inline env) so it is
+   * not size-bound and lives in Git. Unset → no tenant bootstrap.
+   */
+  TENANTS_BOOTSTRAP_PATH: z.string().optional(),
+  /**
+   * Inline tenants-bootstrap JSON (same array shape as `TENANTS_BOOTSTRAP_PATH`),
+   * a dev/test convenience. The PATH wins when both are set. Unset → no inline
+   * tenant bootstrap.
+   */
+  TENANTS_BOOTSTRAP: z.string().optional(),
+  /**
+   * Path to a mounted TEAM-TOKENS bootstrap file: a JSON OBJECT mapping
+   * `team → token`, where each token is a PRE-PROVIDED `fug_` team token (sealed
+   * once, mounted to BOTH this host AND the consuming team's pod). At startup each
+   * token is hashed and registered into the platform team-token store IDEMPOTENTLY
+   * — accepting a pre-provided token replaces the one-time `POST /admin/teams`
+   * capture step. SECRET → ships as a SealedSecret. Unset → no token bootstrap.
+   */
+  TEAM_TOKENS_BOOTSTRAP_PATH: z.string().optional(),
+  /**
+   * Inline team-tokens-bootstrap JSON (same object shape as
+   * `TEAM_TOKENS_BOOTSTRAP_PATH`), a dev/test convenience. The PATH wins when both
+   * are set. SECRET — never commit a real token inline. Unset → no inline token
+   * bootstrap.
+   */
+  TEAM_TOKENS_BOOTSTRAP: z.string().optional(),
 }).refine(
   (c) => c.DEFAULT_DAG_TIMEOUT_MS <= c.MAX_DAG_TIMEOUT_MS,
   { message: "DEFAULT_DAG_TIMEOUT_MS must not exceed MAX_DAG_TIMEOUT_MS" },

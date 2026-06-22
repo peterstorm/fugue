@@ -22,11 +22,12 @@ distinct deployment choice from the **one-host-per-team** model in
 6. [Per-tenant secrets (env-file convention)](#per-tenant-secrets-env-file-convention)
 7. [Deploy the pod](#deploy-the-pod)
 8. [Provision tenants](#provision-tenants)
-9. [Add / remove a team](#add--remove-a-team)
-10. [Per-tenant Redis ACL isolation (optional)](#per-tenant-redis-acl-isolation-optional)
-11. [Environment reference](#environment-reference)
-12. [Choosing a topology](#choosing-a-topology)
-13. [Troubleshooting](#troubleshooting)
+9. [Declarative bootstrap (GitOps — no admin API, no `oc exec`)](#declarative-bootstrap-gitops--no-admin-api-no-oc-exec)
+10. [Add / remove a team](#add--remove-a-team)
+11. [Per-tenant Redis ACL isolation (optional)](#per-tenant-redis-acl-isolation-optional)
+12. [Environment reference](#environment-reference)
+13. [Choosing a topology](#choosing-a-topology)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -248,6 +249,88 @@ oc logs -l app=fugue-host | grep "Fugue worker is running"
 
 ---
 
+## Declarative bootstrap (GitOps — no admin API, no `oc exec`)
+
+The admin-API flow above needs in-cluster reach to a (deliberately Route-less)
+host. On a locked-down namespace with **no `exec`/`port-forward` RBAC** there is
+no way to drive those calls — and the multi-tenant supervisor exposes **no
+team-minting endpoint at all** (team tokens are platform state, not a per-worker
+route). For those environments the supervisor seeds tenants **and** team tokens
+from **mounted files at startup**, so a `git push` + ArgoCD sync brings the host
+up fully provisioned with zero imperative calls.
+
+Both inputs are applied **idempotently on every boot** and **fail closed**: a
+malformed file or an apply error exits the supervisor non-zero (the pod restarts)
+rather than serving a half-seeded host. Re-applying an unchanged file is a no-op.
+
+**1. Tenants — a non-secret ConfigMap.** A JSON **array** of the exact same
+objects the admin API takes (each with a top-level `id`). Mount it and point
+`TENANTS_BOOTSTRAP_PATH` at it.
+
+```yaml
+# ConfigMap fugue-tenants-bootstrap → key tenants.json
+[
+  { "id": "cx",    "team": "cx",    "dagsRoot": "/dags/cx",    "secretsRef": "/run/secrets/fugue-tenants/cx.env",
+    "fsRoot": "/srv/cx",    "keycloakClientMapping": { "realm": "fugue-platform", "clientId": "fugue-host-cx",    "agentClientIdsByDag": {} },
+    "admission": { "maxConcurrentRuns": 10, "maxQueuedRuns": 20 }, "eagerPin": false },
+  { "id": "leads", "team": "leads", "dagsRoot": "/dags/leads", "secretsRef": "/run/secrets/fugue-tenants/leads.env",
+    "fsRoot": "/srv/leads", "keycloakClientMapping": { "realm": "fugue-platform", "clientId": "fugue-host-leads", "agentClientIdsByDag": {} },
+    "admission": { "maxConcurrentRuns": 5,  "maxQueuedRuns": 10 }, "eagerPin": true }
+]
+```
+
+**2. Team tokens — a SealedSecret.** A JSON **object** mapping `team → token`,
+where each token is a **pre-provided** `fug_` team token you generate once. This
+replaces the one-time "minted token shown once" capture step: you seal the SAME
+token into the host's bootstrap secret **and** into the consuming app's secret
+(e.g. lead-desk's `FUGUE_TEAM_TOKEN`), so both sides agree with no copy-paste.
+
+```bash
+# Generate a token with the fug_ shape the auth path requires:
+TOKEN="fug_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+# Seal { "leads": "<TOKEN>" } into the host bootstrap secret AND the app's secret.
+```
+
+```yaml
+# Secret fugue-team-tokens-bootstrap → key team-tokens.json
+{ "cx": "fug_…", "leads": "fug_…" }
+```
+
+Wire both onto the `fugue-host` container:
+
+```yaml
+env:
+  - name: TENANTS_BOOTSTRAP_PATH
+    value: /etc/fugue/bootstrap/tenants.json
+  - name: TEAM_TOKENS_BOOTSTRAP_PATH
+    value: /run/secrets/fugue-bootstrap/team-tokens.json
+volumeMounts:
+  - { name: tenants-bootstrap,    mountPath: /etc/fugue/bootstrap,        readOnly: true }
+  - { name: team-tokens-bootstrap, mountPath: /run/secrets/fugue-bootstrap, readOnly: true }
+volumes:
+  - { name: tenants-bootstrap,    configMap: { name: fugue-tenants-bootstrap } }
+  - { name: team-tokens-bootstrap, secret:   { secretName: fugue-team-tokens-bootstrap } }
+```
+
+Rules the parsers enforce at boot (parse-don't-validate):
+
+- A tenant entry is validated through the **same** parser as `POST /admin/tenants`
+  — a malformed config aborts boot exactly as it would 400 the API.
+- A duplicate tenant `id`, or a duplicate `team` in the token file, is rejected
+  (ambiguous — never last-writer-wins).
+- A token **must** have the `fug_` shape (prefix + ≥43 chars) or it would never
+  resolve via the team-token auth path — caught at boot, not as a silent 401.
+- Every token's team **must** be owned by an active tenant from the tenants file —
+  a token for an unknown team aborts boot rather than 403 the team at runtime.
+- Re-seeding the **same** token for a team is a no-op; a **rotated** token (same
+  team, new value) **upserts** (the stale token stops working).
+- The token value is treated as a secret: it never appears in a log line or error.
+
+> Tip for tests/dev: `TENANTS_BOOTSTRAP` / `TEAM_TOKENS_BOOTSTRAP` accept the same
+> JSON **inline** as an env var (the `*_PATH` file wins when both are set).
+
+---
+
 ## Add / remove a team
 
 **Add:** build `fugue-dags-<team>`, create its env-file Secret, add an
@@ -281,6 +364,9 @@ override applies). Defaults shown where the schema has one.
 |-----|---------|---------|
 | `REDIS_URL` | — (required) | Redis connection (from `fugue-mt-platform`). |
 | `ADMIN_TOKEN` | — (required, ≥16 chars) | Admin bearer token for `/admin/*`. |
+| `TENANTS_BOOTSTRAP_PATH` | (unset) | Path to a mounted ConfigMap file: JSON array of tenant configs seeded idempotently at boot (GitOps, no admin API). |
+| `TEAM_TOKENS_BOOTSTRAP_PATH` | (unset) | Path to a mounted SealedSecret file: JSON `team → fug_token` map seeded idempotently at boot. |
+| `TENANTS_BOOTSTRAP` / `TEAM_TOKENS_BOOTSTRAP` | (unset) | Same JSON inline (dev/test); the `*_PATH` file wins when both set. |
 | `DAGS_REPO_URL` | — (required field) | Unused in the multi-tenant pod (workers run local mode); set `"local"`. |
 | `WORKER_UDS_DIR` | `/run/fugue` | Dir for per-tenant sockets; must match the volume mount. |
 | `FUGUE_SUPERVISOR_HMAC_KEY` | (unset) | Signs the `X-Fugue-Tenant` header on the supervisor↔worker hop. Recommended. |
@@ -325,3 +411,4 @@ team must not share a kernel/pod with any other.
 | Worker exits 1 with `FUGUE_SECRETS_REF is required` / `env-file secrets source '…': …` | The tenant's secret isn't mounted at its `secretsRef` path, or the env-file is malformed. |
 | `503 worker-unavailable` on first request | Spawn failed (OOM / heap cap too low / ACL provisioning error). Check `oc logs` for the underlying cause. |
 | Probe 401/404 | Probes must hit `/health` + `/readiness` on the supervisor's TCP port — not a worker socket. |
+| Supervisor exits 1 with `declarative bootstrap failed` | A bootstrap file is malformed or inconsistent — read the message: bad JSON, duplicate id/team, a non-`fug_` token, or a token whose team no tenant owns. Fail-closed by design (fix the ConfigMap/Secret and re-sync). |

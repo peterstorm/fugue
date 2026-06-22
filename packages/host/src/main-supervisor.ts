@@ -22,6 +22,7 @@
 
 import path from "node:path";
 import { rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { parseHostConfig } from "./domain/config.js";
 import { formatHostError, fsPurgeFailed } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
@@ -65,6 +66,7 @@ import {
 import type { AuditStreamPort } from "./supervisor/audit/audit-sink-log-redis.js";
 import type { AuditPort } from "./supervisor/audit/audit-port.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
+import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
@@ -471,6 +473,54 @@ const main = async () => {
     process.exit(1);
   }
   const tokenStore: TokenStorePort = createRedisTokenStore(redis, platformTenant.value, logger);
+
+  // ── Declarative bootstrap (ADR-0064; GitOps, no admin API / no exec) ───────
+  // Seed tenants + team tokens from mounted files (ConfigMap + SealedSecret) so
+  // the host comes up fully provisioned without a `POST /admin/tenants(/teams)`
+  // call — the locked-down-namespace blocker. IDEMPOTENT (safe every boot) and
+  // FAIL-CLOSED: a read/parse/apply error exits non-zero so the pod restarts
+  // rather than serving a half-seeded host. Tenant bootstrap needs the registry
+  // (hydrated above); token bootstrap needs `tokenStore` (just built) and the
+  // post-seed registry snapshot — so both run here, after `tokenStore`.
+  const bootstrapResult = await runBootstrap(
+    {
+      registry,
+      tokenStore,
+      now: () => Date.now(),
+      // Mounted-file read authority lives HERE in the shell (fail-closed),
+      // mirroring the env-file secrets source: any read failure is a Left.
+      readFile: (p: string): Result<string, HostError> => {
+        try {
+          return ok(readFileSync(p, "utf8"));
+        } catch (e) {
+          const code =
+            typeof e === "object" && e !== null && "code" in e && typeof (e as { code?: unknown }).code === "string"
+              ? (e as { code: string }).code
+              : "unknown";
+          return err({ kind: "config-invalid", message: `bootstrap file '${p}' unreadable (${code})` });
+        }
+      },
+      logger,
+    },
+    {
+      ...(config.TENANTS_BOOTSTRAP_PATH !== undefined ? { tenantsPath: config.TENANTS_BOOTSTRAP_PATH } : {}),
+      ...(config.TENANTS_BOOTSTRAP !== undefined ? { tenantsInline: config.TENANTS_BOOTSTRAP } : {}),
+      ...(config.TEAM_TOKENS_BOOTSTRAP_PATH !== undefined ? { teamTokensPath: config.TEAM_TOKENS_BOOTSTRAP_PATH } : {}),
+      ...(config.TEAM_TOKENS_BOOTSTRAP !== undefined ? { teamTokensInline: config.TEAM_TOKENS_BOOTSTRAP } : {}),
+    },
+  );
+  if (!bootstrapResult.ok) {
+    logger.error(`[supervisor] declarative bootstrap failed — exiting fail-closed: ${formatHostError(bootstrapResult.error)}`);
+    await disconnect();
+    process.exit(1);
+  }
+  if (bootstrapResult.value.tenantsApplied > 0 || bootstrapResult.value.teamTokensApplied > 0) {
+    logger.info("[supervisor] declarative bootstrap complete", {
+      tenants: bootstrapResult.value.tenantsApplied,
+      teamTokens: bootstrapResult.value.teamTokensApplied,
+    });
+  }
+
   const realmJwt: RealmJwtDeps | undefined =
     config.REALM_JWT_ISSUER !== undefined
       ? {
