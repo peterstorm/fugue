@@ -33,6 +33,7 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { hashToken } from "../../domain/auth.js";
 import type { Team, TokenGrant } from "../../domain/auth.js";
+import type { TenantId } from "../../domain/tenant.js";
 import type { TokenStorePort, LogPort } from "../../ports.js";
 import type { RedisTenantRegistry } from "../registry/redis-registry-adapter.js";
 import { activeTenants } from "../registry/tenant-registry.js";
@@ -55,10 +56,24 @@ export interface BootstrapInputs {
 }
 
 export interface BootstrapDeps {
-  /** The live registry — `register` (idempotent) seeds tenants; `snapshot` cross-checks token teams. */
+  /** The live registry — `register` (idempotent) seeds tenants; `snapshot` maps token teams → owning tenant. */
   readonly registry: Pick<RedisTenantRegistry, "register" | "snapshot">;
-  /** The supervisor's platform-keyed team-token store (where inbound team tokens resolve). */
-  readonly tokenStore: TokenStorePort;
+  /**
+   * The supervisor's PLATFORM-keyed team-token store. The supervisor's inbound
+   * `authenticateIdentity` resolves a team token HERE to learn its team and route
+   * the request to the owning tenant's worker — so a token MUST be seeded here or
+   * the supervisor 401s before proxying.
+   */
+  readonly platformTokenStore: TokenStorePort;
+  /**
+   * Build the PER-TENANT team-token store (keyed `fugue:<tenant>:tokens:*`). The
+   * WORKER re-authenticates the proxied request against ITS OWN tenant store
+   * (`host.ts`), so the SAME token must ALSO be seeded under the owning tenant or
+   * the worker rejects it with "Invalid bearer token" even though the supervisor
+   * routed it. Until the platform/per-tenant keyings are reconciled, a bootstrapped
+   * token is written to BOTH stores.
+   */
+  readonly tenantTokenStore: (tenant: TenantId) => TokenStorePort;
   /** Injected clock for the grant `createdAt` (testability). */
   readonly now: () => number;
   /** Read a mounted file's UTF-8 content; fail closed (Left) on ANY read error. */
@@ -104,12 +119,14 @@ const resolveSource = (
  *     store the new one (UPSERT).
  * The token value is never logged or placed in an error message.
  */
-const reconcileTeamToken = async (
-  deps: BootstrapDeps,
+const reconcileInto = async (
+  store: TokenStorePort,
   seed: TeamTokenSeed,
+  hash: Awaited<ReturnType<typeof hashToken>>,
+  now: () => number,
+  logger?: LogPort,
 ): Promise<Result<void, HostError>> => {
-  const hash = await hashToken(seed.token);
-  const existing = await deps.tokenStore.resolve(hash);
+  const existing = await store.resolve(hash);
   if (!existing.ok) return err(existing.error);
   if (existing.value !== null) {
     if (existing.value.team === seed.team) return ok(undefined); // identical → no-op
@@ -121,22 +138,39 @@ const reconcileTeamToken = async (
   const grant: TokenGrant = {
     team: seed.team,
     label: `${seed.team} token (bootstrap)`,
-    createdAt: deps.now(),
+    createdAt: now(),
   };
-  const stored = await deps.tokenStore.store(seed.team, hash, grant);
+  const stored = await store.store(seed.team, hash, grant);
   if (stored.ok) return ok(undefined);
   if (stored.error.kind === "team-already-exists") {
     // Rotation: the team exists with a DIFFERENT (stale) token. Revoke it then
     // store the new one — upsert. Single-supervisor boot is single-threaded, so
     // the revoke→store pair has no concurrent writer to race.
-    deps.logger?.info("[bootstrap] rotating team token (team already had a different token)", { team: seed.team });
-    const revoked = await deps.tokenStore.revoke(seed.team);
+    logger?.info("[bootstrap] rotating team token (team already had a different token)", { team: seed.team });
+    const revoked = await store.revoke(seed.team);
     if (!revoked.ok) return err(revoked.error);
-    const reStored = await deps.tokenStore.store(seed.team, hash, grant);
+    const reStored = await store.store(seed.team, hash, grant);
     if (!reStored.ok) return err(reStored.error);
     return ok(undefined);
   }
   return err(stored.error);
+};
+
+/**
+ * Seed ONE team→token into BOTH the platform store (supervisor routing) and the
+ * owning tenant's store (worker re-auth). Each store is reconciled idempotently;
+ * both must succeed (fail-closed) so a token is never half-installed — present for
+ * routing but rejected by the worker, or vice versa.
+ */
+const reconcileTeamToken = async (
+  deps: BootstrapDeps,
+  seed: TeamTokenSeed,
+  owningTenant: TenantId,
+): Promise<Result<void, HostError>> => {
+  const hash = await hashToken(seed.token);
+  const platform = await reconcileInto(deps.platformTokenStore, seed, hash, deps.now, deps.logger);
+  if (!platform.ok) return err(platform.error);
+  return reconcileInto(deps.tenantTokenStore(owningTenant), seed, hash, deps.now, deps.logger);
 };
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -173,12 +207,16 @@ export const runBootstrap = async (
     const seedsR = parseTeamTokensBootstrap(tokenSrc.value.source, tokenSrc.value.raw);
     if (!seedsR.ok) return err(seedsR.error);
 
-    // Cross-check every token's team against an ACTIVE tenant (post-tenant-seed):
-    // a token for a team no tenant owns would resolve at the boundary but never
-    // route — fail closed at boot rather than 403 the team at runtime.
-    const activeTeams = new Set<Team>(activeTenants(deps.registry.snapshot()).map((t) => t.team));
+    // Map each ACTIVE tenant's team → its tenant id (1:1, ADR-0064/0068). A token's
+    // team MUST own an active tenant: it identifies the per-tenant store the worker
+    // re-auths against AND confirms the token can actually route. A token for a team
+    // no tenant owns fails closed at boot rather than 403 the team at runtime.
+    const tenantByTeam = new Map<Team, TenantId>();
+    for (const t of activeTenants(deps.registry.snapshot())) {
+      if (!tenantByTeam.has(t.team)) tenantByTeam.set(t.team, t.id);
+    }
     for (const seed of seedsR.value) {
-      if (!activeTeams.has(seed.team)) {
+      if (!tenantByTeam.has(seed.team)) {
         return err({
           kind: "config-invalid",
           message: `bootstrap team-token: team '${seed.team}' has a token but no active tenant owns it — register the tenant (TENANTS_BOOTSTRAP) for this team`,
@@ -187,7 +225,8 @@ export const runBootstrap = async (
     }
 
     for (const seed of seedsR.value) {
-      const reconciled = await reconcileTeamToken(deps, seed);
+      const owner = tenantByTeam.get(seed.team) as TenantId; // checked present above
+      const reconciled = await reconcileTeamToken(deps, seed, owner);
       if (!reconciled.ok) return err(reconciled.error);
       teamTokensApplied++;
     }

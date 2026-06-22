@@ -485,7 +485,10 @@ const main = async () => {
   const bootstrapResult = await runBootstrap(
     {
       registry,
-      tokenStore,
+      // Supervisor routing resolves the token here (platform-keyed)…
+      platformTokenStore: tokenStore,
+      // …and the worker re-auths against its own per-tenant store, so seed both.
+      tenantTokenStore: (t: TenantId) => createRedisTokenStore(redis, t, logger),
       now: () => Date.now(),
       // Mounted-file read authority lives HERE in the shell (fail-closed),
       // mirroring the env-file secrets source: any read failure is a Left.

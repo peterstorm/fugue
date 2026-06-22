@@ -25,6 +25,7 @@ import type { BootstrapDeps, BootstrapInputs } from "../../../supervisor/bootstr
 import { createRedisTenantRegistry, createInMemoryRedisFake } from "../../../supervisor/registry/redis-registry-adapter.js";
 import { createInMemoryTokenStore } from "../../../adapters/token-store.js";
 import { hashToken, TOKEN_PREFIX } from "../../../domain/auth.js";
+import type { TenantId } from "../../../domain/tenant.js";
 import type { TokenStorePort, LogPort } from "../../../ports.js";
 
 const silentLog: LogPort = { info: () => {}, warn: () => {}, error: () => {} };
@@ -43,18 +44,27 @@ const tenant = (id: string): Record<string, unknown> => ({
 
 interface Harness {
   readonly deps: BootstrapDeps;
-  readonly tokenStore: TokenStorePort;
+  /** The supervisor's platform-keyed store (routing). */
+  readonly platformTokenStore: TokenStorePort;
+  /** The per-tenant store the worker re-auths against (created lazily per tenant). */
+  readonly tenantTokenStore: (tenant: TenantId) => TokenStorePort;
   readonly registry: ReturnType<typeof createRedisTenantRegistry>;
 }
 
 const harness = (files: Record<string, string> = {}): Harness => {
   const fake = createInMemoryRedisFake();
   const registry = createRedisTenantRegistry(fake.redis, fake.pubsub, {}, silentLog);
-  const tokenStore = createInMemoryTokenStore();
+  const platformTokenStore = createInMemoryTokenStore();
+  const tenantStores = new Map<string, TokenStorePort>();
+  const tenantTokenStore = (tenant: TenantId): TokenStorePort => {
+    let s = tenantStores.get(tenant);
+    if (s === undefined) { s = createInMemoryTokenStore(); tenantStores.set(tenant, s); }
+    return s;
+  };
   const readFile = (p: string): Result<string, HostError> =>
     p in files ? ok(files[p]) : err({ kind: "config-invalid", message: `bootstrap file '${p}' unreadable (ENOENT)` });
-  const deps: BootstrapDeps = { registry, tokenStore, now: () => 1_000, readFile, logger: silentLog };
-  return { deps, tokenStore, registry };
+  const deps: BootstrapDeps = { registry, platformTokenStore, tenantTokenStore, now: () => 1_000, readFile, logger: silentLog };
+  return { deps, platformTokenStore, tenantTokenStore, registry };
 };
 
 const tokenResolves = async (store: TokenStorePort, token: string): Promise<string | null> => {
@@ -104,44 +114,52 @@ describe("runBootstrap — tenants", () => {
 });
 
 describe("runBootstrap — team tokens", () => {
-  it("hashes + stores a provided token so it resolves; idempotent on re-run", async () => {
+  it("seeds the token into BOTH the platform store (routing) and the tenant store (worker auth); idempotent", async () => {
     const token = FUG("alpha-token");
     const inputs: BootstrapInputs = {
       tenantsInline: JSON.stringify([tenant("alpha")]),
       teamTokensInline: JSON.stringify({ alpha: token }),
     };
-    const { deps, tokenStore } = harness();
+    const { deps, platformTokenStore, tenantTokenStore } = harness();
+    const alphaStore = tenantTokenStore("alpha" as TenantId);
 
     const first = await runBootstrap(deps, inputs);
     expect(first.ok).toBe(true);
     if (!first.ok) return;
     expect(first.value.teamTokensApplied).toBe(1);
-    expect(await tokenResolves(tokenStore, token)).toBe("alpha");
+    // The supervisor resolves it here…
+    expect(await tokenResolves(platformTokenStore, token)).toBe("alpha");
+    // …and the worker re-auths against the per-tenant store — the bug this fixes.
+    expect(await tokenResolves(alphaStore, token)).toBe("alpha");
 
     const second = await runBootstrap(deps, inputs);
     expect(second.ok).toBe(true);
-    expect(await tokenResolves(tokenStore, token)).toBe("alpha");
+    expect(await tokenResolves(platformTokenStore, token)).toBe("alpha");
+    expect(await tokenResolves(alphaStore, token)).toBe("alpha");
   });
 
-  it("upserts a rotated token: the new token resolves, the old does not", async () => {
+  it("upserts a rotated token in both stores: the new token resolves, the old does not", async () => {
     const oldToken = FUG("old-token");
     const newToken = FUG("new-token");
-    const { deps, tokenStore } = harness();
+    const { deps, platformTokenStore, tenantTokenStore } = harness();
+    const alphaStore = tenantTokenStore("alpha" as TenantId);
 
     const seed = await runBootstrap(deps, {
       tenantsInline: JSON.stringify([tenant("alpha")]),
       teamTokensInline: JSON.stringify({ alpha: oldToken }),
     });
     expect(seed.ok).toBe(true);
-    expect(await tokenResolves(tokenStore, oldToken)).toBe("alpha");
+    expect(await tokenResolves(alphaStore, oldToken)).toBe("alpha");
 
     const rotate = await runBootstrap(deps, {
       tenantsInline: JSON.stringify([tenant("alpha")]),
       teamTokensInline: JSON.stringify({ alpha: newToken }),
     });
     expect(rotate.ok).toBe(true);
-    expect(await tokenResolves(tokenStore, newToken)).toBe("alpha");
-    expect(await tokenResolves(tokenStore, oldToken)).toBe(null);
+    for (const store of [platformTokenStore, alphaStore]) {
+      expect(await tokenResolves(store, newToken)).toBe("alpha");
+      expect(await tokenResolves(store, oldToken)).toBe(null);
+    }
   });
 
   it("fails closed when the same token is reused across two teams", async () => {
