@@ -107,6 +107,17 @@ export const HostConfigSchema = z.object({
    */
   REALM_JWT_AUDIENCE: z.string().min(1).default("fugue-host"),
   /**
+   * Override the URL the realm JWKS (signing keys) is fetched from, decoupling the
+   * KEY-FETCH endpoint from the `iss` IDENTITY (`REALM_JWT_ISSUER`). The realm's
+   * keys are realm-wide, not route-specific, so a token whose `iss` is the public
+   * route can be signature-verified against keys fetched over the IN-CLUSTER route
+   * (split-horizon, mirrors `KEYCLOAK_TOKEN_URL` for the mint and lead-desk's
+   * EXTERNAL/INTERNAL issuer split). Prefer this over opening external egress.
+   * Optional; when unset the verifier derives `<REALM_JWT_ISSUER>/protocol/
+   * openid-connect/certs`. No secret is sent to this endpoint (public keys only).
+   */
+  REALM_JWKS_URL: z.string().url().optional(),
+  /**
    * Keycloak realm policy: the scopes assigned to each agent client, as a JSON
    * object mapping `agentClientId → ["<provider>:<operation>", …]`. This is the
    * fail-closed gate the live broker consults BEFORE any Entra call (FR-W3-003):
