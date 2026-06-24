@@ -22,6 +22,8 @@ import type { HostError } from "../../domain/host-error.js";
 import type { SharedInfra, LogPort } from "../../ports.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { createNodeContextForDag } from "../../adapters/node-context-factory.js";
+import type { AgentClientMap } from "../../domain/auth.js";
+import type { TenantId } from "../../domain/tenant.js";
 import type { RunExecutorPort, RunExecOutcome, RunExecutionRequest } from "../ports.js";
 import { toExecIdentity } from "../identity.js";
 
@@ -31,6 +33,21 @@ export interface RunExecutorDeps {
   readonly getRegisteredDag: (dagId: string) => RegisteredDag | undefined;
   /** Boot-selected per-node minting broker (undefined when no realm is configured). */
   readonly broker?: CapabilityBroker;
+  /**
+   * DAG-id → REAL Keycloak agent-client-id map (`AGENT_CLIENT_MAP`, FR-040),
+   * threaded into `createNodeContextForDag` so a resumed HITL run resolves the
+   * SAME agent client the initiating request would have. An unmapped DAG id
+   * fails closed (the slice fails) — parity with the synchronous run path.
+   */
+  readonly agentClientMap?: AgentClientMap;
+  /**
+   * The worker's resolved routed `Tenant.id` (FR-013 / SC-001 / ADR-0067),
+   * threaded into `createNodeContextForDag` so a resumed HITL run's cache /
+   * checkpoint keys share the SAME `fugue:<tenant>:` namespace as the
+   * synchronous run path and every other per-tenant store. Omitted on the
+   * single-tenant path (the factory then falls back to the `dag.team` derivation).
+   */
+  readonly tenant?: TenantId;
   readonly logger?: LogPort;
 }
 
@@ -46,7 +63,7 @@ const toFrameworkError = (e: unknown): FrameworkError => {
 };
 
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
-  const { sharedInfra, getRegisteredDag, broker, logger } = deps;
+  const { sharedInfra, getRegisteredDag, broker, agentClientMap, tenant, logger } = deps;
 
   return {
     async seedCheckpoint(dagId, input): Promise<Result<string, HostError>> {
@@ -79,13 +96,22 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           req.runId,
           controller.signal,
           toExecIdentity(req.identity),
+          agentClientMap ?? {},
+          broker !== undefined,
+          // bindSubjectToken: intentionally omitted on the resume path. A user
+          // run's verified `subject_token` is bound at INITIATION (sync path);
+          // across a HITL park/resume it is not re-presented, so a user-path
+          // capability mint fails closed (no proof) rather than reusing a stale
+          // token — correct, not a leak.
+          undefined,
+          tenant,
         );
 
         const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
           jobLike: req.jobLike,
           onHumanReview: req.onHumanReview,
           onDecisionConsumed: req.onDecisionConsumed,
-          ...(broker !== undefined ? { minting: { broker, origin } } : {}),
+          ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
         });
 
         if (outcome.kind === "suspended") {

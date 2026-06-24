@@ -39,6 +39,8 @@ import type {
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { AuthIdentity } from "../../domain/auth.js";
+import { tenantId } from "../../domain/tenant.js";
+import type { TenantId } from "../../domain/tenant.js";
 import type { RunRecord, RunStatus, ReviewNotification } from "../types.js";
 import type {
   RunStorePort,
@@ -58,10 +60,15 @@ import type { HitlRunService } from "../service.js";
 
 const inMemoryRunStore = () => {
   const runs = new Map<string, RunRecord>();
+  // Mirror the real adapter's active-run index (ADR-0074) so the maxQueuedRuns
+  // gate can be exercised end-to-end through the service.
+  const active = new Set<string>();
+  const isTerminal = (s: RunStatus) => s.kind === "completed" || s.kind === "failed";
   const port: RunStorePort = {
     async create(record) {
       if (runs.has(record.runId)) return err({ kind: "internal-invariant-violated", message: "dup run", context: {} });
       runs.set(record.runId, record);
+      active.add(record.runId);
       return ok(undefined);
     },
     async get(runId) {
@@ -77,10 +84,15 @@ const inMemoryRunStore = () => {
       const r = runs.get(runId);
       if (!r) return err({ kind: "run-not-found", runId });
       runs.set(runId, { ...r, status, updatedAtMs: r.updatedAtMs + 1 });
+      if (isTerminal(status)) active.delete(runId);
       return ok(undefined);
     },
+    async countActiveRuns() {
+      for (const id of [...active]) if (!runs.has(id)) active.delete(id);
+      return ok(active.size);
+    },
   };
-  return { port, runs };
+  return { port, runs, active };
 };
 
 /** A queue whose processor is set by the service consumer; drains FIFO. */
@@ -222,6 +234,14 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
 
 const ADMIN: AuthIdentity = { kind: "admin" };
 
+// The worker's bound tenant — names the `tenant-over-quota` error the
+// maxQueuedRuns gate returns (ADR-0074). The service requires it.
+const TENANT: TenantId = (() => {
+  const t = tenantId("acme-prod");
+  if (!t.ok) throw new Error("bad test tenant");
+  return t.value;
+})();
+
 const setup = (dag: DagDef) => {
   const store = inMemoryRunStore();
   const queue = inMemoryRunQueue();
@@ -232,6 +252,7 @@ const setup = (dag: DagDef) => {
     runStore: store.port,
     runQueue: queue.port,
     decisions: dec.port,
+    tenant: TENANT,
     notifier: notif.port,
     executor: realExecutor(dag),
     clock: () => 1_000,
@@ -424,6 +445,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       runStore: store.port,
       runQueue: queue.port,
       decisions: dec.port,
+      tenant: TENANT,
       notifier: racyNotifier,
       executor: realExecutor(dag),
       clock: () => 1_000,
@@ -572,7 +594,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       },
     };
     const service = createHitlRunService({
-      runStore: failingStore, runQueue: queue.port, decisions: dec.port,
+      runStore: failingStore, runQueue: queue.port, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor, clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
@@ -601,7 +623,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       },
     };
     const service = createHitlRunService({
-      runStore: failingStore, runQueue: queue.port, decisions: dec.port,
+      runStore: failingStore, runQueue: queue.port, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
@@ -631,7 +653,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       },
     };
     const service = createHitlRunService({
-      runStore: store.port, runQueue: queuePort, decisions: dec.port,
+      runStore: store.port, runQueue: queuePort, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
     baseQueue.setProcessor(service.processRun);
@@ -669,5 +691,74 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     await queue.drain();
     const c = await service.getRun(runId);
     expect(c.ok && c.value?.status.kind).toBe("completed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maxQueuedRuns admission gate (ADR-0074)
+// ---------------------------------------------------------------------------
+
+describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
+  const gateService = (maxQueuedRuns: number | undefined) => {
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue();
+    const dec = inMemoryDecisionStore();
+    const notif = recordingNotifier();
+    let counter = 0;
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue.port,
+      decisions: dec.port,
+      tenant: TENANT,
+      ...(maxQueuedRuns !== undefined ? { maxQueuedRuns } : {}),
+      notifier: notif.port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId(`run-${++counter}`),
+    });
+    return { service, store };
+  };
+
+  it("refuses startRun with `tenant-over-quota` once the active-run count reaches maxQueuedRuns", async () => {
+    const { service } = gateService(2);
+    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    // At the ceiling (2 outstanding) — the third is refused, scoped to this tenant.
+    const third = await service.startRun("test-dag" as DagId, null, ADMIN);
+    expect(third.ok).toBe(false);
+    if (!third.ok) {
+      expect(third.error.kind).toBe("tenant-over-quota");
+      if (third.error.kind === "tenant-over-quota") {
+        expect(third.error.tenant).toBe(TENANT);
+        expect(third.error.retryAfterSeconds).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("frees a slot when a run settles terminal — a subsequent startRun is admitted again", async () => {
+    const { service, store } = gateService(1);
+    const first = await service.startRun("test-dag" as DagId, null, ADMIN);
+    expect(first.ok).toBe(true);
+    // At the ceiling of 1 — the next is refused.
+    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
+    // Settle the first run terminal → it leaves the active index → a slot frees.
+    if (first.ok) await store.port.setStatus(first.value.runId, { kind: "completed", output: 1 });
+    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+  });
+
+  it("a suspended (parked-at-gate) run still occupies a slot — it is non-terminal", async () => {
+    const { service, store } = gateService(1);
+    const first = await service.startRun("test-dag" as DagId, null, ADMIN);
+    expect(first.ok).toBe(true);
+    if (first.ok) await store.port.setStatus(first.value.runId, { kind: "suspended", nodeId: "g" as NodeId, prompt: "p" });
+    // Still at the ceiling — a parked run is outstanding, so the next is refused.
+    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
+  });
+
+  it("UNSET maxQueuedRuns means unlimited — the gate never fires (backwards compatible)", async () => {
+    const { service } = gateService(undefined);
+    for (let i = 0; i < 5; i++) {
+      expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    }
   });
 });

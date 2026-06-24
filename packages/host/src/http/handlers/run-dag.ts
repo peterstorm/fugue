@@ -61,13 +61,15 @@ export interface RunDagDeps {
   /**
    * Execute the DAG. `origin` (from `createContext`) is threaded through to the
    * framework's per-node minting broker so each node's declared scopes are
-   * authorized + minted at dispatch against the initiating identity.
+   * authorized + minted at dispatch against the initiating identity. `undefined`
+   * only on the no-minting static path (no broker wired AND DAG unmapped), where
+   * the implementation skips minting entirely.
    */
   readonly executeDag: <I, O>(
     dag: DagDef,
     input: I,
     ctx: NodeContext,
-    origin: InvocationOrigin,
+    origin: InvocationOrigin | undefined,
   ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
 }
@@ -257,7 +259,7 @@ export const createRunDagHandler = (
       // Declare ctx before the execution try so it's accessible in the catch block.
       // Guard the createContext call so the timer is cleared if it throws (leak prevention).
       let ctx: NodeContext;
-      let origin: InvocationOrigin;
+      let origin: InvocationOrigin | undefined;
       try {
         // `await` preserves the setup-guard semantics: a synchronous throw or a
         // rejected promise from `createContext` both land in this catch.

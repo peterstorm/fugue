@@ -28,13 +28,39 @@ export interface ConversationReference {
 }
 
 /**
- * Stores the conversation reference(s) the bot can post reviews to. v1 keeps a
- * single DEFAULT reference (the channel the bot was added to); per-team routing
- * is a later refinement keyed off the same store.
+ * Stores the conversation reference(s) the bot can post reviews to. A DEFAULT
+ * reference (the channel the bot was added to) is kept for back-compat and as the
+ * fallback channel; PER-TEAM references (FR-041) let the notifier deliver one
+ * team's review cards to that team's OWN channel.
+ *
+ * Per-team routing is a CONFIDENTIALITY measure — it decides WHERE a card is
+ * delivered so a team's output-under-review is not posted into another team's
+ * channel. It is NOT the control that prevents acting on another team's runs:
+ * that is the authorization gate (`canAccessDag`) on the inbound button-click
+ * path (`messages-handler.ts`), which refuses a non-member's click regardless of
+ * which channel the card reached. A team without its own reference falls back to
+ * the default channel.
+ *
+ * Wiring: `saveTeamReference` is called from `handleBotActivity` on
+ * `conversationUpdate` when the activity's `channelData.team.aadGroupId` maps to
+ * a fugue team via `HITL_TEAM_CHANNELS`; `getTeamReference` is read by
+ * `createBotFrameworkNotifier` to pick the team channel before falling back to
+ * the default.
  */
 export interface ConversationStorePort {
   saveDefaultReference(ref: ConversationReference): Promise<Result<void, HostError>>;
   getDefaultReference(): Promise<Result<ConversationReference | null, HostError>>;
+  /**
+   * Persist the conversation reference for a specific team's channel (FR-041) so
+   * the notifier can route that team's cards there (confidentiality routing).
+   */
+  saveTeamReference(team: string, ref: ConversationReference): Promise<Result<void, HostError>>;
+  /**
+   * Fetch a team's conversation reference, or `ok(null)` when the team has none
+   * (the notifier then falls back to the default channel). Used for confidentiality
+   * routing, not authorization (FR-041).
+   */
+  getTeamReference(team: string): Promise<Result<ConversationReference | null, HostError>>;
 }
 
 /** Posts a Bot Framework activity to a conversation (handles auth + transport). */

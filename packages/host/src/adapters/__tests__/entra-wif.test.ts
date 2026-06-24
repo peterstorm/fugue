@@ -27,10 +27,9 @@ import {
   AZURE_AD_TOKEN_EXCHANGE_AUDIENCE,
   JWT_BEARER_ASSERTION_TYPE,
   type EntraWifConfig,
-  type HttpPost,
-  type HttpPostResponse,
   type WifExchangeRequest,
 } from "../entra-wif.js";
+import type { HttpPost, HttpPostResponse } from "../fetch-http-post.js";
 import { parseScope, type DownstreamScope } from "../../domain/capability-scope.js";
 
 const cfg: EntraWifConfig = { tenantId: "tenant-123", clientId: "fugue-agents" };

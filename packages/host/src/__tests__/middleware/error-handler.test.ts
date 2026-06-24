@@ -123,6 +123,77 @@ describe("error-handler middleware", () => {
     });
   });
 
+  describe("Path 1b: >=500 HostError — generic body, full server-side log (info-disclosure)", () => {
+    it("internal-invariant-violated → 500 with generic message, no details, no leaked internals; logs full detail", async () => {
+      const { logger, logs } = createTestLogger();
+      const hostErr: HostError = {
+        kind: "internal-invariant-violated",
+        message: "secret internal detail",
+        context: { forged: "forged-tenant-id-xyz" },
+      };
+      const app = createApp(logger, () => { throw Object.assign(new Error("invariant"), hostErr); });
+
+      const res = await app.request("/throw");
+
+      // (1) status is the expected 5xx
+      expect(res.status).toBe(500);
+
+      const raw = await res.text();
+      const body = JSON.parse(raw);
+
+      // (2) generic client message, NO details field
+      expect(body.ok).toBe(false);
+      expect(body.error).toBe("internal-invariant-violated");
+      expect(body.message).toBe("An unexpected error occurred");
+      expect(body.details).toBeUndefined();
+
+      // (3) serialized body must NOT contain raw message/context text
+      expect(raw).not.toContain("secret internal detail");
+      expect(raw).not.toContain("forged-tenant-id-xyz");
+
+      // (4) logger.error WAS called with the full detail + context server-side
+      expect(logs.length).toBe(1);
+      expect(logs[0].msg).toBe("Host error in request handler");
+      expect(logs[0].data?.kind).toBe("internal-invariant-violated");
+      expect(logs[0].data?.detail).toContain("secret internal detail");
+      expect(logs[0].data?.context).toEqual({ forged: "forged-tenant-id-xyz" });
+    });
+
+    it("worker-unavailable → 503 with generic message, no details, Retry-After preserved; logs full detail", async () => {
+      const { logger, logs } = createTestLogger();
+      const hostErr: HostError = {
+        kind: "worker-unavailable",
+        tenant: "acme-secret-tenant" as any,
+      };
+      const wrapped = new Error("worker down", { cause: hostErr });
+      const app = createApp(logger, () => { throw wrapped; });
+
+      const res = await app.request("/throw");
+
+      // (1) status is the expected 5xx
+      expect(res.status).toBe(503);
+
+      const raw = await res.text();
+      const body = JSON.parse(raw);
+
+      // (2) generic client message, NO details field (so the tenant id is not echoed)
+      expect(body.message).toBe("An unexpected error occurred");
+      expect(body.details).toBeUndefined();
+
+      // (3) serialized body must NOT leak the tenant id carried by the error
+      expect(raw).not.toContain("acme-secret-tenant");
+
+      // Retry-After is safe to advertise on the 503 path and must be preserved.
+      expect(res.headers.get("Retry-After")).toBe("5");
+
+      // (4) full detail (incl. tenant) logged server-side only
+      expect(logs.length).toBe(1);
+      expect(logs[0].msg).toBe("Host error in request handler");
+      expect(logs[0].data?.kind).toBe("worker-unavailable");
+      expect(logs[0].data?.detail).toContain("acme-secret-tenant");
+    });
+  });
+
   describe("Path 4: Generic unhandled Error", () => {
     it("returns 500 with sanitized message (never leaks internals)", async () => {
       const { logger, logs } = createTestLogger();

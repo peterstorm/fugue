@@ -20,7 +20,7 @@
  * FR-W2-009 groundwork — run-scoped LLM authority, NOT yet on the broker's
  * `mintFor` seam: this decorator is per-run NodeContext wiring, and the runtime
  * currently rejects a broker claiming `provides("llm")` (see
- * capability-broker.ts). Migration onto the seam lifts both guards.
+ * keycloak-broker.ts). Migration onto the seam lifts both guards.
  */
 
 import type {

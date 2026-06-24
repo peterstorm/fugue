@@ -2,6 +2,12 @@
 
 Deploy a Fugue Host instance for a team on OpenShift with their own LLM credentials, Redis, and DAG repository.
 
+> **This guide covers the one-host-per-team topology** (one pod per team, the
+> single-tenant `main.ts` entrypoint). To run **one pod serving many teams** with
+> process-per-tenant isolation, see the
+> [Multi-Tenant Single-Host Deployment guide](./multi-tenant-deployment.md). Both
+> topologies are supported — see its *Choosing a topology* table to decide.
+
 ---
 
 ## Table of Contents

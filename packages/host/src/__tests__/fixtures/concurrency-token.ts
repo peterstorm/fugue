@@ -9,5 +9,5 @@ import type { AcquireToken } from "../../domain/concurrency.js";
  * production surface offers no way to mint a branded token, closing the forgery
  * gap flagged in type-design review.
  */
-export const unsafeTestToken = (dagId: DagId, acquiredAt: number): AcquireToken =>
-  ({ dagId, acquiredAt } as unknown as AcquireToken);
+export const unsafeTestToken = <K = DagId>(dagId: K, acquiredAt: number): AcquireToken<K> =>
+  ({ dagId, acquiredAt } as unknown as AcquireToken<K>);

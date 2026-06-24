@@ -1,13 +1,16 @@
 {
   "name": "@fuguejs/host",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peterstorm/fugue.git",
     "directory": "packages/host"
   },
   "main": "src/index.ts",
-  "bin": "src/main.ts",
+  "bin": {
+    "host": "src/main.ts",
+    "fugue-thin-init": "src/main-thin-init.ts"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./contract": "./src/contract.ts"
@@ -36,6 +39,7 @@
   "files": [
     "src",
     "docs",
+    "deploy",
     "!src/**/__tests__"
   ]
 }

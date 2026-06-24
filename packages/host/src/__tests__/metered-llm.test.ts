@@ -329,6 +329,57 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
       expect(metered_log?.data?.cumulative).toBe(75);
     }
   });
+
+  it("attributes partial usage on a FAILED sendStructured too (the structured arm of settle)", async () => {
+    // The settle() failure-path attribution is shared by both operations, but
+    // every other test here drives it through sendWithTools. This pins the
+    // sendStructured arm: an Err carrying partial usage must still be metered
+    // and stamped with operation "sendStructured".
+    const inner = failingWithUsage("transient", 80, 40); // 120 burned
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+
+    const r = await metered.sendStructured(structuredReq(nodeA));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("transient");
+
+    const metered_log = logs.find((l) => l.msg === "llm.metered");
+    expect(metered_log).toBeDefined();
+    expect(metered_log?.data?.operation).toBe("sendStructured");
+    expect(metered_log?.data?.tokensIn).toBe(80);
+    expect(metered_log?.data?.tokensOut).toBe(40);
+    expect(metered_log?.data?.cumulative).toBe(120);
+
+    // The failure line carries the same deltas and the structured operation.
+    const failLog = logs.find((l) => l.msg === "llm.call-failed");
+    expect(failLog?.data?.operation).toBe("sendStructured");
+    expect(failLog?.data?.errorKind).toBe("transient");
+    expect(failLog?.data?.tokensIn).toBe(80);
+    expect(failLog?.data?.tokensOut).toBe(40);
+  });
+
+  it("a failed sendStructured's burned tokens count toward the budget (structured-arm bypass guard)", async () => {
+    // Mirror of the sendWithTools no-bypass test for the structured arm: a
+    // single failed structured call burns over budget, so the NEXT call is
+    // refused — a crashing structured call cannot bypass the per-run budget.
+    const inner = failingWithUsage("node-crash", 600, 0);
+    const { logger } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, budget: 500, logger });
+
+    const r1 = await metered.sendStructured(structuredReq(nodeA));
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.error.kind).toBe("node-crash");
+
+    const r2 = await metered.sendStructured(structuredReq(nodeA));
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) {
+      expect(r2.error.kind).toBe("llm-budget-exceeded");
+      if (r2.error.kind === "llm-budget-exceeded") {
+        expect(r2.error.cumulative).toBe(600);
+        expect(r2.error.budget).toBe(500);
+      }
+    }
+  });
 });
 
 describe("metered-llm: metering log budget field (advisory)", () => {
@@ -511,5 +562,77 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
     // projects under the 30 budget, so the next call is still admitted.
     const after = await metered.sendStructured(structuredReq(nodeA));
     expect(after.ok).toBe(true);
+  });
+
+  it("rethrows from sendWithTools too, logs errorKind 'thrown' with that operation, and frees the reservation", async () => {
+    // The throw/log/finally-release path is duplicated per operation in the
+    // decorator; the test above pins sendStructured. This pins the sendWithTools
+    // arm: warm up via sendStructured (good inner) to learn the 15-token
+    // estimate, then a throwing sendWithTools reserves 15 — if its finally were
+    // lost the leaked reservation would project 15+15 ≥ 30 and refuse later.
+    const { inner: good } = fakeInner(10, 5);
+    const { logger, logs } = collectLogs();
+
+    const throwing = throwingInner();
+    const composite: LlmClient = {
+      sendStructured: (req) => good.sendStructured(req),
+      sendWithTools: (req, ctx) =>
+        logs.some((l) => l.data?.errorKind === "thrown")
+          ? good.sendWithTools(req, ctx)
+          : throwing.sendWithTools(req, ctx),
+    };
+
+    const metered = createMeteredLlm(composite, { dagId, runId, budget: 30, logger });
+
+    // Learn the estimate with a settled structured call.
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // cumulative 15
+
+    // The throwing tools call: rethrown to the caller.
+    await expect(metered.sendWithTools(toolsReq(nodeA), fakeCtx)).rejects.toThrow("inner client exploded");
+
+    const thrown = logs.find((l) => l.msg === "llm.call-failed" && l.data?.errorKind === "thrown");
+    expect(thrown).toBeDefined();
+    expect(thrown?.data?.operation).toBe("sendWithTools");
+    expect(thrown?.data?.message).toContain("inner client exploded");
+    expect(thrown?.data?.runId).toBe(runId as string);
+    expect(thrown?.data?.nodeId).toBe(nodeA as string);
+
+    // Reservation released in the finally → next call still admitted.
+    const after = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
+    expect(after.ok).toBe(true);
+  });
+
+  it("a throw meters NOTHING — tokens for a thrown call are unknowable, so no llm.metered line and the budget is unmoved", async () => {
+    // Unlike an Err (which can carry settled partial usage), a throw bypasses
+    // settle() entirely — there is no Result to read usage from, so the
+    // decorator must NOT accumulate. Assert no llm.metered line is emitted and
+    // the run's cumulative is unchanged: a generously budgeted call after the
+    // throw is still admitted AND its cumulative starts from 0, not some leaked
+    // figure attributed to the throw.
+    const { inner: good } = fakeInner(10, 5);
+    const { logger, logs } = collectLogs();
+
+    const throwing = throwingInner();
+    const composite: LlmClient = {
+      sendStructured: (req) =>
+        logs.some((l) => l.data?.errorKind === "thrown")
+          ? good.sendStructured(req)
+          : throwing.sendStructured(req),
+      sendWithTools: (req, ctx) => good.sendWithTools(req, ctx),
+    };
+    const metered = createMeteredLlm(composite, { dagId, runId, logger });
+
+    await expect(metered.sendStructured(structuredReq(nodeA))).rejects.toThrow("inner client exploded");
+
+    // The throw produced a call-failed line but NO metering line.
+    expect(logs.some((l) => l.msg === "llm.call-failed" && l.data?.errorKind === "thrown")).toBe(true);
+    expect(logs.some((l) => l.msg === "llm.metered")).toBe(false);
+
+    // The next (succeeding) call's cumulative is exactly its own 15 tokens — the
+    // throw contributed nothing to the meter.
+    const after = await metered.sendStructured(structuredReq(nodeA));
+    expect(after.ok).toBe(true);
+    const metered_log = logs.find((l) => l.msg === "llm.metered");
+    expect(metered_log?.data?.cumulative).toBe(15);
   });
 });

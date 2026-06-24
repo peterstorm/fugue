@@ -1,6 +1,6 @@
 {
   "name": "@fuguejs/xlsx",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peterstorm/fugue.git",
@@ -19,7 +19,8 @@
   "dependencies": {
     "@fuguejs/framework": "workspace:*",
     "exceljs": "^4.4.0",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "xlsx": "^0.18.5"
   },
   "peerDependencies": {
     "zod": "^4.3.6"

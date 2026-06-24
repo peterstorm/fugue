@@ -65,6 +65,25 @@ team's config.
 > budgets, scoped downstream tokens) — that is what the capability broker
 > (§4, §7) addresses.
 
+> **Terminology — "agent" ≠ LLM node.** Throughout this doc and the Keycloak/Entra
+> config, **"agent" means an autonomous *service identity*, not an LLM/agentic
+> node.** The naming (`fugue-agent-*` clients, `agentClientId`, "agent path") is
+> historical and routinely misread. Two orthogonal axes are involved:
+>
+> - **Node kind** (`framework/.../node.ts` — `"fetch" | "transform" | "llm" |
+>   "guardrail" | "eval-judge"`): what a node *does*. A `fetch`/`transform` node
+>   is plain deterministic code — no LLM, no reasoning.
+> - **Invocation origin** (`framework/.../capability-broker.ts`): *who* triggered
+>   the run. `{ kind: "agent" }` = **autonomous / no human in the loop** (cron or
+>   system-initiated, authenticated via `client_credentials` → app-only token).
+>   `{ kind: "user" }` = user-initiated (token exchange preserving `sub`).
+>
+> These axes are independent. **A deterministic, programmatic data-gathering DAG
+> that never touches an LLM is an `"agent"`-origin run** — that is the *normal*,
+> intended case, not an edge case. "Agent path" = "app-only service-account path",
+> nothing more. See [§4.4 — Programmatic nodes reading Graph/Dynamics](#programmatic-nodes-reading-graphdynamics)
+> for the two ways to wire SharePoint/Dynamics reads from a plain node.
+
 The published `@fuguejs` packages never reference Keycloak or Entra. The
 `fugue-platform` realm, the `fugue-agents` Entra app, the scope mirror, and the
 FIC entries are **deployment artifacts of our host instance**, not framework
@@ -178,15 +197,18 @@ identity (`AuthIdentity`) has **three variants**; two are live today:
 |---|---|---|
 | `admin` | `ADMIN_TOKEN` env var, constant-time compare, no Redis, full access. Used to provision teams. | ✅ live |
 | `team` | Opaque `fug_<base64url>` bearer token → SHA-256 hash → Redis lookup → `{ team, label }`. | ✅ live |
-| `user` | A human via a `fugue-platform` realm OIDC JWT → `{ sub, azp, canRunDag }`. | ⚠️ type + middleware exist; **JWKS verifier is a stub** — JWT-shaped tokens 401 today (fail-closed by omission). |
+| `user` | A human via a `fugue-platform` realm OIDC JWT → `{ sub, azp, canRunDag }`. | ✅ live when `REALM_JWT_ISSUER` is set — the JWKS verifier (`createRealmJwtVerifier`, jose `createRemoteJWKSet`) and the `authorizeUserRun` policy are wired as one group (`host.ts:496`); unset ⇒ JWT path disabled-by-omission, JWT-shaped tokens 401 (fail-closed). |
 
 **Token model (live):**
 - Team tokens are minted with `crypto.getRandomValues()` (32 bytes), formatted
   as `fug_<base64url>` by `formatToken` (which *enforces* 32 bytes — the
   `TeamToken` brand means "carries full entropy").
-- Stored hashed (SHA-256, no salt — tokens are high-entropy) in Redis:
-  `fugue:tokens:<hash>` (hot-path lookup) and `fugue:teams:<team>` (reverse index
-  for revocation).
+- Stored hashed (SHA-256, no salt — tokens are high-entropy) in Redis, every key
+  tenant-prefixed (`token-store.ts`): `fugue:<tenant>:tokens:<hash>` (hot-path
+  lookup) and `fugue:<tenant>:teams:<team>` (reverse index for revocation), plus a
+  `fugue:<tenant>:teams-index` SET for enumeration (the per-tenant ACL denies
+  `SCAN`, so a SET is the only sound listing path — see
+  `docs/migrations/tenant-key-namespacing.md`).
 - `isTeamTokenShape` narrows an inbound string to `TeamTokenShaped` (prefix +
   ≥43 chars). Shape is *all* it asserts — a forged `fug_aaaa…` resolves to
   nothing because resolution is hash-based. This is parse-don't-validate: the
@@ -256,7 +278,8 @@ in the design.
 - Governed as **config-as-code** (Java steps in `keycloakConfigAsCode`,
   PR-reviewed, golden-export-tested). Realm build steps:
   `RealmStep` → create realm; `AzureIdpStep` → broker Entra + map Azure groups →
-  realm roles; `ClientStep` → declare clients (BFF + per-agent service accounts);
+  realm roles (role name == team name, the namespace reserved for teams — ADR-0062);
+  `ClientStep` → declare clients (BFF + per-agent service accounts);
   `ClientScopesStep` → optional scopes mirroring downstream permissions;
   `RolesStep` + `ValidationStep` → seal the realm.
 
@@ -287,8 +310,10 @@ added to today's two-path bearer middleware, *not* a rewrite):
    precondition, not an accidental shape property):
    - Signature verified via JWKS (injected `VerifyRealmJwt` port →
      `markSignatureVerified`).
-   - Claims validated (`iss`/`aud`/`exp` against `expectedIss`/`expectedAud`) in
-     `validateRealmJwtClaims` → branded `AuthenticatedUser`.
+   - Claims validated (`iss`/`aud`/`exp` against `expectedIss`/`expectedAud`, plus
+     the `teams` claim defensively hand-parsed — array of non-empty strings, no Zod,
+     fail-closed on malformed — ADR-0063) in `validateRealmJwtClaims` → branded
+     `AuthenticatedUser`.
    - `authorizeUserRun(user, dagTeam)` → captured as `canRunDag` on the identity.
    - Result: `{ kind: "user", sub, azp, canRunDag }`.
 3. **Opaque `fug_` team path** — unchanged.
@@ -298,9 +323,9 @@ The brilliant invariant: a `user` identity **cannot exist** without a wired
 `authorizeUserRun` policy (a *required* member of `RealmJwtDeps`). So "verifier
 wired but authorization undecided" is **unrepresentable in the types** — wiring
 the JWKS verifier *forces* the authz decision at the same construction site, in
-types rather than mirrored SECURITY comments. The JWT path is
-**disabled-by-omission** until the JWKS adapter lands (fail-closed; JWT-shaped
-tokens 401 until then).
+types rather than mirrored SECURITY comments. The JWKS verifier itself is live
+(`createRealmJwtVerifier`); the JWT path is **disabled-by-omission** until
+`REALM_JWT_ISSUER` is configured (fail-closed; JWT-shaped tokens 401 until then).
 
 `fug_` tokens remain for bootstrap, local dev, and callers outside the realm;
 deprecate only if they end up unused.
@@ -349,6 +374,55 @@ token lifetime (SC-008) — per-invocation *authority* must not mean per-invocat
 For **user-initiated runs**, step 1 becomes Standard Token Exchange V2 of the
 user's token (`sub` stays user, `azp` becomes agent), same scope/audience
 narrowing.
+
+<a id="programmatic-nodes-reading-graphdynamics"></a>
+#### Programmatic nodes reading Graph/Dynamics (the non-agentic, no-LLM case)
+
+A very common need: **a plain deterministic node gathers data from SharePoint
+(`msgraph:sites.read`) or Dynamics (`dynamics:read`) programmatically — no LLM,
+no agentic reasoning.** This is fully supported and is the *primary* shape, not an
+edge case. Recall the terminology note in §1: a `fetch`/`transform` node with an
+`{ kind: "agent" }` origin is exactly "autonomous run authenticating as a service
+account" — the word "agent" carries no LLM connotation.
+
+Capabilities are decoupled from node kind entirely. Any node declares what it
+needs in `requires`, and the runtime hands it a typed, **operation-narrowed**
+handle on its `NodeContext` — identical ergonomics to using `db` or `http`:
+
+```ts
+const fetchSites = createFetchNode({
+  requires: ["msgraph:sites.read"],            // or "dynamics:read"
+  run: async (ctx) => {
+    const res = await ctx["msgraph:sites.read"].read(/* … */);  // app-only, zero LLM
+    // … deterministic transform of the rows …
+  },
+});
+```
+
+The handle exposes only `read` — no token, no raw Graph/Dataverse client, no
+agent loop (SC-007). There are **two ways to wire the underlying identity**,
+pick by whether you need per-run scoping:
+
+| | **Option A — static, boot-scoped** | **Option B — per-invocation broker** |
+|---|---|---|
+| When | One fixed app identity reads the same Graph/Dynamics for every run | Per-DAG/per-team scoping, user-initiated reads (`sub` preserved), per-invocation audit |
+| Wiring | Register a normal boot-scoped `CapabilityHandle` (like the `db`/`http` adapters); **no broker** — `runDag` without a `minting` option skips minting (zero-regression default, §3.3) | The Keycloak-backed broker; origin `{ kind: "agent", agentClientId }` → `client_credentials` → WIF → app-only token (the §4.4 flow) |
+| Per-run identity | None — one app identity | Scoped per invocation, audited on `(runId, dagId, nodeId)` |
+
+For most "we just pull data programmatically on a schedule" pipelines, **Option A
+is the simplest correct choice** — you don't need the broker/minting machinery at
+all.
+
+**Provisioning is the same either way** (it's an Entra-side requirement, not a
+code one): SharePoint needs `Sites.Selected` on `fugue-agents` with the target
+site(s) explicitly added (never `Sites.Read.All`); Dynamics needs `fugue-agents`
+registered as a **Dataverse application user** with a read security role plus
+`DYNAMICS_ORG_HOST` set (else the `dynamics:read` audience resolves to `undefined`
+and the capability **fails closed with zero egress** — `audienceForScope` in
+`adapters/keycloak-broker.ts` resolves the Dynamics audience only when the host
+is set). For Option B you additionally assign the
+`msgraph:sites.read` / `dynamics:read` optional scope to that DAG's Keycloak
+service-account client (§4.4).
 
 ### 4.5 The hard constraint (why two origins, not one chain)
 
@@ -461,8 +535,17 @@ into `fugue-agents` (different process → different trust boundary → its own 
 
 ## 5. Gap analysis — current state vs target
 
-Verified 2026-06-14 against `main` HEAD; branch `feat/keycloak-entra-wiring`
-exists but is **0 commits ahead** — none of the wiring below has begun.
+> **STATUS UPDATE (2026-06-17).** The wiring below **has landed.** On branch
+> `feat/keycloak-entra-wiring` (commits `86f82db` T1–T8, `2ee0009` ADRs/runbook,
+> `f2a0ed5` review remediation) **every row marked STUB / MISSING / PLACEHOLDER /
+> LIVE-UNWIRED / v1 GAP below is now IMPLEMENTED, merged, and unit/golden-tested.**
+> The table is retained as the pre-wiring baseline (file → seam map). What remains
+> is **Phase 5 only** — operator provisioning + live verification against a real
+> tenant (see the two runbooks). No host code remains to write.
+
+Baseline below verified 2026-06-14 against `main` HEAD (at that point the branch
+was 0 commits ahead). Read the State/Gap columns as the *starting* condition the
+Phase 0–4 wiring closed.
 
 | Component | File | State | Gap |
 |---|---|---|---|
@@ -470,11 +553,11 @@ exists but is **0 commits ahead** — none of the wiring below has begun.
 | Auth domain + JWT validation (pure) | `domain/auth.ts`, `domain/jwt-validation.ts` | WIRED | — |
 | Token cache, audit, scope-narrow (pure) | `domain/token-cache.ts`, `adapters/broker-audit.ts`, `domain/capability-scope.ts` | WIRED | — |
 | Auth middleware (accepts `RealmJwtDeps`) | `http/middleware/auth.ts` | WIRED | `realmJwt` left `undefined` at boot (`host.ts:130`) |
-| Keycloak token endpoint | `adapters/keycloak-token-endpoint.ts` (port) + `unwired-token-endpoint.ts` | **STUB ONLY** | no live HTTP adapter (`host.ts:170`) |
-| Entra WIF exchange | `adapters/entra-wif.ts` (`createEntraWifExchange`) | **LIVE, UNWIRED** | never called outside tests; boot uses `createUnwiredEntraWifExchange` (`host.ts:176`) |
-| Graph HTTP transport | `adapters/graph-capability.ts` (`GraphHttp` port + builders) | **STUB ONLY** | boot uses `createUnwiredGraphHttp` (`host.ts:177`, stub lives in `adapters/unwired-entra-wif.ts`) |
-| Realm JWT JWKS verifier (`VerifyRealmJwt`) | port in `http/middleware/auth.ts` | **MISSING** | no JWKS adapter; only fakes |
-| `authorizeUserRun` policy | `RealmJwtDeps.authorizeUserRun` | **MISSING** | no decision wired |
+| Keycloak token endpoint | `adapters/keycloak-token-endpoint-http.ts` (`createKeycloakTokenEndpoint`) + `unwired-token-endpoint.ts` | **WIRED (on config)** | live `createKeycloakTokenEndpoint` when `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` is set, else `createUnwiredTokenEndpoint` (`host.ts:309`) |
+| Entra WIF exchange | `adapters/entra-wif.ts` (`createEntraWifExchange`) | **WIRED (on config)** | live when `ENTRA_TENANT_ID`+`ENTRA_CLIENT_ID` are set, else `createUnwiredEntraWifExchange` (`host.ts:324`) |
+| Graph HTTP transport | `adapters/fetch-graph-http.ts` (`createFetchGraphHttp`) | **WIRED (on config)** | live when Entra config present, else `createUnwiredGraphHttp` (`host.ts:328`) |
+| Realm JWT JWKS verifier (`VerifyRealmJwt`) | `adapters/realm-jwt-verifier.ts` (`createRealmJwtVerifier`, jose) | **WIRED (on config)** | live when `REALM_JWT_ISSUER` is set (`host.ts:499`) |
+| `authorizeUserRun` policy | `RealmJwtDeps.authorizeUserRun` | **WIRED (on config)** | stateless `user.teams.includes(dagTeam)`, built with the verifier group (`host.ts:505`) |
 | Subject-token threading (user exchange) | n/a | **MISSING** | `ExchangeV2Request` carries only `userSub` (ADR-0058 amendment gap) |
 | dagId→Keycloak client mapping | `domain/auth.ts` `agentClientIdForDag` | **PLACEHOLDER** | identity function (ADR-0056) |
 | Dynamics/Dataverse | `keycloak-broker.ts:154`, `graph-capability.ts:236` | **PLACEHOLDER** | hardcoded host |
@@ -482,14 +565,18 @@ exists but is **0 commits ahead** — none of the wiring below has begun.
 | HITL durable suspend/resume + stores | `hitl/**` | WIRED (Redis/BullMQ) | — |
 | HITL Bot connector / inbound verify / endpoint | `hitl/adapters/bot/**`, `http/router.ts` | WIRED | needs Azure Bot provisioned |
 | HITL Teams card builder | `hitl/adapters/bot/card.ts` (102 lines) | WIRED | AdaptiveCard v1.4, approve/reject `Action.Execute` (`fugue.review`) + required reason |
-| **HITL Teams-button per-team authz** | `hitl/adapters/bot/messages-handler.ts:18` | **v1 GAP** | any channel member can approve any team's run (`from.aadObjectId` available at `:139`) |
+| **HITL Teams-button per-team authz** | `hitl/adapters/bot/messages-handler.ts` | **IMPLEMENTED** (was v1 GAP) | clicker authorized via `HITL_APPROVER_TEAMS` at parity with HTTP path; non-member click refused (SC-006) |
 | `.env.example` HITL/Entra vars | `.env.example` | **MISSING** | only Server/Redis/MLflow/LLM/Eval vars present |
 
-**Asymmetry:** HITL is *code-complete* (needs Azure Bot provisioning + the
-Teams-button authz gap closed + `.env.example`/docs). Keycloak/Entra has its
-broker plumbing merged but **cannot yet mint a single downstream token** — the
-Keycloak token endpoint has no live HTTP adapter, the WIF adapter is unwired, the
-Graph transport is unwired, and the user inbound JWT path is verifier-less.
+**Asymmetry (RESOLVED 2026-06-17).** At the 2026-06-14 baseline HITL was
+code-complete bar the Teams-button authz gap, and Keycloak/Entra could not yet
+mint a downstream token. **Both are now wired:** the Teams-button authz gap is
+closed (`messages-handler.ts` authorizes the clicker via `HITL_APPROVER_TEAMS` at
+parity with the HTTP path), the live Keycloak token endpoint
+(`keycloak-token-endpoint-http.ts`), Entra WIF, Graph transport
+(`fetch-graph-http.ts`), and the realm JWT verifier (`realm-jwt-verifier.ts`) are
+all present and config-gated in `selectCapabilityBroker`. The only remaining
+dependency is **provisioning + live verification** (Phase 5), not code.
 
 ---
 
@@ -562,6 +649,12 @@ contract); putting the token on `InvocationOrigin` (leaks a host credential acro
 the framework seam).
 
 ### AD-7 — Close the HITL Teams-button per-team authz gap by reusing the HTTP path's check
+**Status (2026-06-17): IMPLEMENTED** (commit `86f82db`, Phase 4). `messages-handler.ts`
+resolves the clicker's `from.aadObjectId` via `HITL_APPROVER_TEAMS` to an approver
+identity (fail-closed on unknown id) and gates on the SAME `canAccessDag`
+predicate the HTTP path uses; per-team conversation routing keys on
+`HITL_TEAM_CHANNELS`. The single-team-per-channel fallback below is **no longer
+required**.
 **Choice:** in `messages-handler.ts`, before recording a button decision, resolve
 the approver's AAD identity (`from.aadObjectId` on the verified inbound activity)
 to fugue team membership and authorize against the run's DAG team — the same check
@@ -622,6 +715,12 @@ realm JWT → auth mw: createRealmJwtVerifier (signature) → validateRealmJwtCl
 - Provision Azure Bot + Entra app (out-of-band; set `BOT_APP_ID`/`BOT_APP_PASSWORD`,
   messaging endpoint → `POST /teams/messages`, install bot in a Teams channel).
 - Smoke-test suspend → card → approve → resume. **Code is ready** — ops only.
+- **Operator runbook:** [`docs/runbooks/azure-bot-hitl-provisioning.md`](runbooks/azure-bot-hitl-provisioning.md)
+  — the full operator-executed procedure (Bot/Entra provisioning, host config, the
+  suspend→card→approve→resume smoke test). **Live provisioning + smoke test are
+  DEFERRED to the operator (Peter Hansen); tracked on GitHub issue #24 and required
+  before production HITL go-live.** This is the Bot's **own** Entra app — distinct
+  from the `fugue-agents` capability-broker app in Appendix A.
 
 ### Phase 2 — User inbound path (depends on Phase 0 verifier)
 - Extend `RealmJwtClaims`/`AuthenticatedUser` with `teams` (AD-5); update
@@ -691,19 +790,26 @@ golden-export-tested realm policy.
 
 ---
 
-## 8. Open decisions (confirm before building)
+## 8. Open decisions — RESOLVED 2026-06-16 (before building)
 
-1. **`authorizeUserRun` source (AD-5):** realm-role/`teams` claim on the JWT
-   (recommended, stateless) vs a Redis-backed user→team grant store?
-2. **HITL Teams-button authz (AD-7):** deploy single-team-per-channel now
-   (document the limit) **or** build approver-AAD→team authz + per-team routing in
-   Phase 4?
-3. **Dynamics/Dataverse:** in scope, or Graph-only (`msgraph:mail.send` /
-   `msgraph:sites.read`) for now?
-4. **Agent-client secrets (AD-1):** env-map JSON acceptable for v1, or wire a
-   secret store (Vault/Azure Key Vault) from the start?
-5. **Sequencing:** is Phase 1′ (HITL go-live) the priority to land first, given
-   it's closest to working?
+All five were resolved before the Phase 0–4 wiring landed; recorded here for
+provenance:
+
+1. **`authorizeUserRun` source (AD-5):** RESOLVED → stateless `teams` claim on the
+   verified realm JWT (`(u, dagTeam) => u.teams.includes(dagTeam)`). No Redis
+   grant store. (ADR-0062/0063.)
+2. **HITL Teams-button authz (AD-7):** RESOLVED → build approver-AAD→team authz +
+   per-team routing in Phase 4 (`HITL_APPROVER_TEAMS` / `HITL_TEAM_CHANNELS`). The
+   single-team-per-channel fallback was NOT taken.
+3. **Dynamics/Dataverse:** RESOLVED → Graph-only (`msgraph:mail.send` /
+   `msgraph:sites.read`) for v1; the Dynamics leg is wired but stays config-gated
+   (`DYNAMICS_ORG_HOST`) and unassigned until needed.
+4. **Agent-client secrets (AD-1):** RESOLVED → env-map JSON
+   (`KEYCLOAK_AGENT_CLIENT_CREDENTIALS`) for v1, behind the `AgentClientCredentials`
+   port so a Vault/Key Vault adapter can replace it with no broker change.
+5. **Sequencing:** RESOLVED → all phases (0–4) landed together on
+   `feat/keycloak-entra-wiring`; HITL go-live and the Entra bridge are now both
+   gated only on operator provisioning (Phase 5).
 
 ---
 
@@ -917,6 +1023,8 @@ To add (Phase 0/4): `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `KEYCLOAK_TOKEN_URL?`
 - **0058** two/three-path inbound host auth (+ 2026-06-12 subject-token amendment)
 - **0059** capability failure taxonomy · **0060** HITL suspend/resume primitive
 - **0061** per-team DAG image scoping (amends **0041** separate DAGs repo → depth-agnostic discovery)
+- **0062** team modeling via realm roles (role name == team name; emit all realm roles as the access-token-only `teams` claim)
+- **0063** `teams` claim defensive parse in the pure host validator (hand-rolled, no Zod; fail-closed on malformed)
 
 ### External references
 
@@ -932,5 +1040,6 @@ To add (Phase 0/4): `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `KEYCLOAK_TOKEN_URL?`
   `packages/host/src/adapters/node-context-factory.ts` (`createNodeContextForDag`),
   `packages/framework/src/types/llm.ts` (`LlmResponse.tokensIn/tokensOut`)
 - BFF/dashboard (non-security): `docs/plans/2026-06-09-lead-desk-bff-dashboard.md`
+- HITL Teams go-live (Phase 1′) operator runbook: [`docs/runbooks/azure-bot-hitl-provisioning.md`](runbooks/azure-bot-hitl-provisioning.md)
 </content>
 </invoke>

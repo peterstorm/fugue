@@ -18,7 +18,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { runId as makeRunId, nodeId as makeNodeId, err } from "@fuguejs/framework";
-import type { Capability, Invocation, InvocationOrigin, Tracer } from "@fuguejs/framework";
+import type { Capability, Invocation, InvocationOrigin, Tracer, RunId } from "@fuguejs/framework";
 import type { LogPort } from "../../ports.js";
 import { createKeycloakBroker, scopeName, audienceForScope } from "../keycloak-broker.js";
 import type {
@@ -29,6 +29,7 @@ import type {
 import type { EntraWifExchange, WifExchangeRequest } from "../entra-wif.js";
 import type { GraphHttp, GraphRequest } from "../graph-capability.js";
 import { parseScope } from "../../domain/capability-scope.js";
+import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";
 
 // ── Test spine ──────────────────────────────────────────────────────────────
 
@@ -168,10 +169,23 @@ const cap = (name: string): Capability => name as Capability;
  * keeps every pre-T10 test construction green while threading the new ports.
  */
 type BrokerArgs = Parameters<typeof createKeycloakBroker>[0];
-const mkBroker = (deps: Omit<BrokerArgs, "entraWif" | "graphHttp"> & Partial<Pick<BrokerArgs, "entraWif" | "graphHttp">>) =>
+
+/**
+ * A fixed verified subject token the default `resolveSubjectToken` hands back for
+ * every run — so the pre-T7 user-path tests (which assert the exchange SUCCEEDS)
+ * keep exercising the proof-bearing path. Tests that pin the FR-030 fail-closed
+ * behaviour override `resolveSubjectToken` with one that returns `undefined`.
+ */
+const TEST_SUBJECT_TOKEN: SubjectToken = markSubjectToken("user.jwt.proof");
+
+const mkBroker = (
+  deps: Omit<BrokerArgs, "entraWif" | "graphHttp" | "resolveSubjectToken"> &
+    Partial<Pick<BrokerArgs, "entraWif" | "graphHttp" | "resolveSubjectToken">>,
+) =>
   createKeycloakBroker({
     entraWif: deps.entraWif ?? recordingWif().wif,
     graphHttp: deps.graphHttp ?? recordingGraphHttp().graphHttp,
+    resolveSubjectToken: deps.resolveSubjectToken ?? (() => TEST_SUBJECT_TOKEN),
     ...deps,
   });
 
@@ -539,7 +553,7 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-W3-008/009)", () => 
     const exReq = exCalls[0];
     if (exReq === undefined) throw new Error("expected one exchange call");
     expect(scopeName(exReq.scope)).toBe("msgraph:mail.send");
-    expect(exReq.audience).toBe(audienceForScope(exReq.scope));
+    expect(exReq.audience).toBe(audienceForScope(exReq.scope, undefined)!);
     expect(exReq.audience).toBe("https://graph.microsoft.com");
   });
 
@@ -568,8 +582,153 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-W3-008/009)", () => 
     const ccReq = ccCalls[0];
     if (ccReq === undefined) throw new Error("expected one client_credentials call");
     expect(scopeName(ccReq.scope)).toBe("msgraph:sites.read");
-    expect(ccReq.audience).toBe(audienceForScope(ccReq.scope));
+    expect(ccReq.audience).toBe(audienceForScope(ccReq.scope, undefined)!);
     expect(ccReq.audience).toBe("https://graph.microsoft.com");
+  });
+});
+
+// ── User subject_token proof threading + fail-closed (T7 / FR-030/031/032) ───
+
+describe("keycloak-broker — user exchange presents the resolved subject_token (FR-030/FR-031)", () => {
+  it("USER branch passes the run's resolved subject_token into exchangeV2; sub stays user, azp becomes agent", async () => {
+    const { endpoint, exCalls, ccCalls } = recordingEndpoint();
+    const { logger } = collectLogs();
+    const proof = markSubjectToken("verified.user.jwt");
+    const seen: RunId[] = [];
+    const broker = mkBroker({
+      endpoint,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      // The side-channel hands back THIS run's verified token (the host-side
+      // thread the run-context factory bound at run start, FR-032).
+      resolveSubjectToken: (rid) => {
+        seen.push(rid);
+        return proof;
+      },
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+
+    expect(result.ok).toBe(true);
+    // Exactly one exchange, the resolved proof presented as the subject_token.
+    expect(exCalls.length).toBe(1);
+    expect(ccCalls.length).toBe(0); // 0 client_credentials on the user path
+    expect(exCalls[0]?.subjectToken).toBe(proof);
+    expect(exCalls[0]?.userSub).toBe("user-abc"); // sub stays user (FR-031)
+    expect(exCalls[0]?.agentClientId).toBe("fugue-agent-mail"); // azp becomes agent
+    // The resolver was keyed on the run's id (the host-side side-channel key).
+    expect(seen).toEqual([runId]);
+  });
+
+  it("AGENT branch NEVER resolves nor presents a subject_token (FR-W3-009)", async () => {
+    const { endpoint, ccCalls, exCalls } = recordingEndpoint();
+    const { logger } = collectLogs();
+    let resolverCalls = 0;
+    const broker = mkBroker({
+      endpoint,
+      assignedScopes: () => new Set<string>(["msgraph:sites.read"]),
+      // If the agent branch ever consulted the side-channel, this counter would tick.
+      resolveSubjectToken: () => {
+        resolverCalls += 1;
+        return markSubjectToken("should-never-be-asked");
+      },
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(agentOrigin("fugue-agent-sites")),
+      [cap("msgraph:sites.read")],
+    );
+
+    expect(result.ok).toBe(true);
+    expect(ccCalls.length).toBe(1); // client_credentials only
+    expect(exCalls.length).toBe(0); // zero exchanges — and so zero subject tokens
+    // The agent hop never even asks the side-channel for a subject token.
+    expect(resolverCalls).toBe(0);
+  });
+});
+
+describe("keycloak-broker — user exchange FAILS CLOSED with no resolvable subject_token (FR-030)", () => {
+  it("refuses (policy-refusal) and performs ZERO egress when resolveSubjectToken returns undefined — no proof-less token", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { wif, wifCount } = recordingWif();
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      // The scope IS assigned — the local scope gate passes — but the user run has
+      // NO resolvable verified token. The exchange MUST NOT proceed proof-less.
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      resolveSubjectToken: () => undefined,
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+
+    // Fail closed: a settled policy-refusal (NOT a token, NOT a silent success).
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected fail-closed refusal");
+    expect(result.error.kind).toBe("policy-refusal");
+    if (result.error.kind === "policy-refusal") {
+      expect(result.error.scope).toBe("msgraph:mail.send");
+      expect(result.error.agentClientId).toBe("fugue-agent-mail");
+    }
+    // NEVER issue a proof-less token: NO exchange egress AND no WIF egress.
+    expect(egressCount()).toBe(0);
+    expect(wifCount()).toBe(0);
+    // The fail-closed outcome is audited as a mint-failed refusal (SC-009).
+    const refusals = logs.filter((l) => l.data?.result === "refusal");
+    expect(refusals.length).toBe(1);
+    expect(refusals[0]?.data?.reason).toBe("mint-failed:policy-refusal");
+    // No mint record — nothing was minted.
+    expect(logs.filter((l) => l.data?.result === "mint").length).toBe(0);
+  });
+});
+
+describe("keycloak-broker — NFR-011: no raw subject_token reachable from a returned handle", () => {
+  it("the minted user handle exposes ONLY the operation method — no token/subjectToken/client field", async () => {
+    const { endpoint } = recordingEndpoint();
+    const { wif } = recordingWif();
+    const { graphHttp } = recordingGraphHttp();
+    const { logger } = collectLogs();
+    const proof = markSubjectToken("verified.user.jwt-NFR011");
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      graphHttp,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      resolveSubjectToken: () => proof,
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected mint");
+    const handle = result.value["msgraph:mail.send" as Capability] as unknown as Record<string, unknown>;
+    // Only the operation method — no raw authority of ANY kind on the handle.
+    expect(Object.keys(handle)).toEqual(["sendMail"]);
+    expect(handle.token).toBeUndefined();
+    expect(handle.subjectToken).toBeUndefined();
+    expect(handle.client).toBeUndefined();
+    // The raw subject token does not appear ANYWHERE in the handle's serialised form.
+    expect(JSON.stringify(handle)).not.toContain("verified.user.jwt-NFR011");
   });
 });
 
@@ -938,12 +1097,16 @@ describe("keycloak-broker — pure scope helpers", () => {
     }
   });
 
-  it("audienceForScope maps each provider to its downstream resource", () => {
+  it("audienceForScope maps each provider to its downstream resource (FR-042: Dynamics → per-org host)", () => {
     const mail = parseScope("msgraph:mail.send");
     const dyn = parseScope("dynamics:read");
     if (mail === undefined || dyn === undefined) throw new Error("parse failed");
-    expect(audienceForScope(mail)).toBe("https://graph.microsoft.com");
-    expect(audienceForScope(dyn)).toBe("https://dynamics.microsoft.com");
+    // msgraph never depends on the org host.
+    expect(audienceForScope(mail, undefined)).toBe("https://graph.microsoft.com");
+    expect(audienceForScope(mail, "org.crm4.dynamics.com")).toBe("https://graph.microsoft.com");
+    // Dynamics targets the CONFIGURED per-org host; UNSET → undefined (fail-closed).
+    expect(audienceForScope(dyn, "org.crm4.dynamics.com")).toBe("https://org.crm4.dynamics.com");
+    expect(audienceForScope(dyn, undefined)).toBeUndefined();
   });
 });
 
@@ -1299,5 +1462,112 @@ describe("keycloak-broker — mintFor is fenced end-to-end (never rejects, SC-00
     expect(refusals[0]?.data?.reason).toBe("mint-failed:infra-unreachable");
     expect(refusals[0]?.data?.azp).toBe("fugue-agent-mail");
     expect(refusals[0]?.data?.runId).toBe(runId as string);
+  });
+});
+
+// ── Dynamics per-org host targeting + fail-closed (FR-042) ───────────────────
+// The `dynamics:read` capability targets the CONFIGURED per-org Dataverse host:
+// the token audience and the read URL are both `https://<DYNAMICS_ORG_HOST>...`.
+// When DYNAMICS_ORG_HOST is unset the scope FAILS CLOSED with zero egress.
+describe("keycloak-broker — Dynamics targets the configured per-org host (FR-042)", () => {
+  const DYN_HOST = "org.crm4.dynamics.com";
+
+  it("dynamics:read with DYNAMICS_ORG_HOST set narrows the WIF audience to the per-org host", async () => {
+    const { endpoint } = recordingEndpoint();
+    const { wif, calls } = recordingWif();
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["dynamics:read"]),
+      dynamicsOrgHost: DYN_HOST,
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-crm")), [cap("dynamics:read")]);
+
+    expect(result.ok).toBe(true);
+    // The WIF exchange's audience is the per-org Dataverse host (FR-042) — never a
+    // hardcoded `dynamics.microsoft.com` placeholder.
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.audience).toBe(`https://${DYN_HOST}`);
+  });
+
+  it("the dynamics read handle GETs the per-org Dataverse Web API URL", async () => {
+    const { endpoint } = recordingEndpoint();
+    const { wif } = recordingWif();
+    const graphRequests: GraphRequest[] = [];
+    const graphHttp: GraphHttp = {
+      request: async (req) => { graphRequests.push(req); return { status: 200, json: { value: [{ id: 1 }] } }; },
+    };
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      graphHttp,
+      assignedScopes: () => new Set<string>(["dynamics:read"]),
+      dynamicsOrgHost: DYN_HOST,
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-crm")), [cap("dynamics:read")]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const handle = (result.value as Record<string, { read: (q: { entity: string }) => Promise<unknown> }>)["dynamics:read"]!;
+    await handle.read({ entity: "accounts" });
+    expect(graphRequests[0]?.url).toBe(`https://${DYN_HOST}/api/data/v9.2/accounts`);
+  });
+
+  it("FR-042 fail-closed: dynamics:read with DYNAMICS_ORG_HOST UNSET is refused with ZERO egress + audited 'dynamics-org-host-unset'", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { wif, wifCount } = recordingWif();
+    const { logger, logs } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      // Scope IS assigned, but no org host is configured (dynamicsOrgHost omitted).
+      assignedScopes: () => new Set<string>(["dynamics:read"]),
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-crm")), [cap("dynamics:read")]);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.error.kind).toBe("policy-refusal");
+    // Zero egress on BOTH hops — the unset-host refusal precedes any token request.
+    expect(egressCount()).toBe(0);
+    expect(wifCount()).toBe(0);
+    // The refusal is audited with the SPECIFIC reason that names the missing host
+    // (distinct from the assigned-scope gate's `scope-not-assigned`) — SC-009.
+    const refusalRecords = logs.filter((l) => l.data?.result === "refusal");
+    expect(refusalRecords.length).toBe(1);
+    expect(refusalRecords[0]?.data?.reason).toBe("dynamics-org-host-unset");
+    expect(refusalRecords[0]?.data?.scope).toBe("dynamics:read");
+  });
+
+  it("an UNSET host does NOT affect msgraph scopes (they never depend on it)", async () => {
+    const { endpoint } = recordingEndpoint();
+    const { wif, calls } = recordingWif();
+    const { logger } = collectLogs();
+    const broker = mkBroker({
+      endpoint,
+      entraWif: wif,
+      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+      // dynamicsOrgHost intentionally omitted.
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-mail")), [cap("msgraph:mail.send")]);
+    expect(result.ok).toBe(true);
+    expect(calls[0]?.audience).toBe("https://graph.microsoft.com");
   });
 });

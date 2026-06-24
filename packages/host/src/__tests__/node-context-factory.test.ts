@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
+import { ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -32,7 +32,17 @@ import {
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
-import type { AuthIdentity } from "../domain/auth.js";
+import { subjectTokenForIdentity } from "../domain/run-context.js";
+import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
+import { tenantId } from "../domain/tenant.js";
+import type { TenantId } from "../domain/tenant.js";
+
+/** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
+const mkTenant = (s: string): TenantId => {
+  const r = tenantId(s);
+  if (!isOk(r)) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
+  return r.value;
+};
 
 // Existing pass-through / wiring tests are identity-agnostic — an admin identity
 // reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
@@ -44,6 +54,15 @@ const adminIdentity: AuthIdentity = { kind: "admin" };
 const testDagId = dagId("test-dag");
 const testRunId = makeRunId("run-001");
 const testNodeId = makeNodeId("node-a");
+// Every key builder + namespaced adapter is now tenant-scoped. The unit tests
+// here use a single fixed tenant; setup and assertion both go through the same
+// constant, so the prefix is consistent regardless of its literal value.
+const testTenant = mkTenant("eng");
+
+// FR-040: map the test DAG to its real agent client so the origin resolves for
+// the wiring/metering tests below (these exercise context construction, not the
+// FR-040 fail-closed path, which has its own dedicated tests).
+const FACTORY_AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
 
 const makeDag = (overrides?: Partial<RegisteredDag["config"]>): RegisteredDag => ({
   id: testDagId,
@@ -99,6 +118,9 @@ const createMockRedis = (store: Map<string, string> = new Map()): {
       store.set(key, value);
       return ok(true);
     },
+    sAdd: async () => ok(1),
+    sRem: async () => ok(1),
+    sMembers: async () => ok([]),
   };
   return { redis, calls };
 };
@@ -110,6 +132,9 @@ const failingRedis = (): RedisPort => ({
   keys: async () => err({ kind: "redis-unavailable", operation: "keys" } as HostError),
   scan: async () => err({ kind: "redis-unavailable", operation: "scan" } as HostError),
   setNx: async () => err({ kind: "redis-unavailable", operation: "setnx" } as HostError),
+  sAdd: async () => err({ kind: "redis-unavailable", operation: "sadd" } as HostError),
+  sRem: async () => err({ kind: "redis-unavailable", operation: "srem" } as HostError),
+  sMembers: async () => err({ kind: "redis-unavailable", operation: "smembers" } as HostError),
 });
 
 const collectLogs = () => {
@@ -163,7 +188,7 @@ describe("createNamespacedCache", () => {
   it("returns cache miss when key not found", async () => {
     const { redis } = createMockRedis();
     const { logger } = collectLogs();
-    const cache = createNamespacedCache(redis, testDagId, undefined, logger);
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
 
     const result = await cache.get("my-key");
     expect(result).toEqual({ hit: false });
@@ -171,11 +196,11 @@ describe("createNamespacedCache", () => {
 
   it("returns cache hit with deserialized value", async () => {
     const store = new Map([
-      [buildCacheKey(testDagId, "my-key"), JSON.stringify({ data: 42 })],
+      [buildCacheKey(testTenant, testDagId, "my-key"), JSON.stringify({ data: 42 })],
     ]);
     const { redis } = createMockRedis(store);
     const { logger } = collectLogs();
-    const cache = createNamespacedCache(redis, testDagId, undefined, logger);
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
 
     const result = await cache.get("my-key");
     expect(result).toEqual({ hit: true, value: { data: 42 } });
@@ -183,7 +208,7 @@ describe("createNamespacedCache", () => {
 
   it("gracefully degrades to miss on Redis get failure", async () => {
     const { logger, logs } = collectLogs();
-    const cache = createNamespacedCache(failingRedis(), testDagId, undefined, logger);
+    const cache = createNamespacedCache(failingRedis(), testTenant, testDagId, undefined, logger);
 
     const result = await cache.get("any-key");
     expect(result).toEqual({ hit: false });
@@ -192,11 +217,11 @@ describe("createNamespacedCache", () => {
 
   it("treats corrupted JSON as cache miss", async () => {
     const store = new Map([
-      [buildCacheKey(testDagId, "bad"), "not-json{{{"],
+      [buildCacheKey(testTenant, testDagId, "bad"), "not-json{{{"],
     ]);
     const { redis } = createMockRedis(store);
     const { logger, logs } = collectLogs();
-    const cache = createNamespacedCache(redis, testDagId, undefined, logger);
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
 
     const result = await cache.get("bad");
     expect(result).toEqual({ hit: false });
@@ -207,16 +232,16 @@ describe("createNamespacedCache", () => {
     const store = new Map<string, string>();
     const { redis } = createMockRedis(store);
     const { logger } = collectLogs();
-    const cache = createNamespacedCache(redis, testDagId, undefined, logger);
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
 
     await cache.set("k", { value: "hello" });
-    const expectedKey = buildCacheKey(testDagId, "k");
+    const expectedKey = buildCacheKey(testTenant, testDagId, "k");
     expect(store.get(expectedKey)).toBe(JSON.stringify({ value: "hello" }));
   });
 
   it("set is best-effort — returns ok on Redis failure", async () => {
     const { logger, logs } = collectLogs();
-    const cache = createNamespacedCache(failingRedis(), testDagId, undefined, logger);
+    const cache = createNamespacedCache(failingRedis(), testTenant, testDagId, undefined, logger);
 
     const result = await cache.set("k", "v");
     expect(result.ok).toBe(true);
@@ -226,7 +251,7 @@ describe("createNamespacedCache", () => {
   it("set handles non-serializable values gracefully", async () => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();
-    const cache = createNamespacedCache(redis, testDagId, undefined, logger);
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
 
     const circular: Record<string, unknown> = {};
     circular.self = circular;
@@ -237,7 +262,7 @@ describe("createNamespacedCache", () => {
 
   it("escalates to error level after consecutive failures", async () => {
     const { logger, logs } = collectLogs();
-    const cache = createNamespacedCache(failingRedis(), testDagId, undefined, logger);
+    const cache = createNamespacedCache(failingRedis(), testTenant, testDagId, undefined, logger);
 
     // Trigger 10 failures to exceed threshold
     for (let i = 0; i < 10; i++) {
@@ -257,17 +282,17 @@ describe("createNamespacedCheckpointWriter", () => {
     const store = new Map<string, string>();
     const { redis } = createMockRedis(store);
     const { logger } = collectLogs();
-    const writer = createNamespacedCheckpointWriter(redis, testDagId, testRunId, undefined, logger);
+    const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
 
     await writer.write(testRunId, testNodeId, { output: "done" });
 
-    const expectedKey = buildCheckpointKey(testDagId, testRunId, testNodeId);
+    const expectedKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId);
     expect(store.get(expectedKey)).toBe(JSON.stringify({ output: "done" }));
   });
 
   it("best-effort — does not throw on Redis failure", async () => {
     const { logger, logs } = collectLogs();
-    const writer = createNamespacedCheckpointWriter(failingRedis(), testDagId, testRunId, undefined, logger);
+    const writer = createNamespacedCheckpointWriter(failingRedis(), testTenant, testDagId, testRunId, undefined, logger);
 
     // Should not throw
     await writer.write(testRunId, testNodeId, { data: 1 });
@@ -277,7 +302,7 @@ describe("createNamespacedCheckpointWriter", () => {
   it("handles non-serializable values gracefully", async () => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();
-    const writer = createNamespacedCheckpointWriter(redis, testDagId, testRunId, undefined, logger);
+    const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
 
     const circular: Record<string, unknown> = {};
     circular.self = circular;
@@ -306,7 +331,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
   it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -317,7 +342,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.http).toBeNull();
   });
@@ -329,7 +354,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // migrated the clock from a factory seam to a capability without host wiring.
   it("surfaces a usable clock when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([{ name: "clock", client: systemClock }]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.clock).not.toBeNull();
     // The presence check `ctx.clock != null` is what `validateCapabilities`
@@ -340,9 +365,111 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves clock null when no clock handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     expect(ctx.clock).toBeNull();
+  });
+});
+
+// ── Fail-closed tenant derivation (SECURITY: AD-4 / US2 / SC-001) ────────────
+//
+// createNodeContextForDag derives the tenant for EVERY Redis key from the DAG's
+// owning `team` via the canonical `tenantId` smart constructor. A team that is
+// not a valid tenant id (contains `:`, a glob metacharacter, or is over 64
+// chars) would, if interpolated unchecked, ESCAPE the `fugue:<tenant>:` prefix
+// and defeat the per-tenant Redis ACL. The factory REFUSES (throws) rather than
+// emit an unscoped key — this is THE production seam that prevents an
+// ACL-escaping key, so it must stay fail-closed.
+
+describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 / SC-001)", () => {
+  const baseSharedInfra = (): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  it("REFUSES (throws) when the DAG's owning team contains a colon — never emits a key that escapes the tenant prefix", async () => {
+    // A team with a `:` cannot be a TenantId (`:` is the key-segment delimiter);
+    // interpolating it unchecked would forge a sibling namespace
+    // (`fugue:evil:ns:...`). The factory must throw before any key is built.
+    const evilTeamDag: RegisteredDag = { ...makeDag(), team: "evil:ns" };
+    const promise = createNodeContextForDag(
+      baseSharedInfra(),
+      evilTeamDag,
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+    await expect(promise).rejects.toThrow(/invalid owning team/i);
+  });
+});
+
+// ── Routed-tenant key namespacing (ADR-0067 / SC-001) ───────────────────────
+//
+// When the supervisor threads the resolved `Tenant.id` as `routedTenant`, it —
+// NOT the DAG's owning `team` — is the authoritative tenant axis for EVERY Redis
+// key the context produces, so cache/checkpoint keys share the SAME
+// `fugue:<tenant>:` namespace as the token / HITL / run-lock stores (`host.ts`).
+// A tenant whose `id` differs from a DAG's `team` must NOT split its keys across
+// two namespaces. The `dag.team` derivation remains as a fallback for the
+// single-tenant entrypoint that omits `routedTenant`.
+
+describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / SC-001)", () => {
+  const sharedWithStore = (store: Map<string, string>): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis(store).redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  it("namespaces cache keys under `routedTenant` — never the DAG's owning team (id != team)", async () => {
+    // DAG owned by team "eng"; worker routed for tenant "acme-prod" (id != team).
+    const store = new Map<string, string>();
+    const routed = mkTenant("acme-prod");
+    const dag = makeDag(); // team: "eng"
+    const { ctx } = await createNodeContextForDag(
+      sharedWithStore(store),
+      dag,
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+      false,
+      undefined,
+      routed,
+    );
+
+    const writeResult = await ctx.cache.set("k", { v: 1 });
+    expect(writeResult.ok).toBe(true);
+
+    // The exact key is under the routed tenant; nothing leaks under the team.
+    expect(store.has(buildCacheKey(routed, dag.id, "k"))).toBe(true);
+    expect([...store.keys()].every((key) => key.startsWith(`fugue:${routed}:`))).toBe(true);
+    expect([...store.keys()].some((key) => key.startsWith("fugue:eng:"))).toBe(false);
+  });
+
+  it("falls back to the `dag.team` derivation when `routedTenant` is omitted (single-tenant path)", async () => {
+    const store = new Map<string, string>();
+    const dag = makeDag(); // team: "eng"
+    const { ctx } = await createNodeContextForDag(
+      sharedWithStore(store),
+      dag,
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+
+    await ctx.cache.set("k", { v: 1 });
+    expect([...store.keys()].some((key) => key.startsWith("fugue:eng:"))).toBe(true);
   });
 });
 
@@ -375,6 +502,7 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
       testRunId,
       new AbortController().signal,
       adminIdentity,
+      FACTORY_AGENT_MAP,
     );
 
     // `extractClients([httpHandle]).http === httpHandle.client` — the factory
@@ -424,7 +552,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm } = fakeLlm(10, 5);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
 
     // If the factory ever stops wrapping (handing the shared client through
     // unmetered), this reference check is the loudest possible regression guard.
@@ -437,7 +565,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudgetTokens: 1 }); // budget 1: call 1 is the single overshoot
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     const r1 = await ctx.llm.sendStructured(structuredReq()); // 0 < 1 → allowed, settles 15
@@ -461,7 +589,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm, calls } = fakeLlm(1_000_000, 0);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity);
+    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     for (let i = 0; i < 3; i++) {
@@ -480,37 +608,53 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
 // origin; these tests prove the user `sub`/`azp` actually land and that the
 // admin/team placeholder is unchanged (byte-for-byte the prior behaviour).
 
-describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () => {
-  it("a user identity produces origin { kind: 'user', sub, agentClientId: dagId } — sub lands, agent client is the DAG's, NOT the frontend azp (I3)", () => {
+describe("invocationOriginForIdentity — user sub threading + real-client resolution (FR-W3-007, FR-040)", () => {
+  // FR-040: the DAG id resolves to its REAL Keycloak agent client via the map,
+  // not the dag-id placeholder. `test-dag` → `fugue-agent-test`.
+  const AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
+
+  it("a user identity produces origin { kind: 'user', sub, agentClientId: <REAL client> } — sub lands, agent client is the mapped client, NOT the dagId nor the frontend azp (I3, FR-040)", () => {
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-abc-123", azp: "fugue-frontend", canRunDag: () => true };
 
-    const origin = invocationOriginForIdentity(userIdentity, testDagId);
+    const origin = invocationOriginForIdentity(AGENT_MAP, userIdentity, testDagId);
 
-    // agentClientId is the AGENT the user acts through (the DAG's agent-type
-    // client placeholder = dagId), NOT the inbound token's frontend `azp`. The
-    // broker gates the user hop with `assignedScopes(agentClientId)`, which must
-    // consult the AGENT's realm policy, never the frontend SSO client's (I3).
+    // agentClientId is the AGENT the user acts through — the DAG's REAL agent-type
+    // Keycloak client resolved from AGENT_CLIENT_MAP — NOT the inbound token's
+    // frontend `azp`, and NOT the dagId placeholder. The broker gates the user
+    // hop with `assignedScopes(agentClientId)`, which must consult the AGENT's
+    // realm policy keyed on the real client id (I3, FR-040).
     expect(origin).toEqual({
       kind: "user",
       sub: "user-abc-123",
-      agentClientId: testDagId,
+      agentClientId: "fugue-agent-test",
     });
-    // Guard the specific regression: the frontend azp must NOT leak into origin.
     expect((origin as { agentClientId: string }).agentClientId).not.toBe("fugue-frontend");
+    expect((origin as { agentClientId: string }).agentClientId).not.toBe(testDagId);
   });
 
-  it("a team identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
+  it("a team identity maps to the agent origin keyed on the REAL client id (FR-040)", () => {
     const teamIdentity: AuthIdentity = { kind: "team", team: "eng", label: "ci" };
 
-    const origin = invocationOriginForIdentity(teamIdentity, testDagId);
+    const origin = invocationOriginForIdentity(AGENT_MAP, teamIdentity, testDagId);
 
-    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+    expect(origin).toEqual({ kind: "agent", agentClientId: "fugue-agent-test" });
   });
 
-  it("an admin identity maps to the agent placeholder keyed on dagId (unchanged behaviour)", () => {
-    const origin = invocationOriginForIdentity(adminIdentity, testDagId);
+  it("an admin identity maps to the agent origin keyed on the REAL client id (FR-040)", () => {
+    const origin = invocationOriginForIdentity(AGENT_MAP, adminIdentity, testDagId);
 
-    expect(origin).toEqual({ kind: "agent", agentClientId: testDagId });
+    expect(origin).toEqual({ kind: "agent", agentClientId: "fugue-agent-test" });
+  });
+
+  it("FR-040 fail-closed: an UNMAPPED dag id resolves to `undefined` (no identity passthrough) for EVERY identity kind", () => {
+    // Empty map → no DAG has an agent client → origin resolution is first-class
+    // ABSENCE, never the dag-id-as-client placeholder.
+    const userIdentity: AuthIdentity = { kind: "user", sub: "u", azp: "fugue-frontend", canRunDag: () => true };
+    expect(invocationOriginForIdentity({}, userIdentity, testDagId)).toBeUndefined();
+    expect(invocationOriginForIdentity({}, { kind: "team", team: "eng", label: "ci" }, testDagId)).toBeUndefined();
+    expect(invocationOriginForIdentity({}, adminIdentity, testDagId)).toBeUndefined();
+    // A map that maps a DIFFERENT dag still fails closed for the unmapped one.
+    expect(invocationOriginForIdentity({ "other-dag": "fugue-agent-other" }, adminIdentity, testDagId)).toBeUndefined();
   });
 
   it("the factory accepts a user identity and produces a usable NodeContext (sub threaded, no throw)", async () => {
@@ -532,12 +676,209 @@ describe("invocationOriginForIdentity — user sub threading (FR-W3-007)", () =>
       testRunId,
       new AbortController().signal,
       userIdentity,
+      // FR-040: map the DAG to its real agent client so the origin resolves.
+      { [testDagId as string]: "fugue-agent-test" },
     );
 
     // The run path no longer dead-ends the user identity: a base NodeContext is
     // produced and the origin the factory built from this identity carries the
-    // user's sub (threaded into per-node minting by the framework).
+    // user's sub (threaded into per-node minting by the framework) AND the REAL
+    // resolved agent client (FR-040).
     expect(ctx).toBeDefined();
-    expect(origin).toMatchObject({ kind: "user", sub: "user-xyz" });
+    expect(origin).toMatchObject({ kind: "user", sub: "user-xyz", agentClientId: "fugue-agent-test" });
+  });
+
+  it("FR-040 fail-closed: the factory REFUSES (throws) a DAG with no agent client mapping when minting is ACTIVE — never mints an absent identity", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const shared = baseSharedInfra();
+    // Empty map + minting ACTIVE (broker wired) → the DAG has no agent client →
+    // fail closed (the origin WOULD be consumed by per-node minting).
+    const promise = createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      {},
+      true,
+    );
+    await expect(promise).rejects.toThrow(/no agent client mapping/);
+  });
+
+  it("zero-regression no-realm baseline (SC-001/SC-005): an UNMAPPED dag with minting INACTIVE does NOT throw and yields origin `undefined` — a no-realm deployment must not 500 every run", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const shared = baseSharedInfra();
+    // Empty map (the default) + minting INACTIVE (no broker) → origin is never
+    // consumed, so the run proceeds on the static path with origin === undefined.
+    const { ctx, origin } = await createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      {},
+      false,
+    );
+    expect(ctx).toBeDefined();
+    expect(origin).toBeUndefined();
+  });
+
+  it("FR-040 + NFR-014 ordering: a user run carrying a subject token on an UNMAPPED dag (minting active) throws BEFORE binding the token — no JWT retained under a non-proceeding run", async () => {
+    const baseSharedInfra = (): SharedInfra => ({
+      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+      redis: createMockRedis().redis,
+      tracer: noopTracer,
+      contentFilter: null,
+      prompts: null,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      capabilities: [],
+    });
+    const shared = baseSharedInfra();
+    const bound: RunId[] = [];
+    const userWithProof: AuthIdentity = {
+      kind: "user",
+      sub: "user-xyz",
+      azp: "fugue-frontend",
+      canRunDag: () => true,
+      subjectToken: markSubjectToken("verified.user.jwt"),
+    };
+    const promise = createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      userWithProof,
+      {},
+      true,
+      (rid) => { bound.push(rid); },
+    );
+    await expect(promise).rejects.toThrow(/no agent client mapping/);
+    // The fail-closed throw fires BEFORE the bind, so nothing is retained.
+    expect(bound).toEqual([]);
+  });
+});
+
+// ── Subject token: host-side only, never on the framework origin (T7/FR-032) ─
+//
+// The user's verified `subject_token` (FR-030 proof) MUST be threaded HOST-SIDE
+// and MUST NEVER appear on the framework `InvocationOrigin` (which stays
+// string-only). These tests pin both halves: the pure seam extracts the token off
+// the identity, and the factory binds it to the run via the side-channel sink
+// WITHOUT it ever crossing into the origin.
+
+describe("subjectTokenForIdentity — pure host-side extraction (FR-030/FR-032)", () => {
+  const proof: SubjectToken = markSubjectToken("verified.user.jwt");
+
+  it("returns the verified token for a user identity that carries one", () => {
+    const userIdentity: AuthIdentity = {
+      kind: "user",
+      sub: "user-xyz",
+      azp: "fugue-frontend",
+      canRunDag: () => true,
+      subjectToken: proof,
+    };
+    expect(subjectTokenForIdentity(userIdentity)).toBe(proof);
+  });
+
+  it("returns undefined for a user identity with no token (durable reconstruction) — broker then fails closed", () => {
+    const reconstructed: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => false };
+    expect(subjectTokenForIdentity(reconstructed)).toBeUndefined();
+  });
+
+  it("returns undefined for admin and team identities (they have no end-user subject token)", () => {
+    expect(subjectTokenForIdentity({ kind: "admin" })).toBeUndefined();
+    expect(subjectTokenForIdentity({ kind: "team", team: "eng", label: "ci" })).toBeUndefined();
+  });
+});
+
+describe("createNodeContextForDag — binds the subject token host-side, NEVER on the origin (FR-032)", () => {
+  const baseSharedInfra = (): SharedInfra => ({
+    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    redis: createMockRedis().redis,
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    capabilities: [],
+  });
+
+  it("binds runId → subject token via the sink for a user run; the token is ABSENT from the string-only origin", async () => {
+    const proof = markSubjectToken("verified.user.jwt-FR032");
+    const userIdentity: AuthIdentity = {
+      kind: "user",
+      sub: "user-xyz",
+      azp: "fugue-frontend",
+      canRunDag: () => true,
+      subjectToken: proof,
+    };
+    const bound: { runId: RunId; token: SubjectToken }[] = [];
+
+    const { origin } = await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      userIdentity,
+      FACTORY_AGENT_MAP,
+      true,
+      (rid, token) => bound.push({ runId: rid, token }),
+    );
+
+    // The token went through the HOST-SIDE sink, keyed on the run id.
+    expect(bound).toEqual([{ runId: testRunId, token: proof }]);
+    // FR-032: the origin is string-only — the raw token appears NOWHERE on it.
+    expect(JSON.stringify(origin)).not.toContain("verified.user.jwt-FR032");
+    expect((origin as Record<string, unknown>).subjectToken).toBeUndefined();
+    expect((origin as Record<string, unknown>).token).toBeUndefined();
+    // The origin still carries only the string sub + the REAL resolved agent client.
+    expect(origin).toEqual({ kind: "user", sub: "user-xyz", agentClientId: "fugue-agent-test" });
+  });
+
+  it("binds NOTHING for an admin run (no subject token) — the sink is never called", async () => {
+    const bound: RunId[] = [];
+    await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+      true,
+      (rid) => bound.push(rid),
+    );
+    expect(bound).toEqual([]);
+  });
+
+  it("binds NOTHING for a user run with no resolvable token (durable reconstruction)", async () => {
+    const reconstructed: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => false };
+    const bound: RunId[] = [];
+    await createNodeContextForDag(
+      baseSharedInfra(),
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      reconstructed,
+      FACTORY_AGENT_MAP,
+      true,
+      (rid) => bound.push(rid),
+    );
+    // No token to bind → the broker's user exchange fails closed for this run.
+    expect(bound).toEqual([]);
   });
 });

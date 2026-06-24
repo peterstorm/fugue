@@ -110,12 +110,40 @@ export type RedisPort = {
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
   readonly del: (key: string) => Promise<Result<number, HostError>>;
   /**
-   * Cursor-based key scanning — the only key-enumeration primitive on the port.
-   * (The blocking O(N) `KEYS` command is intentionally NOT exposed.)
+   * Cursor-based key scanning — a keyspace-enumeration primitive.
+   *
+   * SECURITY NOTE: `scan` enumerates the keyspace and is NOT reliably constrained
+   * by a per-tenant key-pattern ACL across Redis/Valkey versions (key-pattern
+   * ACLs gate commands that ACCESS a key's value, not enumeration). It is
+   * therefore DENIED on the per-tenant worker ACL (see `supervisor/secrets/redis-acl.ts`)
+   * and only the SUPERVISOR/admin connection may call it (e.g. tenant-registry
+   * hydrate over `fugue:tenants:*`). Tenant-scoped adapters MUST NOT use `scan` to
+   * enumerate keys — use a per-tenant index SET + `sMembers` instead (see
+   * `adapters/token-store.ts` `listTeams`). The blocking O(N) `KEYS` command is
+   * intentionally NOT exposed.
+   *
    * Returns a batch of matching keys plus the next cursor. Cursor "0" signals completion.
    * Call iteratively until cursor returns "0" to retrieve all matching keys.
    */
   readonly scan: (pattern: string, cursor?: string) => Promise<Result<{ cursor: string; keys: string[] }, HostError>>;
+  /**
+   * Add a member to a set (`SADD`). Returns the number of members ADDED (0 if it
+   * was already present). Used for tenant-scoped index sets (e.g. the team index
+   * `fugue:<tenant>:teams-index`) so a per-tenant worker can enumerate its OWN
+   * keys via a single key the ACL DOES scope (`sMembers`), without `scan`.
+   */
+  readonly sAdd: (key: string, member: string) => Promise<Result<number, HostError>>;
+  /**
+   * Remove a member from a set (`SREM`). Returns the number of members REMOVED
+   * (0 if it was absent). Idempotent — removing an absent member is fine.
+   */
+  readonly sRem: (key: string, member: string) => Promise<Result<number, HostError>>;
+  /**
+   * Read all members of a set (`SMEMBERS`). Reads ONE key, which a per-tenant
+   * key-pattern ACL DOES constrain, so it is the version-independent, isolation-
+   * safe alternative to `scan` for tenant-scoped enumeration.
+   */
+  readonly sMembers: (key: string) => Promise<Result<string[], HostError>>;
   /**
    * Set key only if it does not already exist (atomic check-and-set).
    * Returns `true` if the key was set, `false` if it already existed.
@@ -134,6 +162,27 @@ export type RedisPort = {
  */
 export type RedisConnectivityPort = {
   readonly ping: () => Promise<Result<void, HostError>>;
+}
+
+/**
+ * Redis pub/sub — the propagation primitive for tenant-registry lifecycle
+ * events (AD-5). `publish` fans a message out on a channel; `subscribe`
+ * registers a handler and returns an unsubscribe handle. Kept SEPARATE from
+ * `RedisPort` because a subscribing connection cannot serve normal commands in
+ * Redis (subscriber mode), so the supervisor wires a dedicated subscriber
+ * connection here while keeping `RedisPort` for read/write.
+ *
+ * Both operations return Result so a pub/sub failure is explicit — the tenant
+ * registry adapter treats a publish failure as a Redis outage and fails closed
+ * (FR-022) by routing through the host's `redisDied` degraded machine, never by
+ * swallowing the error or throwing.
+ */
+export type RedisPubSubPort = {
+  readonly publish: (channel: string, message: string) => Promise<Result<void, HostError>>;
+  readonly subscribe: (
+    channel: string,
+    handler: (message: string) => void,
+  ) => Promise<Result<{ readonly unsubscribe: () => Promise<void> }, HostError>>;
 }
 
 // ── Shared Infrastructure ────────────────────────────────────────────────────

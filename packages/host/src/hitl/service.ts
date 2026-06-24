@@ -18,6 +18,8 @@ import type { DagId, RunId, NodeId, HumanAction, FrameworkError } from "@fuguejs
 import { ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
+import { tenantOverQuota } from "../domain/host-error.js";
+import type { TenantId } from "../domain/tenant.js";
 import type { AuthIdentity } from "../domain/auth.js";
 import type { LogPort } from "../ports.js";
 import type {
@@ -40,6 +42,20 @@ export interface HitlRunServiceDeps {
   readonly executor: RunExecutorPort;
   readonly clock: () => number;
   readonly newRunId: () => RunId;
+  /**
+   * The worker's resolved tenant (ADR-0074). Names the `tenant-over-quota` error
+   * the `maxQueuedRuns` gate returns — its OWN tenant, so no cross-tenant leak.
+   */
+  readonly tenant: TenantId;
+  /**
+   * Per-tenant ceiling on outstanding (non-terminal) HITL runs (ADR-0074,
+   * `admission.maxQueuedRuns`). `startRun` refuses with `tenant-over-quota` (429)
+   * when the active-run count is already at this limit. UNSET → unlimited
+   * (backwards compatible: the single-tenant path and pre-field workers don't gate).
+   */
+  readonly maxQueuedRuns?: number;
+  /** Retry-After (seconds) advertised on the `tenant-over-quota` refusal. Default 5. */
+  readonly retryAfterSeconds?: number;
   readonly logger?: LogPort;
 }
 
@@ -63,7 +79,8 @@ const asRunFailure = (hostError: HostError): FrameworkError => ({
 });
 
 export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => {
-  const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, logger } = deps;
+  const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, tenant, maxQueuedRuns, logger } = deps;
+  const retryAfterSeconds = deps.retryAfterSeconds ?? 5;
 
   const startRun = async (
     dagId: DagId,
@@ -72,6 +89,32 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
   ): Promise<Result<{ runId: RunId }, HostError>> => {
     const seeded = await executor.seedCheckpoint(dagId, input);
     if (!seeded.ok) return seeded;
+
+    // QUEUE-DEPTH ADMISSION (ADR-0074, FR-032/SC-011 for the durable path): a HITL
+    // run returns 202 and continues durably, so the supervisor's request-scoped
+    // `maxConcurrentRuns` slot cannot bound it. Gate the per-tenant count of
+    // outstanding (non-terminal) runs here, AFTER the DAG is validated (so an
+    // unknown DAG still 404s) and BEFORE the run is created (so a refused run
+    // consumes no slot). Refuse with the tenant's OWN `tenant-over-quota` (429 +
+    // Retry-After). UNSET limit → unlimited (backwards compatible).
+    //
+    // SOFT CEILING (by design): this is a non-atomic check-then-create over the
+    // active-run SET — the per-tenant Redis ACL denies `eval`/Lua (ADR-0067), so
+    // there is no atomic check-and-reserve. Two concurrent durable starts can each
+    // read `active < maxQueuedRuns` before either creates, transiently overshooting
+    // the bound by the in-flight `startRun` concurrency. The overshoot is small and
+    // bounded (single-threaded worker event loop), self-heals as runs settle and
+    // `countActiveRuns` prunes, and is acceptable: a counter-based hard ceiling
+    // (`INCR`/`DECR`) would add a counter-vs-SET consistency invariant that drifts
+    // on crashes. Non-durable load is bounded separately by the supervisor's
+    // request-scoped `maxConcurrentRuns` gate.
+    if (maxQueuedRuns !== undefined) {
+      const active = await runStore.countActiveRuns();
+      if (!active.ok) return active;
+      if (active.value >= maxQueuedRuns) {
+        return err(tenantOverQuota(tenant, retryAfterSeconds));
+      }
+    }
 
     const runId = newRunId();
     const now = clock();

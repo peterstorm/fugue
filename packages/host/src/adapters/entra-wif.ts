@@ -44,6 +44,7 @@
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
+import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
 
 /**
  * The reference `aud` value an Entra federated-credential `client_assertion` must
@@ -107,29 +108,12 @@ export interface EntraWifExchange {
 // Live implementation over an injected HTTP transport
 //
 // The real exchange POSTs an application/x-www-form-urlencoded body to the
-// `fugue-agents` Entra token endpoint. The transport is INJECTED (an
-// `HttpPost`), so unit tests drive the exact form body and response mapping with
-// NO live network and NO `fetch` mock. The body is built PURELY by
-// `buildWifFormBody`, exported so a test can assert the audience pin, the
-// assertion-type URN, and the absence of any `client_secret`/cert field.
+// `fugue-agents` Entra token endpoint. The transport is INJECTED (the shared
+// `HttpPost` from `fetch-http-post.ts`), so unit tests drive the exact form body
+// and response mapping with NO live network and NO `fetch` mock. The body is
+// built PURELY by `buildWifFormBody`, exported so a test can assert the audience
+// pin, the assertion-type URN, and the absence of any `client_secret`/cert field.
 // ───────────────────────────────────────────────────────────────────────────
-
-/** A minimal HTTP POST transport — injected so the exchange is fakeable. */
-export interface HttpPost {
-  /**
-   * POST `body` (already URL-encoded) to `url` with `application/x-www-form-urlencoded`.
-   * Resolves to the status + parsed JSON body, or rejects on a transport-level
-   * failure (DNS/socket) which the live impl maps to `infra-unreachable`.
-   */
-  readonly post: (url: string, body: string) => Promise<HttpPostResponse>;
-}
-
-/** The response shape the live impl consumes from the transport. */
-export interface HttpPostResponse {
-  readonly status: number;
-  /** The parsed JSON body. Entra returns `access_token`/`expires_in` on success, `error*` on denial. */
-  readonly json: Record<string, unknown>;
-}
 
 /** Static config for the live exchange — tenant + the one `fugue-agents` client id. */
 export interface EntraWifConfig {

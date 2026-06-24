@@ -101,6 +101,40 @@ describe("parseWorkbook — errors", () => {
   });
 });
 
+describe("parseWorkbook — prototype-pollution safety", () => {
+  it("a header literally named __proto__/constructor never pollutes Object.prototype and leaves real columns intact", async () => {
+    // The header cells come straight from an untrusted file. A header named
+    // `__proto__`/`constructor` keyed onto a plain `{}` would hit the prototype
+    // accessor instead of setting an own property; rows are built on
+    // `Object.create(null)` so every assignment is an own property and the global
+    // prototype is never touched. This pins that threat model — a revert to `{}`
+    // must not silently pass.
+    const Passthrough = z.object({ customerId: z.string(), revenue: z.number() }).passthrough();
+    const bytes = await makeXlsx(
+      [["c-1", 100, "EVIL", "EVIL2"]],
+      { headerRow: ["customerId", "revenue", "__proto__", "constructor"] },
+    );
+
+    const protoBefore = Object.getPrototypeOf({});
+    const r = await parseWorkbook(bytes, Passthrough);
+
+    // Hostile header names must not crash the parse…
+    expect(isOk(r)).toBe(true);
+    // …and the legitimate columns are unaffected by them.
+    if (r.ok) {
+      expect(r.value.rows[0]!.customerId).toBe("c-1");
+      expect(r.value.rows[0]!.revenue).toBe(100);
+    }
+
+    // No global prototype pollution: prototype identity unchanged, a fresh object
+    // gained nothing, and Object.prototype has no injected data keys.
+    expect(Object.getPrototypeOf({})).toBe(protoBefore);
+    expect(({} as Record<string, unknown>).EVIL).toBeUndefined();
+    expect(({} as Record<string, unknown>).customerId).toBeUndefined();
+    expect((Object.prototype as Record<string, unknown>).EVIL).toBeUndefined();
+  });
+});
+
 describe("parseWorkbook — options", () => {
   it("reads headers from a custom 1-based header row (headerRow option)", async () => {
     // Row 1 is a report title; the real headers live on row 2.

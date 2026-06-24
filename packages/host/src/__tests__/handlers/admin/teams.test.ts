@@ -216,6 +216,39 @@ describe("DELETE /admin/teams/:team", () => {
     expect(afterRevoke.ok && afterRevoke.value).toBeNull();
   });
 
+  it("revoke canonicalizes the path segment — a token created under mixed casing is revoked via a DIFFERENTLY-cased path", async () => {
+    // Pins the create-stores-canonical ↔ revoke-targets-canonical contract end to
+    // end: both handlers route the team through the SAME `canonicalizeTeamName`
+    // rule, so the casing a caller happens to use on either side is irrelevant —
+    // the revoke MUST hit the canonical key the create stored under.
+    const { app, tokenStore } = createTestApp();
+
+    // Create under one casing → stored canonical ("team-mixed").
+    const createRes = await app.request("/admin/teams", {
+      method: "POST",
+      headers: { ...adminHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ team: "Team-MIXED" }),
+    });
+    expect(createRes.status).toBe(201);
+    const { token, team } = await createRes.json();
+    expect(team).toBe("team-mixed");
+    const hash = await hashToken(token);
+    expect((await tokenStore.resolve(hash)).ok).toBe(true);
+
+    // Revoke via a path segment with yet ANOTHER casing.
+    const revokeRes = await app.request("/admin/teams/tEaM-MiXeD", {
+      method: "DELETE",
+      headers: adminHeaders,
+    });
+    expect(revokeRes.status).toBe(200);
+    const revokeBody = await revokeRes.json();
+    expect(revokeBody.team).toBe("team-mixed");
+
+    // The token created under the canonical key no longer resolves.
+    const afterRevoke = await tokenStore.resolve(hash);
+    expect(afterRevoke.ok && afterRevoke.value).toBeNull();
+  });
+
   it("is idempotent — revoking non-existent team returns 200", async () => {
     const { app } = createTestApp();
 

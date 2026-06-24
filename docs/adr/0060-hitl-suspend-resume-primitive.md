@@ -145,7 +145,14 @@ work with one predicate and no extra bookkeeping.
   path *does* enforce team access.) Until per-team conversation routing +
   click-time authorization land, the bot must only be installed in a channel
   whose members are authorised approvers for every team whose runs gate through
-  it. Tracked as a follow-up; documented in `packages/host/docs/hitl-teams.md`.
+  it. Tracked as a follow-up; documented in `../runbooks/azure-bot-hitl-provisioning.md`.
+  - **UPDATE (2026-06-17, commit `86f82db` / Phase 4):** this follow-up has
+    LANDED. `messages-handler.ts` now resolves the clicker's `from.aadObjectId`
+    via `HITL_APPROVER_TEAMS` (fail-closed on unknown id) and gates on the same
+    `canAccessDag` check as the HTTP path; per-team routing keys on
+    `HITL_TEAM_CHANNELS`. Cross-team approval is prevented by the authz gate, so
+    single-team-per-channel is no longer a security requirement. See
+    `team-security-and-capabilities.md` AD-7 (IMPLEMENTED).
 - The host's run-store-backed `JobLike.appendEvent` is a **no-op**: the durable
   run record carries the latest `{state, context}` checkpoint (sufficient for
   suspend/resume correctness) but **not** the kernel's per-transition event

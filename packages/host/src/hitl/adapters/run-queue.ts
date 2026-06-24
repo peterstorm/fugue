@@ -14,6 +14,7 @@
 import { ok, err } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import type { TenantId } from "../../domain/tenant.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { RunQueuePort } from "../ports.js";
 
@@ -23,6 +24,14 @@ type RunTrigger = { state: RunId; context: null };
 export interface RunQueueDeps {
   readonly backend: QueueBackend;
   readonly redis: RedisPort;
+  /**
+   * The tenant this queue's single-flight locks are scoped to (AD-4 / FR-013 /
+   * SC-001). The lock key is forced under `fugue:<tenant>:hitl:lock:`, so under
+   * the per-tenant Redis ACL (`~fugue:<tenant>:*`) a queue for tenant A can never
+   * name (or contend on) tenant B's run locks. Required, non-optional: a lock key
+   * cannot be built without a tenant.
+   */
+  readonly tenant: TenantId;
   /** Queue name (default `fugue-hitl-runs`). */
   readonly queueName?: string;
   /**
@@ -60,10 +69,10 @@ export interface RunQueueHandle {
   ): WorkerHandle;
 }
 
-const lockKey = (runId: RunId): string => `fugue:hitl:lock:${runId}`;
+const lockKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:lock:${runId}`;
 
 export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
-  const { backend, redis, lockTtlSec, logger } = deps;
+  const { backend, redis, tenant, lockTtlSec, logger } = deps;
   const name = deps.queueName ?? "fugue-hitl-runs";
   const contentionDelayMs = deps.lockContentionDelayMs ?? 1000;
   const maxAttempts = deps.maxAttempts ?? 5;
@@ -101,7 +110,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
         // Acquire the lock AND its TTL atomically (SET NX EX) so a worker crash
         // mid-slice self-heals after `lockTtlSec` rather than wedging the run
         // behind a lock that never expires.
-        const acquired = await redis.setNx(lockKey(runId), "1", { expiresInSec: lockTtlSec });
+        const acquired = await redis.setNx(lockKey(tenant, runId), "1", { expiresInSec: lockTtlSec });
         if (!acquired.ok) {
           // The lock store is unavailable — throw so the queue retries this
           // wakeup rather than silently acking and dropping it.
@@ -133,7 +142,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
             throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
           }
         } finally {
-          const released = await redis.del(lockKey(runId));
+          const released = await redis.del(lockKey(tenant, runId));
           if (!released.ok) logger?.warn?.("hitl: failed to release lock", { runId });
         }
       },

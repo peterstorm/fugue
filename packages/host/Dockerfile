@@ -49,9 +49,15 @@ USER fugue
 # Default port (overridable via PORT env var)
 EXPOSE 3000
 
-# Health check via the /health endpoint
+# Health check: probes the supervisor's UNAUTHENTICATED /health (it owns the single
+# inbound TCP listener on PORT — served before auth, so the probe is not 401'd).
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/health || exit 1
 
-# Run the host entry point
-CMD ["bun", "run", "packages/host/src/main.ts"]
+# Run the MULTI-TENANT pod entry point: thin-init is PID 1 (AD-2). It spawns +
+# supervises the supervisor binary, restarting it across crashes WITHOUT killing
+# the per-tenant workers (they re-parent to PID 1 and are reaped there; the next
+# supervisor re-adopts them via the Redis registry — SC-006). The SINGLE-tenant
+# entrypoint (packages/host/src/main.ts) remains supported as a deployment choice
+# and can be selected by overriding this CMD.
+CMD ["bun", "run", "packages/host/src/main-thin-init.ts"]

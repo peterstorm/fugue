@@ -13,14 +13,14 @@
 import { parseHostConfig } from "./domain/config.js";
 import type { HostConfig } from "./domain/config.js";
 import { formatHostError } from "./domain/host-error.js";
-import type { HostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 import { createModuleLoader } from "./adapters/module-loader.js";
-import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
+import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
+import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
-import type { Result, LlmClient, CapabilityHandle } from "@fuguejs/framework";
+import { noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
+import type { LlmClient, CapabilityHandle } from "@fuguejs/framework";
 
 // ── Logger ─────────────────────────────────────────────────────────────────
 
@@ -34,97 +34,6 @@ const createLogger = (): SyncLogger => ({
   warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
   error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
 });
-
-// ── Redis Connectivity ─────────────────────────────────────────────────────
-
-const createRedisConnectivity = async (redisUrl: string): Promise<Result<{ port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> }, HostError>> => {
-  try {
-    // Dynamic import avoids loading ioredis at module-level for tests
-    const { Redis } = await import("ioredis");
-    const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
-
-    const port: RedisConnectivityPort = {
-      ping: async () => {
-        try {
-          // `lazyConnect: true` leaves the client in the "wait" state until the
-          // first probe dials it. Guard the connect on that state: after the
-          // initial connection ioredis owns reconnection, and calling
-          // `connect()` on an already-connected client rejects — which would
-          // make every probe tick after the first falsely report Redis dead and
-          // flap the host into `degraded:redis-disconnected`.
-          if (client.status === "wait") {
-            await client.connect();
-          }
-          await client.ping();
-          return ok(undefined);
-        } catch (e) {
-          return err({
-            kind: "redis-unavailable" as const,
-            operation: `PING at startup (${e instanceof Error ? e.message : String(e)})`,
-          });
-        }
-      },
-    };
-
-    const redis: RedisPort = {
-      get: async (key) => {
-        try {
-          const val = await client.get(key);
-          return ok(val);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `GET ${key}: ${e instanceof Error ? e.message : String(e)}` });
-        }
-      },
-      set: async (key, value, opts) => {
-        try {
-          const result = opts?.expiresInSec !== undefined
-            ? await client.set(key, value, "EX", opts.expiresInSec)
-            : await client.set(key, value);
-          return ok(result);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `SET ${key}: ${e instanceof Error ? e.message : String(e)}` });
-        }
-      },
-      del: async (key) => {
-        try {
-          const count = await client.del(key);
-          return ok(count);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}: ${e instanceof Error ? e.message : String(e)}` });
-        }
-      },
-      scan: async (pattern, cursor = "0") => {
-        try {
-          const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
-          return ok({ cursor: nextCursor, keys });
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `SCAN ${pattern}: ${e instanceof Error ? e.message : String(e)}` });
-        }
-      },
-      setNx: async (key, value, opts) => {
-        try {
-          if (opts?.expiresInSec !== undefined) {
-            // Atomic acquire-with-TTL: the key can never exist without an expiry,
-            // so a crash after acquisition still self-heals after the TTL.
-            const result = await client.set(key, value, "EX", opts.expiresInSec, "NX");
-            return ok(result === "OK");
-          }
-          const result = await client.setnx(key, value);
-          return ok(result === 1);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `SETNX ${key}: ${e instanceof Error ? e.message : String(e)}` });
-        }
-      },
-    };
-
-    return ok({ port, redis, disconnect: () => client.quit() });
-  } catch (e) {
-    return err({
-      kind: "redis-unavailable",
-      operation: `Redis client initialization: ${e instanceof Error ? e.message : String(e)}`,
-    });
-  }
-};
 
 // ── LLM Client ─────────────────────────────────────────────────────────────
 

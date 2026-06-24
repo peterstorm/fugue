@@ -5,15 +5,23 @@
  * resume-then-re-park loop notifies only once) and the human's decision (so a
  * resume resolves the gate). `markPending` is atomic create-once via `SET NX`.
  *
- * Redis key layout (KEY_SEP between runId/nodeId — see below):
- *   fugue:hitl:pending:<runId>␟<nodeId>   →  "1"            (presence = pending)
- *   fugue:hitl:decision:<runId>␟<nodeId>  →  JSON HumanAction
+ * Redis key layout (KEY_SEP between runId/nodeId — see below), tenant-prefixed
+ * (AD-4 / FR-013 / SC-001):
+ *   fugue:<tenant>:hitl:pending:<runId>␟<nodeId>   →  "1"        (presence = pending)
+ *   fugue:<tenant>:hitl:decision:<runId>␟<nodeId>  →  JSON HumanAction
+ *
+ * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001): the store is
+ * constructed bound to ONE `TenantId`, so a single instance can only ever
+ * read/write its own tenant's pending markers & decisions — under the per-tenant
+ * Redis ACL (`~fugue:<tenant>:*`) it physically cannot name another tenant's
+ * gates, making a flat cross-tenant decision key unrepresentable.
  */
 
 import { z } from "zod";
 import { ok, err, tryNodeId } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import type { TenantId } from "../../domain/tenant.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { DecisionStorePort } from "../ports.js";
 
@@ -38,7 +46,7 @@ const HumanActionSchema = z.discriminatedUnion("kind", [
 /**
  * Composite-key separator between `runId` and `nodeId`. The unit separator
  * (U+001F) is chosen deliberately: it is OUTSIDE the id alphabet
- * (`ID_REGEX = /^[A-Za-z0-9_:-]+$/`) so the two-part key is injective — unlike
+ * (`ID_REGEX = /^[A-Za-z0-9_:-]{1,128}$/`) so the two-part key is injective — unlike
  * a `:` separator, which collides because `:` is a legal id character
  * (`(runId="a:b", nodeId="c")` and `(runId="a", nodeId="b:c")` would otherwise
  * map to the same key). Unlike a NUL byte (also outside the alphabet) it keeps
@@ -81,11 +89,11 @@ export const createInMemoryDecisionStore = (): DecisionStorePort => {
 
 // ── Redis Adapter (production) ───────────────────────────────────────────────
 
-const PENDING_PREFIX = "fugue:hitl:pending:";
-const DECISION_PREFIX = "fugue:hitl:decision:";
-
-const pendingKey = (runId: RunId, nodeId: NodeId): string => `${PENDING_PREFIX}${runId}${KEY_SEP}${nodeId}`;
-const decisionKey = (runId: RunId, nodeId: NodeId): string => `${DECISION_PREFIX}${runId}${KEY_SEP}${nodeId}`;
+// The prefixes are derived from the bound `TenantId`, so every key a store
+// instance emits is forced under `fugue:<tenant>:hitl:`. There is no code path
+// that builds a pending/decision key without a tenant.
+const pendingKey = (tenant: TenantId, runId: RunId, nodeId: NodeId): string => `fugue:${tenant}:hitl:pending:${runId}${KEY_SEP}${nodeId}`;
+const decisionKey = (tenant: TenantId, runId: RunId, nodeId: NodeId): string => `fugue:${tenant}:hitl:decision:${runId}${KEY_SEP}${nodeId}`;
 
 export interface RedisDecisionStoreConfig {
   /** TTL applied to pending/decision keys, in seconds. Should exceed the run TTL. */
@@ -94,6 +102,7 @@ export interface RedisDecisionStoreConfig {
 
 export const createRedisDecisionStore = (
   redis: RedisPort,
+  tenant: TenantId,
   config: RedisDecisionStoreConfig,
   logger?: LogPort,
 ): DecisionStorePort => {
@@ -103,25 +112,25 @@ export const createRedisDecisionStore = (
     async markPending(runId, nodeId) {
       // Atomic create-once WITH TTL (SET NX EX): the marker can never exist
       // without an expiry, so a crash never leaves a TTL-less pending marker.
-      const set = await redis.setNx(pendingKey(runId, nodeId), "1", expiry);
+      const set = await redis.setNx(pendingKey(tenant, runId, nodeId), "1", expiry);
       if (!set.ok) return err(set.error);
       return ok(set.value);
     },
 
     async isPending(runId, nodeId) {
-      const res = await redis.get(pendingKey(runId, nodeId));
+      const res = await redis.get(pendingKey(tenant, runId, nodeId));
       if (!res.ok) return err(res.error);
       return ok(res.value !== null);
     },
 
     async putDecision(runId, nodeId, action) {
-      const res = await redis.set(decisionKey(runId, nodeId), JSON.stringify(action), expiry);
+      const res = await redis.set(decisionKey(tenant, runId, nodeId), JSON.stringify(action), expiry);
       if (!res.ok) return err(res.error);
       return ok(undefined);
     },
 
     async getDecision(runId, nodeId) {
-      const res = await redis.get(decisionKey(runId, nodeId));
+      const res = await redis.get(decisionKey(tenant, runId, nodeId));
       if (!res.ok) return err(res.error);
       if (res.value === null) return ok(null);
       let raw: unknown;
@@ -142,9 +151,9 @@ export const createRedisDecisionStore = (
     },
 
     async clear(runId, nodeId): Promise<Result<void, HostError>> {
-      const dp = await redis.del(pendingKey(runId, nodeId));
+      const dp = await redis.del(pendingKey(tenant, runId, nodeId));
       if (!dp.ok) return err(dp.error);
-      const dd = await redis.del(decisionKey(runId, nodeId));
+      const dd = await redis.del(decisionKey(tenant, runId, nodeId));
       if (!dd.ok) return err(dd.error);
       return ok(undefined);
     },
