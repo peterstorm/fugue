@@ -316,12 +316,19 @@ describe("buildAclSpec — properties (any valid TenantId)", () => {
 describe("buildAclSpec — defense-in-depth (forged TenantId)", () => {
   it("throws if a forged TenantId violates TENANT_ID_REGEX (would widen scope)", () => {
     const forged = "acme:*" as unknown as TenantId; // contains ':' and glob
-    expect(() => buildAclSpec(forged)).toThrow(/TENANT_ID_REGEX/);
+    expect(() => buildAclSpec(forged)).toThrow(/regex-violating or a reserved control-plane namespace/);
   });
 
   it("throws on a wildcard-injection attempt", () => {
     const forged = "*" as unknown as TenantId;
     expect(() => buildAclSpec(forged)).toThrow();
+  });
+
+  it("throws on a RESERVED control-plane id (its ~fugue:<id>:* pattern would overlap the supervisor keyspace)", () => {
+    // `tenants`/`supervisor` are shape-valid but reserved; a cast that smuggled one
+    // past tenantId() must still be refused here (defense-in-depth, mirrors markTenant).
+    expect(() => buildAclSpec("tenants" as unknown as TenantId)).toThrow(/reserved control-plane namespace/);
+    expect(() => buildAclSpec("supervisor" as unknown as TenantId)).toThrow(/reserved control-plane namespace/);
   });
 });
 
@@ -406,7 +413,7 @@ describe("apply — provisions the scoped ACL user over the admin connection", (
   it("throws (defense-in-depth) if given a forged TenantId", async () => {
     const admin = createFakeAclAdmin();
     const forged = "acme:*" as unknown as TenantId;
-    await expect(apply(admin, forged, fixedRandomBytes())).rejects.toThrow(/TENANT_ID_REGEX/);
+    await expect(apply(admin, forged, fixedRandomBytes())).rejects.toThrow(/regex-violating or a reserved control-plane namespace/);
     // No SETUSER was issued for the forged id.
     expect(admin.setUserCalls).toHaveLength(0);
   });

@@ -29,7 +29,7 @@ import type { HostError } from "./domain/host-error.js";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort, LogPort } from "./ports.js";
-import { createSupervisor } from "./supervisor/supervisor.js";
+import { createSupervisor, createTerminationHandler } from "./supervisor/supervisor.js";
 import type { AdmissionPort, AdmissionOutcome, AuthDeps } from "./supervisor/supervisor.js";
 import {
   initTenantConcurrency,
@@ -243,11 +243,16 @@ const main = async () => {
   // fresh-array allocation on every inbound request. The principal is minted via
   // `markTenant` (the single producer) at index-build time; first-writer-wins
   // preserves the prior `.find` semantics if two active tenants ever shared a team.
-  let teamIndex: { snap: ReturnType<typeof registry.snapshot>; map: Map<string, Tenant> } | undefined;
-  const teamToTenant = (): Map<string, Tenant> => {
+  let teamIndex: { snap: ReturnType<typeof registry.snapshot>; map: Map<Team, Tenant> } | undefined;
+  const teamToTenant = (): Map<Team, Tenant> => {
     const snap = registry.snapshot();
     if (teamIndex && teamIndex.snap === snap) return teamIndex.map;
-    const map = new Map<string, Tenant>();
+    // Keyed by the branded `Team` end-to-end (not bare string): makes the
+    // `TenantRegistryView.tenantForTeam(team: Team)` contract a compile-time type
+    // obligation. (Prototype-key safety at runtime comes from `Map` itself — a
+    // `Map.get` with a string key never walks the prototype chain — independent of
+    // the brand.) `cfg.team` is already a `Team`.
+    const map = new Map<Team, Tenant>();
     for (const cfg of activeTenants(snap)) {
       if (!map.has(cfg.team)) map.set(cfg.team, markTenant(cfg.id, cfg.team));
     }
@@ -255,7 +260,7 @@ const main = async () => {
     return map;
   };
   const registryView: TenantRegistryView = {
-    tenantForTeam: (team: string): Tenant | undefined => teamToTenant().get(team),
+    tenantForTeam: (team: Team): Tenant | undefined => teamToTenant().get(team),
   };
 
   // NEW-run admission gate (FR-022 + FR-032/FR-038, AD-9): registry
@@ -663,6 +668,9 @@ const main = async () => {
     // (lookup) + canServeRequests are unaffected (FR-023).
     onRedisProbeEdge: (dead: boolean) => registry.markRedisDegraded(dead),
     logger,
+    // Inject the wall clock at the composition root (parity with the lifecycle
+    // manager's `clock: () => Date.now()`); the supervisor reads no bare Date.now().
+    clock: () => Date.now(),
     // Shutdown cleanup: stop the idle-evict sweep, then disconnect Redis.
     //
     // DELIBERATE NO-DRAIN ON SUPERVISOR SHUTDOWN (AD-2): we do NOT blanket-drain
@@ -687,9 +695,16 @@ const main = async () => {
   }
 
   const supervisor = supervisorResult.value;
-  const onSignal = () => { void supervisor.shutdown().then(() => process.exit(0)); };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
+  // Always terminate on signal: a shutdown() rejection must NOT leave the pod
+  // hanging on SIGTERM until the orchestrator SIGKILLs it (see
+  // `createTerminationHandler` — the testable seam for both exit paths).
+  const onSignal = createTerminationHandler({
+    shutdown: () => supervisor.shutdown(),
+    logger,
+    exit: (code) => process.exit(code),
+  });
+  process.on("SIGTERM", () => void onSignal());
+  process.on("SIGINT", () => void onSignal());
 
   logger.info("[supervisor] running");
 };

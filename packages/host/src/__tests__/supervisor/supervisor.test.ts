@@ -29,7 +29,7 @@ import { emptyRegistry } from "../../domain/registry.js";
 import { gitSha } from "@fuguejs/framework";
 import type { AuthDeps, AdmissionPort, SupervisorDeps } from "../../supervisor/supervisor.js";
 import type { WorkerLifecyclePort, EnsuredWorker } from "../../supervisor/lifecycle/spawn-port.js";
-import { createSupervisor } from "../../supervisor/supervisor.js";
+import { createSupervisor, createTerminationHandler } from "../../supervisor/supervisor.js";
 import { TENANT_HEADER } from "../../supervisor/uds-proxy.js";
 import type { UdsTransport } from "../../supervisor/uds-proxy.js";
 // Canonical verifier (the proxy no longer re-implements one — it imports the
@@ -328,6 +328,101 @@ describe("buildLivenessResponse / buildReadinessResponse (pure, all phases)", ()
 });
 
 // ── End-to-end pipeline via createSupervisor().handle ──────────────────────────
+
+describe("createSupervisor — injected clock stamps lifecycle transitions", () => {
+  it("stamps the boot→ready transition from the injected clock, never Date.now", async () => {
+    // A fixed, recognizable instant the wall clock could never coincidentally
+    // produce — proves the ready state's timestamp came from the injected port.
+    const FIXED = 424242;
+    const sup = await createSupervisor(buildDeps({ clock: () => FIXED }));
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    const state = sup.value.getState();
+    expect(state.phase).toBe("ready");
+    if (state.phase !== "ready") return;
+    expect(state.lastSyncAt).toBe(FIXED);
+    await sup.value.shutdown();
+  });
+
+  it("stamps the ready→draining transition (shutdown beginDrain) from the injected clock, never Date.now", async () => {
+    // Capture the state MID-shutdown: beginDrain stamps `drainStartedAt` before
+    // `onShutdown` runs, so the injected `onShutdown` seam observes the draining
+    // phase. Proves the supervisor passes its injected clock — not Date.now — to
+    // beginDrain (the transition is otherwise transient: draining → stopped).
+    const FIXED = 515151;
+    let supRef: Awaited<ReturnType<typeof createSupervisor>> | undefined;
+    let drainingSnapshot: HostState | undefined;
+    const sup = await createSupervisor(
+      buildDeps({
+        clock: () => FIXED,
+        onShutdown: async () => {
+          if (supRef?.ok) drainingSnapshot = supRef.value.getState();
+        },
+      }),
+    );
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    supRef = sup;
+    await sup.value.shutdown();
+    expect(drainingSnapshot?.phase).toBe("draining");
+    if (drainingSnapshot?.phase !== "draining") return;
+    expect(drainingSnapshot.drainStartedAt).toBe(FIXED);
+  });
+
+  it("stamps the ready→degraded transition (redisDied) from the injected clock, never Date.now", async () => {
+    // A dead Redis + a tiny probe interval drives the supervisor's onDead path,
+    // which calls redisDied(state, clock()). With a FIXED clock the degraded
+    // `since` is FIXED iff the supervisor used the injected port (Date.now could
+    // never coincidentally equal it).
+    const FIXED = 626262;
+    const deadRedis: RedisConnectivityPort = {
+      ping: async () => err({ kind: "redis-unavailable" as const, operation: "probe (test): forced dead" }),
+    };
+    const fastProbeConfig = { ...baseConfig, REDIS_PROBE_INTERVAL_MS: 5 } as unknown as HostConfig;
+    const sup = await createSupervisor(buildDeps({ clock: () => FIXED, redis: deadRedis, config: fastProbeConfig }));
+    expect(sup.ok).toBe(true);
+    if (!sup.ok) return;
+    try {
+      // Poll until the probe trips the degraded transition (bounded — ~1s budget).
+      let state = sup.value.getState();
+      for (let i = 0; i < 200 && state.phase !== "degraded"; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+        state = sup.value.getState();
+      }
+      expect(state.phase).toBe("degraded");
+      if (state.phase !== "degraded") return;
+      expect(state.since).toBe(FIXED);
+    } finally {
+      await sup.value.shutdown();
+    }
+  });
+});
+
+describe("createTerminationHandler (SIGTERM/SIGINT) — always terminates", () => {
+  it("clean shutdown → exit(0)", async () => {
+    const exits: number[] = [];
+    const handler = createTerminationHandler({
+      shutdown: async () => {},
+      logger: { error: () => {} },
+      exit: (code) => { exits.push(code); },
+    });
+    await handler();
+    expect(exits).toEqual([0]);
+  });
+
+  it("shutdown rejection → logs and exit(1) (never hangs until SIGKILL)", async () => {
+    const exits: number[] = [];
+    const logged: string[] = [];
+    const handler = createTerminationHandler({
+      shutdown: async () => { throw new Error("redis disconnect stalled"); },
+      logger: { error: (msg) => { logged.push(msg); } },
+      exit: (code) => { exits.push(code); },
+    });
+    await handler();
+    expect(exits).toEqual([1]);
+    expect(logged.some((m) => m.includes("shutdown failed"))).toBe(true);
+  });
+});
 
 describe("createSupervisor — unauthenticated health probes (Docker HEALTHCHECK / k8s)", () => {
   it("GET /health returns 200 with NO Authorization header (handled before auth)", async () => {

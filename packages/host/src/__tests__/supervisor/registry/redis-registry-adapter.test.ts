@@ -617,6 +617,10 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     // Gone from the in-memory view entirely (NOT a tombstone — hard delete).
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(false);
     expect(reg.lookup(tid("acme")).ok).toBe(false);
+    // The post-hardDelete registry is FROZEN — runtime-immutability parity with the
+    // other producers (register/deregister/reconfigure), so no caller can mutate the
+    // shared in-memory view out from under a concurrent reader.
+    expect(Object.isFrozen(reg.snapshot())).toBe(true);
   });
 
   it("(c) a del failure fails closed and does NOT advance the in-memory view", async () => {

@@ -21,6 +21,8 @@ import {
   markSecretsRef,
   resolveTenant,
   TENANT_ID_REGEX,
+  RESERVED_TENANT_IDS,
+  isReservedTenantId,
   type Tenant,
   type TenantId,
   type TenantRegistryView,
@@ -105,13 +107,64 @@ describe("tenantId", () => {
         fc.array(charArb, { minLength: 0, maxLength: 70 }).map((cs) => cs.join("")),
         (s) => {
           const accepted = isOk(tenantId(s));
-          const matches = TENANT_ID_REGEX.test(s);
-          // Full biconditional: the smart constructor accepts a string iff the
-          // regex matches it — no fail-open gap on either side.
-          expect(accepted).toBe(matches);
+          // The smart constructor accepts a string iff it is shape-valid AND not a
+          // reserved control-plane namespace — no fail-open gap on either side.
+          const valid = TENANT_ID_REGEX.test(s) && !isReservedTenantId(s);
+          expect(accepted).toBe(valid);
         },
       ),
     );
+  });
+});
+
+// ── Reserved control-plane namespaces (cross-tenant isolation) ───────────────
+
+describe("reserved tenant ids (control-plane namespace collision)", () => {
+  it("RESERVED_TENANT_IDS covers the control-plane namespace roots", () => {
+    // These are the segments that appear immediately after `fugue:` in
+    // NON-tenant-scoped keys/channels. A drift-guard against the actual adapter
+    // prefixes lives in import-boundaries.test.ts (boundary E).
+    expect(RESERVED_TENANT_IDS.has("tenants")).toBe(true);
+    expect(RESERVED_TENANT_IDS.has("supervisor")).toBe(true);
+  });
+
+  it.each([
+    ["the tenant-registry namespace", "tenants"],
+    ["the supervisor-state namespace", "supervisor"],
+    ["a reserved id in different casing (case-insensitive)", "Tenants"],
+    ["a reserved id upper-cased", "SUPERVISOR"],
+  ])("tenantId REJECTS %s — its ~fugue:<id>:* ACL would overlap control-plane keys", (_desc, raw) => {
+    const r = tenantId(raw);
+    expect(isErr(r)).toBe(true);
+    if (isErr(r)) {
+      expect(r.error.kind).toBe("config-invalid");
+      // The message names the overlap reason (not just a shape failure), so a
+      // misconfigured GitOps id is diagnosable.
+      expect(r.error).toHaveProperty("message");
+      if ("message" in r.error) expect(r.error.message).toMatch(/reserved control-plane/i);
+    }
+  });
+
+  it("a reserved id is SHAPE-valid yet still rejected (it passes the regex)", () => {
+    // This is exactly why the regex alone is insufficient: `tenants` matches
+    // TENANT_ID_REGEX, so without the reserved-id check it would mint a colliding
+    // principal.
+    expect(TENANT_ID_REGEX.test("tenants")).toBe(true);
+    expect(isReservedTenantId("tenants")).toBe(true);
+    expect(isErr(tenantId("tenants"))).toBe(true);
+  });
+
+  it("markTenant THROWS on a reserved (cast) id — closes the fail-open gate (defense-in-depth)", () => {
+    // Simulates a producer that bypassed tenantId() with a cast. A `tenants`
+    // principal would get the ACL pattern `~fugue:tenants:*`, overlapping every
+    // other tenant's `fugue:tenants:<id>` config record, so markTenant must refuse.
+    expect(() => markTenant("tenants" as unknown as TenantId, "tenants")).toThrow();
+    try {
+      markTenant("supervisor" as unknown as TenantId, "supervisor");
+      throw new Error("expected markTenant to throw");
+    } catch (e) {
+      expect((e as { kind?: string }).kind).toBe("internal-invariant-violated");
+    }
   });
 });
 
@@ -147,7 +200,7 @@ describe("markTenant", () => {
       fc.property(
         fc.array(charArb, { minLength: 0, maxLength: 70 }).map((cs) => cs.join("")),
         (s) => {
-          const valid = TENANT_ID_REGEX.test(s);
+          const valid = TENANT_ID_REGEX.test(s) && !isReservedTenantId(s);
           if (valid) {
             expect(() => markTenant(s as TenantId, "team")).not.toThrow();
           } else {

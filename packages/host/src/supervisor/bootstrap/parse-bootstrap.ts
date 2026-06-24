@@ -28,7 +28,7 @@ import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { tenantId } from "../../domain/tenant.js";
-import { markTeam, isTeamTokenShape, TOKEN_MIN_LENGTH } from "../../domain/auth.js";
+import { markTeam, canonicalizeTeamName, isTeamTokenShape, TOKEN_MIN_LENGTH } from "../../domain/auth.js";
 import type { Team, TeamTokenShaped } from "../../domain/auth.js";
 import { parseTenantConfigBody } from "../registry/parse-tenant-config.js";
 import type { ActiveTenantConfig } from "../registry/tenant-registry.js";
@@ -130,8 +130,14 @@ export const parseTeamTokensBootstrap = (
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (e) {
-    return fileError(source, `not valid JSON (${e instanceof Error ? e.message : String(e)})`);
+  } catch {
+    // This file is a SealedSecret of live team tokens. Do NOT interpolate the
+    // raw parser error: a `JSON.parse` SyntaxError can quote a fragment of the
+    // offending input, which here could echo part of a secret token into the
+    // log. We surface ONLY the char length — a content-free signal that lets an
+    // operator distinguish an empty/unmounted file from a populated-but-malformed
+    // one without quoting any input (NFR-014 — a token value never appears in an error).
+    return fileError(source, `not valid JSON (${raw.length} chars)`);
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return fileError(source, "must be a JSON object mapping team → token");
@@ -139,7 +145,7 @@ export const parseTeamTokensBootstrap = (
   const seeds: TeamTokenSeed[] = [];
   const seenTeams = new Set<string>();
   for (const [rawTeam, value] of Object.entries(parsed as Record<string, unknown>)) {
-    const team = rawTeam.trim().toLowerCase();
+    const team = canonicalizeTeamName(rawTeam);
     if (!TEAM_NAME_REGEX.test(team)) {
       return fileError(
         source,

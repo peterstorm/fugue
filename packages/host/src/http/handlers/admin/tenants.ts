@@ -47,8 +47,8 @@ import { parseTenantConfigBody } from "../../../supervisor/registry/parse-tenant
 import type { RedisTenantRegistry } from "../../../supervisor/registry/redis-registry-adapter.js";
 import type { WorkerLifecyclePort } from "../../../supervisor/lifecycle/spawn-port.js";
 import type { TokenStorePort, LogPort } from "../../../ports.js";
-import type { AuditPort, AuditAction, AuditActor, AuditOutcome } from "../../../supervisor/audit/audit-port.js";
-import { auditRecord } from "../../../supervisor/audit/audit-port.js";
+import type { AuditPort, AuditAction, AuditActor, AuditOutcome, AuditTenantRef } from "../../../supervisor/audit/audit-port.js";
+import { auditRecord, rawAttemptedTenantId } from "../../../supervisor/audit/audit-port.js";
 import { httpStatusFor, formatHostError } from "../../../domain/host-error.js";
 import type { HostError } from "../../../domain/host-error.js";
 
@@ -73,7 +73,13 @@ export interface AdminTenantsDeps {
   readonly audit: AuditPort;
   /** Injected clock (millis) for the audit timestamp + deregister instant (testability). */
   readonly now: () => number;
-  readonly logger?: LogPort;
+  /**
+   * Diagnostic log sink. REQUIRED (not optional): an audit-sink failure degrades
+   * to a log line (SC-008 mandates a record on every op), so the diagnostic must
+   * never itself be silently dropped because a composition root forgot to wire a
+   * logger. Making it required keeps that fail-soft path observable by construction.
+   */
+  readonly logger: LogPort;
 }
 
 // ── Request body parsing (parse-don't-validate) ───────────────────────────────
@@ -107,7 +113,7 @@ const actorFrom = (request: Request): AuditActor => {
 const emitAudit = async (
   deps: AdminTenantsDeps,
   actor: AuditActor,
-  tenant: TenantId,
+  tenant: AuditTenantRef,
   action: AuditAction,
   outcome: AuditOutcome,
   detail?: string,
@@ -122,7 +128,7 @@ const emitAudit = async (
       auditRecord({ actor, timestamp: deps.now(), tenant, action, outcome, ...(detail ? { detail } : {}) }),
     );
   } catch (e) {
-    deps.logger?.error("[admin/tenants] audit sink threw — audit record dropped (request path unaffected)", {
+    deps.logger.error("[admin/tenants] audit sink threw — audit record dropped (request path unaffected)", {
       tenant,
       action,
       outcome,
@@ -217,7 +223,7 @@ const handleDeregister = async (
   const evictR = await deps.lifecycle.evict(id);
   const evictOk = evictR.ok;
   if (!evictOk) {
-    deps.logger?.warn("[admin/tenants] worker evict during deregister failed (tombstone still in effect)", { tenant: id });
+    deps.logger.warn("[admin/tenants] worker evict during deregister failed (tombstone still in effect)", { tenant: id });
   }
   // Token revoke. A non-empty team is the token to invalidate.
   //   - team present  → revoke; success/failure flows into `tokenOk`.
@@ -232,11 +238,11 @@ const handleDeregister = async (
     const revokeR = await deps.tokenStore.revoke(team);
     tokenOk = revokeR.ok;
     if (!tokenOk) {
-      deps.logger?.warn("[admin/tenants] token revoke during deregister failed", { tenant: id, team });
+      deps.logger.warn("[admin/tenants] token revoke during deregister failed", { tenant: id, team });
     }
   } else if (wasActive) {
     tokenOk = false;
-    deps.logger?.error(
+    deps.logger.error(
       "[admin/tenants] INVARIANT VIOLATION: tombstone of a previously-active tenant carries no team — token revoke SKIPPED, reporting partial (not succeeded)",
       { tenant: id, priorStatus },
     );
@@ -335,33 +341,36 @@ export const handleAdminTenants = async (
     return json(405, { ok: false, error: "method not allowed" });
   }
 
-  // The tenant id is required for every verb (register/deregister/reconfigure all
-  // target a specific tenant). For register/reconfigure it may also ride in the
-  // body, but the path id is authoritative; the collection route has no id.
-  const rawId = route.idSegment ?? (await safeReadIdFromBody(request));
   const actor = actorFrom(request);
 
   // ── AUTHZ: admin-token only (FR-026, SC-008) ──────────────────────────────
+  // Authenticate BEFORE touching the request body. A pre-auth refusal audits only
+  // the PATH id segment — we never parse an untrusted body before authz, which
+  // would be a pre-auth parse surface and could record an attacker-chosen body id
+  // against an unauthenticated caller. The collection route carries no path id, so
+  // such a refusal audits "<none>".
   const identityResult = await authenticateIdentity(deps.auth, request.headers.get("Authorization") ?? undefined);
   if (!identityResult.ok) {
-    // Unauthenticated — audit the refusal against the attempted tenant (or a
-    // placeholder when none was supplied) and return the auth error status.
-    await auditRefusal(deps, actor, rawId, action, "unauthenticated");
+    await auditRefusal(deps, actor, route.idSegment, action, "unauthenticated");
     return errorResp(identityResult.error);
   }
   const identity: AuthIdentity = identityResult.value;
   if (identity.kind !== "admin") {
-    await auditRefusal(deps, actor, rawId, action, "non-admin token");
+    await auditRefusal(deps, actor, route.idSegment, action, "non-admin token");
     return json(403, { ok: false, error: "admin access required" });
   }
 
-  // ── Tenant id parse (after authz, so non-admins never probe id validity) ──
+  // ── Tenant id (read AFTER authz, so non-admins never probe id validity nor
+  // trigger a body parse). The tenant id is required for every verb; the path id
+  // is authoritative, but for register/reconfigure it may instead ride in the
+  // body — read only now that the caller is a confirmed admin. ──────────────────
+  const rawId = route.idSegment ?? (await safeReadIdFromBody(request));
   if (rawId === undefined || rawId.length === 0) {
     return json(400, { ok: false, error: "tenant id is required" });
   }
   const idR = tenantId(rawId);
   if (!idR.ok) {
-    await emitAudit(deps, actor, rawId as TenantId, action, "refused", "invalid tenant id");
+    await emitAudit(deps, actor, rawAttemptedTenantId(rawId), action, "refused", "invalid tenant id");
     return errorResp(idR.error);
   }
   const id = idR.value;
@@ -386,9 +395,10 @@ export const handleAdminTenants = async (
 
 /**
  * Audit a refusal where the tenant id may not have parsed to a `TenantId` yet.
- * The id is recorded as-is (best-effort, for the trail) — the audit record's
- * `tenant` field is branded, but a refusal record is a server-side trail entry,
- * so we brand the raw segment without re-validating (it never routes anywhere).
+ * The id is recorded (bounded — `rawAttemptedTenantId` caps the attacker-influenced
+ * segment) via the distinct `RawAttemptedTenantId` brand, so the looser, unvalidated
+ * shape is expressed in the type rather than cast through `TenantId` (it never routes
+ * anywhere; it is a server-side trail entry only).
  */
 const auditRefusal = async (
   deps: AdminTenantsDeps,
@@ -397,8 +407,7 @@ const auditRefusal = async (
   action: AuditAction,
   detail: string,
 ): Promise<void> => {
-  const tenant = (rawId ?? "<none>") as TenantId;
-  await emitAudit(deps, actor, tenant, action, "refused", detail);
+  await emitAudit(deps, actor, rawAttemptedTenantId(rawId ?? "<none>"), action, "refused", detail);
 };
 
 /**

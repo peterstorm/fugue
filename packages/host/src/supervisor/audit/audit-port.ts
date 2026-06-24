@@ -26,6 +26,76 @@
 
 import type { TenantId } from "../../domain/tenant.js";
 
+// ── Tenant reference (the audit trail's looser tenant shape) ──────────────────
+
+declare const __rawAttemptedTenantIdBrand: unique symbol;
+
+/**
+ * A tenant id that was ATTEMPTED at the admin boundary but did NOT pass
+ * `TENANT_ID_REGEX` (e.g. a malformed `POST /admin/tenants/<bad id>`, or no id at
+ * all). It is recorded (bounded) for the trail and NEVER routes, keys, or becomes
+ * an ACL pattern — so it deliberately does not satisfy the `TenantId` brand's
+ * shape invariant. Hard-branded with a `unique symbol` (matching `TenantId` in
+ * the `AuditTenantRef` union, so neither arm can be forged from a plain object
+ * literal) so this looser shape is expressed in the type rather than smuggled
+ * through a `string as TenantId` cast.
+ */
+export type RawAttemptedTenantId = string & { readonly [__rawAttemptedTenantIdBrand]: void };
+
+/**
+ * Max length of a recorded raw attempted id. The input is an attacker-influenced
+ * URL segment / body field, so `rawAttemptedTenantId` BOUNDS it before it lands in
+ * the audit trail — an unbounded id could bloat the trail or a structured log line.
+ */
+const MAX_RAW_ATTEMPTED_TENANT_ID_LEN = 128;
+
+/**
+ * The tenant a record names: either a shape-validated `TenantId` (every
+ * succeeded/normal refusal record) OR a `RawAttemptedTenantId` (a refusal logged
+ * before the id parsed). Keeping `TenantId` strictly "passed validation" while
+ * still letting the trail capture rejected attempts truthfully.
+ */
+export type AuditTenantRef = TenantId | RawAttemptedTenantId;
+
+/**
+ * Record a raw, unvalidated tenant segment for the audit trail ONLY. The single
+ * greppable producer of `RawAttemptedTenantId` — used where an id failed (or
+ * never reached) `tenantId()` parsing but the refusal must still be audited.
+ *
+ * The value is CONTENT-SANITIZED before it is length-bounded (parse, don't just
+ * tag) since it is attacker-influenced. Control characters (C0 U+0000-U+001F,
+ * DEL/C1 U+007F-U+009F i.e. CR, LF, NUL, ANSI/terminal escapes) are each
+ * replaced with U+FFFD so a crafted segment cannot inject a new line into the
+ * audit trail / a structured log, nor smuggle terminal escape sequences. Each
+ * control unit becomes exactly one U+FFFD, so the length math below is unaffected.
+ *
+ * The sanitized value is then BOUNDED to AT MOST `MAX_RAW_ATTEMPTED_TENANT_ID_LEN`
+ * code units; an over-long segment is truncated with a trailing `…` that COUNTS
+ * toward the bound (so the result length never exceeds the max — the `…` replaces
+ * the final retained character).
+ *
+ * The cut is UTF-16-surrogate-safe: if the retained prefix would end on a lone
+ * high surrogate (a `…` placed mid-emoji), that dangling code unit is dropped too,
+ * so the trail never carries a lone surrogate. The result is then AT MOST the
+ * bound (one shorter when a pair was split), so the length invariant still holds.
+ */
+export const rawAttemptedTenantId = (raw: string): RawAttemptedTenantId => {
+  // Strip control/newline/escape characters first (each → one U+FFFD) so the
+  // length invariant below operates on the sanitized form and is never widened.
+  const sanitized = raw.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "\uFFFD");
+  if (sanitized.length <= MAX_RAW_ATTEMPTED_TENANT_ID_LEN) {
+    return sanitized as RawAttemptedTenantId;
+  }
+  // Reserve one code unit for the trailing `…`; retained indices are 0..end-1.
+  let end = MAX_RAW_ATTEMPTED_TENANT_ID_LEN - 1;
+  const lastRetained = sanitized.charCodeAt(end - 1);
+  if (lastRetained >= 0xd800 && lastRetained <= 0xdbff) {
+    // Last retained unit is a high surrogate whose low half is being cut — drop it.
+    end -= 1;
+  }
+  return `${sanitized.slice(0, end)}…` as RawAttemptedTenantId;
+};
+
 // ── Record ADT ───────────────────────────────────────────────────────────────
 
 /**
@@ -73,8 +143,12 @@ export interface AuditRecord {
   readonly actor: AuditActor;
   /** UNIX-millis instant the operation was performed (caller-stamped, FR-028). */
   readonly timestamp: number;
-  /** The single tenant this operation acted on (names no other tenant). */
-  readonly tenant: TenantId;
+  /**
+   * The single tenant this operation acted on (names no other tenant). A
+   * shape-validated `TenantId` for normal records, or a `RawAttemptedTenantId`
+   * for a refusal logged before the id parsed — see `AuditTenantRef`.
+   */
+  readonly tenant: AuditTenantRef;
   readonly action: AuditAction;
   readonly outcome: AuditOutcome;
   /** Optional non-secret detail (e.g. "non-admin token", "tenant-unknown"). */
@@ -89,7 +163,7 @@ export interface AuditRecord {
 export const auditRecord = (input: {
   readonly actor: AuditActor;
   readonly timestamp: number;
-  readonly tenant: TenantId;
+  readonly tenant: AuditTenantRef;
   readonly action: AuditAction;
   readonly outcome: AuditOutcome;
   readonly detail?: string;

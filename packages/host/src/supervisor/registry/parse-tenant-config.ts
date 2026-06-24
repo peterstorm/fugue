@@ -23,7 +23,7 @@
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { markSecretsRef } from "../../domain/tenant.js";
-import { markTeam } from "../../domain/auth.js";
+import { canonicalTeam, canonicalizeTeamName } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import { tenantConfig } from "./tenant-registry.js";
 import type { ActiveTenantConfig, TenantConfigBase } from "./tenant-registry.js";
@@ -101,6 +101,25 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   if (rawDagsRoot === "") {
     return err(tenantConfigInvalid(`tenant '${id}': dagsRoot is required (the per-tenant directory the worker discovers DAGs under)`));
   }
+  // Canonicalize and validate the team HERE at the trust boundary, symmetric with
+  // secretsRef/dagsRoot above (rather than defaulting to "" and leaning on the
+  // registry to reject it). The canonical `.trim().toLowerCase()` form is
+  // load-bearing — `canAccessDag` compares `Team` with strict `===` and team
+  // tokens are stored under the canonical team, so a verbatim `"Foo"` here would
+  // silently 403 a token stored under `"foo"`. The registry `tenantConfig` is the
+  // final team↔tenant 1:1 authority; this boundary owns the non-blank+canonical shape.
+  const rawTeam = typeof o.team === "string" ? canonicalizeTeamName(o.team) : "";
+  if (rawTeam === "") {
+    return err(tenantConfigInvalid(`tenant '${id}': team is required (the canonical team that owns this tenant's DAGs and token)`));
+  }
+  // Every tenant requires a per-tenant on-disk mount (`fsRoot`) — the directory the
+  // grace-window purge reclaims and the worker's confined filesystem root. Reject a
+  // blank/absent one HERE, symmetric with dagsRoot/secretsRef; the registry
+  // `tenantConfig` is the final confined-absolute-path authority over this value.
+  const rawFsRoot = typeof o.fsRoot === "string" ? o.fsRoot.trim() : "";
+  if (rawFsRoot === "") {
+    return err(tenantConfigInvalid(`tenant '${id}': fsRoot is required (the per-tenant on-disk mount the worker is confined to)`));
+  }
   // Parse-don't-validate the admission limits at this trust boundary: both MUST be
   // numbers. A non-number (`"5"`, `true`, `[]`, `null`) is REJECTED rather than
   // coerced via `Number(...)` into a valid-looking limit. The registry smart
@@ -109,22 +128,32 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   if (typeof adm.maxConcurrentRuns !== "number" || typeof adm.maxQueuedRuns !== "number") {
     return err(tenantConfigInvalid(`tenant '${id}': admission.maxConcurrentRuns and admission.maxQueuedRuns are required and must be numbers`));
   }
+  // Parse the Keycloak realm/clientId HERE at the trust boundary, symmetric with
+  // secretsRef/dagsRoot/team above (rather than defaulting a non-string to "" and
+  // leaning on the registry to reject it later as "non-empty" — which misdescribes
+  // the actual fault for, e.g., `realm: 123`). Both are required and non-blank.
+  const rawRealm = typeof km.realm === "string" ? km.realm.trim() : "";
+  if (rawRealm === "") {
+    return err(tenantConfigInvalid(`tenant '${id}': keycloakClientMapping.realm is required and must be a non-blank string`));
+  }
+  const rawClientId = typeof km.clientId === "string" ? km.clientId.trim() : "";
+  if (rawClientId === "") {
+    return err(tenantConfigInvalid(`tenant '${id}': keycloakClientMapping.clientId is required and must be a non-blank string`));
+  }
   const base: TenantConfigBase = {
     id,
-    // Canonicalize the team to its `.trim().toLowerCase()` form at THIS trust
-    // boundary — exactly as team-TOKEN provisioning does (`admin/teams.ts`, and
-    // the team-token bootstrap parser). The canonical team is load-bearing:
-    // `canAccessDag` compares `Team` with strict `===`, and a team token's grant
-    // carries the canonical team, so branding a verbatim `"Foo"` here would route
-    // a token stored under `"foo"` to a tenant owning `"Foo"` and silently 403.
-    // Canonicalizing keeps every team write-path in lockstep.
-    team: markTeam(typeof o.team === "string" ? o.team.trim().toLowerCase() : ""),
+    // Non-blank-checked above. Brand via `canonicalTeam` (not `markTeam`) so the
+    // canonical form is enforced BY CONSTRUCTION here rather than depending on the
+    // local ordering that `rawTeam` was already canonicalized — idempotent, since
+    // `rawTeam` is `canonicalizeTeamName(o.team)`. The canonical team is load-bearing
+    // for `canAccessDag`'s strict `===` and team-token routing.
+    team: canonicalTeam(rawTeam),
     keycloakClientMapping: {
-      realm: typeof km.realm === "string" ? km.realm : "",
-      clientId: typeof km.clientId === "string" ? km.clientId : "",
+      realm: rawRealm,
+      clientId: rawClientId,
       agentClientIdsByDag: agentMapResult.value,
     },
-    fsRoot: typeof o.fsRoot === "string" ? o.fsRoot : "",
+    fsRoot: rawFsRoot,
     dagsRoot: rawDagsRoot,
     secretsRef: markSecretsRef(rawSecretsRef),
     admission: {

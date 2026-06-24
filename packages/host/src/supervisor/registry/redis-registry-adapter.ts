@@ -526,10 +526,12 @@ export const createRedisTenantRegistry = (
           return err(dead("tenant-hard-delete"));
         }
         if (!pubResult.ok) return err(dead("tenant-hard-delete"));
-        // Advance the in-memory view: drop the entry entirely.
+        // Advance the in-memory view: drop the entry entirely. Freeze the record
+        // for parity with every other registry producer (`emptyRegistry`,
+        // `registryOf`, `withEntry`) so the runtime-immutability guard is uniform.
         const next = new Map(registry.entries);
         next.delete(id);
-        registry = { entries: next };
+        registry = Object.freeze({ entries: next });
         alive();
         return ok(undefined);
       }),

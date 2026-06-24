@@ -6,7 +6,7 @@
  */
 
 import type { RegisteredDag } from "./registry.js";
-import { markTeam } from "./auth.js";
+import { canonicalTeam } from "./auth.js";
 import type { LoadResult } from "../ports.js";
 import type { DagSnapshot } from "./dag-diff.js";
 import type { GitSha } from "@fuguejs/framework";
@@ -92,9 +92,11 @@ export const loadResultToRegisteredDag = (
 ): RegisteredDag => {
   const resolved = resolveDefaults(result.registration);
   // A fugue.yaml `team` (threaded onto the LoadResult) overrides the path-derived
-  // team. This is the DAG-ownership team boundary: brand it `Team` here so every
-  // downstream authz comparison (`canAccessDag`) is type-checked, not bare-string.
-  const team = markTeam(result.team && result.team.length > 0 ? result.team : extractTeam(result.modulePath));
+  // team. This is the DAG-ownership team boundary: brand it a CANONICAL `Team`
+  // (trim + lowercase) so every downstream authz comparison (`canAccessDag`) is
+  // type-checked AND `===`-matches the registered, always-canonical team — a
+  // `fugue.yaml` `team: Foo` must not mismatch a tenant registered as `foo`.
+  const team = canonicalTeam(result.team && result.team.length > 0 ? result.team : extractTeam(result.modulePath));
   const regConfig = result.registration.config;
 
   // Apply host-level defaults and clamp

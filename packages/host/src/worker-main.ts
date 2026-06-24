@@ -38,9 +38,15 @@ import type { HostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
 import { createEnvFileSecretsSource } from "./supervisor/secrets/env-file-secrets-source.js";
 import type { SecretsSource, ResolvedSecrets } from "./supervisor/secrets/secrets-source.js";
+import {
+  WORKER_REDIS_ACL_USERNAME_ENV,
+  WORKER_REDIS_ACL_PASSWORD_ENV,
+  parseAclCredential,
+} from "./supervisor/secrets/redis-acl.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 import { createModuleLoader } from "./adapters/module-loader.js";
-import type { RedisConnectivityPort, SharedInfra, RedisPort } from "./ports.js";
+import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
+import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
 import type { Result, LlmClient, CapabilityHandle } from "@fuguejs/framework";
@@ -118,20 +124,35 @@ export const buildWorkerBootstrap = (
   if (!resolved.ok) return resolved;
 
   // Defense-in-depth (mirrors the TENANT_ID rebind guard below): a secrets source
-  // MUST NOT set WORKER_UDS_DIR. The supervisor force-injects it (bun-spawn-adapter)
-  // to the directory it proxies/probes, so a secrets file that overrode it would
-  // move the worker's bound socket off the supervisor's target — `waitForUds`
-  // times out, the worker is SIGKILLed, and the tenant goes 503 (self-DoS). Reject
-  // such a file outright rather than silently honour a forbidden override.
-  if (Object.prototype.hasOwnProperty.call(resolved.value, "WORKER_UDS_DIR")) {
-    return err({
-      kind: "config-invalid",
-      message: "worker bootstrap: a secrets source must not set WORKER_UDS_DIR (it must not move the worker socket off the supervisor-chosen path)",
-    });
+  // MUST NOT override env vars the SUPERVISOR force-injects into the spawn env.
+  // The merge below layers resolved secrets OVER the base env, so an own-key in
+  // the secrets file would win over a supervisor-injected value. We forbid:
+  //   - WORKER_UDS_DIR: overriding it moves the worker's bound socket off the
+  //     supervisor's proxy/probe target — `waitForUds` times out, the worker is
+  //     SIGKILLed, and the tenant goes 503 (self-DoS).
+  //   - FUGUE_REDIS_ACL_USERNAME / FUGUE_REDIS_ACL_PASSWORD: the supervisor mints
+  //     and injects the per-tenant ACL credential (ADR-0067); a secrets file that
+  //     rebound it could connect the worker to Redis as a different (or unscoped)
+  //     user, tampering with the isolation handoff channel. Reject outright so the
+  //     credential channel is tamper-evident, parallel to WORKER_UDS_DIR.
+  // Reject such a file rather than silently honour a forbidden override.
+  const FORBIDDEN_SECRET_OVERRIDES = [
+    "WORKER_UDS_DIR",
+    WORKER_REDIS_ACL_USERNAME_ENV,
+    WORKER_REDIS_ACL_PASSWORD_ENV,
+  ] as const;
+  for (const forbidden of FORBIDDEN_SECRET_OVERRIDES) {
+    if (Object.prototype.hasOwnProperty.call(resolved.value, forbidden)) {
+      return err({
+        kind: "config-invalid",
+        message: `worker bootstrap: a secrets source must not set ${forbidden} (it is a supervisor-injected spawn-env binding and must not be overridden by a tenant's secrets)`,
+      });
+    }
   }
 
   // Merge resolved secrets OVER the base env. `parseHostConfig` then validates
-  // the union. A resolved secret VALUE never escapes into an error message here.
+  // the union. Secret-VALUE non-leakage is upheld upstream by `parseHostConfig`
+  // (its errors name the offending KEY, never the value), not by this merge line.
   const merged: Record<string, string | undefined> = { ...env, ...(resolved.value as ResolvedSecrets) };
   const configResult = parseHostConfig(merged);
   if (!configResult.ok) return configResult;
@@ -154,68 +175,9 @@ export const buildWorkerBootstrap = (
   });
 };
 
-// ── Redis Connectivity (mirrors main.ts) ──────────────────────────────────────
-
-const createRedisConnectivity = async (
-  redisUrl: string,
-  aclCredential?: { readonly username: string; readonly password: string },
-): Promise<Result<{ port: RedisConnectivityPort; redis: RedisPort; disconnect: () => Promise<unknown> }, HostError>> => {
-  try {
-    const { Redis } = await import("ioredis");
-    // ADR-0067: when the supervisor injected a per-tenant ACL credential, the
-    // worker authenticates as its OWN `~fugue:<tenant>:*`-scoped user — the
-    // explicit username/password OVERRIDE any inherited in the REDIS_URL, so a
-    // cross-tenant key access is refused by Redis with NOPERM. Absent → connect
-    // with the REDIS_URL credential (ACL disabled).
-    const client = new Redis(redisUrl, {
-      maxRetriesPerRequest: 3,
-      lazyConnect: true,
-      ...(aclCredential !== undefined
-        ? { username: aclCredential.username, password: aclCredential.password }
-        : {}),
-    });
-
-    const port: RedisConnectivityPort = {
-      ping: async () => {
-        try {
-          if (client.status === "wait") await client.connect();
-          await client.ping();
-          return ok(undefined);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `PING at startup (${e instanceof Error ? e.message : String(e)})` });
-        }
-      },
-    };
-
-    const redis: RedisPort = {
-      get: async (key) => { try { return ok(await client.get(key)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `GET ${key}: ${e instanceof Error ? e.message : String(e)}` }); } },
-      set: async (key, value, opts) => {
-        try {
-          const result = opts?.expiresInSec !== undefined ? await client.set(key, value, "EX", opts.expiresInSec) : await client.set(key, value);
-          return ok(result);
-        } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `SET ${key}: ${e instanceof Error ? e.message : String(e)}` }); }
-      },
-      del: async (key) => { try { return ok(await client.del(key)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}: ${e instanceof Error ? e.message : String(e)}` }); } },
-      scan: async (pattern, cursor = "0") => {
-        try { const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100); return ok({ cursor: nextCursor, keys }); }
-        catch (e) { return err({ kind: "redis-unavailable" as const, operation: `SCAN ${pattern}: ${e instanceof Error ? e.message : String(e)}` }); }
-      },
-      setNx: async (key, value, opts) => {
-        try {
-          if (opts?.expiresInSec !== undefined) { const result = await client.set(key, value, "EX", opts.expiresInSec, "NX"); return ok(result === "OK"); }
-          const result = await client.setnx(key, value); return ok(result === 1);
-        } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `SETNX ${key}: ${e instanceof Error ? e.message : String(e)}` }); }
-      },
-      sAdd: async (key, member) => { try { return ok(await client.sadd(key, member)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `SADD ${key}: ${e instanceof Error ? e.message : String(e)}` }); } },
-      sRem: async (key, member) => { try { return ok(await client.srem(key, member)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `SREM ${key}: ${e instanceof Error ? e.message : String(e)}` }); } },
-      sMembers: async (key) => { try { return ok(await client.smembers(key)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `SMEMBERS ${key}: ${e instanceof Error ? e.message : String(e)}` }); } },
-    };
-
-    return ok({ port, redis, disconnect: () => client.quit() });
-  } catch (e) {
-    return err({ kind: "redis-unavailable", operation: `Redis client initialization: ${e instanceof Error ? e.message : String(e)}` });
-  }
-};
+// ── Redis Connectivity ─────────────────────────────────────────────────────
+// The ioredis adapter is SHARED with `main.ts` (see `adapters/redis-connectivity.ts`);
+// the worker only supplies the optional per-tenant ACL credential (ADR-0067).
 
 // ── LLM Client (mirrors main.ts) ───────────────────────────────────────────────
 
@@ -256,17 +218,26 @@ const main = async () => {
 
   // Step 5: Redis connectivity (fail-closed). ADR-0067: if the supervisor injected
   // a per-tenant ACL credential, connect as that scoped user (NOPERM-enforced
-  // isolation); both env vars must be present to use it (fail-safe partial).
-  const aclCredential =
-    config.FUGUE_REDIS_ACL_USERNAME !== undefined && config.FUGUE_REDIS_ACL_PASSWORD !== undefined
-      ? { username: config.FUGUE_REDIS_ACL_USERNAME, password: config.FUGUE_REDIS_ACL_PASSWORD }
-      : undefined;
+  // isolation). The all-or-nothing pairing invariant lives in `parseAclCredential`
+  // (a half-injected credential fails CLOSED rather than connecting unscoped).
+  const aclResult = parseAclCredential(config.FUGUE_REDIS_ACL_USERNAME, config.FUGUE_REDIS_ACL_PASSWORD);
+  if (!aclResult.ok) {
+    logger.error(`Worker bootstrap failed: ${formatHostError(aclResult.error)}`, {
+      tenant,
+      hasAclUser: config.FUGUE_REDIS_ACL_USERNAME !== undefined,
+      hasAclPass: config.FUGUE_REDIS_ACL_PASSWORD !== undefined,
+    });
+    process.exit(1);
+  }
+  const aclCredential = aclResult.value;
   if (aclCredential !== undefined) {
     logger.info("Worker connecting to Redis as per-tenant ACL user", { tenant, aclUser: aclCredential.username });
   }
   const redisResult = await createRedisConnectivity(config.REDIS_URL, aclCredential);
   if (!redisResult.ok) {
-    logger.error(`Redis connectivity failed: ${formatHostError(redisResult.error)}`);
+    // Carry { tenant } so this fail-closed exit is attributable in a multi-tenant
+    // log stream, consistent with the ACL-failure log above.
+    logger.error(`Redis connectivity failed: ${formatHostError(redisResult.error)}`, { tenant });
     process.exit(1);
   }
   const { port: redisPort, redis, disconnect: disconnectRedis } = redisResult.value;

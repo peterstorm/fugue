@@ -181,6 +181,15 @@ export interface SupervisorDeps {
    */
   readonly onRedisProbeEdge?: (dead: boolean) => void;
   readonly logger: LogPort;
+  /**
+   * Monotonic-ish wall clock (UNIX millis) used to stamp the supervisor's own
+   * lifecycle transitions (boot/ready/redis-died/drain). Injected as a port so
+   * the supervisor honors the repo-wide injected-clock discipline every sibling
+   * module upholds (`worker-lifecycle-manager`, `admission`, `tenant-registry`,
+   * `grace-window-purge`), making those transitions deterministic under test.
+   * Defaults to `Date.now` at the composition root.
+   */
+  readonly clock?: () => number;
   /** Called during graceful shutdown to clean up infrastructure (e.g., Redis). */
   readonly onShutdown?: () => Promise<void>;
 }
@@ -253,6 +262,36 @@ export const buildReadinessResponse = (state: HostState): Response => {
   });
 };
 
+// ── Process termination ──────────────────────────────────────────────────────
+
+/**
+ * Build the SIGTERM/SIGINT termination handler. ALWAYS terminates: a `shutdown()`
+ * rejection must NOT leave the pod hanging on the signal until the orchestrator
+ * SIGKILLs it. A clean shutdown exits 0; a failed one logs the cause and exits
+ * non-zero so it is visible. A pure factory over injected `shutdown`/`logger`/
+ * `exit` so BOTH paths — including the exit(1) failure branch — are unit-testable
+ * without sending a real signal or actually exiting the process.
+ */
+export const createTerminationHandler = (deps: {
+  readonly shutdown: () => Promise<void>;
+  readonly logger: Pick<LogPort, "error">;
+  readonly exit: (code: number) => void;
+}): (() => Promise<void>) => async () => {
+  try {
+    await deps.shutdown();
+    deps.exit(0);
+  } catch (e) {
+    deps.logger.error("[supervisor] shutdown failed during signal handling — forcing exit", {
+      error: e instanceof Error ? e.message : String(e),
+      // Include the stack: a shutdown that fails inside a signal handler is
+      // inherently hard to reproduce, so the trace is the difference between a
+      // 5-minute and a 2-hour diagnosis.
+      stack: e instanceof Error ? e.stack : undefined,
+    });
+    deps.exit(1);
+  }
+};
+
 // ── Supervisor factory ───────────────────────────────────────────────────────
 
 /**
@@ -265,6 +304,9 @@ export const createSupervisor = async (
   deps: SupervisorDeps,
 ): Promise<Result<SupervisorInstance, HostError>> => {
   const { config, redis, logger } = deps;
+  // Injected clock (repo-wide discipline — NEVER bare Date.now() in the shell's
+  // own state transitions). Defaults to Date.now at this composition seam.
+  const clock = deps.clock ?? Date.now;
   // FR-005: structurally assert no tenant-secret channel exists.
   assertNoTenantSecrets(deps);
 
@@ -275,14 +317,14 @@ export const createSupervisor = async (
   // execute), so it seeds the degraded machine with the empty registry purely to
   // reuse the existing `HostState` transitions (booting → ready → degraded). It
   // never reads DAGs out of it.
-  let state: HostState = booting(Date.now());
+  let state: HostState = booting(clock());
   let redisProbe: RedisProbeHandle | null = null;
   let server: { port: number; stop: () => void } | null = null;
 
   // Boot → ready. The empty registry + a fixed boot sha satisfy the transition's
   // signature without implying the supervisor loads DAGs.
   const BOOT_SHA = gitSha("supervisor");
-  const readyResult = bootComplete(state, emptyRegistry(), BOOT_SHA, Date.now());
+  const readyResult = bootComplete(state, emptyRegistry(), BOOT_SHA, clock());
   if (!readyResult.ok) {
     return err({ kind: "internal-invariant-violated", message: "supervisor boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
   }
@@ -442,7 +484,7 @@ export const createSupervisor = async (
         // every dead tick (idempotent), so a new run is refused the moment the
         // probe sees Redis down — even before/without any registry write.
         deps.onRedisProbeEdge?.(true);
-        const r = redisDied(state, Date.now());
+        const r = redisDied(state, clock());
         if (r.ok) {
           state = r.value;
           logger.warn("[supervisor] Redis probe failed — degraded (redis-disconnected)");
@@ -469,7 +511,7 @@ export const createSupervisor = async (
   const shutdown = async () => {
     logger.info("[supervisor] shutdown initiated");
     if (redisProbe) { redisProbe.stop(); redisProbe = null; }
-    const drainResult = beginDrain(state, 0, Date.now());
+    const drainResult = beginDrain(state, 0, clock());
     if (drainResult.ok) state = drainResult.value;
     if (server) { server.stop(); server = null; }
     if (deps.onShutdown) {

@@ -7,6 +7,11 @@
 import { describe, it, expect } from "bun:test";
 import { buildWorkerBootstrap } from "../worker-main.js";
 import type { SecretsSource, ResolvedSecrets } from "../supervisor/secrets/secrets-source.js";
+import {
+  WORKER_REDIS_ACL_USERNAME_ENV,
+  WORKER_REDIS_ACL_PASSWORD_ENV,
+  parseAclCredential,
+} from "../supervisor/secrets/redis-acl.js";
 import { ok, err } from "@fuguejs/framework";
 import type { SecretsRef } from "../domain/tenant.js";
 
@@ -109,6 +114,111 @@ describe("buildWorkerBootstrap — fail closed", () => {
     if (result.ok) return;
     expect(result.error.kind).toBe("config-invalid");
     expect((result.error as { message: string }).message).toContain("WORKER_UDS_DIR");
+  });
+
+  it("does not let a secrets file rebind the per-tenant ACL username (isolation handoff)", () => {
+    const env = { ...baseEnv, TENANT_ID: "tenant-a", FUGUE_SECRETS_REF: "/x.env" };
+    // A tenant secrets file that rebinds FUGUE_REDIS_ACL_USERNAME could connect the
+    // worker to Redis as a different/unscoped user — reject it (fail-closed).
+    const result = buildWorkerBootstrap(
+      env,
+      fixedSource({ ANTHROPIC_API_KEY: "k", [WORKER_REDIS_ACL_USERNAME_ENV]: "fugue-tenant-evil" }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    expect((result.error as { message: string }).message).toContain(WORKER_REDIS_ACL_USERNAME_ENV);
+  });
+
+  it("does not let a secrets file rebind the per-tenant ACL password (isolation handoff)", () => {
+    const env = { ...baseEnv, TENANT_ID: "tenant-a", FUGUE_SECRETS_REF: "/x.env" };
+    const result = buildWorkerBootstrap(
+      env,
+      fixedSource({ ANTHROPIC_API_KEY: "k", [WORKER_REDIS_ACL_PASSWORD_ENV]: "stolen-password" }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    expect((result.error as { message: string }).message).toContain(WORKER_REDIS_ACL_PASSWORD_ENV);
+    // The forbidden VALUE must never leak into the rejection message.
+    expect((result.error as { message: string }).message).not.toContain("stolen-password");
+  });
+});
+
+describe("parseAclCredential — per-tenant ACL pairing (ADR-0067, fail-closed)", () => {
+  it("BOTH present → Ok(credential): connect as the scoped per-tenant user", () => {
+    const result = parseAclCredential("fugue-tenant-acme", "s3cret");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toEqual({ username: "fugue-tenant-acme", password: "s3cret" });
+  });
+
+  it("TRIMS a whitespace-padded username before forwarding (no auth as `default`), keeps the password byte-exact", () => {
+    // A Redis ACL username is an identifier — surrounding whitespace is never
+    // significant, and a padded value (e.g. injected as `"…acme\n"`) forwarded
+    // verbatim could mismatch the provisioner's whitespace-free user and silently
+    // authenticate as `default` (potentially UNSCOPED) — the fail-open this guards.
+    // The PASSWORD is a secret and must NOT be mutated: its surrounding whitespace
+    // is preserved exactly.
+    const result = parseAclCredential("  fugue-tenant-acme \n", " s3cret ");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toEqual({ username: "fugue-tenant-acme", password: " s3cret " });
+  });
+
+  it("NEITHER set → Ok(undefined): ACL disabled, fall back to REDIS_URL", () => {
+    const result = parseAclCredential(undefined, undefined);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBeUndefined();
+  });
+
+  it("username only → Err: refuses to boot unscoped (fail-closed, not ACL-disabled)", () => {
+    const result = parseAclCredential("fugue-tenant-acme", undefined);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    expect((result.error as { message: string }).message).toContain("fail-closed");
+  });
+
+  it("password only → Err: refuses to boot unscoped (fail-closed)", () => {
+    const result = parseAclCredential(undefined, "s3cret");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    // The lone secret value must not leak into the fail-closed message.
+    expect((result.error as { message: string }).message).not.toContain("s3cret");
+  });
+
+  it("BLANK username → Err: a present-but-empty value is a fault, not ACL-disabled (fail-closed, no fall-open)", () => {
+    // An empty username is never a valid scoped ACL user; forwarding it to ioredis
+    // can authenticate as `default` (potentially UNSCOPED). It must fail closed,
+    // NOT silently degrade to the shared REDIS_URL credential.
+    for (const blank of ["", "   ", "\t"]) {
+      const result = parseAclCredential(blank, "s3cret");
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.error.kind).toBe("config-invalid");
+      expect((result.error as { message: string }).message).not.toContain("s3cret");
+    }
+  });
+
+  it("BLANK password → Err: a present-but-empty secret is a fault (fail-closed)", () => {
+    for (const blank of ["", "   ", "\t"]) {
+      const result = parseAclCredential("fugue-tenant-acme", blank);
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.error.kind).toBe("config-invalid");
+    }
+  });
+
+  it("BOTH blank → Err: not treated as the legal NEITHER-set (disabled) state", () => {
+    // Distinct from `undefined`/`undefined` (ACL disabled): a present-but-empty
+    // pair signals a broken injection and must refuse to boot, not fall back.
+    const result = parseAclCredential("", "");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
   });
 
   it("never leaks a resolved secret value in an error message", () => {

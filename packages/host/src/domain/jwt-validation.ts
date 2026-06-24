@@ -21,7 +21,7 @@ import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { JwtAudience, RealmJwtClaims, SignatureVerifiedClaims, AuthenticatedUser, Team } from "./auth.js";
-import { markAuthenticatedUser, markTeam } from "./auth.js";
+import { markAuthenticatedUser, canonicalTeam } from "./auth.js";
 
 // ── AuthError ADT ──────────────────────────────────────────────────────────
 
@@ -163,8 +163,10 @@ export const validateRealmJwtClaims = (
     teams = [];
   } else if (Array.isArray(c.teams) && c.teams.every(isNonEmptyString)) {
     // This is the JWT team-membership boundary: each verified, non-empty claim
-    // string becomes a branded `Team` so downstream authz compares like types.
-    teams = c.teams.map(markTeam);
+    // string becomes a CANONICAL branded `Team` (trim + lowercase) so it
+    // `===`-matches the registered, always-canonical team in `canAccessDag` — an
+    // issuer emitting `"Team-A"` must not wrongly 403 a member of `"team-a"`.
+    teams = c.teams.map(canonicalTeam);
   } else {
     return err({ kind: "malformed", reason: "non-array or non-string 'teams'" });
   }

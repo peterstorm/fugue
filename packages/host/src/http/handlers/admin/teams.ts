@@ -9,7 +9,7 @@
  */
 
 import type { Context } from "hono";
-import { formatToken, hashToken, markTeam } from "../../../domain/auth.js";
+import { formatToken, hashToken, markTeam, canonicalizeTeamName } from "../../../domain/auth.js";
 import type { TokenGrant, AuthIdentity } from "../../../domain/auth.js";
 import type { TokenStorePort } from "../../../ports.js";
 import { errorResponse } from "../../response.js";
@@ -70,7 +70,7 @@ export const createCreateTeamHandler = (deps: AdminHandlerDeps) => {
       return errorResponse(c, 400, "input-validation-failed", "\"team\" field is required and must be a non-empty string");
     }
 
-    const teamName = team.trim().toLowerCase();
+    const teamName = canonicalizeTeamName(team);
     const teamLabel = typeof label === "string" && label.trim().length > 0
       ? label.trim()
       : `${teamName} token`;
@@ -159,11 +159,16 @@ export const createRevokeTeamHandler = (deps: AdminHandlerDeps) => {
       return errorResponse(c, 400, "input-validation-failed", "Team name is required");
     }
 
-    const result = await deps.tokenStore.revoke(team.trim().toLowerCase());
+    // Canonicalize through the SINGLE shared rule (not a re-inlined
+    // `.trim().toLowerCase()`) so revoke targets the exact canonical key the
+    // create/registration paths stored the token under — no silent drift if the
+    // canonicalization rule ever changes.
+    const teamName = canonicalizeTeamName(team);
+    const result = await deps.tokenStore.revoke(teamName);
     if (!result.ok) {
       return errorResponse(c, 500, "internal-error", "Failed to revoke team token");
     }
 
-    return c.json({ ok: true, team: team.trim().toLowerCase(), revoked: true }, 200);
+    return c.json({ ok: true, team: teamName, revoked: true }, 200);
   };
 };

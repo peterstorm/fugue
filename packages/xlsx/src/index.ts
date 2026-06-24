@@ -186,7 +186,13 @@ export const parseWorkbook = async <T>(
   // ── Data rows (rows after the header row) ──────────────────────────────────
   const rows: T[] = [];
   for (let r = headerR + 1; r <= range.e.r; r++) {
-    const obj: Record<string, unknown> = {};
+    // Prototype-free: row keys come from the file's header cells, so a header
+    // literally named `__proto__`/`constructor` would otherwise mutate the object
+    // prototype instead of setting an own property. `Object.create(null)` makes
+    // every assignment an own property regardless of the key (Zod validation that
+    // follows reads declared fields either way, but this keeps the row a plain
+    // data bag and is consistent with the codebase's null-prototype boundaries).
+    const obj: Record<string, unknown> = Object.create(null);
     let hasValue = false;
     for (const [c, key] of headers) {
       const cell = ws[XLSX.utils.encode_cell({ r, c })] as XLSX.CellObject | undefined;

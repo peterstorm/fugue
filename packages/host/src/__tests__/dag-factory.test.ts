@@ -159,6 +159,20 @@ describe("loadResultToRegisteredDag", () => {
     expect(reg.meta.owner).toBe("platform");
   });
 
+  test("canonicalizes a mixed-case / whitespace fugue.yaml team (so the DAG === its registered team)", () => {
+    // The DAG-ownership boundary lowercases + trims, so a `fugue.yaml` `team: Foo`
+    // authorizes against a tenant registered as `foo` in canAccessDag rather than
+    // mismatching it (fail-closed wrongful 403).
+    const lr = { ...makeLoadResult("d", "/repo/dags/path-team/d/dag.ts"), team: "  Yaml-Team  " };
+    const reg = loadResultToRegisteredDag(lr, SHA, NOW, defaults);
+    expect(reg.team).toBe("yaml-team");
+  });
+
+  test("canonicalizes a path-derived team when the directory casing is non-canonical", () => {
+    const reg = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/Path-Team/d/dag.ts"), SHA, NOW, defaults);
+    expect(reg.team).toBe("path-team");
+  });
+
   test("falls back to path-derived team and no owner when the LoadResult omits them", () => {
     const reg = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/path-team/d/dag.ts"), SHA, NOW, defaults);
     expect(reg.team).toBe("path-team");

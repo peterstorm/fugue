@@ -59,12 +59,36 @@ declare const __teamBrand: unique symbol;
 export type Team = string & { readonly [__teamBrand]: void };
 
 /**
- * Brand a string as a `Team`. The single, greppable producer at each team
- * boundary (JWT `teams` claim, team-token grant, tenant/DAG config). A pure cast —
- * no validation — so it never changes runtime behaviour; it only records that the
- * value crossed a team boundary so downstream authz compares like-typed values.
+ * Brand a string as a `Team`. A pure cast — no validation — so it never changes
+ * runtime behaviour; it only records that the value crossed a team boundary so
+ * downstream authz compares like-typed values. Use this ONLY where the value is
+ * already CANONICAL (a value persisted/stored in canonical form being restored).
+ * For values entering from an ingestion boundary, use `canonicalTeam` so they
+ * `===`-match their registered counterpart.
  */
 export const markTeam = (s: string): Team => s as Team;
+
+/**
+ * The SINGLE canonicalization rule for a team identifier: trim surrounding
+ * whitespace and lowercase. `canAccessDag` compares teams with strict `===`, and
+ * every team WRITE path stores this canonical form, so the rule lives in ONE place
+ * (here) rather than re-inlined as `.trim().toLowerCase()` at each boundary where
+ * it could silently drift. String-level so callers that ALSO shape-validate the
+ * name (e.g. `admin/teams`, the bootstrap parser) can reuse it before their regex.
+ */
+export const canonicalizeTeamName = (s: string): string => s.trim().toLowerCase();
+
+/**
+ * Brand a team value arriving from an INGESTION boundary as a CANONICAL `Team`.
+ *
+ * Unlike `markTeam` (a pure provenance stamp), this canonicalizes first. Use it
+ * where the value enters from outside in possibly-non-canonical form — a verified
+ * JWT `teams` claim, a `fugue.yaml` `team:` field — so it `===`-matches its
+ * registered (always-canonical) counterpart in `canAccessDag`. A non-canonical
+ * value here (`"Team-A"` vs a registered `"team-a"`) would otherwise mismatch and
+ * wrongly 403 a legitimate caller (fail-closed, but a confusing availability bug).
+ */
+export const canonicalTeam = (s: string): Team => markTeam(canonicalizeTeamName(s));
 
 declare const __subjectTokenBrand: unique symbol;
 

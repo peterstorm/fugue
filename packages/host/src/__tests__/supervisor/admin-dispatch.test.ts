@@ -166,6 +166,25 @@ describe("supervisor dispatch → admin-tenants (C1, FR-025)", () => {
     await b.supervisor.value!.shutdown();
   });
 
+  it("audits an INVALID tenant id as a refusal carrying the raw attempted segment", async () => {
+    const b = await build();
+    // Admin token (passes authz) but a shape-invalid id (`:` is forbidden by
+    // TENANT_ID_REGEX) — the id never parses to a TenantId, yet the refusal must
+    // still be recorded verbatim in the trail via RawAttemptedTenantId.
+    const res = await b.supervisor.value!.handle(
+      adminReq("POST", "/admin/tenants/bad:tenant", { token: ADMIN_TOKEN, body: validBody("bad:tenant") }),
+    );
+    expect(res.status).not.toBe(200);
+    const refusal = b.audit.records.find((r) => r.outcome === "refused" && r.tenant === "bad:tenant");
+    expect(refusal).toBeDefined();
+    expect(refusal!.action).toBe("register");
+    expect(refusal!.detail).toContain("invalid tenant id");
+    expect(refusal!.timestamp).toBe(1_000); // stamped from the injected clock
+    // Nothing was registered.
+    expect(b.registry.snapshot().entries.size).toBe(0);
+    await b.supervisor.value!.shutdown();
+  });
+
   it("a non-admin-tenants path falls through to the normal proxy path", async () => {
     const b = await build();
     // A team-shaped path with an admin token resolves a tenant and proxies.

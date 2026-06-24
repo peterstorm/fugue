@@ -13,10 +13,13 @@ import fc from "fast-check";
 import { Hono } from "hono";
 import {
   canAccessDag,
+  canonicalizeTeamName,
+  canonicalTeam,
   formatToken,
   hashToken,
   isTeamTokenShape,
   markAuthenticatedUser,
+  markTeam,
   TOKEN_PREFIX,
   TOKEN_MIN_LENGTH,
 } from "../../domain/auth.js";
@@ -55,7 +58,11 @@ describe("canAccessDag", () => {
     expect(canAccessDag(identity, "team-b")).toBe(false);
   });
 
-  it("team comparison is exact (case-sensitive)", () => {
+  it("team comparison is exact (case-sensitive) — canonicalization is the PRODUCERS' job, not the comparator's", () => {
+    // `canAccessDag` is a pure comparator: BOTH sides must already be canonical.
+    // Non-canonical raw strings (passed directly here, not via `canonicalTeam`)
+    // correctly do NOT match — the ingestion boundaries (`canonicalTeam`) are what
+    // guarantee real producers feed canonical values in.
     const identity: AuthIdentity = { kind: "team", team: "team-a", label: "Team A" };
     expect(canAccessDag(identity, "Team-A")).toBe(false);
     expect(canAccessDag(identity, "TEAM-A")).toBe(false);
@@ -117,6 +124,37 @@ describe("canAccessDag", () => {
     expect(res.status).toBe(403); // …but admin scope is refused
     const body = await res.json();
     expect(body.error).toBe("forbidden");
+  });
+});
+
+// ── Team canonicalization (the single ingestion-boundary rule) ───────────────
+describe("canonicalizeTeamName / canonicalTeam", () => {
+  it("trims surrounding whitespace and lowercases", () => {
+    expect(canonicalizeTeamName("  Team-A  ")).toBe("team-a");
+    expect(canonicalizeTeamName("TEAM-A")).toBe("team-a");
+    expect(canonicalizeTeamName("team-a")).toBe("team-a"); // already canonical → unchanged
+  });
+
+  it("canonicalTeam brands the canonical form so it === a write-side team", () => {
+    // The write side stores `markTeam(canonicalizeTeamName(...))`; an ingestion
+    // value of any casing must produce the SAME branded Team that registration did.
+    expect(canonicalTeam("Team-A")).toBe(markTeam("team-a"));
+    expect(canonicalTeam("  team-a  ")).toBe(markTeam("team-a"));
+  });
+
+  it("a non-canonical ingestion team now AUTHORIZES against its canonical registration (the fixed bug)", () => {
+    // Before the fix a JWT/DAG team `"Team-A"` was branded verbatim and `===`
+    // mismatched a tenant registered as `"team-a"` → wrongful 403. Routing the
+    // ingestion value through `canonicalTeam` closes that mismatch.
+    const registered = markTeam("team-a"); // what the write path stores
+    const fromJwtClaim = canonicalTeam("Team-A"); // what the ingestion boundary now brands
+    const identity: AuthIdentity = { kind: "team", team: fromJwtClaim, label: "Team A" };
+    expect(canAccessDag(identity, registered)).toBe(true);
+  });
+
+  it("is idempotent (canonical of canonical is canonical)", () => {
+    const once = canonicalizeTeamName("  MixedCase  ");
+    expect(canonicalizeTeamName(once)).toBe(once);
   });
 });
 
