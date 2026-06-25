@@ -387,13 +387,25 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
   let poolPromise: Promise<OraclePool> | undefined;
   const getPool = (): Promise<OraclePool> => {
     if (poolPromise == null) {
-      poolPromise = oracledb.createPool({
-        connectString: config.connectString,
-        user: config.user,
-        password: config.password,
-        poolMin,
-        poolMax,
-      });
+      poolPromise = oracledb
+        .createPool({
+          connectString: config.connectString,
+          user: config.user,
+          password: config.password,
+          poolMin,
+          poolMax,
+        })
+        .catch((e) => {
+          // Reset so a transient createPool failure (DNS blip, listener not yet
+          // up, ORA-12541 during a rolling DB restart) can be retried on the
+          // next call rather than wedging the capability with a permanently
+          // cached rejection. Mirrors realm-jwt-verifier's jwksPromise reset and
+          // honours mapOracleError's transient/retriable classification. Also
+          // makes `close()` a clean no-op after a failed open (poolPromise is
+          // undefined again rather than a rejected promise it would re-await).
+          poolPromise = undefined;
+          throw e;
+        });
     }
     return poolPromise;
   };

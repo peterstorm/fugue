@@ -98,7 +98,12 @@ export const HostConfigSchema = z.object({
    * runs use the boot-scoped static capability set unchanged and only
    * admin/`fug_` tokens are accepted (the zero-regression, fail-closed path).
    */
-  REALM_JWT_ISSUER: z.string().optional(),
+  // `.url()`: the issuer is fed to `new URL(...)` to derive the JWKS certs URL
+  // (`realmJwksUri`) and, with agent creds, the Keycloak token URL — a malformed
+  // value must fail at boot, not at first verify (parse-don't-validate, matching
+  // the parallel REALM_JWKS_URL). The https-only gate for the secret-bearing
+  // token-URL derivation is applied additionally in superRefine below.
+  REALM_JWT_ISSUER: z.string().url().optional(),
   /**
    * Audience the host must appear in within an accepted realm JWT (FR-W3-006).
    * Non-empty: an explicit `REALM_JWT_AUDIENCE=""` would neuter the audience
@@ -597,8 +602,12 @@ export const HostConfigSchema = z.object({
    * step (see docs/migrations/tenant-key-namespacing.md) — with it off the worker
    * uses the shared `REDIS_URL` credential and isolation rests on key prefixing.
    */
+  // Accept only an explicit boolean or a recognised string token. An
+  // unrecognised string (a typo'd `yes`/`on`/`enabled`) is REJECTED at boot
+  // rather than silently coerced to `false` — silently disabling a data-plane
+  // security control on a typo is the wrong fail direction (fail-closed-loud).
   SUPERVISOR_REDIS_ACL_ENABLED: z
-    .union([z.boolean(), z.string()])
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
     .transform((v) => v === true || v === "true" || v === "1")
     .default(false),
   /**

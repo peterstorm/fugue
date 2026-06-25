@@ -34,7 +34,7 @@
 // scripts/smoke-mlflow.ts importing framework internals by path). The adapter's
 // `oracledb`/`zod` PEERS are still resolved at the root because host pulls them
 // in (they're lockfile-pinned), so no separate install is needed.
-import { createOracleAdapter } from "../packages/adapter-oracle/src/index.ts";
+import { createOracleAdapter, stripCredentials } from "../packages/adapter-oracle/src/index.ts";
 
 /**
  * Read a required credential from the environment. Returns the value or pushes a
@@ -102,8 +102,11 @@ async function main(): Promise<void> {
     note("✅  Oracle smoke-connect PASSED on the prod image");
     process.exit(0);
   } catch (e) {
-    // The adapter already strips credentials from this message.
-    console.error(`❌  Oracle smoke-connect FAILED: ${e instanceof Error ? e.message : String(e)}`);
+    // The adapter already strips credentials from connect()/healthCheck()
+    // errors; re-strip here as defence-in-depth so the script's "never printed"
+    // guarantee holds even for a throw that originates outside the adapter's
+    // stripping wrappers (FR-041 / SC-008).
+    console.error(`❌  Oracle smoke-connect FAILED: ${stripCredentials(e instanceof Error ? e.message : String(e))}`);
     process.exit(1);
   } finally {
     try {
@@ -115,6 +118,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  console.error(`❌  Oracle smoke-connect threw: ${e instanceof Error ? e.message : String(e)}`);
+  // Defence-in-depth strip: a throw from createOracleAdapter's synchronous
+  // oracledb require runs before any adapter stripping wrapper, so strip here
+  // too rather than trust the message is already clean (FR-041 / SC-008).
+  console.error(`❌  Oracle smoke-connect threw: ${stripCredentials(e instanceof Error ? e.message : String(e))}`);
   process.exit(1);
 });

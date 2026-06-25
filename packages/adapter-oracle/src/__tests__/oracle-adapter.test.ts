@@ -627,3 +627,76 @@ describe("@fuguejs/oracle — createOracleAdapter().connect() credential strippi
     expect(closed).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// pool-promise reset on createPool failure (CRITICAL Fix — getPool recovery)
+// ---------------------------------------------------------------------------
+
+describe("@fuguejs/oracle — createOracleAdapter() recovers from a transient createPool failure", () => {
+  it("re-creates the pool after a rejected createPool instead of caching the rejection forever", async () => {
+    // getPool memoises createPool's promise. A transient open failure (ORA-12541
+    // no-listener during a rolling DB restart) must NOT be cached permanently:
+    // before the reset fix, the rejected promise stuck and EVERY later getPool()
+    // — connect/healthCheck/query — re-awaited the same stale rejection, wedging
+    // the capability for the process lifetime despite an ORA-12541 the classifier
+    // calls transient/retriable. The reset (mirroring realm-jwt-verifier) lets the
+    // next call re-create the pool.
+    let createPoolCalls = 0;
+    void mock.module("oracledb", () => {
+      const mod = {
+        OUT_FORMAT_OBJECT: 4002,
+        createPool: async () => {
+          createPoolCalls += 1;
+          if (createPoolCalls === 1) {
+            throw new Error("ORA-12541: TNS:no listener");
+          }
+          return {
+            getConnection: async () => ({
+              execute: async () => ({ rows: [{ "1": 1 }] }),
+              close: async () => {},
+            }),
+            close: async () => {},
+          };
+        },
+      };
+      return { default: mod, ...mod };
+    });
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    // First attempt hits the rejected createPool and surfaces the error.
+    await expect(handle.connect?.()).rejects.toBeInstanceOf(Error);
+    // Second attempt re-creates the pool and succeeds — the regression proof:
+    // without the reset this would re-await the cached rejection and reject again.
+    await expect(handle.connect?.()).resolves.toBeUndefined();
+    expect(createPoolCalls).toBe(2);
+  });
+
+  it("leaves close() a clean no-op after a failed open (no rejected promise to re-await)", async () => {
+    // The reset returns poolPromise to undefined on rejection, so a close() in the
+    // host's connect-failure cleanup path is a safe no-op rather than re-throwing
+    // the (now stale) open error as a misleading "failed to close".
+    void mock.module("oracledb", () => {
+      const mod = {
+        OUT_FORMAT_OBJECT: 4002,
+        createPool: async () => {
+          throw new Error("ORA-12541: TNS:no listener");
+        },
+      };
+      return { default: mod, ...mod };
+    });
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    await expect(handle.connect?.()).rejects.toBeInstanceOf(Error);
+    await expect(handle.close?.()).resolves.toBeUndefined();
+  });
+});

@@ -12,8 +12,13 @@ on:
   pull_request:
 
 env:
-  # Keep in lockstep with release.yml's PACKAGES.
-  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host
+  # Superset of release.yaml's PACKAGES: CI typechecks + tests every workspace
+  # member, INCLUDING adapter-oracle + http-auth. Those two are intentionally NOT
+  # in release.yaml's publish set yet — publishing them to npm needs a version
+  # bump to host's lockstep version + a manual first-publish (trusted-publisher
+  # setup), an npm decision separate from running them through CI. They MUST be
+  # exercised here regardless, so a regression in either fails the build.
+  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg adapter-oracle http-auth host
 
 jobs:
   check:
@@ -40,79 +45,35 @@ jobs:
             echo "::endgroup::"
           done
 
-  # SC-006: prove @fuguejs/oracle's thin-mode driver opens a REAL Oracle
-  # connection on the PRODUCTION base image. oracledb thin mode was verified on
-  # Bun 1.3.x in dev, but prod runs `oven/bun:1.2-alpine` (packages/host/Dockerfile),
-  # so the smoke MUST run inside that exact image — hence the job-level `container:`.
-  # The script reuses createOracleAdapter().connect()/healthCheck() (each runs
-  # `SELECT 1 FROM DUAL`); any failure exits non-zero and fails the build.
+  # SC-006 / NFR-001 — CI half: prove @fuguejs/oracle's thin-mode driver LOADS and
+  # runs its network stack on the PRODUCTION base image (`oven/bun:1.2-alpine`).
+  # oracledb thin mode was verified on Bun 1.3.x in dev, but prod runs alpine
+  # (packages/host/Dockerfile), so this MUST run inside that exact image — hence the
+  # job-level `container:`. The pure-JS Oracle Net stack over musl/alpine is the one
+  # genuinely image-specific risk, and it needs NO Instant Client and NO native build.
   #
-  # GATING: Oracle is only reachable from networks that hold these secrets, so
-  # this job no-ops on forks / secret-less PRs. The reusable-availability trick:
-  # a guard job reads the ORACLE_* secrets into a job output (secrets are not
-  # valid in step/job `if:`), and the smoke job runs only when they are set.
+  # SECRET-FREE + DB-FREE, so it runs on EVERY push/PR with no gating: it dials an
+  # unreachable target and asserts the driver loaded + attempted a connection (a
+  # network error, not a module-load error). It does NOT prove real connectivity.
   #
-  # FAIL-CLOSED on `main`: secrets ARE absent in a job-level `if:`, but
-  # GITHUB_REF_NAME / GITHUB_EVENT_NAME are not — so the guard can distinguish
-  # the protected branch from forks. On a `push` to `main` the secret is
-  # REQUIRED (its whole point is proving prod-image connectivity), so a missing
-  # / rotated-empty / renamed / mis-scoped secret is a HARD FAILURE, never a
-  # silent skip. Elsewhere (forks / secret-less PRs) absence still self-skips.
-  #
-  # PARTIAL CONFIG: the guard runs the smoke job when ANY ORACLE_* secret is
-  # present, and lets the script's three-var check (oracle-smoke-connect.ts) be
-  # the single authority that fails loudly on a partial set — so a half-wired
-  # secret (e.g. CONNECT_STRING set, USER/PASSWORD empty) FAILS the build rather
-  # than skipping green. On `main`, a fully-empty set is caught here regardless.
-  oracle-smoke-guard:
+  # The REAL connectivity smoke (a live `SELECT 1 FROM DUAL` against prod Oracle)
+  # cannot run in GitHub CI: the ORACLE_* credentials live as OpenShift SealedSecrets
+  # and Oracle is only reachable in-cluster. That proof runs as the OpenShift Job in
+  # packages/host/deploy (scripts/oracle-smoke-connect.ts) at deploy time — gating the
+  # rollout, not the merge. See the fugue-oracle-smoke Job in
+  # packages/host/deploy/multi-tenant-openshift.yaml.
+  oracle-driver-smoke:
     runs-on: ubuntu-latest
-    outputs:
-      configured: ${{ steps.guard.outputs.configured }}
-    steps:
-      - id: guard
-        env:
-          ORACLE_CONNECT_STRING: ${{ secrets.ORACLE_CONNECT_STRING }}
-          ORACLE_USER: ${{ secrets.ORACLE_USER }}
-          ORACLE_PASSWORD: ${{ secrets.ORACLE_PASSWORD }}
-        run: |
-          if [ -n "$ORACLE_CONNECT_STRING" ] || [ -n "$ORACLE_USER" ] || [ -n "$ORACLE_PASSWORD" ]; then
-            # At least one ORACLE_* secret is present — run the smoke job. The
-            # script fails loudly if the set is partial (missing-var check).
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_NAME" = "main" ]; then
-            # Protected branch, no ORACLE_* secret at all: the secret is REQUIRED
-            # here, so absence is a hard failure — NOT a skip-equals-pass.
-            echo "::error::ORACLE_* secrets are required on main but none are set — the SC-006 Oracle smoke-connect cannot be skipped on the protected branch" >&2
-            exit 1
-          else
-            # Forks / secret-less PRs: preserve the fork-friendly self-skip.
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::ORACLE_* secrets not configured — skipping Oracle smoke-connect"
-          fi
-
-  oracle-smoke-connect:
-    needs: oracle-smoke-guard
-    if: needs.oracle-smoke-guard.outputs.configured == 'true'
-    runs-on: ubuntu-latest
-    # Run the steps INSIDE the prod base image — this is the whole point of SC-006.
+    # Run INSIDE the prod base image — that the driver works HERE is the whole point.
     container:
       image: oven/bun:1.2-alpine
     steps:
       - uses: actions/checkout@v5
 
-      # Thin mode only: no Instant Client, no native build step. The frozen
-      # install already resolves @fuguejs/oracle's PEER deps `oracledb`/`zod`:
-      # packages/host depends on @fuguejs/oracle (host/package.json), so those
-      # peers are lockfile-pinned (oracledb@7.0.0, zod@4.3.6 in bun.lock) and
-      # land in root node_modules. `oracledb` 7.x runs in THIN mode by default —
-      # pure-JS Oracle Net over TCP, musl/alpine-safe. No separate `bun add`
-      # needed; --frozen-lockfile is the authority and forbids drift.
+      # Thin mode only: no Instant Client, no native build step. The frozen install
+      # resolves `oracledb` (a host runtime dependency, lockfile-pinned at 7.0.0),
+      # which runs in THIN mode by default — pure-JS Oracle Net over TCP, musl-safe.
       - run: bun install --frozen-lockfile
 
-      - name: Smoke-connect (SELECT 1 FROM DUAL) on oven/bun:1.2-alpine
-        env:
-          # Credentials ONLY from CI secrets — never hardcoded, never echoed.
-          ORACLE_CONNECT_STRING: ${{ secrets.ORACLE_CONNECT_STRING }}
-          ORACLE_USER: ${{ secrets.ORACLE_USER }}
-          ORACLE_PASSWORD: ${{ secrets.ORACLE_PASSWORD }}
-        run: bun scripts/oracle-smoke-connect.ts
+      - name: Driver-loads smoke on oven/bun:1.2-alpine (no secrets, no DB)
+        run: bun scripts/oracle-driver-smoke.ts
