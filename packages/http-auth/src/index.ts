@@ -268,6 +268,10 @@ export const healthCheckWithTimeout = async (
  * 2xx produces the same error classification as the real client (5xx →
  * transient, other non-2xx → non-retriable node-crash); a `matchBody` that
  * returns `false` fails the route so a wrong-payload bug surfaces in tests.
+ *
+ * Construct one with {@link shapedRoute} — that brand is how the fake tells a
+ * shaped route apart from a raw payload, so a raw payload that happens to carry
+ * a `body`/`status` field is never misread as control metadata.
  */
 export interface FakeAuthedHttpRoute {
   readonly status?: number;
@@ -276,26 +280,57 @@ export interface FakeAuthedHttpRoute {
 }
 
 /**
+ * Brand marking a route value as a shaped {@link FakeAuthedHttpRoute} rather
+ * than a raw verbatim payload. A unique symbol (not a `"body" in route` shape
+ * heuristic) so a raw payload can never accidentally look shaped — the only way
+ * to carry it is through {@link shapedRoute}.
+ */
+const SHAPED_ROUTE: unique symbol = Symbol("fuguejs.http-auth.shapedRoute");
+
+type ShapedAuthedHttpRoute = FakeAuthedHttpRoute & { readonly [SHAPED_ROUTE]: true };
+
+/**
+ * Wrap a {@link FakeAuthedHttpRoute} so the fake treats it as control metadata
+ * (status / matchBody / explicit body) instead of a raw response payload. Any
+ * route value NOT built with this helper is returned verbatim, so payloads that
+ * legitimately contain a top-level `body` field round-trip unchanged.
+ *
+ * @example
+ * ```ts
+ * createFakeAuthedHttpCapability({
+ *   "GET /customers/123": { id: "123", name: "Alice" },          // raw — returned verbatim
+ *   "GET /raw": { id: "1", body: "note" },                       // raw — `body` field preserved
+ *   "POST /orders": shapedRoute({ body: { orderId: "ord-1" } }), // shaped — `body` is the response
+ *   "GET /missing": shapedRoute({ status: 404, body: "Not Found" }),
+ * });
+ * ```
+ */
+export const shapedRoute = (route: FakeAuthedHttpRoute): ShapedAuthedHttpRoute => ({
+  ...route,
+  [SHAPED_ROUTE]: true,
+});
+
+const isShapedRoute = (route: unknown): route is ShapedAuthedHttpRoute =>
+  typeof route === "object" && route !== null && (route as Record<symbol, unknown>)[SHAPED_ROUTE] === true;
+
+/**
  * In-memory fake `AuthedHttpCapability` for testing DAG nodes that use
  * `ctx.authedHttp`. No network, no token machinery — routes match on
  * `"METHOD /path"` (or the bare path). Mirrors `createFakeHttpCapability`.
  *
  * @remarks
- * **Shaped-route detection caveat (analogous to the pg fake's prefix-match
- * caveat).** A route value is treated as a *shaped* `FakeAuthedHttpRoute` (with
- * `status`/`matchBody`/`body`) iff it is an object with a `"body"` key —
- * `"body" in route`. This is a heuristic: a canned *raw* payload that itself
- * legitimately contains a top-level `body` field (e.g. returning
- * `{ body: "...", id: "1" }` directly) is MISREAD as a shaped route, so its
- * `body` field is unwrapped as the response and the rest is dropped. To return
- * such a payload verbatim, wrap it explicitly: `{ body: { body: "...", id: "1" } }`.
+ * A route value is a *raw* payload (returned verbatim) unless it was built with
+ * {@link shapedRoute}, which brands it as control metadata (`status`/`matchBody`/
+ * explicit `body`). Detection is by that brand — NOT a `"body" in route` shape
+ * heuristic — so a raw payload that legitimately carries a top-level `body`
+ * field round-trips unchanged instead of being misread as a shaped route.
  *
  * @example
  * ```ts
  * const fake = createFakeAuthedHttpCapability({
- *   "GET /customers/123": { id: "123", name: "Alice" },
- *   "POST /orders": { body: { orderId: "ord-1" } },
- *   "GET /customers/999": { status: 404, body: "Not Found" },
+ *   "GET /customers/123": { id: "123", name: "Alice" },               // raw
+ *   "POST /orders": shapedRoute({ body: { orderId: "ord-1" } }),      // shaped
+ *   "GET /customers/999": shapedRoute({ status: 404, body: "Not Found" }),
  * });
  * ```
  */
@@ -328,16 +363,16 @@ const matchRoute = <T>(
     return err({ kind: "transient", nodeId: FAKE_NODE_ID, message: `No fake route matched: ${key}` });
   }
 
-  const isShaped = typeof route === "object" && route !== null && "body" in route;
+  const shaped = isShapedRoute(route);
 
-  if (isShaped) {
-    const matchBody = (route as FakeAuthedHttpRoute).matchBody;
+  if (shaped) {
+    const matchBody = route.matchBody;
     if (matchBody && !matchBody(requestBody)) {
       return err({ kind: "transient", nodeId: FAKE_NODE_ID, message: `Fake route ${key}: request body did not match matchBody` });
     }
-    const status = (route as FakeAuthedHttpRoute).status;
+    const status = route.status;
     if (status != null && (status < 200 || status >= 300)) {
-      const bodyText = String((route as FakeAuthedHttpRoute).body ?? "");
+      const bodyText = String(route.body ?? "");
       if (status >= 500) {
         return err({ kind: "transient", nodeId: FAKE_NODE_ID, message: `HTTP ${status}: ${bodyText.slice(0, 500)}`, httpStatus: status });
       }
@@ -345,7 +380,7 @@ const matchRoute = <T>(
     }
   }
 
-  const body = isShaped ? (route as FakeAuthedHttpRoute).body : route;
+  const body = shaped ? route.body : route;
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
     return err({ kind: FAKE_NODE_ID_KIND, nodeId: FAKE_NODE_ID, message: `Fake route response validation failed: ${parsed.error.message}`, retriability: "non-retriable" });

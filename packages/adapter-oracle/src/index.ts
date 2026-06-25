@@ -514,41 +514,58 @@ export const healthCheckWithTimeout = async (
  * In-memory fake OracleCapability for unit testing nodes that use
  * `ctx.oracle`.
  *
- * Accepts a response map that returns canned results for SQL patterns. A key
- * matches by exact SQL first, then by **longest prefix**.
+ * Accepts a response map that returns canned results for SQL. Matching is
+ * **exact by default**: a route keyed on a full SQL string matches only that
+ * exact SQL the real adapter would run. This keeps a test from passing against
+ * a query the production pool would never execute.
  *
- * ⚠️ Prefix-match foot-gun: because matching falls back to `startsWith`, a route
- * key that is a prefix of an unrelated query will match it in tests while the
- * real adapter runs the exact SQL the pool is given. Prefer full-SQL keys; reach
- * for short prefixes only when you deliberately want a broad match, and keep keys
- * specific enough that one can't accidentally swallow another's query. Binds are
- * not inspected, so this fake cannot catch a wrong-`:name`-binding bug.
+ * Prefix matching is **opt-in** per route via `{ rows, prefix: true }`: only
+ * routes explicitly flagged participate in the longest-`startsWith` fallback,
+ * and only when no exact key matched. Reach for it when you deliberately want a
+ * broad match (e.g. a query whose binds are interpolated into the SQL string);
+ * keep flagged keys specific enough that one can't accidentally swallow another's
+ * query. Binds are not inspected, so this fake cannot catch a wrong-`:name`
+ * binding bug regardless of match mode.
  *
  * @example
  * ```ts
  * const fakeOracle = createFakeOracleCapability({
- *   "SELECT * FROM TABLE(GET_PACKAGE_INFO": [{ optionKey: "X", standardPrice: "199", discountPrice: "99", packName: "X" }],
+ *   // exact match (default) — matches this SQL and nothing else
+ *   "SELECT * FROM packages": [{ optionKey: "X", standardPrice: "199", discountPrice: "99" }],
+ *   // opt-in prefix match — matches any SQL starting with this string
+ *   "SELECT * FROM TABLE(GET_PACKAGE_INFO": { prefix: true, rows: [{ optionKey: "Y", standardPrice: "1", discountPrice: "1" }] },
  * });
  * ```
  */
 export interface FakeOracleRoute {
   readonly rows?: unknown[];
+  /**
+   * When `true`, this route matches any SQL that `startsWith` its key (longest
+   * flagged prefix wins), used only after an exact-key match fails. Default
+   * `false`/absent → exact-SQL match only. Opt-in to avoid silently swallowing
+   * an unrelated query whose text happens to share a prefix.
+   */
+  readonly prefix?: boolean;
 }
 
 export const createFakeOracleCapability = (
   routes: Readonly<Record<string, unknown[] | FakeOracleRoute>>,
 ): CapabilityHandle<"oracle"> => {
   const matchRoute = (sql: string): FakeOracleRoute | null => {
-    // Try exact match first, then longest prefix match.
+    // Exact match always wins.
     const direct = routes[sql];
     if (direct) {
       return Array.isArray(direct) ? { rows: direct } : direct;
     }
+    // Longest-prefix fallback, restricted to routes that opted in with
+    // `prefix: true`. An array-shorthand or a route without the flag never
+    // participates, so it can only ever match its exact key.
     let bestMatch: FakeOracleRoute | null = null;
     let bestLength = 0;
     for (const [pattern, value] of Object.entries(routes)) {
+      if (Array.isArray(value) || value.prefix !== true) continue;
       if (sql.startsWith(pattern) && pattern.length > bestLength) {
-        bestMatch = Array.isArray(value) ? { rows: value } : value;
+        bestMatch = value;
         bestLength = pattern.length;
       }
     }

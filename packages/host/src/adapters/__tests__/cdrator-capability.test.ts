@@ -192,6 +192,63 @@ describe("buildCdratorCapability — outbound request shape (FR-060/NFR-010)", (
   });
 });
 
+describe("buildCdratorCapability — 401 retry through the real wired token provider", () => {
+  it("invalidates and re-mints on a 401, retrying the data request with a fresh token", async () => {
+    // The adapter wires a REAL createTokenProvider (not a fake). A 401 on the data
+    // request must drive invalidate → re-mint → retry through that wired provider,
+    // proving the wiring re-mints — not just client.ts's unit-level fake provider.
+    const calls: CapturedRequest[] = [];
+    let mintCount = 0;
+    let dataCount = 0;
+    const fetch: FetchLike = async (url, init): Promise<FetchResponseLike> => {
+      calls.push({ url, method: init.method, headers: { ...init.headers }, body: init.body });
+      const isTokenMint = init.body !== undefined && init.body.includes("grant_type");
+      if (isTokenMint) {
+        mintCount += 1;
+        // Distinct token per mint so the retry's Authorization header proves a re-mint.
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => "",
+          json: async () => ({ access_token: `minted-token-${mintCount}`, expires_in: 3600 }),
+        };
+      }
+      // Data request: first attempt 401 (stale token), the retry 200.
+      dataCount += 1;
+      const unauthorized = dataCount === 1;
+      return {
+        ok: !unauthorized,
+        status: unauthorized ? 401 : 200,
+        statusText: unauthorized ? "Unauthorized" : "OK",
+        text: async () => (unauthorized ? "token expired" : ""),
+        json: async () => ({}),
+      };
+    };
+
+    const config = parseOk(cdratorEnv);
+    const handle = buildCdratorCapability(config, fetch);
+    const result = await handle?.client.get("/customers/123", { schema: z.object({}) });
+
+    // The single 401-retry succeeded.
+    expect(result?.ok).toBe(true);
+    // Two mints (initial + re-mint after invalidate) and two data attempts.
+    expect(mintCount).toBe(2);
+    expect(dataCount).toBe(2);
+    // Exact sequence: mint → data(401) → re-mint → data(200).
+    expect(calls.map((c) => (c.body?.includes("grant_type") ? "mint" : "data"))).toEqual([
+      "mint",
+      "data",
+      "mint",
+      "data",
+    ]);
+    // The first data attempt carried token #1; the retry carried the re-minted #2.
+    const dataReqs = calls.filter((c) => !c.body?.includes("grant_type"));
+    expect(dataReqs[0]!.headers.Authorization).toBe("Bearer minted-token-1");
+    expect(dataReqs[1]!.headers.Authorization).toBe("Bearer minted-token-2");
+  });
+});
+
 describe("HostConfigSchema — CDRATOR_* validation (FR-060/NFR-010)", () => {
   it("rejects CDRATOR_URL without the required operator credentials", () => {
     const result = parseHostConfig({ ...baseEnv, CDRATOR_URL: "https://rator1.ibt.oister.dk/rest-api-core" });

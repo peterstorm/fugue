@@ -813,6 +813,21 @@ export const HostConfigSchema = z.object({
         "must be an https:// URL when KEYCLOAK_AGENT_CLIENT_CREDENTIALS is set and KEYCLOAK_TOKEN_URL is unset (the agent client secret is POSTed to the token URL derived from this issuer)",
     });
   }
+  // REALM_JWKS_URL is meaningful ONLY as a key-fetch override for the realm JWT
+  // path, and that path is gated on REALM_JWT_ISSUER (host.ts): with the issuer
+  // unset the verifier is never built and the JWKS override is silently dropped.
+  // An operator who sets REALM_JWKS_URL alone believes they wired split-horizon
+  // key fetch but got a no-op. Reject the half-set pair at boot (FR-001), matching
+  // every other paired field here, rather than silently ignoring it. Issuer-only
+  // is valid (the verifier derives the /certs endpoint from the issuer).
+  if (c.REALM_JWKS_URL !== undefined && c.REALM_JWT_ISSUER === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["REALM_JWKS_URL"],
+      message:
+        "REALM_JWKS_URL requires REALM_JWT_ISSUER (the JWKS override only takes effect when the realm JWT path is enabled by the issuer)",
+    });
+  }
   // Entra tenant and client are an inseparable pair: the WIF hop needs BOTH to
   // federate, and either one alone is an internally-inconsistent config that
   // would silently half-wire the Entra leg. Reject the mismatch at boot (FR-001)

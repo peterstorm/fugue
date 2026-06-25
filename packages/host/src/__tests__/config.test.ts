@@ -589,6 +589,40 @@ describe("HostConfigSchema", () => {
     });
     expect(result.ok).toBe(true);
   });
+
+  // Realm JWT split-horizon JWKS pairing — REALM_JWKS_URL is a key-fetch override
+  // for the realm JWT path, which is gated on REALM_JWT_ISSUER. Setting the URL
+  // alone is a silent no-op (host never builds the verifier), so it is rejected at
+  // boot like every other paired field, rather than being silently ignored.
+  it("rejects REALM_JWKS_URL set without REALM_JWT_ISSUER (silent no-op guard)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      REALM_JWKS_URL: "https://keycloak.svc/realms/fugue/protocol/openid-connect/certs",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("REALM_JWKS_URL");
+    expect(result.error.message).toContain("REALM_JWT_ISSUER");
+  });
+
+  it("accepts REALM_JWKS_URL when REALM_JWT_ISSUER is also set (split-horizon JWKS)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      REALM_JWT_ISSUER: "https://auth.example.com/realms/fugue",
+      REALM_JWKS_URL: "https://keycloak.svc/realms/fugue/protocol/openid-connect/certs",
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts REALM_JWT_ISSUER alone (verifier derives the /certs JWKS endpoint)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      REALM_JWT_ISSUER: "https://auth.example.com/realms/fugue",
+    });
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("FugueYamlSchema", () => {

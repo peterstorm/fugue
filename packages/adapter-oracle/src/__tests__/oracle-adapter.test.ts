@@ -33,12 +33,14 @@ const PackageSchema = z.object({
 
 describe("@fuguejs/oracle — createFakeOracleCapability", () => {
   const fakeHandle = createFakeOracleCapability({
-    "SELECT * FROM TABLE(GET_PACKAGE_INFO": [
-      { optionKey: "A", standardPrice: "199", discountPrice: "99" },
-    ],
-    "SELECT * FROM TABLE(GET_PACKAGE_INFO(:subId)) pkg WHERE pkg.foo": [
-      { optionKey: "NARROW", standardPrice: "299", discountPrice: "199" },
-    ],
+    "SELECT * FROM TABLE(GET_PACKAGE_INFO": {
+      prefix: true,
+      rows: [{ optionKey: "A", standardPrice: "199", discountPrice: "99" }],
+    },
+    "SELECT * FROM TABLE(GET_PACKAGE_INFO(:subId)) pkg WHERE pkg.foo": {
+      prefix: true,
+      rows: [{ optionKey: "NARROW", standardPrice: "299", discountPrice: "199" }],
+    },
     "SELECT * FROM packages": [
       { optionKey: "B", standardPrice: "299", discountPrice: "199" },
       { optionKey: "C", standardPrice: "399", discountPrice: "299" },
@@ -131,10 +133,10 @@ describe("@fuguejs/oracle — createFakeOracleCapability", () => {
   });
 
   describe("longest-prefix matching", () => {
-    it("when two prefixes match, the longest wins", async () => {
+    it("when two opt-in prefixes match, the longest wins", async () => {
       const handle = createFakeOracleCapability({
-        "SELECT * FROM TABLE(GET_PACKAGE_INFO": [{ optionKey: "broad", standardPrice: "1", discountPrice: "1" }],
-        "SELECT * FROM TABLE(GET_PACKAGE_INFO(:subId)) pkg WHERE pkg.foo": [{ optionKey: "narrow", standardPrice: "2", discountPrice: "1" }],
+        "SELECT * FROM TABLE(GET_PACKAGE_INFO": { prefix: true, rows: [{ optionKey: "broad", standardPrice: "1", discountPrice: "1" }] },
+        "SELECT * FROM TABLE(GET_PACKAGE_INFO(:subId)) pkg WHERE pkg.foo": { prefix: true, rows: [{ optionKey: "narrow", standardPrice: "2", discountPrice: "1" }] },
       });
       const result = await handle.client.query(
         PackageSchema,
@@ -144,6 +146,40 @@ describe("@fuguejs/oracle — createFakeOracleCapability", () => {
       expect(isOk(result)).toBe(true);
       if (result.ok) {
         expect(result.value[0]?.optionKey).toBe("narrow");
+      }
+    });
+
+    it("exact (non-prefix) routes do NOT match a query that merely shares their prefix", async () => {
+      // The default route is an exact key. A longer query that starts with it
+      // must NOT match — that prefix-swallow is exactly the foot-gun the opt-in
+      // flag closes. A node running the wrong SQL gets an empty result, not the
+      // fixture meant for a different query.
+      const handle = createFakeOracleCapability({
+        "SELECT * FROM packages": [{ optionKey: "exact", standardPrice: "1", discountPrice: "1" }],
+      });
+      const result = await handle.client.query(
+        PackageSchema,
+        "SELECT * FROM packages WHERE id = :id",
+        { id: "1" },
+      );
+      expect(isOk(result)).toBe(true);
+      if (result.ok) {
+        expect(result.value).toEqual([]);
+      }
+    });
+
+    it("an opt-in prefix route still matches the same longer query", async () => {
+      const handle = createFakeOracleCapability({
+        "SELECT * FROM packages": { prefix: true, rows: [{ optionKey: "broad", standardPrice: "1", discountPrice: "1" }] },
+      });
+      const result = await handle.client.query(
+        PackageSchema,
+        "SELECT * FROM packages WHERE id = :id",
+        { id: "1" },
+      );
+      expect(isOk(result)).toBe(true);
+      if (result.ok) {
+        expect(result.value[0]?.optionKey).toBe("broad");
       }
     });
   });
@@ -698,5 +734,75 @@ describe("@fuguejs/oracle — createOracleAdapter() recovers from a transient cr
 
     await expect(handle.connect?.()).rejects.toBeInstanceOf(Error);
     await expect(handle.close?.()).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production query/close lifecycle (real per-query seam, no injected fake)
+// ---------------------------------------------------------------------------
+
+describe("@fuguejs/oracle — createOracleAdapter() production query/close lifecycle", () => {
+  it("releases the pooled connection when a query's execute throws (finally close)", async () => {
+    // No fake OracleQueryable is injected, so client.query() drives the REAL
+    // per-query seam: pool.getConnection → conn.execute → finally conn.close.
+    // A throwing execute must still release the connection or the pool leaks
+    // under query errors (the seam at adapter index.ts:415 was previously only
+    // covered for connect(), never the query path).
+    let closed = 0;
+    installOracledbMock(() => ({
+      execute: async () => {
+        throw new Error("ORA-00942: table or view does not exist");
+      },
+      close: async () => {
+        closed += 1;
+      },
+    }));
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    const result = await handle.client.query(PackageSchema, "SELECT * FROM packages");
+    expect(isErr(result)).toBe(true);
+    // The connection was released exactly once despite execute throwing.
+    expect(closed).toBe(1);
+  });
+
+  it("close() drains the pool with pool.close(0) after a successful open", async () => {
+    // Only close()-as-no-op-after-failed-open was covered. This asserts the happy
+    // path: once the pool has been opened, close() calls pool.close(0) (zero-drain
+    // window) exactly once.
+    let poolCloseCalls = 0;
+    let poolCloseArg: number | undefined;
+    void mock.module("oracledb", () => {
+      const mod = {
+        OUT_FORMAT_OBJECT: 4002,
+        createPool: async () => ({
+          getConnection: async () => ({
+            execute: async () => ({ rows: [{ "1": 1 }] }),
+            close: async () => {},
+          }),
+          close: async (drainSeconds?: number) => {
+            poolCloseCalls += 1;
+            poolCloseArg = drainSeconds;
+          },
+        }),
+      };
+      return { default: mod, ...mod };
+    });
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    // connect() lazily opens the pool; close() must then drain it.
+    await handle.connect?.();
+    await handle.close?.();
+    expect(poolCloseCalls).toBe(1);
+    expect(poolCloseArg).toBe(0);
   });
 });

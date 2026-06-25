@@ -19,7 +19,7 @@ import {
   buildUrl,
   type AuthedHttpCapability,
 } from "../client.js";
-import { createFakeAuthedHttpCapability } from "../index.js";
+import { createFakeAuthedHttpCapability, shapedRoute } from "../index.js";
 import type { FetchLike, FetchResponseLike, TokenProvider, BearerToken } from "../auth.js";
 
 // ---------------------------------------------------------------------------
@@ -456,9 +456,9 @@ describe("createAuthedHttpClient — Content-Type handling", () => {
 describe("createFakeAuthedHttpCapability", () => {
   const fake = createFakeAuthedHttpCapability({
     "GET /customers/123": { id: "123", name: "Alice" },
-    "POST /orders": { body: { id: "ord-1", name: "Order" } },
-    "GET /customers/999": { status: 404, body: "Not Found" },
-    "GET /flaky": { status: 503, body: "down" },
+    "POST /orders": shapedRoute({ body: { id: "ord-1", name: "Order" } }),
+    "GET /customers/999": shapedRoute({ status: 404, body: "Not Found" }),
+    "GET /flaky": shapedRoute({ status: 503, body: "down" }),
   });
   const client = fake.client;
 
@@ -501,10 +501,10 @@ describe("createFakeAuthedHttpCapability", () => {
 
   it("matchBody mismatch fails the route so a wrong payload surfaces", async () => {
     const fakeWithAssertion = createFakeAuthedHttpCapability({
-      "POST /events": {
+      "POST /events": shapedRoute({
         body: { id: "e1", name: "ok" },
         matchBody: (b: unknown) => (b as { type?: string }).type === "click",
-      },
+      }),
     });
     const wrong = await fakeWithAssertion.client.post("/events", { schema: PayloadSchema, body: { type: "scroll" } });
     expect(isErr(wrong)).toBe(true);

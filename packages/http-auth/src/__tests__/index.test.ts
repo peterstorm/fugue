@@ -15,6 +15,7 @@ import {
   createHttpAuthAdapter,
   healthCheckWithTimeout,
   createFakeAuthedHttpCapability,
+  shapedRoute,
   type HttpAuthConfig,
 } from "../index.js";
 import { createTokenProvider, type FetchLike, type FetchResponseLike } from "../auth.js";
@@ -124,24 +125,24 @@ describe("healthCheckWithTimeout", () => {
 // Fake shaped-route caveat (#9)
 // ---------------------------------------------------------------------------
 
-describe("createFakeAuthedHttpCapability — shaped-route caveat", () => {
-  it("a raw payload with a top-level body field is MISREAD as a shaped route", async () => {
-    // Documented caveat: `{ body: ..., id: ... }` is treated as a shaped route,
-    // so its `body` is unwrapped and the rest dropped.
+describe("createFakeAuthedHttpCapability — raw vs shaped routes", () => {
+  it("a raw payload with a top-level body field is returned VERBATIM (not misread)", async () => {
+    // The `shapedRoute` brand — not a `"body" in route` heuristic — distinguishes
+    // shaped control metadata from raw payloads, so a payload that legitimately
+    // carries a `body` field round-trips unchanged.
     const fake = createFakeAuthedHttpCapability({
-      // Intending to return this payload verbatim, but it has a `body` key:
       "GET /raw": { id: "1", name: "Alice", body: "note" },
     });
     const result = await fake.client.get("/raw", { schema: PayloadSchema });
-    // The unwrapped `body` ("note") is NOT a valid PayloadSchema → node-crash.
-    expect(isErr(result)).toBe(true);
+    expect(isOk(result)).toBe(true);
+    if (result.ok) expect(result.value.name).toBe("Alice");
   });
 
-  it("wrapping the payload in an explicit { body } returns it verbatim", async () => {
+  it("shapedRoute({ body }) unwraps body as the response", async () => {
     const fake = createFakeAuthedHttpCapability({
-      "GET /raw": { body: { id: "1", name: "Alice", body: "note" } },
+      "GET /shaped": shapedRoute({ body: { id: "1", name: "Alice" } }),
     });
-    const result = await fake.client.get("/raw", { schema: PayloadSchema });
+    const result = await fake.client.get("/shaped", { schema: PayloadSchema });
     expect(isOk(result)).toBe(true);
     if (result.ok) expect(result.value.name).toBe("Alice");
   });
