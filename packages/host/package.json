@@ -23,6 +23,8 @@
     "@anthropic-ai/sdk": "^0.91.1",
     "@fuguejs/framework": "workspace:*",
     "@fuguejs/fs": "workspace:*",
+    "@fuguejs/http-auth": "workspace:*",
+    "@fuguejs/oracle": "workspace:*",
     "hono": "^4.7.11",
     "ioredis": "^5.10.1",
     "jose": "^6.1.0",

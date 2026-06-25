@@ -46,6 +46,8 @@ import {
 import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 import { createModuleLoader } from "./adapters/module-loader.js";
 import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
+import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
+import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
@@ -252,6 +254,25 @@ const main = async () => {
       const { createFsAdapter } = await import("@fuguejs/fs");
       capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
       logger.info(`documents capability: @fuguejs/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
+    }
+
+    // Optional `authedHttp` capability (FR-060): the generic @fuguejs/http-auth
+    // adapter configured for the CDRator/Oister REST API from CDRATOR_* env.
+    // Same gating as the documents adapter — undefined when CDRATOR_URL is unset.
+    const cdrator = buildCdratorCapability(config);
+    if (cdrator !== undefined) {
+      capabilities.push(cdrator);
+      logger.info(`authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`, { tenant });
+    }
+
+    // Optional `oracle` capability (FR-031/FR-033): @fuguejs/oracle wired from
+    // ORACLE_* env. Same gating as the documents adapter — undefined when
+    // ORACLE_CONNECT_STRING is unset. We log ONLY the non-secret host:port/service
+    // of the connect string, never user/password (FR-041/SC-008).
+    const oracle = buildOracleCapability(config, logger);
+    if (oracle !== undefined) {
+      capabilities.push(oracle);
+      logger.info(`oracle capability: @fuguejs/oracle targeting ${connectStringHost(config.ORACLE_CONNECT_STRING!)}`, { tenant });
     }
 
     const sharedInfra: SharedInfra = {

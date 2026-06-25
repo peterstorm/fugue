@@ -17,6 +17,8 @@ import { createHost } from "./host.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 import { createModuleLoader } from "./adapters/module-loader.js";
 import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
+import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
+import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
@@ -125,6 +127,30 @@ const main = async () => {
       // Config validation (superRefine) guarantees DOCUMENTS_FS_ROOT is set.
       capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
       logger.info(`documents capability: @fuguejs/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
+    }
+
+    // Optional `authedHttp` capability (FR-060): the generic @fuguejs/http-auth
+    // adapter configured for the CDRator/Oister REST API from CDRATOR_* env.
+    // Returns undefined when CDRATOR_URL is unset, so a `requires: ["authedHttp"]`
+    // DAG fails the boot-time capability check exactly as before — same gating as
+    // the documents adapter. Credentials come only from config; none are logged.
+    const cdrator = buildCdratorCapability(config);
+    if (cdrator !== undefined) {
+      capabilities.push(cdrator);
+      logger.info(`authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`);
+    }
+
+    // Optional `oracle` capability (FR-031/FR-033): the @fuguejs/oracle adapter
+    // (a read-only oracledb pool) wired from ORACLE_* env. Returns undefined when
+    // ORACLE_CONNECT_STRING is unset, so a `requires: ["oracle"]` DAG fails the
+    // boot-time capability check exactly as before — same gating as the documents
+    // adapter (zero regression). Credentials come only from config; we log ONLY
+    // the non-secret host:port/service of the connect string, never user/password
+    // (FR-041/SC-008).
+    const oracle = buildOracleCapability(config, logger);
+    if (oracle !== undefined) {
+      capabilities.push(oracle);
+      logger.info(`oracle capability: @fuguejs/oracle targeting ${connectStringHost(config.ORACLE_CONNECT_STRING!)}`);
     }
 
     // Step 3: Create shared infrastructure

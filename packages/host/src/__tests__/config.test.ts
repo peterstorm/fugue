@@ -276,6 +276,198 @@ describe("HostConfigSchema", () => {
     expect(result.value.DYNAMICS_ORG_HOST).toBeUndefined();
   });
 
+  // ── Oracle `oracle` capability gating (FR-033 / FR-040 / FR-041) ────────────
+  it("leaves the oracle capability unconfigured by default — all ORACLE_* fields absent is valid (FR-033 zero regression)", () => {
+    const result = parseHostConfig(validEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.ORACLE_CONNECT_STRING).toBeUndefined();
+    expect(result.value.ORACLE_USER).toBeUndefined();
+    expect(result.value.ORACLE_PASSWORD).toBeUndefined();
+    expect(result.value.ORACLE_POOL_MIN).toBeUndefined();
+    expect(result.value.ORACLE_POOL_MAX).toBeUndefined();
+  });
+
+  it("accepts ORACLE_CONNECT_STRING with ORACLE_USER + ORACLE_PASSWORD (capability wires)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+      ORACLE_USER: "pricing_app",
+      ORACLE_PASSWORD: "s3cr3t",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.ORACLE_CONNECT_STRING).toBe("dbhost:1521/PRICING");
+    expect(result.value.ORACLE_USER).toBe("pricing_app");
+    expect(result.value.ORACLE_PASSWORD).toBe("s3cr3t");
+  });
+
+  it("coerces ORACLE_POOL_MIN / ORACLE_POOL_MAX to ints when set", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+      ORACLE_USER: "pricing_app",
+      ORACLE_PASSWORD: "s3cr3t",
+      ORACLE_POOL_MIN: "1",
+      ORACLE_POOL_MAX: "8",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.ORACLE_POOL_MIN).toBe(1);
+    expect(result.value.ORACLE_POOL_MAX).toBe(8);
+  });
+
+  it("rejects ORACLE_CONNECT_STRING set without ORACLE_USER (FR-040)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+      ORACLE_PASSWORD: "s3cr3t",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_USER");
+  });
+
+  it("rejects ORACLE_CONNECT_STRING set without ORACLE_PASSWORD (FR-040)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+      ORACLE_USER: "pricing_app",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_PASSWORD");
+  });
+
+  it("rejects ORACLE_CONNECT_STRING set with NEITHER user NOR password (both gated)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_USER");
+    expect(result.error.message).toContain("ORACLE_PASSWORD");
+  });
+
+  it("does NOT leak ORACLE_PASSWORD in the validation error message (FR-041)", () => {
+    // Genuine non-leak proof: the sentinel password is PRESENT in the input AND
+    // the config goes through the error path (ORACLE_USER omitted while
+    // ORACLE_CONNECT_STRING is set, plus a sibling failure on PORT) so the
+    // aggregated message is actually generated. The assertion then proves the
+    // secret value never appears in that message — unlike the old test, whose
+    // "super-secret-value" literal was never in the input and so passed vacuously.
+    const sentinel = "s3ntinel-PW-do-not-log";
+    const result = parseHostConfig({
+      ...validEnv,
+      ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+      ORACLE_PASSWORD: sentinel,
+      // ORACLE_USER omitted on purpose → triggers the gated error path.
+      // A sibling failure broadens the aggregated message that must stay clean.
+      PORT: "0",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    // The error path WAS exercised (it named the missing user)…
+    expect(result.error.message).toContain("ORACLE_USER");
+    // …and still the sentinel secret value never surfaced.
+    expect(result.error.message).not.toContain(sentinel);
+  });
+
+  // ── ORACLE_POOL_MIN ≤ ORACLE_POOL_MAX cross-field check (FR-041) ─────────────
+  const oracleEnv = {
+    ORACLE_CONNECT_STRING: "dbhost:1521/PRICING",
+    ORACLE_USER: "pricing_app",
+    ORACLE_PASSWORD: "s3cr3t",
+  };
+
+  it("rejects ORACLE_POOL_MIN greater than ORACLE_POOL_MAX (min=10, max=4)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ...oracleEnv,
+      ORACLE_POOL_MIN: "10",
+      ORACLE_POOL_MAX: "4",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_POOL_MIN");
+    expect(result.error.message).toContain("ORACLE_POOL_MAX");
+  });
+
+  it("accepts ORACLE_POOL_MIN ≤ ORACLE_POOL_MAX (min=2, max=8)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ...oracleEnv,
+      ORACLE_POOL_MIN: "2",
+      ORACLE_POOL_MAX: "8",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.ORACLE_POOL_MIN).toBe(2);
+    expect(result.value.ORACLE_POOL_MAX).toBe(8);
+  });
+
+  it("accepts ORACLE_POOL_MIN of 0 (the min(0)/min(1) asymmetry)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ...oracleEnv,
+      ORACLE_POOL_MIN: "0",
+      ORACLE_POOL_MAX: "4",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.ORACLE_POOL_MIN).toBe(0);
+  });
+
+  it("rejects ORACLE_POOL_MAX of 0 (below min 1)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ...oracleEnv,
+      ORACLE_POOL_MAX: "0",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_POOL_MAX");
+  });
+
+  it("rejects negative ORACLE_POOL_MIN (below min 0)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ...oracleEnv,
+      ORACLE_POOL_MIN: "-1",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_POOL_MIN");
+  });
+
+  it("rejects fractional ORACLE_POOL_MAX (must be an integer)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      ...oracleEnv,
+      ORACLE_POOL_MAX: "2.5",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("ORACLE_POOL_MAX");
+  });
+
   it("REJECTS at boot an AGENT_CLIENT_SCOPES with a typo'd/unrecognised scope name (fails at boot, never at runtime)", () => {
     const result = parseHostConfig({
       ...validEnv,

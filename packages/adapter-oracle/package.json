@@ -1,0 +1,47 @@
+{
+  "name": "@fuguejs/oracle",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peterstorm/fugue.git",
+    "directory": "packages/adapter-oracle"
+  },
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@fuguejs/framework": "workspace:*"
+  },
+  "peerDependencies": {
+    "oracledb": "^7.0.0",
+    "zod": "^4.3.6"
+  },
+  "peerDependenciesMeta": {
+    "oracledb": {
+      "optional": false
+    },
+    "zod": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/oracledb": "^6.5.0",
+    "@types/bun": "latest",
+    "oracledb": "^7.0.0",
+    "zod": "^4.3.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/__tests__"
+  ]
+}
