@@ -29,8 +29,12 @@ on:
     tags: ["v*"]
 
 env:
-  # Publish order: dependencies before dependents.
-  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host
+  # Publish order: dependencies before dependents. These are DIRECTORY names
+  # (packages/$pkg), not npm names — the oracle package lives in `adapter-oracle`
+  # but publishes as `@fuguejs/oracle`. `adapter-oracle` + `http-auth` depend only
+  # on `framework` and are depended on by `host`, so they slot after the leaf deps
+  # and before `host`.
+  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg adapter-oracle http-auth host
 
 jobs:
   publish:

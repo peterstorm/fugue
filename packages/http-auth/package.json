@@ -1,6 +1,6 @@
 {
   "name": "@fuguejs/http-auth",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peterstorm/fugue.git",
