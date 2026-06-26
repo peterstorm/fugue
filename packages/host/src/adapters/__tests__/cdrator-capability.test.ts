@@ -143,6 +143,43 @@ describe("buildCdratorCapability — outbound request shape (FR-060/NFR-010)", (
     expect(fields.password).toBe("s3cret");
   });
 
+  it("client_credentials grant: Basic client auth + brand_key/operator form fields, NO username/password", async () => {
+    // The real Rator token endpoint (and flexii's own integration) authenticate
+    // with a two-legged client_credentials grant: the client authenticates via
+    // HTTP Basic client_id:client_secret and the body carries brand_key + an
+    // operator identity, but NO resource-owner username/password. Wiring this
+    // flavour must reproduce exactly that shape.
+    const config = parseOk({
+      ...baseEnv,
+      CDRATOR_URL: "https://rator1.ibt.oister.dk/rest-api-core/api",
+      CDRATOR_AUTH_URL: "https://rator1.ibt.oister.dk/rest-api-auth/oauth/token",
+      CDRATOR_BRAND_KEY: "oister",
+      CDRATOR_GRANT_TYPE: "client_credentials",
+      CDRATOR_CLIENT_ID: "toolbox",
+      CDRATOR_CLIENT_SECRET: "s3cret",
+      CDRATOR_OPERATOR: "toolbox",
+      // deliberately NO CDRATOR_USERNAME / CDRATOR_PASSWORD
+    });
+    const { fetch, calls } = recordingFetch();
+    const handle = buildCdratorCapability(config, fetch);
+    await handle?.connect?.();
+
+    expect(calls).toHaveLength(1);
+    const mint = calls[0]!;
+    expect(mint.url).toBe("https://rator1.ibt.oister.dk/rest-api-auth/oauth/token");
+    const fields = formFields(mint.body);
+    expect(fields.grant_type).toBe("client_credentials");
+    expect(fields.brand_key).toBe("oister");
+    expect(fields.operator).toBe("toolbox");
+    // The decisive invariant: no resource-owner credentials in the body.
+    expect(mint.body?.includes("username=")).toBe(false);
+    expect(mint.body?.includes("password=")).toBe(false);
+    // The client authenticates via HTTP Basic client_id:client_secret.
+    const authz = mint.headers.Authorization;
+    expect(authz?.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(authz!.slice(6), "base64").toString("utf8")).toBe("toolbox:s3cret");
+  });
+
   it("threads the X-RATOR-brand-key + Accept-Language: DK default headers onto a data request", async () => {
     const config = parseOk(cdratorEnv);
     const { fetch, calls } = recordingFetch();
@@ -158,8 +195,10 @@ describe("buildCdratorCapability — outbound request shape (FR-060/NFR-010)", (
     expect(dataReq.url).toBe("https://rator1.ibt.oister.dk/rest-api-core/customers/123");
     // The minted bearer token is injected (NFR-010 path: token only on the header).
     expect(dataReq.headers.Authorization).toBe("Bearer minted-token");
-    // The static defaults reach the data request.
-    expect(dataReq.headers["X-RATOR-brand-key"]).toBe("oister");
+    // The static defaults reach the data request. The brand-key header is
+    // UPPERCASED — CDRator matches it case-sensitively (lowercase 404s); the token
+    // brand_key form field stays lowercase (see cdrator-capability.ts).
+    expect(dataReq.headers["X-RATOR-brand-key"]).toBe("OISTER");
     // The market/country value the CDRator API expects — NOT a BCP-47 tag.
     expect(dataReq.headers["Accept-Language"]).toBe("DK");
   });
@@ -311,5 +350,43 @@ describe("HostConfigSchema — CDRATOR_* validation (FR-060/NFR-010)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.CDRATOR_URL).toBeUndefined();
+  });
+
+  // ── Grant-flavour validation (operator_password vs client_credentials) ──────
+
+  const ccEnv = {
+    ...baseEnv,
+    CDRATOR_URL: "https://rator1.ibt.oister.dk/rest-api-core/api",
+    CDRATOR_AUTH_URL: "https://rator1.ibt.oister.dk/rest-api-auth/oauth/token",
+    CDRATOR_BRAND_KEY: "oister",
+    CDRATOR_GRANT_TYPE: "client_credentials",
+    CDRATOR_CLIENT_ID: "toolbox",
+    CDRATOR_CLIENT_SECRET: "s3cret",
+  };
+
+  it("client_credentials: accepts a config WITHOUT operator username/password", () => {
+    // The key relaxation — operator_password's username/password are NOT required
+    // for a two-legged client_credentials grant.
+    const result = parseHostConfig(ccEnv);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.CDRATOR_GRANT_TYPE).toBe("client_credentials");
+    expect(result.value.CDRATOR_USERNAME).toBeUndefined();
+  });
+
+  it("client_credentials: REQUIRES the OAuth client id + secret (the Basic client)", () => {
+    const result = parseHostConfig({ ...ccEnv, CDRATOR_CLIENT_SECRET: undefined });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("CDRATOR_CLIENT_SECRET");
+  });
+
+  it("operator_password (default): still REQUIRES username/password", () => {
+    const result = parseHostConfig({ ...cdratorEnv, CDRATOR_PASSWORD: undefined });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
   });
 });

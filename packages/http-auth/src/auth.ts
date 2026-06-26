@@ -99,8 +99,20 @@ export interface AuthConfig {
   readonly params?: Readonly<Record<string, string>>;
   /** Optional HTTP Basic auth header on the token request. */
   readonly basicAuth?: BasicAuth;
-  /** Form-field credentials (username/password and any extras). */
-  readonly credentials: GrantCredentials;
+  /**
+   * Form-field credentials (username/password and any extras) for resource-owner
+   * style grants (`password`/`operator_password`).
+   *
+   * OPTIONAL because a two-legged `client_credentials` grant carries NO
+   * resource-owner username/password — the client authenticates solely via
+   * `basicAuth` (HTTP Basic `client_id:client_secret`) and any non-secret extras
+   * (brand key, operator) ride in `params`. When omitted, `buildGrantBody` emits
+   * neither `username` nor `password`, so the body is exactly
+   * `grant_type=client_credentials&<params>` — what an OAuth2 client-credentials
+   * token endpoint expects (sending empty `username=`/`password=` would otherwise
+   * be rejected as an `invalid_request`).
+   */
+  readonly credentials?: GrantCredentials;
   /**
    * Request timeout for the token mint, in ms. Falls back to the client's
    * default when absent.
@@ -162,10 +174,16 @@ const basicAuthHeader = (basic: BasicAuth): string => {
 const buildGrantBody = (auth: AuthConfig): string => {
   const params = new URLSearchParams();
   params.set("grant_type", auth.grantType);
-  params.set("username", auth.credentials.username);
-  params.set("password", auth.credentials.password);
-  if (auth.credentials.extra)
-    for (const [k, v] of Object.entries(auth.credentials.extra)) params.set(k, v);
+  // Resource-owner credentials are emitted ONLY when present. A
+  // `client_credentials` grant omits them entirely (the client authenticates via
+  // `basicAuth`); emitting empty `username=`/`password=` would make a compliant
+  // token endpoint reject the request as `invalid_request`.
+  if (auth.credentials) {
+    params.set("username", auth.credentials.username);
+    params.set("password", auth.credentials.password);
+    if (auth.credentials.extra)
+      for (const [k, v] of Object.entries(auth.credentials.extra)) params.set(k, v);
+  }
   if (auth.params) for (const [k, v] of Object.entries(auth.params)) params.set(k, v);
   return params.toString();
 };

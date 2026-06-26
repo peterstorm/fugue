@@ -4,6 +4,9 @@
 node_modules/
 dist/
 .env
+# Local secret env files (CDRator creds, etc.) — never commit. Keep .env.example tracked.
+.env.*
+!.env.example
 *.tsbuildinfo
 # Transient doc-example extraction scratch (swept up by tsconfig include otherwise)
 **/__doc_check_dir__/

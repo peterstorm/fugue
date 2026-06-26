@@ -482,6 +482,30 @@ export const HostConfigSchema = z.object({
    * endpoint, never logged. Set together with CDRATOR_CLIENT_ID.
    */
   CDRATOR_CLIENT_SECRET: z.string().min(1).optional(),
+  /**
+   * Token-grant flavour for the CDRator token endpoint.
+   *
+   * - `operator_password` (default, legacy): resource-owner grant — POSTs
+   *   `grant_type=operator_password` with form `username`/`password`
+   *   (CDRATOR_USERNAME/PASSWORD), optionally under an HTTP Basic client header.
+   * - `client_credentials`: two-legged grant — the client authenticates via the
+   *   HTTP Basic `client_id:client_secret` header (CDRATOR_CLIENT_ID/SECRET) and
+   *   NO resource-owner username/password is sent. This is how the real Rator
+   *   token endpoint (and flexii's own integration) actually authenticates: the
+   *   body is `grant_type=client_credentials&brand_key=…&operator=…`. The
+   *   operator identity (when the deployment needs one) rides in CDRATOR_OPERATOR.
+   *
+   * The cross-field validation below enforces the fields each flavour requires.
+   */
+  CDRATOR_GRANT_TYPE: z.enum(["operator_password", "client_credentials"]).default("operator_password"),
+  /**
+   * Optional CDRator operator identity, sent as the static `operator` form field
+   * on the token grant. Used by the `client_credentials` flavour to scope the
+   * minted token to an operator (Rator authorizes account access by operator
+   * ownership). Ignored by the `operator_password` flavour (which identifies the
+   * operator via CDRATOR_USERNAME). Never logged.
+   */
+  CDRATOR_OPERATOR: z.string().min(1).optional(),
   // ── Oracle discount-pricing capability (`oracle`, FR-033/FR-040/FR-041) ────
   /**
    * Oracle Easy Connect / TNS connect string the `oracle` capability dials (e.g.
@@ -713,11 +737,23 @@ export const HostConfigSchema = z.object({
     if (!c.CDRATOR_BRAND_KEY) {
       ctx.addIssue({ code: "custom", path: ["CDRATOR_BRAND_KEY"], message: "Required when CDRATOR_URL is set" });
     }
-    if (!c.CDRATOR_USERNAME) {
-      ctx.addIssue({ code: "custom", path: ["CDRATOR_USERNAME"], message: "Required when CDRATOR_URL is set" });
-    }
-    if (!c.CDRATOR_PASSWORD) {
-      ctx.addIssue({ code: "custom", path: ["CDRATOR_PASSWORD"], message: "Required when CDRATOR_URL is set" });
+    // The required token-grant fields depend on the grant flavour. operator_password
+    // (default) needs the resource-owner username/password; client_credentials needs
+    // the OAuth client id/secret (the HTTP Basic client) and NO username/password.
+    if (c.CDRATOR_GRANT_TYPE === "client_credentials") {
+      if (!c.CDRATOR_CLIENT_ID) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_CLIENT_ID"], message: "Required when CDRATOR_GRANT_TYPE is 'client_credentials'" });
+      }
+      if (!c.CDRATOR_CLIENT_SECRET) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_CLIENT_SECRET"], message: "Required when CDRATOR_GRANT_TYPE is 'client_credentials'" });
+      }
+    } else {
+      if (!c.CDRATOR_USERNAME) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_USERNAME"], message: "Required when CDRATOR_URL is set (operator_password grant)" });
+      }
+      if (!c.CDRATOR_PASSWORD) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_PASSWORD"], message: "Required when CDRATOR_URL is set (operator_password grant)" });
+      }
     }
   }
   // ── Oracle `oracle` capability (FR-033/FR-040/FR-041) ──────────────────────

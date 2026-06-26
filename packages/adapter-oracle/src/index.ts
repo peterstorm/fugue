@@ -317,6 +317,25 @@ export const createOracleClient = (queryable: OracleQueryable): OracleCapability
 const HEALTH_CHECK_TIMEOUT_MS = 5_000;
 
 /**
+ * Session fix-up SQL run ONCE per freshly-created pooled connection (via the
+ * pool's `sessionCallback`). It pins the session's numeric formatting so the
+ * driver renders NUMBER columns to strings with a PERIOD decimal separator,
+ * INDEPENDENT of the database's default locale.
+ *
+ * Why this exists: the prod OISTERTS database defaults to a Danish locale
+ * (`NLS_NUMERIC_CHARACTERS = ',.'`), so price columns (e.g. `GET_PACKAGE_INFO`'s
+ * `PACK_FEE_PRICE`) came back as `"74,25"` — a COMMA decimal that a canonical
+ * period-decimal parser rejects, collapsing real figures to "unknown" even when
+ * the value is genuinely present. Prices are NUMBERs; the separator is a pure
+ * locale artifact, so the deterministic fix belongs HERE at the adapter seam
+ * (every Oracle-number-as-string consumer benefits) rather than baked into one
+ * caller's parser. The two-char value is decimal + group; the group char is
+ * irrelevant for implicit NUMBER→string conversion (no group separators are
+ * emitted without an explicit format model), so only the leading period matters.
+ */
+export const ORACLE_SESSION_NLS_SQL = "ALTER SESSION SET NLS_NUMERIC_CHARACTERS = '. '";
+
+/**
  * Minimal structural view of the parts of the `oracledb` module the adapter
  * touches. Kept here (rather than importing the SDK types into core
  * signatures) so the lazy `require` call has a precise shape without leaking
@@ -330,6 +349,16 @@ interface OracleDbModule {
     readonly password: string;
     readonly poolMin: number;
     readonly poolMax: number;
+    // Node-callback-form session fix-up: oracledb invokes it on each
+    // newly-created physical connection and waits for `callbackFn()` before
+    // handing the connection out. The CALLBACK form is mandatory here — the
+    // promise/async form HANGS under oracledb thin mode (getConnection never
+    // resolves). See `ORACLE_SESSION_NLS_SQL`.
+    readonly sessionCallback?: (
+      connection: OracleConnection,
+      requestedTag: string,
+      callbackFn: (error?: unknown) => void,
+    ) => void;
   }): Promise<OraclePool>;
 }
 
@@ -394,6 +423,17 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
           password: config.password,
           poolMin,
           poolMax,
+          // Pin numeric locale once per physical connection so NUMBER→string
+          // prices use a period decimal regardless of the DB's default locale
+          // (see ORACLE_SESSION_NLS_SQL). Amortized across every query on the
+          // connection rather than paid per getConnection(). MUST be the
+          // node-callback form — the async/promise form hangs in thin mode.
+          sessionCallback: (connection, _requestedTag, callbackFn) => {
+            connection
+              .execute(ORACLE_SESSION_NLS_SQL)
+              .then(() => callbackFn())
+              .catch((e: unknown) => callbackFn(e));
+          },
         })
         .catch((e) => {
           // Reset so a transient createPool failure (DNS blip, listener not yet

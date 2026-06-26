@@ -18,6 +18,7 @@ import {
   mapOracleError,
   healthCheckWithTimeout,
   stripCredentials,
+  ORACLE_SESSION_NLS_SQL,
 } from "../index.js";
 import type { OracleCapability, OracleQueryable } from "../index.js";
 
@@ -804,5 +805,81 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
     await handle.close?.();
     expect(poolCloseCalls).toBe(1);
     expect(poolCloseArg).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session NLS fix-up — pin the numeric locale on every new pooled connection
+// ---------------------------------------------------------------------------
+//
+// Regression guard for a LIVE-DB bug the fakes can't reach: the prod database
+// defaults to a Danish numeric locale (NLS_NUMERIC_CHARACTERS = ',.'), so NUMBER
+// columns serialized to strings with a COMMA decimal ("74,25"), which canonical
+// period-decimal parsers reject — silently collapsing real figures to "unknown".
+// The adapter must therefore issue an ALTER SESSION pragma on each new physical
+// connection. This is asserted WITHOUT a database by capturing the pool's
+// sessionCallback and simulating how oracledb invokes it.
+describe("@fuguejs/oracle — session NLS fix-up", () => {
+  it("issues the period-decimal NLS pragma on each new connection, before first use (callback form)", async () => {
+    const executed: string[] = [];
+    let captured:
+      | ((conn: unknown, tag: string, cb: (e?: unknown) => void) => void)
+      | undefined;
+
+    const makeConn = () => ({
+      execute: async (sql: string) => {
+        executed.push(sql);
+        return { rows: [{ "1": 1 }] };
+      },
+      close: async () => {},
+    });
+
+    void mock.module("oracledb", () => {
+      const mod = {
+        OUT_FORMAT_OBJECT: 4002,
+        createPool: async (cfg: { sessionCallback?: typeof captured }) => {
+          captured = cfg.sessionCallback;
+          return {
+            // Faithfully simulate oracledb thin mode: run the session fix-up on
+            // each brand-new connection and WAIT for its callback before handing
+            // the connection out (the async/promise form hangs here in reality,
+            // so the adapter must use the node-callback form — exercised below).
+            getConnection: async () => {
+              const conn = makeConn();
+              if (captured) {
+                await new Promise<void>((resolve, reject) =>
+                  captured!(conn, "", (e) => (e ? reject(e) : resolve())),
+                );
+              }
+              return conn;
+            },
+            close: async () => {},
+          };
+        },
+      };
+      return { default: mod, ...mod };
+    });
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+    await handle.connect?.();
+
+    // The adapter wired a session fix-up...
+    expect(captured).toBeTypeOf("function");
+    // ...it ran the exact NLS pragma...
+    expect(executed).toContain(ORACLE_SESSION_NLS_SQL);
+    // ...BEFORE the connection's first real use (the SELECT 1 connectivity probe).
+    const selectIdx = executed.findIndex((s) => s.includes("SELECT 1 FROM DUAL"));
+    expect(selectIdx).toBeGreaterThanOrEqual(0);
+    expect(executed.indexOf(ORACLE_SESSION_NLS_SQL)).toBeLessThan(selectIdx);
+
+    // The pragma pins a PERIOD decimal separator — the whole point of the fix.
+    expect(ORACLE_SESSION_NLS_SQL).toContain("NLS_NUMERIC_CHARACTERS");
+    expect(ORACLE_SESSION_NLS_SQL).toContain("'. '");
+
+    await handle.close?.();
   });
 });

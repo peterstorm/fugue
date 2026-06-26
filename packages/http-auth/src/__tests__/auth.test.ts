@@ -95,6 +95,40 @@ describe("createTokenProvider — mint request shape", () => {
     await provider.get();
     expect(calls[0]!.headers.Authorization).toBeUndefined();
   });
+
+  it("client_credentials grant: omits username/password entirely, authenticates via Basic + params", async () => {
+    // A two-legged client_credentials grant carries NO resource-owner
+    // credentials — the body must be exactly `grant_type=client_credentials`
+    // plus the static params (a compliant token endpoint rejects an empty
+    // `username=`/`password=`). The client authenticates via the Basic header.
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { access_token: "cc-tok", expires_in: 1800 }));
+    const provider = createTokenProvider({
+      auth: {
+        tokenUrl: "https://auth.example.com/oauth/token",
+        grantType: "client_credentials",
+        params: { brand_key: "oister", operator: "toolbox" },
+        basicAuth: { username: "toolbox", password: "s3cret" },
+        // credentials intentionally omitted
+      },
+      fetch,
+    });
+
+    const result = await provider.get();
+    expect(isOk(result)).toBe(true);
+
+    const call = calls[0]!;
+    const params = new URLSearchParams(call.body);
+    expect(params.get("grant_type")).toBe("client_credentials");
+    expect(params.get("brand_key")).toBe("oister");
+    expect(params.get("operator")).toBe("toolbox");
+    // The decisive invariant: no resource-owner fields are present at all.
+    expect(params.has("username")).toBe(false);
+    expect(params.has("password")).toBe(false);
+    // ...and the client authenticates via HTTP Basic.
+    const authz = call.headers.Authorization;
+    expect(authz?.startsWith("Basic ")).toBe(true);
+    expect(Buffer.from(authz!.slice(6), "base64").toString("utf8")).toBe("toolbox:s3cret");
+  });
 });
 
 describe("createTokenProvider — caching & invalidation", () => {

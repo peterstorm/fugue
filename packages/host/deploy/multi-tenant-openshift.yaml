@@ -159,7 +159,19 @@ spec:
             # picks them up through this envFrom and wires @fuguejs/oracle at boot
             # (unset → not registered, zero regression). The fugue-oracle-smoke Job
             # below reads the SAME three keys, so it proves the EXACT creds the host
-            # will use. CDRATOR_* (authedHttp) wire the same way.
+            # will use.
+            #
+            # CDRATOR_* (authedHttp) wire the same way: seal CDRATOR_URL /
+            # CDRATOR_AUTH_URL / CDRATOR_BRAND_KEY / CDRATOR_GRANT_TYPE /
+            # CDRATOR_CLIENT_ID / CDRATOR_CLIENT_SECRET / CDRATOR_OPERATOR into this
+            # Secret. NOTE (not wired yet — TODO when authedHttp goes to cluster):
+            # rator1 serves a chain rooted at the corporate self-signed CA
+            # "Hi3G OAM Root", which Bun's fetch does NOT trust by default — token
+            # mint fails at boot with "self signed certificate in certificate chain".
+            # The fix is to mount that CA (see repo `certs/oister-rator-ca-bundle.pem`,
+            # e.g. as a ConfigMap volume) and set NODE_EXTRA_CA_CERTS to its path on
+            # this container — trusting the corporate CA WITHOUT disabling TLS
+            # verification. Local dev does the same via `.env.cdrator`.
             - secretRef:
                 name: fugue-mt-platform
           volumeMounts:
