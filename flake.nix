@@ -19,6 +19,9 @@
             pythonPkgs.pip
             pythonPkgs.virtualenv
             pkgs.bun
+            # Node 24 bundles npm >= 11.5.1, required for the release workflow's
+            # OIDC trusted publishing (`npm publish`); bun handles everything else.
+            pkgs.nodejs_24
             pkgs.redis
           ];
 
