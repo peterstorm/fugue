@@ -95,7 +95,13 @@ async function main(): Promise<void> {
   // with the exact boot-time message (parse, don't validate).
   const configResult = parseHostConfig(env);
   if (!configResult.ok) {
-    console.error(`❌  Config invalid: ${JSON.stringify(configResult.error)}`);
+    // Log the curated `.message` (Zod issue path + message — names the offending
+    // variable, never its value), NOT `JSON.stringify(error)`. This keeps the
+    // script's "only ever name a missing variable, never its value" contract even
+    // if a future config refinement interpolates a received value into a message.
+    const detail =
+      "message" in configResult.error ? configResult.error.message : configResult.error.kind;
+    console.error(`❌  Config invalid: ${detail}`);
     process.exit(1);
   }
   const config = configResult.value;

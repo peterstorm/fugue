@@ -74,6 +74,21 @@ describe("createTokenProvider — mint request shape", () => {
     expect(params.get("brand_key")).toBe("acme");
   });
 
+  it("loops credentials.extra fields into the urlencoded grant body", async () => {
+    // An optional second factor (e.g. a device id) rides in `credentials.extra`
+    // and must surface as its own urlencoded field alongside username/password.
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { access_token: "tok-1", expires_in: 3600 }));
+    const provider = createTokenProvider({
+      auth: { ...baseAuth, credentials: { ...baseAuth.credentials!, extra: { device_id: "abc" } } },
+      fetch,
+    });
+
+    await provider.get();
+    const params = new URLSearchParams(calls[0]!.body);
+    expect(params.get("username")).toBe("operator");
+    expect(params.get("device_id")).toBe("abc");
+  });
+
   it("sets an HTTP Basic Authorization header when basicAuth is configured", async () => {
     const { fetch, calls } = recordingFetch(() => jsonResponse(200, { access_token: "tok-1" }));
     const provider = createTokenProvider({

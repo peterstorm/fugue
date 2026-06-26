@@ -197,6 +197,12 @@ export const stripCredentials = (message: string): string =>
   message
     // easy-connect / DSN style: user/password@... → ***@... (greedy to last @).
     .replace(/\b[\w.$-]+\/[^\s]*@/g, "***@")
+    // bare user@host form (no `/password`): user@host:port/svc → ***@host:port/svc.
+    // The lookahead requires a host-like token followed by `:` (port) or `/`
+    // (service) so this only fires on a connect-string `userinfo@host`, not on
+    // ordinary prose. `***@` is left intact (`*` ∉ [\w.$-]), so this stays
+    // idempotent and composes with the easy-connect rule above.
+    .replace(/\b[\w.$-]+@(?=[\w.$-]+[:/])/g, "***@")
     // key=value password fields (password=, pwd=, user=, uid=).
     .replace(/\b(password|pwd|user|uid)\s*=\s*[^;,\s)]+/gi, "$1=***");
 

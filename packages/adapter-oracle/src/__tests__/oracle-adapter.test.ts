@@ -882,4 +882,58 @@ describe("@fuguejs/oracle — session NLS fix-up", () => {
 
     await handle.close?.();
   });
+
+  it("propagates a failed NLS pragma through the callback so connection acquisition fails (the .catch(callbackFn(e)) branch)", async () => {
+    // The success path proves the pragma runs before first use. This drives the
+    // failure branch: the ALTER SESSION execute rejects, the adapter feeds the
+    // error to oracledb's callbackFn, and oracledb (faithfully simulated here)
+    // rejects getConnection — fail-closed, no connection handed out un-pinned.
+    const pragmaError = new Error("ORA-00604: NLS pragma failed");
+    let captured:
+      | ((conn: unknown, tag: string, cb: (e?: unknown) => void) => void)
+      | undefined;
+
+    const makeConn = () => ({
+      execute: async (sql: string) => {
+        if (sql === ORACLE_SESSION_NLS_SQL) throw pragmaError;
+        return { rows: [{ "1": 1 }] };
+      },
+      close: async () => {},
+    });
+
+    void mock.module("oracledb", () => {
+      const mod = {
+        OUT_FORMAT_OBJECT: 4002,
+        createPool: async (cfg: { sessionCallback?: typeof captured }) => {
+          captured = cfg.sessionCallback;
+          return {
+            // oracledb propagates a sessionCallback error: the pending
+            // getConnection rejects rather than handing out the connection.
+            getConnection: async () => {
+              const conn = makeConn();
+              if (captured) {
+                await new Promise<void>((resolve, reject) =>
+                  captured!(conn, "", (e) => (e ? reject(e) : resolve())),
+                );
+              }
+              return conn;
+            },
+            close: async () => {},
+          };
+        },
+      };
+      return { default: mod, ...mod };
+    });
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    // connect() lazily opens the pool and acquires a connection — which now
+    // fails because the session fix-up rejected.
+    await expect(handle.connect?.()).rejects.toBeInstanceOf(Error);
+    expect(captured).toBeTypeOf("function");
+  });
 });
