@@ -124,6 +124,21 @@ describe("realmJwksUri — derives the Keycloak certs endpoint (FR-003)", () => 
   });
 });
 
+describe("createRealmJwtVerifier — explicit jwksUri decouples key-fetch from issuer (split-horizon)", () => {
+  it("verifies a token whose iss is an UNREACHABLE public URL by fetching keys from the in-cluster jwksUri", async () => {
+    // issuer = a public route that does NOT resolve (would fail if it were the
+    // key source); jwksUri = the reachable local ('in-cluster') certs endpoint.
+    const verify = createRealmJwtVerifier({
+      issuer: "https://keycloak.public.example/realms/fugue-platform",
+      jwksUri: realmJwksUri(issuerFor()),
+    });
+    const token = await signValid({ iss: "https://keycloak.public.example/realms/fugue-platform" });
+    const res = await verify(token);
+    // Signature verified against keys fetched over jwksUri, not the (dead) issuer.
+    expect(res.ok).toBe(true);
+  });
+});
+
 describe("createRealmJwtVerifier — valid signature → SignatureVerified (FR-003/NFR-020)", () => {
   it("a token signed by the realm's published key verifies and returns the claims", async () => {
     const verify = createRealmJwtVerifier({ issuer: issuerFor() });

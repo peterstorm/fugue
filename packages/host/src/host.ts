@@ -496,7 +496,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   const realmJwt: RealmJwtDeps | undefined =
     config.REALM_JWT_ISSUER !== undefined
       ? {
-          verify: createRealmJwtVerifier({ issuer: config.REALM_JWT_ISSUER }),
+          verify: createRealmJwtVerifier({
+            issuer: config.REALM_JWT_ISSUER,
+            // Fetch keys over the in-cluster route when given, while `expectedIss`
+            // below still pins the public-route identity (split-horizon JWKS).
+            ...(config.REALM_JWKS_URL !== undefined ? { jwksUri: config.REALM_JWKS_URL } : {}),
+          }),
           expectedIss: config.REALM_JWT_ISSUER,
           expectedAud: config.REALM_JWT_AUDIENCE,
           // FR-021/FR-022: stateless team-membership check against the verified

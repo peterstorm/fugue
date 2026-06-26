@@ -52,9 +52,19 @@ const CLOCK_TOLERANCE = "60s";
 export interface RealmJwtVerifierConfig {
   /**
    * The realm issuer URL. Its `<issuer>/protocol/openid-connect/certs` JWKS
-   * endpoint is where the realm publishes its signing keys (Keycloak convention).
+   * endpoint is where the realm publishes its signing keys (Keycloak convention)
+   * — used UNLESS `jwksUri` is given.
    */
   readonly issuer: string;
+  /**
+   * Optional explicit JWKS endpoint, decoupling the key-fetch URL from the `iss`
+   * identity. When set it is used VERBATIM (no `/certs` suffixing). Lets the host
+   * fetch keys over an in-cluster route while still trusting tokens whose `iss` is
+   * the public route — the keys are realm-wide, not route-specific. Signature
+   * verification does not check `iss` here (that stays in `validateRealmJwtClaims`
+   * against `expectedIss`), so the split is safe.
+   */
+  readonly jwksUri?: string;
 }
 
 /**
@@ -136,7 +146,8 @@ type JosePayload = Record<string, unknown>;
  * `markSignatureVerified` brand.
  */
 export const createRealmJwtVerifier = (config: RealmJwtVerifierConfig): VerifyRealmJwt => {
-  const jwksUri = realmJwksUri(config.issuer);
+  // An explicit `jwksUri` (e.g. an in-cluster route) wins; else derive from issuer.
+  const jwksUri = config.jwksUri ?? realmJwksUri(config.issuer);
 
   // Lazily-initialised remote JWKS resolver, cached across calls. Mirrors the
   // Bot verifier: `createRemoteJWKSet` is synchronous (no metadata fetch — the
