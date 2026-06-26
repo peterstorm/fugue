@@ -1031,7 +1031,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   });
 
   logger.info("Host fully booted and ready to serve requests", {
-    port: bunServer.port,
+    // Use the typed `server.port` handle (0 in UDS/worker mode) rather than the
+    // raw `bunServer.port`, which is `undefined` for a UDS listener and would log
+    // a misleading absent port on the boot line.
+    port: server.port,
     dagCount: registry.dags.size,
   });
 

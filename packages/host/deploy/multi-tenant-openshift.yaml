@@ -152,6 +152,27 @@ spec:
             # ADMIN_TOKEN (and, if a provider is shared pod-wide rather than per-tenant,
             # the LLM keys). Per-TENANT secrets do NOT live here — they are the env-file
             # Secrets mounted below and resolved inside each worker.
+            #
+            # OPTIONAL CAPABILITY CREDS via SealedSecret: to enable the `oracle`
+            # capability pod-wide, seal ORACLE_CONNECT_STRING / ORACLE_USER /
+            # ORACLE_PASSWORD into this `fugue-mt-platform` Secret (kubeseal). The host
+            # picks them up through this envFrom and wires @fuguejs/oracle at boot
+            # (unset → not registered, zero regression). The fugue-oracle-smoke Job
+            # below reads the SAME three keys, so it proves the EXACT creds the host
+            # will use.
+            #
+            # CDRATOR_* (authedHttp) wire the same way: seal CDRATOR_URL /
+            # CDRATOR_AUTH_URL / CDRATOR_BRAND_KEY / CDRATOR_GRANT_TYPE /
+            # CDRATOR_CLIENT_ID / CDRATOR_CLIENT_SECRET / CDRATOR_OPERATOR into this
+            # Secret. NOTE (not wired yet — TODO when authedHttp goes to cluster):
+            # rator1 serves a chain rooted at the corporate self-signed CA
+            # "Hi3G OAM Root", which Bun's fetch does NOT trust by default — token
+            # mint fails at boot with "self signed certificate in certificate chain".
+            # The fix is to obtain the corporate "Hi3G OAM Root" CA bundle from
+            # IT-Security (it is NOT committed to this public repo), mount it (e.g.
+            # as a ConfigMap volume), and set NODE_EXTRA_CA_CERTS to its path on this
+            # container — trusting the corporate CA WITHOUT disabling TLS
+            # verification. Local dev does the same via `.env.cdrator`.
             - secretRef:
                 name: fugue-mt-platform
           volumeMounts:
@@ -224,3 +245,83 @@ spec:
   ports:
     - port: 3000
       targetPort: 3000
+---
+# ── Oracle connectivity smoke — the REAL SC-006 / NFR-001 check ───────────────
+# Runs IN-CLUSTER, where the ORACLE_* SealedSecret is decrypted AND Oracle is
+# network-reachable — the two things GitHub CI structurally lacks. (CI only proves
+# the thin-mode driver LOADS on the prod image — see .github/workflows/ci.yml
+# `oracle-driver-smoke` — because the creds live as SealedSecrets and the DB is not
+# reachable from a hosted runner.) This Job opens a REAL connection and runs
+# `SELECT 1 FROM DUAL` via scripts/oracle-smoke-connect.ts — the same
+# createOracleAdapter().connect()/healthCheck() the host uses — so a wrong connect
+# string, rotated password, or network break is caught at DEPLOY time, not at first
+# DAG run. Credentials are never logged (the adapter strips them; FR-041 / SC-008).
+#
+# Argo PostSync hook: runs AFTER the Deployment syncs; a non-zero exit marks the
+# sync failed/degraded, gating the rollout on real Oracle connectivity. The Job is
+# deleted before each new run and on success so every sync gets a fresh probe.
+# Applied via plain `kubectl apply` the hook annotations are ignored — it then runs
+# as an ordinary one-shot Job (ttlSecondsAfterFinished reaps it either way).
+#
+# Only meaningful once ORACLE_* are sealed into fugue-mt-platform (above). Until
+# then the Job's secretKeyRefs are unresolved and it will not schedule — remove this
+# Job, or skip it, in clusters that do not run the oracle capability.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fugue-oracle-smoke
+  labels:
+    app: fugue-host
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    # Fresh Job per sync; clean up on success. A FAILED Job is retained for triage.
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  # Tolerate a transient blip (DB rolling restart / brief partition) with one k8s
+  # retry before failing the sync; the script itself does not retry.
+  backoffLimit: 1
+  # Reap the Job an hour after it finishes even when the Argo delete-policy is not in
+  # force (plain kubectl apply), so completed Jobs don't accumulate.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: fugue-host
+        job: oracle-smoke
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: oracle-smoke
+          # SAME image + tag as the fugue-host container above: the smoke must prove
+          # the artifact that actually ships can reach Oracle. Keep them in lockstep.
+          image: quay.example.com/fugue/host:0.2.0
+          # Override the default thin-init CMD: run the one-shot smoke instead. The
+          # script ships in the image (packages/host/Dockerfile copies it) and imports
+          # the oracle adapter source by relative path; oracledb is a host dep.
+          command: ["bun", "scripts/oracle-smoke-connect.ts"]
+          env:
+            # ORACLE_* come from the SAME SealedSecret-backed Secret the host reads
+            # (fugue-mt-platform), so the smoke exercises EXACTLY the credentials the
+            # running host will use. Seal these three keys with kubeseal.
+            - name: ORACLE_CONNECT_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: fugue-mt-platform
+                  key: ORACLE_CONNECT_STRING
+            - name: ORACLE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fugue-mt-platform
+                  key: ORACLE_USER
+            - name: ORACLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fugue-mt-platform
+                  key: ORACLE_PASSWORD
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"

@@ -98,7 +98,12 @@ export const HostConfigSchema = z.object({
    * runs use the boot-scoped static capability set unchanged and only
    * admin/`fug_` tokens are accepted (the zero-regression, fail-closed path).
    */
-  REALM_JWT_ISSUER: z.string().optional(),
+  // `.url()`: the issuer is fed to `new URL(...)` to derive the JWKS certs URL
+  // (`realmJwksUri`) and, with agent creds, the Keycloak token URL — a malformed
+  // value must fail at boot, not at first verify (parse-don't-validate, matching
+  // the parallel REALM_JWKS_URL). The https-only gate for the secret-bearing
+  // token-URL derivation is applied additionally in superRefine below.
+  REALM_JWT_ISSUER: z.string().url().optional(),
   /**
    * Audience the host must appear in within an accepted realm JWT (FR-W3-006).
    * Non-empty: an explicit `REALM_JWT_AUDIENCE=""` would neuter the audience
@@ -427,6 +432,112 @@ export const HostConfigSchema = z.object({
   DOCUMENTS_ADAPTER: z.enum(["fs"]).optional(),
   /** Root directory for the fs documents adapter — required when DOCUMENTS_ADAPTER=fs */
   DOCUMENTS_FS_ROOT: z.string().optional(),
+  // ── CDRator / Oister authenticated-REST capability (`authedHttp`, FR-060/NFR-010) ──
+  /**
+   * Base URL of the CDRator/Oister core REST API the `authedHttp` capability
+   * targets (e.g. `https://rator1.ibt.oister.dk/rest-api-core`). Setting this
+   * (together with the other required CDRATOR_* fields below) wires the generic
+   * `@fuguejs/http-auth` capability under the key `authedHttp` at boot, so DAGs
+   * declaring `requires: ["authedHttp"]` resolve. UNSET → the capability is NOT
+   * registered and such DAGs fail the boot-time capability check (zero
+   * regression, mirroring the optional `documents` adapter gating).
+   *
+   * FR-060/NFR-010: the URL + operator credentials arrive ONLY from env config
+   * here; nothing is hardcoded in the capability and the credentials are never
+   * logged.
+   */
+  CDRATOR_URL: z.string().url().optional(),
+  /**
+   * Absolute URL of the CDRator token endpoint the operator-password grant POSTs
+   * to (e.g. `https://rator1.ibt.oister.dk/rest-api-auth`). Required when
+   * CDRATOR_URL is set. Must be https — the operator password (and the optional
+   * client-id/secret HTTP Basic header) are POSTed here, so cleartext http is
+   * refused at boot (NFR-010).
+   */
+  CDRATOR_AUTH_URL: z.string().url().optional(),
+  /**
+   * CDRator brand key. Sent both as the static `X-RATOR-brand-key` request
+   * header on the core API AND as a static `brand_key` form field on the token
+   * grant. Required when CDRATOR_URL is set.
+   */
+  CDRATOR_BRAND_KEY: z.string().min(1).optional(),
+  /** CDRator operator username (token-grant form field). Required when CDRATOR_URL is set. */
+  CDRATOR_USERNAME: z.string().min(1).optional(),
+  /**
+   * CDRator operator password (token-grant form field). SENSITIVE (NFR-010): the
+   * password is POSTed to the token endpoint and MUST NEVER be logged. Required
+   * when CDRATOR_URL is set.
+   */
+  CDRATOR_PASSWORD: z.string().min(1).optional(),
+  /**
+   * Optional CDRator OAuth client id, used as the username of the HTTP Basic
+   * header on the token request. Set together with CDRATOR_CLIENT_SECRET (one
+   * without the other is rejected at boot). UNSET → no Basic auth on the token
+   * request (operator-password grant only).
+   */
+  CDRATOR_CLIENT_ID: z.string().min(1).optional(),
+  /**
+   * Optional CDRator OAuth client secret, used as the password of the HTTP Basic
+   * header on the token request. SENSITIVE (NFR-010): POSTed to the token
+   * endpoint, never logged. Set together with CDRATOR_CLIENT_ID.
+   */
+  CDRATOR_CLIENT_SECRET: z.string().min(1).optional(),
+  /**
+   * Token-grant flavour for the CDRator token endpoint.
+   *
+   * - `operator_password` (default, legacy): resource-owner grant — POSTs
+   *   `grant_type=operator_password` with form `username`/`password`
+   *   (CDRATOR_USERNAME/PASSWORD), optionally under an HTTP Basic client header.
+   * - `client_credentials`: two-legged grant — the client authenticates via the
+   *   HTTP Basic `client_id:client_secret` header (CDRATOR_CLIENT_ID/SECRET) and
+   *   NO resource-owner username/password is sent. This is how the real Rator
+   *   token endpoint (and flexii's own integration) actually authenticates: the
+   *   body is `grant_type=client_credentials&brand_key=…&operator=…`. The
+   *   operator identity (when the deployment needs one) rides in CDRATOR_OPERATOR.
+   *
+   * The cross-field validation below enforces the fields each flavour requires.
+   */
+  CDRATOR_GRANT_TYPE: z.enum(["operator_password", "client_credentials"]).default("operator_password"),
+  /**
+   * Optional CDRator operator identity, sent as the static `operator` form field
+   * on the token grant. Used by the `client_credentials` flavour to scope the
+   * minted token to an operator (Rator authorizes account access by operator
+   * ownership). Ignored by the `operator_password` flavour (which identifies the
+   * operator via CDRATOR_USERNAME). Never logged.
+   */
+  CDRATOR_OPERATOR: z.string().min(1).optional(),
+  // ── Oracle discount-pricing capability (`oracle`, FR-033/FR-040/FR-041) ────
+  /**
+   * Oracle Easy Connect / TNS connect string the `oracle` capability dials (e.g.
+   * `dbhost:1521/PRICING`). Setting this (together with the required ORACLE_USER +
+   * ORACLE_PASSWORD below) wires the @fuguejs/oracle capability under the key
+   * `oracle` at boot, so DAGs declaring `requires: ["oracle"]` resolve. UNSET → the
+   * capability is NOT registered and such DAGs fail the boot-time capability check
+   * (zero regression, FR-033 — mirrors the optional `documents`/CDRator gating).
+   *
+   * FR-040/FR-041: the connect string + DB credentials arrive ONLY from env config
+   * here; nothing is hardcoded in the capability and the credentials are never
+   * logged.
+   */
+  ORACLE_CONNECT_STRING: z.string().min(1).optional(),
+  /** Oracle DB username. Required when ORACLE_CONNECT_STRING is set (FR-040). */
+  ORACLE_USER: z.string().min(1).optional(),
+  /**
+   * Oracle DB password. SENSITIVE (FR-041): handed to the oracledb pool and MUST
+   * NEVER be logged nor appear in any error/telemetry. Required when
+   * ORACLE_CONNECT_STRING is set.
+   */
+  ORACLE_PASSWORD: z.string().min(1).optional(),
+  /**
+   * Minimum oracledb connection-pool size. Optional — the adapter defaults to 0
+   * when unset. Coerced to a non-negative integer.
+   */
+  ORACLE_POOL_MIN: z.coerce.number().int().min(0).optional(),
+  /**
+   * Maximum oracledb connection-pool size. Optional — the adapter defaults to 4
+   * when unset. Coerced to a positive integer.
+   */
+  ORACLE_POOL_MAX: z.coerce.number().int().min(1).optional(),
   // ── Multi-tenant single-host: worker + supervisor wiring (AD-1, AD-3) ──────
   /**
    * WORKER MODE selector (T6, FR-007): the tenant id this worker process is
@@ -515,8 +626,12 @@ export const HostConfigSchema = z.object({
    * step (see docs/migrations/tenant-key-namespacing.md) — with it off the worker
    * uses the shared `REDIS_URL` credential and isolation rests on key prefixing.
    */
+  // Accept only an explicit boolean or a recognised string token. An
+  // unrecognised string (a typo'd `yes`/`on`/`enabled`) is REJECTED at boot
+  // rather than silently coerced to `false` — silently disabling a data-plane
+  // security control on a typo is the wrong fail direction (fail-closed-loud).
   SUPERVISOR_REDIS_ACL_ENABLED: z
-    .union([z.boolean(), z.string()])
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
     .transform((v) => v === true || v === "true" || v === "1")
     .default(false),
   /**
@@ -609,6 +724,88 @@ export const HostConfigSchema = z.object({
   if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
     ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });
   }
+  // ── CDRator `authedHttp` capability (FR-060/NFR-010) ───────────────────────
+  // The capability is gated on CDRATOR_URL: once it is set the operator credentials,
+  // brand key and token endpoint are ALL mandatory — a half-wired capability would
+  // either fail-close every request or (worse) mint with missing fields. Reject the
+  // mismatch at boot rather than fail on the first `authedHttp` call. Unset is the
+  // valid zero-regression baseline (the capability is simply not registered).
+  if (c.CDRATOR_URL !== undefined) {
+    if (!c.CDRATOR_AUTH_URL) {
+      ctx.addIssue({ code: "custom", path: ["CDRATOR_AUTH_URL"], message: "Required when CDRATOR_URL is set" });
+    }
+    if (!c.CDRATOR_BRAND_KEY) {
+      ctx.addIssue({ code: "custom", path: ["CDRATOR_BRAND_KEY"], message: "Required when CDRATOR_URL is set" });
+    }
+    // The required token-grant fields depend on the grant flavour. operator_password
+    // (default) needs the resource-owner username/password; client_credentials needs
+    // the OAuth client id/secret (the HTTP Basic client) and NO username/password.
+    if (c.CDRATOR_GRANT_TYPE === "client_credentials") {
+      if (!c.CDRATOR_CLIENT_ID) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_CLIENT_ID"], message: "Required when CDRATOR_GRANT_TYPE is 'client_credentials'" });
+      }
+      if (!c.CDRATOR_CLIENT_SECRET) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_CLIENT_SECRET"], message: "Required when CDRATOR_GRANT_TYPE is 'client_credentials'" });
+      }
+    } else {
+      if (!c.CDRATOR_USERNAME) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_USERNAME"], message: "Required when CDRATOR_URL is set (operator_password grant)" });
+      }
+      if (!c.CDRATOR_PASSWORD) {
+        ctx.addIssue({ code: "custom", path: ["CDRATOR_PASSWORD"], message: "Required when CDRATOR_URL is set (operator_password grant)" });
+      }
+    }
+  }
+  // ── Oracle `oracle` capability (FR-033/FR-040/FR-041) ──────────────────────
+  // The capability is gated on ORACLE_CONNECT_STRING: once it is set the DB
+  // credentials are BOTH mandatory — a half-wired capability would fail to open a
+  // pool and fail-close every query. Reject the mismatch at boot rather than on the
+  // first `oracle` query. Unset is the valid zero-regression baseline (FR-033): the
+  // capability is simply not registered and all ORACLE_* fields may be absent.
+  if (c.ORACLE_CONNECT_STRING !== undefined) {
+    if (!c.ORACLE_USER) {
+      ctx.addIssue({ code: "custom", path: ["ORACLE_USER"], message: "Required when ORACLE_CONNECT_STRING is set" });
+    }
+    if (!c.ORACLE_PASSWORD) {
+      ctx.addIssue({ code: "custom", path: ["ORACLE_PASSWORD"], message: "Required when ORACLE_CONNECT_STRING is set" });
+    }
+  }
+  // ORACLE_POOL_MIN and ORACLE_POOL_MAX are bounded individually (min 0 / min 1)
+  // but nothing rejects min > max — that spec parses OK here and then hands
+  // oracledb an invalid pool, failing at pool-open instead of boot. Mirror the
+  // DEFAULT_DAG_TIMEOUT_MS <= MAX_DAG_TIMEOUT_MS cross-field precedent and reject
+  // an inverted pool range at boot.
+  if (
+    c.ORACLE_POOL_MIN !== undefined &&
+    c.ORACLE_POOL_MAX !== undefined &&
+    c.ORACLE_POOL_MIN > c.ORACLE_POOL_MAX
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ORACLE_POOL_MIN"],
+      message: "ORACLE_POOL_MIN must not exceed ORACLE_POOL_MAX",
+    });
+  }
+  // The operator password and the optional client-id/secret HTTP Basic header are
+  // POSTed to the token endpoint; an http:// token URL would leak them in cleartext.
+  if (c.CDRATOR_AUTH_URL !== undefined && !c.CDRATOR_AUTH_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["CDRATOR_AUTH_URL"], message: "must be an https:// URL (the operator password is POSTed to this endpoint)" });
+  }
+  // The minted bearer token is sent as `Authorization: Bearer` to this core API base
+  // URL on EVERY request; an http:// core URL would transmit the token in cleartext.
+  if (c.CDRATOR_URL !== undefined && !c.CDRATOR_URL.startsWith("https://")) {
+    ctx.addIssue({ code: "custom", path: ["CDRATOR_URL"], message: "must be an https:// URL (the minted bearer token is sent here on every request)" });
+  }
+  // Client id and secret are an inseparable pair: HTTP Basic on the token request
+  // needs BOTH. One without the other is an internally-inconsistent config that
+  // would silently half-build the Basic header. Reject the mismatch at boot.
+  if ((c.CDRATOR_CLIENT_ID !== undefined) !== (c.CDRATOR_CLIENT_SECRET !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: [c.CDRATOR_CLIENT_ID === undefined ? "CDRATOR_CLIENT_ID" : "CDRATOR_CLIENT_SECRET"],
+      message: "CDRATOR_CLIENT_ID and CDRATOR_CLIENT_SECRET must be set together (HTTP Basic on the token request needs both)",
+    });
+  }
   // The review card embeds the output-under-review and an approval deep-link;
   // posting it over http would exfiltrate that in cleartext. Fail boot loudly
   // rather than send HITL review content unencrypted.
@@ -650,6 +847,21 @@ export const HostConfigSchema = z.object({
       path: ["REALM_JWT_ISSUER"],
       message:
         "must be an https:// URL when KEYCLOAK_AGENT_CLIENT_CREDENTIALS is set and KEYCLOAK_TOKEN_URL is unset (the agent client secret is POSTed to the token URL derived from this issuer)",
+    });
+  }
+  // REALM_JWKS_URL is meaningful ONLY as a key-fetch override for the realm JWT
+  // path, and that path is gated on REALM_JWT_ISSUER (host.ts): with the issuer
+  // unset the verifier is never built and the JWKS override is silently dropped.
+  // An operator who sets REALM_JWKS_URL alone believes they wired split-horizon
+  // key fetch but got a no-op. Reject the half-set pair at boot (FR-001), matching
+  // every other paired field here, rather than silently ignoring it. Issuer-only
+  // is valid (the verifier derives the /certs endpoint from the issuer).
+  if (c.REALM_JWKS_URL !== undefined && c.REALM_JWT_ISSUER === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["REALM_JWKS_URL"],
+      message:
+        "REALM_JWKS_URL requires REALM_JWT_ISSUER (the JWKS override only takes effect when the realm JWT path is enabled by the issuer)",
     });
   }
   // Entra tenant and client are an inseparable pair: the WIF hop needs BOTH to

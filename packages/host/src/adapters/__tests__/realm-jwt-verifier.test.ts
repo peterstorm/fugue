@@ -44,6 +44,13 @@ let signingKey: CryptoKey;
 let foreignKey: CryptoKey; // a key whose public half is NEVER published → bad sig
 let hmacKey: CryptoKey; // symmetric key for the HS256 alg-confusion negative test
 
+// EC signing keys (ES256 / ES512) — published alongside the RS256 key so a
+// single JWKS proves an ES-family token verifies against the alg allowlist.
+const EC_ALGS = ["ES256", "ES512"] as const;
+type EcAlg = (typeof EC_ALGS)[number];
+const ecSigningKeys = new Map<EcAlg, CryptoKey>();
+const ecPublicJwks: JWK[] = [];
+
 /**
  * Controls what the JWKS endpoint returns, so a single harness can model a
  * healthy realm AND realm-outage modes (non-200, malformed body) for NFR-020.
@@ -67,6 +74,14 @@ beforeAll(async () => {
   // Symmetric key for the alg-confusion defence test (HS256-signed token).
   hmacKey = (await generateSecret("HS256")) as CryptoKey;
 
+  // EC key pairs whose PUBLIC halves are published in the JWKS — one per EC alg
+  // under test — to prove a positive ES-family signature round-trip.
+  for (const alg of EC_ALGS) {
+    const ecPair = await generateKeyPair(alg);
+    ecSigningKeys.set(alg, ecPair.privateKey);
+    ecPublicJwks.push({ ...(await exportJWK(ecPair.publicKey)), kid: `ec-${alg}`, alg, use: "sig" });
+  }
+
   // Serve the realm's JWKS at the Keycloak certs path the adapter derives.
   server = Bun.serve({
     port: 0,
@@ -86,7 +101,7 @@ beforeAll(async () => {
               headers: { "Content-Type": "application/json" },
             });
           case "ok":
-            return new Response(JSON.stringify({ keys: [publicJwk] }), {
+            return new Response(JSON.stringify({ keys: [publicJwk, ...ecPublicJwks] }), {
               headers: { "Content-Type": "application/json" },
             });
         }
@@ -157,6 +172,23 @@ describe("createRealmJwtVerifier — valid signature → SignatureVerified (FR-0
     expect(r.value.sub).toBe("user-123");
     expect(r.value.azp).toBe("fugue-platform-frontend");
   });
+
+  it.each(EC_ALGS.map((alg) => [alg] as [EcAlg]))(
+    "%s: a token signed by the realm's published EC key verifies (the alg allowlist admits the ES family, not just RS256)",
+    async (alg) => {
+      const verify = createRealmJwtVerifier({ issuer: issuerFor() });
+      const token = await new SignJWT({ iss: issuerFor(), aud: "fugue-host", sub: "ec-user", azp: "x" })
+        .setProtectedHeader({ alg, kid: `ec-${alg}` })
+        .setIssuedAt()
+        .setExpirationTime(Math.floor(Date.now() / 1000) + 3600)
+        .sign(ecSigningKeys.get(alg)!);
+
+      const r = await verify(token);
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error(`expected ok for ${alg}, got ${JSON.stringify(r.error)}`);
+      expect(r.value.sub).toBe("ec-user");
+    },
+  );
 
   it("SIGNATURE-ONLY: a validly-signed token with a 'wrong' issuer/aud STILL passes here (iss/aud belong to the pure validator)", async () => {
     const verify = createRealmJwtVerifier({ issuer: issuerFor() });

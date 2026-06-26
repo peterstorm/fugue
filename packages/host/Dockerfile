@@ -26,6 +26,8 @@ COPY packages/adapter-fs/package.json packages/adapter-fs/package.json
 COPY packages/document-source/package.json packages/document-source/package.json
 COPY packages/adapter-ms-graph/package.json packages/adapter-ms-graph/package.json
 COPY packages/adapter-pg/package.json packages/adapter-pg/package.json
+COPY packages/adapter-oracle/package.json packages/adapter-oracle/package.json
+COPY packages/http-auth/package.json packages/http-auth/package.json
 COPY packages/xlsx/package.json packages/xlsx/package.json
 COPY packages/examples/package.json packages/examples/package.json
 COPY apps/customer-summary/package.json apps/customer-summary/package.json
@@ -37,10 +39,21 @@ RUN bun install --frozen-lockfile --production
 # Copy source for the host's runtime closure only. main.ts dynamically imports
 # @fuguejs/fs when DOCUMENTS_ADAPTER=fs (which the lead DAGs require); @fuguejs/fs
 # pulls in @fuguejs/document-source, and everything depends on @fuguejs/framework.
+# @fuguejs/oracle + @fuguejs/http-auth are host runtime deps (workspace:*) wired in
+# main.ts/worker-main.ts (the `oracle` / `authedHttp` capabilities) — their source
+# MUST be present or the worker import fails when those capabilities are configured.
 COPY packages/framework/ packages/framework/
 COPY packages/host/ packages/host/
 COPY packages/adapter-fs/ packages/adapter-fs/
 COPY packages/document-source/ packages/document-source/
+COPY packages/adapter-oracle/ packages/adapter-oracle/
+COPY packages/http-auth/ packages/http-auth/
+
+# Oracle in-cluster smoke-connect (the real SC-006 check, run by the OpenShift
+# Job in packages/host/deploy as an Argo PostSync hook). It imports the oracle
+# adapter source copied above by relative path and dials Oracle over the cluster
+# network using the SealedSecret-injected ORACLE_* env.
+COPY scripts/oracle-smoke-connect.ts scripts/oracle-smoke-connect.ts
 
 # Non-root user for security
 RUN adduser -D -g '' fugue

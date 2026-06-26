@@ -4,6 +4,9 @@
 node_modules/
 dist/
 .env
+# Local secret env files (CDRator creds, etc.) — never commit. Keep .env.example tracked.
+.env.*
+!.env.example
 *.tsbuildinfo
 # Transient doc-example extraction scratch (swept up by tsconfig include otherwise)
 **/__doc_check_dir__/
@@ -23,3 +26,8 @@ __pycache__/
 
 # cortex memory plugin scratch
 .cortex_extract.json
+
+# Corporate CA material — never commit to this PUBLIC repo. Operators supply the
+# Hi3G OAM CA bundle at deploy time via NODE_EXTRA_CA_CERTS (see host/.env.example).
+*.pem
+certs/

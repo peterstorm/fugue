@@ -12,8 +12,13 @@ on:
   pull_request:
 
 env:
-  # Keep in lockstep with release.yml's PACKAGES.
-  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg host
+  # Superset of release.yaml's PACKAGES: CI typechecks + tests every workspace
+  # member, INCLUDING adapter-oracle + http-auth. Those two are intentionally NOT
+  # in release.yaml's publish set yet — publishing them to npm needs a version
+  # bump to host's lockstep version + a manual first-publish (trusted-publisher
+  # setup), an npm decision separate from running them through CI. They MUST be
+  # exercised here regardless, so a regression in either fails the build.
+  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg adapter-oracle http-auth host
 
 jobs:
   check:
@@ -39,3 +44,36 @@ jobs:
             (cd "packages/$pkg" && bunx tsc --noEmit && bun run test)
             echo "::endgroup::"
           done
+
+  # SC-006 / NFR-001 — CI half: prove @fuguejs/oracle's thin-mode driver LOADS and
+  # runs its network stack on the PRODUCTION base image (`oven/bun:1.2-alpine`).
+  # oracledb thin mode was verified on Bun 1.3.x in dev, but prod runs alpine
+  # (packages/host/Dockerfile), so this MUST run inside that exact image — hence the
+  # job-level `container:`. The pure-JS Oracle Net stack over musl/alpine is the one
+  # genuinely image-specific risk, and it needs NO Instant Client and NO native build.
+  #
+  # SECRET-FREE + DB-FREE, so it runs on EVERY push/PR with no gating: it dials an
+  # unreachable target and asserts the driver loaded + attempted a connection (a
+  # network error, not a module-load error). It does NOT prove real connectivity.
+  #
+  # The REAL connectivity smoke (a live `SELECT 1 FROM DUAL` against prod Oracle)
+  # cannot run in GitHub CI: the ORACLE_* credentials live as OpenShift SealedSecrets
+  # and Oracle is only reachable in-cluster. That proof runs as the OpenShift Job in
+  # packages/host/deploy (scripts/oracle-smoke-connect.ts) at deploy time — gating the
+  # rollout, not the merge. See the fugue-oracle-smoke Job in
+  # packages/host/deploy/multi-tenant-openshift.yaml.
+  oracle-driver-smoke:
+    runs-on: ubuntu-latest
+    # Run INSIDE the prod base image — that the driver works HERE is the whole point.
+    container:
+      image: oven/bun:1.2-alpine
+    steps:
+      - uses: actions/checkout@v5
+
+      # Thin mode only: no Instant Client, no native build step. The frozen install
+      # resolves `oracledb` (a host runtime dependency, lockfile-pinned at 7.0.0),
+      # which runs in THIN mode by default — pure-JS Oracle Net over TCP, musl-safe.
+      - run: bun install --frozen-lockfile
+
+      - name: Driver-loads smoke on oven/bun:1.2-alpine (no secrets, no DB)
+        run: bun scripts/oracle-driver-smoke.ts

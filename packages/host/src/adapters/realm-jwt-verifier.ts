@@ -43,8 +43,11 @@ import type { JwtVerifyError, VerifyRealmJwt } from "../http/middleware/auth.js"
  * (defence-in-depth against an `alg:none`/HS256 confusion attack), rather than
  * trusting the JWKS resolver to never hand back a symmetric key. This is an
  * ALGORITHM gate, not a CLAIM check — the iss/aud/exp split (FR-003) is untouched.
+ * The full RS/PS/ES 256/384/512 set is allowed: all are asymmetric and equally
+ * safe against the alg-confusion attack, so the allowlist stays complete rather
+ * than carrying an unexplained gap a key-rotation could trip over.
  */
-const REALM_TOKEN_ALGS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384"] as const;
+const REALM_TOKEN_ALGS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"] as const;
 
 /** Tolerate normal clock skew between this host and the realm (matches the Bot verifier). */
 const CLOCK_TOLERANCE = "60s";
