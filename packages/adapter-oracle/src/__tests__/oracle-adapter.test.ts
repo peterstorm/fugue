@@ -311,7 +311,11 @@ describe("@fuguejs/oracle — mapOracleError classification", () => {
     expect(mapped.kind).toBe("node-crash");
     if (mapped.kind === "node-crash") {
       expect(mapped.retriability).toBe("non-retriable");
-      expect(mapped.message.length).toBeLessThan(longSql.length + 60);
+      // Pin the exact slice(0, 100) boundary, not a loose length bound: the first
+      // 100 SQL chars are present, the 101st is truncated away. A regression that
+      // widened truncation (e.g. to 150) would surface char 101 and fail here.
+      expect(mapped.message).toContain(longSql.slice(0, 100));
+      expect(mapped.message).not.toContain(longSql.slice(0, 101));
     }
   });
 

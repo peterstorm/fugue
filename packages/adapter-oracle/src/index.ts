@@ -598,9 +598,12 @@ export const createFakeOracleCapability = (
   routes: Readonly<Record<string, unknown[] | FakeOracleRoute>>,
 ): CapabilityHandle<"oracle"> => {
   const matchRoute = (sql: string): FakeOracleRoute | null => {
-    // Exact match always wins.
-    const direct = routes[sql];
-    if (direct) {
+    // Exact match always wins. Guard with hasOwnProperty so a SQL string equal to
+    // a prototype key ("constructor"/"toString"/…) can't resolve an inherited
+    // function as a phantom route (consistent with the own-property guards used
+    // elsewhere, e.g. host.ts assignedScopes).
+    if (Object.prototype.hasOwnProperty.call(routes, sql)) {
+      const direct = routes[sql];
       return Array.isArray(direct) ? { rows: direct } : direct;
     }
     // Longest-prefix fallback, restricted to routes that opted in with

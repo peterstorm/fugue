@@ -292,19 +292,48 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     if (!result.ok) expect(result.error.kind).toBe("node-crash");
   });
 
-  it("invalid JSON maps to non-retriable node-crash", async () => {
+  it("invalid JSON maps to non-retriable node-crash and never leaks the parse-error body", async () => {
+    // V8/Bun JSON parse errors echo a snippet of the offending body; if the body
+    // embedded a token, a naive `e.message` passthrough would leak it. Simulate
+    // exactly that: a SyntaxError whose text carries a credential-like fragment.
     const badResponse: FetchResponseLike = {
       ok: true,
       status: 200,
       statusText: "OK",
-      text: async () => "<html>",
-      json: async () => { throw new SyntaxError("Unexpected token <"); },
+      text: async () => "{not json: access_token=s3cret-in-parse-error",
+      json: async () => {
+        throw new SyntaxError('Unexpected token in JSON: "access_token=s3cret-in-parse-error"');
+      },
     };
     const fetch: FetchLike = async () => badResponse;
     const provider = createTokenProvider({ auth: baseAuth, fetch });
     const result = await provider.get();
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("node-crash");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).not.toContain("s3cret-in-parse-error");
+      }
+    }
+  });
+
+  it("a schema-mismatch token body never leaks field VALUES into the error (paths only)", async () => {
+    // Valid JSON that fails TokenResponseSchema: access_token is the wrong type
+    // and its (secret-bearing) value must not reach the error — only the path.
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(200, { access_token: { leaked: "s3cret-token-value" }, token_type: "bearer" }),
+    );
+    const provider = createTokenProvider({ auth: baseAuth, fetch });
+    const result = await provider.get();
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).not.toContain("s3cret-token-value");
+        // The diagnostic still names which field was wrong.
+        expect(result.error.message).toContain("access_token");
+      }
+    }
   });
 
   it("a failed mint does not poison the cache: the next get() retries", async () => {

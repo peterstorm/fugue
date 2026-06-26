@@ -85,7 +85,10 @@ echo "════════════════════════�
 
 # ── 1. IDENTITY + 3. WIF SHAPE: mint with the granted scope + entra-exchange ──
 hdr "[1] IDENTITY — mint a token as '${AGENT_CLIENT_ID}' (granted scope + entra-exchange)"
-GRANTED_TOKEN="$(mint "${GRANTED_SCOPE} entra-exchange")"
+# `|| true`: `mint` is a `curl | jq` pipeline, so a transport failure (HTTP 000 off
+# the VPN) makes it non-zero. Without this, `set -euo pipefail` aborts the script on
+# the command substitution BEFORE the empty-token check below prints its diagnostic.
+GRANTED_TOKEN="$(mint "${GRANTED_SCOPE} entra-exchange")" || true
 if [[ -z "$GRANTED_TOKEN" ]]; then
   no "could not mint a token — check connectivity to ${KC_HOST}, client id, and secret"
   echo; echo "Cannot continue without a token. (If HTTP 000: you're not on the VPN / in-cluster.)" >&2
@@ -116,7 +119,9 @@ scope_has "$GRANTED_SCOPE" && ok "GRANTED scope present: ${GRANTED_SCOPE}" \
 # Negative control: request a scope this client was NOT granted. Keycloak silently
 # omits unassigned optional scopes — proving "assigning the scope IS the grant".
 hdr "[2b] PERMISSION (negative control) — un-granted scope is refused/omitted"
-UNGRANTED_TOKEN="$(mint "${UNGRANTED_SCOPE}")"
+# `|| true` for the same pipefail reason as the granted mint above; here an empty
+# result is also a legitimate outcome (Keycloak hard-refusing the un-granted scope).
+UNGRANTED_TOKEN="$(mint "${UNGRANTED_SCOPE}")" || true
 if [[ -z "$UNGRANTED_TOKEN" ]]; then
   # Some Keycloak configs hard-error on an unknown/forbidden scope — also a valid refusal.
   ok "Keycloak refused to issue a token for un-granted scope '${UNGRANTED_SCOPE}' (hard refusal)"

@@ -72,3 +72,11 @@ export type { SyncConfig, SyncLogger, SyncLoopHandle } from "./sync/sync-loop.js
 export { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 export { createModuleLoader } from "./adapters/module-loader.js";
 export type { GitPort, ModuleLoaderPort, LoadResult, BulkLoadResult, LoadError, SharedInfra, RedisPort, LogPort } from "./ports.js";
+
+// Capability builders — the host's own boot-wiring primitives. Exported so an
+// out-of-tree consumer (e.g. a live smoke harness) can wire the SAME capabilities
+// the host boots with, through the public surface rather than reaching into
+// internal file layout. `connectStringHost` is the credential-stripping helper
+// used wherever an Oracle connect string is logged.
+export { buildCdratorCapability } from "./adapters/cdrator-capability.js";
+export { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";

@@ -313,13 +313,22 @@ const mintToken = async (
     let body: unknown;
     try {
       body = await response.json();
-    } catch (e) {
-      return err(mapTokenError("parse", e instanceof Error ? e.message : String(e)));
+    } catch {
+      // Do NOT surface the JSON-parse error text: V8/Bun parse messages echo a
+      // snippet of the offending body, which for a token endpoint can carry the
+      // access_token. A static detail keeps the credential out of logs/errors.
+      return err(mapTokenError("parse", "malformed JSON response"));
     }
 
     const parsed = TokenResponseSchema.safeParse(body);
     if (!parsed.success) {
-      return err(mapTokenError("parse", parsed.error.message));
+      // Surface only the failing field PATHS, never zod's full message (which can
+      // interpolate received values for some issue kinds) — the body may carry a
+      // secret. Paths name which fields were wrong without echoing their values.
+      const paths = parsed.error.issues
+        .map((i) => (i.path.length > 0 ? i.path.join(".") : "(root)"))
+        .join(", ");
+      return err(mapTokenError("parse", `unexpected token response shape (${paths})`));
     }
 
     const expiresAtMs =
