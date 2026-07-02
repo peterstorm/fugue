@@ -14,14 +14,15 @@ import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { Result } from "../../types/result.js";
 import type { FrameworkError } from "../../types/errors.js";
 import {
-  authoredToMermaid,
+  parseComposeArgs,
   runCompose,
   type ComposeAnswer,
   type ComposeIo,
   type ComposeTurn,
 } from "../../cli/compose.js";
-import { runGauntlet } from "../../cli/gauntlet.js";
-import type { AuthoredDag } from "../../cli/authored.js";
+import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
+import { describedToMermaid } from "../../cli/visualize.js";
+import { parseAuthoredDag, type AuthoredDag, type AuthoredDagInput } from "../../cli/authored.js";
 
 const tmpRoot = resolve(__dirname, ".tmp-compose");
 
@@ -92,7 +93,15 @@ const scriptedIo = (
 const str = { kind: "string" as const };
 const out = (...names: string[]) => ({ fields: names.map((name) => ({ name, type: str })) });
 
-const validDag: AuthoredDag = {
+// `AuthoredDag` is branded — fixtures are the unbranded wire shape and are
+// parsed (never cast) wherever a real AuthoredDag is needed.
+const mustParse = (raw: unknown): AuthoredDag => {
+  const parsed = parseAuthoredDag(raw);
+  if (!parsed.ok) throw new Error(parsed.problems.join("; "));
+  return parsed.dag;
+};
+
+const validDagInput: AuthoredDagInput = {
   fugueAuthored: 1,
   name: "compose-briefing",
   team: "assist",
@@ -106,14 +115,15 @@ const validDag: AuthoredDag = {
   ],
   structure: { shape: "sources", sources: ["fetch-weather", "fetch-calendar"], join: "join-all", assemble: "final" },
 };
+const validDag = mustParse(validDagInput);
 
-const refinedDag: AuthoredDag = {
-  ...validDag,
+const refinedDag = mustParse({
+  ...validDagInput,
   name: "compose-briefing-v2",
   description: "Briefing from two sources, refined",
-};
+});
 
-const draft = (dag: AuthoredDag): ComposeTurn => ({ action: "draft", dag });
+const draft = (dag: unknown): ComposeTurn => ({ action: "draft", dag });
 
 // ---------------------------------------------------------------------------
 // The loop
@@ -131,8 +141,14 @@ describe("runCompose", () => {
     expect(outcome.rounds).toEqual({ questions: 0, repairs: 0, refinements: 0 });
     expect(outcome.result.files).toContain(join("dags", "assist", "compose-briefing", "dag.ts"));
     expect(outcome.result.files).toContain(join("dags", "assist", "compose-briefing", "dag.authored.json"));
-    // The user was shown the summary + mermaid before accepting.
-    expect(said.join("\n")).toContain("flowchart TD");
+    // The user was shown the summary + the DESCRIBED render before accepting:
+    // `describedToMermaid` over the gauntlet's DescribedDag (the same renderer
+    // `fugue visualize` uses — title line, output node), so the approval is of
+    // the ACTUAL generated DAG, not a re-encoding of the AuthoredDag JSON.
+    const shown = said.join("\n");
+    expect(shown).toContain("flowchart TD");
+    expect(shown).toContain('title: "compose-briefing"');
+    expect(shown).toContain('dag_output(["output"])');
   });
 
   it("clarifying questions round-trips answers into the next turn's context", async () => {
@@ -155,12 +171,12 @@ describe("runCompose", () => {
   // injectable gauntlet seam: fail once with structured violations, then pass.
   const failingOnce = () => {
     let calls = 0;
-    return async (dag: AuthoredDag, root: string) => {
+    return async (dag: AuthoredDag, root: string): Promise<GauntletResult> => {
       calls++;
       if (calls === 1) {
         return {
           ok: false,
-          errors: [{ kind: "import-failed" as const, message: "simulated duplicate declaration" }],
+          errors: [{ kind: "import-failed", message: "simulated duplicate declaration" }],
           advisories: [],
         };
       }
@@ -170,7 +186,7 @@ describe("runCompose", () => {
 
   it("a gauntlet-failing draft is repaired with structured violations fed back", async () => {
     const root = join(tmpRoot, "repair");
-    const repairedDag: AuthoredDag = { ...validDag, name: "compose-repair" };
+    const repairedDag = { ...validDagInput, name: "compose-repair" };
     const { client, requests } = scriptedLlm([draft(repairedDag), draft(repairedDag)]);
     const { io } = scriptedIo(["yes"]);
 
@@ -189,9 +205,9 @@ describe("runCompose", () => {
 
   it("fails closed when repairs are exhausted", async () => {
     const root = join(tmpRoot, "exhausted");
-    const alwaysFail = async () => ({
+    const alwaysFail = async (): Promise<GauntletResult> => ({
       ok: false,
-      errors: [{ kind: "import-failed" as const, message: "never valid" }],
+      errors: [{ kind: "import-failed", message: "never valid" }],
       advisories: [],
     });
     const { client } = scriptedLlm([draft(validDag), draft(validDag)]);
@@ -215,12 +231,12 @@ describe("runCompose", () => {
     // Structure references an unknown node — passes the wire envelope
     // (dag is `unknown` there) but fails parseAuthoredDag inside the loop.
     const invalid = {
-      ...validDag,
+      ...validDagInput,
       structure: { shape: "sources", sources: ["fetch-weather", "ghost"], join: "join-all", assemble: "final" },
     };
     const { client, requests } = scriptedLlm([
       { action: "draft", dag: invalid },
-      draft({ ...validDag, name: "compose-schema-repair" }),
+      draft({ ...validDagInput, name: "compose-schema-repair" }),
     ]);
     const { io } = scriptedIo(["yes"]);
 
@@ -297,7 +313,7 @@ describe("runCompose", () => {
       }
       return runGauntlet(dag, r);
     };
-    const refined: AuthoredDag = { ...validDag, name: "compose-per-draft" };
+    const refined = { ...validDagInput, name: "compose-per-draft" };
     const { client } = scriptedLlm([draft(validDag), draft(validDag), draft(refined), draft(refined)]);
     const { io } = scriptedIo(["rename it", "yes"]);
 
@@ -451,7 +467,7 @@ describe("runCompose", () => {
   it("schema-repair exhaustion fails closed with the schema problems", async () => {
     const root = join(tmpRoot, "schema-exhausted");
     const invalid = {
-      ...validDag,
+      ...validDagInput,
       structure: { shape: "sources", sources: ["fetch-weather", "ghost"], join: "join-all", assemble: "final" },
     };
     const { client } = scriptedLlm([
@@ -475,7 +491,7 @@ describe("runCompose", () => {
   it("a schema-repair turn that returns questions fails closed as llm-error", async () => {
     const root = join(tmpRoot, "repair-got-questions");
     const invalid = {
-      ...validDag,
+      ...validDagInput,
       structure: { shape: "sources", sources: ["fetch-weather", "ghost"], join: "join-all", assemble: "final" },
     };
     const { client } = scriptedLlm([
@@ -511,19 +527,89 @@ describe("runCompose", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Arg parsing — pure, accumulate-all (mirrors parseNewArgs' table style).
+// ---------------------------------------------------------------------------
+
+describe("parseComposeArgs", () => {
+  it("parses a full invocation", () => {
+    const parsed = parseComposeArgs([
+      "Process refunds", "--team", "payments", "--model", "claude-x", "--owner", "p.h", "--dir", "root", "--force",
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.options).toEqual({
+        intent: "Process refunds",
+        team: "payments",
+        model: "claude-x",
+        owner: "p.h",
+        root: "root",
+        force: true,
+      });
+    }
+  });
+
+  it("parses the minimal invocation (intent + --team) with force defaulting off", () => {
+    const parsed = parseComposeArgs(["a briefing", "--team", "assist"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.options).toEqual({ intent: "a briefing", team: "assist", force: false });
+  });
+
+  it("accepts flags before the intent", () => {
+    const parsed = parseComposeArgs(["--team", "assist", "a briefing"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.options).toMatchObject({ intent: "a briefing", team: "assist" });
+  });
+
+  // One rejection per rule — the parser must accumulate rather than die on
+  // the first problem, so each needle must surface for its args.
+  const rejections: readonly (readonly [string, readonly string[], string])[] = [
+    ["a missing intent", ["--team", "assist"], "missing intent string"],
+    ["a missing --team", ["a briefing"], "missing --team"],
+    ["a non-kebab --team", ["a briefing", "--team", "Bad_Team"], "kebab-case"],
+    ["an unknown flag", ["a briefing", "--team", "assist", "--turbo"], "unknown flag: --turbo"],
+    ["a second positional", ["a briefing", "another intent", "--team", "assist"], "unexpected argument: another intent"],
+    ["--team followed by another flag", ["a briefing", "--team", "--force"], "--team requires a value"],
+    ["--model followed by another flag", ["a briefing", "--team", "assist", "--model", "--force"], "--model requires a value"],
+    ["--owner followed by another flag", ["a briefing", "--team", "assist", "--owner", "--force"], "--owner requires a value"],
+    ["--dir at the end of the args", ["a briefing", "--team", "assist", "--dir"], "--dir requires a value"],
+  ];
+  for (const [label, args, needle] of rejections) {
+    it(`rejects ${label}`, () => {
+      const parsed = parseComposeArgs(args);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.problems.join("\n")).toContain(needle);
+    });
+  }
+
+  it("accumulates multiple problems", () => {
+    const parsed = parseComposeArgs([]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("fugue compose (subprocess)", () => {
   it("rejects a non-kebab --team at the CLI boundary (before any API-key or LLM work)", async () => {
     const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
     const proc = Bun.spawn(["bun", binPath, "compose", "an intent", "--team", "Bad_Team"], {
       stdout: "pipe",
       stderr: "pipe",
-      // No key on purpose: the team check must fire first, so this exits 2
-      // (usage) rather than 1 (missing ANTHROPIC_API_KEY).
+      // No key on purpose: the arg parse must fire first — bad args emit the
+      // problems JSON on stdout (like `new`), never the missing-key stderr
+      // message.
       env: { ...process.env, ANTHROPIC_API_KEY: "" },
     });
-    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-    expect(exitCode).toBe(2);
-    expect(stderr).toContain("kebab-case");
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode).toBe(1);
+    const json = JSON.parse(stdout) as { ok: boolean; problems?: string[] };
+    expect(json.ok).toBe(false);
+    expect(json.problems?.join("\n")).toContain("kebab-case");
+    expect(stderr).not.toContain("ANTHROPIC_API_KEY");
   });
 });
 
@@ -538,62 +624,26 @@ describe("runGauntlet", () => {
   });
 });
 
-describe("authoredToMermaid", () => {
-  it("renders every node (n_-prefixed) and the $input edge", () => {
-    const diagram = authoredToMermaid(validDag);
-    for (const n of validDag.nodes) {
-      expect(diagram).toContain(`n_${n.id.replace(/[^A-Za-z0-9_]/g, "_")}`);
+// The Mermaid preview compose presents is `describedToMermaid` over the
+// gauntlet's DescribedDag — the renderer itself (node tokens, injective id
+// escaping, edge kinds, human-review styling) is covered by
+// `visualize.test.ts`; the gauntlet round-trip below proves the DescribedDag
+// carried on the ok verdict matches the authored structure.
+describe("runGauntlet described payload", () => {
+  it("the ok verdict carries the DescribedDag of the generated code", async () => {
+    const root = join(tmpRoot, "gauntlet-described");
+    await mkdir(root, { recursive: true });
+    const result = await runGauntlet(validDag, root);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.described.id).toBe("compose-briefing");
+      expect(new Set(result.described.nodes.map((n) => n.id))).toEqual(
+        new Set(validDag.nodes.map((n) => n.id)),
+      );
+      // The render the user approves comes straight from this payload.
+      const diagram = describedToMermaid(result.described);
+      expect(diagram).toContain("flowchart TD");
+      expect(diagram).toContain('title: "compose-briefing"');
     }
-    expect(diagram).toContain("dag_input");
-    expect(diagram.startsWith("flowchart TD")).toBe(true);
-  });
-
-  it("a node literally named 'dag-input' does not merge with the virtual input token", () => {
-    const d: AuthoredDag = {
-      fugueAuthored: 1,
-      name: "merge-check",
-      team: "assist",
-      description: "d",
-      input: { fields: [{ name: "id", type: str }] },
-      nodes: [
-        { id: "fetch-x", kind: "fetch", purpose: "x", output: out("x") },
-        { id: "dag-input", kind: "transform", purpose: "y", output: out("y") },
-      ],
-      structure: { shape: "linear", order: ["fetch-x", "dag-input"] },
-    };
-    const diagram = authoredToMermaid(d);
-    // The real node's token is n_dag_input; the virtual request node keeps dag_input.
-    expect(diagram).toContain('n_dag_input["dag-input<br/>transform"]');
-    expect(diagram).toContain("dag_input --> n_fetch_x");
-    expect(diagram).toContain("n_fetch_x --> n_dag_input");
-  });
-
-  it("escapes quotes in router edge labels (when.equals is free text)", () => {
-    const d: AuthoredDag = {
-      fugueAuthored: 1,
-      name: "router-escape",
-      team: "assist",
-      description: "d",
-      input: { fields: [{ name: "id", type: str }] },
-      nodes: [
-        {
-          id: "classify",
-          kind: "fetch",
-          purpose: "c",
-          output: { fields: [{ name: "bucket", type: { kind: "enum", values: ['sm"all', "large"] } }] },
-        },
-        { id: "handle-small", kind: "transform", purpose: "s", output: out("v") },
-        { id: "fallback", kind: "transform", purpose: "f", output: out("v") },
-      ],
-      structure: {
-        shape: "router",
-        classifier: "classify",
-        cases: [{ label: "small", when: { field: "bucket", equals: 'sm"all' }, to: "handle-small" }],
-        default: "fallback",
-      },
-    };
-    const diagram = authoredToMermaid(d);
-    expect(diagram).toContain("bucket = sm&quot;all");
-    expect(diagram).not.toContain('sm"all');
   });
 });

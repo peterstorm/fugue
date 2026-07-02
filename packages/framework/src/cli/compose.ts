@@ -7,9 +7,11 @@
 // always generated deterministically (`buildAuthoredScaffold`), and every
 // draft is proven through the real gauntlet before the user sees it:
 // codegen → `import` through `defineDag` (defineDag's structural checks,
-// throws) → `fugue lint` (fan-in keys, passthrough, shape hints). Violations
-// feed back to the LLM as structured JSON events, not prose. The LLM never
-// hand-writes `defineDag`.
+// throws) → `fugue lint` (fan-in keys, passthrough, shape hints) → `fugue
+// describe` (the DescribedDag whose Mermaid render — `describedToMermaid`,
+// the same renderer `fugue visualize` uses — is what the user approves).
+// Violations feed back to the LLM as structured JSON events, not prose. The
+// LLM never hand-writes `defineDag`.
 //
 // The draft payload crosses the wire as `unknown` and is parsed by
 // `parseAuthoredDag` INSIDE the loop — a schema-invalid draft enters the
@@ -21,14 +23,17 @@
 // with a scripted fake — no network, no TTY.
 
 import { resolve, isAbsolute } from "node:path";
+import { match } from "ts-pattern";
 import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
+import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
+import { CONFIDENCE_BUCKET } from "./vocabulary.js";
 import type { NewResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +90,105 @@ export type ComposeOutcome =
     };
 
 // ---------------------------------------------------------------------------
+// CLI argument parsing (pure — mirrors parseNewArgs' accumulate-all shape)
+// ---------------------------------------------------------------------------
+
+// kebab-case, lowercase, single internal dashes — the same convention the
+// AuthoredDag schema enforces on `team` and `fugue new` enforces on its path.
+const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export interface ParsedComposeArgs {
+  readonly ok: true;
+  readonly options: ComposeOptions;
+}
+export interface ParseComposeError {
+  readonly ok: false;
+  readonly problems: readonly string[];
+}
+
+/**
+ * Parse `fugue compose`'s arguments (everything after the `compose` token)
+ * into validated `ComposeOptions`. Pure — no I/O, no `process.*`; the bin
+ * keeps only readline/SIGINT/env-key wiring. Accumulates ALL problems rather
+ * than failing on the first, so the author sees every fix at once (mirrors
+ * `parseNewArgs`).
+ */
+export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
+  const problems: string[] = [];
+  let intent: string | undefined;
+  let team: string | undefined;
+  let model: string | undefined;
+  let owner: string | undefined;
+  let root: string | undefined;
+  let force = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    const takeValue = (flag: string): string | undefined => {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        problems.push(`${flag} requires a value`);
+        return undefined;
+      }
+      i++;
+      return value;
+    };
+    match(arg)
+      .with("--team", () => {
+        team = takeValue("--team");
+      })
+      .with("--model", () => {
+        model = takeValue("--model");
+      })
+      .with("--owner", () => {
+        owner = takeValue("--owner");
+      })
+      .with("--dir", () => {
+        root = takeValue("--dir");
+      })
+      .with("--force", () => {
+        force = true;
+      })
+      .otherwise((other) => {
+        if (other.startsWith("--")) {
+          problems.push(`unknown flag: ${other}`);
+        } else if (intent === undefined) {
+          intent = other;
+        } else {
+          problems.push(`unexpected argument: ${other}`);
+        }
+      });
+  }
+
+  if (intent === undefined) {
+    problems.push('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
+  }
+  if (team === undefined) {
+    problems.push("missing --team <team>");
+  } else if (!KEBAB.test(team)) {
+    // The team lands in the AuthoredDag (kebab-case there) and in the
+    // dags/<team>/ directory name — reject junk at the boundary instead of
+    // letting the first LLM draft fail schema validation on our own flag.
+    problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+  }
+
+  if (intent === undefined || team === undefined || problems.length > 0) {
+    return { ok: false, problems };
+  }
+  return {
+    ok: true,
+    options: {
+      intent,
+      team,
+      force,
+      ...(model !== undefined ? { model } : {}),
+      ...(owner !== undefined ? { owner } : {}),
+      ...(root !== undefined ? { root } : {}),
+    },
+  };
+};
+
+// ---------------------------------------------------------------------------
 // The LLM turn contract (closed)
 // ---------------------------------------------------------------------------
 
@@ -131,7 +235,7 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   (context-only read; sources shape only).
 - The auto-injected llm confidence bucket CANNOT be used as a router
   predicate field — declare it explicitly on the classifier output as
-  {"kind":"enum","values":["high","medium","low"]} if you route on it.
+  {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}} if you route on it.
 - structure is one shape:
   linear   {order:[...≥2]}                    — a chain
   fan-out  {source,branches:[...≥2],join?}    — parallel branches, optional join
@@ -144,57 +248,6 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   DERIVED from the topology — never author them.
 - Prefer the simplest shape that fits. Human gates only where the user asked
   for approval.`;
-
-// ---------------------------------------------------------------------------
-// AuthoredDag → Mermaid (for the present step; pure)
-// ---------------------------------------------------------------------------
-
-// The `n_` prefix keeps real node ids disjoint from the reserved `dag_input`
-// token (a node literally named `dag-input` must not merge with the virtual
-// input node). Unlike visualize's `safeId`, plain `-`→`_` is already
-// injective here: AuthoredDag ids are kebab-case (no `_` or `:` possible).
-const safe = (id: string): string => `n_${id.replace(/[^A-Za-z0-9_]/g, "_")}`;
-
-const escapeLabel = (s: string): string => s.replace(/"/g, "&quot;");
-
-export const authoredToMermaid = (dag: AuthoredDag): string => {
-  const lines = ["flowchart TD", `    dag_input(["$input (request)"])`];
-  for (const n of dag.nodes) {
-    lines.push(
-      n.kind === "human-review"
-        ? `    ${safe(n.id)}{{"${n.id}<br/>${n.kind}"}}`
-        : `    ${safe(n.id)}["${n.id}<br/>${n.kind}"]`,
-    );
-  }
-  const s = dag.structure;
-  switch (s.shape) {
-    case "linear": {
-      lines.push(`    dag_input --> ${safe(s.order[0]!)}`);
-      for (let i = 1; i < s.order.length; i++) lines.push(`    ${safe(s.order[i - 1]!)} --> ${safe(s.order[i]!)}`);
-      break;
-    }
-    case "fan-out":
-    case "diamond": {
-      lines.push(`    dag_input --> ${safe(s.source)}`);
-      for (const b of s.branches) lines.push(`    ${safe(s.source)} --> ${safe(b)}`);
-      if (s.join !== undefined) for (const b of s.branches) lines.push(`    ${safe(b)} --> ${safe(s.join)}`);
-      break;
-    }
-    case "router": {
-      lines.push(`    dag_input --> ${safe(s.classifier)}`);
-      for (const c of s.cases) lines.push(`    ${safe(s.classifier)} -->|"${escapeLabel(`${c.when.field} = ${c.when.equals}`)}"| ${safe(c.to)}`);
-      lines.push(`    ${safe(s.classifier)} -.->|default| ${safe(s.default)}`);
-      break;
-    }
-    case "sources": {
-      for (const src of s.sources) lines.push(`    ${safe(src)} --> ${safe(s.join)}`);
-      lines.push(`    ${safe(s.join)} --> ${safe(s.assemble)}`);
-      lines.push(`    dag_input --> ${safe(s.assemble)}`);
-      break;
-    }
-  }
-  return lines.join("\n");
-};
 
 // ---------------------------------------------------------------------------
 // The loop
@@ -385,7 +438,11 @@ export const runCompose = async (
     }
     lastProven = draft;
 
-    io.say(`\n${summarize(draft)}\n\n${authoredToMermaid(draft)}\n`);
+    // The Mermaid preview is rendered from the gauntlet's DescribedDag — the
+    // structure DERIVED from the actually-generated code (same renderer as
+    // `fugue visualize`), not a re-encoding of the AuthoredDag. The user
+    // approves the real thing.
+    io.say(`\n${summarize(draft)}\n\n${describedToMermaid(verdict.described)}\n`);
     if (verdict.advisories.length > 0) {
       io.say(`Advisories:\n${verdict.advisories.map((a) => `  - ${a.kind}: ${a.message}`).join("\n")}`);
     }

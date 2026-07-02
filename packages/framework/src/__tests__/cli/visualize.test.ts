@@ -8,6 +8,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describedToMermaid, runVisualize } from "../../cli/visualize.js";
 import { writeAuthoredScaffold } from "../../cli/new.js";
+import { parseAuthoredDag } from "../../cli/authored.js";
 import type { DescribedDag } from "../../describe/index.js";
 
 const tmpRoot = resolve(__dirname, ".tmp-visualize");
@@ -93,21 +94,21 @@ describe("describedToMermaid", () => {
 
 describe("runVisualize", () => {
   it("renders a real generated DAG and fails with lint errors for a broken file", async () => {
-    const written = await writeAuthoredScaffold(
-      {
-        fugueAuthored: 1,
-        name: "viz-roundtrip",
-        team: "demo",
-        description: "viz roundtrip",
-        input: { fields: [{ name: "id", type: { kind: "string" } }] },
-        nodes: [
-          { id: "fetch-x", kind: "fetch", purpose: "x", output: { fields: [{ name: "x", type: { kind: "string" } }] } },
-          { id: "shape-x", kind: "transform", purpose: "y", output: { fields: [{ name: "y", type: { kind: "string" } }] } },
-        ],
-        structure: { shape: "linear", order: ["fetch-x", "shape-x"] },
-      },
-      { root: tmpRoot, force: false },
-    );
+    // `AuthoredDag` is branded — parse the fixture (never cast).
+    const authored = parseAuthoredDag({
+      fugueAuthored: 1,
+      name: "viz-roundtrip",
+      team: "demo",
+      description: "viz roundtrip",
+      input: { fields: [{ name: "id", type: { kind: "string" } }] },
+      nodes: [
+        { id: "fetch-x", kind: "fetch", purpose: "x", output: { fields: [{ name: "x", type: { kind: "string" } }] } },
+        { id: "shape-x", kind: "transform", purpose: "y", output: { fields: [{ name: "y", type: { kind: "string" } }] } },
+      ],
+      structure: { shape: "linear", order: ["fetch-x", "shape-x"] },
+    });
+    if (!authored.ok) throw new Error(authored.problems.join("; "));
+    const written = await writeAuthoredScaffold(authored.dag, { root: tmpRoot, force: false });
     if (!written.ok) throw new Error(written.problems.join("; "));
 
     const good = await runVisualize(join(written.dir, "dag.ts"));

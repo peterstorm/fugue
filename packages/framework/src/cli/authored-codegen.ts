@@ -8,6 +8,17 @@
 // description. The LLM (via `fugue compose`) only ever edits the AuthoredDag
 // JSON; this module is the deterministic half of that loop.
 //
+// RELATIONSHIP TO `new-templates.ts` (deliberate, not drift): the golden
+// templates are human-education scaffolds with realistic example bodies and
+// teaching comments; THIS module is the machine generator — placeholder
+// ("todo") bodies, prompts derived from `purpose`, and the
+// regenerate-from-`dag.authored.json` workflow. Both stay compliant with the
+// same idioms because the idiom surface is single-sourced: every emitted NAME
+// comes from the `identifiers.ts` constructors (which also feed the
+// parse-time collision accounting), and the llm-factory boilerplate
+// (`llmFactoryPreamble` / `llmDagFactoryOpen` / `llmConfidenceReturn` /
+// `registration`) is imported from `new-templates.ts` verbatim.
+//
 // Node input schemas are DERIVED from the topology, not authored:
 //   linear    — node i consumes node i-1's output (first consumes the input)
 //   fan-out/  — source consumes the input; branches consume the source;
@@ -20,18 +31,34 @@ import { match } from "ts-pattern";
 import type {
   AuthoredDag,
   AuthoredNode,
-  FieldSpec,
   FieldType,
   SchemaSpec,
 } from "./authored.js";
 import {
-  DEFAULT_MODEL,
   llmConfidenceReturn,
+  llmDagFactoryOpen,
+  llmFactoryPreamble,
   registration,
   type PromptFile,
   type TemplateCtx,
 } from "./new-templates.js";
-import { camelCase, pascalCase } from "./identifiers.js";
+import {
+  DAG_CONST_NAME,
+  DEFAULT_MODEL_NAME,
+  FIXED_IMPORT_NAME,
+  INPUT_SCHEMA_NAME,
+  NODE_FACTORY_NAME,
+  SHAPE_HELPER_NAME,
+  dagFactoryName,
+  fanInConstName,
+  llmFactoryName,
+  nodeRefName,
+  schemaConstName,
+} from "./identifiers.js";
+import { CONFIDENCE_FIELD } from "./vocabulary.js";
+
+/** The llm node variant — the only kind that owns a prompt. */
+type LlmNode = Extract<AuthoredNode, { kind: "llm" }>;
 
 // ---------------------------------------------------------------------------
 // Small pure helpers
@@ -64,11 +91,6 @@ const defaultExpr = (t: FieldType): string =>
     .with({ kind: "enum" }, (e) => JSON.stringify(e.values[0]))
     .exhaustive();
 
-const CONFIDENCE_FIELD: FieldSpec = {
-  name: "confidence",
-  type: { kind: "enum", values: ["high", "medium", "low"] },
-};
-
 /** LLM node outputs always carry bucketed confidence (the framework idiom). */
 const withConfidence = (spec: SchemaSpec): SchemaSpec =>
   spec.fields.some((f) => f.name === "confidence")
@@ -93,63 +115,69 @@ interface NodePlan {
   readonly node: AuthoredNode;
   /** Schema const name for this node's output. */
   readonly outName: string;
-  /** Effective output spec (LLM nodes get confidence injected). */
+  /**
+   * Effective output spec (LLM nodes get confidence injected). `null` exactly
+   * for human-review nodes — their gate is a typed passthrough, so no schema
+   * const is emitted for them.
+   */
   readonly outSpec: SchemaSpec | null;
   /** Expression for the node's input schema const; null for source nodes. */
   readonly inExpr: string | null;
-  /** For LLM nodes: the prompt registry name. */
-  readonly promptName?: string;
   /**
-   * Var identifier referenced in the structure call. DEAD for llm nodes —
-   * `nodeExprRef` calls the factory (`create<Pascal>(model)`) instead of a
-   * bound const, so the `<camel>Node` value assigned here never reaches the
-   * emitted file (it is still claimed by `generatedIdentifiersFor`; see the
-   * rationale there).
+   * Var identifier referenced in the structure call (`nodeRefName`). DEAD for
+   * llm nodes — `nodeExprRef` calls the factory (`llmFactoryName(id)(model)`)
+   * instead of a bound const, so the `llmNodeRefName` value assigned here
+   * never reaches the emitted file (it is still claimed by
+   * `generatedIdentifiersFor`; see the rationale on `llmNodeRefName`).
    */
   readonly ref: string;
 }
 
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
 
-const fetchNode = (p: NodePlan): string => `${purposeComment(p.node)}
-const ${p.ref} = createFetchNode({
+// The placeholder-body emitters take the output spec explicitly: the caller
+// has already narrowed `p.node` by kind, so `p.node.output` is a plain field
+// access — no non-null assertion anywhere.
+
+const fetchNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
+const ${p.ref} = ${NODE_FACTORY_NAME.fetch}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
   // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
   fetch: async (_input) =>
     ok({
-${defaultsObject(p.outSpec!, "      ")}
+${defaultsObject(outSpec, "      ")}
     }),
 });`;
 
-const sourceNode = (p: NodePlan): string => `${purposeComment(p.node)}
-const ${p.ref} = createSourceNode({
+const sourceNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
+const ${p.ref} = ${NODE_FACTORY_NAME.source}({
   id: ${JSON.stringify(p.node.id)},
   outputSchema: ${p.outName},
   // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
   fetch: async () =>
     ok({
-${defaultsObject(p.outSpec!, "      ")}
+${defaultsObject(outSpec, "      ")}
     }),
 });`;
 
-const transformNode = (p: NodePlan): string => `${purposeComment(p.node)}
-const ${p.ref} = createTransformNode({
+const transformNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
+const ${p.ref} = ${NODE_FACTORY_NAME.transform}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
   // Placeholder — map the real values for: ${comment(p.node.purpose)}
   transform: (_input) =>
     ok({
-${defaultsObject(p.outSpec!, "      ")}
+${defaultsObject(outSpec, "      ")}
     }),
 });`;
 
 const humanReviewNode = (p: NodePlan): string => `${purposeComment(p.node)}
 // Human-review gate: the run SUSPENDS here and waits for a decision
 // (approve / reject / approve-with-edit / reroute) before continuing.
-const ${p.ref} = createHumanReviewNode({
+const ${p.ref} = ${NODE_FACTORY_NAME["human-review"]}({
   id: ${JSON.stringify(p.node.id)},
   schema: ${p.inExpr},
   prompt: ${JSON.stringify(`Approve: ${p.node.purpose}?`)},
@@ -158,7 +186,7 @@ const ${p.ref} = createHumanReviewNode({
 /** Prompt placeholders must be identifier-ish — sanitize fan-in keys. */
 const placeholderName = (fieldKey: string): string => fieldKey.replace(/[^A-Za-z0-9_]/g, "_");
 
-const llmNode = (p: NodePlan, inputFields: readonly string[], fanIn: boolean): string => {
+const llmNode = (p: NodePlan, promptName: string, inputFields: readonly string[], fanIn: boolean): string => {
   // Fan-in inputs are OBJECTS keyed by node id — stringify them so the prompt
   // placeholder receives JSON, not "[object Object]".
   const buildInputEntries = inputFields
@@ -168,16 +196,15 @@ const llmNode = (p: NodePlan, inputFields: readonly string[], fanIn: boolean): s
         : `${key(placeholderName(f))}: input[${JSON.stringify(f)}]`,
     )
     .join(", ");
-  const factoryName = `create${pascalCase(p.node.id)}`;
   return `${purposeComment(p.node)}
-const ${factoryName} = (
+const ${llmFactoryName(p.node.id)} = (
   model: string,
 ): LlmNodeDef<z.infer<typeof ${p.inExpr}>, z.infer<typeof ${p.outName}>> => {
-  const node = createLlmNode({
+  const node = ${NODE_FACTORY_NAME.llm}({
     id: ${JSON.stringify(p.node.id)},
     inputSchema: ${p.inExpr},
     outputSchema: ${p.outName},
-    promptName: ${JSON.stringify(p.promptName)},
+    promptName: ${JSON.stringify(promptName)},
     model,
     buildInput: (input) => ({ ${buildInputEntries} }),
   });
@@ -187,7 +214,7 @@ ${llmConfidenceReturn}
 
 const llmPrompt = (
   dag: AuthoredDag,
-  node: AuthoredNode,
+  node: LlmNode,
   promptName: string,
   inputFields: readonly string[],
   fanIn: boolean,
@@ -195,7 +222,7 @@ const llmPrompt = (
   const vars = inputFields
     .map((f) => `${placeholderName(f)}${fanIn ? " (JSON)" : ""}: {{${placeholderName(f)}}}`)
     .join("\n");
-  const outSpec = withConfidence(node.output!);
+  const outSpec = withConfidence(node.output);
   const jsonShape = outSpec.fields
     .map((f) =>
       f.type.kind === "enum"
@@ -230,27 +257,29 @@ interface Plans {
   readonly hasLlm: boolean;
 }
 
+/**
+ * Prompt registry name for an llm node: the dag name when it is the only llm
+ * node, `<dag>-<node>` otherwise.
+ */
+const promptNameFor = (dag: AuthoredDag, id: string): string =>
+  dag.nodes.filter((n) => n.kind === "llm").length === 1 ? dag.name : `${dag.name}-${id}`;
+
 const planNodes = (dag: AuthoredDag): Plans => {
-  const llmNodes = dag.nodes.filter((n) => n.kind === "llm");
   const byId = new Map<string, NodePlan>();
   for (const node of dag.nodes) {
-    const outSpec = node.output ? (node.kind === "llm" ? withConfidence(node.output) : node.output) : null;
-    const promptName =
-      node.kind === "llm"
-        ? llmNodes.length === 1
-          ? dag.name
-          : `${dag.name}-${node.id}`
-        : undefined;
+    const outSpec = match(node)
+      .with({ kind: "human-review" }, () => null)
+      .with({ kind: "llm" }, (n) => withConfidence(n.output))
+      .otherwise((n) => n.output);
     byId.set(node.id, {
       node,
-      outName: `${pascalCase(node.id)}Schema`,
+      outName: schemaConstName(node.id),
       outSpec,
       inExpr: null, // filled by wiring
-      ...(promptName !== undefined ? { promptName } : {}),
-      ref: node.kind === "llm" ? `${camelCase(node.id)}Node` : camelCase(node.id),
+      ref: nodeRefName(node.id, node.kind),
     });
   }
-  return { byId, hasLlm: llmNodes.length > 0 };
+  return { byId, hasLlm: dag.nodes.some((n) => n.kind === "llm") };
 };
 
 /** Fan-in schema const over a set of upstream plans (keys = node ids). */
@@ -286,7 +315,7 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
   };
 
   const s = dag.structure;
-  const schemaDecls: string[] = [schemaConst("InputSchema", dag.input)];
+  const schemaDecls: string[] = [schemaConst(INPUT_SCHEMA_NAME, dag.input)];
   const extraDecls: string[] = [];
 
   // Output schema consts (skip human-review — passthrough)
@@ -298,24 +327,24 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
   // Wire inputs per shape + build the structure expression
   const structureExpr: string = match(s)
     .with({ shape: "linear" }, (lin) => {
-      let prevSchema = "InputSchema";
+      let prevSchema: string = INPUT_SCHEMA_NAME;
       for (const id of lin.order) {
         setInput(id, prevSchema);
         prevSchema = effectiveOutName(plan(id));
       }
-      return `defineLinearDag({
+      return `${SHAPE_HELPER_NAME.linear}({
   id: ${JSON.stringify(dag.name)},
   nodes: [${lin.order.map((id) => nodeExprRef(plan(id))).join(", ")}],
 })`;
     })
     .with({ shape: "fan-out" }, { shape: "diamond" }, (fan) => {
-      const helper = fan.shape === "diamond" ? "defineDiamond" : "defineFanOut";
-      setInput(fan.source, "InputSchema");
+      const helper = SHAPE_HELPER_NAME[fan.shape];
+      setInput(fan.source, INPUT_SCHEMA_NAME);
       const sourceOut = effectiveOutName(plan(fan.source));
       for (const id of fan.branches) setInput(id, sourceOut);
       let joinPart = "";
       if (fan.join !== undefined) {
-        const fanInName = `${pascalCase(fan.join)}FanIn`;
+        const fanInName = fanInConstName(fan.join);
         extraDecls.push(
           `// The join sees every branch keyed by its node id — keys MUST equal the\n// incoming set (\`fugue lint\` enforces this).`,
           fanInConst(fanInName, fan.branches.map(plan)),
@@ -330,7 +359,7 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
 })`;
     })
     .with({ shape: "router" }, (r) => {
-      setInput(r.classifier, "InputSchema");
+      setInput(r.classifier, INPUT_SCHEMA_NAME);
       const classifierOut = effectiveOutName(plan(r.classifier));
       for (const c of r.cases) setInput(c.to, classifierOut);
       setInput(r.default, classifierOut);
@@ -342,7 +371,7 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
     },`,
         )
         .join("\n");
-      return `defineRouter({
+      return `${SHAPE_HELPER_NAME.router}({
   id: ${JSON.stringify(dag.name)},
   classifier: ${nodeExprRef(plan(r.classifier))},
   cases: {
@@ -352,19 +381,19 @@ ${cases}
 })`;
     })
     .with({ shape: "sources" }, (src) => {
-      const joinFanIn = `${pascalCase(src.join)}FanIn`;
+      const joinFanIn = fanInConstName(src.join);
       extraDecls.push(
         `// Join: fan-in keyed by the source node ids (\`fugue lint\` checks the key set).`,
         fanInConst(joinFanIn, src.sources.map(plan)),
       );
       setInput(src.join, joinFanIn);
-      const assembleFanIn = `${pascalCase(src.assemble)}FanIn`;
+      const assembleFanIn = fanInConstName(src.assemble);
       extraDecls.push(
         `// Assemble: fan-in over the join + the request via the "$input" slot.\n// Declaring "$input" is what makes \`defineSources\` add the DAG_INPUT edge.`,
-        fanInConst(assembleFanIn, [plan(src.join)], [["$input", "InputSchema"]]),
+        fanInConst(assembleFanIn, [plan(src.join)], [["$input", INPUT_SCHEMA_NAME]]),
       );
       setInput(src.assemble, assembleFanIn);
-      return `defineSources({
+      return `${SHAPE_HELPER_NAME.sources}({
   id: ${JSON.stringify(dag.name)},
   sources: [${src.sources.map((id) => nodeExprRef(plan(id))).join(", ")}],
   join: ${nodeExprRef(plan(src.join))},
@@ -381,22 +410,23 @@ ${cases}
     const p = plan(id);
     switch (p.node.kind) {
       case "fetch":
-        nodeDecls.push(fetchNode(p));
+        nodeDecls.push(fetchNode(p, p.node.output));
         break;
       case "source":
-        nodeDecls.push(sourceNode(p));
+        nodeDecls.push(sourceNode(p, p.node.output));
         break;
       case "transform":
-        nodeDecls.push(transformNode(p));
+        nodeDecls.push(transformNode(p, p.node.output));
         break;
       case "human-review":
         nodeDecls.push(humanReviewNode(p));
         break;
       case "llm": {
+        const promptName = promptNameFor(dag, p.node.id);
         const inputFields = llmInputFields(dag, p);
         const fanIn = llmInputIsFanIn(dag, p);
-        nodeDecls.push(llmNode(p, inputFields, fanIn));
-        prompts.push(llmPrompt(dag, p.node, p.promptName!, inputFields, fanIn));
+        nodeDecls.push(llmNode(p, promptName, inputFields, fanIn));
+        prompts.push(llmPrompt(dag, p.node, promptName, inputFields, fanIn));
         break;
       }
     }
@@ -405,7 +435,6 @@ ${cases}
   const ctx: TemplateCtx = {
     name: dag.name,
     team: dag.team,
-    pascal: pascalCase(dag.name),
     llm: hasLlm,
   };
 
@@ -418,16 +447,11 @@ ${cases}
 // marked "Placeholder" are yours to implement.`;
 
   const dagBinding = hasLlm
-    ? `export interface ${ctx.pascal}DagOpts {
-  /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
-  readonly model?: string;
-}
+    ? `${llmFactoryPreamble(dag.name)}
 
-const DEFAULT_MODEL = ${JSON.stringify(DEFAULT_MODEL)};
-
-export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
+${llmDagFactoryOpen(dag.name)}
   ${structureExpr.replace(/\n/g, "\n  ")};`
-    : `const dag = ${structureExpr};`;
+    : `const ${DAG_CONST_NAME} = ${structureExpr};`;
 
   const dagTs = [
     header,
@@ -441,7 +465,7 @@ export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
     "",
     dagBinding,
     "",
-    registration(ctx, hasLlm ? `create${ctx.pascal}Dag()` : "dag", dag.description),
+    registration(ctx, hasLlm ? `${dagFactoryName(dag.name)}()` : DAG_CONST_NAME, dag.description),
   ].join("\n");
 
   return { dagTs, prompts };
@@ -469,7 +493,7 @@ const structureOrder = (dag: AuthoredDag): readonly string[] =>
  * everywhere else the plain const.
  */
 const nodeExprRef = (p: NodePlan): string =>
-  p.node.kind === "llm" ? `create${pascalCase(p.node.id)}(opts.model ?? DEFAULT_MODEL)` : p.ref;
+  p.node.kind === "llm" ? `${llmFactoryName(p.node.id)}(opts.model ?? ${DEFAULT_MODEL_NAME})` : p.ref;
 
 /**
  * Whether an LLM node's derived input is a fan-in object (keys = node ids /
@@ -487,7 +511,12 @@ const llmInputIsFanIn = (dag: AuthoredDag, p: NodePlan): boolean =>
 const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
   const s = dag.structure;
   const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
-  const fieldsOf = (id: string): readonly string[] => byId.get(id)?.output?.fields.map((f) => f.name) ?? [];
+  // Human-review gates have no output variant — they contribute no fields here
+  // (the linear walk below skips past them to the real producer anyway).
+  const fieldsOf = (id: string): readonly string[] => {
+    const n = byId.get(id);
+    return n === undefined || n.kind === "human-review" ? [] : n.output.fields.map((f) => f.name);
+  };
 
   switch (s.shape) {
     case "linear": {
@@ -514,33 +543,27 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
   }
 };
 
+// Every import name comes from the `identifiers.ts` catalogue
+// (`FIXED_IMPORT_NAME` / `NODE_FACTORY_NAME` / `SHAPE_HELPER_NAME`), the same
+// sets `RESERVED_IDENTIFIERS` is built from — an import this function emits is
+// reserved at parse time by construction.
 const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
-  const kinds = new Set(dag.nodes.map((n) => n.kind));
-  const helper = match(dag.structure.shape)
-    .with("linear", () => "defineLinearDag")
-    .with("fan-out", () => "defineFanOut")
-    .with("diamond", () => "defineDiamond")
-    .with("router", () => "defineRouter")
-    .with("sources", () => "defineSources")
-    .exhaustive();
+  const kinds = [...new Set(dag.nodes.map((n) => n.kind))];
+  const helper = SHAPE_HELPER_NAME[dag.structure.shape];
 
   const names = [
-    ...(hasLlm ? ["confidence"] : []),
-    ...(kinds.has("fetch") ? ["createFetchNode"] : []),
-    ...(kinds.has("human-review") ? ["createHumanReviewNode"] : []),
-    ...(kinds.has("llm") ? ["createLlmNode"] : []),
-    ...(kinds.has("source") ? ["createSourceNode"] : []),
-    ...(kinds.has("transform") ? ["createTransformNode"] : []),
+    ...(hasLlm ? [FIXED_IMPORT_NAME.confidence] : []),
+    ...kinds.map((k) => NODE_FACTORY_NAME[k]),
     helper,
-    "ok",
+    FIXED_IMPORT_NAME.ok,
   ].sort();
 
   return [
-    `import { z } from "zod";`,
+    `import { ${FIXED_IMPORT_NAME.zod} } from "zod";`,
     `import {`,
     ...names.map((n) => `  ${n},`),
     `} from "@fuguejs/framework";`,
-    ...(hasLlm ? [`import type { LlmNodeDef } from "@fuguejs/framework";`] : []),
-    `import type { DagRegistration } from "@fuguejs/host/contract";`,
+    ...(hasLlm ? [`import type { ${FIXED_IMPORT_NAME.llmNodeDefType} } from "@fuguejs/framework";`] : []),
+    `import type { ${FIXED_IMPORT_NAME.dagRegistrationType} } from "@fuguejs/host/contract";`,
   ].join("\n");
 };

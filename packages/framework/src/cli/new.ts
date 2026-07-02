@@ -41,7 +41,6 @@ import {
 import { parseAuthoredDagJson, type AuthoredDag } from "./authored.js";
 import { buildAuthoredScaffold } from "./authored-codegen.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
-import { pascalCase } from "./identifiers.js";
 import { computePromptHash } from "../prompts/hash.js";
 import type { NewResult } from "./types.js";
 
@@ -231,7 +230,6 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const ctx: TemplateCtx = {
     name: options.name,
     team: options.team,
-    pascal: pascalCase(options.name),
     llm: options.llm,
     review: options.review,
   };
@@ -404,7 +402,6 @@ export const writeAuthoredScaffold = async (
   const ctx: TemplateCtx = {
     name: authored.name,
     team: authored.team,
-    pascal: pascalCase(authored.name),
     llm: hasLlm,
   };
 

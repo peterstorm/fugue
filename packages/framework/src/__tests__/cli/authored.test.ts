@@ -9,10 +9,21 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import fc from "fast-check";
-import { parseAuthoredDag, parseAuthoredDagJson, type AuthoredDag } from "../../cli/authored.js";
+import {
+  parseAuthoredDag,
+  parseAuthoredDagJson,
+  type AuthoredDag,
+  type AuthoredDagInput,
+} from "../../cli/authored.js";
 import { buildAuthoredScaffold } from "../../cli/authored-codegen.js";
-import { runGauntlet } from "../../cli/gauntlet.js";
+import {
+  RESERVED_IDENTIFIERS,
+  dagLevelIdentifiers,
+  generatedIdentifiersFor,
+} from "../../cli/identifiers.js";
+import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
 import { runNewFrom, writeAuthoredScaffold } from "../../cli/new.js";
+import type { DescribedDag } from "../../describe/index.js";
 import { runLint } from "../../cli/lint.js";
 import { runDescribe } from "../../cli/describe.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
@@ -28,13 +39,27 @@ afterAll(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fixtures — one authored description per shape
+// Fixtures — one authored description per shape. Fixtures are the UNBRANDED
+// wire shape; `AuthoredDag` is branded, so anything that consumes one goes
+// through `mustParse` (parse, don't cast).
 // ---------------------------------------------------------------------------
 
 const str = { kind: "string" as const };
 const out = (...names: string[]) => ({ fields: names.map((name) => ({ name, type: str })) });
 
-const FIXTURES: Record<string, AuthoredDag> = {
+const mustParse = (raw: unknown): AuthoredDag => {
+  const parsed = parseAuthoredDag(raw);
+  if (!parsed.ok) throw new Error(parsed.problems.join("; "));
+  return parsed.dag;
+};
+
+/** Narrow a fixture node to its output-carrying variants (test mutations only). */
+const outputOf = (n: AuthoredDagInput["nodes"][number]) => {
+  if (!("output" in n)) throw new Error(`node '${n.id}' has no output to mutate`);
+  return n.output;
+};
+
+const FIXTURES: Record<string, AuthoredDagInput> = {
   linear: {
     fugueAuthored: 1,
     name: "authored-linear",
@@ -182,8 +207,8 @@ describe("AuthoredDag schema", () => {
     });
   }
 
-  const reject = (mutate: (dag: AuthoredDag) => unknown, needle: string) => {
-    const raw = mutate(structuredClone(FIXTURES.router!) as AuthoredDag);
+  const reject = (mutate: (dag: AuthoredDagInput) => unknown, needle: string) => {
+    const raw = mutate(structuredClone(FIXTURES.router!) as AuthoredDagInput);
     const parsed = parseAuthoredDag(raw);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain(needle);
@@ -205,7 +230,7 @@ describe("AuthoredDag schema", () => {
       (d) => ({
         ...d,
         structure: {
-          ...(d.structure as Extract<AuthoredDag["structure"], { shape: "router" }>),
+          ...(d.structure as Extract<AuthoredDagInput["structure"], { shape: "router" }>),
           cases: [{ label: "small", when: { field: "requestId", equals: "x" }, to: "auto-approve" }],
         },
       }),
@@ -218,7 +243,7 @@ describe("AuthoredDag schema", () => {
       (d) => ({
         ...d,
         structure: {
-          ...(d.structure as Extract<AuthoredDag["structure"], { shape: "router" }>),
+          ...(d.structure as Extract<AuthoredDagInput["structure"], { shape: "router" }>),
           cases: [{ label: "small", when: { field: "bucket", equals: "huge" }, to: "auto-approve" }],
         },
       }),
@@ -227,7 +252,7 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects source-kind nodes outside the sources shape", () => {
-    const d = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (d.nodes[0] as { kind: string }).kind = "source";
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
@@ -237,18 +262,92 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects human-review outside linear / as first node / with output", () => {
-    const first = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDag;
+    const first = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDagInput;
     (first.structure as { order: string[] }).order = ["approve", "draft-reply"];
     expect(parseAuthoredDag(first).ok).toBe(false);
 
-    const withOut = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDag;
+    // The kind/output dependency is a discriminated union now — the message
+    // must still state the RULE (the repair loop feeds it to an LLM), not
+    // just Zod's default "unrecognized key".
+    const withOut = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDagInput;
     (withOut.nodes[1] as { output?: unknown }).output = out("x");
-    expect(parseAuthoredDag(withOut).ok).toBe(false);
+    const parsed = parseAuthoredDag(withOut);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("must not declare output");
+  });
+
+  it("rejects a missing output on every kind that requires one, stating the RULE", () => {
+    for (const kind of ["fetch", "transform", "llm", "source"] as const) {
+      // sources-llm exercises every role: mutate a source node for "source",
+      // the llm join for the rest — only the stripped output should fail.
+      const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
+      const idx = kind === "source" ? 0 : 2;
+      (d.nodes[idx] as { kind: string }).kind = kind;
+      delete (d.nodes[idx] as { output?: unknown }).output;
+      const parsed = parseAuthoredDag(d);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) {
+        // The repair loop feeds this to an LLM: the message must state the
+        // kind/output rule, not just Zod's "expected object, received
+        // undefined" shape complaint.
+        const problem = parsed.problems.find((p) => p.startsWith(`nodes.${idx}.output`));
+        expect(problem).toBeDefined();
+        expect(problem).toContain(
+          "output is required for fetch/transform/llm/source nodes — only human-review nodes omit it",
+        );
+      }
+    }
+  });
+
+  it("names the full kind vocabulary on an unknown or missing node kind", () => {
+    // Pre-refactor Zod listed the options; the discriminated union's default
+    // is a bare "Invalid input" — the union error map must restore the list.
+    const vocabulary = '"fetch"|"transform"|"llm"|"human-review"|"source"';
+
+    const unknown = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (unknown.nodes[0] as { kind: string }).kind = "fletch";
+    const p1 = parseAuthoredDag(unknown);
+    expect(p1.ok).toBe(false);
+    if (!p1.ok) expect(p1.problems.join("\n")).toContain(`node kind must be one of ${vocabulary}`);
+
+    const missing = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    delete (missing.nodes[0] as { kind?: string }).kind;
+    const p2 = parseAuthoredDag(missing);
+    expect(p2.ok).toBe(false);
+    if (!p2.ok) expect(p2.problems.join("\n")).toContain(`node kind must be one of ${vocabulary}`);
+  });
+
+  it("reports stray sibling keys alongside the human-review output rule (one issue, both facts)", () => {
+    // `output` and `extra` arrive in the SAME unrecognized_keys issue; the
+    // custom message must not swallow "extra" or the repair loop burns a
+    // round discovering it.
+    const d = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDagInput;
+    (d.nodes[1] as Record<string, unknown>).output = out("x");
+    (d.nodes[1] as Record<string, unknown>).extra = "stray";
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      const problem = parsed.problems.find((p) => p.includes("must not declare output"));
+      expect(problem).toBeDefined();
+      expect(problem).toContain('also unrecognized: "extra"');
+    }
+  });
+
+  it("keeps Zod's default unrecognized-keys message when a human-review stray is not output", () => {
+    const d = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDagInput;
+    (d.nodes[1] as Record<string, unknown>).extra = "stray";
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      const all = parsed.problems.join("\n");
+      expect(all).toContain('Unrecognized key: "extra"');
+      expect(all).not.toContain("must not declare output");
+    }
   });
 
   it("rejects reserved node ids (they collide with generated identifiers)", () => {
     for (const id of ["dag", "input", "registration"]) {
-      const d = structuredClone(FIXTURES.linear!) as AuthoredDag;
+      const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
       (d.nodes[1] as { id: string }).id = id;
       (d.structure as { order: string[] }).order = ["fetch-record", id];
       const parsed = parseAuthoredDag(d);
@@ -262,23 +361,23 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects a newline in purpose / dag description / field description", () => {
-    const purpose = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const purpose = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (purpose.nodes[0] as { purpose: string }).purpose = "line one\n// injected";
     const p = parseAuthoredDag(purpose);
     expect(p.ok).toBe(false);
     if (!p.ok) expect(p.problems.join("\n")).toContain("single line");
 
-    const desc = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const desc = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (desc as { description: string }).description = "line one\nline two";
     expect(parseAuthoredDag(desc).ok).toBe(false);
 
-    const field = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const field = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (field.input.fields[0] as { description?: string }).description = "line one\nline two";
     expect(parseAuthoredDag(field).ok).toBe(false);
   });
 
   it("rejects a node id that camelCases to a JS reserved word", () => {
-    const d = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (d.nodes[1] as { id: string }).id = "default";
     (d.structure as { order: string[] }).order = ["fetch-record", "default"];
     const parsed = parseAuthoredDag(d);
@@ -288,7 +387,7 @@ describe("AuthoredDag schema", () => {
 
   it("rejects an llm node id whose factory collides with a framework import", () => {
     // llm "llm-node" would generate `createLlmNode` — the framework import.
-    const d: AuthoredDag = {
+    const d: AuthoredDagInput = {
       fugueAuthored: 1,
       name: "x-llm",
       team: "demo",
@@ -306,7 +405,7 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects node ids whose digit-boundary camelCase forms collide ('a-1b' vs 'a1b')", () => {
-    const d: AuthoredDag = {
+    const d: AuthoredDagInput = {
       fugueAuthored: 1,
       name: "x-collide",
       team: "demo",
@@ -328,7 +427,7 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects an llm node id colliding with a non-llm node's const ('foo' vs 'foo-node')", () => {
-    const d: AuthoredDag = {
+    const d: AuthoredDagInput = {
       fugueAuthored: 1,
       name: "x-foo",
       team: "demo",
@@ -349,14 +448,14 @@ describe("AuthoredDag schema", () => {
     // `{ __proto__: z.string() }` in generated code SETS THE PROTOTYPE instead
     // of declaring a field — the field would silently not exist while passing
     // the whole gauntlet. Both the DAG input and node outputs must reject it.
-    const inInput = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const inInput = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (inInput.input.fields[0] as { name: string }).name = "__proto__";
     const p1 = parseAuthoredDag(inInput);
     expect(p1.ok).toBe(false);
     if (!p1.ok) expect(p1.problems.join("\n")).toContain("__proto__");
 
-    const inOutput = structuredClone(FIXTURES.linear!) as AuthoredDag;
-    (inOutput.nodes[1]!.output!.fields[0] as { name: string }).name = "__proto__";
+    const inOutput = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (outputOf(inOutput.nodes[1]!).fields[0] as { name: string }).name = "__proto__";
     expect(parseAuthoredDag(inOutput).ok).toBe(false);
 
     // Hostile JSON path too: the same dag arriving as wire text.
@@ -365,21 +464,21 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects leading-digit node ids and dag names (invalid JS identifiers)", () => {
-    const nodeD = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const nodeD = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (nodeD.nodes[1] as { id: string }).id = "2fast";
     (nodeD.structure as { order: string[] }).order = ["fetch-record", "2fast"];
     const p1 = parseAuthoredDag(nodeD);
     expect(p1.ok).toBe(false);
     if (!p1.ok) expect(p1.problems.join("\n")).toContain("starting with a letter");
 
-    const nameD = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    const nameD = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (nameD as { name: string }).name = "2fast-pipeline";
     expect(parseAuthoredDag(nameD).ok).toBe(false);
   });
 
   it("rejects node ids that are strict-mode reserved words ('with', 'debugger', 'eval', 'arguments')", () => {
     for (const id of ["with", "debugger", "eval", "arguments"]) {
-      const d = structuredClone(FIXTURES.linear!) as AuthoredDag;
+      const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
       (d.nodes[1] as { id: string }).id = id;
       (d.structure as { order: string[] }).order = ["fetch-record", id];
       const parsed = parseAuthoredDag(d);
@@ -389,8 +488,8 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects enum values containing a newline", () => {
-    const d = structuredClone(FIXTURES.router!) as AuthoredDag;
-    const bucket = d.nodes[0]!.output!.fields[1]! as { type: { kind: string; values: string[] } };
+    const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
+    const bucket = outputOf(d.nodes[0]!).fields[1]! as { type: { kind: string; values: string[] } };
     bucket.type.values = ["small\ninjected", "large"];
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
@@ -400,7 +499,7 @@ describe("AuthoredDag schema", () => {
   it("rejects duplicate router {field, equals} predicates (unreachable case)", () => {
     reject(
       (d) => {
-        const s = d.structure as Extract<AuthoredDag["structure"], { shape: "router" }>;
+        const s = d.structure as Extract<AuthoredDagInput["structure"], { shape: "router" }>;
         return {
           ...d,
           structure: {
@@ -417,8 +516,8 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects duplicate enum values", () => {
-    const d = structuredClone(FIXTURES.router!) as AuthoredDag;
-    const bucket = d.nodes[0]!.output!.fields[1]! as { type: { kind: string; values: string[] } };
+    const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
+    const bucket = outputOf(d.nodes[0]!).fields[1]! as { type: { kind: string; values: string[] } };
     bucket.type.values = ["small", "small"];
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
@@ -426,7 +525,7 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects a sources join of kind source", () => {
-    const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDag;
+    const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
     (d.nodes[2] as { kind: string }).kind = "source"; // synthesize, the join
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
@@ -434,8 +533,8 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects an llm 'confidence' output field that is not the exact bucket enum", () => {
-    const wrong = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDag;
-    (wrong.nodes[2]!.output!.fields as { name: string; type: unknown }[]).push({
+    const wrong = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
+    (outputOf(wrong.nodes[2]!).fields as { name: string; type: unknown }[]).push({
       name: "confidence",
       type: { kind: "string" },
     });
@@ -444,8 +543,8 @@ describe("AuthoredDag schema", () => {
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("'confidence' must be exactly");
 
     // The exact bucket enum, explicitly declared, is accepted.
-    const exact = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDag;
-    (exact.nodes[2]!.output!.fields as { name: string; type: unknown }[]).push({
+    const exact = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
+    (outputOf(exact.nodes[2]!).fields as { name: string; type: unknown }[]).push({
       name: "confidence",
       type: { kind: "enum", values: ["high", "medium", "low"] },
     });
@@ -462,7 +561,7 @@ describe("authored codegen survives the gauntlet", () => {
   for (const [label, fixture] of Object.entries(FIXTURES)) {
     it(`${label} → dag.ts imports, lints clean, describe matches the structure`, async () => {
       const root = join(tmpRoot, label);
-      const written = await writeAuthoredScaffold(fixture, { root, force: false });
+      const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false });
       if (!written.ok) throw new Error(written.problems.join("; "));
 
       const dagPath = join(written.dir, "dag.ts");
@@ -480,7 +579,7 @@ describe("authored codegen survives the gauntlet", () => {
       // Sidecar roundtrip: dag.authored.json parses back to the same value.
       const sidecar = parseAuthoredDagJson(await readFile(join(written.dir, "dag.authored.json"), "utf-8"));
       if (!sidecar.ok) throw new Error(sidecar.problems.join("; "));
-      expect(sidecar.dag).toEqual(fixture);
+      expect(sidecar.dag).toEqual(mustParse(fixture));
 
       // LLM nodes ⇒ prompts registry green out of the box.
       if (fixture.nodes.some((n) => n.kind === "llm")) {
@@ -492,7 +591,7 @@ describe("authored codegen survives the gauntlet", () => {
 
   it("human-review gates surface as humanReview in describe", async () => {
     const root = join(tmpRoot, "review-describe");
-    const written = await writeAuthoredScaffold(FIXTURES["linear-llm-review"]!, { root, force: false });
+    const written = await writeAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!), { root, force: false });
     if (!written.ok) throw new Error(written.problems.join("; "));
     const described = await runDescribe(join(written.dir, "dag.ts"));
     if (!described.ok) throw new Error("describe failed");
@@ -501,7 +600,7 @@ describe("authored codegen survives the gauntlet", () => {
   });
 
   it("LLM outputs get the confidence bucket injected", () => {
-    const scaffold = buildAuthoredScaffold(FIXTURES["sources-llm"]!);
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["sources-llm"]!));
     expect(scaffold.dagTs).toContain('confidence: z.enum(["high", "medium", "low"])');
     expect(scaffold.prompts).toHaveLength(1);
     expect(scaffold.prompts[0]!.body).toContain("never use a number");
@@ -509,14 +608,14 @@ describe("authored codegen survives the gauntlet", () => {
 
   it("a two-llm dag emits per-node prompt names and a 2-entry registry", async () => {
     const fixture = FIXTURES["linear-two-llm"]!;
-    const scaffold = buildAuthoredScaffold(fixture);
+    const scaffold = buildAuthoredScaffold(mustParse(fixture));
     expect(scaffold.prompts.map((p) => p.name).sort()).toEqual([
       "authored-two-llm-classify",
       "authored-two-llm-draft-reply",
     ]);
 
     const root = join(tmpRoot, "two-llm-registry");
-    const written = await writeAuthoredScaffold(fixture, { root, force: false });
+    const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false });
     if (!written.ok) throw new Error(written.problems.join("; "));
     const registry = JSON.parse(
       await readFile(join(written.dir, "prompts", "registry.json"), "utf-8"),
@@ -530,7 +629,7 @@ describe("authored codegen survives the gauntlet", () => {
   });
 
   it("an llm after a human-review gate consumes the reviewed (upstream) fields", () => {
-    const scaffold = buildAuthoredScaffold(FIXTURES["llm-after-review"]!);
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["llm-after-review"]!));
     // The gate passes fetch-doc's schema through — buildInput and the prompt
     // reference its fields, not the (nonexistent) review output.
     expect(scaffold.dagTs).toContain('text: input["text"]');
@@ -539,7 +638,7 @@ describe("authored codegen survives the gauntlet", () => {
   });
 
   it("fan-in llm buildInput JSON-stringifies the node-keyed objects", () => {
-    const scaffold = buildAuthoredScaffold(FIXTURES["sources-llm"]!);
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["sources-llm"]!));
     expect(scaffold.dagTs).toContain('JSON.stringify(input["fetch-weather"])');
     expect(scaffold.dagTs).toContain('JSON.stringify(input["fetch-calendar"])');
     // The prompt tells the model the placeholder carries JSON.
@@ -548,7 +647,7 @@ describe("authored codegen survives the gauntlet", () => {
 
   it("buildAuthoredScaffold is deterministic (same input → identical output)", () => {
     for (const fixture of Object.values(FIXTURES)) {
-      expect(buildAuthoredScaffold(fixture)).toEqual(buildAuthoredScaffold(fixture));
+      expect(buildAuthoredScaffold(mustParse(fixture))).toEqual(buildAuthoredScaffold(mustParse(fixture)));
     }
   });
 
@@ -612,11 +711,81 @@ describe("authored codegen survives the gauntlet", () => {
       message: "identity-shaped transform",
       nodeId: "summarize",
     };
-    const okWithAdvisory = async () => ({ ok: true as const, advisories: [advisory] });
+    // The ok verdict now carries the DescribedDag of the generated code —
+    // runNewFrom only forwards advisories, so a minimal stub suffices here.
+    const describedStub: DescribedDag = {
+      id: "authored-linear",
+      route: "/authored-linear",
+      description: "stub",
+      version: "1.0.0",
+      inputSchema: null,
+      outputSchema: null,
+      outputNodeId: null,
+      nodes: [],
+      edges: [],
+      waves: [],
+      prompts: [],
+      capabilities: [],
+    };
+    const okWithAdvisory = async (): Promise<GauntletResult> => ({
+      ok: true,
+      described: describedStub,
+      advisories: [advisory],
+    });
     const result = await runNewFrom({ from: fromPath, force: false, root }, okWithAdvisory);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.advisories).toEqual([advisory]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Identifier accounting drift guard — the parse-time collision check
+// (`generatedIdentifiersFor` ∪ `dagLevelIdentifiers` ∪ `RESERVED_IDENTIFIERS`)
+// must claim EVERY name codegen actually emits: every top-level const /
+// interface declaration and every import binding in a generated dag.ts.
+// Both are now built from the same `identifiers.ts` name constructors; this
+// test proves the derivation covers the emission for every fixture shape, so
+// a new emitted name can never silently regress collision detection back to
+// gauntlet-time SyntaxErrors.
+// ---------------------------------------------------------------------------
+
+describe("identifier accounting covers every emitted name", () => {
+  /** Top-level declared identifiers + import bindings of a generated dag.ts. */
+  const emittedNames = (dagTs: string): Set<string> => {
+    const names = new Set<string>();
+    // `const x = …` / `export const x = …` / `export interface X {` at column 0.
+    for (const m of dagTs.matchAll(/^(?:export )?(?:const|interface) ([A-Za-z_$][\w$]*)/gm)) {
+      names.add(m[1]!);
+    }
+    // Single-name (possibly type-only) imports: `import { z } from "zod";` etc.
+    for (const m of dagTs.matchAll(/^import(?: type)? \{ ([A-Za-z_$][\w$]*) \}/gm)) {
+      names.add(m[1]!);
+    }
+    // The multi-line framework import block.
+    const block = dagTs.match(/^import \{\n([\s\S]*?)\n\} from "@fuguejs\/framework";/m);
+    for (const line of block?.[1]?.split("\n") ?? []) {
+      const name = line.trim().replace(/,$/, "");
+      if (name.length > 0) names.add(name);
+    }
+    return names;
+  };
+
+  for (const [label, fixture] of Object.entries(FIXTURES)) {
+    it(`${label}: every emitted name is claimed by the accounting`, () => {
+      const dag = mustParse(fixture);
+      const { dagTs } = buildAuthoredScaffold(dag);
+      const claimed = new Set<string>([
+        ...RESERVED_IDENTIFIERS,
+        ...dagLevelIdentifiers(dag.name),
+        ...dag.nodes.flatMap((n) => [...generatedIdentifiersFor(n)]),
+      ]);
+      const emitted = emittedNames(dagTs);
+      // Sanity: the extraction saw the real module, not an empty regex miss.
+      expect(emitted.size).toBeGreaterThanOrEqual(dag.nodes.length + 2);
+      const unclaimed = [...emitted].filter((name) => !claimed.has(name));
+      expect(unclaimed).toEqual([]);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -627,8 +796,8 @@ describe("authored codegen survives the gauntlet", () => {
 // ---------------------------------------------------------------------------
 
 describe("hostile free-text properties", () => {
-  const setFreeText = (dag: AuthoredDag, s: string): AuthoredDag => {
-    const d = structuredClone(dag) as AuthoredDag;
+  const setFreeText = (dag: AuthoredDagInput, s: string): AuthoredDagInput => {
+    const d = structuredClone(dag) as AuthoredDagInput;
     (d as { description: string }).description = s;
     for (const n of d.nodes) (n as { purpose: string }).purpose = s;
     (d.input.fields[0] as { description?: string }).description = s;

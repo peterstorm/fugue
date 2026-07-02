@@ -12,6 +12,10 @@
 // predicates are `{ field, equals }` on an enum — no expression language.
 // Everything here is Zod-parsed (parse, don't validate) and cross-checked
 // with `superRefine` so an `AuthoredDag` value that exists is buildable.
+// The exported `AuthoredDag` type is BRANDED: `parseAuthoredDag` /
+// `parseAuthoredDagJson` are the only producers, so every consumer
+// (codegen, gauntlet, scaffold writer) is guaranteed a value that already
+// passed every refinement — no structurally-shaped impostors.
 
 import { z } from "zod";
 import {
@@ -21,6 +25,7 @@ import {
   dagLevelIdentifiers,
   generatedIdentifiersFor,
 } from "./identifiers.js";
+import { CONFIDENCE_BUCKET } from "./vocabulary.js";
 
 // ---------------------------------------------------------------------------
 // Field / schema specs (closed vocabulary)
@@ -85,53 +90,129 @@ export const FieldSpecSchema = z
   });
 export type FieldSpec = z.infer<typeof FieldSpecSchema>;
 
-export const SchemaSpecSchema = z
-  .object({ fields: z.array(FieldSpecSchema).min(1) })
-  .strict()
-  .superRefine((spec, ctx) => {
-    const seen = new Set<string>();
-    for (const f of spec.fields) {
-      if (seen.has(f.name)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate field name '${f.name}'` });
+/**
+ * One definition serves both `SchemaSpecSchema` (the shared spec) and the
+ * required-`output` slot on nodes — the ONLY difference is the message a
+ * MISSING value produces. `missingMessage` is a thunk so the output slot can
+ * name the kinds that require an output, derived from the node variants
+ * declared further down (the thunk runs at parse time, so ordering is safe).
+ */
+const schemaSpec = (missingMessage?: () => string) =>
+  z
+    .object(
+      { fields: z.array(FieldSpecSchema).min(1) },
+      missingMessage === undefined
+        ? undefined
+        : { error: (issue) => (issue.input === undefined ? missingMessage() : undefined) },
+    )
+    .strict()
+    .superRefine((spec, ctx) => {
+      const seen = new Set<string>();
+      for (const f of spec.fields) {
+        if (seen.has(f.name)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate field name '${f.name}'` });
+        }
+        seen.add(f.name);
       }
-      seen.add(f.name);
-    }
-  });
+    });
+
+export const SchemaSpecSchema = schemaSpec();
 export type SchemaSpec = z.infer<typeof SchemaSpecSchema>;
 
 // ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
-export const NODE_KINDS = ["fetch", "transform", "llm", "human-review", "source"] as const;
+const nodeId = z.string().regex(KEBAB_IDENT, "node id must be kebab-case starting with a letter");
+/** What this node is for — the authoring intent DescribedDag can't carry. */
+const nodePurpose = z.string().min(1).regex(SINGLE_LINE, "must be a single line");
 
-export const AuthoredNodeSchema = z
-  .object({
-    id: z.string().regex(KEBAB_IDENT, "node id must be kebab-case starting with a letter"),
-    kind: z.enum(NODE_KINDS),
-    /** What this node is for — the authoring intent DescribedDag can't carry. */
-    purpose: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
-    /**
-     * Output field spec. Omitted ONLY for human-review nodes (a review gate is
-     * a typed passthrough over the reviewed node's schema).
-     */
-    output: SchemaSpecSchema.optional(),
-  })
-  .strict()
-  .superRefine((node, ctx) => {
-    if (node.kind === "human-review" && node.output !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `human-review node '${node.id}' must not declare output (it passes through the reviewed schema)`,
-      });
-    }
-    if (node.kind !== "human-review" && node.output === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `node '${node.id}' (${node.kind}) requires an output spec`,
-      });
-    }
-  });
+/**
+ * The `output` slot for kinds that require one. Zod's default missing-key
+ * message ("expected object, received undefined") names the shape but not the
+ * RULE — the compose repair loop feeds parse problems to an LLM, so a missing
+ * output must state which kinds require one and which kind omits it.
+ */
+const requiredOutput = schemaSpec(
+  () => `output is required for ${OUTPUT_NODE_KINDS.join("/")} nodes — only human-review nodes omit it`,
+);
+
+/**
+ * A node kind whose output spec is REQUIRED — every kind except human-review.
+ * Generic so each variant keeps its literal `kind` (the discriminated-union
+ * type stays precise: `Extract<AuthoredNode, { kind: "llm" }>` works).
+ */
+const outputNode = <K extends string>(kind: K) =>
+  z
+    .object({
+      id: nodeId,
+      kind: z.literal(kind),
+      purpose: nodePurpose,
+      /** Output field spec — required for every kind except human-review. */
+      output: requiredOutput,
+    })
+    .strict();
+
+/**
+ * The node union, discriminated on `kind`. A human-review gate is a typed
+ * passthrough over the reviewed node's schema, so its variant has NO `output`
+ * — every other kind requires one. Same JSON wire shape as ever; the union
+ * just makes the kind/output dependency a parse-time fact instead of a
+ * superRefine.
+ */
+const authoredNodeVariants = [
+  outputNode("fetch"),
+  outputNode("transform"),
+  outputNode("llm"),
+  z
+    .object(
+      {
+        id: nodeId,
+        kind: z.literal("human-review"),
+        purpose: nodePurpose,
+      },
+      {
+        // The default strict-object issue is `Unrecognized key: "output"`,
+        // which names the key but not the rule — the compose repair loop
+        // feeds these messages to an LLM, so state the rule precisely.
+        // Sibling stray keys ride along in the SAME issue (`issue.keys`), so
+        // they must survive into the message too — swallowing them costs the
+        // repair loop a round. When `output` itself is absent, Zod's default
+        // unrecognized-keys message already says everything there is to say.
+        error: (issue) => {
+          if (issue.code !== "unrecognized_keys" || !issue.keys.includes("output")) {
+            return undefined;
+          }
+          const rule =
+            "human-review nodes must not declare output (a review gate passes through the reviewed node's schema)";
+          const siblings = issue.keys.filter((k) => k !== "output");
+          return siblings.length === 0
+            ? rule
+            : `${rule}; also unrecognized: ${siblings.map((k) => JSON.stringify(k)).join(", ")}`;
+        },
+      },
+    )
+    .strict(),
+  outputNode("source"),
+] as const;
+
+/**
+ * Kind vocabularies DERIVED from the variant literals above — the single
+ * source; never hand-write a second copy of the kind list.
+ */
+const NODE_KINDS = authoredNodeVariants.map((v) => v.shape.kind.value);
+const OUTPUT_NODE_KINDS = authoredNodeVariants
+  .filter((v) => "output" in v.shape)
+  .map((v) => v.shape.kind.value);
+const KIND_LIST = NODE_KINDS.map((k) => JSON.stringify(k)).join("|");
+
+export const AuthoredNodeSchema = z.discriminatedUnion("kind", authoredNodeVariants, {
+  // Zod's default for an unknown or missing discriminator is a bare
+  // "Invalid input" — useless to the compose repair loop. Name the full
+  // vocabulary; every other issue code falls through to its own message.
+  error: (issue) =>
+    issue.code === "invalid_union" ? `node kind must be one of ${KIND_LIST}` : undefined,
+});
 export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
 
 // ---------------------------------------------------------------------------
@@ -331,24 +412,22 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
     }
   }
 
-  // LLM confidence: codegen injects {kind:"enum",values:["high","medium","low"]}
-  // when absent. An EXPLICIT 'confidence' output field must be exactly that
-  // shape — anything else would clash with the framework's bucketed-confidence
+  // LLM confidence: codegen injects the CONFIDENCE_BUCKET enum when absent.
+  // An EXPLICIT 'confidence' output field must be exactly that shape —
+  // anything else would clash with the framework's bucketed-confidence
   // channel (`confidence(o.confidence, "self-reported-bucket")`).
   for (const n of dag.nodes) {
-    if (n.kind !== "llm" || n.output === undefined) continue;
+    if (n.kind !== "llm") continue;
     const conf = n.output.fields.find((f) => f.name === "confidence");
     if (conf === undefined) continue;
     const isBucket =
       conf.type.kind === "enum" &&
-      conf.type.values.length === 3 &&
-      conf.type.values[0] === "high" &&
-      conf.type.values[1] === "medium" &&
-      conf.type.values[2] === "low";
+      conf.type.values.length === CONFIDENCE_BUCKET.length &&
+      conf.type.values.every((v, i) => v === CONFIDENCE_BUCKET[i]);
     if (!isBucket) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `llm node '${n.id}' output field 'confidence' must be exactly {"kind":"enum","values":["high","medium","low"]} (the framework's bucketed confidence) — or omit it and let codegen inject it`,
+        message: `llm node '${n.id}' output field 'confidence' must be exactly {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}} (the framework's bucketed confidence) — or omit it and let codegen inject it`,
       });
     }
   }
@@ -367,7 +446,10 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
   // every `equals` must be one of its values; the default handler catches the rest.
   if (s.shape === "router") {
     const classifier = byId.get(s.classifier);
-    const fields = classifier?.output?.fields ?? [];
+    // A human-review classifier has no output (and is illegal outside linear —
+    // reported above), so every predicate correctly reports "not a field".
+    const fields =
+      classifier === undefined || classifier.kind === "human-review" ? [] : classifier.output.fields;
     for (const [i, c] of s.cases.entries()) {
       const field = fields.find((f) => f.name === c.when.field);
       if (!field) {
@@ -404,8 +486,19 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
       predicates.add(p);
     }
   }
-});
-export type AuthoredDag = z.infer<typeof BaseAuthoredDagSchema>;
+}).brand<"AuthoredDag">();
+
+/**
+ * BRANDED: only `parseAuthoredDag` / `parseAuthoredDagJson` produce this type,
+ * so holding an `AuthoredDag` means every refinement above already passed.
+ */
+export type AuthoredDag = z.infer<typeof AuthoredDagSchema>;
+/**
+ * The unbranded wire shape — what an author (human, LLM, or test fixture)
+ * writes BEFORE parsing. The only path from this to `AuthoredDag` is
+ * `parseAuthoredDag`.
+ */
+export type AuthoredDagInput = z.input<typeof AuthoredDagSchema>;
 
 // ---------------------------------------------------------------------------
 // Parse entry points

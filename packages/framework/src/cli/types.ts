@@ -10,6 +10,7 @@ import type {
   DescribedEdge,
 } from "../describe/index.js";
 import type { Shape } from "./new-templates.js";
+import { SHAPE_HELPER_NAME } from "./identifiers.js";
 
 // Re-export the shared describe shapes so existing CLI consumers keep their
 // import path. The canonical home is `@fuguejs/framework`'s `describe` module —
@@ -38,19 +39,15 @@ export type LintResult =
     };
 
 /**
- * The shape-helper constructor each scaffold `Shape` corresponds to. `satisfies
- * Record<Shape, string>` makes this exhaustive over `Shape` (and therefore over
- * `DagProvenance`, its single source) — adding a shape without a helper name, or
- * naming one that isn't a shape, is a compile error. `ShapeHelper` is the union
- * of constructor names, derived rather than re-listed.
+ * The shape-helper constructor each scaffold `Shape` corresponds to. The
+ * catalogue itself lives in `identifiers.ts` (`SHAPE_HELPER_NAME`, the
+ * import-free single source codegen also emits from); the `satisfies
+ * Record<Shape, string>` here makes it exhaustive over `Shape` (and therefore
+ * over `DagProvenance`, its single source) — adding a shape without a helper
+ * name, or naming one that isn't a shape, is a compile error. `ShapeHelper`
+ * is the union of constructor names, derived rather than re-listed.
  */
-export const SHAPE_HELPER = {
-  linear: "defineLinearDag",
-  "fan-out": "defineFanOut",
-  diamond: "defineDiamond",
-  router: "defineRouter",
-  sources: "defineSources",
-} as const satisfies Record<Shape, string>;
+export const SHAPE_HELPER = SHAPE_HELPER_NAME satisfies Record<Shape, string>;
 
 /** A DAG shape-helper constructor name (`defineLinearDag` … `defineSources`). */
 export type ShapeHelper = (typeof SHAPE_HELPER)[Shape];

@@ -34,7 +34,7 @@ import { runVisualize } from "../src/cli/visualize.js";
 import { runCapabilities } from "../src/cli/capabilities.js";
 import { runPromptsSync, runPromptsCheck } from "../src/cli/prompts.js";
 import { parseNewArgs, runNew, runNewFrom } from "../src/cli/new.js";
-import { runCompose, type ComposeAnswer, type ComposeIo } from "../src/cli/compose.js";
+import { parseComposeArgs, runCompose, type ComposeAnswer, type ComposeIo } from "../src/cli/compose.js";
 import { DEFAULT_MODEL } from "../src/cli/new-templates.js";
 
 const USAGE = `Usage: fugue <command> [path]
@@ -124,37 +124,14 @@ const main = async (): Promise<number> => {
     return result.ok ? 0 : 1;
   }
 
-  // `compose` — interactive; needs an Anthropic key. All flags optional but --team.
+  // `compose` — interactive; needs an Anthropic key. Args are parsed by the
+  // pure `parseComposeArgs` (accumulated problems as JSON, like `new`); this
+  // block keeps only readline/SIGINT/env-key wiring.
   if (command === "compose") {
-    const intent = pathArg;
-    if (!intent || intent.startsWith("--")) {
-      dieUsage('`compose` requires an intent string: fugue compose "Process refunds…" --team <team>');
-    }
-    let team: string | undefined;
-    let model: string | undefined;
-    let owner: string | undefined;
-    let root: string | undefined;
-    let force = false;
-    for (let i = 0; i < rest.length; i++) {
-      const take = (): string | undefined => {
-        const v = rest[i + 1];
-        if (v === undefined || v.startsWith("--")) dieUsage(`${rest[i]} requires a value`);
-        i++;
-        return v;
-      };
-      if (rest[i] === "--team") team = take();
-      else if (rest[i] === "--model") model = take();
-      else if (rest[i] === "--owner") owner = take();
-      else if (rest[i] === "--dir") root = take();
-      else if (rest[i] === "--force") force = true;
-      else dieUsage(`unknown compose flag: ${rest[i]}`);
-    }
-    if (!team) dieUsage("`compose` requires --team <team>");
-    // The team lands in the AuthoredDag (kebab-case there) and in the
-    // dags/<team>/ directory name — reject junk at the boundary instead of
-    // letting the first LLM draft fail schema validation on our own flag.
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(team)) {
-      dieUsage(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+    const parsed = parseComposeArgs([pathArg, ...rest].filter((a): a is string => a !== undefined));
+    if (!parsed.ok) {
+      process.stdout.write(`${JSON.stringify({ ok: false, problems: parsed.problems }, null, 2)}\n`);
+      return 1;
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -196,14 +173,7 @@ const main = async (): Promise<number> => {
     };
     try {
       const outcome = await runCompose(
-        {
-          intent,
-          team,
-          force,
-          ...(model !== undefined ? { model } : {}),
-          ...(owner !== undefined ? { owner } : {}),
-          ...(root !== undefined ? { root } : {}),
-        },
+        parsed.options,
         new AnthropicLlmClient(new Anthropic({ apiKey })),
         io,
       );

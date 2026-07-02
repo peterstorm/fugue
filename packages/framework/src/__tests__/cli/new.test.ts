@@ -136,7 +136,7 @@ describe("human-review scaffolds (--review)", () => {
 // --------------------------------------------------------------------------
 
 describe("generated content guarantees", () => {
-  const ctx = (llm: boolean) => ({ name: "x", team: "t", pascal: "X", llm });
+  const ctx = (llm: boolean) => ({ name: "x", team: "t", llm });
 
   for (const shape of SHAPES) {
     it(`${shape} --llm pins a current, non-dated model id`, () => {

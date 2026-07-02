@@ -47,7 +47,11 @@
 9. **Doc fixes** (comment-analyzer 3-10): identifiers.ts:64 (`${camel}Node` rationale), authored-codegen.ts:102 (ref dead for llm nodes), identifiers.ts:85 (InputSchema always emitted), new.ts:1-20 (header: --from mode + side effects), new.ts:77-82 (ParsedNewFromArgs variant), new.ts:328-330 (sidecar readers), authored-codegen.ts:409 + new.ts:302 (generated-by attribution), types.ts:210-212 (DescribeResult wraps import, not lint).
 10. **Test gaps** (pr-test-analyzer): parseNewArgs `--from` happy + 4 mutual-exclusion tests; runNewFrom error paths (unreadable, schema-invalid, gauntlet-failure); transport llm-error turn; schema-repair exhaustion + "got questions" branch; writeAuthoredScaffold-throws branch; pin message in source-kind-outside-sources test.
 
-## Deferred (documented, not in this pass — architectural refactors beyond minimal-fix scope)
+## Deferred — RESOLVED later the same day (2026-07-02)
+
+All items below were implemented in the follow-up "deferred refactors" pass, except new-templates convergence, where the honest alternative was taken deliberately: templates are human-education scaffolds (realistic bodies, error-path demos, teaching comments) while authored-codegen emits regenerable machine output — shared llm-factory idiom emitters were extracted (llmFactoryPreamble, llmDagFactoryOpen) and both module headers now document the relationship. Regressions caught by post-refactor review and fixed: discriminated-union kind errors restored to full-vocabulary messages, missing-output message states the rule, human-review error map no longer swallows sibling stray keys.
+
+### Original deferred list (architectural refactors beyond minimal-fix scope)
 
 - Brand AuthoredDag (`.brand<"AuthoredDag">()`); AuthoredNode discriminated union on `kind` (type-design-analyzer).
 - identifiers.ts as name-constructor single source of truth consumed by codegen (architecture).
