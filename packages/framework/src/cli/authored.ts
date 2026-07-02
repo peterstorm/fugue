@@ -27,8 +27,19 @@ import {
 // ---------------------------------------------------------------------------
 
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// Node ids and the DAG name feed codegen'd identifiers (`const <camel> = …`,
+// `interface <Pascal>DagOpts`), so their first segment must start with a
+// LETTER — `2fast` camelCases to `2fast`, which is not a valid JS identifier
+// and would only surface as a SyntaxError at gauntlet time. Team and case
+// labels never become bare identifiers, so plain KEBAB stays enough there.
+const KEBAB_IDENT = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 // A field name must be a valid JS identifier so codegen can emit dotted access.
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// `__proto__` as an object-literal key is a prototype SETTER, not a property:
+// a field named `__proto__` would silently vanish from every generated
+// `z.object({...})` / defaults / buildInput literal while passing the whole
+// gauntlet. Rejected at parse time — there is no safe emission for it.
+const FORBIDDEN_FIELD_NAMES: ReadonlySet<string> = new Set(["__proto__"]);
 // Free-text fields are interpolated into `//` comments by codegen — a newline
 // would break out of the comment into code position, so the schema rejects it
 // (codegen's `comment()` helper is the defense-in-depth behind this).
@@ -39,14 +50,25 @@ export const FieldTypeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("number") }).strict(),
   z.object({ kind: z.literal("boolean") }).strict(),
   z
-    .object({ kind: z.literal("enum"), values: z.array(z.string().min(1)).min(2) })
+    .object({
+      kind: z.literal("enum"),
+      // Enum values reach `//`-comment-free but still single-line contexts:
+      // prompt bodies and Mermaid edge labels. A newline there garbles the
+      // rendering even though codegen JSON-escapes the z.enum literal.
+      values: z.array(z.string().min(1).regex(SINGLE_LINE, "must be a single line")).min(2),
+    })
     .strict(),
 ]);
 export type FieldType = z.infer<typeof FieldTypeSchema>;
 
 export const FieldSpecSchema = z
   .object({
-    name: z.string().regex(IDENT, "field name must be a JS identifier"),
+    name: z
+      .string()
+      .regex(IDENT, "field name must be a JS identifier")
+      .refine((n) => !FORBIDDEN_FIELD_NAMES.has(n), {
+        message: "field name '__proto__' is not allowed (object-literal prototype setter — it cannot be emitted as a schema key)",
+      }),
     type: FieldTypeSchema,
     description: z.string().min(1).regex(SINGLE_LINE, "must be a single line").optional(),
   })
@@ -85,7 +107,7 @@ export const NODE_KINDS = ["fetch", "transform", "llm", "human-review", "source"
 
 export const AuthoredNodeSchema = z
   .object({
-    id: z.string().regex(KEBAB, "node id must be kebab-case"),
+    id: z.string().regex(KEBAB_IDENT, "node id must be kebab-case starting with a letter"),
     kind: z.enum(NODE_KINDS),
     /** What this node is for — the authoring intent DescribedDag can't carry. */
     purpose: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
@@ -173,7 +195,7 @@ const BaseAuthoredDagSchema = z
   .object({
     /** Format discriminator + version for forward evolution. */
     fugueAuthored: z.literal(1),
-    name: z.string().regex(KEBAB, "name must be kebab-case"),
+    name: z.string().regex(KEBAB_IDENT, "name must be kebab-case starting with a letter"),
     team: z.string().regex(KEBAB, "team must be kebab-case"),
     description: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
     /** DAG input schema (the request). */
@@ -366,6 +388,20 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${i}] duplicate label '${c.label}'` });
       }
       labels.add(c.label);
+    }
+    // Two cases with the same {field, equals} predicate: the second can never
+    // fire (cases are checked in order) — an unreachable route is an authoring
+    // mistake, not a fallback.
+    const predicates = new Set<string>();
+    for (const [i, c] of s.cases.entries()) {
+      const p = `${c.when.field} ${c.when.equals}`;
+      if (predicates.has(p)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `cases[${i}] duplicate predicate {field: '${c.when.field}', equals: '${c.when.equals}'} — the case is unreachable`,
+        });
+      }
+      predicates.add(p);
     }
   }
 });

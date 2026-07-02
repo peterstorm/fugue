@@ -20,8 +20,21 @@ export type VisualizeResult =
 
 const INPUT_ID = "$input";
 
-// Mermaid node ids must avoid `$` and other specials — map ids to safe tokens.
-const safeId = (id: string): string => (id === INPUT_ID ? "dag_input" : id.replace(/[^A-Za-z0-9_]/g, "_"));
+// Mermaid node ids must avoid `:`/`$` and other specials — map ids to safe
+// tokens. Two properties the old `replace(/[^A-Za-z0-9_]/g, "_")` lacked:
+//   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_REGEX), so
+//      collapsing them all to `_` merged distinct ids (`a:b` vs `a_b`) into
+//      one Mermaid node. The escape scheme below (`_` doubles as the lead-in,
+//      `:`/`-` get fixed 2-char escapes, anything else a `_x<hex>_` escape) is
+//      decodable left-to-right, hence injective.
+//   2. NAMESPACED — the `n_` prefix keeps real ids disjoint from the reserved
+//      `dag_input` / `dag_output` virtual tokens (a node literally named
+//      `dag_input` must not merge with the request node).
+// Rendered labels still show the original id; only the token is encoded.
+const escapeIdChar = (c: string): string =>
+  c === "_" ? "__" : c === ":" ? "_c" : c === "-" ? "_d" : `_x${c.charCodeAt(0).toString(16)}_`;
+const safeId = (id: string): string =>
+  id === INPUT_ID ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 
 const escapeLabel = (s: string): string => s.replace(/"/g, "&quot;");
 

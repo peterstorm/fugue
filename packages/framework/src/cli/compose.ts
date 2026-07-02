@@ -31,16 +31,23 @@ import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
 import type { NewResult } from "./types.js";
 
-// Re-export the gauntlet from its old home so existing importers keep working.
-export { runGauntlet, type GauntletResult } from "./gauntlet.js";
-
 // ---------------------------------------------------------------------------
 // Seams
 // ---------------------------------------------------------------------------
 
+/**
+ * What a single terminal prompt produced. `closed` means the input stream is
+ * GONE (Ctrl-C / Ctrl-D / piped stdin exhausted) — there is no user anymore,
+ * so every ask site must abort the loop instead of treating the sentinel as
+ * an answer and burning further LLM/gauntlet rounds against a dead terminal.
+ */
+export type ComposeAnswer =
+  | { readonly kind: "answer"; readonly text: string }
+  | { readonly kind: "closed" };
+
 /** Terminal seam — injectable so tests script the conversation. */
 export interface ComposeIo {
-  readonly ask: (question: string) => Promise<string>;
+  readonly ask: (question: string) => Promise<ComposeAnswer>;
   readonly say: (message: string) => void;
 }
 
@@ -72,7 +79,8 @@ export type ComposeOutcome =
     }
   | {
       readonly ok: false;
-      readonly reason: "aborted" | "llm-error" | "repair-exhausted" | "write-failed";
+      /** `gauntlet-failed` = the proving machinery itself threw (an environment failure, not a draft problem). */
+      readonly reason: "aborted" | "llm-error" | "repair-exhausted" | "write-failed" | "gauntlet-failed";
       readonly problems: readonly string[];
     };
 
@@ -109,7 +117,8 @@ Respond with exactly one action:
 - {"action":"draft","dag":{...}} — a complete AuthoredDag.
 
 AuthoredDag rules (closed vocabulary — the schema rejects anything else):
-- fugueAuthored: 1. name/team/node ids/case labels: kebab-case.
+- fugueAuthored: 1. name/team/node ids/case labels: kebab-case (name and
+  node ids must start with a letter).
 - input + node outputs are field lists; field types are ONLY
   {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
@@ -140,7 +149,13 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
 // AuthoredDag → Mermaid (for the present step; pure)
 // ---------------------------------------------------------------------------
 
-const safe = (id: string): string => id.replace(/[^A-Za-z0-9_]/g, "_");
+// The `n_` prefix keeps real node ids disjoint from the reserved `dag_input`
+// token (a node literally named `dag-input` must not merge with the virtual
+// input node). Unlike visualize's `safeId`, plain `-`→`_` is already
+// injective here: AuthoredDag ids are kebab-case (no `_` or `:` possible).
+const safe = (id: string): string => `n_${id.replace(/[^A-Za-z0-9_]/g, "_")}`;
+
+const escapeLabel = (s: string): string => s.replace(/"/g, "&quot;");
 
 export const authoredToMermaid = (dag: AuthoredDag): string => {
   const lines = ["flowchart TD", `    dag_input(["$input (request)"])`];
@@ -167,7 +182,7 @@ export const authoredToMermaid = (dag: AuthoredDag): string => {
     }
     case "router": {
       lines.push(`    dag_input --> ${safe(s.classifier)}`);
-      for (const c of s.cases) lines.push(`    ${safe(s.classifier)} -->|"${c.when.field} = ${c.when.equals}"| ${safe(c.to)}`);
+      for (const c of s.cases) lines.push(`    ${safe(s.classifier)} -->|"${escapeLabel(`${c.when.field} = ${c.when.equals}`)}"| ${safe(c.to)}`);
       lines.push(`    ${safe(s.classifier)} -.->|default| ${safe(s.default)}`);
       break;
     }
@@ -186,6 +201,17 @@ export const authoredToMermaid = (dag: AuthoredDag): string => {
 // ---------------------------------------------------------------------------
 
 const COMPOSE_NODE_ID = nodeId("fugue-compose");
+
+/**
+ * A draft is the user's work product — failure outcomes carry the full
+ * serialized JSON (after a labeling marker line) so it can be saved and
+ * replayed via `fugue new --from`.
+ */
+const withDraftJson = (problems: readonly string[], dag: AuthoredDag, label: string): readonly string[] => [
+  ...problems,
+  label,
+  JSON.stringify(dag),
+];
 
 const summarize = (dag: AuthoredDag): string =>
   [
@@ -221,6 +247,20 @@ export const runCompose = async (
     `Intent: ${options.intent}`,
   ];
 
+  // The most recent draft that survived the full gauntlet. Budget/transport
+  // failures attach it so hitting a wall never discards work the user already
+  // saw proven.
+  let lastProven: AuthoredDag | null = null;
+  const failClosed = (
+    reason: "llm-error" | "repair-exhausted",
+    problems: readonly string[],
+  ): Extract<ComposeOutcome, { ok: false }> => ({
+    ok: false,
+    reason,
+    problems:
+      lastProven !== null ? withDraftJson(problems, lastProven, "last proven draft JSON follows") : problems,
+  });
+
   const turn = async (extra?: string): Promise<ComposeTurn | { readonly error: string }> => {
     const user = [...conversation, ...(extra !== undefined ? [extra] : [])].join("\n\n");
     const res = await llm.sendStructured({
@@ -247,7 +287,7 @@ export const runCompose = async (
       const parsed = parseAuthoredDag(current.dag);
       if (parsed.ok) return { ok: true, dag: parsed.dag };
       if (draftRepairs >= maxRepairs) {
-        return { ok: false, outcome: { ok: false, reason: "repair-exhausted", problems: parsed.problems } };
+        return { ok: false, outcome: failClosed("repair-exhausted", parsed.problems) };
       }
       draftRepairs++;
       rounds.repairs++;
@@ -256,9 +296,9 @@ export const runCompose = async (
           `Current draft:\n${JSON.stringify(current.dag, null, 2)}\n` +
           `Return a corrected {"action":"draft","dag":{...}}.`,
       );
-      if ("error" in t) return { ok: false, outcome: { ok: false, reason: "llm-error", problems: [t.error] } };
+      if ("error" in t) return { ok: false, outcome: failClosed("llm-error", [t.error]) };
       if (t.action !== "draft") {
-        return { ok: false, outcome: { ok: false, reason: "llm-error", problems: ["expected a corrected draft, got questions"] } };
+        return { ok: false, outcome: failClosed("llm-error", ["expected a corrected draft, got questions"]) };
       }
       current = t;
     }
@@ -269,34 +309,63 @@ export const runCompose = async (
   while (draft === null) {
     const mustDraft = rounds.questions >= maxQuestions;
     const t = await turn(mustDraft ? "No more questions — produce the draft now." : undefined);
-    if ("error" in t) return { ok: false, reason: "llm-error", problems: [t.error] };
+    if ("error" in t) return failClosed("llm-error", [t.error]);
     if (t.action === "questions" && !mustDraft) {
       rounds.questions++;
       for (const q of t.questions) {
         const answer = await io.ask(q);
-        conversation.push(`Q: ${q}\nA: ${answer}`);
+        // A closed stream means there is no user — abort instead of recording
+        // the sentinel as an answer and paying for further LLM rounds.
+        if (answer.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
+        conversation.push(`Q: ${q}\nA: ${answer.text}`);
       }
       continue;
     }
     if (t.action !== "draft") {
-      return { ok: false, reason: "llm-error", problems: ["model kept asking questions past the round limit"] };
+      return failClosed("llm-error", ["model kept asking questions past the round limit"]);
     }
     const attempt = await parseDraftWithRepairs(t);
     if (!attempt.ok) return attempt.outcome;
     draft = attempt.dag;
   }
 
+  // The gauntlet stages real files (mkdir → write → import → rm) — a throw
+  // there is an ENVIRONMENT failure (ENOSPC, EACCES, …), not a draft problem.
+  // Fail closed WITH the current draft's JSON so the work survives.
+  type Proven =
+    | { readonly ok: true; readonly verdict: GauntletResult }
+    | { readonly ok: false; readonly outcome: ComposeOutcome };
+  const prove = async (d: AuthoredDag): Promise<Proven> => {
+    try {
+      return { ok: true, verdict: await gauntlet(d, root) };
+    } catch (e) {
+      return {
+        ok: false,
+        outcome: {
+          ok: false,
+          reason: "gauntlet-failed",
+          problems: withDraftJson(
+            [e instanceof Error ? e.message : String(e)],
+            d,
+            "draft JSON follows",
+          ),
+        },
+      };
+    }
+  };
+
   // --- validate → present → refine, until accept/abort ---
   for (;;) {
     // Repair loop: the draft must survive codegen + defineDag + lint.
-    let verdict = await gauntlet(draft, root);
+    let proven = await prove(draft);
+    if (!proven.ok) return proven.outcome;
+    let verdict = proven.verdict;
     while (!verdict.ok) {
       if (draftRepairs >= maxRepairs) {
-        return {
-          ok: false,
-          reason: "repair-exhausted",
-          problems: verdict.errors.map((e) => `${e.kind}: ${e.message}`),
-        };
+        return failClosed(
+          "repair-exhausted",
+          verdict.errors.map((e) => `${e.kind}: ${e.message}`),
+        );
       }
       draftRepairs++;
       rounds.repairs++;
@@ -305,20 +374,27 @@ export const runCompose = async (
           `Current draft:\n${JSON.stringify(draft, null, 2)}\n` +
           `Return a corrected {"action":"draft","dag":{...}}.`,
       );
-      if ("error" in t) return { ok: false, reason: "llm-error", problems: [t.error] };
-      if (t.action !== "draft") return { ok: false, reason: "llm-error", problems: ["expected a corrected draft, got questions"] };
+      if ("error" in t) return failClosed("llm-error", [t.error]);
+      if (t.action !== "draft") return failClosed("llm-error", ["expected a corrected draft, got questions"]);
       const attempt = await parseDraftWithRepairs(t);
       if (!attempt.ok) return attempt.outcome;
       draft = attempt.dag;
-      verdict = await gauntlet(draft, root);
+      proven = await prove(draft);
+      if (!proven.ok) return proven.outcome;
+      verdict = proven.verdict;
     }
+    lastProven = draft;
 
     io.say(`\n${summarize(draft)}\n\n${authoredToMermaid(draft)}\n`);
     if (verdict.advisories.length > 0) {
       io.say(`Advisories:\n${verdict.advisories.map((a) => `  - ${a.kind}: ${a.message}`).join("\n")}`);
     }
 
-    const answer = (await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)')).trim();
+    const res = await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)');
+    // Closed stream ⇒ nobody can accept — abort from here exactly like an
+    // explicit "abort" answer (the draft was only ever staged, never written).
+    if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
+    const answer = res.text.trim();
     if (/^(yes|y|accept)$/i.test(answer)) break;
     if (/^(abort|no|quit|exit)$/i.test(answer)) {
       return { ok: false, reason: "aborted", problems: [] };
@@ -331,8 +407,8 @@ export const runCompose = async (
       `Current accepted-so-far draft:\n${JSON.stringify(draft, null, 2)}\n` +
         `Apply the refinement above and return {"action":"draft","dag":{...}}.`,
     );
-    if ("error" in t) return { ok: false, reason: "llm-error", problems: [t.error] };
-    if (t.action !== "draft") return { ok: false, reason: "llm-error", problems: ["expected a refined draft, got questions"] };
+    if ("error" in t) return failClosed("llm-error", [t.error]);
+    if (t.action !== "draft") return failClosed("llm-error", ["expected a refined draft, got questions"]);
     const attempt = await parseDraftWithRepairs(t);
     if (!attempt.ok) return attempt.outcome;
     draft = attempt.dag;
@@ -341,11 +417,6 @@ export const runCompose = async (
   // --- accept: deterministic write of the final scaffold ---
   // The accepted draft is the user's work product — any write failure carries
   // the full serialized JSON so it can be saved and replayed via `new --from`.
-  const withDraftJson = (problems: readonly string[]): readonly string[] => [
-    ...problems,
-    "accepted draft JSON follows",
-    JSON.stringify(draft),
-  ];
   let result: NewResult;
   try {
     result = await writeAuthoredScaffold(draft, {
@@ -357,11 +428,11 @@ export const runCompose = async (
     return {
       ok: false,
       reason: "write-failed",
-      problems: withDraftJson([e instanceof Error ? e.message : String(e)]),
+      problems: withDraftJson([e instanceof Error ? e.message : String(e)], draft, "accepted draft JSON follows"),
     };
   }
   if (!result.ok) {
-    return { ok: false, reason: "write-failed", problems: withDraftJson(result.problems) };
+    return { ok: false, reason: "write-failed", problems: withDraftJson(result.problems, draft, "accepted draft JSON follows") };
   }
   return { ok: true, result, rounds };
 };

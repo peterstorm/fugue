@@ -45,25 +45,49 @@ const described: DescribedDag = {
 describe("describedToMermaid", () => {
   const diagram = describedToMermaid(described);
 
-  it("declares every node exactly once", () => {
-    expect(diagram.match(/classify\[/g)).toHaveLength(1);
-    expect(diagram.match(/reply\{\{/g)).toHaveLength(1);
+  it("declares every node exactly once (n_-prefixed tokens, original ids in labels)", () => {
+    expect(diagram.match(/n_classify\[/g)).toHaveLength(1);
+    expect(diagram.match(/n_reply\{\{/g)).toHaveLength(1);
+    expect(diagram).toContain("classify<br/>fetch");
   });
 
   it("renders each edge kind distinctly", () => {
-    expect(diagram).toContain("dag_input --> classify");
-    expect(diagram).toContain('classify -->|"is-billing (v2)"| reply');
-    expect(diagram).toContain("classify -.->|default| reply");
+    expect(diagram).toContain("dag_input --> n_classify");
+    expect(diagram).toContain('n_classify -->|"is-billing (v2)"| n_reply');
+    expect(diagram).toContain("n_classify -.->|default| n_reply");
   });
 
   it("marks human-review gates and the output node", () => {
     expect(diagram).toContain("[human review]");
-    expect(diagram).toContain("class reply humanReview;");
-    expect(diagram).toContain('reply --> dag_output(["output"])');
+    expect(diagram).toContain("class n_reply humanReview;");
+    expect(diagram).toContain('n_reply --> dag_output(["output"])');
   });
 
   it("annotates capabilities in the title", () => {
     expect(diagram).toContain("capabilities: llm");
+  });
+
+  it("keeps distinct node ids distinct and clear of the reserved tokens", () => {
+    // ID_REGEX allows `_`, `:` and `-` — the old sanitizer collapsed them all
+    // to `_`, merging distinct nodes into one Mermaid id. The encoding must be
+    // injective, and a node literally named `dag_input` must not merge with
+    // the virtual request node.
+    const node = (id: string) =>
+      ({ id, kind: "fetch", sideEffects: "none", requires: [], humanReview: false }) as const;
+    const d: DescribedDag = {
+      ...described,
+      outputNodeId: null,
+      nodes: [node("a:b"), node("a_b"), node("a-b"), node("dag_input")],
+      edges: [],
+      waves: [["a:b", "a_b", "a-b", "dag_input"]],
+    };
+    const merged = describedToMermaid(d);
+    expect(merged).toContain('n_a_cb["a:b<br/>fetch"]');
+    expect(merged).toContain('n_a__b["a_b<br/>fetch"]');
+    expect(merged).toContain('n_a_db["a-b<br/>fetch"]');
+    expect(merged).toContain('n_dag__input["dag_input<br/>fetch"]');
+    // Exactly four distinct declarations — nothing merged.
+    expect(merged.match(/n_[A-Za-z0-9_]+\[/g)).toHaveLength(4);
   });
 });
 
@@ -89,8 +113,11 @@ describe("runVisualize", () => {
     const good = await runVisualize(join(written.dir, "dag.ts"));
     expect(good.ok).toBe(true);
     if (good.ok) {
-      expect(good.diagram).toContain("fetch_x");
-      expect(good.diagram).toContain("shape_x");
+      // `-` encodes to `_d` (injective escape) and real ids get the n_ prefix;
+      // the human-readable labels keep the original ids.
+      expect(good.diagram).toContain("n_fetch_dx");
+      expect(good.diagram).toContain("n_shape_dx");
+      expect(good.diagram).toContain("fetch-x<br/>fetch");
     }
 
     const brokenPath = join(tmpRoot, "broken.ts");

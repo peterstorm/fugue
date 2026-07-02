@@ -387,6 +387,34 @@ describe("parseNewArgs", () => {
   });
 });
 
+describe("parseNewArgs --from", () => {
+  it("parses --from with --owner/--dir/--force into the from variant", () => {
+    const parsed = parseNewArgs(["--from", "x.authored.json", "--owner", "p.h", "--dir", "root", "--force"]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || !("from" in parsed)) throw new Error("expected the --from variant");
+    expect(parsed.from).toBe("x.authored.json");
+    expect(parsed.owner).toBe("p.h");
+    expect(parsed.root).toBe("root");
+    expect(parsed.force).toBe(true);
+  });
+
+  // name/team/shape/nodes all come from the authored file — the shape-mode
+  // arguments are contradictions, and each must be rejected loudly.
+  const exclusions: readonly (readonly [string, readonly string[]])[] = [
+    ["<team>/<name>", ["leads/x", "--from", "x.authored.json"]],
+    ["--shape", ["--from", "x.authored.json", "--shape", "linear"]],
+    ["--llm", ["--from", "x.authored.json", "--llm"]],
+    ["--review", ["--from", "x.authored.json", "--review"]],
+  ];
+  for (const [what, args] of exclusions) {
+    it(`rejects --from combined with ${what}`, () => {
+      const parsed = parseNewArgs(args);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("--from");
+    });
+  }
+});
+
 // --------------------------------------------------------------------------
 // Bin subprocess contract.
 // --------------------------------------------------------------------------

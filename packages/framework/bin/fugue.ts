@@ -22,9 +22,10 @@
 //                              AuthoredDag JSON; code is generated and proven.
 //
 // All output is JSON on stdout — except `visualize --raw`, which prints the
-// bare Mermaid text. Unexpected errors land on stderr with a non-zero exit
-// code. Designed for LLM tooling: parse `ok` and `errors[].kind` rather than
-// scraping prose.
+// bare Mermaid text, and `compose`, which is INTERACTIVE (prompts, summaries
+// and Mermaid previews are prose on stdout; only its final outcome line is
+// JSON). Unexpected errors land on stderr with a non-zero exit code. Designed
+// for LLM tooling: parse `ok` and `errors[].kind` rather than scraping prose.
 
 import { match } from "ts-pattern";
 import { runLint } from "../src/cli/lint.js";
@@ -33,7 +34,7 @@ import { runVisualize } from "../src/cli/visualize.js";
 import { runCapabilities } from "../src/cli/capabilities.js";
 import { runPromptsSync, runPromptsCheck } from "../src/cli/prompts.js";
 import { parseNewArgs, runNew, runNewFrom } from "../src/cli/new.js";
-import { runCompose, type ComposeIo } from "../src/cli/compose.js";
+import { runCompose, type ComposeAnswer, type ComposeIo } from "../src/cli/compose.js";
 import { DEFAULT_MODEL } from "../src/cli/new-templates.js";
 
 const USAGE = `Usage: fugue <command> [path]
@@ -149,6 +150,12 @@ const main = async (): Promise<number> => {
       else dieUsage(`unknown compose flag: ${rest[i]}`);
     }
     if (!team) dieUsage("`compose` requires --team <team>");
+    // The team lands in the AuthoredDag (kebab-case there) and in the
+    // dags/<team>/ directory name — reject junk at the boundary instead of
+    // letting the first LLM draft fail schema validation on our own flag.
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(team)) {
+      dieUsage(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+    }
 
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
@@ -163,18 +170,28 @@ const main = async (): Promise<number> => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     // Ctrl-D / piped-stdin exhaustion closes the interface and Ctrl-C fires
     // SIGINT — either way a pending `ask` must settle rather than hang the
-    // process forever. Resolving to "abort" routes the compose loop to its
-    // clean { ok: false, reason: "aborted" } outcome. Registered ONCE, up
-    // front, so every subsequent ask shares the same close promise.
-    const closedToAbort: Promise<string> = new Promise((resolveClosed) => {
-      rl.once("close", () => resolveClosed("abort"));
+    // process forever. Resolving to { kind: "closed" } routes the compose
+    // loop to its clean { ok: false, reason: "aborted" } outcome from ANY ask
+    // site — a closed stream is a fact about the terminal, distinct from a
+    // user who typed the word "abort". Registered ONCE, up front, so every
+    // subsequent ask shares the same close promise.
+    const closed: ComposeAnswer = { kind: "closed" };
+    const closedToAbort: Promise<ComposeAnswer> = new Promise((resolveClosed) => {
+      rl.once("close", () => resolveClosed(closed));
     });
     process.once("SIGINT", () => rl.close());
     const io: ComposeIo = {
       // If the interface closes mid-question, rl.question either never settles
       // or rejects (runtime-dependent) — race it against the close promise and
-      // fold a rejection into "abort" too.
-      ask: (q) => Promise.race([rl.question(`${q}\n> `).catch(() => "abort"), closedToAbort]),
+      // fold a rejection into { kind: "closed" } too.
+      ask: (q) =>
+        Promise.race([
+          rl.question(`${q}\n> `).then(
+            (text): ComposeAnswer => ({ kind: "answer", text }),
+            (): ComposeAnswer => closed,
+          ),
+          closedToAbort,
+        ]),
       say: (m) => process.stdout.write(`${m}\n`),
     };
     try {

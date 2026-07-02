@@ -22,9 +22,10 @@ export const camelCase = (kebab: string): string => {
 };
 
 /**
- * ECMAScript reserved words (plus the contextual/strict-mode set and the
- * literal keywords). A node id whose camelCase form lands here would emit
- * `const default = …` — a SyntaxError.
+ * ECMAScript reserved words (plus the contextual/strict-mode set — including
+ * `eval`/`arguments`, which strict mode forbids as binding names; generated
+ * modules are always strict — and the literal keywords). A node id whose
+ * camelCase form lands here would emit `const default = …` — a SyntaxError.
  */
 export const JS_RESERVED_WORDS: ReadonlySet<string> = new Set([
   "default", "case", "new", "class", "function", "return", "const", "let",
@@ -33,6 +34,7 @@ export const JS_RESERVED_WORDS: ReadonlySet<string> = new Set([
   "of", "delete", "yield", "await", "async", "static", "super", "this",
   "null", "true", "false", "enum", "export", "import", "extends",
   "implements", "interface", "package", "private", "protected", "public",
+  "with", "debugger", "eval", "arguments",
 ]);
 
 /**
@@ -61,7 +63,11 @@ export interface IdentifierSource {
 /**
  * Every identifier `authored-codegen` can emit for a node:
  *   - `camelCase(id)`            — the node const (non-llm ref)
- *   - `camelCase(id) + "Node"`   — the llm node local inside its factory
+ *   - `camelCase(id) + "Node"`   — the llm plan ref (current codegen calls the
+ *                                  factory directly, so this never hits the
+ *                                  emitted file — claimed anyway so an llm id
+ *                                  `foo` can never collide with a sibling
+ *                                  `foo-node` if codegen starts binding it)
  *   - `"create" + pascalCase(id)`— the llm factory
  *   - `pascalCase(id) + "Schema"`— the output schema const
  *   - `pascalCase(id) + "FanIn"` — the fan-in schema const (join/assemble roles)
@@ -82,9 +88,10 @@ export const generatedIdentifiersFor = (node: IdentifierSource): readonly string
 };
 
 /**
- * DAG-level identifiers derived from the DAG name (emitted only for --llm
- * factory scaffolds, but claimed unconditionally — see the conservatism note
- * on `generatedIdentifiersFor`).
+ * DAG-level identifiers derived from the DAG name. `InputSchema` is emitted by
+ * EVERY scaffold; `DEFAULT_MODEL` and `create<Pascal>Dag` only by the --llm
+ * factory scaffolds — but all are claimed unconditionally (see the
+ * conservatism note on `generatedIdentifiersFor`).
  */
 export const dagLevelIdentifiers = (dagName: string): readonly string[] => [
   "InputSchema",

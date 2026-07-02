@@ -200,6 +200,12 @@ export type NewResult =
       readonly files: readonly string[];
       /** Ordered, copy-pasteable follow-up commands for the author. */
       readonly nextSteps: readonly string[];
+      /**
+       * Non-fatal lint advisories the proving gauntlet raised (`--from` /
+       * compose). Template scaffolds don't run the gauntlet, so this is `[]`
+       * there. Always an array — consumers never branch on presence.
+       */
+      readonly advisories: readonly LintAdvisory[];
     }
   | {
       readonly ok: false;
@@ -207,9 +213,11 @@ export type NewResult =
     };
 
 /**
- * Describe outcome: a structured summary of a valid DAG file. Always wraps
- * a lint pass — a file that fails to lint also fails to describe, surfacing
- * the same `LintError` array.
+ * Describe outcome: a structured summary of a valid DAG file. Wraps the
+ * IMPORT path (`importDagFile`, which runs `defineDag`'s structural
+ * validation) and reuses the `LintError` shapes for its failures — but it
+ * does NOT re-run the `analyzeDag` schema checks `fugue lint` adds, so a DAG
+ * with e.g. a fan-in-key-mismatch fails lint yet still describes.
  */
 export type DescribeResult =
   | {

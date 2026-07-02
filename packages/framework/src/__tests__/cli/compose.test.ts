@@ -9,13 +9,14 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { ok } from "../../types/result.js";
+import { err, ok } from "../../types/result.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { Result } from "../../types/result.js";
 import type { FrameworkError } from "../../types/errors.js";
 import {
   authoredToMermaid,
   runCompose,
+  type ComposeAnswer,
   type ComposeIo,
   type ComposeTurn,
 } from "../../cli/compose.js";
@@ -57,7 +58,13 @@ const scriptedLlm = (turns: readonly ComposeTurn[]): { client: LlmClient; reques
   return { client, requests };
 };
 
-const scriptedIo = (answers: readonly string[]): { io: ComposeIo; said: string[]; asked: string[] } => {
+// Plain strings script typed answers; the CLOSED sentinel scripts the stream
+// dying mid-conversation (Ctrl-C / Ctrl-D / piped stdin exhausted).
+const CLOSED: ComposeAnswer = { kind: "closed" };
+
+const scriptedIo = (
+  answers: readonly (string | ComposeAnswer)[],
+): { io: ComposeIo; said: string[]; asked: string[] } => {
   const queue = [...answers];
   const said: string[] = [];
   const asked: string[] = [];
@@ -67,7 +74,7 @@ const scriptedIo = (answers: readonly string[]): { io: ComposeIo; said: string[]
         asked.push(q);
         const a = queue.shift();
         if (a === undefined) throw new Error(`scripted IO ran out of answers (asked: ${q})`);
-        return a;
+        return typeof a === "string" ? { kind: "answer", text: a } : a;
       },
       say: (m) => {
         said.push(m);
@@ -315,6 +322,209 @@ describe("runCompose", () => {
     if (!outcome.ok) expect(outcome.reason).toBe("aborted");
     expect(await Bun.file(join(root, "dags", "assist", "compose-briefing", "dag.ts")).exists()).toBe(false);
   });
+
+  it("a closed stream during the interview aborts before any further paid calls", async () => {
+    const root = join(tmpRoot, "closed-interview");
+    const { client, requests } = scriptedLlm([
+      { action: "questions", questions: ["Which sources?"] },
+      draft(validDag), // must never be consumed
+    ]);
+    const { io } = scriptedIo([CLOSED]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+    // The dead terminal stopped the loop: exactly the one question turn, no
+    // draft/gauntlet round against nobody.
+    expect(requests).toHaveLength(1);
+    expect(existsSync(join(root, "dags"))).toBe(false);
+  });
+
+  it("a closed stream at the accept prompt aborts and writes nothing", async () => {
+    const root = join(tmpRoot, "closed-accept");
+    const { client } = scriptedLlm([draft(validDag)]);
+    const { io } = scriptedIo([CLOSED]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+    expect(await Bun.file(join(root, "dags", "assist", "compose-briefing", "dag.ts")).exists()).toBe(false);
+  });
+
+  // sendStructured returning Err (transport/API failure) — distinct from the
+  // scripted fake's throw-on-exhaustion, which would be a test bug.
+  const erroringAfter = (turns: readonly ComposeTurn[]): LlmClient => {
+    const queue = [...turns];
+    return {
+      async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        const turn = queue.shift();
+        if (turn === undefined) {
+          return err({ kind: "cache-error", operation: "send", message: "socket hang up" });
+        }
+        const parsed = req.schema.safeParse(turn);
+        if (!parsed.success) throw new Error(`scripted turn failed schema: ${parsed.error.message}`);
+        return ok({ output: parsed.data, tokensIn: 0, tokensOut: 0, rawText: JSON.stringify(turn) });
+      },
+      async sendWithTools(): Promise<never> {
+        throw new Error("compose never uses tools");
+      },
+    };
+  };
+
+  it("a transport error on the first turn fails closed as llm-error", async () => {
+    const root = join(tmpRoot, "llm-error-first");
+    const { io } = scriptedIo([]);
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, erroringAfter([]), io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("llm-error");
+      expect(outcome.problems[0]).toContain("socket hang up");
+    }
+  });
+
+  it("a transport error after a proven draft carries that draft's JSON", async () => {
+    const root = join(tmpRoot, "llm-error-carries-draft");
+    // validDag is proven and presented; the refinement turn then dies on the wire.
+    const { io } = scriptedIo(["rename it"]);
+    const outcome = await runCompose(
+      { intent: "briefing", team: "assist", root },
+      erroringAfter([draft(validDag)]),
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("llm-error");
+      expect(outcome.problems).toContain("last proven draft JSON follows");
+      expect(outcome.problems).toContain(JSON.stringify(validDag));
+    }
+  });
+
+  it("repair-exhausted after a refinement carries the last proven draft's JSON", async () => {
+    const root = join(tmpRoot, "exhausted-carries-draft");
+    let calls = 0;
+    const failFromSecondCall = async (dag: AuthoredDag, r: string) => {
+      calls++;
+      if (calls >= 2) {
+        return {
+          ok: false as const,
+          errors: [{ kind: "import-failed" as const, message: "never valid" }],
+          advisories: [],
+        };
+      }
+      return runGauntlet(dag, r);
+    };
+    const { client } = scriptedLlm([draft(validDag), draft(refinedDag), draft(refinedDag)]);
+    const { io } = scriptedIo(["make it worse"]);
+
+    const outcome = await runCompose(
+      { intent: "briefing", team: "assist", root, maxRepairRounds: 1 },
+      client,
+      io,
+      failFromSecondCall,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("repair-exhausted");
+      expect(outcome.problems).toContain("last proven draft JSON follows");
+      expect(outcome.problems).toContain(JSON.stringify(validDag));
+    }
+  });
+
+  it("a throwing gauntlet is an environment failure: gauntlet-failed WITH the draft JSON", async () => {
+    const root = join(tmpRoot, "gauntlet-throws");
+    const throwing = async (): Promise<never> => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+    const { client } = scriptedLlm([draft(validDag)]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io, throwing);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("gauntlet-failed");
+      expect(outcome.problems[0]).toContain("ENOSPC");
+      expect(outcome.problems).toContain("draft JSON follows");
+      expect(outcome.problems).toContain(JSON.stringify(validDag));
+    }
+  });
+
+  it("schema-repair exhaustion fails closed with the schema problems", async () => {
+    const root = join(tmpRoot, "schema-exhausted");
+    const invalid = {
+      ...validDag,
+      structure: { shape: "sources", sources: ["fetch-weather", "ghost"], join: "join-all", assemble: "final" },
+    };
+    const { client } = scriptedLlm([
+      { action: "draft", dag: invalid },
+      { action: "draft", dag: invalid },
+    ]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: "briefing", team: "assist", root, maxRepairRounds: 1 },
+      client,
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("repair-exhausted");
+      expect(outcome.problems.join("\n")).toContain("ghost");
+    }
+  });
+
+  it("a schema-repair turn that returns questions fails closed as llm-error", async () => {
+    const root = join(tmpRoot, "repair-got-questions");
+    const invalid = {
+      ...validDag,
+      structure: { shape: "sources", sources: ["fetch-weather", "ghost"], join: "join-all", assemble: "final" },
+    };
+    const { client } = scriptedLlm([
+      { action: "draft", dag: invalid },
+      { action: "questions", questions: ["are you sure?"] },
+    ]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("llm-error");
+      expect(outcome.problems.join("\n")).toContain("got questions");
+    }
+  });
+
+  it("a THROWING scaffold write fails closed as write-failed with the accepted draft", async () => {
+    // `dags` is a regular file → isDirNonEmpty rethrows ENOTDIR inside
+    // writeAuthoredScaffold; compose must catch it and keep the draft.
+    const root = join(tmpRoot, "write-throws");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "dags"), "i am a file, not a directory", "utf-8");
+    const { client } = scriptedLlm([draft(validDag)]);
+    const { io } = scriptedIo(["yes"]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("write-failed");
+      expect(outcome.problems).toContain("accepted draft JSON follows");
+      expect(outcome.problems).toContain(JSON.stringify(validDag));
+    }
+  });
+});
+
+describe("fugue compose (subprocess)", () => {
+  it("rejects a non-kebab --team at the CLI boundary (before any API-key or LLM work)", async () => {
+    const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
+    const proc = Bun.spawn(["bun", binPath, "compose", "an intent", "--team", "Bad_Team"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      // No key on purpose: the team check must fire first, so this exits 2
+      // (usage) rather than 1 (missing ANTHROPIC_API_KEY).
+      env: { ...process.env, ANTHROPIC_API_KEY: "" },
+    });
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("kebab-case");
+  });
 });
 
 describe("runGauntlet", () => {
@@ -329,12 +539,61 @@ describe("runGauntlet", () => {
 });
 
 describe("authoredToMermaid", () => {
-  it("renders every node and the $input edge", () => {
+  it("renders every node (n_-prefixed) and the $input edge", () => {
     const diagram = authoredToMermaid(validDag);
     for (const n of validDag.nodes) {
-      expect(diagram).toContain(n.id.replace(/[^A-Za-z0-9_]/g, "_"));
+      expect(diagram).toContain(`n_${n.id.replace(/[^A-Za-z0-9_]/g, "_")}`);
     }
     expect(diagram).toContain("dag_input");
     expect(diagram.startsWith("flowchart TD")).toBe(true);
+  });
+
+  it("a node literally named 'dag-input' does not merge with the virtual input token", () => {
+    const d: AuthoredDag = {
+      fugueAuthored: 1,
+      name: "merge-check",
+      team: "assist",
+      description: "d",
+      input: { fields: [{ name: "id", type: str }] },
+      nodes: [
+        { id: "fetch-x", kind: "fetch", purpose: "x", output: out("x") },
+        { id: "dag-input", kind: "transform", purpose: "y", output: out("y") },
+      ],
+      structure: { shape: "linear", order: ["fetch-x", "dag-input"] },
+    };
+    const diagram = authoredToMermaid(d);
+    // The real node's token is n_dag_input; the virtual request node keeps dag_input.
+    expect(diagram).toContain('n_dag_input["dag-input<br/>transform"]');
+    expect(diagram).toContain("dag_input --> n_fetch_x");
+    expect(diagram).toContain("n_fetch_x --> n_dag_input");
+  });
+
+  it("escapes quotes in router edge labels (when.equals is free text)", () => {
+    const d: AuthoredDag = {
+      fugueAuthored: 1,
+      name: "router-escape",
+      team: "assist",
+      description: "d",
+      input: { fields: [{ name: "id", type: str }] },
+      nodes: [
+        {
+          id: "classify",
+          kind: "fetch",
+          purpose: "c",
+          output: { fields: [{ name: "bucket", type: { kind: "enum", values: ['sm"all', "large"] } }] },
+        },
+        { id: "handle-small", kind: "transform", purpose: "s", output: out("v") },
+        { id: "fallback", kind: "transform", purpose: "f", output: out("v") },
+      ],
+      structure: {
+        shape: "router",
+        classifier: "classify",
+        cases: [{ label: "small", when: { field: "bucket", equals: 'sm"all' }, to: "handle-small" }],
+        default: "fallback",
+      },
+    };
+    const diagram = authoredToMermaid(d);
+    expect(diagram).toContain("bucket = sm&quot;all");
+    expect(diagram).not.toContain('sm"all');
   });
 });

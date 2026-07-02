@@ -5,6 +5,7 @@
 // (the roundtrip that makes AuthoredDag ⊇ DescribedDag one format family).
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import fc from "fast-check";
@@ -230,6 +231,9 @@ describe("AuthoredDag schema", () => {
     (d.nodes[0] as { kind: string }).kind = "source";
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.problems.join("\n")).toContain("source nodes belong to the sources shape");
+    }
   });
 
   it("rejects human-review outside linear / as first node / with output", () => {
@@ -339,6 +343,77 @@ describe("AuthoredDag schema", () => {
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("fooNode");
+  });
+
+  it("rejects '__proto__' as a field name (object-literal prototype setter)", () => {
+    // `{ __proto__: z.string() }` in generated code SETS THE PROTOTYPE instead
+    // of declaring a field — the field would silently not exist while passing
+    // the whole gauntlet. Both the DAG input and node outputs must reject it.
+    const inInput = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (inInput.input.fields[0] as { name: string }).name = "__proto__";
+    const p1 = parseAuthoredDag(inInput);
+    expect(p1.ok).toBe(false);
+    if (!p1.ok) expect(p1.problems.join("\n")).toContain("__proto__");
+
+    const inOutput = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (inOutput.nodes[1]!.output!.fields[0] as { name: string }).name = "__proto__";
+    expect(parseAuthoredDag(inOutput).ok).toBe(false);
+
+    // Hostile JSON path too: the same dag arriving as wire text.
+    const viaJson = parseAuthoredDagJson(JSON.stringify(inInput));
+    expect(viaJson.ok).toBe(false);
+  });
+
+  it("rejects leading-digit node ids and dag names (invalid JS identifiers)", () => {
+    const nodeD = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (nodeD.nodes[1] as { id: string }).id = "2fast";
+    (nodeD.structure as { order: string[] }).order = ["fetch-record", "2fast"];
+    const p1 = parseAuthoredDag(nodeD);
+    expect(p1.ok).toBe(false);
+    if (!p1.ok) expect(p1.problems.join("\n")).toContain("starting with a letter");
+
+    const nameD = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (nameD as { name: string }).name = "2fast-pipeline";
+    expect(parseAuthoredDag(nameD).ok).toBe(false);
+  });
+
+  it("rejects node ids that are strict-mode reserved words ('with', 'debugger', 'eval', 'arguments')", () => {
+    for (const id of ["with", "debugger", "eval", "arguments"]) {
+      const d = structuredClone(FIXTURES.linear!) as AuthoredDag;
+      (d.nodes[1] as { id: string }).id = id;
+      (d.structure as { order: string[] }).order = ["fetch-record", id];
+      const parsed = parseAuthoredDag(d);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.problems.join("\n")).toContain(`reserved word '${id}'`);
+    }
+  });
+
+  it("rejects enum values containing a newline", () => {
+    const d = structuredClone(FIXTURES.router!) as AuthoredDag;
+    const bucket = d.nodes[0]!.output!.fields[1]! as { type: { kind: string; values: string[] } };
+    bucket.type.values = ["small\ninjected", "large"];
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("single line");
+  });
+
+  it("rejects duplicate router {field, equals} predicates (unreachable case)", () => {
+    reject(
+      (d) => {
+        const s = d.structure as Extract<AuthoredDag["structure"], { shape: "router" }>;
+        return {
+          ...d,
+          structure: {
+            ...s,
+            cases: [
+              ...s.cases,
+              { label: "small-again", when: { field: "bucket", equals: "small" }, to: "manual-review" },
+            ],
+          },
+        };
+      },
+      "duplicate predicate",
+    );
   });
 
   it("rejects duplicate enum values", () => {
@@ -484,9 +559,63 @@ describe("authored codegen survives the gauntlet", () => {
     await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
     const first = await runNewFrom({ from: fromPath, force: false, root });
     expect(first.ok).toBe(true);
+    // Codegen'd scaffolds are advisory-clean; the field must still be present
+    // (always-an-array contract).
+    if (first.ok) expect(first.advisories).toEqual([]);
     const second = await runNewFrom({ from: fromPath, force: false, root });
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.problems[0]).toContain("--force");
+  });
+
+  it("runNewFrom surfaces an unreadable file as problems, not a throw", async () => {
+    const result = await runNewFrom({ from: join(tmpRoot, "does-not-exist.authored.json"), force: false, root: tmpRoot });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.problems[0]).toContain("cannot read");
+  });
+
+  it("runNewFrom surfaces schema problems prefixed with the file path", async () => {
+    const root = join(tmpRoot, "from-schema-invalid");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "bad.authored.json");
+    await Bun.write(fromPath, JSON.stringify({ ...FIXTURES.linear, name: "2fast" }));
+    const result = await runNewFrom({ from: fromPath, force: false, root });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.problems[0]).toContain(fromPath);
+      expect(result.problems.join("\n")).toContain("starting with a letter");
+    }
+  });
+
+  it("runNewFrom fails closed on a gauntlet failure and writes NOTHING", async () => {
+    const root = join(tmpRoot, "from-gauntlet-fail");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "x.authored.json");
+    await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
+    const alwaysFail = async () => ({
+      ok: false as const,
+      errors: [{ kind: "import-failed" as const, message: "simulated gauntlet failure" }],
+      advisories: [],
+    });
+    const result = await runNewFrom({ from: fromPath, force: false, root }, alwaysFail);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.problems[0]).toContain("import-failed");
+    expect(existsSync(join(root, "dags"))).toBe(false);
+  });
+
+  it("runNewFrom surfaces gauntlet advisories on the success result", async () => {
+    const root = join(tmpRoot, "from-advisories");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "x.authored.json");
+    await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
+    const advisory = {
+      kind: "redundant-passthrough" as const,
+      message: "identity-shaped transform",
+      nodeId: "summarize",
+    };
+    const okWithAdvisory = async () => ({ ok: true as const, advisories: [advisory] });
+    const result = await runNewFrom({ from: fromPath, force: false, root }, okWithAdvisory);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.advisories).toEqual([advisory]);
   });
 });
 

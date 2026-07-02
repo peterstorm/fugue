@@ -48,7 +48,10 @@ export const runGauntlet = async (dag: AuthoredDag, root: string): Promise<Gaunt
       ? { ok: true, advisories: lint.advisories }
       : { ok: false, errors: lint.errors, advisories: lint.advisories };
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    // Cleanup failures must not mask the verdict: a throw inside `finally`
+    // REPLACES the function's result, so a flaky rm would turn a proven draft
+    // into an environment error. Leftover staging dirs are cheap; swallow.
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
     // Leave no empty `.fugue-compose` behind. A concurrent draft's staging dir
     // makes this rmdir fail — that is fine, the last one out removes it.
     await rmdir(stagingBase).catch(() => {});
