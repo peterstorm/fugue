@@ -46,6 +46,7 @@ import {
   DAG_CONST_NAME,
   DEFAULT_MODEL_NAME,
   FIXED_IMPORT_NAME,
+  IDENT,
   INPUT_SCHEMA_NAME,
   NODE_FACTORY_NAME,
   SHAPE_HELPER_NAME,
@@ -64,7 +65,8 @@ type LlmNode = Extract<AuthoredNode, { kind: "llm" }>;
 // Small pure helpers
 // ---------------------------------------------------------------------------
 
-const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// IDENT is single-sourced in `identifiers.ts` — the same rule the authoring
+// schema enforces on field names.
 const key = (name: string): string => (IDENT.test(name) ? name : JSON.stringify(name));
 
 /**
@@ -294,10 +296,20 @@ const fanInConst = (name: string, upstream: readonly NodePlan[], extra?: readonl
 /**
  * A human-review node's effective output schema is the reviewed (upstream)
  * schema — resolved during wiring and stored in `inExpr` (review gates are
- * typed passthroughs).
+ * typed passthroughs). A null `inExpr` here means a caller asked for the
+ * gate's schema BEFORE wiring resolved it — an internal ordering bug, never
+ * an authoring error, so it throws (matching the `plan()` invariant) instead
+ * of silently emitting `z.never()` into the generated module.
  */
-const effectiveOutName = (p: NodePlan): string =>
-  p.node.kind === "human-review" ? (p.inExpr ?? "z.never()") : p.outName;
+const effectiveOutName = (p: NodePlan): string => {
+  if (p.node.kind !== "human-review") return p.outName;
+  if (p.inExpr === null) {
+    throw new Error(
+      `authored-codegen invariant: human-review node '${p.node.id}' reached effectiveOutName before wiring`,
+    );
+  }
+  return p.inExpr;
+};
 
 /**
  * Build the full `dag.ts` + prompt files from a validated AuthoredDag.

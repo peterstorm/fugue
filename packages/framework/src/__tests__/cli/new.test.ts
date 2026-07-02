@@ -388,14 +388,21 @@ describe("parseNewArgs", () => {
 });
 
 describe("parseNewArgs --from", () => {
-  it("parses --from with --owner/--dir/--force into the from variant", () => {
+  it("parses --from with --owner/--dir/--force into the from variant (mode discriminant)", () => {
     const parsed = parseNewArgs(["--from", "x.authored.json", "--owner", "p.h", "--dir", "root", "--force"]);
     expect(parsed.ok).toBe(true);
-    if (!parsed.ok || !("from" in parsed)) throw new Error("expected the --from variant");
+    if (!parsed.ok || parsed.mode !== "from") throw new Error("expected the --from variant");
     expect(parsed.from).toBe("x.authored.json");
     expect(parsed.owner).toBe("p.h");
     expect(parsed.root).toBe("root");
     expect(parsed.force).toBe(true);
+  });
+
+  it("shape mode carries mode: 'shape' (the discriminant the bin dispatches on)", () => {
+    const parsed = parseNewArgs(["leads/x", "--shape", "linear"]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.mode !== "shape") throw new Error("expected the shape variant");
+    expect(parsed.options.shape).toBe("linear");
   });
 
   // name/team/shape/nodes all come from the authored file — the shape-mode
@@ -429,6 +436,35 @@ describe("fugue new (subprocess)", () => {
     const json = JSON.parse(stdout) as { ok: boolean; files?: string[] };
     expect(json.ok).toBe(true);
     expect(json.files).toContain(join("dags", "demo", "cli-dag", "dag.ts"));
+  });
+
+  it("dispatches --from mode: deterministic codegen from an authored file", async () => {
+    const root = join(tmpRoot, "bin-from");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "cli.authored.json");
+    await writeFile(
+      fromPath,
+      JSON.stringify({
+        fugueAuthored: 1,
+        name: "bin-from-dag",
+        team: "demo",
+        description: "bin --from dispatch",
+        input: { fields: [{ name: "id", type: { kind: "string" } }] },
+        nodes: [
+          { id: "fetch-x", kind: "fetch", purpose: "x", output: { fields: [{ name: "x", type: { kind: "string" } }] } },
+          { id: "shape-x", kind: "transform", purpose: "y", output: { fields: [{ name: "y", type: { kind: "string" } }] } },
+        ],
+        structure: { shape: "linear", order: ["fetch-x", "shape-x"] },
+      }),
+      "utf-8",
+    );
+    const { exitCode, stdout } = await runBin(["new", "--from", fromPath, "--dir", root]);
+    expect(exitCode).toBe(0);
+    const json = JSON.parse(stdout) as { ok: boolean; name?: string; files?: string[] };
+    expect(json.ok).toBe(true);
+    // The sidecar proves --from mode ran (shape mode never writes one).
+    expect(json.name).toBe("bin-from-dag");
+    expect(json.files).toContain(join("dags", "demo", "bin-from-dag", "dag.authored.json"));
   });
 
   it("exits 1 and emits problems JSON on bad args", async () => {

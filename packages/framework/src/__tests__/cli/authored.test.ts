@@ -22,6 +22,7 @@ import {
   generatedIdentifiersFor,
 } from "../../cli/identifiers.js";
 import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
+import { CONFIDENCE_FIELD } from "../../cli/vocabulary.js";
 import { runNewFrom, writeAuthoredScaffold } from "../../cli/new.js";
 import type { DescribedDag } from "../../describe/index.js";
 import { runLint } from "../../cli/lint.js";
@@ -178,6 +179,36 @@ const FIXTURES: Record<string, AuthoredDagInput> = {
       default: "manual-review",
     },
   },
+  "router-llm": {
+    fugueAuthored: 1,
+    name: "authored-router-llm",
+    team: "demo",
+    description: "LLM classifier routing on its declared confidence bucket",
+    input: out("message"),
+    nodes: [
+      {
+        id: "classify",
+        kind: "llm",
+        purpose: "Classify the message",
+        output: {
+          fields: [
+            { name: "topic", type: str },
+            // The bucket enum declared EXPLICITLY — the only way to route on
+            // confidence (the auto-injected field is not a predicate target).
+            { name: "confidence", type: { kind: "enum", values: ["high", "medium", "low"] } },
+          ],
+        },
+      },
+      { id: "auto-handle", kind: "transform", purpose: "Handle a confident classification", output: out("verdict") },
+      { id: "escalate", kind: "transform", purpose: "Escalate an uncertain classification", output: out("verdict") },
+    ],
+    structure: {
+      shape: "router",
+      classifier: "classify",
+      cases: [{ label: "confident", when: { field: "confidence", equals: "high" }, to: "auto-handle" }],
+      default: "escalate",
+    },
+  },
   "sources-llm": {
     fugueAuthored: 1,
     name: "authored-sources",
@@ -261,10 +292,22 @@ describe("AuthoredDag schema", () => {
     }
   });
 
-  it("rejects human-review outside linear / as first node / with output", () => {
+  it("rejects human-review outside linear (a fan-out branch gate)", () => {
+    const d = structuredClone(FIXTURES["fan-out"]!) as AuthoredDagInput;
+    // Replace the enrich-b branch with a human-review gate — schema-shaped
+    // (no output) but placed in a shape that cannot host one.
+    d.nodes[2] = { id: "enrich-b", kind: "human-review", purpose: "Gate branch B" };
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain('requires shape "linear"');
+  });
+
+  it("rejects human-review as first node / with output", () => {
     const first = structuredClone(FIXTURES["linear-llm-review"]!) as AuthoredDagInput;
     (first.structure as { order: string[] }).order = ["approve", "draft-reply"];
-    expect(parseAuthoredDag(first).ok).toBe(false);
+    const p1 = parseAuthoredDag(first);
+    expect(p1.ok).toBe(false);
+    if (!p1.ok) expect(p1.problems.join("\n")).toContain("cannot be the first node");
 
     // The kind/output dependency is a discriminated union now — the message
     // must still state the RULE (the repair loop feeds it to an LLM), not
@@ -532,6 +575,78 @@ describe("AuthoredDag schema", () => {
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("join 'synthesize' must not be a source node");
   });
 
+  it("rejects a sources assemble of kind source", () => {
+    const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
+    (d.nodes[3] as { kind: string }).kind = "source"; // final, the assemble
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("assemble 'final' must not be a source node");
+  });
+
+  it("rejects a sources entry that is not of kind source", () => {
+    const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
+    (d.nodes[0] as { kind: string }).kind = "fetch"; // fetch-weather, a sources[] entry
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.problems.join("\n")).toContain(`sources entry 'fetch-weather' must be kind "source"`);
+    }
+  });
+
+  it("rejects a node referenced more than once in the structure", () => {
+    // Point the router default at the case handler: auto-approve now plays
+    // two roles (accumulate-all also flags the orphaned manual-review).
+    reject(
+      (d) => ({ ...d, structure: { ...d.structure, default: "auto-approve" } }),
+      "each node plays exactly one role",
+    );
+  });
+
+  it("rejects duplicate router case labels", () => {
+    reject(
+      (d) => {
+        const s = d.structure as Extract<AuthoredDagInput["structure"], { shape: "router" }>;
+        return {
+          ...d,
+          structure: {
+            ...s,
+            cases: [
+              ...s.cases,
+              // Same label, different predicate — isolates the label rule from
+              // the duplicate-predicate rule.
+              { label: "small", when: { field: "bucket", equals: "large" }, to: "manual-review" },
+            ],
+          },
+        };
+      },
+      "duplicate label 'small'",
+    );
+  });
+
+  it("rejects duplicate node ids", () => {
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    d.nodes.push({ id: "summarize", kind: "transform", purpose: "Impostor", output: out("z") });
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("duplicate node id 'summarize'");
+  });
+
+  it("rejects duplicate field names in a schema spec", () => {
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (d.input.fields as { name: string; type: unknown }[]).push({ name: "id", type: str });
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("duplicate field name 'id'");
+  });
+
+  it("rejects a wrong fugueAuthored version literal", () => {
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (d as { fugueAuthored: number }).fugueAuthored = 2;
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("fugueAuthored");
+  });
+
   it("rejects an llm 'confidence' output field that is not the exact bucket enum", () => {
     const wrong = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
     (outputOf(wrong.nodes[2]!).fields as { name: string; type: unknown }[]).push({
@@ -552,6 +667,18 @@ describe("AuthoredDag schema", () => {
   });
 });
 
+// The confidence vocabulary is an exported singleton guarding a declared
+// byte-for-byte invariant across authored.ts / authored-codegen.ts /
+// compose.ts — a mutation anywhere would silently corrupt all three, so the
+// value must be deep-frozen (a loud TypeError instead).
+describe("CONFIDENCE_FIELD", () => {
+  it("is deep-frozen at every level", () => {
+    expect(Object.isFrozen(CONFIDENCE_FIELD)).toBe(true);
+    expect(Object.isFrozen(CONFIDENCE_FIELD.type)).toBe(true);
+    expect(Object.isFrozen(CONFIDENCE_FIELD.type.values)).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // B2 — the acceptance matrix: authored → codegen → defineDag + lint, and the
 // describe roundtrip
@@ -561,7 +688,7 @@ describe("authored codegen survives the gauntlet", () => {
   for (const [label, fixture] of Object.entries(FIXTURES)) {
     it(`${label} → dag.ts imports, lints clean, describe matches the structure`, async () => {
       const root = join(tmpRoot, label);
-      const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false });
+      const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false }, []);
       if (!written.ok) throw new Error(written.problems.join("; "));
 
       const dagPath = join(written.dir, "dag.ts");
@@ -591,7 +718,7 @@ describe("authored codegen survives the gauntlet", () => {
 
   it("human-review gates surface as humanReview in describe", async () => {
     const root = join(tmpRoot, "review-describe");
-    const written = await writeAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!), { root, force: false });
+    const written = await writeAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!), { root, force: false }, []);
     if (!written.ok) throw new Error(written.problems.join("; "));
     const described = await runDescribe(join(written.dir, "dag.ts"));
     if (!described.ok) throw new Error("describe failed");
@@ -615,7 +742,7 @@ describe("authored codegen survives the gauntlet", () => {
     ]);
 
     const root = join(tmpRoot, "two-llm-registry");
-    const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false });
+    const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false }, []);
     if (!written.ok) throw new Error(written.problems.join("; "));
     const registry = JSON.parse(
       await readFile(join(written.dir, "prompts", "registry.json"), "utf-8"),

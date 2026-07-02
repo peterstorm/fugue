@@ -34,7 +34,8 @@ import { runVisualize } from "../src/cli/visualize.js";
 import { runCapabilities } from "../src/cli/capabilities.js";
 import { runPromptsSync, runPromptsCheck } from "../src/cli/prompts.js";
 import { parseNewArgs, runNew, runNewFrom } from "../src/cli/new.js";
-import { parseComposeArgs, runCompose, type ComposeAnswer, type ComposeIo } from "../src/cli/compose.js";
+import { parseComposeArgs, runCompose } from "../src/cli/compose.js";
+import { readlineComposeIo } from "../src/cli/compose-io.js";
 import { DEFAULT_MODEL } from "../src/cli/new-templates.js";
 
 const USAGE = `Usage: fugue <command> [path]
@@ -117,7 +118,7 @@ const main = async (): Promise<number> => {
       process.stdout.write(`${JSON.stringify({ ok: false, problems: parsed.problems }, null, 2)}\n`);
       return 1;
     }
-    const result = "from" in parsed
+    const result = parsed.mode === "from"
       ? await runNewFrom({ from: parsed.from, force: parsed.force, ...(parsed.owner !== undefined ? { owner: parsed.owner } : {}), ...(parsed.root !== undefined ? { root: parsed.root } : {}) })
       : await runNew(parsed.options);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -136,7 +137,11 @@ const main = async (): Promise<number> => {
 
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
-      process.stderr.write("compose needs ANTHROPIC_API_KEY in the environment.\n");
+      // Same machine-readable envelope as every other author-facing failure —
+      // tooling parses stdout JSON, so a missing key must not break the contract.
+      process.stdout.write(
+        `${JSON.stringify({ ok: false, problems: ["compose needs ANTHROPIC_API_KEY in the environment"] }, null, 2)}\n`,
+      );
       return 1;
     }
     const [{ AnthropicLlmClient }, { default: Anthropic }, readline] = await Promise.all([
@@ -145,32 +150,18 @@ const main = async (): Promise<number> => {
       import("node:readline/promises"),
     ]);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    // Ctrl-D / piped-stdin exhaustion closes the interface and Ctrl-C fires
-    // SIGINT — either way a pending `ask` must settle rather than hang the
-    // process forever. Resolving to { kind: "closed" } routes the compose
-    // loop to its clean { ok: false, reason: "aborted" } outcome from ANY ask
-    // site — a closed stream is a fact about the terminal, distinct from a
-    // user who typed the word "abort". Registered ONCE, up front, so every
-    // subsequent ask shares the same close promise.
-    const closed: ComposeAnswer = { kind: "closed" };
-    const closedToAbort: Promise<ComposeAnswer> = new Promise((resolveClosed) => {
-      rl.once("close", () => resolveClosed(closed));
+    // Ctrl-C: close the interface so any pending `ask` settles as closed (the
+    // adapter routes the loop to its clean aborted outcome), and SAY SO — an
+    // in-flight LLM/gauntlet round finishes before the loop can observe the
+    // closed stream, so silence here reads as a hang. (AbortSignal threading
+    // into the LLM client is deliberately deferred.)
+    process.once("SIGINT", () => {
+      process.stderr.write("\ninterrupted — finishing the current step, then aborting…\n");
+      rl.close();
     });
-    process.once("SIGINT", () => rl.close());
-    const io: ComposeIo = {
-      // If the interface closes mid-question, rl.question either never settles
-      // or rejects (runtime-dependent) — race it against the close promise and
-      // fold a rejection into { kind: "closed" } too.
-      ask: (q) =>
-        Promise.race([
-          rl.question(`${q}\n> `).then(
-            (text): ComposeAnswer => ({ kind: "answer", text }),
-            (): ComposeAnswer => closed,
-          ),
-          closedToAbort,
-        ]),
-      say: (m) => process.stdout.write(`${m}\n`),
-    };
+    // Ctrl-D / piped-stdin exhaustion / close-mid-question semantics live in
+    // the adapter (see compose-io.ts).
+    const io = readlineComposeIo(rl);
     try {
       const outcome = await runCompose(
         parsed.options,

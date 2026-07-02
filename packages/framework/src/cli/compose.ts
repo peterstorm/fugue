@@ -30,6 +30,7 @@ import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
+import { KEBAB } from "./identifiers.js";
 import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
@@ -87,15 +88,22 @@ export type ComposeOutcome =
       /** `gauntlet-failed` = the proving machinery itself threw (an environment failure, not a draft problem). */
       readonly reason: "aborted" | "llm-error" | "repair-exhausted" | "write-failed" | "gauntlet-failed";
       readonly problems: readonly string[];
+      /**
+       * The user's work product, carried as DATA so hitting a wall never
+       * discards it: the most recent draft that survived the full gauntlet
+       * (or, for gauntlet-/write-failures, the draft in flight). Absent only
+       * when no draft existed yet, or on a deliberate abort. Replayable via
+       * `fugue new --from`.
+       */
+      readonly draft?: AuthoredDag;
     };
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing (pure — mirrors parseNewArgs' accumulate-all shape)
 // ---------------------------------------------------------------------------
 
-// kebab-case, lowercase, single internal dashes — the same convention the
+// KEBAB (single-sourced in `identifiers.ts`) — the same convention the
 // AuthoredDag schema enforces on `team` and `fugue new` enforces on its path.
-const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export interface ParsedComposeArgs {
   readonly ok: true;
@@ -255,17 +263,6 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
 
 const COMPOSE_NODE_ID = nodeId("fugue-compose");
 
-/**
- * A draft is the user's work product — failure outcomes carry the full
- * serialized JSON (after a labeling marker line) so it can be saved and
- * replayed via `fugue new --from`.
- */
-const withDraftJson = (problems: readonly string[], dag: AuthoredDag, label: string): readonly string[] => [
-  ...problems,
-  label,
-  JSON.stringify(dag),
-];
-
 const summarize = (dag: AuthoredDag): string =>
   [
     `${dag.name} (${dag.structure.shape}) — ${dag.description}`,
@@ -301,8 +298,8 @@ export const runCompose = async (
   ];
 
   // The most recent draft that survived the full gauntlet. Budget/transport
-  // failures attach it so hitting a wall never discards work the user already
-  // saw proven.
+  // failures attach it (the typed `draft` field) so hitting a wall never
+  // discards work the user already saw proven.
   let lastProven: AuthoredDag | null = null;
   const failClosed = (
     reason: "llm-error" | "repair-exhausted",
@@ -310,8 +307,8 @@ export const runCompose = async (
   ): Extract<ComposeOutcome, { ok: false }> => ({
     ok: false,
     reason,
-    problems:
-      lastProven !== null ? withDraftJson(problems, lastProven, "last proven draft JSON follows") : problems,
+    problems,
+    ...(lastProven !== null ? { draft: lastProven } : {}),
   });
 
   const turn = async (extra?: string): Promise<ComposeTurn | { readonly error: string }> => {
@@ -333,19 +330,25 @@ export const runCompose = async (
 
   // Schema gate: parse the wire-level `unknown` into an AuthoredDag. A schema
   // failure is a repair round exactly like a gauntlet failure — the superRefine
-  // problems go back to the model as structured JSON and we re-turn.
+  // problems go back to the model as structured JSON and we re-turn. The
+  // validated `--team` flag is enforced HERE too: it only reaches the model as
+  // prose, so a drifting draft would otherwise pass every gate and write to
+  // `dags/<the model's team>/` — a flag the user set must bind, not suggest.
   const parseDraftWithRepairs = async (first: Extract<ComposeTurn, { action: "draft" }>): Promise<DraftAttempt> => {
     let current = first;
     for (;;) {
       const parsed = parseAuthoredDag(current.dag);
-      if (parsed.ok) return { ok: true, dag: parsed.dag };
+      if (parsed.ok && parsed.dag.team === options.team) return { ok: true, dag: parsed.dag };
+      const problems = parsed.ok
+        ? [`team must be '${options.team}' (from --team), got '${parsed.dag.team}'`]
+        : parsed.problems;
       if (draftRepairs >= maxRepairs) {
-        return { ok: false, outcome: failClosed("repair-exhausted", parsed.problems) };
+        return { ok: false, outcome: failClosed("repair-exhausted", problems) };
       }
       draftRepairs++;
       rounds.repairs++;
       const t = await turn(
-        `Your draft failed schema validation. Problems:\n${JSON.stringify(parsed.problems, null, 2)}\n` +
+        `Your draft failed schema validation. Problems:\n${JSON.stringify(problems, null, 2)}\n` +
           `Current draft:\n${JSON.stringify(current.dag, null, 2)}\n` +
           `Return a corrected {"action":"draft","dag":{...}}.`,
       );
@@ -397,11 +400,10 @@ export const runCompose = async (
         outcome: {
           ok: false,
           reason: "gauntlet-failed",
-          problems: withDraftJson(
-            [e instanceof Error ? e.message : String(e)],
-            d,
-            "draft JSON follows",
-          ),
+          // Environment failures are debugged from this outcome alone — keep
+          // the stack, not just the message.
+          problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          draft: d,
         },
       };
     }
@@ -452,7 +454,37 @@ export const runCompose = async (
     // explicit "abort" answer (the draft was only ever staged, never written).
     if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
     const answer = res.text.trim();
-    if (/^(yes|y|accept)$/i.test(answer)) break;
+    if (/^(yes|y|accept)$/i.test(answer)) {
+      // --- accept: deterministic write of the final scaffold ---
+      // Writing HERE (inside the loop) keeps the accepted verdict in scope, so
+      // its advisories reach the machine-readable outcome — the NewResult
+      // contract `runNewFrom` honors too. The accepted draft is the user's
+      // work product: any write failure carries it as the typed `draft` field
+      // so it can be saved and replayed via `fugue new --from`.
+      let result: NewResult;
+      try {
+        result = await writeAuthoredScaffold(
+          draft,
+          {
+            root,
+            force: options.force ?? false,
+            ...(options.owner !== undefined ? { owner: options.owner } : {}),
+          },
+          verdict.advisories,
+        );
+      } catch (e) {
+        return {
+          ok: false,
+          reason: "write-failed",
+          problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          draft,
+        };
+      }
+      if (!result.ok) {
+        return { ok: false, reason: "write-failed", problems: result.problems, draft };
+      }
+      return { ok: true, result, rounds };
+    }
     if (/^(abort|no|quit|exit)$/i.test(answer)) {
       return { ok: false, reason: "aborted", problems: [] };
     }
@@ -470,26 +502,4 @@ export const runCompose = async (
     if (!attempt.ok) return attempt.outcome;
     draft = attempt.dag;
   }
-
-  // --- accept: deterministic write of the final scaffold ---
-  // The accepted draft is the user's work product — any write failure carries
-  // the full serialized JSON so it can be saved and replayed via `new --from`.
-  let result: NewResult;
-  try {
-    result = await writeAuthoredScaffold(draft, {
-      root,
-      force: options.force ?? false,
-      ...(options.owner !== undefined ? { owner: options.owner } : {}),
-    });
-  } catch (e) {
-    return {
-      ok: false,
-      reason: "write-failed",
-      problems: withDraftJson([e instanceof Error ? e.message : String(e)], draft, "accepted draft JSON follows"),
-    };
-  }
-  if (!result.ok) {
-    return { ok: false, reason: "write-failed", problems: withDraftJson(result.problems, draft, "accepted draft JSON follows") };
-  }
-  return { ok: true, result, rounds };
 };

@@ -41,8 +41,9 @@ import {
 import { parseAuthoredDagJson, type AuthoredDag } from "./authored.js";
 import { buildAuthoredScaffold } from "./authored-codegen.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
+import { KEBAB } from "./identifiers.js";
 import { computePromptHash } from "../prompts/hash.js";
-import type { NewResult } from "./types.js";
+import type { LintAdvisory, NewResult } from "./types.js";
 
 export interface NewOptions {
   readonly team: string;
@@ -58,18 +59,21 @@ export interface NewOptions {
   readonly force: boolean;
 }
 
-// kebab-case, lowercase, single internal dashes — a valid DAG id and directory
+// KEBAB (single-sourced in `identifiers.ts`) is a valid DAG id and directory
 // segment. (Node ids allow `[A-Za-z0-9_-]+`; we hold authors to the kebab
 // convention every existing DAG follows.)
-const SEGMENT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export interface ParsedNewArgs {
   readonly ok: true;
+  /** Discriminant: shape mode vs `--from` mode — narrow on this, not key probing. */
+  readonly mode: "shape";
   readonly options: NewOptions;
 }
 /** `fugue new --from <authored.json>` — everything else comes from the file. */
 export interface ParsedNewFromArgs {
   readonly ok: true;
+  /** Discriminant: shape mode vs `--from` mode — narrow on this, not key probing. */
+  readonly mode: "from";
   readonly from: string;
   readonly owner?: string;
   readonly root?: string;
@@ -152,7 +156,7 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
     if (llm) problems.push("--from and --llm are mutually exclusive (LLM nodes come from the authored file)");
     if (review) problems.push("--from and --review are mutually exclusive (review gates come from the authored file)");
     if (problems.length > 0) return { ok: false, problems };
-    return { ok: true, from, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) };
+    return { ok: true, mode: "from", from, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) };
   }
 
   if (target === undefined) {
@@ -166,8 +170,8 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
       problems.push(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
     } else {
       [team, name] = parts as [string, string];
-      if (!SEGMENT.test(team)) problems.push(`team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
-      if (!SEGMENT.test(name)) problems.push(`name '${name}' must be kebab-case (lowercase, digits, single dashes)`);
+      if (!KEBAB.test(team)) problems.push(`team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+      if (!KEBAB.test(name)) problems.push(`name '${name}' must be kebab-case (lowercase, digits, single dashes)`);
     }
   }
 
@@ -191,6 +195,7 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
+    mode: "shape",
     options: { team, name, shape: shape as Shape, llm, review, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) },
   };
 };
@@ -371,17 +376,23 @@ export const runNewFrom = async (
   if (!verdict.ok) {
     return { ok: false, problems: verdict.errors.map((e) => `${e.kind}: ${e.message}`) };
   }
-  const written = await writeAuthoredScaffold(parsed.dag, options);
-  return written.ok ? { ...written, advisories: verdict.advisories } : written;
+  return writeAuthoredScaffold(parsed.dag, options, verdict.advisories);
 };
 
 /**
  * Write the scaffold for an already-validated AuthoredDag. Shared between
  * `runNewFrom` (file input) and `fugue compose` (LLM-drafted input).
+ *
+ * `advisories` are the proving gauntlet's non-fatal hints, carried onto the
+ * success result (the `NewResult.advisories` contract). REQUIRED — not
+ * defaulted — so the type forces every caller to thread its verdict's
+ * advisories rather than silently dropping them from the machine-readable
+ * outcome.
  */
 export const writeAuthoredScaffold = async (
   authored: AuthoredDag,
   options: Omit<NewFromOptions, "from">,
+  advisories: readonly LintAdvisory[],
 ): Promise<NewResult> => {
   const cwd = process.cwd();
   const root = options.root ?? cwd;
@@ -454,6 +465,6 @@ export const writeAuthoredScaffold = async (
     review: authored.nodes.some((n) => n.kind === "human-review"),
     files: written,
     nextSteps,
-    advisories: [],
+    advisories,
   };
 };

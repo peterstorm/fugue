@@ -16,6 +16,30 @@
 // `authored-codegen.ts`, `new-templates.ts` and `types.ts` all depend on this
 // module, never the reverse.
 
+// ---------------------------------------------------------------------------
+// Lexical rules — the single source for the kebab/identifier regexes every
+// authoring surface enforces (`authored.ts` schema, `compose.ts` / `new.ts`
+// arg parsing, `authored-codegen.ts` key emission). One copy here so the
+// vocabularies can never drift apart.
+// ---------------------------------------------------------------------------
+
+/**
+ * kebab-case, lowercase, single internal dashes — a valid DAG id / directory
+ * segment and the convention `team` and case labels follow everywhere.
+ */
+export const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * KEBAB whose first segment starts with a LETTER. Node ids and the DAG name
+ * feed codegen'd identifiers (`const <camel> = …`, `interface <Pascal>DagOpts`)
+ * — `2fast` camelCases to `2fast`, which is not a valid JS identifier and
+ * would only surface as a SyntaxError at gauntlet time.
+ */
+export const KEBAB_IDENT = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+/** A valid JS identifier — field names must match so codegen can emit dotted access. */
+export const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export const pascalCase = (kebab: string): string =>
   kebab
     .split("-")
@@ -77,10 +101,10 @@ export const llmNodeRefName = (id: string): string => `${camelCase(id)}Node`;
 /**
  * The identifier a node contributes to the structure expression: the llm ref
  * for llm nodes (dead today — see `llmNodeRefName`), the plain const otherwise.
- * `kind` is the node's authored kind string (structural, like
- * `IdentifierSource`, so this module stays import-free).
+ * `kind` is the closed authored kind vocabulary (`AuthoredNodeKind` — derived
+ * in-module from `NODE_FACTORY_NAME`, so this module stays import-free).
  */
-export const nodeRefName = (id: string, kind: string): string =>
+export const nodeRefName = (id: string, kind: AuthoredNodeKind): string =>
   kind === "llm" ? llmNodeRefName(id) : nodeConstName(id);
 
 /** The exported DAG factory for llm scaffolds: `lead-opener` → `createLeadOpenerDag`. */
@@ -115,6 +139,13 @@ export const NODE_FACTORY_NAME = {
   "human-review": "createHumanReviewNode",
   source: "createSourceNode",
 } as const;
+
+/**
+ * The closed authored node-kind vocabulary, derived from the factory
+ * catalogue's keys — the same set `authored.ts` builds its discriminated
+ * union from. Kept here (not imported) so this module stays import-free.
+ */
+export type AuthoredNodeKind = keyof typeof NODE_FACTORY_NAME;
 
 /**
  * DAG shape → `define*` helper import name. `types.ts` re-derives its
@@ -171,7 +202,7 @@ export const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
  */
 export interface IdentifierSource {
   readonly id: string;
-  readonly kind: string;
+  readonly kind: AuthoredNodeKind;
 }
 
 /**

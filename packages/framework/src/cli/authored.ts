@@ -19,7 +19,10 @@
 
 import { z } from "zod";
 import {
+  IDENT,
   JS_RESERVED_WORDS,
+  KEBAB,
+  KEBAB_IDENT,
   RESERVED_IDENTIFIERS,
   camelCase,
   dagLevelIdentifiers,
@@ -31,15 +34,12 @@ import { CONFIDENCE_BUCKET } from "./vocabulary.js";
 // Field / schema specs (closed vocabulary)
 // ---------------------------------------------------------------------------
 
-const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-// Node ids and the DAG name feed codegen'd identifiers (`const <camel> = …`,
-// `interface <Pascal>DagOpts`), so their first segment must start with a
-// LETTER — `2fast` camelCases to `2fast`, which is not a valid JS identifier
-// and would only surface as a SyntaxError at gauntlet time. Team and case
-// labels never become bare identifiers, so plain KEBAB stays enough there.
-const KEBAB_IDENT = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-// A field name must be a valid JS identifier so codegen can emit dotted access.
-const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// The lexical rules (KEBAB / KEBAB_IDENT / IDENT) are single-sourced in
+// `identifiers.ts` — the same copies `compose.ts` / `new.ts` arg parsing and
+// `authored-codegen.ts` key emission enforce. KEBAB_IDENT (first segment
+// starts with a letter) applies to node ids and the DAG name because they
+// feed codegen'd identifiers; team and case labels never become bare
+// identifiers, so plain KEBAB stays enough there.
 // `__proto__` as an object-literal key is a prototype SETTER, not a property:
 // a field named `__proto__` would silently vanish from every generated
 // `z.object({...})` / defaults / buildInput literal while passing the whole

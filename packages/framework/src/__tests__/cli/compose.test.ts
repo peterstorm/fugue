@@ -266,7 +266,7 @@ describe("runCompose", () => {
     }
   });
 
-  it("write-failed carries the accepted draft JSON so the work is never lost", async () => {
+  it("write-failed carries the accepted draft as typed data so the work is never lost", async () => {
     const root = join(tmpRoot, "write-failed");
     const dir = join(root, "dags", "assist", "compose-briefing");
     await mkdir(dir, { recursive: true });
@@ -279,8 +279,7 @@ describe("runCompose", () => {
     if (!outcome.ok) {
       expect(outcome.reason).toBe("write-failed");
       expect(outcome.problems.join("\n")).toContain("--force");
-      expect(outcome.problems).toContain("accepted draft JSON follows");
-      expect(outcome.problems).toContain(JSON.stringify(validDag));
+      expect(outcome.draft).toEqual(validDag);
     }
   });
 
@@ -398,7 +397,7 @@ describe("runCompose", () => {
     }
   });
 
-  it("a transport error after a proven draft carries that draft's JSON", async () => {
+  it("a transport error after a proven draft carries that draft as typed data", async () => {
     const root = join(tmpRoot, "llm-error-carries-draft");
     // validDag is proven and presented; the refinement turn then dies on the wire.
     const { io } = scriptedIo(["rename it"]);
@@ -410,8 +409,7 @@ describe("runCompose", () => {
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.reason).toBe("llm-error");
-      expect(outcome.problems).toContain("last proven draft JSON follows");
-      expect(outcome.problems).toContain(JSON.stringify(validDag));
+      expect(outcome.draft).toEqual(validDag);
     }
   });
 
@@ -441,12 +439,11 @@ describe("runCompose", () => {
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.reason).toBe("repair-exhausted");
-      expect(outcome.problems).toContain("last proven draft JSON follows");
-      expect(outcome.problems).toContain(JSON.stringify(validDag));
+      expect(outcome.draft).toEqual(validDag);
     }
   });
 
-  it("a throwing gauntlet is an environment failure: gauntlet-failed WITH the draft JSON", async () => {
+  it("a throwing gauntlet is an environment failure: gauntlet-failed WITH the typed draft", async () => {
     const root = join(tmpRoot, "gauntlet-throws");
     const throwing = async (): Promise<never> => {
       throw new Error("ENOSPC: no space left on device");
@@ -459,8 +456,9 @@ describe("runCompose", () => {
     if (!outcome.ok) {
       expect(outcome.reason).toBe("gauntlet-failed");
       expect(outcome.problems[0]).toContain("ENOSPC");
-      expect(outcome.problems).toContain("draft JSON follows");
-      expect(outcome.problems).toContain(JSON.stringify(validDag));
+      // Environment failures keep the STACK, not just the message.
+      expect(outcome.problems[0]).toContain("at ");
+      expect(outcome.draft).toEqual(validDag);
     }
   });
 
@@ -521,9 +519,87 @@ describe("runCompose", () => {
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.reason).toBe("write-failed");
-      expect(outcome.problems).toContain("accepted draft JSON follows");
-      expect(outcome.problems).toContain(JSON.stringify(validDag));
+      expect(outcome.draft).toEqual(validDag);
     }
+  });
+
+  it("gauntlet advisories reach both the user (io.say) and the machine-readable ok outcome", async () => {
+    const root = join(tmpRoot, "advisories");
+    const advisory = {
+      kind: "redundant-passthrough" as const,
+      message: "identity-shaped transform",
+      nodeId: "join-all",
+    };
+    // Real gauntlet (so the DescribedDag / Mermaid render is genuine) with the
+    // advisory tacked onto the ok verdict — codegen'd drafts are advisory-clean
+    // by construction, so the seam is the only way to exercise the channel.
+    const okWithAdvisory = async (dag: AuthoredDag, r: string): Promise<GauntletResult> => {
+      const verdict = await runGauntlet(dag, r);
+      return verdict.ok ? { ...verdict, advisories: [advisory] } : verdict;
+    };
+    const { client } = scriptedLlm([draft(validDag)]);
+    const { io, said } = scriptedIo(["yes"]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io, okWithAdvisory);
+    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    // (a) the ok outcome's NewResult carries the accepted verdict's advisories
+    // (the contract runNewFrom honors — compose must not drop them).
+    expect(outcome.result.advisories).toEqual([advisory]);
+    // (b) the advisory display branch fired at the accept prompt.
+    const shown = said.join("\n");
+    expect(shown).toContain("Advisories:");
+    expect(shown).toContain("redundant-passthrough: identity-shaped transform");
+  });
+
+  it("a draft whose team drifts from --team enters the repair loop like a schema failure", async () => {
+    const root = join(tmpRoot, "team-drift");
+    // "elsewhere" is schema-valid kebab — only the --team flag binds it.
+    const drifted = { ...validDagInput, name: "compose-team-drift", team: "elsewhere" };
+    const corrected = { ...validDagInput, name: "compose-team-drift" };
+    const { client, requests } = scriptedLlm([draft(drifted), draft(corrected)]);
+    const { io } = scriptedIo(["yes"]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    expect(outcome.rounds.repairs).toBe(1);
+    expect(outcome.result.team).toBe("assist");
+    // The repair prompt carried the team rule, structured like schema problems.
+    expect(requests[1]).toContain("failed schema validation");
+    expect(requests[1]).toContain("team must be 'assist' (from --team)");
+    // Nothing ever lands under the drifted team's directory.
+    expect(existsSync(join(root, "dags", "elsewhere"))).toBe(false);
+  });
+
+  // The accept prompt's closed vocabulary: yes/y/accept write (any case);
+  // no/abort/quit/exit abort WITHOUT burning a refinement LLM round.
+  const acceptVariants = ["y", "accept", "YES", "Accept"] as const;
+  acceptVariants.forEach((answer, i) => {
+    it(`accept variant '${answer}' writes the scaffold`, async () => {
+      const root = join(tmpRoot, `accept-variant-${i}`);
+      const { client } = scriptedLlm([draft(validDag)]);
+      const { io } = scriptedIo([answer]);
+
+      const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+      if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+      expect(outcome.result.files).toContain(join("dags", "assist", "compose-briefing", "dag.ts"));
+    });
+  });
+
+  const abortVariants = ["no", "quit", "exit", "No", "EXIT"] as const;
+  abortVariants.forEach((answer, i) => {
+    it(`abort variant '${answer}' aborts without burning an LLM round`, async () => {
+      const root = join(tmpRoot, `abort-variant-${i}`);
+      const { client, requests } = scriptedLlm([draft(validDag)]);
+      const { io } = scriptedIo([answer]);
+
+      const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+      // Exactly the one draft turn — the "no"-family never reaches the
+      // refinement branch and its paid LLM call.
+      expect(requests).toHaveLength(1);
+      expect(existsSync(join(root, "dags"))).toBe(false);
+    });
   });
 });
 
@@ -590,8 +666,9 @@ describe("parseComposeArgs", () => {
 });
 
 describe("fugue compose (subprocess)", () => {
+  const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
+
   it("rejects a non-kebab --team at the CLI boundary (before any API-key or LLM work)", async () => {
-    const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
     const proc = Bun.spawn(["bun", binPath, "compose", "an intent", "--team", "Bad_Team"], {
       stdout: "pipe",
       stderr: "pipe",
@@ -610,6 +687,21 @@ describe("fugue compose (subprocess)", () => {
     expect(json.ok).toBe(false);
     expect(json.problems?.join("\n")).toContain("kebab-case");
     expect(stderr).not.toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("a missing ANTHROPIC_API_KEY emits the problems JSON envelope on stdout, exit 1", async () => {
+    // Valid args, no key: the failure must keep the machine-readable stdout
+    // contract (`{ ok: false, problems }`), not bare stderr prose.
+    const proc = Bun.spawn(["bun", binPath, "compose", "an intent", "--team", "assist"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ANTHROPIC_API_KEY: "" },
+    });
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    expect(exitCode).toBe(1);
+    const json = JSON.parse(stdout) as { ok: boolean; problems?: string[] };
+    expect(json.ok).toBe(false);
+    expect(json.problems?.join("\n")).toContain("ANTHROPIC_API_KEY");
   });
 });
 

@@ -20,13 +20,23 @@
 export const CONFIDENCE_BUCKET = ["high", "medium", "low"] as const;
 
 /**
+ * `Object.freeze` typed as identity: runtime immutability without changing
+ * assignability (`Readonly<T>` / `readonly T[]` would break consumers that
+ * expect the mutable-typed `FieldSpec` shape — the freeze is a runtime guard,
+ * invisible to the type checker on purpose).
+ */
+const freeze = <T>(value: T): T => Object.freeze(value) as T;
+
+/**
  * The `confidence` output field codegen injects on every LLM node — and the
  * exact shape an EXPLICITLY declared `confidence` field must carry. Shaped
  * like a `FieldSpec` structurally; this module cannot import that type (the
  * shared layer is import-free), so `authored-codegen` assigns it where a
- * `FieldSpec` is expected.
+ * `FieldSpec` is expected. Deep-frozen: it is an exported singleton guarding
+ * a declared byte-for-byte invariant, so a mutation anywhere would silently
+ * corrupt every consumer — freeze makes that a loud TypeError instead.
  */
-export const CONFIDENCE_FIELD = {
+export const CONFIDENCE_FIELD = freeze({
   name: "confidence",
-  type: { kind: "enum" as const, values: [...CONFIDENCE_BUCKET] },
-};
+  type: freeze({ kind: "enum" as const, values: freeze([...CONFIDENCE_BUCKET]) }),
+});
