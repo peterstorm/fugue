@@ -312,7 +312,7 @@ describe("parseNewArgs", () => {
   it("parses a full invocation", () => {
     const parsed = parseNewArgs(["leads/my-dag", "--shape", "sources", "--llm", "--owner", "p.h"]);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
+    if (parsed.ok && "options" in parsed) {
       expect(parsed.options).toMatchObject({
         team: "leads",
         name: "my-dag",
@@ -327,13 +327,13 @@ describe("parseNewArgs", () => {
   it("accepts flags before the positional", () => {
     const parsed = parseNewArgs(["--shape", "linear", "leads/x"]);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.options).toMatchObject({ team: "leads", name: "x", shape: "linear" });
+    if (parsed.ok && "options" in parsed) expect(parsed.options).toMatchObject({ team: "leads", name: "x", shape: "linear" });
   });
 
   it("parses --review on a linear shape", () => {
     const parsed = parseNewArgs(["leads/x", "--shape", "linear", "--review"]);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.options.review).toBe(true);
+    if (parsed.ok && "options" in parsed) expect(parsed.options.review).toBe(true);
   });
 
   it("rejects --review with a non-linear shape", () => {

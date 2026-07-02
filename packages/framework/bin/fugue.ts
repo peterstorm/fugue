@@ -17,15 +17,20 @@
 import { match } from "ts-pattern";
 import { runLint } from "../src/cli/lint.js";
 import { runDescribe } from "../src/cli/describe.js";
+import { runVisualize } from "../src/cli/visualize.js";
 import { runCapabilities } from "../src/cli/capabilities.js";
 import { runPromptsSync, runPromptsCheck } from "../src/cli/prompts.js";
-import { parseNewArgs, runNew } from "../src/cli/new.js";
+import { parseNewArgs, runNew, runNewFrom } from "../src/cli/new.js";
+import { runCompose, type ComposeIo } from "../src/cli/compose.js";
+import { DEFAULT_MODEL } from "../src/cli/new-templates.js";
 
 const USAGE = `Usage: fugue <command> [path]
 
 Commands:
   lint <path>              Validate a DAG file. Prints JSON, exits 0 on success.
   describe <path>          Print a structured summary of a DAG file as JSON.
+  visualize <path>         Render a DAG file as a Mermaid flowchart (JSON result;
+                           --raw prints only the diagram).
   capabilities             List the framework's built-in capabilities as JSON
                            (takes no path).
   prompts sync <dagDir>    Rewrite prompts/registry.json from the prompt files
@@ -39,9 +44,19 @@ Commands:
       --owner <owner>      Set fugue.yaml owner (optional)
       --dir <root>         Root that contains dags/ (defaults to cwd)
       --force              Overwrite a non-empty target directory
+  new --from <authored.json>
+                           Deterministic codegen from an AuthoredDag description
+                           (no <team>/<name>/--shape — all come from the file).
+      --owner/--dir/--force  As above.
+  compose "<intent>" --team <team>
+                           Conversational authoring: an LLM drafts/edits ONLY the
+                           AuthoredDag JSON; code is always generated and proven
+                           through defineDag + lint before you see it.
+      --model <id>         Model id (default: ${DEFAULT_MODEL}); needs ANTHROPIC_API_KEY.
+      --owner/--dir/--force  As above.
 
-For lint/describe the path must point to a dag.ts (or other module) that
-default-exports a DagRegistration: { dag: defineDag(...), inputSchema, ... }`;
+For lint/describe/visualize the path must point to a dag.ts (or other module)
+that default-exports a DagRegistration: { dag: defineDag(...), inputSchema, ... }`;
 
 const printUsage = (stream: NodeJS.WriteStream): void => {
   stream.write(`${USAGE}\n`);
@@ -81,17 +96,81 @@ const main = async (): Promise<number> => {
     return result.ok ? 0 : 1;
   }
 
-  // `new` takes `<team>/<name>` plus flags — handle it before the generic
-  // single-<path> requirement below.
+  // `new` takes `<team>/<name>` plus flags (or `--from <authored.json>`) —
+  // handle it before the generic single-<path> requirement below.
   if (command === "new") {
     const parsed = parseNewArgs([pathArg, ...rest].filter((a): a is string => a !== undefined));
     if (!parsed.ok) {
       process.stdout.write(`${JSON.stringify({ ok: false, problems: parsed.problems }, null, 2)}\n`);
       return 1;
     }
-    const result = await runNew(parsed.options);
+    const result = "from" in parsed
+      ? await runNewFrom({ from: parsed.from, force: parsed.force, ...(parsed.owner !== undefined ? { owner: parsed.owner } : {}), ...(parsed.root !== undefined ? { root: parsed.root } : {}) })
+      : await runNew(parsed.options);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return result.ok ? 0 : 1;
+  }
+
+  // `compose` — interactive; needs an Anthropic key. All flags optional but --team.
+  if (command === "compose") {
+    const intent = pathArg;
+    if (!intent || intent.startsWith("--")) {
+      dieUsage('`compose` requires an intent string: fugue compose "Process refunds…" --team <team>');
+    }
+    let team: string | undefined;
+    let model: string | undefined;
+    let owner: string | undefined;
+    let root: string | undefined;
+    let force = false;
+    for (let i = 0; i < rest.length; i++) {
+      const take = (): string | undefined => {
+        const v = rest[i + 1];
+        if (v === undefined || v.startsWith("--")) dieUsage(`${rest[i]} requires a value`);
+        i++;
+        return v;
+      };
+      if (rest[i] === "--team") team = take();
+      else if (rest[i] === "--model") model = take();
+      else if (rest[i] === "--owner") owner = take();
+      else if (rest[i] === "--dir") root = take();
+      else if (rest[i] === "--force") force = true;
+      else dieUsage(`unknown compose flag: ${rest[i]}`);
+    }
+    if (!team) dieUsage("`compose` requires --team <team>");
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      process.stderr.write("compose needs ANTHROPIC_API_KEY in the environment.\n");
+      return 1;
+    }
+    const [{ AnthropicLlmClient }, { default: Anthropic }, readline] = await Promise.all([
+      import("../src/llm/anthropic-client.js"),
+      import("@anthropic-ai/sdk"),
+      import("node:readline/promises"),
+    ]);
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const io: ComposeIo = {
+      ask: (q) => rl.question(`${q}\n> `),
+      say: (m) => process.stdout.write(`${m}\n`),
+    };
+    try {
+      const outcome = await runCompose(
+        {
+          intent,
+          team,
+          force,
+          ...(model !== undefined ? { model } : {}),
+          ...(owner !== undefined ? { owner } : {}),
+          ...(root !== undefined ? { root } : {}),
+        },
+        new AnthropicLlmClient(new Anthropic({ apiKey })),
+        io,
+      );
+      process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
+      return outcome.ok ? 0 : 1;
+    } finally {
+      rl.close();
+    }
   }
 
   // `capabilities` is the one command that takes no path — it emits static
@@ -108,7 +187,10 @@ const main = async (): Promise<number> => {
     dieUsage("Missing required <path> argument.");
   }
 
-  if (rest.length > 0) {
+  // `visualize` accepts an optional `--raw` after the path.
+  const raw = rest.includes("--raw");
+  const restNonFlags = rest.filter((a) => a !== "--raw");
+  if (restNonFlags.length > 0 || (raw && command !== "visualize")) {
     dieUsage(`Unexpected extra arguments: ${rest.join(" ")}`);
   }
 
@@ -120,6 +202,19 @@ const main = async (): Promise<number> => {
     })
     .with("describe", async () => {
       const result = await runDescribe(pathArg);
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return result.ok ? 0 : 1;
+    })
+    .with("visualize", async () => {
+      const result = await runVisualize(pathArg);
+      if (raw) {
+        if (result.ok) {
+          process.stdout.write(`${result.diagram}\n`);
+          return 0;
+        }
+        process.stderr.write(`${JSON.stringify(result, null, 2)}\n`);
+        return 1;
+      }
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return result.ok ? 0 : 1;
     })

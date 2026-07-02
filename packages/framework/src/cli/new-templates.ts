@@ -53,10 +53,10 @@ export interface Scaffold {
 
 // A current model id — kept in one place so a model-id bump touches one line.
 // See `@fuguejs/framework/docs/llm-dag-authoring.md` ("Model ids").
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 /** Shared `frameworkError.*` confidence/spread-override boilerplate for LLM nodes. */
-const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { mode: "none" }\`. Spread-override the
+export const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { mode: "none" }\`. Spread-override the
   // field to emit the model's self-reported BUCKET through the framework's
   // typed confidence channel — never a number (see docs/llm-dag-authoring.md).
   return {
@@ -67,7 +67,7 @@ const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { mode: "
     },
   };`;
 
-const registration = (ctx: TemplateCtx, dagExpr: string, description: string): string =>
+export const registration = (ctx: TemplateCtx, dagExpr: string, description: string): string =>
   `const registration: DagRegistration = {
   dag: ${dagExpr},
   inputSchema: InputSchema,
