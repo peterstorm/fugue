@@ -155,10 +155,23 @@ const main = async (): Promise<number> => {
     // in-flight LLM/gauntlet round finishes before the loop can observe the
     // closed stream, so silence here reads as a hang. (AbortSignal threading
     // into the LLM client is deliberately deferred.)
-    process.once("SIGINT", () => {
+    //
+    // Registered on BOTH process and the readline Interface: with a real TTY,
+    // readline puts stdin in raw mode and CONSUMES ^C itself, emitting
+    // 'SIGINT' on the Interface — the process-level handler never fires there
+    // (it covers `kill -INT` and non-TTY/piped stdin). Idempotent (the
+    // `interrupted` flag) so a double delivery closes once and prints the
+    // stderr notice once. This wiring is bin-only on purpose: the compose-io
+    // fake cannot cover it.
+    let interrupted = false;
+    const interrupt = (): void => {
+      if (interrupted) return;
+      interrupted = true;
       process.stderr.write("\ninterrupted — finishing the current step, then aborting…\n");
       rl.close();
-    });
+    };
+    process.once("SIGINT", interrupt);
+    rl.once("SIGINT", interrupt);
     // Ctrl-D / piped-stdin exhaustion / close-mid-question semantics live in
     // the adapter (see compose-io.ts).
     const io = readlineComposeIo(rl);
@@ -228,8 +241,17 @@ const main = async (): Promise<number> => {
 // Top-level guard: main() is designed not to reject, but JSON.stringify of a
 // pathological result payload could throw. Surface it as a clean non-zero exit
 // rather than an unhandled rejection with a non-deterministic exit code.
+//
+// Success path sets `process.exitCode` and lets the loop drain naturally —
+// `process.exit(code)` can truncate a large JSON payload still buffered in a
+// piped stdout. Every handle is closed by the time main() resolves (readline
+// closes in compose's finally), so the drain terminates. The pathological
+// catch arm keeps the hard exit: state is unknown there, and its output is a
+// short stderr line, not a stdout payload.
 main()
-  .then((code) => process.exit(code))
+  .then((code) => {
+    process.exitCode = code;
+  })
   .catch((e: unknown) => {
     process.stderr.write(`${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
     process.exit(1);

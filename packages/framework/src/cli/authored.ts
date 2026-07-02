@@ -24,10 +24,12 @@ import {
   KEBAB,
   KEBAB_IDENT,
   RESERVED_IDENTIFIERS,
+  SINGLE_LINE,
   camelCase,
   dagLevelIdentifiers,
   generatedIdentifiersFor,
 } from "./identifiers.js";
+import { assertNever } from "./types.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
 
 // ---------------------------------------------------------------------------
@@ -45,10 +47,12 @@ import { CONFIDENCE_BUCKET } from "./vocabulary.js";
 // `z.object({...})` / defaults / buildInput literal while passing the whole
 // gauntlet. Rejected at parse time — there is no safe emission for it.
 const FORBIDDEN_FIELD_NAMES: ReadonlySet<string> = new Set(["__proto__"]);
-// Free-text fields are interpolated into `//` comments by codegen — a newline
-// would break out of the comment into code position, so the schema rejects it
-// (codegen's `comment()` helper is the defense-in-depth behind this).
-const SINGLE_LINE = /^[^\r\n]+$/;
+// Free-text fields are interpolated into `//` comments by codegen — ANY JS
+// line terminator (\r, \n, U+2028, U+2029) would break out of the comment
+// into code position, so the schema rejects them all. SINGLE_LINE is
+// single-sourced in `identifiers.ts` alongside the LINE_TERMINATORS scrub
+// codegen's `comment()` applies as defense-in-depth — one character class,
+// so the two layers can never disagree on the set.
 
 export const FieldTypeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("string") }).strict(),
@@ -57,9 +61,11 @@ export const FieldTypeSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("enum"),
-      // Enum values reach `//`-comment-free but still single-line contexts:
-      // prompt bodies and Mermaid edge labels. A newline there garbles the
-      // rendering even though codegen JSON-escapes the z.enum literal.
+      // Enum values never reach `//` comments, but they DO reach another
+      // single-line context: the prompt body's JSON response shape (jsonShape
+      // in authored-codegen renders every value inline). A line terminator
+      // there garbles the prompt even though codegen JSON-escapes the z.enum
+      // literal.
       values: z.array(z.string().min(1).regex(SINGLE_LINE, "must be a single line")).min(2),
     })
     .strict(),
@@ -219,7 +225,11 @@ export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
 // Structure (one variant per DAG shape; mirrors the define* helpers)
 // ---------------------------------------------------------------------------
 
-const nodeRef = z.string().regex(KEBAB);
+// Structure references point at node ids, so they share the id's lexical rule
+// (KEBAB_IDENT, not plain KEBAB) — a ref like "2fast" can never resolve and
+// should be rejected with the precise lexical message rather than only the
+// unknown-node refinement.
+const nodeRef = z.string().regex(KEBAB_IDENT, "node reference must be kebab-case starting with a letter");
 
 export const RouterCaseSchema = z
   .object({
@@ -310,6 +320,11 @@ const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [string, st
         [s.join, "join"] as const,
         [s.assemble, "assemble"] as const,
       ];
+    default:
+      // The return type is inferred, so a missing case would otherwise fall
+      // through to `undefined` silently — assertNever makes a new shape a
+      // compile error here.
+      return assertNever(s);
   }
 };
 

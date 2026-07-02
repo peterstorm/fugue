@@ -5,7 +5,7 @@
 // `new --from`), every draft passes the real gauntlet before the user sees
 // it, and a draft the gauntlet rejects is repaired or the run fails closed.
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -14,6 +14,7 @@ import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { Result } from "../../types/result.js";
 import type { FrameworkError } from "../../types/errors.js";
 import {
+  SYSTEM_PROMPT,
   parseComposeArgs,
   runCompose,
   type ComposeAnswer,
@@ -21,6 +22,7 @@ import {
   type ComposeTurn,
 } from "../../cli/compose.js";
 import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
+import { NODE_FACTORY_NAME, SHAPE_HELPER_NAME } from "../../cli/identifiers.js";
 import { describedToMermaid } from "../../cli/visualize.js";
 import { parseAuthoredDag, type AuthoredDag, type AuthoredDagInput } from "../../cli/authored.js";
 
@@ -486,6 +488,47 @@ describe("runCompose", () => {
     }
   });
 
+  it("a gauntlet-repair turn that returns questions fails closed as llm-error", async () => {
+    // The GAUNTLET-failure repair loop (distinct from the schema-repair loop
+    // below): the model must return a corrected draft, never more questions.
+    const root = join(tmpRoot, "gauntlet-repair-got-questions");
+    const alwaysFail = async (): Promise<GauntletResult> => ({
+      ok: false,
+      errors: [{ kind: "import-failed", message: "never valid" }],
+      advisories: [],
+    });
+    const { client } = scriptedLlm([
+      draft(validDag),
+      { action: "questions", questions: ["are you sure?"] },
+    ]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io, alwaysFail);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("llm-error");
+      expect(outcome.problems.join("\n")).toContain("expected a corrected draft, got questions");
+    }
+  });
+
+  it("a refinement turn that returns questions fails closed as llm-error, keeping the proven draft", async () => {
+    const root = join(tmpRoot, "refine-got-questions");
+    const { client } = scriptedLlm([
+      draft(validDag),
+      { action: "questions", questions: ["what would you like?"] },
+    ]);
+    const { io } = scriptedIo(["rename it"]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("llm-error");
+      expect(outcome.problems.join("\n")).toContain("expected a refined draft, got questions");
+      // The proven draft rides along as typed data — the work is never lost.
+      expect(outcome.draft).toEqual(validDag);
+    }
+  });
+
   it("a schema-repair turn that returns questions fails closed as llm-error", async () => {
     const root = join(tmpRoot, "repair-got-questions");
     const invalid = {
@@ -603,6 +646,24 @@ describe("runCompose", () => {
   });
 });
 
+// The system prompt's kind/shape vocabulary is DERIVED from the identifiers.ts
+// catalogues (satisfies-checked Records make a missing entry a compile error);
+// this pins the render — every closed-vocabulary token must actually reach
+// the prompt text the model drafts against.
+describe("SYSTEM_PROMPT vocabulary coverage", () => {
+  it("names every node kind from the catalogue", () => {
+    for (const kind of Object.keys(NODE_FACTORY_NAME)) {
+      expect(SYSTEM_PROMPT).toContain(kind);
+    }
+  });
+
+  it("names every shape from the catalogue", () => {
+    for (const shape of Object.keys(SHAPE_HELPER_NAME)) {
+      expect(SYSTEM_PROMPT).toContain(shape);
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Arg parsing — pure, accumulate-all (mirrors parseNewArgs' table style).
 // ---------------------------------------------------------------------------
@@ -703,6 +764,76 @@ describe("fugue compose (subprocess)", () => {
     expect(json.ok).toBe(false);
     expect(json.problems?.join("\n")).toContain("ANTHROPIC_API_KEY");
   });
+
+  it("SIGINT during the interactive wait aborts with the JSON outcome envelope and exit 1", async () => {
+    // Non-TTY (piped stdin) exercises the PROCESS-level SIGINT handler: the
+    // handler closes readline, the pending ask settles as closed, and the
+    // loop returns the aborted outcome — the "only the final outcome line is
+    // JSON" contract must hold on the interrupt path. The LLM turn is served
+    // by a local mock (the Anthropic SDK honors ANTHROPIC_BASE_URL) that
+    // returns a questions turn, parking compose on the interactive ask.
+    const questionsTurn = {
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: "test-model",
+      content: [
+        {
+          type: "tool_use",
+          id: "tu_1",
+          name: "structured_output",
+          input: { action: "questions", questions: ["Which sources?"] },
+        },
+      ],
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json(questionsTurn),
+    });
+    try {
+      const proc = Bun.spawn(["bun", binPath, "compose", "a briefing", "--team", "assist"], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          ANTHROPIC_API_KEY: "test-key",
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}`,
+        },
+      });
+      // Wait until compose is parked on the ask (the question prose reaches
+      // stdout), then interrupt.
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let stdout = "";
+      while (!stdout.includes("Which sources?")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`compose exited before asking; stdout: ${stdout}`);
+        stdout += decoder.decode(value, { stream: true });
+      }
+      proc.kill("SIGINT");
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        stdout += decoder.decode(value, { stream: true });
+      }
+      const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+      expect(exitCode).toBe(1);
+      // The handler said so on stderr (silence reads as a hang)…
+      expect(stderr).toContain("interrupted");
+      // …and the final stdout block is the machine-readable aborted outcome.
+      const jsonBlock = stdout.match(/\{[\s\S]*\}\s*$/)?.[0];
+      expect(jsonBlock).toBeDefined();
+      const json = JSON.parse(jsonBlock!) as { ok: boolean; reason?: string; problems?: string[] };
+      expect(json.ok).toBe(false);
+      expect(json.reason).toBe("aborted");
+    } finally {
+      server.stop(true);
+    }
+  }, 30_000);
 });
 
 describe("runGauntlet", () => {
@@ -713,6 +844,53 @@ describe("runGauntlet", () => {
     expect(result.ok).toBe(true);
     // The whole .fugue-compose base is removed once the last draft dir is gone.
     expect(existsSync(join(root, ".fugue-compose"))).toBe(false);
+  });
+
+  it("a describe failure AFTER lint passed flips the verdict, keeping lint's advisories", async () => {
+    // Generated code makes this branch nearly unrepresentable (describe only
+    // fails on a topologically-invalid dag lint would have caught) — exercise
+    // it through the injectable describe seam.
+    const root = join(tmpRoot, "gauntlet-describe-fails");
+    await mkdir(root, { recursive: true });
+    const failingDescribe = async (path: string) => ({
+      ok: false as const,
+      path,
+      errors: [
+        {
+          kind: "describe-failed" as const,
+          message: "simulated assemble failure",
+          detail: { kind: "cache-error" as const, operation: "get", message: "simulated" },
+        },
+      ],
+    });
+    const result = await runGauntlet(validDag, root, { describe: failingDescribe });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]!.kind).toBe("describe-failed");
+      // The real lint ran and passed — its (empty) advisories still ride along.
+      expect(result.advisories).toEqual([]);
+    }
+    // The staging cleanup still ran despite the failure verdict.
+    expect(existsSync(join(root, ".fugue-compose"))).toBe(false);
+  });
+
+  it("a failing cleanup rm warns on stderr and never masks the verdict", async () => {
+    const root = join(tmpRoot, "gauntlet-cleanup-warns");
+    await mkdir(root, { recursive: true });
+    const failingCleanup = () => Promise.reject(new Error("EACCES: permission denied"));
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runGauntlet(validDag, root, { cleanup: failingCleanup });
+      // The verdict survives — a cleanup failure must not replace a proven draft.
+      expect(result.ok).toBe(true);
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(written).toContain("failed to clean up compose staging dir");
+      expect(written).toContain("EACCES");
+    } finally {
+      stderrSpy.mockRestore();
+      // The injected rm never removed the staging dir — clear it for real.
+      await rm(join(root, ".fugue-compose"), { recursive: true, force: true });
+    }
   });
 });
 

@@ -881,7 +881,7 @@ TODO — describe the request, the sources/steps, and the response.
 ## Verify
 
 \`\`\`bash
-bun node_modules/@fuguejs/framework/bin/fugue.ts lint     dags/${ctx.team}/${ctx.name}/dag.ts
+bun node_modules/@fuguejs/framework/bin/fugue.ts lint      dags/${ctx.team}/${ctx.name}/dag.ts
 bun node_modules/@fuguejs/framework/bin/fugue.ts describe  dags/${ctx.team}/${ctx.name}/dag.ts
 ${ctx.llm ? `bun node_modules/@fuguejs/framework/bin/fugue.ts prompts check dags/${ctx.team}/${ctx.name}\n` : ""}bun test
 \`\`\`

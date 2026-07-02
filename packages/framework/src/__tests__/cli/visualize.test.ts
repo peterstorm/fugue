@@ -69,10 +69,10 @@ describe("describedToMermaid", () => {
   });
 
   it("keeps distinct node ids distinct and clear of the reserved tokens", () => {
-    // ID_REGEX allows `_`, `:` and `-` — the old sanitizer collapsed them all
-    // to `_`, merging distinct nodes into one Mermaid id. The encoding must be
-    // injective, and a node literally named `dag_input` must not merge with
-    // the virtual request node.
+    // ID_REGEX allows `_`, `:` and `-` — the Mermaid id encoding must be
+    // INJECTIVE (distinct node ids map to distinct tokens; `a:b` and `a_b`
+    // must never merge into one node) and NAMESPACED (a node literally named
+    // `dag_input` must not merge with the virtual request node).
     const node = (id: string) =>
       ({ id, kind: "fetch", sideEffects: "none", requires: [], humanReview: false }) as const;
     const d: DescribedDag = {

@@ -18,6 +18,17 @@ import { SHAPE_HELPER_NAME } from "./identifiers.js";
 export type { DescribedDag, DescribedNode, DescribedEdge };
 
 /**
+ * Exhaustiveness backstop for `switch`es over closed unions whose return type
+ * is INFERRED (no annotation to catch a missing case): the default branch
+ * calls this, so adding a union member without a case is a compile error at
+ * the switch — and an impossible runtime value still fails loudly instead of
+ * falling through to `undefined`.
+ */
+export const assertNever = (value: never): never => {
+  throw new Error(`unreachable: ${JSON.stringify(value)}`);
+};
+
+/**
  * Lint outcome: either the DAG file imports cleanly and validates, or one or
  * more errors were captured. Both `errors` and `advisories` are always arrays
  * even when empty or singleton, so consumers never branch on cardinality or on
@@ -43,9 +54,10 @@ export type LintResult =
  * catalogue itself lives in `identifiers.ts` (`SHAPE_HELPER_NAME`, the
  * import-free single source codegen also emits from); the `satisfies
  * Record<Shape, string>` here makes it exhaustive over `Shape` (and therefore
- * over `DagProvenance`, its single source) — adding a shape without a helper
- * name, or naming one that isn't a shape, is a compile error. `ShapeHelper`
- * is the union of constructor names, derived rather than re-listed.
+ * over `DagProvenance` — both derive from the canonical `DAG_SHAPES` tuple in
+ * `types/dag.ts`) — adding a shape without a helper name, or naming one that
+ * isn't a shape, is a compile error. `ShapeHelper` is the union of
+ * constructor names, derived rather than re-listed.
  */
 export const SHAPE_HELPER = SHAPE_HELPER_NAME satisfies Record<Shape, string>;
 

@@ -12,6 +12,9 @@
 //     `closed` ONLY when the interface actually closed. Any other rejection
 //     is a genuine readline failure and must propagate (the bin's top-level
 //     catch prints it), never be misreported as a user abort.
+//   * Under Bun, `rl.question` on an ALREADY-closed interface throws
+//     synchronously instead — `ask` short-circuits a known close and folds a
+//     sync throw by the same rule (closed ⇒ fold, live ⇒ propagate).
 
 import type { ComposeAnswer, ComposeIo } from "./compose.js";
 
@@ -41,9 +44,24 @@ export const readlineComposeIo = (rl: ReadlineLike): ComposeIo => {
     });
   });
   return {
-    ask: (q) =>
-      Promise.race([
-        rl.question(`${q}\n> `).then(
+    ask: (q) => {
+      // Under Bun, `rl.question` on an already-closed interface throws
+      // SYNCHRONOUSLY (Node returns a promise that never settles) — the throw
+      // would escape before the race / rejection-fold below ever attaches and
+      // crash the abort path with a raw stack trace. Short-circuit a known
+      // close first; then fold a sync throw exactly like the rejection: the
+      // close licenses the fold, a throw from a LIVE interface is a genuine
+      // readline failure and must propagate.
+      if (isClosed) return Promise.resolve(closed);
+      let question: Promise<string>;
+      try {
+        question = rl.question(`${q}\n> `);
+      } catch (e) {
+        if (isClosed) return Promise.resolve(closed);
+        throw e;
+      }
+      return Promise.race([
+        question.then(
           (text): ComposeAnswer => ({ kind: "answer", text }),
           (e: unknown): ComposeAnswer => {
             // A rejection from a CLOSED interface is the close manifesting —
@@ -54,7 +72,8 @@ export const readlineComposeIo = (rl: ReadlineLike): ComposeIo => {
           },
         ),
         closedToAbort,
-      ]),
+      ]);
+    },
     say: (m) => process.stdout.write(`${m}\n`),
   };
 };

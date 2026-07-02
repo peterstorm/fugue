@@ -12,7 +12,8 @@
 //
 // The staging dir lives UNDER `root` (`.fugue-compose/draft-*`) so the
 // generated file resolves `@fuguejs/*` through the project's node_modules.
-// Always cleaned up; the `.fugue-compose` base is removed too once empty.
+// Cleaned up best-effort (a failed rm warns on stderr rather than masking the
+// verdict); the `.fugue-compose` base is removed too once empty.
 
 import { mkdir, mkdtemp, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,10 +44,30 @@ export type GauntletResult =
     };
 
 /**
+ * The gauntlet's I/O collaborators, injectable for the branches a REAL
+ * generated module makes nearly unrepresentable: `describe` failing after
+ * `lint` passed, and a cleanup `rm` failing. Production always uses the
+ * defaults (mirrors the injectable gauntlet seam on `runCompose` /
+ * `runNewFrom`).
+ */
+export interface GauntletDeps {
+  readonly lint?: typeof runLint;
+  readonly describe?: typeof runDescribe;
+  readonly cleanup?: typeof rm;
+}
+
+/**
  * Prove a draft through the real machinery: generate `dag.ts`, import it
  * (running `defineDag`'s structural validation), lint it, describe it.
  */
-export const runGauntlet = async (dag: AuthoredDag, root: string): Promise<GauntletResult> => {
+export const runGauntlet = async (
+  dag: AuthoredDag,
+  root: string,
+  deps: GauntletDeps = {},
+): Promise<GauntletResult> => {
+  const lintDag = deps.lint ?? runLint;
+  const describeDag = deps.describe ?? runDescribe;
+  const cleanup = deps.cleanup ?? rm;
   const scaffold = buildAuthoredScaffold(dag);
   const stagingBase = join(root, ".fugue-compose");
   await mkdir(stagingBase, { recursive: true });
@@ -54,7 +75,7 @@ export const runGauntlet = async (dag: AuthoredDag, root: string): Promise<Gaunt
   try {
     const dagPath = join(staging, "dag.ts");
     await writeFile(dagPath, scaffold.dagTs, "utf-8");
-    const lint = await runLint(dagPath);
+    const lint = await lintDag(dagPath);
     if (!lint.ok) {
       return { ok: false, errors: lint.errors, advisories: lint.advisories };
     }
@@ -62,7 +83,7 @@ export const runGauntlet = async (dag: AuthoredDag, root: string): Promise<Gaunt
     // re-imports the path `runLint` just imported SUCCESSFULLY, so this hits
     // the module cache (the failed-evaluation TDZ caveat in `importDagFile`
     // only applies to modules whose first import threw — those returned above).
-    const described = await runDescribe(dagPath);
+    const described = await describeDag(dagPath);
     if (!described.ok) {
       return { ok: false, errors: described.errors, advisories: lint.advisories };
     }
@@ -72,13 +93,22 @@ export const runGauntlet = async (dag: AuthoredDag, root: string): Promise<Gaunt
     // REPLACES the function's result, so a flaky rm would turn a proven draft
     // into an environment error. Leftover staging dirs are cheap — warn on
     // stderr (so the leak is diagnosable) but never throw.
-    await rm(staging, { recursive: true, force: true }).catch((e: unknown) =>
+    await cleanup(staging, { recursive: true, force: true }).catch((e: unknown) =>
       process.stderr.write(
         `warning: failed to clean up compose staging dir ${staging}: ${e instanceof Error ? e.message : String(e)}\n`,
       ),
     );
-    // Leave no empty `.fugue-compose` behind. A concurrent draft's staging dir
-    // makes this rmdir fail — that is fine, the last one out removes it.
-    await rmdir(stagingBase).catch(() => {});
+    // Leave no empty `.fugue-compose` behind. A concurrent draft's staging
+    // dir makes this rmdir ENOTEMPTY (the last one out removes the base) and
+    // losing the removal race makes it ENOENT — both expected. Any OTHER code
+    // (EACCES/EPERM/EIO, …) is a real cleanup failure: warn on stderr
+    // (symmetry with the rm above), never throw.
+    await rmdir(stagingBase).catch((e: unknown) => {
+      const code = (e as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOTEMPTY" || code === "ENOENT") return;
+      process.stderr.write(
+        `warning: failed to remove compose staging base ${stagingBase}: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+    });
   }
 };

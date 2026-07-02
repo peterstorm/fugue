@@ -343,8 +343,9 @@ describe("AuthoredDag schema", () => {
   });
 
   it("names the full kind vocabulary on an unknown or missing node kind", () => {
-    // Pre-refactor Zod listed the options; the discriminated union's default
-    // is a bare "Invalid input" — the union error map must restore the list.
+    // The discriminated union's default for a bad discriminator is a bare
+    // "Invalid input" — useless to the compose repair loop, so the union
+    // error map must name the full kind vocabulary.
     const vocabulary = '"fetch"|"transform"|"llm"|"human-review"|"source"';
 
     const unknown = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
@@ -417,6 +418,49 @@ describe("AuthoredDag schema", () => {
     const field = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (field.input.fields[0] as { description?: string }).description = "line one\nline two";
     expect(parseAuthoredDag(field).ok).toBe(false);
+  });
+
+  it("rejects U+2028/U+2029 in purpose / dag description / field description (JS line terminators)", () => {
+    // JS honors LINE SEPARATOR and PARAGRAPH SEPARATOR as source line
+    // terminators — they end `//` comments exactly like \n, so a purpose
+    // carrying one would break out of the generated comment into code
+    // position. The schema must reject the FULL LineTerminator set.
+    for (const terminator of ["\u2028", "\u2029"]) {
+      const purpose = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+      (purpose.nodes[0] as { purpose: string }).purpose = `x${terminator}globalThis.__PWNED=1`;
+      const p = parseAuthoredDag(purpose);
+      expect(p.ok).toBe(false);
+      if (!p.ok) expect(p.problems.join("\n")).toContain("single line");
+
+      const desc = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+      (desc as { description: string }).description = `line one${terminator}line two`;
+      expect(parseAuthoredDag(desc).ok).toBe(false);
+
+      const field = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+      (field.input.fields[0] as { description?: string }).description = `a${terminator}b`;
+      expect(parseAuthoredDag(field).ok).toBe(false);
+
+      const enumValue = structuredClone(FIXTURES.router!) as AuthoredDagInput;
+      const bucket = outputOf(enumValue.nodes[0]!).fields[1]! as { type: { kind: string; values: string[] } };
+      bucket.type.values = [`small${terminator}injected`, "large"];
+      expect(parseAuthoredDag(enumValue).ok).toBe(false);
+    }
+  });
+
+  it("comment() scrubs U+2028/U+2029 at the emission site (defense-in-depth behind the schema)", () => {
+    // The schema (above) is the first line of defense, so a BRANDED dag can
+    // never carry these — bypass the brand deliberately (the only cast in
+    // this suite) to prove the second layer holds on its own: were a
+    // terminator ever to reach codegen, the emitted module must not contain
+    // it in comment position.
+    const hostile = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    for (const n of hostile.nodes) {
+      (n as { purpose: string }).purpose = "x\u2028globalThis.__PWNED=1\u2029y";
+    }
+    const scaffold = buildAuthoredScaffold(hostile as unknown as AuthoredDag);
+    expect(scaffold.dagTs).not.toContain("\u2028");
+    expect(scaffold.dagTs).not.toContain("\u2029");
+    expect(scaffold.dagTs).toContain("x globalThis.__PWNED=1 y");
   });
 
   it("rejects a node id that camelCases to a JS reserved word", () => {
@@ -733,6 +777,19 @@ describe("authored codegen survives the gauntlet", () => {
     expect(scaffold.prompts[0]!.body).toContain("never use a number");
   });
 
+  it("imports `ok` only when a node body uses it (all-llm and llm+review DAGs omit it)", () => {
+    // `ok(...)` appears only in placeholder fetch/transform/source bodies —
+    // an all-llm (or llm + human-review) DAG importing it would carry an
+    // unused import in every generated module.
+    const okImportLine = /^\s+ok,$/m;
+    expect(buildAuthoredScaffold(mustParse(FIXTURES["linear-two-llm"]!)).dagTs).not.toMatch(okImportLine);
+    expect(buildAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!)).dagTs).not.toMatch(okImportLine);
+    // DAGs with an ok-using body keep the import (and the emitted code uses it).
+    const withBodies = buildAuthoredScaffold(mustParse(FIXTURES.linear!)).dagTs;
+    expect(withBodies).toMatch(okImportLine);
+    expect(withBodies).toContain("ok({");
+  });
+
   it("a two-llm dag emits per-node prompt names and a 2-entry registry", async () => {
     const fixture = FIXTURES["linear-two-llm"]!;
     const scaffold = buildAuthoredScaffold(mustParse(fixture));
@@ -810,6 +867,43 @@ describe("authored codegen survives the gauntlet", () => {
       expect(result.problems[0]).toContain(fromPath);
       expect(result.problems.join("\n")).toContain("starting with a letter");
     }
+  });
+
+  it("runNewFrom folds a THROWING gauntlet into the problems envelope (environment failure)", async () => {
+    // A gauntlet throw is ENOSPC/EACCES territory — it must land in the same
+    // `{ ok: false, problems }` JSON envelope as every other failure (the bin
+    // prints stdout JSON), with the stack kept for debugging, not crash past
+    // the machine-readable contract.
+    const root = join(tmpRoot, "from-gauntlet-throws");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "x.authored.json");
+    await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
+    const throwing = async (): Promise<never> => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+    const result = await runNewFrom({ from: fromPath, force: false, root }, throwing);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.problems[0]).toContain("gauntlet failed");
+      expect(result.problems[0]).toContain("ENOSPC");
+      // Environment failures keep the STACK, not just the message.
+      expect(result.problems[0]).toContain("at ");
+    }
+    expect(existsSync(join(root, "dags"))).toBe(false);
+  });
+
+  it("runNewFrom folds a THROWING scaffold write into the problems envelope", async () => {
+    // `dags` is a regular file → isDirNonEmpty rethrows ENOTDIR inside
+    // writeAuthoredScaffold; runNewFrom must catch it (mirroring runCompose's
+    // write-failed arm) instead of breaking the JSON envelope.
+    const root = join(tmpRoot, "from-write-throws");
+    await mkdir(root, { recursive: true });
+    await Bun.write(join(root, "dags"), "i am a file, not a directory");
+    const fromPath = join(root, "x.authored.json");
+    await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
+    const result = await runNewFrom({ from: fromPath, force: false, root });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.problems[0]).toContain("write failed");
   });
 
   it("runNewFrom fails closed on a gauntlet failure and writes NOTHING", async () => {
@@ -931,9 +1025,15 @@ describe("hostile free-text properties", () => {
     return d;
   };
 
-  it("rejects ANY purpose/description containing a newline", () => {
+  it("rejects ANY purpose/description containing a JS line terminator", () => {
+    // The FULL ECMAScript LineTerminator set — \n, \r, and the U+2028/U+2029
+    // separators JS also honors as `//`-comment terminators.
     const withNewline = fc
-      .tuple(fc.string({ maxLength: 20 }), fc.constantFrom("\n", "\r", "\r\n"), fc.string({ maxLength: 20 }))
+      .tuple(
+        fc.string({ maxLength: 20 }),
+        fc.constantFrom("\n", "\r", "\r\n", "\u2028", "\u2029"),
+        fc.string({ maxLength: 20 }),
+      )
       .map(([a, nl, b]) => `${a}${nl}${b}`);
     fc.assert(
       fc.property(withNewline, (s) => {
@@ -960,6 +1060,72 @@ describe("hostile free-text properties", () => {
         }
       }),
       { numRuns: 15 },
+    );
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Identifier-collision property (mirrors the hostile-text asyncProperty):
+// every set of lexically-valid (KEBAB_IDENT) node ids either fails
+// parseAuthoredDag with a precise collision/reserved message, or generates a
+// module that survives the real gauntlet — there is no third outcome where
+// the schema accepts ids whose generated identifiers then collide into a
+// gauntlet-time duplicate-declaration SyntaxError.
+// ---------------------------------------------------------------------------
+
+describe("identifier collision property", () => {
+  const alnum = fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789");
+  const letter = fc.constantFrom(..."abcdefghij");
+  const segment = fc.string({ unit: alnum, minLength: 1, maxLength: 5 });
+  const firstSegment = fc
+    .tuple(letter, fc.string({ unit: alnum, maxLength: 4 }))
+    .map(([head, tail]) => `${head}${tail}`);
+  const kebabIdent = fc
+    .tuple(firstSegment, fc.array(segment, { maxLength: 2 }))
+    .map(([head, rest]) => [head, ...rest].join("-"));
+  // Hazard ids known to stress the accounting: reserved words, framework
+  // imports, dag-level names for the fixed dag name "prop-ids", and
+  // digit-boundary camelCase collisions.
+  const hazardId = fc.constantFrom(
+    "dag", "input", "ok", "default", "llm-node", "registration",
+    "input-schema", "default-model", "create-prop-ids-dag", "prop-ids-dag-opts",
+    "a-1b", "a1b", "foo", "foo-node",
+  );
+  const nodeIds = fc.array(fc.oneof(kebabIdent, hazardId), { minLength: 2, maxLength: 4 });
+  const kinds = fc.array(fc.constantFrom("fetch", "transform", "llm"), { minLength: 4, maxLength: 4 });
+
+  it("arbitrary KEBAB_IDENT id sets either reject at parse or survive the real gauntlet", async () => {
+    // Real codegen + import + lint per accepted run — keep numRuns small.
+    const root = join(tmpRoot, "prop-identifiers");
+    await mkdir(root, { recursive: true });
+    await fc.assert(
+      fc.asyncProperty(nodeIds, kinds, async (ids, kindPool) => {
+        const dagInput: AuthoredDagInput = {
+          fugueAuthored: 1,
+          name: "prop-ids",
+          team: "demo",
+          description: "identifier collision property",
+          input: out("id"),
+          nodes: ids.map((id, i) => ({
+            id,
+            kind: kindPool[i]! as "fetch" | "transform" | "llm",
+            purpose: `Node ${i}`,
+            output: out(`f${i}`),
+          })),
+          structure: { shape: "linear", order: ids },
+        };
+        const parsed = parseAuthoredDag(dagInput);
+        // Rejection is a legitimate outcome — the property is that ACCEPTED
+        // id sets never fail the gauntlet on identifier grounds.
+        if (!parsed.ok) return;
+        const verdict = await runGauntlet(parsed.dag, root);
+        if (!verdict.ok) {
+          throw new Error(
+            `gauntlet failed for ids ${JSON.stringify(ids)}: ${JSON.stringify(verdict.errors)}`,
+          );
+        }
+      }),
+      { numRuns: 12 },
     );
   }, 60_000);
 });

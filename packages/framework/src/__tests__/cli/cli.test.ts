@@ -201,6 +201,19 @@ describe("runDescribe", () => {
     expect(result.dag.outputSchema).toBeNull();
   });
 
+  it("still describes a DAG that fails lint (fan-in-key-mismatch) — describe skips analyzeDag", async () => {
+    // The documented lint/describe divergence: describe wraps only the import
+    // path (defineDag's structural validation) and does NOT re-run the
+    // analyzeDag schema checks, so a fan-in-key-mismatch fails lint (covered
+    // above) yet still describes — drawing the wrong-but-importable topology
+    // is often how the mistake is found.
+    const result = await runDescribe(fixturePath("manual-fan-in-mismatch.ts"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.dag.nodes.map((n) => n.id)).toContain("join");
+    }
+  });
+
   it("propagates lint errors as describe errors", async () => {
     // Uses a *separate* invalid-DAG fixture (`-2`) so this test doesn't share
     // a poisoned module-cache entry with the runLint test above. Bun caches
@@ -297,6 +310,18 @@ describe("fugue bin (subprocess)", () => {
     const { exitCode, stderr } = await runBin(["bogus", fixturePath("valid-dag.ts")]);
     expect(exitCode).toBe(2);
     expect(stderr).toContain("Unknown command");
+  });
+
+  it("exits 2 on a bad prompts subcommand", async () => {
+    const { exitCode, stderr } = await runBin(["prompts", "bogus", "some-dir"]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("requires a subcommand");
+  });
+
+  it("exits 2 when prompts is given no dag directory", async () => {
+    const { exitCode, stderr } = await runBin(["prompts", "sync"]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("exactly one <dagDir>");
   });
 
   it("--help exits 0 with usage on stdout", async () => {

@@ -30,7 +30,12 @@ import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
-import { KEBAB } from "./identifiers.js";
+import {
+  KEBAB,
+  NODE_FACTORY_NAME,
+  SHAPE_HELPER_NAME,
+  type AuthoredNodeKind,
+} from "./identifiers.js";
 import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
@@ -92,8 +97,8 @@ export type ComposeOutcome =
        * The user's work product, carried as DATA so hitting a wall never
        * discards it: the most recent draft that survived the full gauntlet
        * (or, for gauntlet-/write-failures, the draft in flight). Absent only
-       * when no draft existed yet, or on a deliberate abort. Replayable via
-       * `fugue new --from`.
+       * when no draft had yet survived the gauntlet, or on a deliberate
+       * abort. Replayable via `fugue new --from`.
        */
       readonly draft?: AuthoredDag;
     };
@@ -219,7 +224,45 @@ export const ComposeTurnSchema = z.discriminatedUnion("action", [
 ]);
 export type ComposeTurn = z.infer<typeof ComposeTurnSchema>;
 
-const SYSTEM_PROMPT = `You are the drafting half of \`fugue compose\`. You NEVER write code —
+// ---------------------------------------------------------------------------
+// The system prompt's kind/shape vocabulary is DERIVED from the identifiers.ts
+// catalogues (`NODE_FACTORY_NAME` / `SHAPE_HELPER_NAME`) — the same closed
+// sets the schema and codegen are built from. The per-token prose lives in
+// `satisfies`-checked Records, so adding a kind or shape without teaching the
+// prompt about it is a COMPILE error here, not silent prompt drift.
+// ---------------------------------------------------------------------------
+
+/** One-clause drafting guidance per node kind (rendered `kind (guidance)`). */
+const NODE_KIND_GUIDANCE = {
+  fetch: "external read",
+  transform: "pure mapping",
+  llm: "model call — a confidence bucket is added automatically",
+  "human-review": "approval gate; NO output field; linear shape only, never first",
+  source: "context-only read; sources shape only",
+} satisfies Record<AuthoredNodeKind, string>;
+
+/** Structure syntax + guidance per shape (rendered as the shape table). */
+const SHAPE_GUIDANCE = {
+  linear: "{order:[...≥2]}                    — a chain",
+  "fan-out": "{source,branches:[...≥2],join?}    — parallel branches, optional join",
+  diamond: "{source,branches:[...≥2],join}     — parallel branches, required join",
+  router:
+    "{classifier,cases:[{label,when:{field,equals},to}],default}\n" +
+    "           — when.field must be an enum field of the classifier output and\n" +
+    "             when.equals one of its values; default is REQUIRED",
+  sources: '{sources:[...≥2],join,assemble}    — sources are kind "source"',
+} satisfies Record<keyof typeof SHAPE_HELPER_NAME, string>;
+
+const NODE_KIND_LINES = (Object.keys(NODE_FACTORY_NAME) as readonly AuthoredNodeKind[])
+  .map((kind) => `${kind} (${NODE_KIND_GUIDANCE[kind]})`)
+  .join(", ");
+
+const SHAPE_LINES = (Object.keys(SHAPE_HELPER_NAME) as ReadonlyArray<keyof typeof SHAPE_HELPER_NAME>)
+  .map((shape) => `  ${shape.padEnd(8)} ${SHAPE_GUIDANCE[shape]}`)
+  .join("\n");
+
+/** Exported for the vocabulary-coverage test — never edited outside compose. */
+export const SYSTEM_PROMPT = `You are the drafting half of \`fugue compose\`. You NEVER write code —
 you emit or edit a single AuthoredDag JSON document; deterministic codegen
 turns it into a validated Fugue DAG.
 
@@ -237,21 +280,12 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   words and must not collide with the identifiers codegen derives from them —
   avoid ids like "dag", "input", "ok", or "llm-node".
 - purpose and description fields are single-line (no newlines).
-- Node kinds: fetch (external read), transform (pure mapping), llm
-  (model call — a confidence bucket is added automatically), human-review
-  (approval gate; NO output field; linear shape only, never first), source
-  (context-only read; sources shape only).
+- Node kinds: ${NODE_KIND_LINES}.
 - The auto-injected llm confidence bucket CANNOT be used as a router
   predicate field — declare it explicitly on the classifier output as
   {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}} if you route on it.
 - structure is one shape:
-  linear   {order:[...≥2]}                    — a chain
-  fan-out  {source,branches:[...≥2],join?}    — parallel branches, optional join
-  diamond  {source,branches:[...≥2],join}     — parallel branches, required join
-  router   {classifier,cases:[{label,when:{field,equals},to}],default}
-           — when.field must be an enum field of the classifier output and
-             when.equals one of its values; default is REQUIRED
-  sources  {sources:[...≥2],join,assemble}    — sources are kind "source"
+${SHAPE_LINES}
 - Every node appears in the structure exactly once. Node input schemas are
   DERIVED from the topology — never author them.
 - Prefer the simplest shape that fits. Human gates only where the user asked

@@ -12,7 +12,7 @@
 
 import type { DescribedDag, DescribedEdge } from "../describe/index.js";
 import { runDescribe } from "./describe.js";
-import type { LintError } from "./types.js";
+import { assertNever, type LintError } from "./types.js";
 
 export type VisualizeResult =
   | { readonly ok: true; readonly path: string; readonly format: "mermaid"; readonly diagram: string }
@@ -21,12 +21,12 @@ export type VisualizeResult =
 const INPUT_ID = "$input";
 
 // Mermaid node ids must avoid `:`/`$` and other specials — map ids to safe
-// tokens. Two properties the old `replace(/[^A-Za-z0-9_]/g, "_")` lacked:
-//   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_REGEX), so
-//      collapsing them all to `_` merged distinct ids (`a:b` vs `a_b`) into
-//      one Mermaid node. The escape scheme below (`_` doubles as the lead-in,
-//      `:`/`-` get fixed 2-char escapes, anything else a `_x<hex>_` escape) is
-//      decodable left-to-right, hence injective.
+// tokens. Two properties the encoding must hold:
+//   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_REGEX), and
+//      distinct ids must map to distinct Mermaid tokens (`a:b` and `a_b` must
+//      never merge into one node). The escape scheme below (`_` doubles as
+//      the lead-in, `:`/`-` get fixed 2-char escapes, anything else a
+//      `_x<hex>_` escape) is decodable left-to-right, hence injective.
 //   2. NAMESPACED — the `n_` prefix keeps real ids disjoint from the reserved
 //      `dag_input` / `dag_output` virtual tokens (a node literally named
 //      `dag_input` must not merge with the request node).
@@ -48,6 +48,11 @@ const edgeLine = (e: DescribedEdge): string => {
       return `    ${from} -->|"${escapeLabel(e.predicateLabel)} (v${e.predicateVersion})"| ${to}`;
     case "default":
       return `    ${from} -.->|default| ${to}`;
+    default:
+      // The return type is inferred, so a missing case would otherwise fall
+      // through to `undefined` silently — assertNever makes a new edge kind a
+      // compile error here.
+      return assertNever(e);
   }
 };
 

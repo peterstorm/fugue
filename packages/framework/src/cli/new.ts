@@ -60,8 +60,9 @@ export interface NewOptions {
 }
 
 // KEBAB (single-sourced in `identifiers.ts`) is a valid DAG id and directory
-// segment. (Node ids allow `[A-Za-z0-9_-]+`; we hold authors to the kebab
-// convention every existing DAG follows.)
+// segment. (Runtime ids allow the wider /^[A-Za-z0-9_:-]{1,128}$/ — ID_REGEX
+// in types/ids.ts; we hold authors to the kebab convention every existing
+// DAG follows.)
 
 export interface ParsedNewArgs {
   readonly ok: true;
@@ -372,11 +373,35 @@ export const runNewFrom = async (
 
   const root = options.root ?? cwd;
   const absRoot = isAbsolute(root) ? root : resolve(cwd, root);
-  const verdict = await gauntlet(parsed.dag, absRoot);
+  // The gauntlet stages real files (mkdir → write → import → rm) — a throw
+  // there is an ENVIRONMENT failure (ENOSPC, EACCES, …), not an author error.
+  // It must land in the same `{ ok: false, problems }` envelope as every
+  // other failure (the bin prints stdout JSON; a raw throw would break the
+  // machine-readable contract) — mirrors runCompose's gauntlet-failed arm,
+  // keeping the stack so the environment is debuggable from the outcome.
+  let verdict: GauntletResult;
+  try {
+    verdict = await gauntlet(parsed.dag, absRoot);
+  } catch (e) {
+    return {
+      ok: false,
+      problems: [`gauntlet failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
+    };
+  }
   if (!verdict.ok) {
     return { ok: false, problems: verdict.errors.map((e) => `${e.kind}: ${e.message}`) };
   }
-  return writeAuthoredScaffold(parsed.dag, options, verdict.advisories);
+  // Same rule for the scaffold write (mirrors runCompose's write-failed arm):
+  // a throwing write is an environment failure, not a framework bug — fold it
+  // into the envelope rather than crashing past the JSON contract.
+  try {
+    return await writeAuthoredScaffold(parsed.dag, options, verdict.advisories);
+  } catch (e) {
+    return {
+      ok: false,
+      problems: [`write failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
+    };
+  }
 };
 
 /**

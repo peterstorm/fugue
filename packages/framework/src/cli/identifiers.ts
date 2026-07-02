@@ -40,6 +40,34 @@ export const KEBAB_IDENT = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 /** A valid JS identifier — field names must match so codegen can emit dotted access. */
 export const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * The full ECMAScript LineTerminator set as a regex character-class body:
+ * `\r`, `\n`, U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR). JS
+ * honors ALL FOUR as source line terminators — including terminating `//`
+ * comments — so free text that codegen interpolates into a comment must
+ * exclude exactly this set or an author/LLM-supplied purpose could break out
+ * of the comment into code position. Single-sourced here (spelled with
+ * escapes, never raw characters) so the schema rejection (`authored.ts`
+ * SINGLE_LINE) and the emission-site scrub (`authored-codegen.ts` comment())
+ * can never again agree on an incomplete set.
+ */
+const LINE_TERMINATOR_CLASS = "\\r\\n\\u2028\\u2029";
+
+/**
+ * Free text that is safe in a single-line context: non-empty and containing
+ * no JS line terminator (see `LINE_TERMINATOR_CLASS`). The authoring schema
+ * applies this to every purpose / description / enum value.
+ */
+export const SINGLE_LINE = new RegExp(`^[^${LINE_TERMINATOR_CLASS}]+$`);
+
+/**
+ * Global matcher over runs of JS line terminators — the defense-in-depth
+ * scrub `authored-codegen`'s comment() applies at the emission site (safe to
+ * share despite the `g` flag: it is only used with `String.replace`, which
+ * does not depend on `lastIndex`).
+ */
+export const LINE_TERMINATORS = new RegExp(`[${LINE_TERMINATOR_CLASS}]+`, "g");
+
 export const pascalCase = (kebab: string): string =>
   kebab
     .split("-")

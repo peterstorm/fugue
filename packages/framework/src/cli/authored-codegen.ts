@@ -48,6 +48,7 @@ import {
   FIXED_IMPORT_NAME,
   IDENT,
   INPUT_SCHEMA_NAME,
+  LINE_TERMINATORS,
   NODE_FACTORY_NAME,
   SHAPE_HELPER_NAME,
   dagFactoryName,
@@ -70,12 +71,15 @@ type LlmNode = Extract<AuthoredNode, { kind: "llm" }>;
 const key = (name: string): string => (IDENT.test(name) ? name : JSON.stringify(name));
 
 /**
- * Every free-text interpolation into a `//` comment goes through here: a
- * newline in the text would otherwise break out of the comment into code
- * position. The authoring schema already rejects multi-line purpose /
- * description fields — this is the defense-in-depth at the emission site.
+ * Every free-text interpolation into a `//` comment goes through here: any JS
+ * line terminator (\r, \n, U+2028, U+2029 — `LINE_TERMINATORS`, single-sourced
+ * in `identifiers.ts` with the schema's SINGLE_LINE) would otherwise break out
+ * of the comment into code position. The authoring schema already rejects
+ * multi-line purpose / description fields — this is the defense-in-depth at
+ * the emission site, scrubbing with the SAME character class so the two
+ * layers can never disagree on the set.
  */
-const comment = (text: string): string => text.replace(/[\r\n]+/g, " ");
+const comment = (text: string): string => text.replace(LINE_TERMINATORS, " ");
 
 const zodExpr = (t: FieldType): string =>
   match(t)
@@ -563,11 +567,20 @@ const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
   const kinds = [...new Set(dag.nodes.map((n) => n.kind))];
   const helper = SHAPE_HELPER_NAME[dag.structure.shape];
 
+  // `ok(...)` appears only in the placeholder fetch/transform/source bodies —
+  // llm factories return through the confidence spread and human-review gates
+  // have no body — so an all-llm/review DAG must not import it (mirrors the
+  // `confidence`/hasLlm gating; an unused import is lint noise in every
+  // generated module).
+  const needsOk = dag.nodes.some(
+    (n) => n.kind === "fetch" || n.kind === "transform" || n.kind === "source",
+  );
+
   const names = [
     ...(hasLlm ? [FIXED_IMPORT_NAME.confidence] : []),
     ...kinds.map((k) => NODE_FACTORY_NAME[k]),
     helper,
-    FIXED_IMPORT_NAME.ok,
+    ...(needsOk ? [FIXED_IMPORT_NAME.ok] : []),
   ].sort();
 
   return [
