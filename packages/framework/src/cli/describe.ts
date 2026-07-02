@@ -16,8 +16,10 @@ import type { DescribeResult, LintError } from "./types.js";
 
 /**
  * Describe a DAG file. On success, returns the dag's id, route, schemas,
- * wave plan, prompts, and capabilities. On lint failure, returns the same
- * `errors[]` array `runLint` would have produced.
+ * wave plan, prompts, and capabilities. On import/definition failure, returns
+ * the same `LintError` shapes `importDagFile` produces (plus `describe-failed`
+ * for assembly errors); lint-only analyzer checks (e.g. fan-in-key-mismatch)
+ * are not re-run — see `DescribeResult`.
  */
 export const runDescribe = async (path: string): Promise<DescribeResult> => {
   const imported = await importDagFile(path);
@@ -67,13 +69,15 @@ export const runDescribe = async (path: string): Promise<DescribeResult> => {
 
   // Non-fatal schema serialization failures are surfaced on stderr so a
   // subprocess caller can capture them without contaminating the JSON
-  // payload on stdout. The describe payload still ships with `null` in
-  // place of the affected schema (consumers see this as "schema unavailable").
+  // payload on stdout — AND carried on the machine-readable result's
+  // `warnings` field so in-process consumers never have to scrape stderr.
+  // The describe payload still ships with `null` in place of the affected
+  // schema (consumers see this as "schema unavailable").
   if (schemaWarnings.length > 0) {
     for (const warning of schemaWarnings) {
       process.stderr.write(`[fugue describe] ${warning}\n`);
     }
   }
 
-  return { ok: true, path: imported.path, dag: built.value };
+  return { ok: true, path: imported.path, dag: built.value, warnings: schemaWarnings };
 };

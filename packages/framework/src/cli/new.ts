@@ -215,10 +215,12 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
 };
 
 /**
- * Scaffold a DAG. Writes the files and returns the structured outcome. The only
- * failure modes are a non-empty target dir without `--force` (the author's to
- * resolve) — everything else (a malformed template) is a framework bug, not an
- * author error, so it propagates rather than being swallowed.
+ * Scaffold a DAG. Writes the files and returns the structured outcome. Author
+ * errors (a non-empty target dir without `--force`) and environment write
+ * failures (ENOSPC/EACCES/EISDIR, …) both land in `{ ok: false, problems }` —
+ * the bin prints stdout JSON, so a raw throw would break the machine-readable
+ * contract (mirrors `runNewFrom`'s write-failed arm). A malformed template is
+ * a framework bug, not an author error, so it still propagates.
  */
 export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const root = options.root ?? process.cwd();
@@ -241,38 +243,49 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   };
   const scaffold = buildScaffold(options.shape, ctx);
 
-  await mkdir(dir, { recursive: true });
-
   const written: string[] = [];
   const write = async (rel: string, content: string): Promise<void> => {
     await writeFile(join(dir, rel), content, "utf-8");
     written.push(join(relDir, rel));
   };
 
-  await write("dag.ts", scaffold.dagTs);
-  await write("fugue.yaml", fugueYaml(ctx, options.owner));
-  await write("README.md", readme(ctx, options.shape));
+  // The mkdir + write batch is an environment surface (ENOSPC/EACCES/EISDIR,
+  // …) — fold a throw into the `{ ok: false, problems }` envelope (mirrors
+  // `runNewFrom`) rather than crashing past the stdout-JSON contract, keeping
+  // the stack so the environment is debuggable from the outcome.
+  try {
+    await mkdir(dir, { recursive: true });
 
-  if (scaffold.prompt) {
-    await mkdir(join(dir, "prompts"), { recursive: true });
-    await write(join("prompts", `${scaffold.prompt.name}.txt`), scaffold.prompt.body);
-    // Write prompts/registry.json as part of the same scaffold write batch so
-    // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
-    // is always new → version 1.0.0, so the registry is computed in-memory here
-    // rather than via a separate `prompts sync` post-step. Computing it in-process
-    // (no post-step) means a successful run never leaves a written .txt without a
-    // matching registry entry. This is in-process ordering, NOT crash atomicity:
-    // a mid-batch IO failure (ENOSPC/EACCES) still propagates the real cause, but
-    // can leave a partially-written scaffold dir behind. Format matches
-    // `runPromptsSync` byte-for-byte (2-space JSON + trailing newline) so a later
-    // `prompts sync`/`check` sees no drift.
-    const registry = {
-      [scaffold.prompt.name]: {
-        version: "1.0.0",
-        hash: computePromptHash(scaffold.prompt.body),
-      },
+    await write("dag.ts", scaffold.dagTs);
+    await write("fugue.yaml", fugueYaml(ctx, options.owner));
+    await write("README.md", readme(ctx, options.shape));
+
+    if (scaffold.prompt) {
+      await mkdir(join(dir, "prompts"), { recursive: true });
+      await write(join("prompts", `${scaffold.prompt.name}.txt`), scaffold.prompt.body);
+      // Write prompts/registry.json as part of the same scaffold write batch so
+      // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
+      // is always new → version 1.0.0, so the registry is computed in-memory here
+      // rather than via a separate `prompts sync` post-step. Computing it in-process
+      // (no post-step) means a successful run never leaves a written .txt without a
+      // matching registry entry. This is in-process ordering, NOT crash atomicity:
+      // a mid-batch IO failure (ENOSPC/EACCES) still surfaces the real cause, but
+      // can leave a partially-written scaffold dir behind. Format matches
+      // `runPromptsSync` byte-for-byte (2-space JSON + trailing newline) so a later
+      // `prompts sync`/`check` sees no drift.
+      const registry = {
+        [scaffold.prompt.name]: {
+          version: "1.0.0",
+          hash: computePromptHash(scaffold.prompt.body),
+        },
+      };
+      await write(join("prompts", "registry.json"), `${JSON.stringify(registry, null, 2)}\n`);
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      problems: [`write failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
     };
-    await write(join("prompts", "registry.json"), `${JSON.stringify(registry, null, 2)}\n`);
   }
 
   const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";
@@ -344,8 +357,8 @@ bun test
  * is deterministic; the authored JSON is written back alongside the code as
  * `dag.authored.json` (the sidecar a later `fugue new --from` regeneration
  * re-reads — nothing consumes it automatically today). The description is
- * proven through the validation gauntlet (codegen → defineDag import → lint,
- * in a staging dir) BEFORE anything is written — same guarantee `fugue
+ * proven through the validation gauntlet (codegen → defineDag import → lint →
+ * describe, in a staging dir) BEFORE anything is written — same guarantee `fugue
  * compose` gives every draft; the gauntlet's non-fatal advisories ride along
  * on the success result. Same failure envelope as `runNew` — author errors
  * return `{ ok: false, problems }`, framework bugs propagate.

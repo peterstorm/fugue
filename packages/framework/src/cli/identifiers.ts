@@ -40,6 +40,31 @@ export const KEBAB_IDENT = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 /** A valid JS identifier — field names must match so codegen can emit dotted access. */
 export const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// ---------------------------------------------------------------------------
+// Branded lexical types — parse, don't validate. The `parse*` smart
+// constructors below are the ONLY producers, so holding one of these proves
+// the corresponding regex already passed; downstream signatures narrow to the
+// brand instead of re-validating (or trusting) a bare string.
+// ---------------------------------------------------------------------------
+
+/** A `KEBAB`-validated string (team names, case labels). */
+export type Kebab = string & { readonly __brand: "Kebab" };
+
+/**
+ * A `KEBAB_IDENT`-validated string (node ids, DAG names) — the only strings
+ * safe to feed the name constructors below, since they camelCase/PascalCase
+ * into emitted JS identifiers.
+ */
+export type KebabIdent = string & { readonly __brand: "KebabIdent" };
+
+/** The sole `Kebab` producer: `null` unless `KEBAB` matches. */
+export const parseKebab = (raw: string): Kebab | null =>
+  KEBAB.test(raw) ? (raw as Kebab) : null;
+
+/** The sole `KebabIdent` producer: `null` unless `KEBAB_IDENT` matches. */
+export const parseKebabIdent = (raw: string): KebabIdent | null =>
+  KEBAB_IDENT.test(raw) ? (raw as KebabIdent) : null;
+
 /**
  * The full ECMAScript LineTerminator set as a regex character-class body:
  * `\r`, `\n`, U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR). JS
@@ -101,21 +126,24 @@ export const JS_RESERVED_WORDS: ReadonlySet<string> = new Set([
 // site; the accounting sets below are derived from the same functions.
 // ---------------------------------------------------------------------------
 
+// Node-level constructors take the branded `KebabIdent` — the parse-time
+// guarantee that camelCase/PascalCase yields a valid JS identifier.
+
 /** Output-schema const for a node: `fetch-record` → `FetchRecordSchema`. */
-export const schemaConstName = (id: string): string => `${pascalCase(id)}Schema`;
+export const schemaConstName = (id: KebabIdent): string => `${pascalCase(id)}Schema`;
 
 /**
  * Fan-in schema const for a join/assemble node: `merge` → `MergeFanIn`.
  * Emitted only when the node's role receives a keyed fan-in, but claimed for
  * EVERY node (see the conservatism note on `generatedIdentifiersFor`).
  */
-export const fanInConstName = (id: string): string => `${pascalCase(id)}FanIn`;
+export const fanInConstName = (id: KebabIdent): string => `${pascalCase(id)}FanIn`;
 
 /** LLM node factory (the injectable model seam): `summarize` → `createSummarize`. */
-export const llmFactoryName = (id: string): string => `create${pascalCase(id)}`;
+export const llmFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}`;
 
 /** Module-level node const for non-llm nodes: `fetch-record` → `fetchRecord`. */
-export const nodeConstName = (id: string): string => camelCase(id);
+export const nodeConstName = (id: KebabIdent): string => camelCase(id);
 
 /**
  * The `<camel>Node` identifier claimed for llm nodes: `summarize` →
@@ -124,7 +152,7 @@ export const nodeConstName = (id: string): string => camelCase(id);
  * emitted file. It is claimed anyway so an llm id `foo` can never collide
  * with a sibling `foo-node` if codegen ever starts binding the factory result.
  */
-export const llmNodeRefName = (id: string): string => `${camelCase(id)}Node`;
+export const llmNodeRefName = (id: KebabIdent): string => `${camelCase(id)}Node`;
 
 /**
  * The identifier a node contributes to the structure expression: the llm ref
@@ -132,8 +160,14 @@ export const llmNodeRefName = (id: string): string => `${camelCase(id)}Node`;
  * `kind` is the closed authored kind vocabulary (`AuthoredNodeKind` — derived
  * in-module from `NODE_FACTORY_NAME`, so this module stays import-free).
  */
-export const nodeRefName = (id: string, kind: AuthoredNodeKind): string =>
+export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string =>
   kind === "llm" ? llmNodeRefName(id) : nodeConstName(id);
+
+// The two DAG-level constructors stay `string`-typed: they serve BOTH the
+// authored pipeline (names are KEBAB_IDENT there) and `new-templates.ts`'s
+// golden scaffolds, whose names follow `fugue new`'s plain-KEBAB rule —
+// narrowing them to `KebabIdent` would force `fugue new` to reject names it
+// accepts today.
 
 /** The exported DAG factory for llm scaffolds: `lead-opener` → `createLeadOpenerDag`. */
 export const dagFactoryName = (dagName: string): string => `create${pascalCase(dagName)}Dag`;
@@ -229,7 +263,7 @@ export const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
  * imports us, not the other way around.
  */
 export interface IdentifierSource {
-  readonly id: string;
+  readonly id: KebabIdent;
   readonly kind: AuthoredNodeKind;
 }
 
@@ -261,7 +295,7 @@ export const generatedIdentifiersFor = (node: IdentifierSource): readonly string
  * only by the --llm factory scaffolds — but all are claimed unconditionally
  * (see the conservatism note on `generatedIdentifiersFor`).
  */
-export const dagLevelIdentifiers = (dagName: string): readonly string[] => [
+export const dagLevelIdentifiers = (dagName: KebabIdent): readonly string[] => [
   INPUT_SCHEMA_NAME,
   DEFAULT_MODEL_NAME,
   dagFactoryName(dagName),

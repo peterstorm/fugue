@@ -54,6 +54,8 @@ export interface GauntletDeps {
   readonly lint?: typeof runLint;
   readonly describe?: typeof runDescribe;
   readonly cleanup?: typeof rm;
+  /** Removes the empty `.fugue-compose` base — injectable for the unexpected-errno warn path. */
+  readonly removeBase?: typeof rmdir;
 }
 
 /**
@@ -68,6 +70,7 @@ export const runGauntlet = async (
   const lintDag = deps.lint ?? runLint;
   const describeDag = deps.describe ?? runDescribe;
   const cleanup = deps.cleanup ?? rm;
+  const removeBase = deps.removeBase ?? rmdir;
   const scaffold = buildAuthoredScaffold(dag);
   const stagingBase = join(root, ".fugue-compose");
   await mkdir(stagingBase, { recursive: true });
@@ -103,7 +106,7 @@ export const runGauntlet = async (
     // losing the removal race makes it ENOENT — both expected. Any OTHER code
     // (EACCES/EPERM/EIO, …) is a real cleanup failure: warn on stderr
     // (symmetry with the rm above), never throw.
-    await rmdir(stagingBase).catch((e: unknown) => {
+    await removeBase(stagingBase).catch((e: unknown) => {
       const code = (e as NodeJS.ErrnoException | undefined)?.code;
       if (code === "ENOTEMPTY" || code === "ENOENT") return;
       process.stderr.write(

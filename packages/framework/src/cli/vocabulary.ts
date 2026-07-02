@@ -26,14 +26,6 @@ import type { FieldSpec } from "./authored.js";
 export const CONFIDENCE_BUCKET = ["high", "medium", "low"] as const;
 
 /**
- * `Object.freeze` typed as identity: runtime immutability without changing
- * assignability (`Readonly<T>` / `readonly T[]` would break consumers that
- * expect the mutable-typed `FieldSpec` shape — the freeze is a runtime guard,
- * invisible to the type checker on purpose).
- */
-const freeze = <T>(value: T): T => Object.freeze(value) as T;
-
-/**
  * The `confidence` output field codegen injects on every LLM node — and the
  * exact shape an EXPLICITLY declared `confidence` field must carry. The
  * `satisfies FieldSpec` (const-preserving — the inferred literal type is
@@ -41,9 +33,11 @@ const freeze = <T>(value: T): T => Object.freeze(value) as T;
  * than at whichever consumer happens to assign it first. Deep-frozen: it is
  * an exported singleton guarding a declared byte-for-byte invariant, so a
  * mutation anywhere would silently corrupt every consumer — freeze makes
- * that a loud TypeError instead.
+ * that a loud TypeError instead. Plain `Object.freeze` (no identity cast):
+ * `FieldSpec`'s arrays are ReadonlyArray in the schema-inferred type, so the
+ * frozen readonly shapes are directly assignable.
  */
-export const CONFIDENCE_FIELD = freeze({
+export const CONFIDENCE_FIELD = Object.freeze({
   name: "confidence",
-  type: freeze({ kind: "enum" as const, values: freeze([...CONFIDENCE_BUCKET]) }),
+  type: Object.freeze({ kind: "enum" as const, values: Object.freeze([...CONFIDENCE_BUCKET]) }),
 }) satisfies FieldSpec;

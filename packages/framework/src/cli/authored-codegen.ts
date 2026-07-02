@@ -56,6 +56,7 @@ import {
   llmFactoryName,
   nodeRefName,
   schemaConstName,
+  type KebabIdent,
 } from "./identifiers.js";
 import { CONFIDENCE_FIELD } from "./vocabulary.js";
 
@@ -232,7 +233,9 @@ const llmPrompt = (
   const jsonShape = outSpec.fields
     .map((f) =>
       f.type.kind === "enum"
-        ? `"${f.name}": ${f.type.values.map((v) => `"${v}"`).join(" | ")}`
+        ? // JSON.stringify (matching zodExpr) — a schema-legal enum value that
+          // contains a double quote must not garble the prompt's shape hint.
+          `"${f.name}": ${f.type.values.map((v) => JSON.stringify(v)).join(" | ")}`
         : `"${f.name}": ${f.type.kind}`,
     )
     .join(", ");
@@ -529,7 +532,7 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
   const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
   // Human-review gates have no output variant — they contribute no fields here
   // (the linear walk below skips past them to the real producer anyway).
-  const fieldsOf = (id: string): readonly string[] => {
+  const fieldsOf = (id: KebabIdent): readonly string[] => {
     const n = byId.get(id);
     return n === undefined || n.kind === "human-review" ? [] : n.output.fields.map((f) => f.name);
   };

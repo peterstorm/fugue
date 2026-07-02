@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { resolve } from "node:path";
 import { runLint } from "../../cli/lint.js";
 import { runDescribe } from "../../cli/describe.js";
@@ -179,6 +179,31 @@ describe("runDescribe", () => {
     // No human-review on these nodes, no prompts referenced
     expect(result.dag.nodes.every((n) => !n.humanReview)).toBe(true);
     expect(result.dag.prompts).toEqual([]);
+
+    // `warnings` is non-optional on the ok arm — always an array, empty when
+    // every schema serialized cleanly (consumers never branch on presence).
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("carries schema-serialization failures on the ok result's warnings (schema ships as null)", async () => {
+    // The fixture's registration inputSchema is z.void() — unrepresentable in
+    // JSON Schema. The describe stays ok (best-effort), the affected schema
+    // is null, and the failure reaches BOTH the machine-readable `warnings`
+    // and stderr (for subprocess callers).
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runDescribe(fixturePath("schema-warning.ts"));
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.dag.inputSchema).toBeNull();
+        expect(result.warnings).toHaveLength(1);
+        expect(result.warnings[0]).toContain("inputSchema");
+      }
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(written).toContain("[fugue describe] inputSchema");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("sets outputSchema from the output node's schema", async () => {

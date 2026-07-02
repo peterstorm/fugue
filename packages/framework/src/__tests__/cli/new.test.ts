@@ -290,6 +290,22 @@ describe("runNew overwrite guard", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("folds a throwing write batch into the problems envelope, keeping the stdout-JSON contract", async () => {
+    // `dag.ts` pre-exists as a DIRECTORY, so the batch's writeFile fails with
+    // EISDIR mid-write. That is an environment failure — it must land in the
+    // `{ ok: false, problems }` envelope (mirrors runNewFrom's write-failed
+    // arm), never crash past the machine-readable contract.
+    const root = join(tmpRoot, "write-envelope");
+    await mkdir(join(root, "dags", "t", "x", "dag.ts"), { recursive: true });
+    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: true, root });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.problems[0]).toContain("write failed");
+      // Environment failures keep the STACK, not just the message.
+      expect(result.problems[0]).toContain("at ");
+    }
+  });
+
   it("propagates a non-ENOENT stat error rather than treating the target as safe-to-write", async () => {
     // `dags` is a regular file, so readdir(dags/t/x) fails with ENOTDIR — we
     // *cannot verify* emptiness, so isDirNonEmpty must rethrow (not report

@@ -1,7 +1,7 @@
 // CLI result types — stable JSON shapes consumed by both human readers and
 // machine harnesses (LLM authoring tools). These are intentionally simple
 // discriminated unions so callers can pattern-match on `ok` and either
-// proceed or surface the structured `errors` payload.
+// proceed or surface the structured `errors`/`problems` payload.
 
 import type { FrameworkError } from "../types/errors.js";
 import type {
@@ -60,6 +60,19 @@ export type LintResult =
  * constructor names, derived rather than re-listed.
  */
 export const SHAPE_HELPER = SHAPE_HELPER_NAME satisfies Record<Shape, string>;
+
+/**
+ * Exact-key backstop for the `satisfies` above: `Record<Shape, string>` only
+ * proves every `Shape` HAS a helper — an EXTRA key in `SHAPE_HELPER_NAME`
+ * (a helper naming something that isn't a shape) would slip through because
+ * excess-property checking doesn't apply to a non-literal reference. This
+ * alias resolves to `never` (a compile error at its own annotation) the
+ * moment `SHAPE_HELPER_NAME` grows a key outside `Shape`.
+ */
+type _NoExtraShapes = Exclude<keyof typeof SHAPE_HELPER_NAME, Shape> extends never ? true : never;
+// Anchor the check so the alias is used (and survives unused-type lint).
+const _noExtraShapes: _NoExtraShapes = true;
+void _noExtraShapes;
 
 /** A DAG shape-helper constructor name (`defineLinearDag` … `defineSources`). */
 export type ShapeHelper = (typeof SHAPE_HELPER)[Shape];
@@ -170,7 +183,7 @@ export interface CapabilityCatalogEntry {
  *
  * Always `ok: true` — the catalogue is static framework data with no failure
  * mode — but the field is kept so machine consumers branch on `ok` uniformly
- * across all three CLI commands.
+ * across all CLI commands.
  *
  * `builtin` lists capabilities the framework ships. Adapter-provided
  * capabilities (e.g. `documents`, `db`) are deployment-specific: they exist
@@ -233,6 +246,13 @@ export type DescribeResult =
       readonly ok: true;
       readonly path: string;
       readonly dag: DescribedDag;
+      /**
+       * Non-fatal schema-serialization warnings — the affected schema ships
+       * as `null` inside `dag`. Always an array (empty when none), so
+       * consumers never branch on presence; also echoed to stderr for
+       * subprocess callers.
+       */
+      readonly warnings: readonly string[];
     }
   | {
       readonly ok: false;

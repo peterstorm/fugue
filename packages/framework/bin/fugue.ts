@@ -159,19 +159,25 @@ const main = async (): Promise<number> => {
     // Registered on BOTH process and the readline Interface: with a real TTY,
     // readline puts stdin in raw mode and CONSUMES ^C itself, emitting
     // 'SIGINT' on the Interface — the process-level handler never fires there
-    // (it covers `kill -INT` and non-TTY/piped stdin). Idempotent (the
-    // `interrupted` flag) so a double delivery closes once and prints the
-    // stderr notice once. This wiring is bin-only on purpose: the compose-io
-    // fake cannot cover it.
+    // (it covers `kill -INT` and non-TTY/piped stdin; once the first interrupt
+    // closes readline, raw mode is off and later ^C reaches the process
+    // handler). The first interrupt closes readline and says so; a SECOND
+    // interrupt means the user is done waiting on the in-flight LLM/gauntlet
+    // round — force-quit with the conventional SIGINT exit code instead of
+    // silently swallowing it. This wiring is bin-only on purpose: the
+    // compose-io fake cannot cover it.
     let interrupted = false;
     const interrupt = (): void => {
-      if (interrupted) return;
+      if (interrupted) {
+        process.stderr.write("force-quitting\n");
+        process.exit(130);
+      }
       interrupted = true;
       process.stderr.write("\ninterrupted — finishing the current step, then aborting…\n");
       rl.close();
     };
-    process.once("SIGINT", interrupt);
-    rl.once("SIGINT", interrupt);
+    process.on("SIGINT", interrupt);
+    rl.on("SIGINT", interrupt);
     // Ctrl-D / piped-stdin exhaustion / close-mid-question semantics live in
     // the adapter (see compose-io.ts).
     const io = readlineComposeIo(rl);
@@ -238,9 +244,13 @@ const main = async (): Promise<number> => {
     });
 };
 
-// Top-level guard: main() is designed not to reject, but JSON.stringify of a
-// pathological result payload could throw. Surface it as a clean non-zero exit
-// rather than an unhandled rejection with a non-deterministic exit code.
+// Top-level guard: main() is designed not to reject, but two paths are known
+// to: genuine readline failures, which compose-io deliberately RETHROWS (a
+// rejection from a live interface is never folded into the "closed" sentinel
+// — see compose-io.ts), and compose's dynamic imports (the Anthropic SDK /
+// readline modules failing to resolve). JSON.stringify of a pathological
+// result payload could also throw. Surface any of these as a clean non-zero
+// exit rather than an unhandled rejection with a non-deterministic exit code.
 //
 // Success path sets `process.exitCode` and lets the loop drain naturally —
 // `process.exit(code)` can truncate a large JSON payload still buffered in a

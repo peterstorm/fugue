@@ -209,6 +209,52 @@ const FIXTURES: Record<string, AuthoredDagInput> = {
       default: "escalate",
     },
   },
+  "diamond-llm-join": {
+    fugueAuthored: 1,
+    name: "authored-diamond-llm",
+    team: "demo",
+    description: "Parallel branches joined by an LLM synthesis",
+    input: out("id"),
+    nodes: [
+      { id: "trigger", kind: "fetch", purpose: "Load the trigger", output: out("id") },
+      { id: "left", kind: "fetch", purpose: "Left branch", output: out("l") },
+      { id: "right", kind: "fetch", purpose: "Right branch", output: out("r") },
+      // The join is an LLM node: its derived input is the branch-keyed fan-in,
+      // so buildInput must JSON.stringify the branch objects for the prompt.
+      { id: "synthesize", kind: "llm", purpose: "Synthesize the branches", output: out("summary") },
+    ],
+    structure: { shape: "diamond", source: "trigger", branches: ["left", "right"], join: "synthesize" },
+  },
+  "router-llm-handler": {
+    fugueAuthored: 1,
+    name: "authored-router-handler",
+    team: "demo",
+    description: "Route to LLM case and default handlers",
+    input: out("message"),
+    nodes: [
+      {
+        id: "classify",
+        kind: "fetch",
+        purpose: "Classify the message",
+        output: {
+          fields: [
+            { name: "message", type: str },
+            { name: "bucket", type: { kind: "enum", values: ["simple", "complex"] } },
+          ],
+        },
+      },
+      // Both the case handler and the default are LLM nodes — they consume the
+      // classifier's flat output fields (no fan-in), each with its own prompt.
+      { id: "quick-reply", kind: "llm", purpose: "Draft a quick reply", output: out("reply") },
+      { id: "deep-reply", kind: "llm", purpose: "Draft a thorough reply", output: out("reply") },
+    ],
+    structure: {
+      shape: "router",
+      classifier: "classify",
+      cases: [{ label: "simple", when: { field: "bucket", equals: "simple" }, to: "quick-reply" }],
+      default: "deep-reply",
+    },
+  },
   "sources-llm": {
     fugueAuthored: 1,
     name: "authored-sources",
@@ -404,6 +450,14 @@ describe("AuthoredDag schema", () => {
     expect(parseAuthoredDagJson("{nope").ok).toBe(false);
   });
 
+  it('rejects a non-kebab team ("Bad_Team")', () => {
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (d as { team: string }).team = "Bad_Team";
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("team must be kebab-case");
+  });
+
   it("rejects a newline in purpose / dag description / field description", () => {
     const purpose = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (purpose.nodes[0] as { purpose: string }).purpose = "line one\n// injected";
@@ -441,8 +495,8 @@ describe("AuthoredDag schema", () => {
       expect(parseAuthoredDag(field).ok).toBe(false);
 
       const enumValue = structuredClone(FIXTURES.router!) as AuthoredDagInput;
-      const bucket = outputOf(enumValue.nodes[0]!).fields[1]! as { type: { kind: string; values: string[] } };
-      bucket.type.values = [`small${terminator}injected`, "large"];
+      const bucket = outputOf(enumValue.nodes[0]!).fields[1]! as { type: { kind: string; values: readonly string[] } };
+      bucket.type = { kind: "enum", values: [`small${terminator}injected`, "large"] };
       expect(parseAuthoredDag(enumValue).ok).toBe(false);
     }
   });
@@ -576,8 +630,8 @@ describe("AuthoredDag schema", () => {
 
   it("rejects enum values containing a newline", () => {
     const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
-    const bucket = outputOf(d.nodes[0]!).fields[1]! as { type: { kind: string; values: string[] } };
-    bucket.type.values = ["small\ninjected", "large"];
+    const bucket = outputOf(d.nodes[0]!).fields[1]! as { type: { kind: string; values: readonly string[] } };
+    bucket.type = { kind: "enum", values: ["small\ninjected", "large"] };
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("single line");
@@ -604,8 +658,8 @@ describe("AuthoredDag schema", () => {
 
   it("rejects duplicate enum values", () => {
     const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
-    const bucket = outputOf(d.nodes[0]!).fields[1]! as { type: { kind: string; values: string[] } };
-    bucket.type.values = ["small", "small"];
+    const bucket = outputOf(d.nodes[0]!).fields[1]! as { type: { kind: string; values: readonly string[] } };
+    bucket.type = { kind: "enum", values: ["small", "small"] };
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("duplicate enum value 'small'");
@@ -827,6 +881,42 @@ describe("authored codegen survives the gauntlet", () => {
     expect(scaffold.dagTs).toContain('JSON.stringify(input["fetch-calendar"])');
     // The prompt tells the model the placeholder carries JSON.
     expect(scaffold.prompts[0]!.body).toContain("fetch_weather (JSON): {{fetch_weather}}");
+  });
+
+  it("a diamond llm JOIN gets the branch-keyed fan-in wiring (JSON.stringify per branch)", () => {
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["diamond-llm-join"]!));
+    expect(scaffold.dagTs).toContain('JSON.stringify(input["left"])');
+    expect(scaffold.dagTs).toContain('JSON.stringify(input["right"])');
+    expect(scaffold.prompts[0]!.body).toContain("left (JSON): {{left}}");
+    expect(scaffold.prompts[0]!.body).toContain("right (JSON): {{right}}");
+  });
+
+  it("router llm case/default handlers consume the classifier's flat fields (no fan-in)", () => {
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["router-llm-handler"]!));
+    // Handlers read the classifier output directly — never JSON.stringify.
+    expect(scaffold.dagTs).toContain('message: input["message"]');
+    expect(scaffold.dagTs).not.toContain("JSON.stringify(");
+    // Two llm nodes ⇒ per-node prompt names.
+    expect(scaffold.prompts.map((p) => p.name).sort()).toEqual([
+      "authored-router-handler-deep-reply",
+      "authored-router-handler-quick-reply",
+    ]);
+  });
+
+  it("--force overwrites in place WITHOUT clearing stale files (pinned)", async () => {
+    // The overwrite guard only gates writing — `--force` re-writes the
+    // scaffold files over a non-empty dir but never deletes files it does not
+    // itself write. Pinned so a future "clean the dir first" change is a
+    // deliberate decision, not an accident.
+    const root = join(tmpRoot, "force-stale");
+    const dag = mustParse(FIXTURES.linear!);
+    const first = await writeAuthoredScaffold(dag, { root, force: false }, []);
+    if (!first.ok) throw new Error(first.problems.join("; "));
+    await Bun.write(join(first.dir, "stale.txt"), "left over");
+    const second = await writeAuthoredScaffold(dag, { root, force: true }, []);
+    expect(second.ok).toBe(true);
+    expect(await Bun.file(join(first.dir, "stale.txt")).text()).toBe("left over");
+    expect(await Bun.file(join(first.dir, "dag.ts")).exists()).toBe(true);
   });
 
   it("buildAuthoredScaffold is deterministic (same input → identical output)", () => {

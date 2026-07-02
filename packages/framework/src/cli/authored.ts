@@ -22,12 +22,13 @@ import {
   IDENT,
   JS_RESERVED_WORDS,
   KEBAB,
-  KEBAB_IDENT,
   RESERVED_IDENTIFIERS,
   SINGLE_LINE,
   camelCase,
   dagLevelIdentifiers,
   generatedIdentifiersFor,
+  parseKebabIdent,
+  type KebabIdent,
 } from "./identifiers.js";
 import { assertNever } from "./types.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
@@ -65,8 +66,9 @@ export const FieldTypeSchema = z.discriminatedUnion("kind", [
       // single-line context: the prompt body's JSON response shape (jsonShape
       // in authored-codegen renders every value inline). A line terminator
       // there garbles the prompt even though codegen JSON-escapes the z.enum
-      // literal.
-      values: z.array(z.string().min(1).regex(SINGLE_LINE, "must be a single line")).min(2),
+      // literal. `.readonly()` so the inferred type is ReadonlyArray (and the
+      // parsed value is frozen) — enum values are facts, never mutated.
+      values: z.array(z.string().min(1).regex(SINGLE_LINE, "must be a single line")).min(2).readonly(),
     })
     .strict(),
 ]);
@@ -106,7 +108,9 @@ export type FieldSpec = z.infer<typeof FieldSpecSchema>;
 const schemaSpec = (missingMessage?: () => string) =>
   z
     .object(
-      { fields: z.array(FieldSpecSchema).min(1) },
+      // `.readonly()` — field lists are ReadonlyArray in the inferred types
+      // (consumers only map/iterate; extension goes through spread copies).
+      { fields: z.array(FieldSpecSchema).min(1).readonly() },
       missingMessage === undefined
         ? undefined
         : { error: (issue) => (issue.input === undefined ? missingMessage() : undefined) },
@@ -129,7 +133,22 @@ export type SchemaSpec = z.infer<typeof SchemaSpecSchema>;
 // Nodes
 // ---------------------------------------------------------------------------
 
-const nodeId = z.string().regex(KEBAB_IDENT, "node id must be kebab-case starting with a letter");
+/**
+ * A KEBAB_IDENT string field, parsed into the branded `KebabIdent` through
+ * the single smart constructor — so every id/name on a parsed AuthoredDag is
+ * PROOF the name constructors in `identifiers.ts` can safely emit from it.
+ */
+const kebabIdentField = (message: string) =>
+  z.string().transform((s, ctx) => {
+    const parsed = parseKebabIdent(s);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
+const nodeId = kebabIdentField("node id must be kebab-case starting with a letter");
 /** What this node is for — the authoring intent DescribedDag can't carry. */
 const nodePurpose = z.string().min(1).regex(SINGLE_LINE, "must be a single line");
 
@@ -229,7 +248,7 @@ export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
 // (KEBAB_IDENT, not plain KEBAB) — a ref like "2fast" can never resolve and
 // should be rejected with the precise lexical message rather than only the
 // unknown-node refinement.
-const nodeRef = z.string().regex(KEBAB_IDENT, "node reference must be kebab-case starting with a letter");
+const nodeRef = kebabIdentField("node reference must be kebab-case starting with a letter");
 
 export const RouterCaseSchema = z
   .object({
@@ -286,7 +305,7 @@ const BaseAuthoredDagSchema = z
   .object({
     /** Format discriminator + version for forward evolution. */
     fugueAuthored: z.literal(1),
-    name: z.string().regex(KEBAB_IDENT, "name must be kebab-case starting with a letter"),
+    name: kebabIdentField("name must be kebab-case starting with a letter"),
     team: z.string().regex(KEBAB, "team must be kebab-case"),
     description: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
     /** DAG input schema (the request). */
@@ -297,7 +316,7 @@ const BaseAuthoredDagSchema = z
   .strict();
 
 /** Node ids referenced by a structure, with the role each plays. */
-const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [string, string]> => {
+const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> => {
   switch (s.shape) {
     case "linear":
       return s.order.map((id, i) => [id, `order[${i}]`] as const);
@@ -404,7 +423,7 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
 
   // Kind constraints per shape role
   const s = dag.structure;
-  const kindOf = (id: string) => byId.get(id)?.kind;
+  const kindOf = (id: KebabIdent) => byId.get(id)?.kind;
 
   if (s.shape === "sources") {
     for (const id of s.sources) {

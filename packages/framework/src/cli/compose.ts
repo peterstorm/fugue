@@ -31,10 +31,11 @@ import { nodeId } from "../types/ids.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import {
-  KEBAB,
   NODE_FACTORY_NAME,
   SHAPE_HELPER_NAME,
+  parseKebab,
   type AuthoredNodeKind,
+  type Kebab,
 } from "./identifiers.js";
 import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
@@ -63,10 +64,14 @@ export interface ComposeIo {
 }
 
 export interface ComposeOptions {
-  /** The natural-language pipeline description. */
+  /** The natural-language pipeline description. Non-empty — `parseComposeArgs` rejects blank intents. */
   readonly intent: string;
-  /** Owning team (kebab-case) — goes into the AuthoredDag. */
-  readonly team: string;
+  /**
+   * Owning team — goes into the AuthoredDag. BRANDED: `parseKebab` is the
+   * only producer, so holding `ComposeOptions` proves the team already
+   * passed the kebab-case rule the schema enforces on drafts.
+   */
+  readonly team: Kebab;
   readonly model?: string;
   /** Root dir that contains `dags/` and resolvable node_modules. */
   readonly root?: string;
@@ -88,19 +93,36 @@ export type ComposeOutcome =
       readonly result: Extract<NewResult, { ok: true }>;
       readonly rounds: { readonly questions: number; readonly repairs: number; readonly refinements: number };
     }
+  // The failure arms are split per reason so the type states exactly when the
+  // user's work product (`draft`, replayable via `fugue new --from`) rides
+  // along — carrying it as DATA means hitting a wall never discards it.
+  | {
+      readonly ok: false;
+      /**
+       * Deliberate abort — `draft` is ABSENT on any abort (an explicit
+       * "abort" answer or a closed input stream): nothing was written and
+       * the user chose to walk away.
+       */
+      readonly reason: "aborted";
+      readonly problems: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "llm-error" | "repair-exhausted";
+      readonly problems: readonly string[];
+      /**
+       * The most recent draft that survived the full gauntlet. Absent only
+       * when no draft had yet been proven.
+       */
+      readonly draft?: AuthoredDag;
+    }
   | {
       readonly ok: false;
       /** `gauntlet-failed` = the proving machinery itself threw (an environment failure, not a draft problem). */
-      readonly reason: "aborted" | "llm-error" | "repair-exhausted" | "write-failed" | "gauntlet-failed";
+      readonly reason: "write-failed" | "gauntlet-failed";
       readonly problems: readonly string[];
-      /**
-       * The user's work product, carried as DATA so hitting a wall never
-       * discards it: the most recent draft that survived the full gauntlet
-       * (or, for gauntlet-/write-failures, the draft in flight). Absent only
-       * when no draft had yet survived the gauntlet, or on a deliberate
-       * abort. Replayable via `fugue new --from`.
-       */
-      readonly draft?: AuthoredDag;
+      /** The draft in flight when the environment failed — always present. */
+      readonly draft: AuthoredDag;
     };
 
 // ---------------------------------------------------------------------------
@@ -130,6 +152,7 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
   const problems: string[] = [];
   let intent: string | undefined;
   let team: string | undefined;
+  let parsedTeam: Kebab | null = null;
   let model: string | undefined;
   let owner: string | undefined;
   let root: string | undefined;
@@ -175,24 +198,32 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
 
   if (intent === undefined) {
     problems.push('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
+  } else if (intent.trim().length === 0) {
+    // A blank intent gives the model nothing to draft from — reject it here
+    // rather than burning an LLM round on an empty brief.
+    problems.push("intent must be non-empty");
   }
   if (team === undefined) {
     problems.push("missing --team <team>");
-  } else if (!KEBAB.test(team)) {
+  } else {
     // The team lands in the AuthoredDag (kebab-case there) and in the
     // dags/<team>/ directory name — reject junk at the boundary instead of
     // letting the first LLM draft fail schema validation on our own flag.
-    problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+    // `parseKebab` is the single producer of the branded team.
+    parsedTeam = parseKebab(team);
+    if (parsedTeam === null) {
+      problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+    }
   }
 
-  if (intent === undefined || team === undefined || problems.length > 0) {
+  if (intent === undefined || parsedTeam === null || problems.length > 0) {
     return { ok: false, problems };
   }
   return {
     ok: true,
     options: {
       intent,
-      team,
+      team: parsedTeam,
       force,
       ...(model !== undefined ? { model } : {}),
       ...(owner !== undefined ? { owner } : {}),
@@ -338,7 +369,7 @@ export const runCompose = async (
   const failClosed = (
     reason: "llm-error" | "repair-exhausted",
     problems: readonly string[],
-  ): Extract<ComposeOutcome, { ok: false }> => ({
+  ): Extract<ComposeOutcome, { reason: "llm-error" | "repair-exhausted" }> => ({
     ok: false,
     reason,
     problems,
@@ -360,7 +391,7 @@ export const runCompose = async (
 
   type DraftAttempt =
     | { readonly ok: true; readonly dag: AuthoredDag }
-    | { readonly ok: false; readonly outcome: ComposeOutcome };
+    | { readonly ok: false; readonly outcome: Extract<ComposeOutcome, { ok: false }> };
 
   // Schema gate: parse the wire-level `unknown` into an AuthoredDag. A schema
   // failure is a repair round exactly like a gauntlet failure — the superRefine
@@ -424,7 +455,7 @@ export const runCompose = async (
   // Fail closed WITH the current draft's JSON so the work survives.
   type Proven =
     | { readonly ok: true; readonly verdict: GauntletResult }
-    | { readonly ok: false; readonly outcome: ComposeOutcome };
+    | { readonly ok: false; readonly outcome: Extract<ComposeOutcome, { ok: false }> };
   const prove = async (d: AuthoredDag): Promise<Proven> => {
     try {
       return { ok: true, verdict: await gauntlet(d, root) };
@@ -483,11 +514,19 @@ export const runCompose = async (
       io.say(`Advisories:\n${verdict.advisories.map((a) => `  - ${a.kind}: ${a.message}`).join("\n")}`);
     }
 
-    const res = await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)');
-    // Closed stream ⇒ nobody can accept — abort from here exactly like an
-    // explicit "abort" answer (the draft was only ever staged, never written).
-    if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
-    const answer = res.text.trim();
+    // A blank answer (bare Enter / whitespace) is not a refinement — hint and
+    // re-ask locally instead of burning a paid LLM round on an empty
+    // "Refinement request: ".
+    let answer = "";
+    for (;;) {
+      const res = await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)');
+      // Closed stream ⇒ nobody can accept — abort from here exactly like an
+      // explicit "abort" answer (the draft was only ever staged, never written).
+      if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
+      answer = res.text.trim();
+      if (answer.length > 0) break;
+      io.say('Please answer "yes" to write, "abort" to quit, or describe a refinement.');
+    }
     if (/^(yes|y|accept)$/i.test(answer)) {
       // --- accept: deterministic write of the final scaffold ---
       // Writing HERE (inside the loop) keeps the accepted verdict in scope, so

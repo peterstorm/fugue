@@ -90,6 +90,21 @@ describe("describedToMermaid", () => {
     // Exactly four distinct declarations — nothing merged.
     expect(merged.match(/n_[A-Za-z0-9_]+\[/g)).toHaveLength(4);
   });
+
+  it("escapes characters outside the fixed 2-char set with the _x<hex>_ fallback", () => {
+    // `escapeIdChar` has fixed escapes only for `_`/`:`/`-`; anything else
+    // non-alphanumeric falls back to `_x<hex>_` ("." is 0x2e). The label
+    // keeps the original id.
+    const d: DescribedDag = {
+      ...described,
+      outputNodeId: null,
+      nodes: [{ id: "a.b", kind: "fetch", sideEffects: "none", requires: [], humanReview: false }],
+      edges: [],
+      waves: [["a.b"]],
+    };
+    const diagram = describedToMermaid(d);
+    expect(diagram).toContain('n_a_x2e_b["a.b<br/>fetch"]');
+  });
 });
 
 /** Scaffold a small valid DAG under tmpRoot and return its dag.ts path. */
