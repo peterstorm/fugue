@@ -33,6 +33,8 @@ import {
 } from "./new-templates.js";
 import { parseAuthoredDagJson, type AuthoredDag } from "./authored.js";
 import { buildAuthoredScaffold } from "./authored-codegen.js";
+import { runGauntlet } from "./gauntlet.js";
+import { pascalCase } from "./identifiers.js";
 import { computePromptHash } from "../prompts/hash.js";
 import type { NewResult } from "./types.js";
 
@@ -54,12 +56,6 @@ export interface NewOptions {
 // segment. (Node ids allow `[A-Za-z0-9_-]+`; we hold authors to the kebab
 // convention every existing DAG follows.)
 const SEGMENT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-const pascalCase = (kebab: string): string =>
-  kebab
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("");
 
 export interface ParsedNewArgs {
   readonly ok: true;
@@ -331,8 +327,11 @@ bun test
  * Scaffold a DAG from an AuthoredDag description file. Everything structural
  * is deterministic; the authored JSON is written back alongside the code as
  * `dag.authored.json` (the sidecar the compose loop and future regenerations
- * read). Same failure envelope as `runNew` — author errors return
- * `{ ok: false, problems }`, framework bugs propagate.
+ * read). The description is proven through the validation gauntlet (codegen →
+ * defineDag import → lint, in a staging dir) BEFORE anything is written —
+ * same guarantee `fugue compose` gives every draft. Same failure envelope as
+ * `runNew` — author errors return `{ ok: false, problems }`, framework bugs
+ * propagate.
  */
 export const runNewFrom = async (options: NewFromOptions): Promise<NewResult> => {
   const cwd = process.cwd();
@@ -347,6 +346,13 @@ export const runNewFrom = async (options: NewFromOptions): Promise<NewResult> =>
   const parsed = parseAuthoredDagJson(json);
   if (!parsed.ok) {
     return { ok: false, problems: parsed.problems.map((p) => `${fromPath}: ${p}`) };
+  }
+
+  const root = options.root ?? cwd;
+  const absRoot = isAbsolute(root) ? root : resolve(cwd, root);
+  const verdict = await runGauntlet(parsed.dag, absRoot);
+  if (!verdict.ok) {
+    return { ok: false, problems: verdict.errors.map((e) => `${e.kind}: ${e.message}`) };
   }
   return writeAuthoredScaffold(parsed.dag, options);
 };
@@ -378,10 +384,7 @@ export const writeAuthoredScaffold = async (
   const ctx: TemplateCtx = {
     name: authored.name,
     team: authored.team,
-    pascal: authored.name
-      .split("-")
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(""),
+    pascal: pascalCase(authored.name),
     llm: hasLlm,
   };
 
@@ -393,12 +396,17 @@ export const writeAuthoredScaffold = async (
     written.push(join(relDir, rel));
   };
 
+  // Partial-write semantics: this batch is in-process ordering, NOT crash
+  // atomicity — a mid-batch IO failure (ENOSPC/EACCES) propagates the real
+  // cause but can leave a partially-written dir behind. The sidecar
+  // (dag.authored.json) is therefore written FIRST: it is the authoritative
+  // description, and everything after it can be regenerated from it with
+  // `fugue new --from`. Canonical 2-space JSON so diffs stay clean across
+  // regenerations.
+  await write("dag.authored.json", `${JSON.stringify(authored, null, 2)}\n`);
   await write("dag.ts", scaffold.dagTs);
   await write("fugue.yaml", fugueYaml(ctx, options.owner));
   await write("README.md", authoredReadme(authored));
-  // The sidecar: one DAG-description family, roundtripped. Canonical 2-space
-  // JSON so diffs stay clean across regenerations.
-  await write("dag.authored.json", `${JSON.stringify(authored, null, 2)}\n`);
 
   if (hasLlm) {
     await mkdir(join(dir, "prompts"), { recursive: true });

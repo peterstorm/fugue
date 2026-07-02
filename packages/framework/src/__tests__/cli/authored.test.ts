@@ -7,8 +7,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import fc from "fast-check";
 import { parseAuthoredDag, parseAuthoredDagJson, type AuthoredDag } from "../../cli/authored.js";
 import { buildAuthoredScaffold } from "../../cli/authored-codegen.js";
+import { runGauntlet } from "../../cli/gauntlet.js";
 import { runNewFrom, writeAuthoredScaffold } from "../../cli/new.js";
 import { runLint } from "../../cli/lint.js";
 import { runDescribe } from "../../cli/describe.js";
@@ -56,6 +58,31 @@ const FIXTURES: Record<string, AuthoredDag> = {
     ],
     structure: { shape: "linear", order: ["draft-reply", "approve"] },
   },
+  "linear-two-llm": {
+    fugueAuthored: 1,
+    name: "authored-two-llm",
+    team: "demo",
+    description: "Classify then draft with two model calls",
+    input: out("message"),
+    nodes: [
+      { id: "classify", kind: "llm", purpose: "Classify the message", output: out("topic") },
+      { id: "draft-reply", kind: "llm", purpose: "Draft a reply", output: out("reply") },
+    ],
+    structure: { shape: "linear", order: ["classify", "draft-reply"] },
+  },
+  "llm-after-review": {
+    fugueAuthored: 1,
+    name: "authored-llm-after-review",
+    team: "demo",
+    description: "Fetch, gate behind approval, then summarize",
+    input: out("id"),
+    nodes: [
+      { id: "fetch-doc", kind: "fetch", purpose: "Load the document", output: out("text") },
+      { id: "approve", kind: "human-review", purpose: "Approve the document" },
+      { id: "summarize", kind: "llm", purpose: "Summarize the approved document", output: out("summary") },
+    ],
+    structure: { shape: "linear", order: ["fetch-doc", "approve", "summarize"] },
+  },
   "fan-out": {
     fugueAuthored: 1,
     name: "authored-fan-out",
@@ -69,6 +96,19 @@ const FIXTURES: Record<string, AuthoredDag> = {
       { id: "merge", kind: "transform", purpose: "Merge the branches", output: out("a", "b") },
     ],
     structure: { shape: "fan-out", source: "trigger", branches: ["enrich-a", "enrich-b"], join: "merge" },
+  },
+  "fan-out-nojoin": {
+    fugueAuthored: 1,
+    name: "authored-fan-out-nojoin",
+    team: "demo",
+    description: "Parallel enrichment without a join",
+    input: out("id"),
+    nodes: [
+      { id: "trigger", kind: "fetch", purpose: "Load the trigger", output: out("id") },
+      { id: "enrich-a", kind: "fetch", purpose: "Enrich from A", output: out("a") },
+      { id: "enrich-b", kind: "fetch", purpose: "Enrich from B", output: out("b") },
+    ],
+    structure: { shape: "fan-out", source: "trigger", branches: ["enrich-a", "enrich-b"] },
   },
   diamond: {
     fugueAuthored: 1,
@@ -216,6 +256,126 @@ describe("AuthoredDag schema", () => {
   it("rejects invalid JSON text", () => {
     expect(parseAuthoredDagJson("{nope").ok).toBe(false);
   });
+
+  it("rejects a newline in purpose / dag description / field description", () => {
+    const purpose = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (purpose.nodes[0] as { purpose: string }).purpose = "line one\n// injected";
+    const p = parseAuthoredDag(purpose);
+    expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.problems.join("\n")).toContain("single line");
+
+    const desc = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (desc as { description: string }).description = "line one\nline two";
+    expect(parseAuthoredDag(desc).ok).toBe(false);
+
+    const field = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (field.input.fields[0] as { description?: string }).description = "line one\nline two";
+    expect(parseAuthoredDag(field).ok).toBe(false);
+  });
+
+  it("rejects a node id that camelCases to a JS reserved word", () => {
+    const d = structuredClone(FIXTURES.linear!) as AuthoredDag;
+    (d.nodes[1] as { id: string }).id = "default";
+    (d.structure as { order: string[] }).order = ["fetch-record", "default"];
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("reserved word 'default'");
+  });
+
+  it("rejects an llm node id whose factory collides with a framework import", () => {
+    // llm "llm-node" would generate `createLlmNode` — the framework import.
+    const d: AuthoredDag = {
+      fugueAuthored: 1,
+      name: "x-llm",
+      team: "demo",
+      description: "d",
+      input: out("id"),
+      nodes: [
+        { id: "fetch-record", kind: "fetch", purpose: "Load", output: out("text") },
+        { id: "llm-node", kind: "llm", purpose: "Reply", output: out("reply") },
+      ],
+      structure: { shape: "linear", order: ["fetch-record", "llm-node"] },
+    };
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("createLlmNode");
+  });
+
+  it("rejects node ids whose digit-boundary camelCase forms collide ('a-1b' vs 'a1b')", () => {
+    const d: AuthoredDag = {
+      fugueAuthored: 1,
+      name: "x-collide",
+      team: "demo",
+      description: "d",
+      input: out("id"),
+      nodes: [
+        { id: "a-1b", kind: "fetch", purpose: "One", output: out("x") },
+        { id: "a1b", kind: "transform", purpose: "Two", output: out("y") },
+      ],
+      structure: { shape: "linear", order: ["a-1b", "a1b"] },
+    };
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      const all = parsed.problems.join("\n");
+      expect(all).toContain("'a-1b' and 'a1b'");
+      expect(all).toContain("a1b, A1bSchema, A1bFanIn");
+    }
+  });
+
+  it("rejects an llm node id colliding with a non-llm node's const ('foo' vs 'foo-node')", () => {
+    const d: AuthoredDag = {
+      fugueAuthored: 1,
+      name: "x-foo",
+      team: "demo",
+      description: "d",
+      input: out("id"),
+      nodes: [
+        { id: "foo", kind: "llm", purpose: "One", output: out("x") },
+        { id: "foo-node", kind: "transform", purpose: "Two", output: out("y") },
+      ],
+      structure: { shape: "linear", order: ["foo", "foo-node"] },
+    };
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("fooNode");
+  });
+
+  it("rejects duplicate enum values", () => {
+    const d = structuredClone(FIXTURES.router!) as AuthoredDag;
+    const bucket = d.nodes[0]!.output!.fields[1]! as { type: { kind: string; values: string[] } };
+    bucket.type.values = ["small", "small"];
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("duplicate enum value 'small'");
+  });
+
+  it("rejects a sources join of kind source", () => {
+    const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDag;
+    (d.nodes[2] as { kind: string }).kind = "source"; // synthesize, the join
+    const parsed = parseAuthoredDag(d);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("join 'synthesize' must not be a source node");
+  });
+
+  it("rejects an llm 'confidence' output field that is not the exact bucket enum", () => {
+    const wrong = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDag;
+    (wrong.nodes[2]!.output!.fields as { name: string; type: unknown }[]).push({
+      name: "confidence",
+      type: { kind: "string" },
+    });
+    const parsed = parseAuthoredDag(wrong);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("'confidence' must be exactly");
+
+    // The exact bucket enum, explicitly declared, is accepted.
+    const exact = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDag;
+    (exact.nodes[2]!.output!.fields as { name: string; type: unknown }[]).push({
+      name: "confidence",
+      type: { kind: "enum", values: ["high", "medium", "low"] },
+    });
+    expect(parseAuthoredDag(exact).ok).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -272,6 +432,51 @@ describe("authored codegen survives the gauntlet", () => {
     expect(scaffold.prompts[0]!.body).toContain("never use a number");
   });
 
+  it("a two-llm dag emits per-node prompt names and a 2-entry registry", async () => {
+    const fixture = FIXTURES["linear-two-llm"]!;
+    const scaffold = buildAuthoredScaffold(fixture);
+    expect(scaffold.prompts.map((p) => p.name).sort()).toEqual([
+      "authored-two-llm-classify",
+      "authored-two-llm-draft-reply",
+    ]);
+
+    const root = join(tmpRoot, "two-llm-registry");
+    const written = await writeAuthoredScaffold(fixture, { root, force: false });
+    if (!written.ok) throw new Error(written.problems.join("; "));
+    const registry = JSON.parse(
+      await readFile(join(written.dir, "prompts", "registry.json"), "utf-8"),
+    ) as Record<string, { version: string }>;
+    expect(Object.keys(registry).sort()).toEqual([
+      "authored-two-llm-classify",
+      "authored-two-llm-draft-reply",
+    ]);
+    const prompts = await runPromptsCheck(written.dir);
+    expect(prompts.ok).toBe(true);
+  });
+
+  it("an llm after a human-review gate consumes the reviewed (upstream) fields", () => {
+    const scaffold = buildAuthoredScaffold(FIXTURES["llm-after-review"]!);
+    // The gate passes fetch-doc's schema through — buildInput and the prompt
+    // reference its fields, not the (nonexistent) review output.
+    expect(scaffold.dagTs).toContain('text: input["text"]');
+    const prompt = scaffold.prompts.find((p) => p.name === "authored-llm-after-review")!;
+    expect(prompt.body).toContain("text: {{text}}");
+  });
+
+  it("fan-in llm buildInput JSON-stringifies the node-keyed objects", () => {
+    const scaffold = buildAuthoredScaffold(FIXTURES["sources-llm"]!);
+    expect(scaffold.dagTs).toContain('JSON.stringify(input["fetch-weather"])');
+    expect(scaffold.dagTs).toContain('JSON.stringify(input["fetch-calendar"])');
+    // The prompt tells the model the placeholder carries JSON.
+    expect(scaffold.prompts[0]!.body).toContain("fetch_weather (JSON): {{fetch_weather}}");
+  });
+
+  it("buildAuthoredScaffold is deterministic (same input → identical output)", () => {
+    for (const fixture of Object.values(FIXTURES)) {
+      expect(buildAuthoredScaffold(fixture)).toEqual(buildAuthoredScaffold(fixture));
+    }
+  });
+
   it("runNewFrom reads the file, refuses to clobber without --force", async () => {
     const root = join(tmpRoot, "from-file");
     await mkdir(root, { recursive: true });
@@ -283,4 +488,53 @@ describe("authored codegen survives the gauntlet", () => {
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.problems[0]).toContain("--force");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Hostile-string properties (mirrors new.test.ts's yamlScalar property) — the
+// comment-injection surface: free text either carries a newline (schema must
+// reject) or it doesn't (the generated code must still import cleanly, no
+// matter what quotes/backticks/template syntax it carries).
+// ---------------------------------------------------------------------------
+
+describe("hostile free-text properties", () => {
+  const setFreeText = (dag: AuthoredDag, s: string): AuthoredDag => {
+    const d = structuredClone(dag) as AuthoredDag;
+    (d as { description: string }).description = s;
+    for (const n of d.nodes) (n as { purpose: string }).purpose = s;
+    (d.input.fields[0] as { description?: string }).description = s;
+    return d;
+  };
+
+  it("rejects ANY purpose/description containing a newline", () => {
+    const withNewline = fc
+      .tuple(fc.string({ maxLength: 20 }), fc.constantFrom("\n", "\r", "\r\n"), fc.string({ maxLength: 20 }))
+      .map(([a, nl, b]) => `${a}${nl}${b}`);
+    fc.assert(
+      fc.property(withNewline, (s) => {
+        expect(parseAuthoredDag(setFreeText(FIXTURES.linear!, s)).ok).toBe(false);
+      }),
+    );
+  });
+
+  it("single-line quote/backtick-hostile text parses AND survives the real gauntlet", async () => {
+    // Real codegen + import + lint per run — keep numRuns small.
+    const hostileChar = fc.constantFrom('"', "'", "`", "\\", "$", "{", "}", "/", "*", "a", " ", "—");
+    const singleLineHostile = fc
+      .string({ unit: hostileChar, minLength: 1, maxLength: 30 })
+      .filter((s) => /^[^\r\n]+$/.test(s));
+    const root = join(tmpRoot, "prop-gauntlet");
+    await mkdir(root, { recursive: true });
+    await fc.assert(
+      fc.asyncProperty(singleLineHostile, async (s) => {
+        const parsed = parseAuthoredDag(setFreeText(FIXTURES.linear!, s));
+        if (!parsed.ok) throw new Error(parsed.problems.join("; "));
+        const verdict = await runGauntlet(parsed.dag, root);
+        if (!verdict.ok) {
+          throw new Error(`gauntlet failed for ${JSON.stringify(s)}: ${JSON.stringify(verdict.errors)}`);
+        }
+      }),
+      { numRuns: 15 },
+    );
+  }, 60_000);
 });

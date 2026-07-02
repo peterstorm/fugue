@@ -6,7 +6,8 @@
 // it, and a draft the gauntlet rejects is repaired or the run fails closed.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ok } from "../../types/result.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
@@ -15,10 +16,10 @@ import type { FrameworkError } from "../../types/errors.js";
 import {
   authoredToMermaid,
   runCompose,
-  runGauntlet,
   type ComposeIo,
   type ComposeTurn,
 } from "../../cli/compose.js";
+import { runGauntlet } from "../../cli/gauntlet.js";
 import type { AuthoredDag } from "../../cli/authored.js";
 
 const tmpRoot = resolve(__dirname, ".tmp-compose");
@@ -202,6 +203,64 @@ describe("runCompose", () => {
     }
   });
 
+  it("a schema-invalid draft enters the repair loop and is fixed by a second draft", async () => {
+    const root = join(tmpRoot, "schema-repair");
+    // Structure references an unknown node — passes the wire envelope
+    // (dag is `unknown` there) but fails parseAuthoredDag inside the loop.
+    const invalid = {
+      ...validDag,
+      structure: { shape: "sources", sources: ["fetch-weather", "ghost"], join: "join-all", assemble: "final" },
+    };
+    const { client, requests } = scriptedLlm([
+      { action: "draft", dag: invalid },
+      draft({ ...validDag, name: "compose-schema-repair" }),
+    ]);
+    const { io } = scriptedIo(["yes"]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    expect(outcome.rounds.repairs).toBe(1);
+    // The repair prompt carried the structured schema problems, not prose.
+    expect(requests[1]).toContain("failed schema validation");
+    expect(requests[1]).toContain("ghost");
+  });
+
+  it("exhausting the question rounds without a draft fails closed as llm-error", async () => {
+    const root = join(tmpRoot, "question-exhaustion");
+    const q = (text: string): ComposeTurn => ({ action: "questions", questions: [text] });
+    const { client } = scriptedLlm([q("one?"), q("two?"), q("three?")]);
+    const { io } = scriptedIo(["a1", "a2"]);
+
+    const outcome = await runCompose(
+      { intent: "briefing", team: "assist", root, maxQuestionRounds: 2 },
+      client,
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("llm-error");
+      expect(outcome.problems[0]).toContain("past the round limit");
+    }
+  });
+
+  it("write-failed carries the accepted draft JSON so the work is never lost", async () => {
+    const root = join(tmpRoot, "write-failed");
+    const dir = join(root, "dags", "assist", "compose-briefing");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "keep.txt"), "occupied", "utf-8");
+    const { client } = scriptedLlm([draft(validDag)]);
+    const { io } = scriptedIo(["yes"]);
+
+    const outcome = await runCompose({ intent: "briefing", team: "assist", root }, client, io);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("write-failed");
+      expect(outcome.problems.join("\n")).toContain("--force");
+      expect(outcome.problems).toContain("accepted draft JSON follows");
+      expect(outcome.problems).toContain(JSON.stringify(validDag));
+    }
+  });
+
   it("refinement requests produce a new draft that is re-proven before writing", async () => {
     const root = join(tmpRoot, "refine");
     const { client, requests } = scriptedLlm([draft(validDag), draft(refinedDag)]);
@@ -212,6 +271,38 @@ describe("runCompose", () => {
     expect(outcome.rounds.refinements).toBe(1);
     expect(outcome.result.name).toBe("compose-briefing-v2");
     expect(requests[1]).toContain("Refinement request: rename it to v2");
+  });
+
+  it("the repair budget is per draft — a refinement resets it", async () => {
+    const root = join(tmpRoot, "per-draft-budget");
+    // Fail the FIRST gauntlet check of each draft (calls 1 and 3). With a
+    // budget of 1 this only passes if the refinement resets the counter;
+    // cumulative rounds.repairs still reports both.
+    let calls = 0;
+    const failFirstCheckPerDraft = async (dag: AuthoredDag, r: string) => {
+      calls++;
+      if (calls === 1 || calls === 3) {
+        return {
+          ok: false as const,
+          errors: [{ kind: "import-failed" as const, message: "simulated" }],
+          advisories: [],
+        };
+      }
+      return runGauntlet(dag, r);
+    };
+    const refined: AuthoredDag = { ...validDag, name: "compose-per-draft" };
+    const { client } = scriptedLlm([draft(validDag), draft(validDag), draft(refined), draft(refined)]);
+    const { io } = scriptedIo(["rename it", "yes"]);
+
+    const outcome = await runCompose(
+      { intent: "briefing", team: "assist", root, maxRepairRounds: 1 },
+      client,
+      io,
+      failFirstCheckPerDraft,
+    );
+    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    expect(outcome.rounds.repairs).toBe(2);
+    expect(outcome.rounds.refinements).toBe(1);
   });
 
   it("abort leaves nothing behind", async () => {
@@ -227,15 +318,13 @@ describe("runCompose", () => {
 });
 
 describe("runGauntlet", () => {
-  it("passes a valid draft and cleans up its staging dir", async () => {
+  it("passes a valid draft and cleans up its staging dir AND the empty base", async () => {
     const root = join(tmpRoot, "gauntlet");
     await mkdir(root, { recursive: true });
     const result = await runGauntlet(validDag, root);
     expect(result.ok).toBe(true);
-    const staging = await Array.fromAsync(
-      new Bun.Glob("draft-*").scan({ cwd: join(root, ".fugue-compose"), onlyFiles: false }),
-    ).catch(() => []);
-    expect(staging).toEqual([]);
+    // The whole .fugue-compose base is removed once the last draft dir is gone.
+    expect(existsSync(join(root, ".fugue-compose"))).toBe(false);
   });
 });
 

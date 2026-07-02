@@ -14,6 +14,13 @@
 // with `superRefine` so an `AuthoredDag` value that exists is buildable.
 
 import { z } from "zod";
+import {
+  JS_RESERVED_WORDS,
+  RESERVED_IDENTIFIERS,
+  camelCase,
+  dagLevelIdentifiers,
+  generatedIdentifiersFor,
+} from "./identifiers.js";
 
 // ---------------------------------------------------------------------------
 // Field / schema specs (closed vocabulary)
@@ -22,6 +29,10 @@ import { z } from "zod";
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 // A field name must be a valid JS identifier so codegen can emit dotted access.
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Free-text fields are interpolated into `//` comments by codegen — a newline
+// would break out of the comment into code position, so the schema rejects it
+// (codegen's `comment()` helper is the defense-in-depth behind this).
+const SINGLE_LINE = /^[^\r\n]+$/;
 
 export const FieldTypeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("string") }).strict(),
@@ -37,9 +48,19 @@ export const FieldSpecSchema = z
   .object({
     name: z.string().regex(IDENT, "field name must be a JS identifier"),
     type: FieldTypeSchema,
-    description: z.string().min(1).optional(),
+    description: z.string().min(1).regex(SINGLE_LINE, "must be a single line").optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((f, ctx) => {
+    if (f.type.kind !== "enum") return;
+    const seen = new Set<string>();
+    for (const v of f.type.values) {
+      if (seen.has(v)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `field '${f.name}': duplicate enum value '${v}'` });
+      }
+      seen.add(v);
+    }
+  });
 export type FieldSpec = z.infer<typeof FieldSpecSchema>;
 
 export const SchemaSpecSchema = z
@@ -67,7 +88,7 @@ export const AuthoredNodeSchema = z
     id: z.string().regex(KEBAB, "node id must be kebab-case"),
     kind: z.enum(NODE_KINDS),
     /** What this node is for — the authoring intent DescribedDag can't carry. */
-    purpose: z.string().min(1),
+    purpose: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
     /**
      * Output field spec. Omitted ONLY for human-review nodes (a review gate is
      * a typed passthrough over the reviewed node's schema).
@@ -154,7 +175,7 @@ const BaseAuthoredDagSchema = z
     fugueAuthored: z.literal(1),
     name: z.string().regex(KEBAB, "name must be kebab-case"),
     team: z.string().regex(KEBAB, "team must be kebab-case"),
-    description: z.string().min(1),
+    description: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
     /** DAG input schema (the request). */
     input: SchemaSpecSchema,
     nodes: z.array(AuthoredNodeSchema).min(1),
@@ -189,34 +210,46 @@ const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [string, st
   }
 };
 
-const camelOf = (kebab: string): string => {
-  const pascal = kebab
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("");
-  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
-};
-
-/**
- * Identifiers the generated `dag.ts` imports or declares. A node id whose
- * camelCase form lands here would produce a duplicate declaration. The
- * validation gauntlet (codegen → import) would also catch these, but
- * rejecting at parse time gives the author/LLM a precise message instead of
- * a duplicate-declaration SyntaxError.
- */
-const RESERVED_IDENTIFIERS = new Set([
-  "dag", "input", "registration", "z", "ok", "confidence",
-  "createFetchNode", "createTransformNode", "createLlmNode",
-  "createHumanReviewNode", "createSourceNode",
-  "defineLinearDag", "defineFanOut", "defineDiamond", "defineRouter", "defineSources",
-]);
-
 export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
 
-  for (const n of dag.nodes) {
-    if (RESERVED_IDENTIFIERS.has(camelOf(n.id))) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node id '${n.id}' is reserved (collides with generated identifiers)` });
+  // Identifier safety: every identifier codegen will emit for a node (const,
+  // schema const, fan-in const, llm factory) must avoid JS reserved words, the
+  // module's imports/fixed consts, the DAG-level names, and every OTHER node's
+  // generated identifiers. The gauntlet (codegen → import) would also catch
+  // these, but rejecting at parse time gives the author/LLM a precise message
+  // naming both sides instead of a duplicate-declaration SyntaxError.
+  const moduleReserved = new Set([...RESERVED_IDENTIFIERS, ...dagLevelIdentifiers(dag.name)]);
+  const identsByNode = dag.nodes.map((n) => ({ node: n, idents: generatedIdentifiersFor(n) }));
+  for (const { node, idents } of identsByNode) {
+    const camel = camelCase(node.id);
+    if (JS_RESERVED_WORDS.has(camel)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `node id '${node.id}' is reserved (camelCases to the JS reserved word '${camel}')`,
+      });
+    }
+    for (const ident of idents) {
+      if (moduleReserved.has(ident)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `node id '${node.id}' is reserved (generated identifier '${ident}' collides with a generated or imported identifier)`,
+        });
+      }
+    }
+  }
+  for (let a = 0; a < identsByNode.length; a++) {
+    for (let b = a + 1; b < identsByNode.length; b++) {
+      const left = identsByNode[a]!;
+      const right = identsByNode[b]!;
+      if (left.node.id === right.node.id) continue; // duplicate ids get their own message below
+      const shared = left.idents.filter((i) => right.idents.includes(i));
+      if (shared.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `node ids '${left.node.id}' and '${right.node.id}' generate colliding identifier(s): ${shared.join(", ")}`,
+        });
+      }
     }
   }
 
@@ -261,6 +294,9 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: `sources entry '${id}' must be kind "source" (got "${kindOf(id)}")` });
       }
     }
+    if (byId.has(s.join) && kindOf(s.join) === "source") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `join '${s.join}' must not be a source node` });
+    }
     if (byId.has(s.assemble) && kindOf(s.assemble) === "source") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `assemble '${s.assemble}' must not be a source node` });
     }
@@ -270,6 +306,28 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
       if (n.kind === "source") {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node '${n.id}' is kind "source" but shape is "${s.shape}" — source nodes belong to the sources shape` });
       }
+    }
+  }
+
+  // LLM confidence: codegen injects {kind:"enum",values:["high","medium","low"]}
+  // when absent. An EXPLICIT 'confidence' output field must be exactly that
+  // shape — anything else would clash with the framework's bucketed-confidence
+  // channel (`confidence(o.confidence, "self-reported-bucket")`).
+  for (const n of dag.nodes) {
+    if (n.kind !== "llm" || n.output === undefined) continue;
+    const conf = n.output.fields.find((f) => f.name === "confidence");
+    if (conf === undefined) continue;
+    const isBucket =
+      conf.type.kind === "enum" &&
+      conf.type.values.length === 3 &&
+      conf.type.values[0] === "high" &&
+      conf.type.values[1] === "medium" &&
+      conf.type.values[2] === "low";
+    if (!isBucket) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `llm node '${n.id}' output field 'confidence' must be exactly {"kind":"enum","values":["high","medium","low"]} (the framework's bucketed confidence) — or omit it and let codegen inject it`,
+      });
     }
   }
 

@@ -31,19 +31,22 @@ import {
   type PromptFile,
   type TemplateCtx,
 } from "./new-templates.js";
+import { camelCase, pascalCase } from "./identifiers.js";
 
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
 
-const pascalCase = (kebab: string): string =>
-  kebab
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("");
-
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const key = (name: string): string => (IDENT.test(name) ? name : JSON.stringify(name));
+
+/**
+ * Every free-text interpolation into a `//` comment goes through here: a
+ * newline in the text would otherwise break out of the comment into code
+ * position. The authoring schema already rejects multi-line purpose /
+ * description fields — this is the defense-in-depth at the emission site.
+ */
+const comment = (text: string): string => text.replace(/[\r\n]+/g, " ");
 
 const zodExpr = (t: FieldType): string =>
   match(t)
@@ -74,7 +77,7 @@ const withConfidence = (spec: SchemaSpec): SchemaSpec =>
 
 const schemaConst = (name: string, spec: SchemaSpec): string => {
   const fields = spec.fields
-    .map((f) => `  ${key(f.name)}: ${zodExpr(f.type)},${f.description ? ` // ${f.description}` : ""}`)
+    .map((f) => `  ${key(f.name)}: ${zodExpr(f.type)},${f.description ? ` // ${comment(f.description)}` : ""}`)
     .join("\n");
   return `const ${name} = z.object({\n${fields}\n});`;
 };
@@ -100,19 +103,14 @@ interface NodePlan {
   readonly ref: string;
 }
 
-const camelCase = (kebab: string): string => {
-  const pascal = pascalCase(kebab);
-  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
-};
-
-const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${node.purpose}`;
+const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
 
 const fetchNode = (p: NodePlan): string => `${purposeComment(p.node)}
 const ${p.ref} = createFetchNode({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
-  // Placeholder — implement the real fetch for: ${p.node.purpose}
+  // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
   fetch: async (_input) =>
     ok({
 ${defaultsObject(p.outSpec!, "      ")}
@@ -123,7 +121,7 @@ const sourceNode = (p: NodePlan): string => `${purposeComment(p.node)}
 const ${p.ref} = createSourceNode({
   id: ${JSON.stringify(p.node.id)},
   outputSchema: ${p.outName},
-  // Placeholder — implement the real fetch for: ${p.node.purpose}
+  // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
   fetch: async () =>
     ok({
 ${defaultsObject(p.outSpec!, "      ")}
@@ -135,7 +133,7 @@ const ${p.ref} = createTransformNode({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
-  // Placeholder — map the real values for: ${p.node.purpose}
+  // Placeholder — map the real values for: ${comment(p.node.purpose)}
   transform: (_input) =>
     ok({
 ${defaultsObject(p.outSpec!, "      ")}
@@ -154,9 +152,15 @@ const ${p.ref} = createHumanReviewNode({
 /** Prompt placeholders must be identifier-ish — sanitize fan-in keys. */
 const placeholderName = (fieldKey: string): string => fieldKey.replace(/[^A-Za-z0-9_]/g, "_");
 
-const llmNode = (p: NodePlan, inputFields: readonly string[]): string => {
+const llmNode = (p: NodePlan, inputFields: readonly string[], fanIn: boolean): string => {
+  // Fan-in inputs are OBJECTS keyed by node id — stringify them so the prompt
+  // placeholder receives JSON, not "[object Object]".
   const buildInputEntries = inputFields
-    .map((f) => `${key(placeholderName(f))}: input[${JSON.stringify(f)}]`)
+    .map((f) =>
+      fanIn
+        ? `${key(placeholderName(f))}: JSON.stringify(input[${JSON.stringify(f)}])`
+        : `${key(placeholderName(f))}: input[${JSON.stringify(f)}]`,
+    )
     .join(", ");
   const factoryName = `create${pascalCase(p.node.id)}`;
   return `${purposeComment(p.node)}
@@ -175,8 +179,16 @@ ${llmConfidenceReturn}
 };`;
 };
 
-const llmPrompt = (dag: AuthoredDag, node: AuthoredNode, promptName: string, inputFields: readonly string[]): PromptFile => {
-  const vars = inputFields.map((f) => `${placeholderName(f)}: {{${placeholderName(f)}}}`).join("\n");
+const llmPrompt = (
+  dag: AuthoredDag,
+  node: AuthoredNode,
+  promptName: string,
+  inputFields: readonly string[],
+  fanIn: boolean,
+): PromptFile => {
+  const vars = inputFields
+    .map((f) => `${placeholderName(f)}${fanIn ? " (JSON)" : ""}: {{${placeholderName(f)}}}`)
+    .join("\n");
   const outSpec = withConfidence(node.output!);
   const jsonShape = outSpec.fields
     .map((f) =>
@@ -268,7 +280,7 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
   };
 
   const s = dag.structure;
-  const schemaDecls: string[] = [`const InputSchema = z.object({\n${dag.input.fields.map((f) => `  ${key(f.name)}: ${zodExpr(f.type)},${f.description ? ` // ${f.description}` : ""}`).join("\n")}\n});`];
+  const schemaDecls: string[] = [schemaConst("InputSchema", dag.input)];
   const extraDecls: string[] = [];
 
   // Output schema consts (skip human-review — passthrough)
@@ -376,8 +388,9 @@ ${cases}
         break;
       case "llm": {
         const inputFields = llmInputFields(dag, p);
-        nodeDecls.push(llmNode(p, inputFields));
-        prompts.push(llmPrompt(dag, p.node, p.promptName!, inputFields));
+        const fanIn = llmInputIsFanIn(dag, p);
+        nodeDecls.push(llmNode(p, inputFields, fanIn));
+        prompts.push(llmPrompt(dag, p.node, p.promptName!, inputFields, fanIn));
         break;
       }
     }
@@ -391,7 +404,7 @@ ${cases}
   };
 
   const imports = buildImports(dag, hasLlm);
-  const header = `// ${dag.name} — ${dag.description}
+  const header = `// ${dag.name} — ${comment(dag.description)}
 //
 // Generated by \`fugue new --from\` (deterministic codegen from dag.authored.json).
 // The STRUCTURE is authoritative — edit dag.authored.json and regenerate rather
@@ -451,6 +464,18 @@ const structureOrder = (dag: AuthoredDag): readonly string[] =>
 const nodeExprRef = (p: NodePlan): string =>
   p.node.kind === "llm" ? `create${pascalCase(p.node.id)}(opts.model ?? DEFAULT_MODEL)` : p.ref;
 
+/**
+ * Whether an LLM node's derived input is a fan-in object (keys = node ids /
+ * `$input`) rather than a predecessor's flat fields. Fan-in values are
+ * objects, so `buildInput` must JSON.stringify them for the prompt.
+ */
+const llmInputIsFanIn = (dag: AuthoredDag, p: NodePlan): boolean =>
+  match(dag.structure)
+    .with({ shape: "fan-out" }, { shape: "diamond" }, (s) => s.join === p.node.id)
+    .with({ shape: "sources" }, (s) => s.join === p.node.id || s.assemble === p.node.id)
+    .with({ shape: "linear" }, { shape: "router" }, () => false)
+    .exhaustive();
+
 /** Top-level input keys an LLM node's buildInput/prompt can reference. */
 const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
   const s = dag.structure;
@@ -460,7 +485,11 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
   switch (s.shape) {
     case "linear": {
       const i = s.order.indexOf(p.node.id);
-      return i === 0 ? dag.input.fields.map((f) => f.name) : fieldsOf(s.order[i - 1]!);
+      // Human-review gates are typed passthroughs — walk back to the nearest
+      // predecessor that actually produces fields (mirrors effectiveOutName).
+      let j = i - 1;
+      while (j >= 0 && byId.get(s.order[j]!)?.kind === "human-review") j--;
+      return j < 0 ? dag.input.fields.map((f) => f.name) : fieldsOf(s.order[j]!);
     }
     case "fan-out":
     case "diamond":

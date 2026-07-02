@@ -1,5 +1,5 @@
 // fugue describe — import a DAG file and emit a structured summary as JSON.
-// Reuses `runLint` for the import + validation work, then delegates to the
+// Reuses `importDagFile` for the import + validation work, then delegates to the
 // framework's shared `buildDescribedDag` so the CLI surface matches what
 // `GET /dags/:id/manifest` returns (same node/edge/wave shapes).
 //

@@ -2,9 +2,12 @@
 // core convergence, Phase B4).
 //
 // `describedToMermaid` is a PURE function `DescribedDag → string`; the CLI
-// wrapper reuses `runDescribe` for the import + validation work, so a file
-// that fails lint fails visualize with the same structured `errors[]`. The
-// JSON result carries the Mermaid text; `--raw` in the bin prints only the
+// wrapper reuses `runDescribe`, which imports the file via `importDagFile`
+// (running `defineDag`'s structural validation). It does NOT re-run the
+// `analyzeDag` schema checks `fugue lint` adds — a DAG with, say, a
+// fan-in-key-mismatch fails lint but still visualizes (drawing the
+// wrong-but-importable topology is often how the mistake is found). The JSON
+// result carries the Mermaid text; `--raw` in the bin prints only the
 // diagram for direct piping into docs.
 
 import type { DescribedDag, DescribedEdge } from "../describe/index.js";

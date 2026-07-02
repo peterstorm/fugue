@@ -3,16 +3,28 @@
 // fugue — DAG authoring CLI.
 //
 // Subcommands:
-//   fugue lint <path>      Import a dag.ts and report structural diagnostics
-//                          as JSON. Exit 0 on success, 1 on failure.
-//   fugue describe <path>  Print a structured summary of a DAG file:
-//                          input/output schemas, waves, prompts, capabilities.
+//   fugue lint <path>          Import a dag.ts and report structural diagnostics
+//                              as JSON. Exit 0 on success, 1 on failure.
+//   fugue describe <path>      Print a structured summary of a DAG file:
+//                              input/output schemas, waves, prompts, capabilities.
+//   fugue visualize <path>     Render a DAG file as a Mermaid flowchart. JSON
+//                              result by default; `--raw` prints the bare
+//                              Mermaid diagram for piping into docs.
+//   fugue capabilities         List the framework's built-in capabilities.
+//   fugue prompts sync|check <dagDir>
+//                              Rewrite / verify prompts/registry.json.
 //   fugue new <team>/<name> --shape <shape> [--llm] [--review]
-//                          Scaffold a compliant DAG directory under dags/.
+//                              Scaffold a compliant DAG directory under dags/.
+//   fugue new --from <authored.json>
+//                              Deterministic codegen from an AuthoredDag file.
+//   fugue compose "<intent>" --team <team>
+//                              Conversational authoring: the LLM edits only the
+//                              AuthoredDag JSON; code is generated and proven.
 //
-// All output is JSON on stdout. Unexpected errors land on stderr with a
-// non-zero exit code. Designed for LLM tooling: parse `ok` and `errors[].kind`
-// rather than scraping prose.
+// All output is JSON on stdout — except `visualize --raw`, which prints the
+// bare Mermaid text. Unexpected errors land on stderr with a non-zero exit
+// code. Designed for LLM tooling: parse `ok` and `errors[].kind` rather than
+// scraping prose.
 
 import { match } from "ts-pattern";
 import { runLint } from "../src/cli/lint.js";
@@ -149,8 +161,20 @@ const main = async (): Promise<number> => {
       import("node:readline/promises"),
     ]);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    // Ctrl-D / piped-stdin exhaustion closes the interface and Ctrl-C fires
+    // SIGINT — either way a pending `ask` must settle rather than hang the
+    // process forever. Resolving to "abort" routes the compose loop to its
+    // clean { ok: false, reason: "aborted" } outcome. Registered ONCE, up
+    // front, so every subsequent ask shares the same close promise.
+    const closedToAbort: Promise<string> = new Promise((resolveClosed) => {
+      rl.once("close", () => resolveClosed("abort"));
+    });
+    process.once("SIGINT", () => rl.close());
     const io: ComposeIo = {
-      ask: (q) => rl.question(`${q}\n> `),
+      // If the interface closes mid-question, rl.question either never settles
+      // or rejects (runtime-dependent) — race it against the close promise and
+      // fold a rejection into "abort" too.
+      ask: (q) => Promise.race([rl.question(`${q}\n> `).catch(() => "abort"), closedToAbort]),
       say: (m) => process.stdout.write(`${m}\n`),
     };
     try {

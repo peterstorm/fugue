@@ -6,26 +6,33 @@
 // every turn is `sendStructured` against a closed Zod schema, graph code is
 // always generated deterministically (`buildAuthoredScaffold`), and every
 // draft is proven through the real gauntlet before the user sees it:
-// codegen → `import` through `defineDag` (22 structural checks, throws) →
-// `fugue lint` (fan-in keys, passthrough, shape hints). Violations feed back
-// to the LLM as structured JSON events, not prose. The LLM never hand-writes
-// `defineDag`.
+// codegen → `import` through `defineDag` (defineDag's structural checks,
+// throws) → `fugue lint` (fan-in keys, passthrough, shape hints). Violations
+// feed back to the LLM as structured JSON events, not prose. The LLM never
+// hand-writes `defineDag`.
+//
+// The draft payload crosses the wire as `unknown` and is parsed by
+// `parseAuthoredDag` INSIDE the loop — a schema-invalid draft enters the
+// repair loop (the superRefine problems reach the model as structured JSON)
+// instead of killing the session at the transport boundary. Nothing else ever
+// consumes the unknown, so the LLM-only-emits-AuthoredDag guarantee holds.
 //
 // Seams are injected (LlmClient + ComposeIo) so the whole loop is testable
 // with a scripted fake — no network, no TTY.
 
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, resolve, isAbsolute } from "node:path";
+import { resolve, isAbsolute } from "node:path";
 import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
-import { AuthoredDagSchema, type AuthoredDag } from "./authored.js";
-import { buildAuthoredScaffold } from "./authored-codegen.js";
+import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
+import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import { writeAuthoredScaffold } from "./new.js";
-import { runLint } from "./lint.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
-import type { LintError, LintResult, NewResult } from "./types.js";
+import type { NewResult } from "./types.js";
+
+// Re-export the gauntlet from its old home so existing importers keep working.
+export { runGauntlet, type GauntletResult } from "./gauntlet.js";
 
 // ---------------------------------------------------------------------------
 // Seams
@@ -49,7 +56,11 @@ export interface ComposeOptions {
   readonly force?: boolean;
   /** Max clarifying-question rounds before the model must draft. Default 2. */
   readonly maxQuestionRounds?: number;
-  /** Max validate→revise rounds per draft. Default 3. */
+  /**
+   * Max repair rounds PER DRAFT (schema-validation failures and gauntlet
+   * failures both count; the budget resets when a refinement produces a new
+   * draft). `rounds.repairs` in the outcome stays cumulative. Default 3.
+   */
   readonly maxRepairRounds?: number;
 }
 
@@ -71,7 +82,10 @@ export type ComposeOutcome =
 
 /**
  * Every model turn is exactly one of: clarifying questions, or a full
- * AuthoredDag draft. Validated at the API boundary by `sendStructured`.
+ * AuthoredDag draft. The envelope is validated at the API boundary by
+ * `sendStructured`; the draft payload is deliberately `unknown` at the wire so
+ * `parseAuthoredDag`'s problems can feed the repair loop rather than fail the
+ * transport (see the module header). `parseAuthoredDag` is the ONLY consumer.
  */
 export const ComposeTurnSchema = z.discriminatedUnion("action", [
   z.object({
@@ -80,7 +94,7 @@ export const ComposeTurnSchema = z.discriminatedUnion("action", [
   }),
   z.object({
     action: z.literal("draft"),
-    dag: AuthoredDagSchema,
+    dag: z.unknown(),
   }),
 ]);
 export type ComposeTurn = z.infer<typeof ComposeTurnSchema>;
@@ -98,10 +112,17 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
 - fugueAuthored: 1. name/team/node ids/case labels: kebab-case.
 - input + node outputs are field lists; field types are ONLY
   {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
+- Field names must be valid JS identifiers. Node ids must not be JS reserved
+  words and must not collide with the identifiers codegen derives from them —
+  avoid ids like "dag", "input", "ok", or "llm-node".
+- purpose and description fields are single-line (no newlines).
 - Node kinds: fetch (external read), transform (pure mapping), llm
   (model call — a confidence bucket is added automatically), human-review
   (approval gate; NO output field; linear shape only, never first), source
   (context-only read; sources shape only).
+- The auto-injected llm confidence bucket CANNOT be used as a router
+  predicate field — declare it explicitly on the classifier output as
+  {"kind":"enum","values":["high","medium","low"]} if you route on it.
 - structure is one shape:
   linear   {order:[...≥2]}                    — a chain
   fan-out  {source,branches:[...≥2],join?}    — parallel branches, optional join
@@ -114,39 +135,6 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   DERIVED from the topology — never author them.
 - Prefer the simplest shape that fits. Human gates only where the user asked
   for approval.`;
-
-// ---------------------------------------------------------------------------
-// Validation gauntlet: codegen → defineDag import → lint (in a temp dir)
-// ---------------------------------------------------------------------------
-
-export interface GauntletResult {
-  readonly ok: boolean;
-  readonly errors: readonly LintError[];
-  readonly advisories: LintResult["advisories"];
-}
-
-/**
- * Prove a draft through the real machinery: generate `dag.ts`, import it
- * (running `defineDag`'s structural validation), lint it. The temp dir lives
- * UNDER `root` so the generated file resolves \`@fuguejs/*\` through the
- * project's node_modules. Always cleaned up.
- */
-export const runGauntlet = async (dag: AuthoredDag, root: string): Promise<GauntletResult> => {
-  const scaffold = buildAuthoredScaffold(dag);
-  const stagingBase = join(root, ".fugue-compose");
-  await mkdir(stagingBase, { recursive: true });
-  const staging = await mkdtemp(join(stagingBase, "draft-"));
-  try {
-    const dagPath = join(staging, "dag.ts");
-    await writeFile(dagPath, scaffold.dagTs, "utf-8");
-    const lint = await runLint(dagPath);
-    return lint.ok
-      ? { ok: true, errors: [], advisories: lint.advisories }
-      : { ok: false, errors: lint.errors, advisories: lint.advisories };
-  } finally {
-    await rm(staging, { recursive: true, force: true });
-  }
-};
 
 // ---------------------------------------------------------------------------
 // AuthoredDag → Mermaid (for the present step; pure)
@@ -222,6 +210,11 @@ export const runCompose = async (
   const maxRepairs = options.maxRepairRounds ?? 3;
 
   const rounds = { questions: 0, repairs: 0, refinements: 0 };
+  // Per-draft repair budget (schema + gauntlet failures both draw on it) —
+  // reset whenever a refinement produces a new draft. `rounds.repairs` above
+  // stays cumulative for reporting.
+  let draftRepairs = 0;
+
   // The conversation the model sees — grows with answers, violations, refinements.
   const conversation: string[] = [
     `Team: ${options.team}`,
@@ -241,6 +234,36 @@ export const runCompose = async (
     return res.value.output;
   };
 
+  type DraftAttempt =
+    | { readonly ok: true; readonly dag: AuthoredDag }
+    | { readonly ok: false; readonly outcome: ComposeOutcome };
+
+  // Schema gate: parse the wire-level `unknown` into an AuthoredDag. A schema
+  // failure is a repair round exactly like a gauntlet failure — the superRefine
+  // problems go back to the model as structured JSON and we re-turn.
+  const parseDraftWithRepairs = async (first: Extract<ComposeTurn, { action: "draft" }>): Promise<DraftAttempt> => {
+    let current = first;
+    for (;;) {
+      const parsed = parseAuthoredDag(current.dag);
+      if (parsed.ok) return { ok: true, dag: parsed.dag };
+      if (draftRepairs >= maxRepairs) {
+        return { ok: false, outcome: { ok: false, reason: "repair-exhausted", problems: parsed.problems } };
+      }
+      draftRepairs++;
+      rounds.repairs++;
+      const t = await turn(
+        `Your draft failed schema validation. Problems:\n${JSON.stringify(parsed.problems, null, 2)}\n` +
+          `Current draft:\n${JSON.stringify(current.dag, null, 2)}\n` +
+          `Return a corrected {"action":"draft","dag":{...}}.`,
+      );
+      if ("error" in t) return { ok: false, outcome: { ok: false, reason: "llm-error", problems: [t.error] } };
+      if (t.action !== "draft") {
+        return { ok: false, outcome: { ok: false, reason: "llm-error", problems: ["expected a corrected draft, got questions"] } };
+      }
+      current = t;
+    }
+  };
+
   // --- interview → first draft ---
   let draft: AuthoredDag | null = null;
   while (draft === null) {
@@ -258,7 +281,9 @@ export const runCompose = async (
     if (t.action !== "draft") {
       return { ok: false, reason: "llm-error", problems: ["model kept asking questions past the round limit"] };
     }
-    draft = t.dag;
+    const attempt = await parseDraftWithRepairs(t);
+    if (!attempt.ok) return attempt.outcome;
+    draft = attempt.dag;
   }
 
   // --- validate → present → refine, until accept/abort ---
@@ -266,13 +291,14 @@ export const runCompose = async (
     // Repair loop: the draft must survive codegen + defineDag + lint.
     let verdict = await gauntlet(draft, root);
     while (!verdict.ok) {
-      if (rounds.repairs >= maxRepairs) {
+      if (draftRepairs >= maxRepairs) {
         return {
           ok: false,
           reason: "repair-exhausted",
           problems: verdict.errors.map((e) => `${e.kind}: ${e.message}`),
         };
       }
+      draftRepairs++;
       rounds.repairs++;
       const t = await turn(
         `Your draft failed validation. Structured violations:\n${JSON.stringify(verdict.errors, null, 2)}\n` +
@@ -281,7 +307,9 @@ export const runCompose = async (
       );
       if ("error" in t) return { ok: false, reason: "llm-error", problems: [t.error] };
       if (t.action !== "draft") return { ok: false, reason: "llm-error", problems: ["expected a corrected draft, got questions"] };
-      draft = t.dag;
+      const attempt = await parseDraftWithRepairs(t);
+      if (!attempt.ok) return attempt.outcome;
+      draft = attempt.dag;
       verdict = await gauntlet(draft, root);
     }
 
@@ -297,6 +325,7 @@ export const runCompose = async (
     }
 
     rounds.refinements++;
+    draftRepairs = 0; // a refinement is a new draft — fresh repair budget
     conversation.push(`Refinement request: ${answer}`);
     const t = await turn(
       `Current accepted-so-far draft:\n${JSON.stringify(draft, null, 2)}\n` +
@@ -304,17 +333,35 @@ export const runCompose = async (
     );
     if ("error" in t) return { ok: false, reason: "llm-error", problems: [t.error] };
     if (t.action !== "draft") return { ok: false, reason: "llm-error", problems: ["expected a refined draft, got questions"] };
-    draft = t.dag;
+    const attempt = await parseDraftWithRepairs(t);
+    if (!attempt.ok) return attempt.outcome;
+    draft = attempt.dag;
   }
 
   // --- accept: deterministic write of the final scaffold ---
-  const result = await writeAuthoredScaffold(draft, {
-    root,
-    force: options.force ?? false,
-    ...(options.owner !== undefined ? { owner: options.owner } : {}),
-  });
+  // The accepted draft is the user's work product — any write failure carries
+  // the full serialized JSON so it can be saved and replayed via `new --from`.
+  const withDraftJson = (problems: readonly string[]): readonly string[] => [
+    ...problems,
+    "accepted draft JSON follows",
+    JSON.stringify(draft),
+  ];
+  let result: NewResult;
+  try {
+    result = await writeAuthoredScaffold(draft, {
+      root,
+      force: options.force ?? false,
+      ...(options.owner !== undefined ? { owner: options.owner } : {}),
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      reason: "write-failed",
+      problems: withDraftJson([e instanceof Error ? e.message : String(e)]),
+    };
+  }
   if (!result.ok) {
-    return { ok: false, reason: "write-failed", problems: result.problems };
+    return { ok: false, reason: "write-failed", problems: withDraftJson(result.problems) };
   }
   return { ok: true, result, rounds };
 };
