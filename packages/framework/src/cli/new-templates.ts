@@ -32,6 +32,7 @@ import {
   REGISTRATION_CONST_NAME,
   dagFactoryName,
   dagOptsInterfaceName,
+  type KebabIdent,
 } from "./identifiers.js";
 
 /**
@@ -42,8 +43,14 @@ export const SHAPES = DAG_SHAPES;
 export type Shape = (typeof SHAPES)[number];
 
 export interface TemplateCtx {
-  /** DAG id / directory name (kebab-case). */
-  readonly name: string;
+  /**
+   * DAG id / directory name. BRANDED (`KebabIdent`): the name feeds the
+   * `dagFactoryName` / `dagOptsInterfaceName` constructors, which PascalCase
+   * it into emitted JS identifiers — the brand proves the first segment
+   * starts with a letter, so a `2fast` scaffold (a SyntaxError) is
+   * unrepresentable.
+   */
+  readonly name: KebabIdent;
   /** Owning team (from the `<team>/<name>` path). */
   readonly team: string;
   /** Whether to scaffold an LLM node + prompt. */
@@ -95,7 +102,7 @@ export const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { 
  * the interface/const names come from the `identifiers.ts` constructors the
  * collision accounting is built from.
  */
-export const llmFactoryPreamble = (name: string): string =>
+export const llmFactoryPreamble = (name: KebabIdent): string =>
   `export interface ${dagOptsInterfaceName(name)} {
   /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
   readonly model?: string;
@@ -108,7 +115,7 @@ const ${DEFAULT_MODEL_NAME} = ${JSON.stringify(DEFAULT_MODEL)};`;
  * to: `export const create<Pascal>Dag = (opts: <Pascal>DagOpts = {}) =>`.
  * Shared for the same no-drift reason as `llmFactoryPreamble`.
  */
-export const llmDagFactoryOpen = (name: string): string =>
+export const llmDagFactoryOpen = (name: KebabIdent): string =>
   `export const ${dagFactoryName(name)} = (opts: ${dagOptsInterfaceName(name)} = {}) =>`;
 
 export const registration = (ctx: TemplateCtx, dagExpr: string, description: string): string =>

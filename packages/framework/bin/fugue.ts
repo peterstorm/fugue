@@ -23,8 +23,8 @@
 //
 // All output is JSON on stdout — except `visualize --raw`, which prints the
 // bare Mermaid text, and `compose`, which is INTERACTIVE (prompts, summaries
-// and Mermaid previews are prose on stdout; only its final outcome line is
-// JSON). Unexpected errors land on stderr with a non-zero exit code. Designed
+// and Mermaid previews are prose on stdout; only its final output is a JSON
+// block). Unexpected errors land on stderr with a non-zero exit code. Designed
 // for LLM tooling: parse `ok` and `errors[].kind` rather than scraping prose.
 
 import { match } from "ts-pattern";

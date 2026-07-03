@@ -36,6 +36,13 @@ export type GauntletResult =
       /** The generated DAG as `fugue describe` sees it (nodes/edges/waves). */
       readonly described: DescribedDag;
       readonly advisories: LintResult["advisories"];
+      /**
+       * `runDescribe`'s non-fatal schema-serialization warnings, carried
+       * through (the warnings-threading contract `DescribeResult` states:
+       * in-process consumers never have to scrape stderr). Always an array,
+       * empty when every schema serialized cleanly.
+       */
+      readonly warnings: readonly string[];
     }
   | {
       readonly ok: false;
@@ -56,6 +63,12 @@ export interface GauntletDeps {
   readonly cleanup?: typeof rm;
   /** Removes the empty `.fugue-compose` base — injectable for the unexpected-errno warn path. */
   readonly removeBase?: typeof rmdir;
+  /**
+   * Cleanup-failure warning sink; defaults to stderr. Injectable so tests
+   * assert the warn paths with a plain captured-array fake instead of
+   * spying on `process.stderr`.
+   */
+  readonly warn?: (message: string) => void;
 }
 
 /**
@@ -71,6 +84,7 @@ export const runGauntlet = async (
   const describeDag = deps.describe ?? runDescribe;
   const cleanup = deps.cleanup ?? rm;
   const removeBase = deps.removeBase ?? rmdir;
+  const warn = deps.warn ?? ((message: string): void => void process.stderr.write(message));
   const scaffold = buildAuthoredScaffold(dag);
   const stagingBase = join(root, ".fugue-compose");
   await mkdir(stagingBase, { recursive: true });
@@ -90,26 +104,31 @@ export const runGauntlet = async (
     if (!described.ok) {
       return { ok: false, errors: described.errors, advisories: lint.advisories };
     }
-    return { ok: true, described: described.dag, advisories: lint.advisories };
+    return {
+      ok: true,
+      described: described.dag,
+      advisories: lint.advisories,
+      warnings: described.warnings,
+    };
   } finally {
     // Cleanup failures must not mask the verdict: a throw inside `finally`
     // REPLACES the function's result, so a flaky rm would turn a proven draft
-    // into an environment error. Leftover staging dirs are cheap — warn on
-    // stderr (so the leak is diagnosable) but never throw.
+    // into an environment error. Leftover staging dirs are cheap — warn (so
+    // the leak is diagnosable) but never throw.
     await cleanup(staging, { recursive: true, force: true }).catch((e: unknown) =>
-      process.stderr.write(
+      warn(
         `warning: failed to clean up compose staging dir ${staging}: ${e instanceof Error ? e.message : String(e)}\n`,
       ),
     );
     // Leave no empty `.fugue-compose` behind. A concurrent draft's staging
     // dir makes this rmdir ENOTEMPTY (the last one out removes the base) and
     // losing the removal race makes it ENOENT — both expected. Any OTHER code
-    // (EACCES/EPERM/EIO, …) is a real cleanup failure: warn on stderr
-    // (symmetry with the rm above), never throw.
+    // (EACCES/EPERM/EIO, …) is a real cleanup failure: warn (symmetry with
+    // the rm above), never throw.
     await removeBase(stagingBase).catch((e: unknown) => {
       const code = (e as NodeJS.ErrnoException | undefined)?.code;
       if (code === "ENOTEMPTY" || code === "ENOENT") return;
-      process.stderr.write(
+      warn(
         `warning: failed to remove compose staging base ${stagingBase}: ${e instanceof Error ? e.message : String(e)}\n`,
       );
     });

@@ -163,17 +163,18 @@ export const llmNodeRefName = (id: KebabIdent): string => `${camelCase(id)}Node`
 export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string =>
   kind === "llm" ? llmNodeRefName(id) : nodeConstName(id);
 
-// The two DAG-level constructors stay `string`-typed: they serve BOTH the
-// authored pipeline (names are KEBAB_IDENT there) and `new-templates.ts`'s
-// golden scaffolds, whose names follow `fugue new`'s plain-KEBAB rule —
-// narrowing them to `KebabIdent` would force `fugue new` to reject names it
-// accepts today.
+// The two DAG-level constructors take the branded `KebabIdent`, exactly like
+// the node-level constructors above: both the authored pipeline (`dag.name`)
+// and `fugue new`'s path argument PascalCase the name into emitted JS
+// identifiers (`create<Pascal>Dag`, `<Pascal>DagOpts`), so a digit-leading
+// name like `2fast` would emit `interface 2fastDagOpts` — a SyntaxError the
+// brand makes unrepresentable at every call site.
 
 /** The exported DAG factory for llm scaffolds: `lead-opener` → `createLeadOpenerDag`. */
-export const dagFactoryName = (dagName: string): string => `create${pascalCase(dagName)}Dag`;
+export const dagFactoryName = (dagName: KebabIdent): string => `create${pascalCase(dagName)}Dag`;
 
 /** The factory-opts interface for llm scaffolds: `lead-opener` → `LeadOpenerDagOpts`. */
-export const dagOptsInterfaceName = (dagName: string): string => `${pascalCase(dagName)}DagOpts`;
+export const dagOptsInterfaceName = (dagName: KebabIdent): string => `${pascalCase(dagName)}DagOpts`;
 
 /** The DAG input-schema const every scaffold declares. */
 export const INPUT_SCHEMA_NAME = "InputSchema";

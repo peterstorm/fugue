@@ -41,13 +41,19 @@ import {
 import { parseAuthoredDagJson, type AuthoredDag } from "./authored.js";
 import { buildAuthoredScaffold } from "./authored-codegen.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
-import { KEBAB } from "./identifiers.js";
-import { computePromptHash } from "../prompts/hash.js";
+import { KEBAB, parseKebabIdent, type KebabIdent } from "./identifiers.js";
+import { freshRegistryEntry, serializeRegistry, type RegistryEntry } from "./prompts.js";
 import type { LintAdvisory, NewResult } from "./types.js";
 
 export interface NewOptions {
   readonly team: string;
-  readonly name: string;
+  /**
+   * DAG id / directory name. BRANDED (`KebabIdent`, `parseNewArgs` is the
+   * producer): the name PascalCases into emitted JS identifiers
+   * (`create<Pascal>Dag` / `<Pascal>DagOpts`), so a digit-leading name would
+   * scaffold a SyntaxError — the brand rejects it at the arg boundary.
+   */
+  readonly name: KebabIdent;
   readonly shape: Shape;
   readonly llm: boolean;
   /** Add a human-review gate (ADR-0060). Linear shape only. */
@@ -164,15 +170,25 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
     problems.push("missing <team>/<name> argument (e.g. `fugue new leads/my-dag --shape sources`)");
   }
   let team = "";
-  let name = "";
+  let name: KebabIdent | null = null;
   if (target !== undefined) {
     const parts = target.split("/");
     if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
       problems.push(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
     } else {
-      [team, name] = parts as [string, string];
+      const [rawTeam, rawName] = parts as [string, string];
+      team = rawTeam;
       if (!KEBAB.test(team)) problems.push(`team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
-      if (!KEBAB.test(name)) problems.push(`name '${name}' must be kebab-case (lowercase, digits, single dashes)`);
+      // The name feeds codegen'd identifiers (`create<Pascal>Dag`,
+      // `<Pascal>DagOpts`) — it must camelCase to a valid JS identifier, so
+      // the first segment cannot start with a digit (KEBAB_IDENT, the same
+      // rule the AuthoredDag schema enforces on `name` and node ids).
+      name = parseKebabIdent(rawName);
+      if (name === null) {
+        problems.push(
+          `name '${rawName}' must be kebab-case starting with a letter (lowercase, digits, single dashes — it becomes a JS identifier in the generated dag.ts, so a digit-leading name would not compile)`,
+        );
+      }
     }
   }
 
@@ -193,7 +209,9 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
     );
   }
 
-  if (problems.length > 0) return { ok: false, problems };
+  // Every `name === null` path pushed a problem above (missing target, bad
+  // path shape, non-KEBAB_IDENT name), so the null check is the same gate.
+  if (name === null || problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
     mode: "shape",
@@ -228,11 +246,25 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const relDir = join("dags", options.team, options.name);
   const dir = join(absRoot, relDir);
 
-  if (!options.force && (await isDirNonEmpty(dir))) {
-    return {
-      ok: false,
-      problems: [`${dir} already exists and is not empty — pass --force to overwrite`],
-    };
+  // The emptiness probe is an environment surface too (EACCES/ENOTDIR from
+  // readdir) — fold a rethrow into the `{ ok: false, problems }` envelope like
+  // the write batch below, so it never escapes the stdout-JSON contract.
+  if (!options.force) {
+    let dirNonEmpty: boolean;
+    try {
+      dirNonEmpty = await isDirNonEmpty(dir);
+    } catch (e) {
+      return {
+        ok: false,
+        problems: [`cannot verify ${dir} is safe to write: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
+      };
+    }
+    if (dirNonEmpty) {
+      return {
+        ok: false,
+        problems: [`${dir} already exists and is not empty — pass --force to overwrite`],
+      };
+    }
   }
 
   const ctx: TemplateCtx = {
@@ -265,21 +297,17 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
       await write(join("prompts", `${scaffold.prompt.name}.txt`), scaffold.prompt.body);
       // Write prompts/registry.json as part of the same scaffold write batch so
       // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
-      // is always new → version 1.0.0, so the registry is computed in-memory here
-      // rather than via a separate `prompts sync` post-step. Computing it in-process
-      // (no post-step) means a successful run never leaves a written .txt without a
-      // matching registry entry. This is in-process ordering, NOT crash atomicity:
-      // a mid-batch IO failure (ENOSPC/EACCES) still surfaces the real cause, but
-      // can leave a partially-written scaffold dir behind. Format matches
-      // `runPromptsSync` byte-for-byte (2-space JSON + trailing newline) so a later
-      // `prompts sync`/`check` sees no drift.
-      const registry = {
-        [scaffold.prompt.name]: {
-          version: "1.0.0",
-          hash: computePromptHash(scaffold.prompt.body),
-        },
-      };
-      await write(join("prompts", "registry.json"), `${JSON.stringify(registry, null, 2)}\n`);
+      // is always new → `freshRegistryEntry` (version 1.0.0), so the registry is
+      // computed in-memory here rather than via a separate `prompts sync`
+      // post-step. Computing it in-process (no post-step) means a successful run
+      // never leaves a written .txt without a matching registry entry. This is
+      // in-process ordering, NOT crash atomicity: a mid-batch IO failure
+      // (ENOSPC/EACCES) still surfaces the real cause, but can leave a
+      // partially-written scaffold dir behind. Entry shape and byte format are
+      // single-sourced in `prompts.ts` (`freshRegistryEntry`/`serializeRegistry` —
+      // the same functions `runPromptsSync` writes with).
+      const registry = { [scaffold.prompt.name]: freshRegistryEntry(scaffold.prompt.body) };
+      await write(join("prompts", "registry.json"), serializeRegistry(registry));
     }
   } catch (e) {
     return {
@@ -476,12 +504,12 @@ export const writeAuthoredScaffold = async (
 
   if (hasLlm) {
     await mkdir(join(dir, "prompts"), { recursive: true });
-    const registry: Record<string, { version: string; hash: string }> = {};
+    const registry: Record<string, RegistryEntry> = {};
     for (const prompt of scaffold.prompts as readonly PromptFile[]) {
       await write(join("prompts", `${prompt.name}.txt`), prompt.body);
-      registry[prompt.name] = { version: "1.0.0", hash: computePromptHash(prompt.body) };
+      registry[prompt.name] = freshRegistryEntry(prompt.body);
     }
-    await write(join("prompts", "registry.json"), `${JSON.stringify(registry, null, 2)}\n`);
+    await write(join("prompts", "registry.json"), serializeRegistry(registry));
   }
 
   const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";

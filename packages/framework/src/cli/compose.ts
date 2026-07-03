@@ -63,9 +63,23 @@ export interface ComposeIo {
   readonly say: (message: string) => void;
 }
 
+/**
+ * The natural-language pipeline description: non-empty after trimming.
+ * BRANDED: `parseIntent` is the only producer, so holding one proves the
+ * blank-intent rule already passed (mirrors `team`'s `Kebab` treatment) —
+ * a whitespace-only brief can never reach a paid LLM round.
+ */
+export type Intent = string & { readonly __brand: "Intent" };
+
+/** The sole `Intent` producer: the trimmed text, or `null` when blank. */
+export const parseIntent = (raw: string): Intent | null => {
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? null : (trimmed as Intent);
+};
+
 export interface ComposeOptions {
-  /** The natural-language pipeline description. Non-empty — `parseComposeArgs` rejects blank intents. */
-  readonly intent: string;
+  /** The natural-language pipeline description. Non-empty — the `Intent` brand is the proof. */
+  readonly intent: Intent;
   /**
    * Owning team — goes into the AuthoredDag. BRANDED: `parseKebab` is the
    * only producer, so holding `ComposeOptions` proves the team already
@@ -87,11 +101,22 @@ export interface ComposeOptions {
   readonly maxRepairRounds?: number;
 }
 
+/**
+ * Loop telemetry: how many question / repair / refinement rounds ran.
+ * Carried on EVERY outcome arm — `repair-exhausted` is precisely where
+ * `repairs` is diagnostic, so failure never discards it.
+ */
+export interface ComposeRounds {
+  readonly questions: number;
+  readonly repairs: number;
+  readonly refinements: number;
+}
+
 export type ComposeOutcome =
   | {
       readonly ok: true;
       readonly result: Extract<NewResult, { ok: true }>;
-      readonly rounds: { readonly questions: number; readonly repairs: number; readonly refinements: number };
+      readonly rounds: ComposeRounds;
     }
   // The failure arms are split per reason so the type states exactly when the
   // user's work product (`draft`, replayable via `fugue new --from`) rides
@@ -105,11 +130,13 @@ export type ComposeOutcome =
        */
       readonly reason: "aborted";
       readonly problems: readonly string[];
+      readonly rounds: ComposeRounds;
     }
   | {
       readonly ok: false;
       readonly reason: "llm-error" | "repair-exhausted";
       readonly problems: readonly string[];
+      readonly rounds: ComposeRounds;
       /**
        * The most recent draft that survived the full gauntlet. Absent only
        * when no draft had yet been proven.
@@ -121,6 +148,7 @@ export type ComposeOutcome =
       /** `gauntlet-failed` = the proving machinery itself threw (an environment failure, not a draft problem). */
       readonly reason: "write-failed" | "gauntlet-failed";
       readonly problems: readonly string[];
+      readonly rounds: ComposeRounds;
       /** The draft in flight when the environment failed — always present. */
       readonly draft: AuthoredDag;
     };
@@ -151,6 +179,7 @@ export interface ParseComposeError {
 export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
   const problems: string[] = [];
   let intent: string | undefined;
+  let parsedIntent: Intent | null = null;
   let team: string | undefined;
   let parsedTeam: Kebab | null = null;
   let model: string | undefined;
@@ -198,10 +227,12 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
 
   if (intent === undefined) {
     problems.push('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
-  } else if (intent.trim().length === 0) {
+  } else {
     // A blank intent gives the model nothing to draft from — reject it here
-    // rather than burning an LLM round on an empty brief.
-    problems.push("intent must be non-empty");
+    // rather than burning an LLM round on an empty brief. `parseIntent` is
+    // the single producer of the branded intent.
+    parsedIntent = parseIntent(intent);
+    if (parsedIntent === null) problems.push("intent must be non-empty");
   }
   if (team === undefined) {
     problems.push("missing --team <team>");
@@ -216,13 +247,13 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
     }
   }
 
-  if (intent === undefined || parsedTeam === null || problems.length > 0) {
+  if (parsedIntent === null || parsedTeam === null || problems.length > 0) {
     return { ok: false, problems };
   }
   return {
     ok: true,
     options: {
-      intent,
+      intent: parsedIntent,
       team: parsedTeam,
       force,
       ...(model !== undefined ? { model } : {}),
@@ -373,6 +404,7 @@ export const runCompose = async (
     ok: false,
     reason,
     problems,
+    rounds,
     ...(lastProven !== null ? { draft: lastProven } : {}),
   });
 
@@ -437,7 +469,7 @@ export const runCompose = async (
         const answer = await io.ask(q);
         // A closed stream means there is no user — abort instead of recording
         // the sentinel as an answer and paying for further LLM rounds.
-        if (answer.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
+        if (answer.kind === "closed") return { ok: false, reason: "aborted", problems: [], rounds };
         conversation.push(`Q: ${q}\nA: ${answer.text}`);
       }
       continue;
@@ -468,6 +500,7 @@ export const runCompose = async (
           // Environment failures are debugged from this outcome alone — keep
           // the stack, not just the message.
           problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          rounds,
           draft: d,
         },
       };
@@ -522,7 +555,7 @@ export const runCompose = async (
       const res = await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)');
       // Closed stream ⇒ nobody can accept — abort from here exactly like an
       // explicit "abort" answer (the draft was only ever staged, never written).
-      if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [] };
+      if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [], rounds };
       answer = res.text.trim();
       if (answer.length > 0) break;
       io.say('Please answer "yes" to write, "abort" to quit, or describe a refinement.');
@@ -550,16 +583,17 @@ export const runCompose = async (
           ok: false,
           reason: "write-failed",
           problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          rounds,
           draft,
         };
       }
       if (!result.ok) {
-        return { ok: false, reason: "write-failed", problems: result.problems, draft };
+        return { ok: false, reason: "write-failed", problems: result.problems, rounds, draft };
       }
       return { ok: true, result, rounds };
     }
     if (/^(abort|no|quit|exit)$/i.test(answer)) {
-      return { ok: false, reason: "aborted", problems: [] };
+      return { ok: false, reason: "aborted", problems: [], rounds };
     }
 
     rounds.refinements++;

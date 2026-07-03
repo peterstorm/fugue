@@ -19,6 +19,25 @@ export interface RegistryEntry {
   readonly hash: string;
 }
 
+/**
+ * The registry entry a freshly scaffolded prompt gets: version 1.0.0 plus the
+ * body's hash. Single-sourced here so every writer (`runPromptsSync`, the
+ * `fugue new` scaffold batches) produces the same entry shape.
+ */
+export const freshRegistryEntry = (body: string): RegistryEntry => ({
+  version: "1.0.0",
+  hash: computePromptHash(body),
+});
+
+/**
+ * The `prompts/registry.json` byte format: canonical 2-space JSON plus a
+ * trailing newline. Single-sourced so scaffold writers and `runPromptsSync`
+ * can never drift — a later `prompts sync`/`check` over a scaffolded registry
+ * sees no spurious diff.
+ */
+export const serializeRegistry = (entries: Record<string, RegistryEntry>): string =>
+  `${JSON.stringify(entries, null, 2)}\n`;
+
 export type PromptStatus = "unchanged" | "added" | "bumped" | "removed";
 
 export interface PromptsResult {
@@ -80,7 +99,7 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
     const hash = computePromptHash(text);
     const prior = existing[name];
     if (prior === undefined) {
-      next[name] = { version: "1.0.0", hash };
+      next[name] = freshRegistryEntry(text);
       prompts[name] = { ...next[name], status: "added" };
     } else if (prior.hash !== hash) {
       next[name] = { version: bumpPatch(prior.version), hash };
@@ -95,7 +114,7 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
   }
 
   if (files.size > 0 || Object.keys(existing).length > 0) {
-    await writeFile(registryPath, `${JSON.stringify(next, null, 2)}\n`, "utf-8");
+    await writeFile(registryPath, serializeRegistry(next), "utf-8");
   }
   return { ok: true, registryPath, prompts, problems: [] };
 };

@@ -91,6 +91,50 @@ describe("describedToMermaid", () => {
     expect(merged.match(/n_[A-Za-z0-9_]+\[/g)).toHaveLength(4);
   });
 
+  it("escapes double quotes in labels as &quot; (predicate labels and the title)", () => {
+    // Labels sit inside Mermaid's double-quoted syntax — a raw `"` in a
+    // predicate label would close the quote and corrupt the edge statement.
+    const d: DescribedDag = {
+      ...described,
+      id: 'quote"demo',
+      edges: [
+        {
+          from: "classify",
+          to: "reply",
+          kind: "conditional",
+          predicateLabel: 'says "billing"',
+          predicateVersion: 1,
+        },
+      ],
+    };
+    const diagram = describedToMermaid(d);
+    expect(diagram).toContain('n_classify -->|"says &quot;billing&quot; (v1)"| n_reply');
+    expect(diagram).toContain('title: "quote&quot;demo');
+    // No raw double quote survives inside the label body.
+    expect(diagram).not.toContain('says "billing"');
+  });
+
+  it("neutralizes JS line terminators in labels (\\n and U+2028) to spaces", () => {
+    // Mermaid node/edge statements are one line each — a line terminator in a
+    // predicate label would break the statement apart. The scrub reuses the
+    // single-sourced LINE_TERMINATORS class from identifiers.ts.
+    const d: DescribedDag = {
+      ...described,
+      edges: [
+        {
+          from: "classify",
+          to: "reply",
+          kind: "conditional",
+          predicateLabel: "line one\nline two line three",
+          predicateVersion: 3,
+        },
+      ],
+    };
+    const diagram = describedToMermaid(d);
+    expect(diagram).toContain('n_classify -->|"line one line two line three (v3)"| n_reply');
+    expect(diagram).not.toContain(" ");
+  });
+
   it("escapes characters outside the fixed 2-char set with the _x<hex>_ fallback", () => {
     // `escapeIdChar` has fixed escapes only for `_`/`:`/`-`; anything else
     // non-alphanumeric falls back to `_x<hex>_` ("." is 0x2e). The label

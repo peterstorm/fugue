@@ -12,10 +12,23 @@
 
 import type { DescribedDag, DescribedEdge } from "../describe/index.js";
 import { runDescribe } from "./describe.js";
+import { LINE_TERMINATORS } from "./identifiers.js";
 import { assertNever, type LintError } from "./types.js";
 
 export type VisualizeResult =
-  | { readonly ok: true; readonly path: string; readonly format: "mermaid"; readonly diagram: string }
+  | {
+      readonly ok: true;
+      readonly path: string;
+      readonly format: "mermaid";
+      readonly diagram: string;
+      /**
+       * `runDescribe`'s non-fatal schema-serialization warnings, carried
+       * through (the warnings-threading contract `DescribeResult` states:
+       * in-process consumers never have to scrape stderr). Always an array,
+       * empty when every schema serialized cleanly.
+       */
+      readonly warnings: readonly string[];
+    }
   | { readonly ok: false; readonly path: string; readonly errors: readonly LintError[] };
 
 const INPUT_ID = "$input";
@@ -36,7 +49,12 @@ const escapeIdChar = (c: string): string =>
 const safeId = (id: string): string =>
   id === INPUT_ID ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 
-const escapeLabel = (s: string): string => s.replace(/"/g, "&quot;");
+// Labels sit inside Mermaid's double-quoted `["…"]` / `-->|"…"|` syntax: a `"`
+// would close the quote, and a JS line terminator (`LINE_TERMINATORS` — the
+// same single-sourced class the codegen comment scrub uses) would break the
+// one-line node/edge statement. Neutralize both.
+const escapeLabel = (s: string): string =>
+  s.replace(/"/g, "&quot;").replace(LINE_TERMINATORS, " ");
 
 const edgeLine = (e: DescribedEdge): string => {
   const from = safeId(e.from);
@@ -112,5 +130,6 @@ export const runVisualize = async (path: string): Promise<VisualizeResult> => {
     path: described.path,
     format: "mermaid",
     diagram: describedToMermaid(described.dag),
+    warnings: described.warnings,
   };
 };

@@ -20,6 +20,7 @@ import {
   RESERVED_IDENTIFIERS,
   dagLevelIdentifiers,
   generatedIdentifiersFor,
+  type Kebab,
 } from "../../cli/identifiers.js";
 import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
 import { CONFIDENCE_FIELD } from "../../cli/vocabulary.js";
@@ -269,6 +270,23 @@ const FIXTURES: Record<string, AuthoredDagInput> = {
     ],
     structure: { shape: "sources", sources: ["fetch-weather", "fetch-calendar"], join: "synthesize", assemble: "final" },
   },
+  "sources-llm-assemble": {
+    // The ASSEMBLE role as an LLM node: its derived input is the
+    // `{ join, $input }` fan-in, so buildInput must JSON.stringify both AND
+    // sanitize the `$input` key to the identifier-safe `_input` placeholder.
+    fugueAuthored: 1,
+    name: "authored-sources-assemble",
+    team: "demo",
+    description: "Assemble the briefing with an LLM over the join and the request",
+    input: out("region"),
+    nodes: [
+      { id: "fetch-weather", kind: "source", purpose: "Read the weather", output: out("forecast") },
+      { id: "fetch-calendar", kind: "source", purpose: "Read the calendar", output: out("events") },
+      { id: "join-all", kind: "transform", purpose: "Join the sources", output: out("joined") },
+      { id: "write-brief", kind: "llm", purpose: "Write the briefing", output: out("briefing") },
+    ],
+    structure: { shape: "sources", sources: ["fetch-weather", "fetch-calendar"], join: "join-all", assemble: "write-brief" },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -456,6 +474,14 @@ describe("AuthoredDag schema", () => {
     const parsed = parseAuthoredDag(d);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("team must be kebab-case");
+  });
+
+  it("parses team into the branded Kebab (proof rides on the parsed dag)", () => {
+    const dag = mustParse(FIXTURES.linear!);
+    // Compile-time: `team` carries the brand, so brand-demanding consumers
+    // (runCompose's --team comparison) type-check without a cast.
+    const team: Kebab = dag.team;
+    expect(team as string).toBe("demo");
   });
 
   it("rejects a newline in purpose / dag description / field description", () => {
@@ -875,6 +901,18 @@ describe("authored codegen survives the gauntlet", () => {
     expect(prompt.body).toContain("text: {{text}}");
   });
 
+  it("an llm ASSEMBLE consumes the { join, $input } fan-in with '$input' sanitized to '_input'", () => {
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["sources-llm-assemble"]!));
+    // buildInput reads the raw fan-in keys but emits identifier-safe
+    // placeholder names — `$input` → `_input`, `join-all` → `join_all`.
+    expect(scaffold.dagTs).toContain('_input: JSON.stringify(input["$input"])');
+    expect(scaffold.dagTs).toContain('join_all: JSON.stringify(input["join-all"])');
+    // The prompt uses the SAME sanitized placeholder, so template and
+    // buildInput can never disagree on the variable name.
+    expect(scaffold.prompts[0]!.body).toContain("_input (JSON): {{_input}}");
+    expect(scaffold.prompts[0]!.body).toContain("join_all (JSON): {{join_all}}");
+  });
+
   it("fan-in llm buildInput JSON-stringifies the node-keyed objects", () => {
     const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["sources-llm"]!));
     expect(scaffold.dagTs).toContain('JSON.stringify(input["fetch-weather"])');
@@ -1042,6 +1080,7 @@ describe("authored codegen survives the gauntlet", () => {
       ok: true,
       described: describedStub,
       advisories: [advisory],
+      warnings: [],
     });
     const result = await runNewFrom({ from: fromPath, force: false, root }, okWithAdvisory);
     expect(result.ok).toBe(true);

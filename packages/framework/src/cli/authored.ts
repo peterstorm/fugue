@@ -27,6 +27,7 @@ import {
   camelCase,
   dagLevelIdentifiers,
   generatedIdentifiersFor,
+  parseKebab,
   parseKebabIdent,
   type KebabIdent,
 } from "./identifiers.js";
@@ -306,7 +307,18 @@ const BaseAuthoredDagSchema = z
     /** Format discriminator + version for forward evolution. */
     fugueAuthored: z.literal(1),
     name: kebabIdentField("name must be kebab-case starting with a letter"),
-    team: z.string().regex(KEBAB, "team must be kebab-case"),
+    // Parsed into the branded `Kebab` through the single smart constructor
+    // (mirrors `name`'s treatment) — so a parsed dag's `team` carries the
+    // proof the KEBAB rule passed, and consumers like `runCompose`'s --team
+    // comparison work brand-to-brand instead of trusting a bare string.
+    team: z.string().transform((s, ctx) => {
+      const parsed = parseKebab(s);
+      if (parsed === null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "team must be kebab-case" });
+        return z.NEVER;
+      }
+      return parsed;
+    }),
     description: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
     /** DAG input schema (the request). */
     input: SchemaSpecSchema,
