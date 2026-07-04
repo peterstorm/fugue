@@ -59,6 +59,7 @@ import {
   type KebabIdent,
 } from "./identifiers.js";
 import { CONFIDENCE_FIELD } from "./vocabulary.js";
+import { assertNever } from "./types.js";
 
 /** The llm node variant — the only kind that owns a prompt. */
 type LlmNode = Extract<AuthoredNode, { kind: "llm" }>;
@@ -559,6 +560,11 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
       if (p.node.id === s.join) return s.sources; // fan-in keys
       if (p.node.id === s.assemble) return [s.join, "$input"];
       return []; // a source node consumes nothing
+    default:
+      // `noImplicitReturns` is off, so without this a newly-added Shape would
+      // silently fall through to `undefined` and crash downstream on `.map`.
+      // Match every sibling walker in this file: fail exhaustively at compile time.
+      return assertNever(s);
   }
 };
 

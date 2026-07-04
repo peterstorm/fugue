@@ -90,7 +90,22 @@ const readRegistry = async (registryPath: string): Promise<Record<string, Regist
 export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => {
   const registryPath = join(dagDir, PROMPTS_DIR, REGISTRY_FILE);
   const files = await readPromptFiles(dagDir);
-  const existing = await readRegistry(registryPath);
+
+  // A corrupt/unreadable registry must surface through the stdout-JSON envelope
+  // — the same contract `runPromptsCheck` honours — not a raw stderr stack.
+  // We fail rather than silently overwrite so a hand-edited registry isn't
+  // clobbered (and its version history lost) without the operator knowing.
+  let existing: Record<string, RegistryEntry>;
+  try {
+    existing = await readRegistry(registryPath);
+  } catch (e) {
+    return {
+      ok: false,
+      registryPath,
+      prompts: {},
+      problems: [`registry.json unreadable: ${e instanceof Error ? e.message : String(e)} — fix or remove it, then re-run \`fugue prompts sync\``],
+    };
+  }
 
   const prompts: Record<string, { version: string; hash: string; status: PromptStatus }> = {};
   const next: Record<string, RegistryEntry> = {};

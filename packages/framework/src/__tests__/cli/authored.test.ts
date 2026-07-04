@@ -74,6 +74,37 @@ const FIXTURES: Record<string, AuthoredDagInput> = {
     ],
     structure: { shape: "linear", order: ["fetch-record", "summarize"] },
   },
+  // Exercises the number/boolean codegen arms (z.number()/z.boolean() +
+  // 0/false defaults). Every other fixture uses only string/enum fields, so
+  // without this the scalar-type branches emit into generated dag.ts untested.
+  "linear-scalar-fields": {
+    fugueAuthored: 1,
+    name: "authored-scalar",
+    team: "demo",
+    description: "Fetch metrics then score them",
+    input: out("id"),
+    nodes: [
+      {
+        id: "fetch-metrics",
+        kind: "fetch",
+        purpose: "Load the metrics",
+        output: {
+          fields: [
+            { name: "count", type: { kind: "number" } },
+            { name: "active", type: { kind: "boolean" } },
+            { name: "label", type: { kind: "string" } },
+          ],
+        },
+      },
+      {
+        id: "score",
+        kind: "transform",
+        purpose: "Score the metrics",
+        output: { fields: [{ name: "passed", type: { kind: "boolean" } }] },
+      },
+    ],
+    structure: { shape: "linear", order: ["fetch-metrics", "score"] },
+  },
   "linear-llm-review": {
     fugueAuthored: 1,
     name: "authored-review",
