@@ -34,9 +34,14 @@ const fakeRl = (
   resolveQuestion: (text: string) => void;
   rejectQuestion: (e: unknown) => void;
   asked: string[];
+  written: string[];
 } => {
   const closeListeners: (() => void)[] = [];
   const asked: string[] = [];
+  // Captures what `say` routes through the injected output seam — the
+  // symmetric counterpart to `asked`, so the prose half is testable through
+  // the fake instead of leaking to the global process.stdout.
+  const written: string[] = [];
   let settle: { resolve: (text: string) => void; reject: (e: unknown) => void } | undefined;
   const close = (): void => {
     for (const l of closeListeners) l();
@@ -60,11 +65,13 @@ const fakeRl = (
         closeListeners.push(listener);
         return undefined;
       },
+      output: { write: (s: string) => void written.push(s) },
     },
     close,
     resolveQuestion: (text) => settle?.resolve(text),
     rejectQuestion: (e) => settle?.reject(e),
     asked,
+    written,
   };
 };
 
@@ -76,6 +83,14 @@ describe("readlineComposeIo", () => {
     resolveQuestion("weather");
     expect(await pending).toEqual({ kind: "answer", text: "weather" });
     expect(asked[0]).toBe("Which sources?\n> ");
+  });
+
+  it("say routes through the injected output seam (newline-terminated), not global stdout", () => {
+    const { rl, written } = fakeRl();
+    const io = readlineComposeIo(rl);
+    io.say("Advisories:");
+    io.say("  - purpose-drift: rewrite the purpose");
+    expect(written).toEqual(["Advisories:\n", "  - purpose-drift: rewrite the purpose\n"]);
   });
 
   it("closing mid-question settles the pending ask as closed (question hangs)", async () => {

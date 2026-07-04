@@ -812,7 +812,7 @@ describe("authored codegen survives the gauntlet", () => {
   for (const [label, fixture] of Object.entries(FIXTURES)) {
     it(`${label} → dag.ts imports, lints clean, describe matches the structure`, async () => {
       const root = join(tmpRoot, label);
-      const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false }, []);
+      const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false }, [], []);
       if (!written.ok) throw new Error(written.problems.join("; "));
 
       const dagPath = join(written.dir, "dag.ts");
@@ -842,7 +842,7 @@ describe("authored codegen survives the gauntlet", () => {
 
   it("human-review gates surface as humanReview in describe", async () => {
     const root = join(tmpRoot, "review-describe");
-    const written = await writeAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!), { root, force: false }, []);
+    const written = await writeAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!), { root, force: false }, [], []);
     if (!written.ok) throw new Error(written.problems.join("; "));
     const described = await runDescribe(join(written.dir, "dag.ts"));
     if (!described.ok) throw new Error("describe failed");
@@ -879,7 +879,7 @@ describe("authored codegen survives the gauntlet", () => {
     ]);
 
     const root = join(tmpRoot, "two-llm-registry");
-    const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false }, []);
+    const written = await writeAuthoredScaffold(mustParse(fixture), { root, force: false }, [], []);
     if (!written.ok) throw new Error(written.problems.join("; "));
     const registry = JSON.parse(
       await readFile(join(written.dir, "prompts", "registry.json"), "utf-8"),
@@ -948,10 +948,10 @@ describe("authored codegen survives the gauntlet", () => {
     // deliberate decision, not an accident.
     const root = join(tmpRoot, "force-stale");
     const dag = mustParse(FIXTURES.linear!);
-    const first = await writeAuthoredScaffold(dag, { root, force: false }, []);
+    const first = await writeAuthoredScaffold(dag, { root, force: false }, [], []);
     if (!first.ok) throw new Error(first.problems.join("; "));
     await Bun.write(join(first.dir, "stale.txt"), "left over");
-    const second = await writeAuthoredScaffold(dag, { root, force: true }, []);
+    const second = await writeAuthoredScaffold(dag, { root, force: true }, [], []);
     expect(second.ok).toBe(true);
     expect(await Bun.file(join(first.dir, "stale.txt")).text()).toBe("left over");
     expect(await Bun.file(join(first.dir, "dag.ts")).exists()).toBe(true);
@@ -1190,6 +1190,83 @@ describe("hostile free-text properties", () => {
       }),
       { numRuns: 15 },
     );
+  }, 60_000);
+
+  // Hostile ENUM values: a `"`, backtick, or `${...}` passes the schema's
+  // SINGLE_LINE check (only LINE TERMINATORS are rejected) and then flows,
+  // unescaped-if-naive, into FOUR JSON.stringify-guarded sites — zodExpr
+  // (authored-codegen ~90), defaultExpr (~98), the LLM prompt's jsonShape hint
+  // (~238), and the router `when.equals` comparison (~388). The existing
+  // free-text property never mutates enum values, so these four sites went
+  // uncovered against hostile input. Note: an LLM node's `confidence` field is
+  // pinned to the exact bucket enum, so we cover the LLM-prompt jsonShape via a
+  // NON-confidence enum output field (`sources-llm`) and the router when.equals
+  // via a fetch classifier's free-form enum (plain `router`).
+  const HOSTILE_ENUMS = ['a"b', "a`b", "a${b}", '"; DROP TABLE dags; --'] as const;
+
+  it("hostile ENUM values on a router predicate survive codegen + the real gauntlet (when.equals)", async () => {
+    const root = join(tmpRoot, "prop-enum-hostile-router");
+    await mkdir(root, { recursive: true });
+    for (const hostile of HOSTILE_ENUMS) {
+      const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
+      // The fetch classifier's `bucket` enum (zodExpr/defaultExpr) AND the
+      // routing case's `equals` (when.equals, codegen line 388) set to the same
+      // hostile value so it is a legal predicate target.
+      const bucket = outputOf(d.nodes[0]!).fields.find((f) => f.name === "bucket")! as {
+        type: { kind: string; values?: readonly string[] };
+      };
+      bucket.type = { kind: "enum", values: [hostile, "large"] };
+      (d.structure as { cases: { when: { equals: string } }[] }).cases[0]!.when.equals = hostile;
+
+      const parsed = parseAuthoredDag(d);
+      if (!parsed.ok) throw new Error(`${JSON.stringify(hostile)} rejected: ${parsed.problems.join("; ")}`);
+
+      // Real codegen + import through defineDag + lint — a naive template that
+      // interpolated the value bare would emit a dag.ts with a syntax error (or
+      // an injected expression) and the gauntlet would fail here.
+      const verdict = await runGauntlet(parsed.dag, root);
+      if (!verdict.ok) {
+        throw new Error(`gauntlet failed for ${JSON.stringify(hostile)}: ${JSON.stringify(verdict.errors)}`);
+      }
+
+      // The generated dag.ts routes on the JSON-escaped literal (line 388) and
+      // the zod enum lists it escaped — never the raw hostile bytes.
+      const dagTs = buildAuthoredScaffold(parsed.dag).dagTs;
+      expect(dagTs).toContain(`=== ${JSON.stringify(hostile)}`);
+      expect(dagTs).toContain(`z.enum([${JSON.stringify(hostile)}, ${JSON.stringify("large")}])`);
+    }
+  }, 60_000);
+
+  it("hostile ENUM values on an LLM output field survive codegen + gauntlet, and the prompt shape-hint stays escaped (jsonShape)", async () => {
+    const root = join(tmpRoot, "prop-enum-hostile-prompt");
+    await mkdir(root, { recursive: true });
+    for (const hostile of HOSTILE_ENUMS) {
+      const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
+      // Add a NON-confidence enum output field to the LLM `synthesize` node —
+      // this reaches the prompt jsonShape hint (codegen line 238) plus
+      // zodExpr/defaultExpr for the generated output schema.
+      const synth = d.nodes.find((n) => n.id === "synthesize")!;
+      (outputOf(synth).fields as { name: string; type: unknown }[]).push({
+        name: "category",
+        type: { kind: "enum", values: [hostile, "other"] },
+      });
+
+      const parsed = parseAuthoredDag(d);
+      if (!parsed.ok) throw new Error(`${JSON.stringify(hostile)} rejected: ${parsed.problems.join("; ")}`);
+
+      const verdict = await runGauntlet(parsed.dag, root);
+      if (!verdict.ok) {
+        throw new Error(`gauntlet failed for ${JSON.stringify(hostile)}: ${JSON.stringify(verdict.errors)}`);
+      }
+
+      // The prompt shape-hint must carry the value JSON-escaped (line 238), not
+      // the raw hostile bytes that would break the `{ ... }` hint or open a
+      // `${}` template hole in the generated prompt string.
+      const scaffold = buildAuthoredScaffold(parsed.dag);
+      const prompt = scaffold.prompts.find((p) => p.body.includes('"category"'))!;
+      expect(prompt.body).toContain(`"category": ${JSON.stringify(hostile)} | ${JSON.stringify("other")}`);
+      expect(prompt.body).not.toContain(`"category": ${hostile}`);
+    }
   }, 60_000);
 });
 

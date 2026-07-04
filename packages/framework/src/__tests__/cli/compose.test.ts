@@ -317,7 +317,7 @@ describe("runCompose", () => {
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     if (!outcome.ok) throw new Error(outcome.reason);
     expect(outcome.rounds.refinements).toBe(1);
-    expect(outcome.result.name).toBe("compose-briefing-v2");
+    expect(outcome.result.name as string).toBe("compose-briefing-v2");
     expect(requests[1]).toContain("Refinement request: rename it to v2");
   });
 
@@ -673,7 +673,7 @@ describe("runCompose", () => {
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
     expect(outcome.rounds.repairs).toBe(1);
-    expect(outcome.result.team).toBe("assist");
+    expect(outcome.result.team as string).toBe("assist");
     // The repair prompt carried the team rule, structured like schema problems.
     expect(requests[1]).toContain("failed schema validation");
     expect(requests[1]).toContain("team must be 'assist' (from --team)");

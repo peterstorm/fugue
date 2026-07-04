@@ -167,7 +167,7 @@ const scaffoldVizDag = async (): Promise<string> => {
     structure: { shape: "linear", order: ["fetch-x", "shape-x"] },
   });
   if (!authored.ok) throw new Error(authored.problems.join("; "));
-  const written = await writeAuthoredScaffold(authored.dag, { root: tmpRoot, force: true }, []);
+  const written = await writeAuthoredScaffold(authored.dag, { root: tmpRoot, force: true }, [], []);
   if (!written.ok) throw new Error(written.problems.join("; "));
   return join(written.dir, "dag.ts");
 };

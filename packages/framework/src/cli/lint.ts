@@ -8,15 +8,12 @@
 // caught here is what `defineDag` already validated. The CLI's job is to
 // surface the resulting `DagDefinitionError` as machine-readable JSON.
 
-import { resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DagDefinitionError } from "../executor/define-dag.js";
 import type { DagDef } from "../types/dag.js";
 import { analyzeDag } from "./lint-checks.js";
+import { resolveRoot } from "./paths.js";
 import type { LintAdvisory, LintError, LintResult } from "./types.js";
-
-const toAbsolute = (path: string): string =>
-  isAbsolute(path) ? path : resolve(process.cwd(), path);
 
 /**
  * Result of importing a DAG file. Shared between `runLint` and `runDescribe`
@@ -42,7 +39,10 @@ export type ImportedDagFile =
  * default export, no `.dag` field) as discriminated `LintError` values.
  */
 export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
-  const absolute = toAbsolute(path);
+  // `importDagFile` is the imperative shell (it `await import()`s the file), so
+  // the `process.cwd()` env read stays here at the boundary — `resolveRoot` is
+  // the pure core fed the cwd explicitly.
+  const absolute = resolveRoot(path, process.cwd());
   // Note: this CLI is intended to be invoked as a subprocess (one DAG file
   // per run). When re-used within a single process across multiple files,
   // each file imports cleanly. Bun caches a module's *failed* evaluation

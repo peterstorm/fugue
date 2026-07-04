@@ -10,7 +10,7 @@ import type {
   DescribedEdge,
 } from "../describe/index.js";
 import type { Shape } from "./new-templates.js";
-import { SHAPE_HELPER_NAME } from "./identifiers.js";
+import { SHAPE_HELPER_NAME, type Kebab, type KebabIdent } from "./identifiers.js";
 
 // Re-export the shared describe shapes so existing CLI consumers keep their
 // import path. The canonical home is `@fuguejs/framework`'s `describe` module —
@@ -213,8 +213,12 @@ export type NewResult =
       /** Absolute path of the generated DAG directory. */
       readonly dir: string;
       readonly shape: Shape;
-      readonly team: string;
-      readonly name: string;
+      // Branded — kept from the source AuthoredDag (`team: Kebab`,
+      // `name: KebabIdent`) rather than widened back to bare `string`, so the
+      // wire outcome carries proof the KEBAB rules passed. Serializes to
+      // identical JSON.
+      readonly team: Kebab;
+      readonly name: KebabIdent;
       readonly llm: boolean;
       /** Whether a human-review gate (ADR-0060) was scaffolded. */
       readonly review: boolean;
@@ -228,6 +232,15 @@ export type NewResult =
        * there. Always an array — consumers never branch on presence.
        */
       readonly advisories: readonly LintAdvisory[];
+      /**
+       * Non-fatal warnings the proving gauntlet's `describe` pass carried
+       * through (schema-serialization warnings — see `DescribeResult.warnings`
+       * and `GauntletResult.warnings`). Threaded here so the structured stdout
+       * outcome carries them end-to-end instead of surviving only via stderr.
+       * Template scaffolds don't run the gauntlet, so this is `[]` there.
+       * Always an array — consumers never branch on presence.
+       */
+      readonly warnings: readonly string[];
     }
   | {
       readonly ok: false;

@@ -14,7 +14,7 @@ import { parse as parseYaml } from "yaml";
 import { runLint } from "../../cli/lint.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
-import { parseKebabIdent, type KebabIdent } from "../../cli/identifiers.js";
+import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "../../cli/identifiers.js";
 import { SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
 
 // `NewOptions.name` / `TemplateCtx.name` are branded (`KebabIdent`) — parse
@@ -22,6 +22,14 @@ import { SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
 const mustName = (raw: string): KebabIdent => {
   const parsed = parseKebabIdent(raw);
   if (parsed === null) throw new Error(`not a KebabIdent: ${raw}`);
+  return parsed;
+};
+
+// `NewOptions.team` is branded (`Kebab`) — parse test teams through the single
+// smart constructor, never cast (mirrors `mustName`).
+const mustTeam = (raw: string): Kebab => {
+  const parsed = parseKebab(raw);
+  if (parsed === null) throw new Error(`not a Kebab: ${raw}`);
   return parsed;
 };
 
@@ -64,7 +72,7 @@ describe("generated scaffolds lint clean", () => {
       it(`${label} → dag.ts lints, fugue.yaml parses${llm ? ", prompts check green" : ""}`, async () => {
         const root = join(tmpRoot, `lint-${shape}-${llm ? "llm" : "plain"}`);
         const name = mustName(`scaffold-${shape}`);
-        const result = await runNew({ team: "demo", name, shape, llm, review: false, force: false, root });
+        const result = await runNew({ team: mustTeam("demo"), name, shape, llm, review: false, force: false, root });
         if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
 
         const dagDir = join(root, "dags", "demo", name);
@@ -110,7 +118,7 @@ describe("human-review scaffolds (--review)", () => {
     it(`${label} → dag.ts lints and carries a human-review gate`, async () => {
       const root = join(tmpRoot, `review-${llm ? "llm" : "plain"}`);
       const name = mustName("scaffold-review");
-      const result = await runNew({ team: "demo", name, shape: "linear", llm, review: true, force: false, root });
+      const result = await runNew({ team: mustTeam("demo"), name, shape: "linear", llm, review: true, force: false, root });
       if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
       expect(result.review).toBe(true);
 
@@ -176,7 +184,7 @@ describe("generated content guarantees", () => {
 describe("runNew file layout", () => {
   it("writes dag.ts, fugue.yaml, README.md under dags/<team>/<name>", async () => {
     const root = join(tmpRoot, "layout");
-    const result = await runNew({ team: "leads", name: mustName("my-dag"), shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("leads"), name: mustName("my-dag"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
       // The no-`--review` case carries the literal `false` (stable-JSON contract),
@@ -194,7 +202,7 @@ describe("runNew file layout", () => {
 
   it("--llm adds prompts/<name>.txt and a synced registry.json", async () => {
     const root = join(tmpRoot, "layout-llm");
-    const result = await runNew({ team: "leads", name: mustName("opener"), shape: "sources", llm: true, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("leads"), name: mustName("opener"), shape: "sources", llm: true, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.files).toContain(join("dags", "leads", "opener", "prompts", "opener.txt"));
@@ -208,7 +216,7 @@ describe("runNew file layout", () => {
 
   it("--owner sets the fugue.yaml owner", async () => {
     const root = join(tmpRoot, "owner");
-    await runNew({ team: "leads", name: mustName("owned"), shape: "linear", llm: false, review: false, owner: "peter.hansen", force: false, root });
+    await runNew({ team: mustTeam("leads"), name: mustName("owned"), shape: "linear", llm: false, review: false, owner: "peter.hansen", force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "owned", "fugue.yaml"), "utf-8");
     expect(yaml).toContain("owner: peter.hansen");
   });
@@ -218,7 +226,7 @@ describe("runNew file layout", () => {
     // keys. The value is emitted double-quoted (JSON-escaped) by construction.
     const root = join(tmpRoot, "owner-hostile");
     const owner = "evil: true\ninjected: pwned";
-    await runNew({ team: "leads", name: mustName("h"), shape: "linear", llm: false, review: false, owner, force: false, root });
+    await runNew({ team: mustTeam("leads"), name: mustName("h"), shape: "linear", llm: false, review: false, owner, force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "h", "fugue.yaml"), "utf-8");
     // The whole owner sits inside one quoted scalar; the newline is escaped, so
     // `injected:` never appears as its own top-level mapping line.
@@ -228,7 +236,7 @@ describe("runNew file layout", () => {
 
   it("the LLM factory shape exports create<Pascal>Dag", async () => {
     const root = join(tmpRoot, "factory");
-    await runNew({ team: "leads", name: mustName("lead-opener"), shape: "sources", llm: true, review: false, force: false, root });
+    await runNew({ team: mustTeam("leads"), name: mustName("lead-opener"), shape: "sources", llm: true, review: false, force: false, root });
     const dagTs = await readFile(join(root, "dags", "leads", "lead-opener", "dag.ts"), "utf-8");
     expect(dagTs).toContain("export const createLeadOpenerDag");
   });
@@ -274,7 +282,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "existing.txt"), "keep me", "utf-8");
 
-    const result = await runNew({ team: "t", name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.problems[0]).toContain("--force");
   });
@@ -285,7 +293,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "dag.ts"), "// stale", "utf-8");
 
-    const result = await runNew({ team: "t", name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
     expect(result.ok).toBe(true);
     const dagTs = await readFile(join(dir, "dag.ts"), "utf-8");
     expect(dagTs).not.toBe("// stale");
@@ -295,7 +303,7 @@ describe("runNew overwrite guard", () => {
     const root = join(tmpRoot, "guard-empty");
     const dir = join(root, "dags", "t", "x");
     await mkdir(dir, { recursive: true });
-    const result = await runNew({ team: "t", name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
   });
 
@@ -306,7 +314,7 @@ describe("runNew overwrite guard", () => {
     // arm), never crash past the machine-readable contract.
     const root = join(tmpRoot, "write-envelope");
     await mkdir(join(root, "dags", "t", "x", "dag.ts"), { recursive: true });
-    const result = await runNew({ team: "t", name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.problems[0]).toContain("write failed");
@@ -325,7 +333,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(root, { recursive: true });
     await writeFile(join(root, "dags"), "i am a file, not a directory", "utf-8");
 
-    const result = await runNew({ team: "t", name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.problems[0]).toContain("cannot verify");

@@ -21,15 +21,23 @@ import type { ComposeAnswer, ComposeIo } from "./compose.js";
 /**
  * The minimal structural slice of `node:readline/promises`' `Interface` this
  * adapter needs — narrow so tests substitute a plain fake object.
+ *
+ * `output` is the write seam `say` routes through — the symmetric counterpart
+ * to `question`'s injected input. Without it `say` would write straight to the
+ * global `process.stdout`, making the interactive prose untestable through the
+ * structural fake. The real `node:readline` `Interface` already carries its
+ * `output` stream, and `process.stdout` satisfies the seam directly.
  */
 export interface ReadlineLike {
   question(query: string): Promise<string>;
   once(event: "close", listener: () => void): unknown;
+  readonly output: { write(s: string): void };
 }
 
 /**
- * Build a `ComposeIo` over a readline interface. `say` writes to stdout —
- * compose is interactive prose until its final JSON outcome line.
+ * Build a `ComposeIo` over a readline interface. `say` writes through the
+ * interface's `output` seam (stdout in production) — compose is interactive
+ * prose until its final JSON outcome line.
  */
 export const readlineComposeIo = (rl: ReadlineLike): ComposeIo => {
   const closed: ComposeAnswer = { kind: "closed" };
@@ -74,6 +82,6 @@ export const readlineComposeIo = (rl: ReadlineLike): ComposeIo => {
         closedToAbort,
       ]);
     },
-    say: (m) => process.stdout.write(`${m}\n`),
+    say: (m) => rl.output.write(`${m}\n`),
   };
 };

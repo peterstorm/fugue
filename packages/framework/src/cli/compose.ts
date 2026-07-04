@@ -22,13 +22,13 @@
 // Seams are injected (LlmClient + ComposeIo) so the whole loop is testable
 // with a scripted fake — no network, no TTY.
 
-import { resolve, isAbsolute } from "node:path";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
+import { resolveRoot } from "./paths.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import {
   NODE_FACTORY_NAME,
@@ -376,7 +376,7 @@ export const runCompose = async (
 ): Promise<ComposeOutcome> => {
   const model = options.model ?? DEFAULT_MODEL;
   const root = options.root !== undefined
-    ? (isAbsolute(options.root) ? options.root : resolve(process.cwd(), options.root))
+    ? resolveRoot(options.root, process.cwd())
     : process.cwd();
   const maxQuestions = options.maxQuestionRounds ?? 2;
   const maxRepairs = options.maxRepairRounds ?? 3;
@@ -577,6 +577,7 @@ export const runCompose = async (
             ...(options.owner !== undefined ? { owner: options.owner } : {}),
           },
           verdict.advisories,
+          verdict.warnings,
         );
       } catch (e) {
         return {

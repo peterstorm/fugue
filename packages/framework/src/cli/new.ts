@@ -27,7 +27,7 @@
 // JSON, matching `lint` / `describe` / `prompts`.
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { match } from "ts-pattern";
 import {
   SHAPES,
@@ -41,12 +41,16 @@ import {
 import { parseAuthoredDagJson, type AuthoredDag } from "./authored.js";
 import { buildAuthoredScaffold } from "./authored-codegen.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
-import { KEBAB, parseKebabIdent, type KebabIdent } from "./identifiers.js";
+import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "./identifiers.js";
+import { resolveRoot } from "./paths.js";
 import { freshRegistryEntry, serializeRegistry, type RegistryEntry } from "./prompts.js";
 import type { LintAdvisory, NewResult } from "./types.js";
 
 export interface NewOptions {
-  readonly team: string;
+  // BRANDED (`Kebab`, `parseNewArgs` is the producer) — mirrors `name`'s
+  // treatment so the scaffold outcome (`NewResult.team: Kebab`) carries proof
+  // the KEBAB rule passed rather than a re-widened bare string.
+  readonly team: Kebab;
   /**
    * DAG id / directory name. BRANDED (`KebabIdent`, `parseNewArgs` is the
    * producer): the name PascalCases into emitted JS identifiers
@@ -169,7 +173,7 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
   if (target === undefined) {
     problems.push("missing <team>/<name> argument (e.g. `fugue new leads/my-dag --shape sources`)");
   }
-  let team = "";
+  let team: Kebab | null = null;
   let name: KebabIdent | null = null;
   if (target !== undefined) {
     const parts = target.split("/");
@@ -177,8 +181,8 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
       problems.push(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
     } else {
       const [rawTeam, rawName] = parts as [string, string];
-      team = rawTeam;
-      if (!KEBAB.test(team)) problems.push(`team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
+      team = parseKebab(rawTeam);
+      if (team === null) problems.push(`team '${rawTeam}' must be kebab-case (lowercase, digits, single dashes)`);
       // The name feeds codegen'd identifiers (`create<Pascal>Dag`,
       // `<Pascal>DagOpts`) — it must camelCase to a valid JS identifier, so
       // the first segment cannot start with a digit (KEBAB_IDENT, the same
@@ -209,9 +213,11 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
     );
   }
 
-  // Every `name === null` path pushed a problem above (missing target, bad
-  // path shape, non-KEBAB_IDENT name), so the null check is the same gate.
-  if (name === null || problems.length > 0) return { ok: false, problems };
+  // Every `name === null` / `team === null` path pushed a problem above
+  // (missing target, bad path shape, non-KEBAB team, non-KEBAB_IDENT name), so
+  // the null checks are the same gate — and they also narrow both brands for
+  // the success arm below.
+  if (name === null || team === null || problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
     mode: "shape",
@@ -241,8 +247,9 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
  * a framework bug, not an author error, so it still propagates.
  */
 export const runNew = async (options: NewOptions): Promise<NewResult> => {
-  const root = options.root ?? process.cwd();
-  const absRoot = isAbsolute(root) ? root : resolve(process.cwd(), root);
+  const cwd = process.cwd();
+  const root = options.root ?? cwd;
+  const absRoot = resolveRoot(root, cwd);
   const relDir = join("dags", options.team, options.name);
   const dir = join(absRoot, relDir);
 
@@ -337,6 +344,9 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     files: written,
     nextSteps,
     advisories: [],
+    // Template scaffolds don't run the proving gauntlet, so there are no
+    // describe-pass warnings to carry — always the empty array here.
+    warnings: [],
   };
 };
 
@@ -399,7 +409,7 @@ export const runNewFrom = async (
   gauntlet: (dag: AuthoredDag, root: string) => Promise<GauntletResult> = runGauntlet,
 ): Promise<NewResult> => {
   const cwd = process.cwd();
-  const fromPath = isAbsolute(options.from) ? options.from : resolve(cwd, options.from);
+  const fromPath = resolveRoot(options.from, cwd);
 
   let json: string;
   try {
@@ -413,7 +423,7 @@ export const runNewFrom = async (
   }
 
   const root = options.root ?? cwd;
-  const absRoot = isAbsolute(root) ? root : resolve(cwd, root);
+  const absRoot = resolveRoot(root, cwd);
   // The gauntlet stages real files (mkdir → write → import → rm) — a throw
   // there is an ENVIRONMENT failure (ENOSPC, EACCES, …), not an author error.
   // It must land in the same `{ ok: false, problems }` envelope as every
@@ -436,7 +446,7 @@ export const runNewFrom = async (
   // a throwing write is an environment failure, not a framework bug — fold it
   // into the envelope rather than crashing past the JSON contract.
   try {
-    return await writeAuthoredScaffold(parsed.dag, options, verdict.advisories);
+    return await writeAuthoredScaffold(parsed.dag, options, verdict.advisories, verdict.warnings);
   } catch (e) {
     return {
       ok: false,
@@ -449,20 +459,22 @@ export const runNewFrom = async (
  * Write the scaffold for an already-validated AuthoredDag. Shared between
  * `runNewFrom` (file input) and `fugue compose` (LLM-drafted input).
  *
- * `advisories` are the proving gauntlet's non-fatal hints, carried onto the
- * success result (the `NewResult.advisories` contract). REQUIRED — not
- * defaulted — so the type forces every caller to thread its verdict's
- * advisories rather than silently dropping them from the machine-readable
- * outcome.
+ * `advisories` are the proving gauntlet's non-fatal hints, and `warnings` are
+ * its `describe`-pass schema-serialization warnings — both carried onto the
+ * success result (the `NewResult.advisories` / `NewResult.warnings` contract).
+ * REQUIRED — not defaulted — so the type forces every caller to thread its
+ * verdict's advisories AND warnings rather than silently dropping them from the
+ * machine-readable outcome.
  */
 export const writeAuthoredScaffold = async (
   authored: AuthoredDag,
   options: Omit<NewFromOptions, "from">,
   advisories: readonly LintAdvisory[],
+  warnings: readonly string[],
 ): Promise<NewResult> => {
   const cwd = process.cwd();
   const root = options.root ?? cwd;
-  const absRoot = isAbsolute(root) ? root : resolve(cwd, root);
+  const absRoot = resolveRoot(root, cwd);
   const relDir = join("dags", authored.team, authored.name);
   const dir = join(absRoot, relDir);
 
@@ -532,5 +544,6 @@ export const writeAuthoredScaffold = async (
     files: written,
     nextSteps,
     advisories,
+    warnings,
   };
 };
