@@ -478,6 +478,11 @@ export const writeAuthoredScaffold = async (
   const relDir = join("dags", authored.team, authored.name);
   const dir = join(absRoot, relDir);
 
+  // Unlike `runNew` (which folds a readdir EACCES/ENOTDIR here into its result),
+  // a probe throw is intentionally left to propagate: every caller of
+  // `writeAuthoredScaffold` (`runNewFrom`, `runCompose`) wraps it in a try/catch
+  // that folds the throw into the stdout envelope, so the fold lives once at the
+  // boundary rather than being duplicated at both probe sites.
   if (!options.force && (await isDirNonEmpty(dir))) {
     return {
       ok: false,

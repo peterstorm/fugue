@@ -243,6 +243,9 @@ export type NewResult =
       readonly warnings: readonly string[];
     }
   | {
+      // No `warnings`/`advisories` on the failure arm by design: they are
+      // properties of a PRODUCED artifact, and nothing was written here. The
+      // asymmetry is the invariant — do not "fix" it by adding empty arrays.
       readonly ok: false;
       readonly problems: readonly string[];
     };
@@ -268,6 +271,9 @@ export type DescribeResult =
       readonly warnings: readonly string[];
     }
   | {
+      // No `warnings` on the failure arm: the import failed before schema
+      // serialization ran, so there are no serialization warnings to carry.
+      // Deliberate asymmetry, mirroring `NewResult` — not an oversight.
       readonly ok: false;
       readonly path: string;
       readonly errors: readonly LintError[];

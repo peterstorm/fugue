@@ -32,6 +32,7 @@ import {
   type KebabIdent,
 } from "./identifiers.js";
 import { assertNever } from "./types.js";
+import type { Shape } from "./new-templates.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
 
 // ---------------------------------------------------------------------------
@@ -297,6 +298,22 @@ export const StructureSchema = z.discriminatedUnion("shape", [
     .strict(),
 ]);
 export type AuthoredStructure = z.infer<typeof StructureSchema>;
+
+// Compile-time proof that `StructureSchema`'s discriminated union covers exactly
+// the canonical `Shape` set (derived from the `DAG_SHAPES` tuple in
+// `types/dag.ts`). The `assertNever` in `structureRefs` only fires when a
+// variant is ADDED to the union — it cannot force the union to COVER every
+// `Shape`. These two aliases close both directions, mirroring the
+// `_NoExtraShapes` backstop in `types.ts`: a new shape in `DAG_SHAPES` with no
+// `StructureSchema` variant makes it silently un-authorable, and a variant
+// naming a shape that isn't canonical would drift the authoring surface from
+// the schema — each resolves to `never` and fails at its own annotation.
+type _StructureCoversShapes = Exclude<Shape, AuthoredStructure["shape"]> extends never ? true : never;
+type _StructureNoExtraShapes = Exclude<AuthoredStructure["shape"], Shape> extends never ? true : never;
+const _structureCoversShapes: _StructureCoversShapes = true;
+const _structureNoExtraShapes: _StructureNoExtraShapes = true;
+void _structureCoversShapes;
+void _structureNoExtraShapes;
 
 // ---------------------------------------------------------------------------
 // The AuthoredDag

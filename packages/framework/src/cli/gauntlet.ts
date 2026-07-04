@@ -12,8 +12,18 @@
 //
 // The staging dir lives UNDER `root` (`.fugue-compose/draft-*`) so the
 // generated file resolves `@fuguejs/*` through the project's node_modules.
+// The `.fugue-compose` base name is compose-branded but shared: the `new
+// --from` path proves through this same gauntlet, so it too creates (and
+// cleans up) `.fugue-compose/` regardless of the invoking command.
 // Cleaned up best-effort (a failed rm warns on stderr rather than masking the
 // verdict); the `.fugue-compose` base is removed too once empty.
+//
+// Lifecycle note: each repair/refinement round imports a FRESH `dag.ts` under a
+// unique `mkdtemp` dir, so paths never collide — but every import adds one
+// un-unloadable ESM module record to the long-lived process. A single compose
+// session with many repair rounds therefore accumulates one record per draft;
+// bounded by `maxRepairs`, acceptable for a CLI session, unlike the subprocess
+// (one-file) lifecycle `importDagFile` reasons about.
 
 import { mkdir, mkdtemp, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
