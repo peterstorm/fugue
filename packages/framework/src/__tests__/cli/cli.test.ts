@@ -1,7 +1,7 @@
 import { describe, it, expect, spyOn } from "bun:test";
 import { resolve } from "node:path";
 import { runLint } from "../../cli/lint.js";
-import { runDescribe } from "../../cli/describe.js";
+import { parseRegistrationMeta, runDescribe } from "../../cli/describe.js";
 import { runCapabilities } from "../../cli/capabilities.js";
 import { BUILTIN_CAPABILITY_KEYS } from "../../types/node.js";
 
@@ -250,6 +250,39 @@ describe("runDescribe", () => {
     if (!result.ok) {
       expect(result.errors[0]!.kind).toBe("dag-definition-error");
     }
+  });
+});
+
+describe("parseRegistrationMeta", () => {
+  // The degrade contract: missing/mis-typed meta fields fall back to the same
+  // defaults the manifest endpoint uses ("" / "0.0.0") — never a throw. The
+  // registration's `meta` is untyped user input, so every shape must degrade.
+  it("returns the defaults for a missing meta record", () => {
+    expect(parseRegistrationMeta(undefined)).toEqual({ description: "", version: "0.0.0" });
+    expect(parseRegistrationMeta(null)).toEqual({ description: "", version: "0.0.0" });
+  });
+
+  it("returns the defaults for a non-object meta value", () => {
+    expect(parseRegistrationMeta("meta")).toEqual({ description: "", version: "0.0.0" });
+    expect(parseRegistrationMeta(42)).toEqual({ description: "", version: "0.0.0" });
+  });
+
+  it("degrades mis-typed fields individually, keeping well-typed siblings", () => {
+    expect(parseRegistrationMeta({ description: 7, version: "1.2.3" })).toEqual({
+      description: "",
+      version: "1.2.3",
+    });
+    expect(parseRegistrationMeta({ description: "real", version: { major: 1 } })).toEqual({
+      description: "real",
+      version: "0.0.0",
+    });
+  });
+
+  it("passes through well-typed fields verbatim", () => {
+    expect(parseRegistrationMeta({ description: "d", version: "9.9.9" })).toEqual({
+      description: "d",
+      version: "9.9.9",
+    });
   });
 });
 

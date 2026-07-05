@@ -319,6 +319,60 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
+  it("threads req.temperature into the wire body, and omits it when absent", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+
+    const base = {
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    };
+    // A pinned temperature reaches the wire (compose pins 0 for determinism)…
+    await makeClient().sendStructured<SchemaType>({ ...base, temperature: 0 });
+    const first = JSON.parse(fetchCalls[0]!.init.body as string);
+    expect(first.temperature).toBe(0);
+    // …and an absent temperature stays ABSENT (provider default) — never a
+    // fabricated value.
+    await makeClient().sendStructured<SchemaType>(base);
+    const second = JSON.parse(fetchCalls[1]!.init.body as string);
+    expect("temperature" in second).toBe(false);
+  });
+
+  it("thinking + temperature → typed validation error before any request is sent", async () => {
+    // Reasoning models reject `temperature` alongside `reasoning` with an
+    // opaque HTTP 400 — the illegal combination is caught at the seam as a
+    // validation FrameworkError (never silently dropped, never a node-crash).
+    handler = async () => {
+      throw new Error("should never reach the wire");
+    };
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "reasoning-node" as NodeId,
+      thinking: { type: "enabled", budgetTokens: 1024 },
+      temperature: 0,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("reasoning-node"));
+        expect(result.error.message).toMatch(/temperature/);
+        expect(result.error.message).toMatch(/thinking/);
+      }
+    }
+    // The request never left the process.
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it("text.format is wired as json_schema with strict=true", async () => {
     handler = async () =>
       jsonResponse({

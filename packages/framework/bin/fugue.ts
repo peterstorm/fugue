@@ -191,6 +191,12 @@ const main = async (): Promise<number> => {
       return outcome.ok ? 0 : 1;
     } finally {
       rl.close();
+      // The rl-level listener dies with rl.close(); the process-level one
+      // would otherwise LEAK past compose completion — a Ctrl-C during the
+      // post-completion stdout drain would print the misleading "finishing
+      // the current step" message, and a second press would exit(130) and
+      // truncate the final JSON payload mid-write.
+      process.removeListener("SIGINT", interrupt);
     }
   }
 

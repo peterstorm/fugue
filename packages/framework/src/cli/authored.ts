@@ -353,8 +353,13 @@ const BaseAuthoredDagSchema = z
   })
   .strict();
 
-/** Node ids referenced by a structure, with the role each plays. */
-const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> => {
+/**
+ * Node ids referenced by a structure, with the role each plays — in dependency
+ * order (declarations precede use). Exported as the single source of the
+ * structural walk: codegen's `structureOrder` derives its iteration order from
+ * this same function, so the two can never disagree on a shape's node set.
+ */
+export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> => {
   switch (s.shape) {
     case "linear":
       return s.order.map((id, i) => [id, `order[${i}]`] as const);

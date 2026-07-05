@@ -185,6 +185,20 @@ export class OpenAILlmClient implements LlmClient {
       });
     }
 
+    // Pre-flight: reasoning models reject `temperature` alongside `reasoning`
+    // with an opaque HTTP 400. That combination is a deterministic caller
+    // error — surface it as a typed validation failure at the seam rather
+    // than letting the wire round-trip crash the node (and never silently
+    // drop the caller's temperature).
+    if (req.thinking?.type === "enabled" && req.temperature !== undefined) {
+      return err({
+        kind: "validation",
+        nodeId: req.nodeId,
+        message:
+          "temperature cannot be combined with thinking (OpenAI reasoning models reject the pair) — unset one of them",
+      });
+    }
+
     try {
       const body: Record<string, unknown> = {
         model: this.modelOverride ?? req.model,

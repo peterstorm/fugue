@@ -271,9 +271,12 @@ export type DescribeResult =
       readonly warnings: readonly string[];
     }
   | {
-      // No `warnings` on the failure arm: the import failed before schema
-      // serialization ran, so there are no serialization warnings to carry.
-      // Deliberate asymmetry, mirroring `NewResult` — not an oversight.
+      // No `warnings` on the failure arm. On the import-failed path that is
+      // genuine — the import failed before schema serialization ran, so none
+      // exist. On the describe-failed path, schema warnings may have
+      // accumulated before assembly failed; they are DELIBERATELY dropped
+      // along with the failed payload. Asymmetry mirrors `NewResult` — not an
+      // oversight.
       readonly ok: false;
       readonly path: string;
       readonly errors: readonly LintError[];

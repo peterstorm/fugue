@@ -28,6 +28,7 @@
 //               source ids; assemble consumes { join, $input }
 
 import { match } from "ts-pattern";
+import { structureRefs } from "./authored.js";
 import type {
   AuthoredDag,
   AuthoredNode,
@@ -500,18 +501,13 @@ ${llmDagFactoryOpen(dag.name)}
 // Wiring helpers
 // ---------------------------------------------------------------------------
 
-/** Structure roles in dependency order, so declarations always precede use. */
+/**
+ * Structure roles in dependency order, so declarations always precede use.
+ * Derived from `structureRefs` (the schema's own structural walk) rather than
+ * a hand-duplicated per-shape switch — one walk, one order.
+ */
 const structureOrder = (dag: AuthoredDag): readonly string[] =>
-  match(dag.structure)
-    .with({ shape: "linear" }, (s) => s.order)
-    .with({ shape: "fan-out" }, { shape: "diamond" }, (s) => [
-      s.source,
-      ...s.branches,
-      ...(s.join !== undefined ? [s.join] : []),
-    ])
-    .with({ shape: "router" }, (s) => [s.classifier, ...s.cases.map((c) => c.to), s.default])
-    .with({ shape: "sources" }, (s) => [...s.sources, s.join, s.assemble])
-    .exhaustive();
+  structureRefs(dag.structure).map(([id]) => id);
 
 /**
  * In the LLM factory case the structure references `create<Node>(model)`;

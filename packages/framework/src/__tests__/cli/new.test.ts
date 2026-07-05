@@ -299,6 +299,26 @@ describe("runNew overwrite guard", () => {
     expect(dagTs).not.toBe("// stale");
   });
 
+  it("--force removes a leftover dag.authored.json sidecar (tool-owned, shape mode never writes one)", async () => {
+    // A prior --from/compose scaffold leaves a dag.authored.json sidecar. A
+    // shape-mode --force regeneration must remove it — otherwise a later
+    // `fugue new --from dag.authored.json --force` silently resurrects the
+    // OLD DAG, breaking the documented regen fixed point.
+    const root = join(tmpRoot, "guard-force-sidecar");
+    const dir = join(root, "dags", "t", "x");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "dag.authored.json"), `{"fugueAuthored":1}`, "utf-8");
+    // A user file outside the tool-owned set must SURVIVE (never rm -rf).
+    await writeFile(join(dir, "notes.md"), "mine", "utf-8");
+
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(result.ok).toBe(true);
+    const entries = await readdir(dir);
+    expect(entries).not.toContain("dag.authored.json");
+    expect(entries).toContain("notes.md");
+    expect(entries).toContain("dag.ts");
+  });
+
   it("--force treats generated prompts/ as tool-owned: an --llm scaffold force-regenerated without --llm drops the stale prompt artifacts", async () => {
     // regen(a) then regen(b, --force) must equal a fresh regen(b) for
     // everything the tool writes — a stale prompts/ from the --llm scaffold

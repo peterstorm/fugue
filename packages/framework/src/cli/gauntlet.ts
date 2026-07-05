@@ -22,8 +22,9 @@
 // unique `mkdtemp` dir, so paths never collide — but every import adds one
 // un-unloadable ESM module record to the long-lived process. A single compose
 // session with many repair rounds therefore accumulates one record per draft;
-// bounded by `maxRepairs`, acceptable for a CLI session, unlike the subprocess
-// (one-file) lifecycle `importDagFile` reasons about.
+// bounded per draft by `maxRepairs` (each refinement starts a fresh budget),
+// acceptable for an interactive session, unlike the subprocess (one-file)
+// lifecycle `importDagFile` reasons about.
 
 import { mkdir, mkdtemp, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";

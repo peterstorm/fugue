@@ -17,8 +17,9 @@ import type { DescribeResult, LintError } from "./types.js";
  * Parse the registration's untyped `meta` record into the two fields describe
  * consumes, with the same defaults the manifest endpoint falls back to —
  * missing/mis-typed values degrade to the defaults, never throw.
+ * Exported for direct testing of the degrade contract (pure function).
  */
-const parseRegistrationMeta = (
+export const parseRegistrationMeta = (
   raw: unknown,
 ): { readonly description: string; readonly version: string } => {
   const meta =

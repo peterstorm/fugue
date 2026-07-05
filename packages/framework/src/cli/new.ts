@@ -370,6 +370,13 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     // previous scaffold wrote that this one does not, so regeneration is a
     // fixed point (`prompts check` stays green after a shape/--llm change).
     if (options.force) {
+      // The `dag.authored.json` sidecar is tool-owned too (written only by the
+      // --from/compose path). A shape-mode scaffold never writes one, so a
+      // leftover from a prior --from scaffold would silently resurrect the OLD
+      // DAG on a later `fugue new --from dag.authored.json --force` — remove
+      // it for the same fixed-point reason stale prompts are reconciled.
+      // `force: true` makes a missing sidecar a no-op (ENOENT ignored).
+      await rm(join(dir, "dag.authored.json"), { force: true });
       await reconcilePromptsDir(dir, new Set(scaffold.prompt ? [`${scaffold.prompt.name}.txt`] : []));
     }
   } catch (e) {
