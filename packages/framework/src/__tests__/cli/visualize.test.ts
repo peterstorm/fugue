@@ -3,7 +3,7 @@
 // kind's arrow, human-review gates are visually distinct, and a file that
 // fails lint fails visualize with the same structured errors.
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describedToMermaid, runVisualize } from "../../cli/visualize.js";
@@ -190,6 +190,31 @@ describe("runVisualize", () => {
     const bad = await runVisualize(brokenPath);
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.errors[0]?.kind).toBe("missing-dag-field");
+  });
+
+  it("threads describe's schema-serialization warnings through the ok arm (never dropped)", async () => {
+    // The schema-warning fixture's registration inputSchema is z.void() —
+    // describe stays ok with a warning; runVisualize must carry it on
+    // `warnings` (the always-an-array contract), not lose it in the wrap.
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runVisualize(resolve(__dirname, "fixtures", "schema-warning.ts"));
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.diagram).toContain("flowchart TD");
+        expect(result.warnings).toHaveLength(1);
+        expect(result.warnings[0]).toContain("inputSchema");
+      }
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("carries an EMPTY warnings array on a clean render (consumers never branch on presence)", async () => {
+    const dagPath = await scaffoldVizDag();
+    const result = await runVisualize(dagPath);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.warnings).toEqual([]);
   });
 });
 

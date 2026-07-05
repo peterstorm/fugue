@@ -171,6 +171,30 @@ describe("runCompose", () => {
     expect(shown).toContain('dag_output(["output"])');
   });
 
+  it("pins temperature 0 on every structured drafting/repair turn (deterministic core)", async () => {
+    const root = join(tmpRoot, "temperature");
+    const temperatures: (number | undefined)[] = [];
+    const queue: ComposeTurn[] = [draft({ nope: true }), draft(validDag)]; // one repair round, then clean
+    const client: LlmClient = {
+      async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        temperatures.push(req.temperature);
+        const turn = queue.shift();
+        if (turn === undefined) throw new Error("scripted LLM ran out of turns");
+        const parsed = req.schema.safeParse(turn);
+        if (!parsed.success) throw new Error(`scripted turn failed schema: ${parsed.error.message}`);
+        return ok({ output: parsed.data, tokensIn: 0, tokensOut: 0, rawText: JSON.stringify(turn) });
+      },
+      async sendWithTools(): Promise<never> {
+        throw new Error("compose never uses tools");
+      },
+    };
+    const { io } = scriptedIo(["yes"]);
+    const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
+    if (!outcome.ok) throw new Error(`compose failed: ${outcome.reason} ${outcome.problems.join("; ")}`);
+    // BOTH the drafting turn and the (schema-)repair turn ran pinned to 0.
+    expect(temperatures).toEqual([0, 0]);
+  });
+
   it("clarifying questions round-trips answers into the next turn's context", async () => {
     const root = join(tmpRoot, "questions");
     const { client, requests } = scriptedLlm([
@@ -794,6 +818,18 @@ describe("parseComposeArgs", () => {
     const parsed = parseComposeArgs([]);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a repeated value-taking flag is last-wins (pinned)", () => {
+    // Duplicate flags are not rejected — the LAST occurrence binds (matches
+    // getopt convention and parseNewArgs). Pinned so a future "reject
+    // duplicates" change is a deliberate decision, not drift.
+    const parsed = parseComposeArgs(["a briefing", "--team", "first", "--team", "second", "--model", "m1", "--model", "m2"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.options.team).toBe(mustKebab("second"));
+      expect(parsed.options.model).toBe("m2");
+    }
   });
 });
 

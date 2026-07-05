@@ -416,6 +416,10 @@ export const runCompose = async (
       model,
       schema: ComposeTurnSchema,
       nodeId: COMPOSE_NODE_ID,
+      // Deterministic-core: drafting/repair turns are structured edits of a
+      // closed JSON document, not creative writing — pin sampling to 0 so a
+      // replayed conversation is as reproducible as the provider allows.
+      temperature: 0,
     });
     if (!res.ok) return { error: formatFrameworkError(res.error) };
     return res.value.output;

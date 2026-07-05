@@ -6,7 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import fc from "fast-check";
 import {
@@ -972,10 +972,11 @@ describe("authored codegen survives the gauntlet", () => {
     ]);
   });
 
-  it("--force overwrites in place WITHOUT clearing stale files (pinned)", async () => {
+  it("--force overwrites in place WITHOUT clearing user files outside prompts/ (pinned)", async () => {
     // The overwrite guard only gates writing — `--force` re-writes the
     // scaffold files over a non-empty dir but never deletes files it does not
-    // itself write. Pinned so a future "clean the dir first" change is a
+    // itself own (the ONE exception is the tool-owned prompts/ artifacts,
+    // reconciled below). Pinned so a future "clean the dir first" change is a
     // deliberate decision, not an accident.
     const root = join(tmpRoot, "force-stale");
     const dag = mustParse(FIXTURES.linear!);
@@ -988,10 +989,100 @@ describe("authored codegen survives the gauntlet", () => {
     expect(await Bun.file(join(first.dir, "dag.ts")).exists()).toBe(true);
   });
 
+  it("--force reconciles tool-owned prompts/: regen(a) then regen(b, --force) ≡ fresh regen(b)", async () => {
+    // Fixed point over the prompt set: the two-llm draft writes two prompt
+    // files; force-regenerating a single-llm draft of the SAME dag must drop
+    // the stale ones (and rewrite the registry) so `prompts check` is green —
+    // exactly the state a fresh regen of the single-llm draft produces.
+    const twoLlm = mustParse({ ...FIXTURES["linear-two-llm"]!, name: "force-fixed-point" });
+    const oneLlm = mustParse({
+      ...FIXTURES["linear-two-llm"]!,
+      name: "force-fixed-point",
+      nodes: [
+        { id: "classify", kind: "transform", purpose: "Classify the message", output: out("topic") },
+        { id: "draft-reply", kind: "llm", purpose: "Draft a reply", output: out("reply") },
+      ],
+    });
+
+    const rootA = join(tmpRoot, "force-fixed-point-regen");
+    const first = await writeAuthoredScaffold(twoLlm, { root: rootA, force: false }, [], []);
+    if (!first.ok) throw new Error(first.problems.join("; "));
+    const second = await writeAuthoredScaffold(oneLlm, { root: rootA, force: true }, [], []);
+    if (!second.ok) throw new Error(second.problems.join("; "));
+
+    const rootB = join(tmpRoot, "force-fixed-point-fresh");
+    const fresh = await writeAuthoredScaffold(oneLlm, { root: rootB, force: false }, [], []);
+    if (!fresh.ok) throw new Error(fresh.problems.join("; "));
+
+    // Same prompts/ dir listing AND same registry bytes as the fresh regen.
+    const listing = async (dir: string) => (await readdir(join(dir, "prompts"))).sort();
+    expect(await listing(second.dir)).toEqual(await listing(fresh.dir));
+    expect(await readFile(join(second.dir, "prompts", "registry.json"), "utf-8")).toBe(
+      await readFile(join(fresh.dir, "prompts", "registry.json"), "utf-8"),
+    );
+    const check = await runPromptsCheck(second.dir);
+    expect(check.ok).toBe(true);
+
+    // The llm-free draft as the final regen: prompts/ disappears entirely.
+    const noLlm = mustParse({ ...FIXTURES.linear!, name: "force-fixed-point" });
+    const third = await writeAuthoredScaffold(noLlm, { root: rootA, force: true }, [], []);
+    if (!third.ok) throw new Error(third.problems.join("; "));
+    expect(existsSync(join(third.dir, "prompts"))).toBe(false);
+  });
+
   it("buildAuthoredScaffold is deterministic (same input → identical output)", () => {
     for (const fixture of Object.values(FIXTURES)) {
       expect(buildAuthoredScaffold(mustParse(fixture))).toEqual(buildAuthoredScaffold(mustParse(fixture)));
     }
+  });
+
+  it("nodes-array permutations parse to the same value and byte-identical scaffolds (canonical node order)", () => {
+    // The parse canonicalizes `nodes` to structure order, so two authored
+    // files differing only in array order are the SAME document — same
+    // sidecar bytes, same generated dag.ts, same prompts.
+    for (const [label, fixture] of Object.entries(FIXTURES)) {
+      const permuted: AuthoredDagInput = structuredClone(fixture);
+      (permuted as { nodes: unknown[] }).nodes = [...permuted.nodes].reverse();
+      const a = mustParse(fixture);
+      const b = mustParse(permuted);
+      expect(JSON.stringify(b, null, 2)).toBe(JSON.stringify(a, null, 2)); // the sidecar bytes
+      const sa = buildAuthoredScaffold(a);
+      const sb = buildAuthoredScaffold(b);
+      if (sb.dagTs !== sa.dagTs) throw new Error(`${label}: permuted nodes produced different dag.ts bytes`);
+      expect(sb.prompts).toEqual(sa.prompts);
+    }
+  });
+
+  it("parse canonicalizes dag.nodes to structure order", () => {
+    const permuted: AuthoredDagInput = structuredClone(FIXTURES["sources-llm"]!);
+    (permuted as { nodes: unknown[] }).nodes = [...permuted.nodes].reverse();
+    const dag = mustParse(permuted);
+    // sources shape order: sources…, join, assemble.
+    expect(dag.nodes.map((n) => n.id as string)).toEqual([
+      "fetch-weather",
+      "fetch-calendar",
+      "synthesize",
+      "final",
+    ]);
+  });
+
+  it("an EXPLICIT llm confidence field is emitted exactly once (withConfidence skip branch)", () => {
+    // router-llm declares the bucket enum explicitly — injection must be
+    // skipped, or the schema const would carry a duplicate `confidence` key.
+    const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["router-llm"]!));
+    const occurrences = scaffold.dagTs.match(/confidence: z\.enum\(/g) ?? [];
+    expect(occurrences).toHaveLength(1);
+    // The prompt shape hint carries it exactly once too.
+    const prompt = scaffold.prompts[0]!;
+    expect(prompt.body.match(/"confidence":/g) ?? []).toHaveLength(1);
+  });
+
+  it("router case labels parse into the branded Kebab (proof rides on the parsed dag)", () => {
+    const dag = mustParse(FIXTURES.router!);
+    if (dag.structure.shape !== "router") throw new Error("expected the router structure");
+    // Compile-time: `label` carries the brand (mirrors `team`'s treatment).
+    const label: Kebab = dag.structure.cases[0]!.label;
+    expect(label as string).toBe("small");
   });
 
   it("runNewFrom reads the file, refuses to clobber without --force", async () => {
@@ -1116,6 +1207,54 @@ describe("authored codegen survives the gauntlet", () => {
     const result = await runNewFrom({ from: fromPath, force: false, root }, okWithAdvisory);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.advisories).toEqual([advisory]);
+  });
+
+  it("runNewFrom threads non-empty gauntlet warnings onto the machine-readable outcome", async () => {
+    // The describe-pass schema-serialization warnings ride the verdict; the
+    // NewResult contract says they reach the success result (never dropped).
+    const root = join(tmpRoot, "from-warnings");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "x.authored.json");
+    await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
+    const describedStub: DescribedDag = {
+      id: "authored-linear",
+      route: "/authored-linear",
+      description: "stub",
+      version: "1.0.0",
+      inputSchema: null,
+      outputSchema: null,
+      outputNodeId: null,
+      nodes: [],
+      edges: [],
+      waves: [],
+      prompts: [],
+      capabilities: [],
+    };
+    const warning = "outputSchema (node 'summarize'): unrepresentable in JSON Schema";
+    const okWithWarning = async (): Promise<GauntletResult> => ({
+      ok: true,
+      described: describedStub,
+      advisories: [],
+      warnings: [warning],
+    });
+    const result = await runNewFrom({ from: fromPath, force: false, root }, okWithWarning);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.warnings).toEqual([warning]);
+  });
+});
+
+describe("parse problem formatting", () => {
+  it("a root-level issue (empty path) surfaces the bare message, no dangling path prefix", () => {
+    // `issuesToProblems` prefixes `path.join(".")` only when the path is
+    // non-empty — a non-object root exercises the empty-path branch.
+    const parsed = parseAuthoredDag(null);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.problems).toHaveLength(1);
+      // No path → the problem IS the message: no leading ": " or field path.
+      expect(parsed.problems[0]).toMatch(/^Invalid input/);
+      expect(parsed.problems[0]!.startsWith(":")).toBe(false);
+    }
   });
 });
 

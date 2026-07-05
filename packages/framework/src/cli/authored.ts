@@ -21,7 +21,6 @@ import { z } from "zod";
 import {
   IDENT,
   JS_RESERVED_WORDS,
-  KEBAB,
   RESERVED_IDENTIFIERS,
   SINGLE_LINE,
   camelCase,
@@ -150,6 +149,21 @@ const kebabIdentField = (message: string) =>
     return parsed;
   });
 
+/**
+ * A plain-KEBAB string field, parsed into the branded `Kebab` through the
+ * single smart constructor (mirrors `kebabIdentField`) — used where the value
+ * never becomes a bare identifier (team, router case labels).
+ */
+const kebabField = (message: string) =>
+  z.string().transform((s, ctx) => {
+    const parsed = parseKebab(s);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
 const nodeId = kebabIdentField("node id must be kebab-case starting with a letter");
 /** What this node is for — the authoring intent DescribedDag can't carry. */
 const nodePurpose = z.string().min(1).regex(SINGLE_LINE, "must be a single line");
@@ -254,7 +268,9 @@ const nodeRef = kebabIdentField("node reference must be kebab-case starting with
 
 export const RouterCaseSchema = z
   .object({
-    label: z.string().regex(KEBAB, "case label must be kebab-case"),
+    // Parsed into the branded `Kebab` (mirrors `team`'s treatment) — a parsed
+    // case label carries the proof the KEBAB rule passed, not a bare string.
+    label: kebabField("case label must be kebab-case"),
     /** Closed predicate: classifier output `field` equals `equals`. */
     when: z.object({ field: z.string().regex(IDENT), equals: z.string().min(1) }).strict(),
     to: nodeRef,
@@ -328,14 +344,7 @@ const BaseAuthoredDagSchema = z
     // (mirrors `name`'s treatment) — so a parsed dag's `team` carries the
     // proof the KEBAB rule passed, and consumers like `runCompose`'s --team
     // comparison work brand-to-brand instead of trusting a bare string.
-    team: z.string().transform((s, ctx) => {
-      const parsed = parseKebab(s);
-      if (parsed === null) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "team must be kebab-case" });
-        return z.NEVER;
-      }
-      return parsed;
-    }),
+    team: kebabField("team must be kebab-case"),
     description: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
     /** DAG input schema (the request). */
     input: SchemaSpecSchema,
@@ -549,7 +558,24 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
       predicates.add(p);
     }
   }
-}).brand<"AuthoredDag">();
+})
+  // Canonicalize node order to the structure's dependency order (the order
+  // `structureRefs` walks — the same walk codegen's `structureOrder` uses),
+  // so two authored files differing only in `nodes` array order parse to the
+  // SAME value and therefore generate byte-identical scaffolds. Pure and
+  // total AFTER the refinements above: every node is referenced exactly once
+  // by the structure, so the reordering is a bijection. When refinements
+  // failed (unknown refs / duplicate roles) the parse is already a failure —
+  // the guards below only keep this transform throw-free on that dead path.
+  .transform((dag) => {
+    const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
+    const ordered = structureRefs(dag.structure).flatMap(([id]) => {
+      const node = byId.get(id);
+      return node === undefined ? [] : [node];
+    });
+    return ordered.length === dag.nodes.length ? { ...dag, nodes: ordered } : dag;
+  })
+  .brand<"AuthoredDag">();
 
 /**
  * BRANDED: only `parseAuthoredDag` / `parseAuthoredDagJson` produce this type,

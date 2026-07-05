@@ -120,6 +120,31 @@ describe("AnthropicLlmClient.sendStructured", () => {
     }
   });
 
+  it("threads req.temperature into MessageCreateParams, and omits it when absent", async () => {
+    const seen: Anthropic.MessageCreateParams[] = [];
+    const client = new AnthropicLlmClient(
+      makeStub(async (params) => {
+        seen.push(params);
+        return makeToolUseResponse({ greeting: "hi" });
+      }),
+    );
+
+    const base = {
+      system: "s",
+      user: "u",
+      model: "claude-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    };
+    // A pinned temperature reaches the wire (compose pins 0 for determinism)…
+    await client.sendStructured<SchemaType>({ ...base, temperature: 0 });
+    expect(seen[0]?.temperature).toBe(0);
+    // …and an absent temperature stays ABSENT (provider default) — never a
+    // fabricated value.
+    await client.sendStructured<SchemaType>(base);
+    expect("temperature" in (seen[1] ?? {})).toBe(false);
+  });
+
   it("missing tool_use block → node-crash with nodeId", async () => {
     const client = new AnthropicLlmClient(makeStub(async () => makeTextResponse("just text")));
     const result = await client.sendStructured<SchemaType>({

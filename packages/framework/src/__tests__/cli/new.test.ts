@@ -299,6 +299,34 @@ describe("runNew overwrite guard", () => {
     expect(dagTs).not.toBe("// stale");
   });
 
+  it("--force treats generated prompts/ as tool-owned: an --llm scaffold force-regenerated without --llm drops the stale prompt artifacts", async () => {
+    // regen(a) then regen(b, --force) must equal a fresh regen(b) for
+    // everything the tool writes — a stale prompts/ from the --llm scaffold
+    // would otherwise fail `fugue prompts check` forever.
+    const root = join(tmpRoot, "guard-force-prompts");
+    const first = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: true, review: false, force: false, root });
+    expect(first.ok).toBe(true);
+    const dir = join(root, "dags", "t", "x");
+    // A user file inside prompts/ must SURVIVE the reconciliation (never rm -rf).
+    await writeFile(join(dir, "prompts", "notes.md"), "mine", "utf-8");
+
+    const second = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(second.ok).toBe(true);
+    // Tool-owned artifacts gone; the user file (and thus the dir) kept.
+    const entries = await readdir(join(dir, "prompts"));
+    expect(entries).toEqual(["notes.md"]);
+  });
+
+  it("--force with no leftover user files removes the now-promptless prompts/ dir entirely (fixed point)", async () => {
+    const root = join(tmpRoot, "guard-force-prompts-clean");
+    const first = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: true, review: false, force: false, root });
+    expect(first.ok).toBe(true);
+    const second = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(second.ok).toBe(true);
+    // Identical to a fresh non-llm scaffold: no prompts/ dir at all.
+    await expect(readdir(join(root, "dags", "t", "x", "prompts"))).rejects.toThrow();
+  });
+
   it("scaffolds into an empty existing dir without --force", async () => {
     const root = join(tmpRoot, "guard-empty");
     const dir = join(root, "dags", "t", "x");
@@ -449,6 +477,18 @@ describe("parseNewArgs", () => {
     const parsed = parseNewArgs([]);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a repeated value-taking flag is last-wins (pinned)", () => {
+    // Duplicate flags are not rejected — the LAST occurrence binds (matches
+    // getopt convention). Pinned so a future "reject duplicates" change is a
+    // deliberate decision, not drift.
+    const parsed = parseNewArgs(["leads/x", "--shape", "router", "--shape", "linear", "--owner", "a", "--owner", "b"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.mode === "shape") {
+      expect(parsed.options.shape).toBe("linear");
+      expect(parsed.options.owner).toBe("b");
+    }
   });
 });
 

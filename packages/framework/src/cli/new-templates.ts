@@ -42,6 +42,14 @@ import {
 export const SHAPES = DAG_SHAPES;
 export type Shape = (typeof SHAPES)[number];
 
+/**
+ * The sole `Shape` producer for raw CLI input: the membership check IS the
+ * narrowing, so no call site ever pairs a non-narrowing `includes` with a
+ * separate `as Shape` cast (parse, don't validate).
+ */
+export const parseShape = (raw: string): Shape | null =>
+  (SHAPES as readonly string[]).includes(raw) ? (raw as Shape) : null;
+
 export interface TemplateCtx {
   /**
    * DAG id / directory name. BRANDED (`KebabIdent`): the name feeds the

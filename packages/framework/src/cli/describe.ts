@@ -8,11 +8,26 @@
 // `null` rather than being omitted, so LLM tooling never has to branch on
 // "field present vs missing" — only on the value.
 
-import type { DagDef } from "../types/dag.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { buildDescribedDag } from "../describe/index.js";
 import { importDagFile } from "./lint.js";
 import type { DescribeResult, LintError } from "./types.js";
+
+/**
+ * Parse the registration's untyped `meta` record into the two fields describe
+ * consumes, with the same defaults the manifest endpoint falls back to —
+ * missing/mis-typed values degrade to the defaults, never throw.
+ */
+const parseRegistrationMeta = (
+  raw: unknown,
+): { readonly description: string; readonly version: string } => {
+  const meta =
+    raw !== null && typeof raw === "object" ? (raw as { description?: unknown; version?: unknown }) : {};
+  return {
+    description: typeof meta.description === "string" ? meta.description : "",
+    version: typeof meta.version === "string" ? meta.version : "0.0.0",
+  };
+};
 
 /**
  * Describe a DAG file. On success, returns the dag's id, route, schemas,
@@ -28,16 +43,14 @@ export const runDescribe = async (path: string): Promise<DescribeResult> => {
   }
 
   const registration = imported.defaultExport;
-  const dag = registration.dag as DagDef;
+  const dag = imported.dag;
 
   const route =
     typeof registration.route === "string"
       ? registration.route
-      : `/dags/${dag.id as string}/run`;
+      : `/dags/${dag.id}/run`;
 
-  const meta = registration.meta as { description?: unknown; version?: unknown } | undefined;
-  const description = typeof meta?.description === "string" ? meta.description : "";
-  const version = typeof meta?.version === "string" ? meta.version : "0.0.0";
+  const { description, version } = parseRegistrationMeta(registration.meta);
 
   const schemaWarnings: string[] = [];
   const built = buildDescribedDag({

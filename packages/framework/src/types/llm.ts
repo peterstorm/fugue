@@ -42,6 +42,12 @@ export interface LlmRequest<O> {
    * streaming, not yet implemented). OpenAI maps it to `reasoning.effort: "high"`.
    */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
+  /**
+   * Sampling temperature. Omitted → the provider's default. Deterministic
+   * drafting loops (e.g. `fugue compose`) pin this to 0 so structured turns
+   * are as reproducible as the provider allows.
+   */
+  readonly temperature?: number;
   readonly signal?: AbortSignal;
   /**
    * DAG node identifier for error reporting. Required so failures attribute

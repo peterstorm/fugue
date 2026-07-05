@@ -26,13 +26,14 @@
 // invalid input surfaces as `{ ok: false, problems }`); the bin prints it as
 // JSON, matching `lint` / `describe` / `prompts`.
 
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import {
   SHAPES,
   buildScaffold,
   fugueYaml,
+  parseShape,
   readme,
   type PromptFile,
   type Shape,
@@ -196,33 +197,81 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
     }
   }
 
+  // `parseShape` is the single Shape producer (parse, don't validate) — the
+  // membership check narrows, so the success arm never needs an `as Shape`.
+  let parsedShape: Shape | null = null;
   if (shape === undefined) {
     problems.push(`missing --shape (one of: ${SHAPES.join(", ")})`);
-  } else if (!(SHAPES as readonly string[]).includes(shape)) {
-    problems.push(`unknown --shape '${shape}' (one of: ${SHAPES.join(", ")})`);
+  } else {
+    parsedShape = parseShape(shape);
+    if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${SHAPES.join(", ")})`);
   }
 
   // `--review` is a human-review gate (an aspect) — but the scaffold only knows
   // where to place it in a linear chain. For other shapes, gate a node by hand
   // with `withHumanReview`. Reject the combination fail-fast rather than silently
   // dropping the flag. (A missing/unknown shape is already reported above.)
-  if (review && shape !== undefined && (SHAPES as readonly string[]).includes(shape) && shape !== "linear") {
+  if (review && parsedShape !== null && parsedShape !== "linear") {
     problems.push(
       "--review is currently supported only with --shape linear " +
         "(gate a node in other shapes with withHumanReview)",
     );
   }
 
-  // Every `name === null` / `team === null` path pushed a problem above
-  // (missing target, bad path shape, non-KEBAB team, non-KEBAB_IDENT name), so
-  // the null checks are the same gate — and they also narrow both brands for
-  // the success arm below.
-  if (name === null || team === null || problems.length > 0) return { ok: false, problems };
+  // Every `name === null` / `team === null` / `parsedShape === null` path
+  // pushed a problem above (missing target, bad path shape, non-KEBAB team,
+  // non-KEBAB_IDENT name, missing/unknown shape), so the null checks are the
+  // same gate — and they also narrow the brands for the success arm below.
+  if (name === null || team === null || parsedShape === null || problems.length > 0) {
+    return { ok: false, problems };
+  }
   return {
     ok: true,
     mode: "shape",
-    options: { team, name, shape: shape as Shape, llm, review, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) },
+    options: { team, name, shape: parsedShape, llm, review, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) },
   };
+};
+
+/**
+ * Under `--force`, the generated `prompts/` dir is TOOL-OWNED: reconcile it
+ * against the scaffold's prompt set by LISTING — remove `<name>.txt` prompts
+ * the new scaffold no longer writes (and, when the new scaffold has no
+ * prompts at all, the tool-written `registry.json` and the then-empty dir).
+ * Never `rm -rf`: anything that is not a tool-written prompt artifact
+ * survives. This makes `--force` regeneration a fixed point — regen(a) then
+ * regen(b, --force) leaves the same prompts/ state as a fresh regen(b), so
+ * `fugue prompts check` never trips over a stale prompt from a prior shape.
+ *
+ * Runs AFTER the write batch (sidecar-first ordering untouched); a throw is
+ * an environment failure the callers fold into their problems envelope.
+ */
+const reconcilePromptsDir = async (dir: string, keep: ReadonlySet<string>): Promise<void> => {
+  const promptsDir = join(dir, "prompts");
+  let entries: string[];
+  try {
+    entries = await readdir(promptsDir);
+  } catch (e) {
+    // No prompts/ dir → nothing stale to reconcile. Anything else (EACCES,
+    // ENOTDIR, …) means we could not verify the dir's state — rethrow.
+    if ((e as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return;
+    throw e;
+  }
+  for (const entry of entries) {
+    const stale =
+      (entry.endsWith(".txt") && !keep.has(entry)) ||
+      (entry === "registry.json" && keep.size === 0);
+    if (stale) await rm(join(promptsDir, entry));
+  }
+  if (keep.size === 0) {
+    // A now-promptless scaffold never creates prompts/ — drop the leftover
+    // dir when (and only when) it is empty; user files keep it alive.
+    try {
+      await rmdir(promptsDir);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOTEMPTY" && code !== "ENOENT") throw e;
+    }
+  }
 };
 
 const isDirNonEmpty = async (dir: string): Promise<boolean> => {
@@ -315,6 +364,13 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
       // the same functions `runPromptsSync` writes with).
       const registry = { [scaffold.prompt.name]: freshRegistryEntry(scaffold.prompt.body) };
       await write(join("prompts", "registry.json"), serializeRegistry(registry));
+    }
+
+    // `--force` owns the generated prompts/ dir — drop prompt artifacts a
+    // previous scaffold wrote that this one does not, so regeneration is a
+    // fixed point (`prompts check` stays green after a shape/--llm change).
+    if (options.force) {
+      await reconcilePromptsDir(dir, new Set(scaffold.prompt ? [`${scaffold.prompt.name}.txt`] : []));
     }
   } catch (e) {
     return {
@@ -527,6 +583,18 @@ export const writeAuthoredScaffold = async (
       registry[prompt.name] = freshRegistryEntry(prompt.body);
     }
     await write(join("prompts", "registry.json"), serializeRegistry(registry));
+  }
+
+  // `--force` owns the generated prompts/ dir — drop prompt artifacts a
+  // previous scaffold wrote that this one does not, so regeneration is a
+  // fixed point: regen(a) then regen(b, --force) ≡ fresh regen(b) for
+  // everything the tool writes (a throw here propagates to the callers'
+  // write-failed folds like the rest of this batch).
+  if (options.force) {
+    await reconcilePromptsDir(
+      dir,
+      new Set((scaffold.prompts as readonly PromptFile[]).map((p) => `${p.name}.txt`)),
+    );
   }
 
   const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";

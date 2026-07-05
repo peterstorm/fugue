@@ -206,6 +206,10 @@ export class OpenAILlmClient implements LlmClient {
         body.reasoning = { effort: "high", summary: "auto" };
       }
 
+      if (req.temperature !== undefined) {
+        body.temperature = req.temperature;
+      }
+
       const httpResult = await withLlmSpan(
         req.tracer ?? null,
         { provider: "openai", model: this.modelOverride ?? req.model, operation: "chat" },

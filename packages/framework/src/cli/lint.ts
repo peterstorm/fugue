@@ -25,7 +25,14 @@ export type ImportedDagFile =
   | {
       readonly ok: true;
       readonly path: string;
+      /** The registration record (route/meta/inputSchema live here, untyped). */
       readonly defaultExport: Record<string, unknown>;
+      /**
+       * The registration's `.dag`, already checked object-shaped — the ONE
+       * cast to `DagDef` lives at that check, so consumers (`runLint`,
+       * `runDescribe`) never re-cast from the raw record.
+       */
+      readonly dag: DagDef;
     }
   | {
       readonly ok: false;
@@ -114,6 +121,9 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
     ok: true,
     path: absolute,
     defaultExport: defaultExport as Record<string, unknown>,
+    // The single checked cast: `dagField` is present and object-shaped (the
+    // guard above). Deep validation is `@fuguejs/host`'s contract.
+    dag: dagField as DagDef,
   };
 };
 
@@ -136,7 +146,7 @@ export const runLint = async (path: string): Promise<LintResult> => {
   let errors: readonly LintError[] = [];
   let advisories: readonly LintAdvisory[] = [];
   try {
-    const analysis = analyzeDag(imported.defaultExport.dag as DagDef);
+    const analysis = analyzeDag(imported.dag);
     errors = analysis.errors;
     advisories = analysis.advisories;
   } catch (e) {

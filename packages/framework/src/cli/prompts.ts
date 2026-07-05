@@ -30,13 +30,25 @@ export const freshRegistryEntry = (body: string): RegistryEntry => ({
 });
 
 /**
- * The `prompts/registry.json` byte format: canonical 2-space JSON plus a
- * trailing newline. Single-sourced so scaffold writers and `runPromptsSync`
- * can never drift — a later `prompts sync`/`check` over a scaffolded registry
- * sees no spurious diff.
+ * Canonical key order: raw UTF-16 codepoint comparison. NEVER `localeCompare`
+ * — its answer depends on the host's ICU tables/locale, so two machines could
+ * write byte-different registries for identical content.
  */
-export const serializeRegistry = (entries: Record<string, RegistryEntry>): string =>
-  `${JSON.stringify(entries, null, 2)}\n`;
+const codepointCompare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * The `prompts/registry.json` byte format: canonical 2-space JSON, keys in
+ * codepoint order, plus a trailing newline. Single-sourced so scaffold writers
+ * and `runPromptsSync` can never drift — a later `prompts sync`/`check` over a
+ * scaffolded registry sees no spurious diff, and the same entries always
+ * serialize to the same bytes regardless of insertion order or host locale.
+ */
+export const serializeRegistry = (entries: Record<string, RegistryEntry>): string => {
+  const sorted = Object.fromEntries(
+    Object.entries(entries).sort(([a], [b]) => codepointCompare(a, b)),
+  );
+  return `${JSON.stringify(sorted, null, 2)}\n`;
+};
 
 export type PromptStatus = "unchanged" | "added" | "bumped" | "removed";
 
@@ -62,10 +74,19 @@ const readPromptFiles = async (dagDir: string): Promise<ReadonlyMap<string, stri
   let entries: string[];
   try {
     entries = await readdir(dir);
-  } catch {
-    return map; // no prompts/ — nothing to version
+  } catch (e) {
+    // ONLY a missing prompts/ dir means "nothing to version". Any other errno
+    // (EACCES, EIO, ENOTDIR, …) means we could not SEE the prompt files —
+    // folding that into an empty map would let `runPromptsSync` mark every
+    // prompt removed and rewrite the registry to {} under ok: true. Rethrow;
+    // the callers fold it into their `{ ok: false, problems }` envelope.
+    if ((e as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return map;
+    throw e;
   }
-  for (const entry of entries) {
+  // Codepoint order (matching `serializeRegistry`) so the iteration — and
+  // therefore every result/registry derived from it — is independent of the
+  // filesystem's readdir order.
+  for (const entry of [...entries].sort(codepointCompare)) {
     if (!entry.endsWith(".txt")) continue;
     map.set(entry.slice(0, -4), await readFile(join(dir, entry), "utf-8"));
   }
@@ -76,12 +97,35 @@ const readRegistry = async (registryPath: string): Promise<Record<string, Regist
   let raw: string;
   try {
     raw = await readFile(registryPath, "utf-8");
-  } catch {
-    return {};
+  } catch (e) {
+    // ONLY a missing registry.json means "no registry yet". Any other errno
+    // (EACCES, EIO, EISDIR, …) means the registry exists but could not be
+    // read — treating that as {} would silently discard the version history
+    // on the next sync. Rethrow; callers report through their envelope.
+    if ((e as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return {};
+    throw e;
   }
   const parsed = JSON.parse(raw) as unknown; // malformed JSON throws → caller reports
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("registry.json must be an object keyed by prompt name");
+  }
+  // Parse, don't validate-by-cast: each entry must be { version: string,
+  // hash: string } or `bumpPatch`/hash comparison would operate on junk —
+  // name the offending key so a hand-edited registry is fixable from the
+  // message alone.
+  for (const [name, entry] of Object.entries(parsed)) {
+    const e = entry as { version?: unknown; hash?: unknown } | null;
+    if (
+      e === null ||
+      typeof e !== "object" ||
+      Array.isArray(e) ||
+      typeof e.version !== "string" ||
+      typeof e.hash !== "string"
+    ) {
+      throw new Error(
+        `registry.json entry '${name}' must be { "version": string, "hash": string }`,
+      );
+    }
   }
   return parsed as Record<string, RegistryEntry>;
 };
@@ -89,7 +133,21 @@ const readRegistry = async (registryPath: string): Promise<Record<string, Regist
 /** `fugue prompts sync <dagDir>` — rewrite registry.json from the prompt files. */
 export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => {
   const registryPath = join(dagDir, PROMPTS_DIR, REGISTRY_FILE);
-  const files = await readPromptFiles(dagDir);
+
+  // An unreadable prompts/ dir (EACCES/EIO/…, rethrown by readPromptFiles) is
+  // an environment failure, not "no prompts" — fold it into the envelope
+  // instead of syncing the registry down to {} under ok: true.
+  let files: ReadonlyMap<string, string>;
+  try {
+    files = await readPromptFiles(dagDir);
+  } catch (e) {
+    return {
+      ok: false,
+      registryPath,
+      prompts: {},
+      problems: [`prompts/ unreadable: ${e instanceof Error ? e.message : String(e)}`],
+    };
+  }
 
   // A corrupt/unreadable registry must surface through the stdout-JSON envelope
   // — the same contract `runPromptsCheck` honours — not a raw stderr stack.
@@ -110,7 +168,10 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
   const prompts: Record<string, { version: string; hash: string; status: PromptStatus }> = {};
   const next: Record<string, RegistryEntry> = {};
 
-  for (const [name, text] of [...files.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  // `files` iterates in codepoint order already (readPromptFiles), and
+  // `serializeRegistry` canonicalizes key order on write — no locale-dependent
+  // sort anywhere on the path to registry bytes.
+  for (const [name, text] of files) {
     const hash = computePromptHash(text);
     const prior = existing[name];
     if (prior === undefined) {
@@ -128,8 +189,21 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
     if (!files.has(name)) prompts[name] = { ...existing[name]!, status: "removed" };
   }
 
-  if (files.size > 0 || Object.keys(existing).length > 0) {
-    await writeFile(registryPath, serializeRegistry(next), "utf-8");
+  // The write is an environment surface (ENOSPC/EACCES/EISDIR, …) — fold a
+  // throw into the `{ ok: false, problems }` envelope (mirrors `runNew`'s
+  // write batch) rather than crashing past the stdout-JSON contract, keeping
+  // the stack so the environment is debuggable from the outcome.
+  try {
+    if (files.size > 0 || Object.keys(existing).length > 0) {
+      await writeFile(registryPath, serializeRegistry(next), "utf-8");
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      registryPath,
+      prompts,
+      problems: [`registry write failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
+    };
   }
   return { ok: true, registryPath, prompts, problems: [] };
 };
@@ -137,7 +211,21 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
 /** `fugue prompts check <dagDir>` — verify registry.json matches the files (no writes). */
 export const runPromptsCheck = async (dagDir: string): Promise<PromptsResult> => {
   const registryPath = join(dagDir, PROMPTS_DIR, REGISTRY_FILE);
-  const files = await readPromptFiles(dagDir);
+
+  // Same fold as `runPromptsSync`: an unreadable prompts/ dir must surface
+  // through the envelope, never masquerade as "no prompts" (which would flag
+  // every registered prompt as missing).
+  let files: ReadonlyMap<string, string>;
+  try {
+    files = await readPromptFiles(dagDir);
+  } catch (e) {
+    return {
+      ok: false,
+      registryPath,
+      prompts: {},
+      problems: [`prompts/ unreadable: ${e instanceof Error ? e.message : String(e)}`],
+    };
+  }
 
   let existing: Record<string, RegistryEntry>;
   try {

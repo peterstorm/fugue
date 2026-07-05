@@ -131,6 +131,7 @@ export class AnthropicLlmClient implements LlmClient {
         messages: [{ role: "user", content: req.user }],
         tools: [toolDef],
         tool_choice: { type: "tool", name: "structured_output" },
+        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       };
 
       const response = await withLlmSpan(

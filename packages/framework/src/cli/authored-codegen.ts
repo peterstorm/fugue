@@ -335,12 +335,18 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
   };
 
   const s = dag.structure;
+  // One canonical iteration order for EVERY emitted section — parse already
+  // canonicalizes `dag.nodes` to this order, but deriving it here keeps the
+  // emitted bytes independent of the nodes array even for a value that
+  // bypassed the brand (tests) — schema consts, node decls, and prompts can
+  // never disagree.
+  const orderedIds = structureOrder(dag);
   const schemaDecls: string[] = [schemaConst(INPUT_SCHEMA_NAME, dag.input)];
   const extraDecls: string[] = [];
 
   // Output schema consts (skip human-review — passthrough)
-  for (const node of dag.nodes) {
-    const p = plan(node.id);
+  for (const id of orderedIds) {
+    const p = plan(id);
     if (p.outSpec) schemaDecls.push(schemaConst(p.outName, p.outSpec));
   }
 
@@ -423,7 +429,6 @@ ${cases}
     .exhaustive();
 
   // Node declarations (structure order = declaration order)
-  const orderedIds = structureOrder(dag);
   const nodeDecls: string[] = [];
   const prompts: PromptFile[] = [];
   for (const id of orderedIds) {
