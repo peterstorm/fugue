@@ -2,11 +2,13 @@
 // structured result. Pure function — never prints, never exits. The bin
 // entry (`bin/fugue.ts`) handles I/O.
 //
-// The lint check is deliberately minimal: if `import(path)` succeeds and the
-// module has a default export with a `.dag` field that is a branded DagDef,
-// the file is valid. `defineDag` itself runs at import time, so anything
-// caught here is what `defineDag` already validated. The CLI's job is to
-// surface the resulting `DagDefinitionError` as machine-readable JSON.
+// The lint check has two halves. First, the import surfaces what `defineDag`
+// already validated at module-load time (topology, registration shape) as a
+// machine-readable `DagDefinitionError`. Second, `analyzeDag` runs schema-
+// aware structural checks `defineDag` deliberately does NOT perform: fan-in
+// key mismatches are errors, pass-through/shape hints are advisories, and a
+// crashed analyzer is itself an `analyzer-failed` error. A lint-green file
+// therefore proves buildability AND fan-in soundness, not just importability.
 
 import { pathToFileURL } from "node:url";
 import { DagDefinitionError } from "../executor/define-dag.js";

@@ -248,6 +248,13 @@ export const FIXED_IMPORT_NAME = {
 export const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
   DAG_CONST_NAME,
   "input",
+  // `opts` is the llm dag-factory's parameter binding (`export const
+  // create<Pascal>Dag = (opts: … = {}) =>`), and the structure expression —
+  // which references node consts by name — is evaluated INSIDE that factory
+  // scope. A node id `opts` would be shadowed by the parameter, so the
+  // factory would pass `{}` to defineDag instead of the node const and fail
+  // only deep in the gauntlet with an opaque id-mismatch error.
+  "opts",
   REGISTRATION_CONST_NAME,
   ...Object.values(FIXED_IMPORT_NAME),
   ...Object.values(NODE_FACTORY_NAME),

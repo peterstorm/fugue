@@ -165,28 +165,39 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
     };
   }
 
-  const prompts: Record<string, { version: string; hash: string; status: PromptStatus }> = {};
-  const next: Record<string, RegistryEntry> = {};
+  // Accumulate in Maps, NOT plain Records: prompt names are filesystem-derived,
+  // so a prompt file named `__proto__.txt` would hit the object-literal
+  // prototype setter (entry silently vanishes from the written registry while
+  // sync reports ok), and `existing[name]` for any Object.prototype property
+  // name (`constructor`, `toString`, …) would read a truthy non-entry through
+  // the prototype chain. `readEntry` guards the reads with Object.hasOwn;
+  // Object.fromEntries at the serialization edge defines own properties only.
+  const prompts = new Map<string, { version: string; hash: string; status: PromptStatus }>();
+  const next = new Map<string, RegistryEntry>();
+  const readEntry = (name: string): RegistryEntry | undefined =>
+    Object.hasOwn(existing, name) ? existing[name] : undefined;
 
   // `files` iterates in codepoint order already (readPromptFiles), and
   // `serializeRegistry` canonicalizes key order on write — no locale-dependent
   // sort anywhere on the path to registry bytes.
   for (const [name, text] of files) {
     const hash = computePromptHash(text);
-    const prior = existing[name];
+    const prior = readEntry(name);
     if (prior === undefined) {
-      next[name] = freshRegistryEntry(text);
-      prompts[name] = { ...next[name], status: "added" };
+      const entry = freshRegistryEntry(text);
+      next.set(name, entry);
+      prompts.set(name, { ...entry, status: "added" });
     } else if (prior.hash !== hash) {
-      next[name] = { version: bumpPatch(prior.version), hash };
-      prompts[name] = { ...next[name], status: "bumped" };
+      const entry = { version: bumpPatch(prior.version), hash };
+      next.set(name, entry);
+      prompts.set(name, { ...entry, status: "bumped" });
     } else {
-      next[name] = prior;
-      prompts[name] = { ...prior, status: "unchanged" };
+      next.set(name, prior);
+      prompts.set(name, { ...prior, status: "unchanged" });
     }
   }
   for (const name of Object.keys(existing)) {
-    if (!files.has(name)) prompts[name] = { ...existing[name]!, status: "removed" };
+    if (!files.has(name)) prompts.set(name, { ...existing[name]!, status: "removed" });
   }
 
   // The write is an environment surface (ENOSPC/EACCES/EISDIR, …) — fold a
@@ -195,17 +206,17 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
   // the stack so the environment is debuggable from the outcome.
   try {
     if (files.size > 0 || Object.keys(existing).length > 0) {
-      await writeFile(registryPath, serializeRegistry(next), "utf-8");
+      await writeFile(registryPath, serializeRegistry(Object.fromEntries(next)), "utf-8");
     }
   } catch (e) {
     return {
       ok: false,
       registryPath,
-      prompts,
+      prompts: Object.fromEntries(prompts),
       problems: [`registry write failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
     };
   }
-  return { ok: true, registryPath, prompts, problems: [] };
+  return { ok: true, registryPath, prompts: Object.fromEntries(prompts), problems: [] };
 };
 
 /** `fugue prompts check <dagDir>` — verify registry.json matches the files (no writes). */
@@ -240,26 +251,28 @@ export const runPromptsCheck = async (dagDir: string): Promise<PromptsResult> =>
   }
 
   const problems: string[] = [];
-  const prompts: Record<string, { version: string; hash: string; status: PromptStatus }> = {};
+  // Map + Object.hasOwn for the same reason as runPromptsSync: filesystem-
+  // derived names must never traverse the prototype chain or hit its setter.
+  const prompts = new Map<string, { version: string; hash: string; status: PromptStatus }>();
 
   if (files.size > 0 && Object.keys(existing).length === 0) {
     problems.push("prompts exist but registry.json is missing or empty — run `fugue prompts sync`");
   }
   for (const [name, text] of files) {
     const hash = computePromptHash(text);
-    const prior = existing[name];
+    const prior = Object.hasOwn(existing, name) ? existing[name] : undefined;
     if (prior === undefined) {
       problems.push(`'${name}': not in registry.json — run \`fugue prompts sync\``);
     } else if (prior.hash !== hash) {
       problems.push(`'${name}': hash mismatch — prompt edited without version bump, run \`fugue prompts sync\``);
-      prompts[name] = { ...prior, status: "bumped" };
+      prompts.set(name, { ...prior, status: "bumped" });
     } else {
-      prompts[name] = { ...prior, status: "unchanged" };
+      prompts.set(name, { ...prior, status: "unchanged" });
     }
   }
   for (const name of Object.keys(existing)) {
     if (!files.has(name)) problems.push(`'${name}': registered but prompts/${name}.txt is missing`);
   }
 
-  return { ok: problems.length === 0, registryPath, prompts, problems };
+  return { ok: problems.length === 0, registryPath, prompts: Object.fromEntries(prompts), problems };
 };

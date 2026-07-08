@@ -59,6 +59,57 @@ describe("fugue prompts sync", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Prototype-key robustness: prompt names come from the filesystem, so
+// `__proto__.txt` must not vanish through the object-literal prototype setter
+// and Object.prototype property names (`constructor`, `toString`) must not
+// read truthy non-entries through the prototype chain.
+// ---------------------------------------------------------------------------
+
+describe("fugue prompts — prototype-key prompt names", () => {
+  it("sync registers a prompt named __proto__ instead of silently dropping it", async () => {
+    reset({ ["__proto__"]: "proto body", opener: "hej" });
+    const result = await runPromptsSync(DIR);
+    expect(result.ok).toBe(true);
+    expect(result.prompts["__proto__"]).toEqual({
+      version: "1.0.0",
+      hash: computePromptHash("proto body"),
+      status: "added",
+    });
+    const written = JSON.parse(readFileSync(join(promptsDir, "registry.json"), "utf-8")) as Record<
+      string,
+      { version: string; hash: string }
+    >;
+    expect(Object.hasOwn(written, "__proto__")).toBe(true);
+    expect(Object.keys(written).length).toBe(2);
+    // Sync over its own output converges: check is clean.
+    const check = await runPromptsCheck(DIR);
+    expect(check.ok).toBe(true);
+    expect(check.problems).toEqual([]);
+  });
+
+  it("sync treats Object.prototype names as NEW prompts, not phantom registry entries", async () => {
+    // `constructor`/`toString` are prototype-chain hits on a plain object —
+    // an unguarded `existing[name]` would classify these as "bumped" and feed
+    // garbage to bumpPatch.
+    reset({ constructor: "ctor body", toString: "ts body" });
+    const result = await runPromptsSync(DIR);
+    expect(result.ok).toBe(true);
+    expect(result.prompts.constructor).toMatchObject({ version: "1.0.0", status: "added" });
+    expect(result.prompts.toString).toMatchObject({ version: "1.0.0", status: "added" });
+  });
+
+  it("check reports a missing __proto__ registration instead of failing forever after sync", async () => {
+    reset({ ["__proto__"]: "proto body" });
+    const before = await runPromptsCheck(DIR);
+    expect(before.ok).toBe(false);
+    expect(before.problems.some((p) => p.includes("'__proto__'"))).toBe(true);
+    await runPromptsSync(DIR);
+    const after = await runPromptsCheck(DIR);
+    expect(after.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Environment-failure envelopes: only ENOENT means "absent". Every other
 // errno is an unreadable environment — it must surface as `{ ok: false,
 // problems }`, NEVER fold to "no prompts"/"no registry" (which would let

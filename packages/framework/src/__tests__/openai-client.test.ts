@@ -189,6 +189,29 @@ describe("OpenAILlmClient.sendStructured", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.nodeId).toBe(N("n"));
         expect(result.error.message).toMatch(/500/);
+        // 5xx is server-side — the retry budget MAY be spent on it.
+        expect(result.error.retriability).toBe("retriable");
+      }
+    }
+  });
+
+  it("non-429 4xx → node-crash NON-retriable (deterministic client error, retrying burns budget)", async () => {
+    for (const status of [400, 401, 422]) {
+      handler = async () => jsonResponse({ error: "client error" }, status);
+      const result = await makeClient().sendStructured<SchemaType>({
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        schema: Schema,
+        nodeId: "n" as NodeId,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.retriability).toBe("non-retriable");
+          expect(result.error.message).toMatch(new RegExp(String(status)));
+        }
       }
     }
   });
@@ -428,6 +451,29 @@ describe("OpenAILlmClient.sendWithTools", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  it("non-429 4xx → node-crash NON-retriable (sendWithTools arm)", async () => {
+    handler = async () => jsonResponse({ error: "bad request" }, 400);
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "test-node" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toMatch(/400/);
+      }
     }
   });
 

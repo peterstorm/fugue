@@ -213,6 +213,16 @@ describe("runCompose", () => {
   // The authoring schema + codegen make gauntlet failures nearly
   // unrepresentable by design, so the repair loop is exercised through the
   // injectable gauntlet seam: fail once with structured violations, then pass.
+  // The simulated kind must be a REPAIRABLE one (fan-in-key-mismatch) —
+  // environment-class kinds (import-failed/analyzer-failed) short-circuit to
+  // gauntlet-failed without entering the repair loop.
+  const repairableError = (message: string) => ({
+    kind: "fan-in-key-mismatch" as const,
+    nodeId: "join-all",
+    message,
+    missingKeys: ["fetch-weather"],
+    extraKeys: [],
+  });
   const failingOnce = () => {
     let calls = 0;
     return async (dag: AuthoredDag, root: string): Promise<GauntletResult> => {
@@ -220,7 +230,7 @@ describe("runCompose", () => {
       if (calls === 1) {
         return {
           ok: false,
-          errors: [{ kind: "import-failed", message: "simulated duplicate declaration" }],
+          errors: [repairableError("simulated key mismatch")],
           advisories: [],
         };
       }
@@ -243,7 +253,7 @@ describe("runCompose", () => {
     if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
     expect(outcome.rounds.repairs).toBe(1);
     // The repair prompt carried the structured violations, not prose.
-    expect(requests[1]).toContain('"kind": "import-failed"');
+    expect(requests[1]).toContain('"kind": "fan-in-key-mismatch"');
     expect(requests[1]).toContain("Return a corrected");
   });
 
@@ -251,7 +261,7 @@ describe("runCompose", () => {
     const root = join(tmpRoot, "exhausted");
     const alwaysFail = async (): Promise<GauntletResult> => ({
       ok: false,
-      errors: [{ kind: "import-failed", message: "never valid" }],
+      errors: [repairableError("never valid")],
       advisories: [],
     });
     const { client } = scriptedLlm([draft(validDag), draft(validDag)]);
@@ -266,11 +276,41 @@ describe("runCompose", () => {
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
       expect(outcome.reason).toBe("repair-exhausted");
-      expect(outcome.problems[0]).toContain("import-failed");
+      expect(outcome.problems[0]).toContain("fan-in-key-mismatch");
       // The failure arm carries the loop telemetry — repair-exhausted is
       // precisely where the repair count is diagnostic.
       expect(outcome.rounds).toEqual({ questions: 0, repairs: 1, refinements: 0 });
     }
+  });
+
+  it("environment-class verdict errors (import-failed) short-circuit to gauntlet-failed without burning repair rounds", async () => {
+    const root = join(tmpRoot, "unrepairable-shortcircuit");
+    // An import-failed verdict is module resolution / a codegen bug — the LLM
+    // cannot fix it by editing the AuthoredDag, so no paid repair round may
+    // be spent on it and the failure must be attributed to the environment.
+    const importBroken = async (): Promise<GauntletResult> => ({
+      ok: false,
+      errors: [{ kind: "import-failed", message: "Cannot find package '@fuguejs/framework'" }],
+      advisories: [],
+    });
+    const { client, requests } = scriptedLlm([draft(validDag), draft(validDag)]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      io,
+      importBroken,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("gauntlet-failed");
+      expect(outcome.problems[0]).toContain("import-failed");
+      expect(outcome.rounds.repairs).toBe(0);
+      if (outcome.reason === "gauntlet-failed") expect(outcome.draft).toEqual(validDag);
+    }
+    // Only the initial draft turn was paid for — no repair turn was sent.
+    expect(requests.length).toBe(1);
   });
 
   it("a schema-invalid draft enters the repair loop and is fixed by a second draft", async () => {
@@ -356,7 +396,7 @@ describe("runCompose", () => {
       if (calls === 1 || calls === 3) {
         return {
           ok: false as const,
-          errors: [{ kind: "import-failed" as const, message: "simulated" }],
+          errors: [repairableError("simulated")],
           advisories: [],
         };
       }
@@ -509,7 +549,7 @@ describe("runCompose", () => {
       if (calls >= 2) {
         return {
           ok: false as const,
-          errors: [{ kind: "import-failed" as const, message: "never valid" }],
+          errors: [repairableError("never valid")],
           advisories: [],
         };
       }
@@ -586,7 +626,7 @@ describe("runCompose", () => {
     const root = join(tmpRoot, "gauntlet-repair-got-questions");
     const alwaysFail = async (): Promise<GauntletResult> => ({
       ok: false,
-      errors: [{ kind: "import-failed", message: "never valid" }],
+      errors: [repairableError("never valid")],
       advisories: [],
     });
     const { client } = scriptedLlm([

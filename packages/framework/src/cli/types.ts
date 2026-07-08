@@ -91,10 +91,13 @@ export type LintAdvisory =
   | {
       /**
        * B2 (advisory): a transform node whose input and output schemas are the
-       * SAME reference (a pass-through / identity-shaped transform). Pre-0.2.0
-       * this was the `read-request` idiom — a node existing only to carry the
-       * DAG request past wave 1. The fix is a `DAG_INPUT` edge straight to the
-       * consumer; the pass-through node can then be deleted.
+       * SAME reference (a pass-through / identity-shaped transform) AND whose
+       * sole incoming source is `DAG_INPUT` — the legacy request-carrier
+       * idiom. Both conjuncts are required: a legitimate A→A transform fed by
+       * another node does not fire. Pre-0.2.0 this was the `read-request`
+       * idiom — a node existing only to carry the DAG request past wave 1.
+       * The fix is a `DAG_INPUT` edge straight to the consumer; the
+       * pass-through node can then be deleted.
        */
       readonly kind: "redundant-passthrough";
       readonly message: string;

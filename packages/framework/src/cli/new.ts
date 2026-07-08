@@ -5,7 +5,10 @@
 //   fugue new --from <authored.json> [--owner <owner>] [--dir <root>] [--force]
 //
 // Shape mode is pure orchestration over the string builders in
-// `new-templates.ts`; its only side effect is writing the scaffold files.
+// `new-templates.ts`; its side effects are writing the scaffold files and,
+// under `--force`, reconciling away tool-owned artifacts a prior scaffold
+// wrote (the `dag.authored.json` sidecar, stale prompt files, an emptied
+// `prompts/` dir).
 // `--from` mode instead parses an AuthoredDag file and PROVES it through the
 // validation gauntlet before writing — which stages a temporary draft under
 // `<root>/.fugue-compose/` (created and removed during the check) in addition
@@ -449,7 +452,7 @@ ${dag.nodes.map((n) => `- \`${n.id}\` (${n.kind}) — ${n.purpose}`).join("\n")}
 bun node_modules/@fuguejs/framework/bin/fugue.ts lint      dags/${dag.team}/${dag.name}/dag.ts
 bun node_modules/@fuguejs/framework/bin/fugue.ts describe  dags/${dag.team}/${dag.name}/dag.ts
 bun node_modules/@fuguejs/framework/bin/fugue.ts visualize dags/${dag.team}/${dag.name}/dag.ts
-bun test
+${dag.nodes.some((n) => n.kind === "llm") ? `bun node_modules/@fuguejs/framework/bin/fugue.ts prompts check dags/${dag.team}/${dag.name}\n` : ""}bun test
 \`\`\`
 `;
 

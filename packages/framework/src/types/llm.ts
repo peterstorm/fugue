@@ -45,7 +45,9 @@ export interface LlmRequest<O> {
   /**
    * Sampling temperature. Omitted → the provider's default. Deterministic
    * drafting loops (e.g. `fugue compose`) pin this to 0 so structured turns
-   * are as reproducible as the provider allows.
+   * are as reproducible as the provider allows. Cannot be combined with
+   * `thinking` on OpenAI — the client rejects the pair pre-flight as a typed
+   * `validation` error before anything reaches the wire.
    */
   readonly temperature?: number;
   readonly signal?: AbortSignal;

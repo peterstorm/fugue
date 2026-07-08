@@ -340,7 +340,7 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
-  avoid ids like "dag", "input", "ok", or "llm-node".
+  avoid ids like "dag", "input", "opts", "ok", or "llm-node".
 - purpose and description fields are single-line (no newlines).
 - Node kinds: ${NODE_KIND_LINES}.
 - The auto-injected llm confidence bucket CANNOT be used as a router
@@ -518,6 +518,24 @@ export const runCompose = async (
     if (!proven.ok) return proven.outcome;
     let verdict = proven.verdict;
     while (!verdict.ok) {
+      // Environment-class verdict errors are unfixable by editing the
+      // AuthoredDag JSON: `import-failed` is module resolution / a codegen
+      // SyntaxError, `analyzer-failed` is a crashed analyzer. Feeding either
+      // to the LLM burns maxRepairs identical paid rounds and then misreports
+      // the failure as "repair-exhausted" — short-circuit to the same
+      // gauntlet-failed arm a gauntlet THROW takes, draft attached.
+      const unrepairable = verdict.errors.filter(
+        (e) => e.kind === "import-failed" || e.kind === "analyzer-failed",
+      );
+      if (unrepairable.length > 0) {
+        return {
+          ok: false,
+          reason: "gauntlet-failed",
+          problems: unrepairable.map((e) => `${e.kind}: ${e.message}`),
+          rounds,
+          draft,
+        };
+      }
       if (draftRepairs >= maxRepairs) {
         return failClosed(
           "repair-exhausted",

@@ -485,7 +485,10 @@ describe("AuthoredDag schema", () => {
   });
 
   it("rejects reserved node ids (they collide with generated identifiers)", () => {
-    for (const id of ["dag", "input", "registration"]) {
+    // "opts" is the llm dag-factory parameter binding: a node const named
+    // `opts` would be shadowed inside `create<Pascal>Dag = (opts = {}) =>`,
+    // handing `{}` to defineDag instead of the node.
+    for (const id of ["dag", "input", "registration", "opts"]) {
       const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
       (d.nodes[1] as { id: string }).id = id;
       (d.structure as { order: string[] }).order = ["fetch-record", id];

@@ -32,6 +32,7 @@ import {
   REGISTRATION_CONST_NAME,
   dagFactoryName,
   dagOptsInterfaceName,
+  type Kebab,
   type KebabIdent,
 } from "./identifiers.js";
 
@@ -59,8 +60,11 @@ export interface TemplateCtx {
    * unrepresentable.
    */
   readonly name: KebabIdent;
-  /** Owning team (from the `<team>/<name>` path). */
-  readonly team: string;
+  /** Owning team (from the `<team>/<name>` path). BRANDED (`Kebab`): the
+   * team is interpolated raw into `fugue.yaml` and generated markdown, so
+   * YAML/identifier safety must be structural, not caller discipline —
+   * matching `name`'s brand on the same type. */
+  readonly team: Kebab;
   /** Whether to scaffold an LLM node + prompt. */
   readonly llm: boolean;
   /**
@@ -882,12 +886,12 @@ export const fugueYaml = (ctx: TemplateCtx, owner?: string): string =>
 export const readme = (ctx: TemplateCtx, shape: Shape): string =>
   `# ${ctx.name}
 
-> Scaffolded by \`fugue new ${ctx.team}/${ctx.name} --shape ${shape}${ctx.llm ? " --llm" : ""}\`.
+> Scaffolded by \`fugue new ${ctx.team}/${ctx.name} --shape ${shape}${ctx.llm ? " --llm" : ""}${ctx.review ? " --review" : ""}\`.
 > Replace this description, the placeholder schemas, and the node bodies.
 
 **Team:** ${ctx.team}
 **Route:** \`/${ctx.name}\`
-**Shape:** ${shape}${ctx.llm ? " (LLM)" : ""}
+**Shape:** ${shape}${ctx.llm ? " (LLM)" : ""}${ctx.review ? " (human-review gate)" : ""}
 
 ## What it does
 

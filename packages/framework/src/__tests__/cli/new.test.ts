@@ -153,7 +153,7 @@ describe("human-review scaffolds (--review)", () => {
 // --------------------------------------------------------------------------
 
 describe("generated content guarantees", () => {
-  const ctx = (llm: boolean) => ({ name: mustName("x"), team: "t", llm });
+  const ctx = (llm: boolean) => ({ name: mustName("x"), team: mustTeam("t"), llm });
 
   for (const shape of SHAPES) {
     it(`${shape} --llm pins a current, non-dated model id`, () => {
