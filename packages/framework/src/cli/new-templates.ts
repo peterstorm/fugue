@@ -1,7 +1,7 @@
 // Scaffold templates for `fugue new` (C3). Pure string builders — no I/O.
 //
 // Every template is a parameterized copy of a lint-tested golden example
-// (`docs/examples/01-04`, `08`, `09`), so the generated `dag.ts` is compliant
+// (`docs/examples/01-04`, `08`, `09`, `10`), so the generated `dag.ts` is compliant
 // by construction: current model ids, `frameworkError.*` (never raw `err`
 // literals), correct fan-in schemas keyed by source-node id, bucketed
 // confidence via the spread-override pattern, and `$input` edges for the
@@ -61,9 +61,12 @@ export interface TemplateCtx {
    */
   readonly name: KebabIdent;
   /** Owning team (from the `<team>/<name>` path). BRANDED (`Kebab`): the
-   * team is interpolated raw into `fugue.yaml` and generated markdown, so
-   * YAML/identifier safety must be structural, not caller discipline —
-   * matching `name`'s brand on the same type. */
+   * team feeds generated markdown and `fugue.yaml`, so identifier/path safety
+   * is structural, not caller discipline — matching `name`'s brand on the same
+   * type. Kebab-safety is NOT YAML-scalar-safety, though: the KEBAB regex admits
+   * `true`/`false`/`null`/`0`/`007`/`1e5`, which YAML would coerce to a
+   * boolean/null/number, so `team` is emitted via `yamlScalar` (like `owner`) to
+   * keep such values as strings. */
   readonly team: Kebab;
   /** Whether to scaffold an LLM node + prompt. */
   readonly llm: boolean;
@@ -841,8 +844,11 @@ export const buildScaffold = (shape: Shape, ctx: TemplateCtx): Scaffold =>
 
 // A plain (unquoted) YAML scalar is only a SYNTAX-safe shape candidate: it must
 // start alphanumeric and contain no character that changes YAML meaning (`:`,
-// `#`, newlines, leading/trailing space, indicators). `team` is path-derived and
-// kebab-constrained so it is always safe; `owner` is freeform author input.
+// `#`, newlines, leading/trailing space, indicators). Both `team` (path-derived,
+// kebab-constrained) and `owner` (freeform author input) are routed through
+// `yamlScalar`: the KEBAB regex still admits YAML-coercible values (`true`,
+// `false`, `null`, `0`, `007`, `1e5`), which the core schema would coerce to a
+// boolean/null/number, so kebab-safety is NOT scalar-safety.
 // Passing this regex is necessary but NOT sufficient — a syntactically-plain
 // `0`/`true`/`null`/`1.5` parses back as a number/boolean/null, not the original
 // string (see the round-trip guard in `yamlScalar`).
@@ -879,8 +885,8 @@ export const yamlScalar = (value: string): string => {
 /** `fugue.yaml` — team from the `<team>/<name>` path; owner optional. */
 export const fugueYaml = (ctx: TemplateCtx, owner?: string): string =>
   owner !== undefined
-    ? `team: ${ctx.team}\nowner: ${yamlScalar(owner)}\n`
-    : `team: ${ctx.team}\n# owner: your.name   # optional — individual owner within the team\n`;
+    ? `team: ${yamlScalar(ctx.team)}\nowner: ${yamlScalar(owner)}\n`
+    : `team: ${yamlScalar(ctx.team)}\n# owner: your.name   # optional — individual owner within the team\n`;
 
 /** Per-DAG README stub: what it does, route, and the verification loop. */
 export const readme = (ctx: TemplateCtx, shape: Shape): string =>

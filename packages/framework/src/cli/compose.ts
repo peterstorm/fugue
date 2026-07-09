@@ -145,7 +145,14 @@ export type ComposeOutcome =
     }
   | {
       readonly ok: false;
-      /** `gauntlet-failed` = the proving machinery itself threw (an environment failure, not a draft problem). */
+      /**
+       * `gauntlet-failed` = an environment-class failure of the proving
+       * machinery — it either THREW, OR it completed normally but returned
+       * unrepairable errors (import-failed/analyzer-failed/describe-failed/
+       * no-default-export/missing-dag-field). Never a repairable draft problem.
+       * `problems` carries the stack (throw path) or the formatted verdict
+       * strings (unrepairable-verdict path) accordingly.
+       */
       readonly reason: "write-failed" | "gauntlet-failed";
       readonly problems: readonly string[];
       readonly rounds: ComposeRounds;
@@ -340,7 +347,9 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
-  avoid ids like "dag", "input", "opts", "ok", or "llm-node".
+  reserved ids: "dag", "input", "opts", "ok". Also avoid "<x>-node" ids that
+  would shadow a sibling llm node named "<x>" (e.g. "llm-node" collides only
+  when a sibling llm node "llm" exists).
 - purpose and description fields are single-line (no newlines).
 - Node kinds: ${NODE_KIND_LINES}.
 - The auto-injected llm confidence bucket CANNOT be used as a router
@@ -518,15 +527,21 @@ export const runCompose = async (
     if (!proven.ok) return proven.outcome;
     let verdict = proven.verdict;
     while (!verdict.ok) {
-      // Environment-class verdict errors are unfixable by editing the
-      // AuthoredDag JSON: `import-failed` is module resolution / a codegen
-      // SyntaxError, `analyzer-failed` is a crashed analyzer. Feeding either
-      // to the LLM burns maxRepairs identical paid rounds and then misreports
-      // the failure as "repair-exhausted" — short-circuit to the same
-      // gauntlet-failed arm a gauntlet THROW takes, draft attached.
-      const unrepairable = verdict.errors.filter(
-        (e) => e.kind === "import-failed" || e.kind === "analyzer-failed",
-      );
+      // Allowlist of draft-repairable LintError kinds: only these are fixable by
+      // editing the AuthoredDag JSON (`dag-definition-error` is a bad
+      // node/schema/edge the author wrote; `fan-in-key-mismatch` is a mis-keyed
+      // fan-in schema). Everything else in the LintError union is
+      // environment/framework-class and unfixable by re-drafting —
+      // `import-failed` (module resolution / codegen SyntaxError),
+      // `analyzer-failed` (crashed analyzer), `describe-failed` (framework
+      // invariant violation), `no-default-export` / `missing-dag-field` (codegen
+      // bug). Feeding any of those to the LLM burns maxRepairs identical paid
+      // rounds and then misreports the failure as "repair-exhausted" —
+      // short-circuit to the same gauntlet-failed arm a gauntlet THROW takes,
+      // draft attached. Inverting to an allowlist means any future LintError
+      // kind defaults to the safe short-circuit until proven draft-repairable.
+      const REPAIRABLE_KINDS = new Set(["dag-definition-error", "fan-in-key-mismatch"]);
+      const unrepairable = verdict.errors.filter((e) => !REPAIRABLE_KINDS.has(e.kind));
       if (unrepairable.length > 0) {
         return {
           ok: false,

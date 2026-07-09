@@ -1,6 +1,7 @@
 // fugue lint — import a DAG file, capture any DagDefinitionError, return a
-// structured result. Pure function — never prints, never exits. The bin
-// entry (`bin/fugue.ts`) handles I/O.
+// structured result. No printing, no exiting — returns structured results only;
+// the bin entry (`bin/fugue.ts`) handles I/O. (The import step is the imperative
+// shell — see the `importDagFile` note below — feeding the pure verdict builder.)
 //
 // The lint check has two halves. First, the import surfaces what `defineDag`
 // already validated at module-load time (topology, registration shape) as a

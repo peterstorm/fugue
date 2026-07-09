@@ -180,7 +180,16 @@ const main = async (): Promise<number> => {
     rl.on("SIGINT", interrupt);
     // Ctrl-D / piped-stdin exhaustion / close-mid-question semantics live in
     // the adapter (see compose-io.ts).
-    const io = readlineComposeIo(rl);
+    // Build the `ReadlineLike` seam explicitly rather than passing `rl` whole:
+    // `@types/node` does not declare `output` on the readline `Interface`, so
+    // relying on the interface satisfying the seam structurally would only
+    // "compile" where bin/ escapes typechecking. `process.stdout` is the real
+    // output stream the interface was created over, and satisfies the write seam.
+    const io = readlineComposeIo({
+      question: (q) => rl.question(q),
+      once: (e, l) => rl.once(e, l),
+      output: process.stdout,
+    });
     try {
       const outcome = await runCompose(
         parsed.options,
@@ -245,9 +254,7 @@ const main = async (): Promise<number> => {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       return result.ok ? 0 : 1;
     })
-    .otherwise(() => {
-      dieUsage(`Unknown command: ${command}`);
-    });
+    .otherwise(() => dieUsage(`Unknown command: ${command}`));
 };
 
 // Top-level guard: main() is designed not to reject, but two paths are known
