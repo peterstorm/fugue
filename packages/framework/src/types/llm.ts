@@ -136,7 +136,10 @@ export interface SendWithToolsRequest<O> {
   readonly maxIterations?: number;
   /** Total wall-clock deadline across all turns (ms). Default: unlimited. Exceed → Err({ kind: "transient" }). */
   readonly deadlineMs?: number;
-  /** Anthropic-only — extended thinking. Ignored by other providers. */
+  /**
+   * Anthropic ignores this in `sendWithTools` (extended thinking requires
+   * streaming, not yet implemented). OpenAI maps it to `reasoning.effort: "high"`.
+   */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   /** Cancellation. Aborted mid-loop returns Err({ kind: "aborted" }). */
   readonly signal?: AbortSignal;

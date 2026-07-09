@@ -13,6 +13,7 @@ import { err, ok } from "../../types/result.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { Result } from "../../types/result.js";
 import type { FrameworkError } from "../../types/errors.js";
+import { nodeId } from "../../types/ids.js";
 import {
   SYSTEM_PROMPT,
   parseComposeArgs,
@@ -306,6 +307,44 @@ describe("runCompose", () => {
     if (!outcome.ok) {
       expect(outcome.reason).toBe("gauntlet-failed");
       expect(outcome.problems[0]).toContain("import-failed");
+      expect(outcome.rounds.repairs).toBe(0);
+      if (outcome.reason === "gauntlet-failed") expect(outcome.draft).toEqual(validDag);
+    }
+    // Only the initial draft turn was paid for — no repair turn was sent.
+    expect(requests.length).toBe(1);
+  });
+
+  it("a describe-failed verdict short-circuits to gauntlet-failed with zero repair turns", async () => {
+    const root = join(tmpRoot, "describe-failed-shortcircuit");
+    // describe-failed is a framework invariant violation — outside the
+    // REPAIRABLE_KINDS allowlist, so it must take the same short-circuit as
+    // import-failed. Pins the allowlist membership: a regression to the
+    // round-11 denylist (which only named import-failed/analyzer-failed)
+    // would feed this verdict to the LLM and burn paid repair rounds.
+    const describeBroken = async (): Promise<GauntletResult> => ({
+      ok: false,
+      errors: [
+        {
+          kind: "describe-failed",
+          message: "simulated framework invariant violation",
+          detail: { kind: "validation", nodeId: nodeId("join-all"), message: "simulated" },
+        },
+      ],
+      advisories: [],
+    });
+    const { client, requests } = scriptedLlm([draft(validDag), draft(validDag)]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      io,
+      describeBroken,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("gauntlet-failed");
+      expect(outcome.problems[0]).toContain("describe-failed");
       expect(outcome.rounds.repairs).toBe(0);
       if (outcome.reason === "gauntlet-failed") expect(outcome.draft).toEqual(validDag);
     }

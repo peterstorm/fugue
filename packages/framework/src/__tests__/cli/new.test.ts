@@ -234,6 +234,19 @@ describe("runNew file layout", () => {
     expect(yaml).not.toMatch(/^injected: pwned$/m);
   });
 
+  it("emits a YAML-coercible team through yamlScalar so it parses back as a STRING", async () => {
+    // KEBAB admits YAML-coercible words (`true`/`null`/`0`/`1e5`) — a raw
+    // `team: ${ctx.team}` would parse back as boolean true, silently changing
+    // the value the host reads. The team must route through yamlScalar (which
+    // quotes it), exactly like owner. Pins the round-12 fix.
+    const root = join(tmpRoot, "team-coercible");
+    await runNew({ team: mustTeam("true"), name: mustName("coerce"), shape: "linear", llm: false, review: false, force: false, root });
+    const yaml = await readFile(join(root, "dags", "true", "coerce", "fugue.yaml"), "utf-8");
+    const parsed = parseYaml(yaml) as { team: unknown };
+    expect(typeof parsed.team).toBe("string");
+    expect(parsed.team).toBe("true");
+  });
+
   it("the LLM factory shape exports create<Pascal>Dag", async () => {
     const root = join(tmpRoot, "factory");
     await runNew({ team: mustTeam("leads"), name: mustName("lead-opener"), shape: "sources", llm: true, review: false, force: false, root });

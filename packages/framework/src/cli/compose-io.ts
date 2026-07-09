@@ -25,8 +25,11 @@ import type { ComposeAnswer, ComposeIo } from "./compose.js";
  * `output` is the write seam `say` routes through — the symmetric counterpart
  * to `question`'s injected input. Without it `say` would write straight to the
  * global `process.stdout`, making the interactive prose untestable through the
- * structural fake. The real `node:readline` `Interface` already carries its
- * `output` stream, and `process.stdout` satisfies the seam directly.
+ * structural fake. The runtime `node:readline` `Interface` carries its
+ * `output` stream, but `@types/node` does not declare it — passing `rl` whole
+ * would not typecheck, so callers build the seam explicitly, supplying the
+ * stream the interface was created over (see bin/fugue.ts, which passes
+ * `process.stdout`).
  */
 export interface ReadlineLike {
   question(query: string): Promise<string>;

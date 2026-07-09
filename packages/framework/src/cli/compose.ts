@@ -41,7 +41,7 @@ import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
-import type { NewResult } from "./types.js";
+import type { LintError, NewResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Seams
@@ -347,7 +347,10 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
-  reserved ids: "dag", "input", "opts", "ok". Also avoid "<x>-node" ids that
+  reserved ids: "dag", "input", "opts", "ok", "registration", "z",
+  "confidence", plus any id that camelCases to a framework import/const
+  (e.g. "create-fetch-node" → createFetchNode, "define-router" →
+  defineRouter). Also avoid "<x>-node" ids that
   would shadow a sibling llm node named "<x>" (e.g. "llm-node" collides only
   when a sibling llm node "llm" exists).
 - purpose and description fields are single-line (no newlines).
@@ -367,6 +370,26 @@ ${SHAPE_LINES}
 // ---------------------------------------------------------------------------
 
 const COMPOSE_NODE_ID = nodeId("fugue-compose");
+
+// Allowlist of draft-repairable LintError kinds: only these are fixable by
+// editing the AuthoredDag JSON (`dag-definition-error` is a bad
+// node/schema/edge the author wrote; `fan-in-key-mismatch` is a mis-keyed
+// fan-in schema). Everything else in the LintError union is
+// environment/framework-class and unfixable by re-drafting —
+// `import-failed` (module resolution / codegen SyntaxError),
+// `analyzer-failed` (crashed analyzer), `describe-failed` (framework
+// invariant violation), `no-default-export` / `missing-dag-field` (codegen
+// bug). Feeding any of those to the LLM burns maxRepairs identical paid
+// rounds and then misreports the failure as "repair-exhausted" —
+// short-circuit to the same gauntlet-failed arm a gauntlet THROW takes,
+// draft attached. Inverting to an allowlist means any future LintError
+// kind defaults to the safe short-circuit until proven draft-repairable.
+// Typed against `LintError["kind"]` so a renamed/removed kind fails
+// compilation here instead of silently draining the allowlist.
+const REPAIRABLE_KINDS: ReadonlySet<LintError["kind"]> = new Set([
+  "dag-definition-error",
+  "fan-in-key-mismatch",
+]);
 
 const summarize = (dag: AuthoredDag): string =>
   [
@@ -527,20 +550,8 @@ export const runCompose = async (
     if (!proven.ok) return proven.outcome;
     let verdict = proven.verdict;
     while (!verdict.ok) {
-      // Allowlist of draft-repairable LintError kinds: only these are fixable by
-      // editing the AuthoredDag JSON (`dag-definition-error` is a bad
-      // node/schema/edge the author wrote; `fan-in-key-mismatch` is a mis-keyed
-      // fan-in schema). Everything else in the LintError union is
-      // environment/framework-class and unfixable by re-drafting —
-      // `import-failed` (module resolution / codegen SyntaxError),
-      // `analyzer-failed` (crashed analyzer), `describe-failed` (framework
-      // invariant violation), `no-default-export` / `missing-dag-field` (codegen
-      // bug). Feeding any of those to the LLM burns maxRepairs identical paid
-      // rounds and then misreports the failure as "repair-exhausted" —
-      // short-circuit to the same gauntlet-failed arm a gauntlet THROW takes,
-      // draft attached. Inverting to an allowlist means any future LintError
-      // kind defaults to the safe short-circuit until proven draft-repairable.
-      const REPAIRABLE_KINDS = new Set(["dag-definition-error", "fan-in-key-mismatch"]);
+      // Anything outside the REPAIRABLE_KINDS allowlist (module scope, above)
+      // short-circuits to gauntlet-failed before any paid repair round.
       const unrepairable = verdict.errors.filter((e) => !REPAIRABLE_KINDS.has(e.kind));
       if (unrepairable.length > 0) {
         return {
