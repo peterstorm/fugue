@@ -623,6 +623,23 @@ describe("AuthoredDag schema", () => {
     expect(prompt.body).toContain("text: {{text}}");
   });
 
+  it("promptText() scrub survives odd/overlapping brace runs — no '{{' re-created", () => {
+    // The literal-pair replacement (`{{` → `{ {`) re-created `{{` from odd
+    // runs: `"{{{text}}"` → `"{ {{text}}"`, still a live placeholder. The
+    // lookahead scrub must leave NO `{{` in the authored text's emission site
+    // (the Task line) for exactly that adversarial class.
+    for (const purpose of ["Summarize {{{text}} nicely", "Braces {{{{ galore"]) {
+      const hostile = structuredClone(FIXTURES["llm-after-review"]!) as AuthoredDagInput;
+      (hostile.nodes[2] as { purpose: string }).purpose = purpose;
+      const scaffold = buildAuthoredScaffold(hostile as unknown as AuthoredDag);
+      const taskLine = scaffold.prompts[0]!.body
+        .split("\n")
+        .find((line) => line.includes("Task:"));
+      expect(taskLine).toBeDefined();
+      expect(taskLine!).not.toContain("{{");
+    }
+  });
+
   it("rejects a node id that camelCases to a JS reserved word", () => {
     const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (d.nodes[1] as { id: string }).id = "default";
@@ -1212,12 +1229,24 @@ describe("authored codegen survives the gauntlet", () => {
     await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
     const alwaysFail = async () => ({
       ok: false as const,
-      errors: [{ kind: "import-failed" as const, message: "simulated gauntlet failure" }],
+      errors: [
+        {
+          kind: "import-failed" as const,
+          message: "simulated gauntlet failure",
+          stack: "Error: simulated gauntlet failure\n    at import (dag.ts:1:1)",
+        },
+      ],
       advisories: [],
     });
     const result = await runNewFrom({ from: fromPath, force: false, root }, alwaysFail);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.problems[0]).toContain("import-failed");
+    if (!result.ok) {
+      expect(result.problems[0]).toContain("import-failed");
+      // formatLintError must keep the import-failed arm's stack — the
+      // problems envelope is the only surviving record (mutation pin:
+      // reverting to `${kind}: ${message}` silently drops it).
+      expect(result.problems[0]).toContain("at import (dag.ts:1:1)");
+    }
     expect(existsSync(join(root, "dags"))).toBe(false);
   });
 

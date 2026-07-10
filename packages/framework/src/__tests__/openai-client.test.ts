@@ -216,6 +216,29 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
+  it("a throwing schema construction stays inside the Result boundary as a typed validation error", async () => {
+    // buildJsonSchema over a non-schema throws — the pre-flight wrap must
+    // convert that into a typed validation error, never an escaped exception,
+    // and nothing may reach the wire (mirrors the sendWithTools pin below).
+    handler = async () => jsonResponse({ output: [] });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: {} as unknown as z.ZodType<SchemaType>,
+      nodeId: "bad-schema" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("bad-schema"));
+        expect(result.error.message).toMatch(/Schema construction failed/);
+      }
+    }
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it("AbortError → aborted", async () => {
     handler = async () => {
       const e = new Error("aborted");
@@ -245,12 +268,95 @@ describe("OpenAILlmClient.sendStructured", () => {
       nodeId: "missing" as NodeId,
     });
     expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe(N("missing"));
-      // A malformed 200 must be debuggable from this error alone: the
-      // response's own status and a truncated body snapshot ride along.
-      expect(result.error.message).toContain("response.status: incomplete");
-      expect(result.error.message).toContain('"output":[]');
+    if (!result.ok) {
+      // Hard assertion (not a soft guard) — a reclassified arm must FAIL
+      // here, never pass vacuously by skipping the narrowed block.
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("missing"));
+        // A malformed 200 must be debuggable from this error alone: the
+        // response's own status and a truncated body snapshot ride along.
+        expect(result.error.message).toContain("response.status: incomplete");
+        expect(result.error.message).toContain('"output":[]');
+        // status incomplete = truncation — deterministic, non-retriable.
+        expect(result.error.retriability).toBe("non-retriable");
+      }
+    }
+  });
+
+  it("response.status incomplete (truncation) → NON-retriable on the JSON-parse and schema-failure arms", async () => {
+    // Truncated output that is no longer valid JSON.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput('{"greeting": "cut off')],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+      });
+    const r1 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-json" as NodeId,
+    });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) {
+      expect(r1.error.kind).toBe("node-crash");
+      if (r1.error.kind === "node-crash") {
+        expect(r1.error.retriability).toBe("non-retriable");
+        expect(r1.error.message).toContain("response.status: incomplete");
+      }
+    }
+
+    // Truncated output that parses but no longer matches the schema.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+      });
+    const r2 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-schema" as NodeId,
+    });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) {
+      expect(r2.error.kind).toBe("node-crash");
+      if (r2.error.kind === "node-crash") {
+        expect(r2.error.retriability).toBe("non-retriable");
+        expect(r2.error.message).toContain("response.status: incomplete");
+      }
+    }
+  });
+
+  it("HTTP 200 with a non-JSON body → node-crash carrying HTTP 200 + the body snapshot", async () => {
+    // A proxy interstitial / HTML error page on a 200 must not escape as a
+    // raw SyntaxError from `.json()` — it takes the same hardened
+    // malformed-success arm as any other HTTP failure.
+    handler = async () =>
+      new Response("<html>gateway maintenance</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "non-json-200" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("non-json-200"));
+        expect(result.error.message).toContain("HTTP 200");
+        expect(result.error.message).toContain("gateway maintenance");
+        expect(result.error.retriability).toBe("retriable");
+      }
     }
   });
 
@@ -545,6 +651,39 @@ describe("OpenAILlmClient.sendWithTools", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toMatch(/400/);
+      }
+    }
+  });
+
+  it("response.status incomplete (truncation) → NON-retriable node-crash carrying the turn's usage", async () => {
+    // A truncated turn's tool calls / final answer are unreliable, and
+    // retrying the identical request hits the identical cap (mirrors the
+    // Anthropic stop_reason max_tokens treatment on sendWithTools).
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput('{"greeting": "cut off')],
+        usage: { input_tokens: 9, output_tokens: 4 },
+        status: "incomplete",
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "trunc-tools" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: incomplete");
+        // The truncated turn still burned tokens — they must be attributed.
+        expect(result.error.usage).toEqual({ tokensIn: 9, tokensOut: 4 });
       }
     }
   });

@@ -18,7 +18,12 @@ import {
 import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 import { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
-import { classifyLlmError, validateTemperature } from "./llm-errors.js";
+import {
+  classifyLlmError,
+  httpFailureToError,
+  truncateErrorBody,
+  validateTemperature,
+} from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
 import type {
@@ -40,10 +45,6 @@ import {
   extractFinalText,
   extractReasoning,
 } from "./openai-types.js";
-
-/** Safely truncate API error body to prevent data leakage through error propagation paths. */
-const truncateErrorBody = (body: string, maxLen = 200): string =>
-  body.length > maxLen ? body.slice(0, maxLen) + "…[truncated]" : body;
 
 const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
   const json = zodToJsonSchema(schema);
@@ -71,13 +72,7 @@ const toolChoiceToOpenAi = (
     .exhaustive();
 
 
-/**
- * OpenAI LLM client using the Responses API (`POST {baseUrl}/responses`;
- * Azure: `{base}/openai/responses?api-version=…` — see `buildRequestConfig`).
- *
- * Validated against gpt-4o-mini and gpt-5-mini. Other OpenAI models work but
- * require a `PRICE_TABLE` entry in `llm/cost.ts` for cost attribution to fire.
- */
+/** Constructor options for {@link OpenAILlmClient}. */
 export interface OpenAILlmClientOpts {
   /** API key sent on every request (Authorization header for OpenAI, `api-key` header for Azure). */
   readonly apiKey: string;
@@ -100,6 +95,13 @@ export interface OpenAILlmClientOpts {
   readonly modelOverride?: string;
 }
 
+/**
+ * OpenAI LLM client using the Responses API (`POST {baseUrl}/responses`;
+ * Azure: `{base}/openai/responses?api-version=…` — see `buildRequestConfig`).
+ *
+ * Validated against gpt-4o-mini and gpt-5-mini. Other OpenAI models work but
+ * require a `PRICE_TABLE` entry in `llm/cost.ts` for cost attribution to fire.
+ */
 export class OpenAILlmClient implements LlmClient {
   private readonly requestTimeoutMs: number;
   private readonly baseUrl: string;
@@ -169,8 +171,16 @@ export class OpenAILlmClient implements LlmClient {
       const text = await httpRes.text();
       return { ok: false, status: httpRes.status, bodyText: text };
     }
-    const response = (await httpRes.json()) as ResponsesApiResponse;
-    return { ok: true, response };
+    // A 200 whose body is not JSON (proxy interstitial, HTML error page)
+    // must not escape as a raw SyntaxError from `.json()` — fold it into the
+    // same failure shape as a non-OK status, so the typed error carries
+    // `HTTP 200` plus the (truncated) body snapshot.
+    const text = await httpRes.text();
+    try {
+      return { ok: true, response: JSON.parse(text) as ResponsesApiResponse };
+    } catch {
+      return { ok: false, status: httpRes.status, bodyText: text };
+    }
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
@@ -249,32 +259,18 @@ export class OpenAILlmClient implements LlmClient {
         },
       );
       if (!httpResult.ok) {
-        if (httpResult.status === 429) {
-          return err({
-            kind: "transient",
-            nodeId: req.nodeId,
-            message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-          });
-        }
-        // Non-429 4xx (401/403/422/...) is a deterministic client error —
-        // retrying burns the budget without changing the outcome.
-        if (httpResult.status >= 400 && httpResult.status < 500) {
-          return err({
-            kind: "node-crash",
-            retriability: "non-retriable",
-            nodeId: req.nodeId,
-            message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-          });
-        }
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: req.nodeId,
-          message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-        });
+        // The shared 429/4xx/5xx policy — see `httpFailureToError`.
+        return httpFailureToError(httpResult.status, httpResult.bodyText, req.nodeId);
       }
       const response = httpResult.response;
       const output = response.output ?? [];
+
+      // `response.status === "incomplete"` means the output was TRUNCATED
+      // (token cap) — retrying the identical request hits the identical cap,
+      // so it is a deterministic (non-retriable) failure on every arm below
+      // (mirrors the Anthropic stop_reason max_tokens treatment).
+      const truncated = response.status === "incomplete";
+      const retriability = truncated ? ("non-retriable" as const) : ("retriable" as const);
 
       const messageBlock = output.find(isMessageBlock);
       const textPart = messageBlock?.content.find(isOutputTextPart);
@@ -286,7 +282,7 @@ export class OpenAILlmClient implements LlmClient {
         // body) so the failure is debuggable from this error alone.
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
           message: `Responses API returned no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
         });
@@ -301,9 +297,9 @@ export class OpenAILlmClient implements LlmClient {
         const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
-          message: `Not valid JSON (${parseMsg}): ${rawText.slice(0, 200)}`,
+          message: `Not valid JSON (${parseMsg})${truncated ? " (response.status: incomplete)" : ""}: ${rawText.slice(0, 200)}`,
         });
       }
 
@@ -311,9 +307,9 @@ export class OpenAILlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
-          message: `Schema validation failed: ${parsed.error.message}`,
+          message: `Schema validation failed${truncated ? " (response.status: incomplete)" : ""}: ${parsed.error.message}`,
         });
       }
 
@@ -411,35 +407,31 @@ export class OpenAILlmClient implements LlmClient {
         }
 
         if (!httpResult.ok) {
-          if (httpResult.status === 429) {
-            return err({
-              kind: "transient",
-              nodeId: req.nodeId,
-              message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-            });
-          }
-          // Non-429 4xx (401/403/422/...) is a deterministic client error —
-          // retrying burns the budget without changing the outcome.
-          if (httpResult.status >= 400 && httpResult.status < 500) {
-            return err({
-              kind: "node-crash",
-              retriability: "non-retriable",
-              nodeId: req.nodeId,
-              message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-            });
-          }
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: req.nodeId,
-            message: `HTTP ${httpResult.status}: ${truncateErrorBody(httpResult.bodyText)}`,
-          });
+          // The shared 429/4xx/5xx policy — see `httpFailureToError`.
+          return httpFailureToError(httpResult.status, httpResult.bodyText, req.nodeId);
         }
 
         const response = httpResult.response;
         const output: readonly ResponsesOutputItem[] = response.output ?? [];
         const tokensIn = response.usage?.input_tokens ?? 0;
         const tokensOut = response.usage?.output_tokens ?? 0;
+
+        // `response.status === "incomplete"` means this turn's output was
+        // TRUNCATED (token cap) — the tool calls / final answer are
+        // unreliable and retrying the identical request hits the identical
+        // cap, so it is a deterministic (non-retriable) failure (mirrors the
+        // Anthropic stop_reason max_tokens treatment). The turn's own usage
+        // rides along so the loop still attributes the burned tokens.
+        if (response.status === "incomplete") {
+          return err({
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: req.nodeId,
+            message: `Responses API returned an incomplete (truncated) response (response.status: incomplete): ${truncateErrorBody(JSON.stringify(response))}`,
+            usage: { tokensIn, tokensOut },
+          });
+        }
+
         const reasoning = extractReasoning(output);
 
         // Echo all output items into the conversation

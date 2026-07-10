@@ -1,7 +1,10 @@
 // fugue visualize (B4) — describedToMermaid is pure over DescribedDag; the
 // invariants: every node appears exactly once, every edge renders with its
-// kind's arrow, human-review gates are visually distinct, and a file that
-// fails lint fails visualize with the same structured errors.
+// kind's arrow, human-review gates are visually distinct, and a file whose
+// IMPORT fails (import/definition-class errors — the only failure class
+// visualize shares with lint) fails visualize with the same structured
+// errors. Visualize does NOT re-run lint's analyzeDag schema checks, so
+// e.g. a fan-in-key-mismatch fails lint yet still visualizes (visualize.ts).
 
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";

@@ -91,12 +91,17 @@ export interface ComposeOptions {
   readonly root?: string;
   readonly owner?: string;
   readonly force?: boolean;
-  /** Max clarifying-question rounds before the model must draft. Default 2. */
+  /**
+   * Max clarifying-question rounds before the model must draft. Default 2.
+   * Must be a non-negative integer — `runCompose` throws otherwise (NaN /
+   * negative / fractional values would silently disable the bound).
+   */
   readonly maxQuestionRounds?: number;
   /**
    * Max repair rounds PER DRAFT (schema-validation failures and gauntlet
    * failures both count; the budget resets when a refinement produces a new
    * draft). `rounds.repairs` in the outcome stays cumulative. Default 3.
+   * Must be a non-negative integer — `runCompose` throws otherwise.
    */
   readonly maxRepairRounds?: number;
 }
@@ -124,19 +129,34 @@ export type ComposeOutcome =
   | {
       readonly ok: false;
       /**
-       * Deliberate abort — `draft` is ABSENT on any abort (an explicit
-       * "abort" answer or a closed input stream): nothing was written and
-       * the user chose to walk away. There are no `problems` by design —
-       * an abort is a decision, not a failure with diagnostics.
+       * Deliberate abort — an explicit "abort" answer at the accept prompt:
+       * nothing was written and the user chose to walk away, so `draft` is
+       * ABSENT (structurally — the arm has no field). There are no
+       * `problems` by design — an abort is a decision, not a failure with
+       * diagnostics.
        */
       readonly reason: "aborted";
-      /**
-       * `"user"` = an explicit abort answer at the accept prompt;
-       * `"input-closed"` = the input stream died (Ctrl-C / Ctrl-D / piped
-       * stdin exhausted) — nobody is there to answer anymore.
-       */
-      readonly cause: "user" | "input-closed";
+      readonly cause: "user";
       readonly rounds: ComposeRounds;
+    }
+  | {
+      readonly ok: false;
+      /**
+       * The input stream died (Ctrl-C / Ctrl-D / piped stdin exhausted) —
+       * nobody is there to answer anymore. A wall, not a decision: the most
+       * recent gauntlet-proven draft rides along as `draft` (absent only
+       * when no draft had yet been proven), so hitting the wall never
+       * discards proven work. There are no `problems` by design — a dead
+       * stream carries no diagnostics.
+       */
+      readonly reason: "aborted";
+      readonly cause: "input-closed";
+      readonly rounds: ComposeRounds;
+      /**
+       * The most recent draft that survived the full gauntlet. Absent only
+       * when no draft had yet been proven.
+       */
+      readonly draft?: AuthoredDag;
     }
   | {
       readonly ok: false;
@@ -379,6 +399,8 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   would shadow a sibling llm node named "<x>" (e.g. "llm-node" collides only
   when a sibling llm node "llm" exists).
 - purpose and description fields are single-line (no newlines).
+- purpose, description, field descriptions and enum values must not contain
+  "{{" (the runtime prompt-placeholder opener).
 - Node kinds: ${NODE_KIND_LINES}.
 - The auto-injected llm confidence bucket CANNOT be used as a router
   predicate field — declare it explicitly on the classifier output as
@@ -447,13 +469,34 @@ export type AnswerClass =
   | { readonly kind: "abort" }
   | { readonly kind: "refine"; readonly text: string };
 
-/** Pure classifier for the accept-prompt answer (expects trimmed, non-empty text). */
-export const classifyAnswer = (text: string): AnswerClass =>
-  /^(yes|y|accept)$/i.test(text)
+/**
+ * Pure classifier for the accept-prompt answer (expects non-empty text).
+ * Trims internally rather than trusting the caller — idempotent for the
+ * current caller (which already trims), and "  yes  " can never silently
+ * become a paid refinement round via an untrimmed call site.
+ */
+export const classifyAnswer = (text: string): AnswerClass => {
+  const trimmed = text.trim();
+  return /^(yes|y|accept)$/i.test(trimmed)
     ? { kind: "accept" }
-    : /^(abort|no|quit|exit)$/i.test(text)
+    : /^(abort|no|quit|exit)$/i.test(trimmed)
       ? { kind: "abort" }
-      : { kind: "refine", text };
+      : { kind: "refine", text: trimmed };
+};
+
+/**
+ * Guard a programmatic round budget: NaN / negative / fractional values
+ * would silently disable the bound (`rounds.questions >= NaN` is always
+ * false — unbounded paid turns). Malformed budgets are a deterministic
+ * caller bug (the CLI never sets these options), so the boundary throws
+ * rather than returning a ComposeOutcome arm.
+ */
+const requireRoundBudget = (value: number, name: string): number => {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer, got ${value}`);
+  }
+  return value;
+};
 
 const summarize = (dag: AuthoredDag): string =>
   [
@@ -474,8 +517,8 @@ export const runCompose = async (
   const root = options.root !== undefined
     ? resolveRoot(options.root, process.cwd())
     : process.cwd();
-  const maxQuestions = options.maxQuestionRounds ?? 2;
-  const maxRepairs = options.maxRepairRounds ?? 3;
+  const maxQuestions = requireRoundBudget(options.maxQuestionRounds ?? 2, "maxQuestionRounds");
+  const maxRepairs = requireRoundBudget(options.maxRepairRounds ?? 3, "maxRepairRounds");
 
   const rounds = { questions: 0, repairs: 0, refinements: 0 };
   // Per-draft repair budget (schema + gauntlet failures both draw on it) —
@@ -580,9 +623,18 @@ export const runCompose = async (
       for (const q of t.questions) {
         const answer = await io.ask(q);
         // A closed stream means there is no user — abort instead of recording
-        // the sentinel as an answer and paying for further LLM rounds.
+        // the sentinel as an answer and paying for further LLM rounds. The
+        // spread is uniform with the accept-prompt site; here `lastProven` is
+        // still null by construction (no draft has been proven yet), so
+        // `draft` stays absent.
         if (answer.kind === "closed") {
-          return { ok: false, reason: "aborted", cause: "input-closed", rounds };
+          return {
+            ok: false,
+            reason: "aborted",
+            cause: "input-closed",
+            rounds,
+            ...(lastProven !== null ? { draft: lastProven } : {}),
+          };
         }
         conversation.push(`Q: ${q}\nA: ${answer.text}`);
       }
@@ -678,10 +730,18 @@ export const runCompose = async (
     let answer = "";
     for (;;) {
       const res = await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)');
-      // Closed stream ⇒ nobody can accept — abort from here exactly like an
-      // explicit "abort" answer (the draft was only ever staged, never written).
+      // Closed stream ⇒ nobody can accept — abort from here. Unlike an
+      // explicit "abort" answer (a decision), a dead stream is a WALL: the
+      // gauntlet-proven draft rides along as typed data (replayable via
+      // `fugue new --from`) instead of vanishing with the terminal.
       if (res.kind === "closed") {
-        return { ok: false, reason: "aborted", cause: "input-closed", rounds };
+        return {
+          ok: false,
+          reason: "aborted",
+          cause: "input-closed",
+          rounds,
+          ...(lastProven !== null ? { draft: lastProven } : {}),
+        };
       }
       answer = res.text.trim();
       if (answer.length > 0) break;

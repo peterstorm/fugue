@@ -20,9 +20,12 @@ import type { LintAdvisory, LintError, LintResult } from "./types.js";
 
 /**
  * Result of importing a DAG file. Shared between `runLint` and `runDescribe`
- * so we only `await import()` the file once per CLI invocation — re-imports
- * of a module whose first evaluation threw can return a record with the
- * default binding in TDZ on Bun, which would lose the original error.
+ * as the single import seam because of a Bun hazard: re-importing a module
+ * whose first evaluation THREW can return a record whose default binding is
+ * in TDZ, surfacing a ReferenceError instead of the original error. Repeat
+ * imports of a SUCCESSFULLY evaluated module are harmless cache hits (the
+ * gauntlet path imports the same staged file twice) — the seam exists so a
+ * failed evaluation is only ever imported once and its real error captured.
  */
 export type ImportedDagFile =
   | {
@@ -132,7 +135,8 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
 
 /**
  * Run lint against a DAG file path. Returns a structured result describing
- * either success or the first failure encountered.
+ * either success or the accumulated errors (`checkFanInKeys` accumulates one
+ * per mismatched fan-in node — the author sees every fix at once).
  */
 export const runLint = async (path: string): Promise<LintResult> => {
   const imported = await importDagFile(path);

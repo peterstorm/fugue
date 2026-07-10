@@ -110,8 +110,12 @@ export const TEMPLATE_OPEN = /\{\{/;
 /**
  * Global matcher for the emission-site scrub (safe to share despite the `g`
  * flag: only used with `String.replace`, which does not depend on `lastIndex`).
+ * A LOOKAHEAD (`\{(?=\{)` — not the literal `\{\{`) so the second brace stays
+ * in scan: replacing the literal pair with `"{ {"` re-creates `{{` from odd /
+ * overlapping brace runs (`"{{{text}}"` → `"{ {{text}}"`, still a live
+ * placeholder), while the lookahead scrub is idempotent — no `{{` survives.
  */
-export const TEMPLATE_OPENERS = /\{\{/g;
+export const TEMPLATE_OPENERS = /\{(?=\{)/g;
 
 export const pascalCase = (kebab: string): string =>
   kebab

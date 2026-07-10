@@ -268,6 +268,25 @@ export class AnthropicLlmClient implements LlmClient {
           t.cleanup();
         }
 
+        // `stop_reason === "max_tokens"` means this turn's output was
+        // TRUNCATED at the fixed ANTHROPIC_MAX_TOKENS cap — the tool calls /
+        // final answer are unreliable and retrying the identical request hits
+        // the identical cap, so it is a deterministic (non-retriable) failure
+        // (mirrors sendStructured). The turn's own usage rides along so the
+        // loop still attributes the burned tokens (FR-W0-001).
+        if (response.stop_reason === "max_tokens") {
+          return err({
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: req.nodeId,
+            message: `Anthropic response truncated at the ${ANTHROPIC_MAX_TOKENS}-token cap (stop_reason: max_tokens)`,
+            usage: {
+              tokensIn: response.usage.input_tokens,
+              tokensOut: response.usage.output_tokens,
+            },
+          });
+        }
+
         const thinkingBlock = response.content.find((b) => b.type === "thinking");
         const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
 

@@ -1,5 +1,13 @@
 import { describe, test, expect } from "bun:test";
-import { classifyLlmError, isAbort, isRateLimit, isTimeoutError } from "../llm/llm-errors.js";
+import fc from "fast-check";
+import {
+  classifyLlmError,
+  httpFailureToError,
+  isAbort,
+  isRateLimit,
+  isTimeoutError,
+  truncateErrorBody,
+} from "../llm/llm-errors.js";
 import { N } from "./_id-helpers.js";
 
 const nodeId = N("test-node");
@@ -59,6 +67,66 @@ describe("isTimeoutError", () => {
   });
 });
 
+describe("httpFailureToError", () => {
+  test("429 → transient carrying HTTP status + body", () => {
+    const result = httpFailureToError(429, "rate limited", nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.nodeId).toBe(nodeId);
+        expect(result.error.message).toBe("HTTP 429: rate limited");
+      }
+    }
+  });
+
+  test("401 → node-crash NON-retriable (deterministic client error)", () => {
+    const result = httpFailureToError(401, "unauthorized", nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toBe("HTTP 401: unauthorized");
+      }
+    }
+  });
+
+  test("200 (malformed-success body) → node-crash retriable carrying HTTP 200", () => {
+    const result = httpFailureToError(200, "<html>gateway</html>", nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("HTTP 200");
+      }
+    }
+  });
+
+  test("body is truncated in the message (no unbounded error payloads)", () => {
+    const result = httpFailureToError(500, "x".repeat(500), nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toBe(`HTTP 500: ${truncateErrorBody("x".repeat(500))}`);
+      expect(result.error.message).toContain("…[truncated]");
+    }
+  });
+
+  test("property: over 400–599, exactly 429 is transient, other 4xx non-retriable, 5xx retriable", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 400, max: 599 }), (status) => {
+        const result = httpFailureToError(status, "body", nodeId);
+        if (result.ok) return false;
+        const e = result.error;
+        if (status === 429) return e.kind === "transient";
+        if (status < 500) return e.kind === "node-crash" && e.retriability === "non-retriable";
+        return e.kind === "node-crash" && e.retriability === "retriable";
+      }),
+    );
+  });
+});
+
 describe("classifyLlmError", () => {
   test("timeout-induced abort → transient with timeout message", () => {
     const e = new Error("aborted");
@@ -109,6 +177,30 @@ describe("classifyLlmError", () => {
       if (result.error.kind === "transient") {
         expect(result.error.message).toBe("Too Many Requests");
       }
+    }
+  });
+
+  test("duck-typed non-429 4xx (SDK error with .status) → node-crash NON-retriable", () => {
+    // The same 4xx policy httpFailureToError applies on the raw-HTTP path:
+    // a deterministic client error must not silently burn the retry budget.
+    for (const status of [400, 401, 403, 422]) {
+      const e = Object.assign(new Error(`client error ${status}`), { status });
+      const result = classifyLlmError(e, nodeId);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.retriability).toBe("non-retriable");
+          expect(result.error.message).toBe(`client error ${status}`);
+        }
+      }
+    }
+    // …while a duck-typed 5xx stays a retriable generic crash.
+    const e5xx = Object.assign(new Error("server error"), { status: 500 });
+    const result = classifyLlmError(e5xx, nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("retriable");
     }
   });
 

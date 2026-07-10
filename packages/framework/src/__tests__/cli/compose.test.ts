@@ -351,10 +351,47 @@ describe("runCompose", () => {
     }
     expect(outcome.cause).toBe("unrepairable-errors");
     expect(outcome.problems[0]).toContain("describe-failed");
+    // formatLintError must keep the arm's structured `detail` payload — the
+    // terminal problems string is the only surviving record (mutation pin:
+    // reverting to `${kind}: ${message}` silently drops it).
+    expect(outcome.problems[0]).toContain("detail:");
+    expect(outcome.problems[0]).toContain('"message":"simulated"');
     expect(outcome.rounds.repairs).toBe(0);
     expect(outcome.draft).toEqual(validDag);
     // Only the initial draft turn was paid for — no repair turn was sent.
     expect(requests.length).toBe(1);
+  });
+
+  it("an import-failed verdict's stack survives into the terminal problems (formatLintError pin)", async () => {
+    const root = join(tmpRoot, "import-failed-stack");
+    // The import-failed arm's `stack` is its primary diagnostic (module
+    // resolution / codegen SyntaxError) — the gauntlet-failed problems must
+    // carry it, not just the message (mutation pin, mirrors the detail pin).
+    const stack =
+      "Error: Cannot find package '@fuguejs/framework'\n    at import (dag.ts:1:1)";
+    const importBrokenWithStack = async (): Promise<GauntletResult> => ({
+      ok: false,
+      errors: [
+        { kind: "import-failed", message: "Cannot find package '@fuguejs/framework'", stack },
+      ],
+      advisories: [],
+    });
+    const { client } = scriptedLlm([draft(validDag)]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      io,
+      importBrokenWithStack,
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "gauntlet-failed") {
+      throw new Error(`expected gauntlet-failed, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.cause).toBe("unrepairable-errors");
+    expect(outcome.problems[0]).toContain("import-failed");
+    expect(outcome.problems[0]).toContain("at import (dag.ts:1:1)");
   });
 
   it("a MIXED repairable+unrepairable verdict short-circuits to gauntlet-failed, surfacing both", async () => {
@@ -448,6 +485,8 @@ describe("runCompose", () => {
     if (outcome.ok || outcome.reason !== "write-failed") {
       throw new Error(`expected write-failed, got ${JSON.stringify(outcome)}`);
     }
+    // A typed writer refusal (not a throw) — the cause discriminant says so.
+    expect(outcome.cause).toBe("rejected");
     expect(outcome.problems.join("\n")).toContain("--force");
     expect(outcome.draft).toEqual(validDag);
     // The write-failed arm carries the loop telemetry too.
@@ -530,6 +569,8 @@ describe("runCompose", () => {
     }
     // A dead stream is distinguishable from a user decision.
     expect(outcome.cause).toBe("input-closed");
+    // No draft had been proven during the interview — `draft` stays absent.
+    if (outcome.cause === "input-closed") expect(outcome.draft).toBeUndefined();
     // The dead terminal stopped the loop: exactly the one question turn, no
     // draft/gauntlet round against nobody.
     expect(requests).toHaveLength(1);
@@ -573,17 +614,20 @@ describe("runCompose", () => {
     expect(outcome.result.files).toContain(join("dags", "assist", "compose-briefing", "dag.ts"));
   });
 
-  it("a closed stream at the accept prompt aborts and writes nothing", async () => {
+  it("a closed stream at the accept prompt aborts and writes nothing, carrying the proven draft", async () => {
     const root = join(tmpRoot, "closed-accept");
     const { client } = scriptedLlm([draft(validDag)]);
     const { io } = scriptedIo([CLOSED]);
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     expect(outcome.ok).toBe(false);
-    if (outcome.ok || outcome.reason !== "aborted") {
-      throw new Error(`expected aborted, got ${JSON.stringify(outcome)}`);
+    if (outcome.ok || outcome.reason !== "aborted" || outcome.cause !== "input-closed") {
+      throw new Error(`expected input-closed abort, got ${JSON.stringify(outcome)}`);
     }
-    expect(outcome.cause).toBe("input-closed");
+    // A dead stream is a WALL, not a decision — the gauntlet-proven draft
+    // rides along as typed data (replayable via `fugue new --from`) instead
+    // of vanishing with the terminal.
+    expect(outcome.draft).toEqual(validDag);
     expect(await Bun.file(join(root, "dags", "assist", "compose-briefing", "dag.ts")).exists()).toBe(false);
   });
 
@@ -681,6 +725,8 @@ describe("runCompose", () => {
     if (outcome.ok || outcome.reason !== "gauntlet-failed") {
       throw new Error(`expected gauntlet-failed, got ${JSON.stringify(outcome)}`);
     }
+    // The throw path is discriminated from the verdict path by `cause`.
+    expect(outcome.cause).toBe("threw");
     expect(outcome.problems[0]).toContain("ENOSPC");
     // Environment failures keep the STACK, not just the message.
     expect(outcome.problems[0]).toContain("at ");
@@ -788,6 +834,8 @@ describe("runCompose", () => {
     if (outcome.ok || outcome.reason !== "write-failed") {
       throw new Error(`expected write-failed, got ${JSON.stringify(outcome)}`);
     }
+    // A throwing writer (not a typed refusal) — the cause discriminant says so.
+    expect(outcome.cause).toBe("threw");
     expect(outcome.draft).toEqual(validDag);
   });
 
@@ -853,6 +901,31 @@ describe("runCompose", () => {
     });
   });
 
+  it("rejects NaN/negative/fractional round budgets at the boundary before any paid turn", async () => {
+    // `rounds.questions >= NaN` is always false — a NaN budget silently
+    // disables the bound (unbounded paid turns). Malformed budgets are a
+    // deterministic caller bug, so the boundary throws before any LLM call.
+    const root = join(tmpRoot, "bad-budgets");
+    for (const bad of [Number.NaN, -1, 1.5]) {
+      {
+        const { client, requests } = scriptedLlm([]);
+        const { io } = scriptedIo([]);
+        await expect(
+          runCompose({ intent: mustIntent("briefing"), team: assist, root, maxQuestionRounds: bad }, client, io),
+        ).rejects.toThrow("maxQuestionRounds must be a non-negative integer");
+        expect(requests).toHaveLength(0);
+      }
+      {
+        const { client, requests } = scriptedLlm([]);
+        const { io } = scriptedIo([]);
+        await expect(
+          runCompose({ intent: mustIntent("briefing"), team: assist, root, maxRepairRounds: bad }, client, io),
+        ).rejects.toThrow("maxRepairRounds must be a non-negative integer");
+        expect(requests).toHaveLength(0);
+      }
+    }
+  });
+
   const abortVariants = ["no", "quit", "exit", "No", "EXIT"] as const;
   abortVariants.forEach((answer, i) => {
     it(`abort variant '${answer}' aborts without burning an LLM round`, async () => {
@@ -896,6 +969,12 @@ describe("classifyAnswer", () => {
     ["yes please", { kind: "refine", text: "yes please" }],
     // …and a near-miss of the abort vocabulary is NOT an abort.
     ["nope", { kind: "refine", text: "nope" }],
+    // The classifier trims internally — an untrimmed call site can never turn
+    // "  yes  " into a paid refinement round (idempotent for the current
+    // caller, which already trims).
+    ["  yes  ", { kind: "accept" }],
+    ["  abort ", { kind: "abort" }],
+    ["  rename it  ", { kind: "refine", text: "rename it" }],
   ];
   for (const [text, expected] of rows) {
     it(`classifies ${JSON.stringify(text)} as ${expected.kind}`, () => {

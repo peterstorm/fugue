@@ -184,9 +184,14 @@ describe("AnthropicLlmClient.sendStructured", () => {
       nodeId: "trunc-1" as NodeId,
     });
     expect(r1.ok).toBe(false);
-    if (!r1.ok && r1.error.kind === "node-crash") {
-      expect(r1.error.retriability).toBe("non-retriable");
-      expect(r1.error.message).toContain("stop_reason: max_tokens");
+    if (!r1.ok) {
+      // Hard assertion (not a soft guard) — a reclassified arm must FAIL
+      // here, never pass vacuously by skipping the narrowed block.
+      expect(r1.error.kind).toBe("node-crash");
+      if (r1.error.kind === "node-crash") {
+        expect(r1.error.retriability).toBe("non-retriable");
+        expect(r1.error.message).toContain("stop_reason: max_tokens");
+      }
     }
 
     // Truncated tool input that no longer parses against the schema.
@@ -203,9 +208,12 @@ describe("AnthropicLlmClient.sendStructured", () => {
       nodeId: "trunc-2" as NodeId,
     });
     expect(r2.ok).toBe(false);
-    if (!r2.ok && r2.error.kind === "node-crash") {
-      expect(r2.error.retriability).toBe("non-retriable");
-      expect(r2.error.message).toContain("stop_reason: max_tokens");
+    if (!r2.ok) {
+      expect(r2.error.kind).toBe("node-crash");
+      if (r2.error.kind === "node-crash") {
+        expect(r2.error.retriability).toBe("non-retriable");
+        expect(r2.error.message).toContain("stop_reason: max_tokens");
+      }
     }
   });
 
@@ -249,6 +257,35 @@ describe("AnthropicLlmClient.sendStructured", () => {
     }
     // None of the rejected requests reached the wire.
     expect(calls).toBe(2);
+  });
+
+  it("a throwing schema construction stays inside the Result boundary as a typed validation error", async () => {
+    // zodToJsonSchema over a non-schema throws — the pre-flight wrap must
+    // convert that into a typed validation error, never an escaped exception,
+    // and nothing may reach the wire (mirrors the sendWithTools pin below).
+    let calls = 0;
+    const client = new AnthropicLlmClient(
+      makeStub(async () => {
+        calls++;
+        return makeToolUseResponse({ greeting: "hi" });
+      }),
+    );
+    const result = await client.sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "claude-test",
+      schema: {} as unknown as z.ZodType<SchemaType>,
+      nodeId: "bad-schema" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("bad-schema"));
+        expect(result.error.message).toMatch(/Schema construction failed/);
+      }
+    }
+    expect(calls).toBe(0);
   });
 
   it("schema validation failure → node-crash with nodeId", async () => {
@@ -554,6 +591,38 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     }
   });
 
+  it("stop_reason max_tokens (truncation) → NON-retriable node-crash carrying the turn's usage", async () => {
+    // A max_tokens stop means this turn's output was truncated at the fixed
+    // cap — the tool calls / final answer are unreliable, and retrying the
+    // identical request hits the identical cap (mirrors sendStructured).
+    const truncated = {
+      ...makeTextResponse("partial"),
+      stop_reason: "max_tokens",
+    } as Anthropic.Message;
+    const client = new AnthropicLlmClient(makeStub(async () => truncated));
+    const result = await client.sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "claude-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "trunc-tools" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("stop_reason: max_tokens");
+        // The truncated turn still burned tokens — they must be attributed.
+        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+      }
+    }
+  });
+
   it("SDK throws non-rate-limit error → node-crash (regression for §6.10)", async () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => { throw new Error("connection refused"); }),
@@ -574,6 +643,37 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
+    }
+  });
+});
+
+// Round 15: non-429 4xx (401/400/…) is a deterministic client error — the
+// duck-typed status path in classifyLlmError must mark it NON-retriable
+// (same policy as OpenAI's httpFailureToError; previously it fell through
+// as a retriable generic crash, silently burning the retry budget).
+describe("AnthropicLlmClient — non-429 4xx mapping (sendStructured)", () => {
+  it("SDK throws status=401 → node-crash NON-retriable", async () => {
+    const authError = Object.assign(new Error("authentication_error: invalid x-api-key"), {
+      status: 401,
+    });
+    const client = new AnthropicLlmClient(
+      makeStub(async () => { throw authError; }),
+    );
+    const result = await client.sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "claude-test",
+      schema: Schema,
+      nodeId: "auth-node" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("auth-node"));
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("authentication_error");
+      }
     }
   });
 });

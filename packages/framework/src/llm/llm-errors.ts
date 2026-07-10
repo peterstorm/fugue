@@ -13,6 +13,36 @@ import { err } from "../types/result.js";
 export const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
 
+/** Safely truncate API error body to prevent data leakage through error propagation paths. */
+export const truncateErrorBody = (body: string, maxLen = 200): string =>
+  body.length > maxLen ? body.slice(0, maxLen) + "…[truncated]" : body;
+
+/**
+ * The ONE HTTP failure policy, shared by every client's non-OK response arm:
+ * - 429 → `transient` (rate limit — retriable by kind);
+ * - other 4xx → NON-retriable `node-crash` (a deterministic client error —
+ *   retrying burns the budget without changing the outcome);
+ * - everything else (5xx, and malformed-success bodies reported with their
+ *   2xx status) → retriable `node-crash` (server-side, MAY be worth a retry).
+ * Pure — `status`/`bodyText` in, typed error out; the message always carries
+ * `HTTP <status>` plus the (truncated) body so the failure is debuggable
+ * from the error alone.
+ */
+export const httpFailureToError = (
+  status: number,
+  bodyText: string,
+  nodeId: NodeId,
+): Result<never, FrameworkError> => {
+  const message = `HTTP ${status}: ${truncateErrorBody(bodyText)}`;
+  if (status === 429) {
+    return err({ kind: "transient", nodeId, message });
+  }
+  if (status >= 400 && status < 500) {
+    return err({ kind: "node-crash", retriability: "non-retriable", nodeId, message });
+  }
+  return err({ kind: "node-crash", retriability: "retriable", nodeId, message });
+};
+
 /**
  * Pre-flight validation of `LlmRequest.temperature`. The documented range is
  * [0, 1] — the providers' common denominator (Anthropic caps sampling at 1.0;
@@ -100,6 +130,20 @@ export const classifyLlmError = (
       kind: "transient",
       nodeId,
       message: e instanceof Error ? e.message : String(e),
+    });
+  }
+  // Duck-typed HTTP status (SDK errors carry `.status`, e.g. Anthropic's
+  // AuthenticationError/BadRequestError): a non-429 4xx is a deterministic
+  // client error — non-retriable, the same policy `httpFailureToError`
+  // applies on the raw-HTTP path (429 was handled above via `isRateLimit`).
+  const status = (e as { status?: unknown })?.status;
+  if (typeof status === "number" && status >= 400 && status < 500) {
+    return err({
+      kind: "node-crash",
+      retriability: "non-retriable",
+      nodeId,
+      message: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
     });
   }
   return err({

@@ -94,8 +94,12 @@ const comment = (text: string): string => text.replace(LINE_TERMINATORS, " ");
  * values — this is the defense-in-depth at the emission site (mirrors
  * `comment()`), scrubbing with the SAME sequence (`TEMPLATE_OPENERS`,
  * single-sourced in `identifiers.ts`) so the two layers can never disagree.
+ * The matcher is a lookahead on the FIRST brace of each `{{` pair, so the
+ * replacement only inserts a space after it — idempotent over odd/overlapping
+ * brace runs (`{{{text}}`, `{{{{`), where replacing the literal pair would
+ * re-create a live `{{`.
  */
-const promptText = (text: string): string => text.replace(TEMPLATE_OPENERS, "{ {");
+const promptText = (text: string): string => text.replace(TEMPLATE_OPENERS, "{ ");
 
 const zodExpr = (t: FieldType): string =>
   match(t)
