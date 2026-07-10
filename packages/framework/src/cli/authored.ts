@@ -23,6 +23,7 @@ import {
   JS_RESERVED_WORDS,
   RESERVED_IDENTIFIERS,
   SINGLE_LINE,
+  TEMPLATE_OPEN,
   camelCase,
   dagLevelIdentifiers,
   generatedIdentifiersFor,
@@ -55,6 +56,18 @@ const FORBIDDEN_FIELD_NAMES: ReadonlySet<string> = new Set(["__proto__"]);
 // single-sourced in `identifiers.ts` alongside the LINE_TERMINATORS scrub
 // codegen's `comment()` applies as defense-in-depth — one character class,
 // so the two layers can never disagree on the set.
+// Free text also reaches generated PROMPT bodies (node purpose, enum values),
+// where the runtime's `interpolatePrompt` replaceAll-substitutes any literal
+// `{{field}}` matching a buildInput var — a purpose like "… {{text}} …" would
+// silently splice runtime input into the prompt while passing the whole
+// gauntlet. TEMPLATE_OPEN is single-sourced in `identifiers.ts` alongside the
+// TEMPLATE_OPENERS scrub codegen's `promptText()` applies as defense-in-depth
+// — one sequence, so the two layers can never disagree on it either.
+const NO_TEMPLATE_OPEN = {
+  check: (s: string): boolean => !TEMPLATE_OPEN.test(s),
+  message:
+    "must not contain '{{' (the runtime prompt-placeholder opener — it would splice runtime input into the generated prompt)",
+} as const;
 
 export const FieldTypeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("string") }).strict(),
@@ -69,7 +82,16 @@ export const FieldTypeSchema = z.discriminatedUnion("kind", [
       // there garbles the prompt even though codegen JSON-escapes the z.enum
       // literal. `.readonly()` so the inferred type is ReadonlyArray (and the
       // parsed value is frozen) — enum values are facts, never mutated.
-      values: z.array(z.string().min(1).regex(SINGLE_LINE, "must be a single line")).min(2).readonly(),
+      values: z
+        .array(
+          z
+            .string()
+            .min(1)
+            .regex(SINGLE_LINE, "must be a single line")
+            .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message),
+        )
+        .min(2)
+        .readonly(),
     })
     .strict(),
 ]);
@@ -84,7 +106,12 @@ export const FieldSpecSchema = z
         message: "field name '__proto__' is not allowed (object-literal prototype setter — it cannot be emitted as a schema key)",
       }),
     type: FieldTypeSchema,
-    description: z.string().min(1).regex(SINGLE_LINE, "must be a single line").optional(),
+    description: z
+      .string()
+      .min(1)
+      .regex(SINGLE_LINE, "must be a single line")
+      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+      .optional(),
   })
   .strict()
   .superRefine((f, ctx) => {
@@ -166,7 +193,11 @@ const kebabField = (message: string) =>
 
 const nodeId = kebabIdentField("node id must be kebab-case starting with a letter");
 /** What this node is for — the authoring intent DescribedDag can't carry. */
-const nodePurpose = z.string().min(1).regex(SINGLE_LINE, "must be a single line");
+const nodePurpose = z
+  .string()
+  .min(1)
+  .regex(SINGLE_LINE, "must be a single line")
+  .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message);
 
 /**
  * The `output` slot for kinds that require one. Zod's default missing-key
@@ -345,7 +376,11 @@ const BaseAuthoredDagSchema = z
     // proof the KEBAB rule passed, and consumers like `runCompose`'s --team
     // comparison work brand-to-brand instead of trusting a bare string.
     team: kebabField("team must be kebab-case"),
-    description: z.string().min(1).regex(SINGLE_LINE, "must be a single line"),
+    description: z
+      .string()
+      .min(1)
+      .regex(SINGLE_LINE, "must be a single line")
+      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message),
     /** DAG input schema (the request). */
     input: SchemaSpecSchema,
     nodes: z.array(AuthoredNodeSchema).min(1),

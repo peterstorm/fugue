@@ -41,7 +41,7 @@ import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
-import type { LintError, NewResult } from "./types.js";
+import { formatLintError, type LintError, type NewResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Seams
@@ -126,10 +126,16 @@ export type ComposeOutcome =
       /**
        * Deliberate abort — `draft` is ABSENT on any abort (an explicit
        * "abort" answer or a closed input stream): nothing was written and
-       * the user chose to walk away.
+       * the user chose to walk away. There are no `problems` by design —
+       * an abort is a decision, not a failure with diagnostics.
        */
       readonly reason: "aborted";
-      readonly problems: readonly string[];
+      /**
+       * `"user"` = an explicit abort answer at the accept prompt;
+       * `"input-closed"` = the input stream died (Ctrl-C / Ctrl-D / piped
+       * stdin exhausted) — nobody is there to answer anymore.
+       */
+      readonly cause: "user" | "input-closed";
       readonly rounds: ComposeRounds;
     }
   | {
@@ -147,16 +153,35 @@ export type ComposeOutcome =
       readonly ok: false;
       /**
        * `gauntlet-failed` = an environment-class failure of the proving
-       * machinery — it either THREW, OR it completed normally but returned
-       * unrepairable errors (import-failed/analyzer-failed/describe-failed/
-       * no-default-export/missing-dag-field). Never a repairable draft problem.
-       * `problems` carries the stack (throw path) or the formatted verdict
-       * strings (unrepairable-verdict path) accordingly.
+       * machinery. `cause` carries the doc's own taxonomy as a discriminant:
+       * `"threw"` — the gauntlet threw (ENOSPC, EACCES, …), `problems` is the
+       * stack; `"unrepairable-errors"` — it completed normally but the verdict
+       * carried errors outside the repairable allowlist (import-failed/
+       * analyzer-failed/describe-failed/no-default-export/missing-dag-field),
+       * `problems` is the formatted verdict (unrepairable first, any
+       * co-occurring repairable errors after — never dropped). Never a
+       * repairable draft problem alone.
        */
-      readonly reason: "write-failed" | "gauntlet-failed";
+      readonly reason: "gauntlet-failed";
+      readonly cause: "threw" | "unrepairable-errors";
       readonly problems: readonly string[];
       readonly rounds: ComposeRounds;
       /** The draft in flight when the environment failed — always present. */
+      readonly draft: AuthoredDag;
+    }
+  | {
+      readonly ok: false;
+      /**
+       * The accepted draft could not be written. `cause`: `"threw"` — the
+       * scaffold writer threw (environment failure; `problems` is the stack);
+       * `"rejected"` — it returned a typed refusal (`NewResult`'s problems,
+       * e.g. a non-empty target dir without --force).
+       */
+      readonly reason: "write-failed";
+      readonly cause: "threw" | "rejected";
+      readonly problems: readonly string[];
+      readonly rounds: ComposeRounds;
+      /** The accepted draft — the user's work product, never discarded. */
       readonly draft: AuthoredDag;
     };
 
@@ -384,12 +409,51 @@ const COMPOSE_NODE_ID = nodeId("fugue-compose");
 // short-circuit to the same gauntlet-failed arm a gauntlet THROW takes,
 // draft attached. Inverting to an allowlist means any future LintError
 // kind defaults to the safe short-circuit until proven draft-repairable.
-// Typed against `LintError["kind"]` so a renamed/removed kind fails
-// compilation here instead of silently draining the allowlist.
-const REPAIRABLE_KINDS: ReadonlySet<LintError["kind"]> = new Set([
+
+/**
+ * The LintError kinds fixable by editing the AuthoredDag JSON — the element
+ * type of the allowlist, so the set can never admit an unrepairable kind.
+ */
+export type RepairableKind = "dag-definition-error" | "fan-in-key-mismatch";
+// Compile-time proof every RepairableKind IS a LintError kind (mirrors the
+// `_NoExtraShapes` backstop in types.ts): a renamed/removed kind fails at
+// this annotation instead of silently draining the allowlist.
+type _RepairableKindsAreLintKinds = Exclude<RepairableKind, LintError["kind"]> extends never
+  ? true
+  : never;
+const _repairableKindsAreLintKinds: _RepairableKindsAreLintKinds = true;
+void _repairableKindsAreLintKinds;
+
+const REPAIRABLE_KINDS: ReadonlySet<RepairableKind> = new Set<RepairableKind>([
   "dag-definition-error",
   "fan-in-key-mismatch",
 ]);
+
+const isRepairable = (e: LintError): boolean => {
+  // Widening ASSIGNMENT (no cast — ReadonlySet reads are covariant): the
+  // allowlist stays typed to `RepairableKind` while `.has` accepts any kind.
+  const kinds: ReadonlySet<LintError["kind"]> = REPAIRABLE_KINDS;
+  return kinds.has(e.kind);
+};
+
+/**
+ * Classification of a non-empty accept-prompt answer. The closed accept /
+ * abort vocabularies are matched case-insensitively; anything unrecognized is
+ * BY DESIGN a refinement request (free text describing the change) — an
+ * explicit `refine` arm, not a fallthrough.
+ */
+export type AnswerClass =
+  | { readonly kind: "accept" }
+  | { readonly kind: "abort" }
+  | { readonly kind: "refine"; readonly text: string };
+
+/** Pure classifier for the accept-prompt answer (expects trimmed, non-empty text). */
+export const classifyAnswer = (text: string): AnswerClass =>
+  /^(yes|y|accept)$/i.test(text)
+    ? { kind: "accept" }
+    : /^(abort|no|quit|exit)$/i.test(text)
+      ? { kind: "abort" }
+      : { kind: "refine", text };
 
 const summarize = (dag: AuthoredDag): string =>
   [
@@ -463,34 +527,46 @@ export const runCompose = async (
 
   // Schema gate: parse the wire-level `unknown` into an AuthoredDag. A schema
   // failure is a repair round exactly like a gauntlet failure — the superRefine
-  // problems go back to the model as structured JSON and we re-turn. The
+  // problems go back to the model as structured JSON and we re-turn (via
+  // `correctedDraftTurn`, mutual recursion bounded by the repair budget). The
   // validated `--team` flag is enforced HERE too: it only reaches the model as
   // prose, so a drifting draft would otherwise pass every gate and write to
   // `dags/<the model's team>/` — a flag the user set must bind, not suggest.
   const parseDraftWithRepairs = async (first: Extract<ComposeTurn, { action: "draft" }>): Promise<DraftAttempt> => {
-    let current = first;
-    for (;;) {
-      const parsed = parseAuthoredDag(current.dag);
-      if (parsed.ok && parsed.dag.team === options.team) return { ok: true, dag: parsed.dag };
-      const problems = parsed.ok
-        ? [`team must be '${options.team}' (from --team), got '${parsed.dag.team}'`]
-        : parsed.problems;
-      if (draftRepairs >= maxRepairs) {
-        return { ok: false, outcome: failClosed("repair-exhausted", problems) };
-      }
-      draftRepairs++;
-      rounds.repairs++;
-      const t = await turn(
-        `Your draft failed schema validation. Problems:\n${JSON.stringify(problems, null, 2)}\n` +
-          `Current draft:\n${JSON.stringify(current.dag, null, 2)}\n` +
-          `Return a corrected {"action":"draft","dag":{...}}.`,
-      );
-      if ("error" in t) return { ok: false, outcome: failClosed("llm-error", [t.error]) };
-      if (t.action !== "draft") {
-        return { ok: false, outcome: failClosed("llm-error", ["expected a corrected draft, got questions"]) };
-      }
-      current = t;
+    const parsed = parseAuthoredDag(first.dag);
+    if (parsed.ok && parsed.dag.team === options.team) return { ok: true, dag: parsed.dag };
+    const problems = parsed.ok
+      ? [`team must be '${options.team}' (from --team), got '${parsed.dag.team}'`]
+      : parsed.problems;
+    if (draftRepairs >= maxRepairs) {
+      return { ok: false, outcome: failClosed("repair-exhausted", problems) };
     }
+    draftRepairs++;
+    rounds.repairs++;
+    return correctedDraftTurn(
+      `Your draft failed schema validation. Problems:\n${JSON.stringify(problems, null, 2)}\n` +
+        `Current draft:\n${JSON.stringify(first.dag, null, 2)}\n` +
+        `Return a corrected {"action":"draft","dag":{...}}.`,
+    );
+  };
+
+  // The one repair/refinement turn motif (shared by the schema-repair,
+  // gauntlet-repair and refinement sites): send the prompt, fail closed on a
+  // transport error or a questions turn, and push the draft through the
+  // schema gate. `expected` only flavors the failure message.
+  const correctedDraftTurn = async (
+    prompt: string,
+    expected: "corrected" | "refined" = "corrected",
+  ): Promise<DraftAttempt> => {
+    const t = await turn(prompt);
+    if ("error" in t) return { ok: false, outcome: failClosed("llm-error", [t.error]) };
+    if (t.action !== "draft") {
+      return {
+        ok: false,
+        outcome: failClosed("llm-error", [`expected a ${expected} draft, got questions`]),
+      };
+    }
+    return parseDraftWithRepairs(t);
   };
 
   // --- interview → first draft ---
@@ -505,7 +581,9 @@ export const runCompose = async (
         const answer = await io.ask(q);
         // A closed stream means there is no user — abort instead of recording
         // the sentinel as an answer and paying for further LLM rounds.
-        if (answer.kind === "closed") return { ok: false, reason: "aborted", problems: [], rounds };
+        if (answer.kind === "closed") {
+          return { ok: false, reason: "aborted", cause: "input-closed", rounds };
+        }
         conversation.push(`Q: ${q}\nA: ${answer.text}`);
       }
       continue;
@@ -533,6 +611,7 @@ export const runCompose = async (
         outcome: {
           ok: false,
           reason: "gauntlet-failed",
+          cause: "threw",
           // Environment failures are debugged from this outcome alone — keep
           // the stack, not just the message.
           problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
@@ -552,32 +631,30 @@ export const runCompose = async (
     while (!verdict.ok) {
       // Anything outside the REPAIRABLE_KINDS allowlist (module scope, above)
       // short-circuits to gauntlet-failed before any paid repair round.
-      const unrepairable = verdict.errors.filter((e) => !REPAIRABLE_KINDS.has(e.kind));
+      const unrepairable = verdict.errors.filter((e) => !isRepairable(e));
       if (unrepairable.length > 0) {
+        // Co-occurring REPAIRABLE errors ride along after the unrepairable
+        // ones — the terminal outcome must never drop part of the verdict.
+        const repairable = verdict.errors.filter(isRepairable);
         return {
           ok: false,
           reason: "gauntlet-failed",
-          problems: unrepairable.map((e) => `${e.kind}: ${e.message}`),
+          cause: "unrepairable-errors",
+          problems: [...unrepairable, ...repairable].map(formatLintError),
           rounds,
           draft,
         };
       }
       if (draftRepairs >= maxRepairs) {
-        return failClosed(
-          "repair-exhausted",
-          verdict.errors.map((e) => `${e.kind}: ${e.message}`),
-        );
+        return failClosed("repair-exhausted", verdict.errors.map(formatLintError));
       }
       draftRepairs++;
       rounds.repairs++;
-      const t = await turn(
+      const attempt = await correctedDraftTurn(
         `Your draft failed validation. Structured violations:\n${JSON.stringify(verdict.errors, null, 2)}\n` +
           `Current draft:\n${JSON.stringify(draft, null, 2)}\n` +
           `Return a corrected {"action":"draft","dag":{...}}.`,
       );
-      if ("error" in t) return failClosed("llm-error", [t.error]);
-      if (t.action !== "draft") return failClosed("llm-error", ["expected a corrected draft, got questions"]);
-      const attempt = await parseDraftWithRepairs(t);
       if (!attempt.ok) return attempt.outcome;
       draft = attempt.dag;
       proven = await prove(draft);
@@ -603,12 +680,15 @@ export const runCompose = async (
       const res = await io.ask('Accept this DAG? ("yes" to write, "abort", or describe a refinement)');
       // Closed stream ⇒ nobody can accept — abort from here exactly like an
       // explicit "abort" answer (the draft was only ever staged, never written).
-      if (res.kind === "closed") return { ok: false, reason: "aborted", problems: [], rounds };
+      if (res.kind === "closed") {
+        return { ok: false, reason: "aborted", cause: "input-closed", rounds };
+      }
       answer = res.text.trim();
       if (answer.length > 0) break;
       io.say('Please answer "yes" to write, "abort" to quit, or describe a refinement.');
     }
-    if (/^(yes|y|accept)$/i.test(answer)) {
+    const classified = classifyAnswer(answer);
+    if (classified.kind === "accept") {
       // --- accept: deterministic write of the final scaffold ---
       // Writing HERE (inside the loop) keeps the accepted verdict in scope, so
       // its advisories reach the machine-readable outcome — the NewResult
@@ -631,30 +711,36 @@ export const runCompose = async (
         return {
           ok: false,
           reason: "write-failed",
+          cause: "threw",
           problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
           rounds,
           draft,
         };
       }
       if (!result.ok) {
-        return { ok: false, reason: "write-failed", problems: result.problems, rounds, draft };
+        return {
+          ok: false,
+          reason: "write-failed",
+          cause: "rejected",
+          problems: result.problems,
+          rounds,
+          draft,
+        };
       }
       return { ok: true, result, rounds };
     }
-    if (/^(abort|no|quit|exit)$/i.test(answer)) {
-      return { ok: false, reason: "aborted", problems: [], rounds };
+    if (classified.kind === "abort") {
+      return { ok: false, reason: "aborted", cause: "user", rounds };
     }
 
     rounds.refinements++;
     draftRepairs = 0; // a refinement is a new draft — fresh repair budget
-    conversation.push(`Refinement request: ${answer}`);
-    const t = await turn(
+    conversation.push(`Refinement request: ${classified.text}`);
+    const attempt = await correctedDraftTurn(
       `Current accepted-so-far draft:\n${JSON.stringify(draft, null, 2)}\n` +
         `Apply the refinement above and return {"action":"draft","dag":{...}}.`,
+      "refined",
     );
-    if ("error" in t) return failClosed("llm-error", [t.error]);
-    if (t.action !== "draft") return failClosed("llm-error", ["expected a refined draft, got questions"]);
-    const attempt = await parseDraftWithRepairs(t);
     if (!attempt.ok) return attempt.outcome;
     draft = attempt.dag;
   }

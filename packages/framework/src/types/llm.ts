@@ -43,11 +43,15 @@ export interface LlmRequest<O> {
    */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   /**
-   * Sampling temperature. Omitted → the provider's default. Deterministic
-   * drafting loops (e.g. `fugue compose`) pin this to 0 so structured turns
-   * are as reproducible as the provider allows. Cannot be combined with
-   * `thinking` on OpenAI — the client rejects the pair pre-flight as a typed
-   * `validation` error before anything reaches the wire.
+   * Sampling temperature in [0, 1] — the providers' common denominator
+   * (Anthropic caps sampling at 1.0; OpenAI accepts up to 2 but this seam
+   * pins the portable range). Both clients reject a non-finite or
+   * out-of-range value pre-flight as a typed `validation` error before
+   * anything reaches the wire. Omitted → the provider's default.
+   * Deterministic drafting loops (e.g. `fugue compose`) pin this to 0 so
+   * structured turns are as reproducible as the provider allows. Cannot be
+   * combined with `thinking` on OpenAI — the client rejects the pair
+   * pre-flight the same way.
    */
   readonly temperature?: number;
   readonly signal?: AbortSignal;

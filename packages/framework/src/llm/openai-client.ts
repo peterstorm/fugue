@@ -18,7 +18,7 @@ import {
 import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 import { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
-import { classifyLlmError } from "./llm-errors.js";
+import { classifyLlmError, validateTemperature } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
 import type {
@@ -72,7 +72,8 @@ const toolChoiceToOpenAi = (
 
 
 /**
- * OpenAI LLM client using the Responses API (/openai/responses).
+ * OpenAI LLM client using the Responses API (`POST {baseUrl}/responses`;
+ * Azure: `{base}/openai/responses?api-version=…` — see `buildRequestConfig`).
  *
  * Validated against gpt-4o-mini and gpt-5-mini. Other OpenAI models work but
  * require a `PRICE_TABLE` entry in `llm/cost.ts` for cost attribution to fire.
@@ -185,6 +186,11 @@ export class OpenAILlmClient implements LlmClient {
       });
     }
 
+    // Pre-flight: an out-of-range/non-finite temperature is a deterministic
+    // caller error — typed validation failure before anything reaches the wire.
+    const temperatureError = validateTemperature(req.temperature, req.nodeId);
+    if (temperatureError !== null) return temperatureError;
+
     // Pre-flight: reasoning models reject `temperature` alongside `reasoning`
     // with an opaque HTTP 400. That combination is a deterministic caller
     // error — surface it as a typed validation failure at the seam rather
@@ -275,11 +281,14 @@ export class OpenAILlmClient implements LlmClient {
       const rawText = textPart?.text ?? "";
 
       if (!rawText) {
+        // A 200 whose body carries no message/output_text is a malformed
+        // success — snapshot what the API actually sent (status + truncated
+        // body) so the failure is debuggable from this error alone.
         return err({
           kind: "node-crash",
           retriability: "retriable",
           nodeId: req.nodeId,
-          message: "Responses API returned no text output",
+          message: `Responses API returned no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
         });
       }
 
@@ -331,8 +340,21 @@ export class OpenAILlmClient implements LlmClient {
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
     const maxIterations = req.maxIterations ?? 10;
-    const finalSchema = buildJsonSchema(req.schema as z.ZodType<any>);
-    const toolSpecs = req.tools.map(toolToOpenAiSpec);
+    // Pre-flight: schema/tool-spec construction (zodToJsonSchema) is
+    // deterministic — a throw here must stay inside the Result boundary as a
+    // typed non-retriable validation error (mirrors sendStructured).
+    let finalSchema: Record<string, unknown>;
+    let toolSpecs: Record<string, unknown>[];
+    try {
+      finalSchema = buildJsonSchema(req.schema as z.ZodType<any>);
+      toolSpecs = req.tools.map(toolToOpenAiSpec);
+    } catch (e) {
+      return err({
+        kind: "validation",
+        nodeId: req.nodeId,
+        message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
     const toolChoice = toolChoiceToOpenAi(req.toolChoice);
 
     const conversation: ConversationItem[] = [

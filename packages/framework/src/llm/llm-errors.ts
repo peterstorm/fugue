@@ -14,6 +14,29 @@ export const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
 
 /**
+ * Pre-flight validation of `LlmRequest.temperature`. The documented range is
+ * [0, 1] — the providers' common denominator (Anthropic caps sampling at 1.0;
+ * OpenAI accepts up to 2, but this seam pins the portable range so a request
+ * never means different things per provider). A non-finite or out-of-range
+ * value is a deterministic caller error: reject at the seam as a typed
+ * `validation` failure (non-retriable by kind) instead of an opaque provider
+ * HTTP 400 — mirrors the OpenAI thinking+temperature conflict pre-flight.
+ * Returns `null` when the request is valid.
+ */
+export const validateTemperature = (
+  temperature: number | undefined,
+  nodeId: NodeId,
+): Result<never, FrameworkError> | null =>
+  temperature !== undefined &&
+  (!Number.isFinite(temperature) || temperature < 0 || temperature > 1)
+    ? err({
+        kind: "validation",
+        nodeId,
+        message: `temperature must be a finite number in [0, 1], got ${temperature}`,
+      })
+    : null;
+
+/**
  * Duck-typed 429 detection. The Anthropic SDK throws `RateLimitError` with
  * `.status === 429`; duck-typing avoids a class-hierarchy dependency.
  */

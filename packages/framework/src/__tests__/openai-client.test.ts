@@ -235,8 +235,8 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("missing output_text → node-crash with nodeId", async () => {
-    handler = async () => jsonResponse({ output: [], usage: {} });
+  it("missing output_text → node-crash with nodeId, snapshotting status + body", async () => {
+    handler = async () => jsonResponse({ output: [], usage: {}, status: "incomplete" });
     const result = await makeClient().sendStructured<SchemaType>({
       system: "s",
       user: "u",
@@ -247,7 +247,52 @@ describe("OpenAILlmClient.sendStructured", () => {
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe(N("missing"));
+      // A malformed 200 must be debuggable from this error alone: the
+      // response's own status and a truncated body snapshot ride along.
+      expect(result.error.message).toContain("response.status: incomplete");
+      expect(result.error.message).toContain('"output":[]');
     }
+  });
+
+  it("out-of-range/non-finite temperature → typed validation error before any request is sent", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    for (const temperature of [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.5]) {
+      const result = await makeClient().sendStructured<SchemaType>({
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        schema: Schema,
+        nodeId: "temp-node" as NodeId,
+        temperature,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("validation");
+        if (result.error.kind === "validation") {
+          expect(result.error.nodeId).toBe(N("temp-node"));
+          expect(result.error.message).toMatch(/temperature/);
+        }
+      }
+    }
+    // None of the rejected requests reached the wire…
+    expect(fetchCalls).toHaveLength(0);
+    // …while the boundary values of the documented [0, 1] range are legal.
+    for (const temperature of [0, 1]) {
+      const result = await makeClient().sendStructured<SchemaType>({
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        schema: Schema,
+        nodeId: "temp-node" as NodeId,
+        temperature,
+      });
+      expect(result.ok).toBe(true);
+    }
+    expect(fetchCalls).toHaveLength(2);
   });
 
   // Wave 7 §7.4 — typed traversal regression: unknown output item types
@@ -432,6 +477,33 @@ const makeTool = (
 }) as ToolDef<unknown, unknown>;
 
 describe("OpenAILlmClient.sendWithTools", () => {
+  it("a throwing schema construction stays inside the Result boundary as a typed validation error", async () => {
+    // zodToJsonSchema over a non-schema throws — the pre-flight wrap must
+    // convert that into a typed validation error, never an escaped exception,
+    // and nothing may reach the wire.
+    handler = async () => jsonResponse({ output: [] });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: {} as unknown as z.ZodType<SchemaType>,
+        nodeId: "bad-schema" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("bad-schema"));
+        expect(result.error.message).toMatch(/Schema construction failed/);
+      }
+    }
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it("pre-aborted signal → aborted", async () => {
     handler = async () => jsonResponse({ output: [] });
     const ctrl = new AbortController();

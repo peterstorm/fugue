@@ -50,6 +50,7 @@ import {
   IDENT,
   INPUT_SCHEMA_NAME,
   LINE_TERMINATORS,
+  TEMPLATE_OPENERS,
   NODE_FACTORY_NAME,
   SHAPE_HELPER_NAME,
   dagFactoryName,
@@ -83,6 +84,18 @@ const key = (name: string): string => (IDENT.test(name) ? name : JSON.stringify(
  * layers can never disagree on the set.
  */
 const comment = (text: string): string => text.replace(LINE_TERMINATORS, " ");
+
+/**
+ * Every free-text interpolation into a PROMPT BODY goes through here: a
+ * literal `{{field}}` in authored text would be replaceAll-substituted with
+ * runtime input by the prompt renderer (`interpolatePrompt`) — silent
+ * injection the gauntlet can never see (it never renders prompts). The
+ * authoring schema already rejects `{{` in purpose / description / enum
+ * values — this is the defense-in-depth at the emission site (mirrors
+ * `comment()`), scrubbing with the SAME sequence (`TEMPLATE_OPENERS`,
+ * single-sourced in `identifiers.ts`) so the two layers can never disagree.
+ */
+const promptText = (text: string): string => text.replace(TEMPLATE_OPENERS, "{ {");
 
 const zodExpr = (t: FieldType): string =>
   match(t)
@@ -237,13 +250,14 @@ const llmPrompt = (
       f.type.kind === "enum"
         ? // JSON.stringify (matching zodExpr) — a schema-legal enum value that
           // contains a double quote must not garble the prompt's shape hint.
-          `"${f.name}": ${f.type.values.map((v) => JSON.stringify(v)).join(" | ")}`
+          // promptText — a `{{` inside a value must not open a placeholder.
+          `"${f.name}": ${f.type.values.map((v) => promptText(JSON.stringify(v))).join(" | ")}`
         : `"${f.name}": ${f.type.kind}`,
     )
     .join(", ");
   return {
     name: promptName,
-    body: `You are a node in the ${dag.name} pipeline. Task: ${node.purpose}
+    body: `You are a node in the ${dag.name} pipeline. Task: ${promptText(node.purpose)}
 
 Input:
 ${vars}

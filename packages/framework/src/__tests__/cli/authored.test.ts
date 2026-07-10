@@ -23,6 +23,7 @@ import {
   type Kebab,
 } from "../../cli/identifiers.js";
 import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
+import { nodeId } from "../../types/ids.js";
 import { CONFIDENCE_FIELD } from "../../cli/vocabulary.js";
 import { runNewFrom, writeAuthoredScaffold } from "../../cli/new.js";
 import type { DescribedDag } from "../../describe/index.js";
@@ -575,6 +576,51 @@ describe("AuthoredDag schema", () => {
     expect(scaffold.dagTs).not.toContain("\u2028");
     expect(scaffold.dagTs).not.toContain("\u2029");
     expect(scaffold.dagTs).toContain("x globalThis.__PWNED=1 y");
+  });
+
+  it("rejects '{{' in purpose/description/enum values (prompt-placeholder injection)", () => {
+    // A hostile purpose "... {{text}} ..." on an llm node whose derived input
+    // carries a `text` field would reach the generated prompt body, where the
+    // runtime's interpolatePrompt replaceAll-substitutes `{{text}}` with the
+    // RUNTIME input -- silent injection that passes the entire gauntlet (which
+    // never renders prompts). The schema must reject the opener everywhere.
+    const purpose = structuredClone(FIXTURES["llm-after-review"]!) as AuthoredDagInput;
+    (purpose.nodes[2] as { purpose: string }).purpose = "Summarize {{text}} nicely";
+    const p = parseAuthoredDag(purpose);
+    expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.problems.join("\n")).toContain("must not contain '{{'");
+
+    const desc = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (desc as { description: string }).description = "a {{id}} b";
+    expect(parseAuthoredDag(desc).ok).toBe(false);
+
+    const field = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (field.input.fields[0] as { description?: string }).description = "a {{id}} b";
+    expect(parseAuthoredDag(field).ok).toBe(false);
+
+    const enumValue = structuredClone(FIXTURES.router!) as AuthoredDagInput;
+    const bucket = outputOf(enumValue.nodes[0]!).fields[1]! as {
+      type: { kind: string; values: readonly string[] };
+    };
+    bucket.type = { kind: "enum", values: ["{{requestId}}", "large"] };
+    expect(parseAuthoredDag(enumValue).ok).toBe(false);
+  });
+
+  it("promptText() scrubs '{{' at the prompt emission site (defense-in-depth behind the schema)", () => {
+    // The schema (above) is the first line of defense, so a BRANDED dag can
+    // never carry `{{` -- bypass the brand deliberately (mirroring the
+    // comment() scrub test) to prove the second layer holds on its own: were
+    // a hostile purpose ever to reach codegen, the emitted prompt must not
+    // contain a substitutable `{{text}}` in the Task line.
+    const hostile = structuredClone(FIXTURES["llm-after-review"]!) as AuthoredDagInput;
+    (hostile.nodes[2] as { purpose: string }).purpose = "Summarize {{text}} nicely";
+    const scaffold = buildAuthoredScaffold(hostile as unknown as AuthoredDag);
+    const prompt = scaffold.prompts[0]!;
+    // The authored `{{` is neutralized in the Task line...
+    expect(prompt.body).toContain("Task: Summarize { {text}} nicely");
+    expect(prompt.body).not.toContain("Task: Summarize {{text}}");
+    // ...while the codegen-emitted (legitimate) placeholder survives untouched.
+    expect(prompt.body).toContain("text: {{text}}");
   });
 
   it("rejects a node id that camelCases to a JS reserved word", () => {
@@ -1183,7 +1229,7 @@ describe("authored codegen survives the gauntlet", () => {
     const advisory = {
       kind: "redundant-passthrough" as const,
       message: "identity-shaped transform",
-      nodeId: "summarize",
+      nodeId: nodeId("summarize"),
     };
     // The ok verdict now carries the DescribedDag of the generated code —
     // runNewFrom only forwards advisories, so a minimal stub suffices here.
@@ -1349,7 +1395,10 @@ describe("hostile free-text properties", () => {
     const hostileChar = fc.constantFrom('"', "'", "`", "\\", "$", "{", "}", "/", "*", "a", " ", "—");
     const singleLineHostile = fc
       .string({ unit: hostileChar, minLength: 1, maxLength: 30 })
-      .filter((s) => /^[^\r\n]+$/.test(s));
+      // `{{` is schema-rejected (the prompt-placeholder opener — see the
+      // dedicated injection tests below), so the survives-the-gauntlet
+      // property quantifies over the ACCEPTED language only.
+      .filter((s) => /^[^\r\n]+$/.test(s) && !s.includes("{{"));
     const root = join(tmpRoot, "prop-gauntlet");
     await mkdir(root, { recursive: true });
     await fc.assert(

@@ -39,7 +39,7 @@ import {
   setLlmRequestAttributes,
   setLlmResponseAttributes,
 } from "./spans.js";
-import { classifyLlmError } from "./llm-errors.js";
+import { classifyLlmError, validateTemperature } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
 
@@ -114,10 +114,27 @@ export class AnthropicLlmClient implements LlmClient {
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // Pre-flight: an out-of-range/non-finite temperature is a deterministic
+    // caller error — typed validation failure before anything reaches the wire.
+    const temperatureError = validateTemperature(req.temperature, req.nodeId);
+    if (temperatureError !== null) return temperatureError;
+
+    // Pre-flight: schema construction is deterministic — non-retriable on
+    // failure (mirrors OpenAI's sendStructured pre-flight).
+    let jsonSchema: ReturnType<typeof zodToJsonSchema>;
+    try {
+      jsonSchema = zodToJsonSchema(req.schema);
+    } catch (e) {
+      return err({
+        kind: "validation",
+        nodeId: req.nodeId,
+        message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+
     const t = createTimeoutSignal(this.requestTimeoutMs, req.signal);
 
     try {
-      const jsonSchema = zodToJsonSchema(req.schema);
       const toolDef = {
         name: "structured_output",
         description: "Return the structured output",
@@ -148,13 +165,20 @@ export class AnthropicLlmClient implements LlmClient {
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
 
+      // `stop_reason === "max_tokens"` means the output was TRUNCATED at the
+      // fixed ANTHROPIC_MAX_TOKENS cap — retrying the identical request hits
+      // the identical cap, so it is a deterministic (non-retriable) failure.
+      // Every other stop_reason on these arms is transient model behavior.
+      const truncated = response.stop_reason === "max_tokens";
+      const retriability = truncated ? ("non-retriable" as const) : ("retriable" as const);
+
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
-          message: "Anthropic response did not contain a tool_use block",
+          message: `Anthropic response did not contain a tool_use block (stop_reason: ${response.stop_reason ?? "unknown"})`,
         });
       }
 
@@ -162,9 +186,9 @@ export class AnthropicLlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
-          message: `Schema validation failed: ${parsed.error.message}`,
+          message: `Schema validation failed (stop_reason: ${response.stop_reason ?? "unknown"}): ${parsed.error.message}`,
         });
       }
 
@@ -194,8 +218,21 @@ export class AnthropicLlmClient implements LlmClient {
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
     const maxIterations = req.maxIterations ?? 10;
-    const system = appendSchemaInstruction(req.system, req.schema as z.ZodType<any>);
-    const toolSpecs = req.tools.map(toolToAnthropicSpec);
+    // Pre-flight: schema/tool-spec construction (zodToJsonSchema) is
+    // deterministic — a throw here must stay inside the Result boundary as a
+    // typed non-retriable validation error (mirrors sendStructured).
+    let system: string;
+    let toolSpecs: Anthropic.Tool[];
+    try {
+      system = appendSchemaInstruction(req.system, req.schema as z.ZodType<any>);
+      toolSpecs = req.tools.map(toolToAnthropicSpec);
+    } catch (e) {
+      return err({
+        kind: "validation",
+        nodeId: req.nodeId,
+        message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
     const toolChoice = toolChoiceToAnthropic(req.toolChoice);
     const messages: AnthropicMessage[] = [{ role: "user", content: req.user }];
 

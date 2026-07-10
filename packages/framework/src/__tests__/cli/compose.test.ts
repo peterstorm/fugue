@@ -16,9 +16,11 @@ import type { FrameworkError } from "../../types/errors.js";
 import { nodeId } from "../../types/ids.js";
 import {
   SYSTEM_PROMPT,
+  classifyAnswer,
   parseComposeArgs,
   parseIntent,
   runCompose,
+  type AnswerClass,
   type ComposeAnswer,
   type ComposeIo,
   type ComposeTurn,
@@ -157,7 +159,7 @@ describe("runCompose", () => {
     const { io, said } = scriptedIo(["yes"]);
 
     const outcome = await runCompose({ intent: mustIntent("morning briefing"), team: assist, root }, client, io);
-    if (!outcome.ok) throw new Error(`compose failed: ${outcome.reason} ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
 
     expect(outcome.rounds).toEqual({ questions: 0, repairs: 0, refinements: 0 });
     expect(outcome.result.files).toContain(join("dags", "assist", "compose-briefing", "dag.ts"));
@@ -191,7 +193,7 @@ describe("runCompose", () => {
     };
     const { io } = scriptedIo(["yes"]);
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
-    if (!outcome.ok) throw new Error(`compose failed: ${outcome.reason} ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     // BOTH the drafting turn and the (schema-)repair turn ran pinned to 0.
     expect(temperatures).toEqual([0, 0]);
   });
@@ -219,7 +221,7 @@ describe("runCompose", () => {
   // gauntlet-failed without entering the repair loop.
   const repairableError = (message: string) => ({
     kind: "fan-in-key-mismatch" as const,
-    nodeId: "join-all",
+    nodeId: nodeId("join-all"),
     message,
     missingKeys: ["fetch-weather"],
     extraKeys: [],
@@ -251,7 +253,7 @@ describe("runCompose", () => {
       io,
       failingOnce(),
     );
-    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     expect(outcome.rounds.repairs).toBe(1);
     // The repair prompt carried the structured violations, not prose.
     expect(requests[1]).toContain('"kind": "fan-in-key-mismatch"');
@@ -275,13 +277,13 @@ describe("runCompose", () => {
       alwaysFail,
     );
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("repair-exhausted");
-      expect(outcome.problems[0]).toContain("fan-in-key-mismatch");
-      // The failure arm carries the loop telemetry — repair-exhausted is
-      // precisely where the repair count is diagnostic.
-      expect(outcome.rounds).toEqual({ questions: 0, repairs: 1, refinements: 0 });
+    if (outcome.ok || outcome.reason !== "repair-exhausted") {
+      throw new Error(`expected repair-exhausted, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.problems[0]).toContain("fan-in-key-mismatch");
+    // The failure arm carries the loop telemetry — repair-exhausted is
+    // precisely where the repair count is diagnostic.
+    expect(outcome.rounds).toEqual({ questions: 0, repairs: 1, refinements: 0 });
   });
 
   it("environment-class verdict errors (import-failed) short-circuit to gauntlet-failed without burning repair rounds", async () => {
@@ -304,12 +306,14 @@ describe("runCompose", () => {
       importBroken,
     );
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("gauntlet-failed");
-      expect(outcome.problems[0]).toContain("import-failed");
-      expect(outcome.rounds.repairs).toBe(0);
-      if (outcome.reason === "gauntlet-failed") expect(outcome.draft).toEqual(validDag);
+    if (outcome.ok || outcome.reason !== "gauntlet-failed") {
+      throw new Error(`expected gauntlet-failed, got ${JSON.stringify(outcome)}`);
     }
+    // The verdict path is discriminated from the throw path by `cause`.
+    expect(outcome.cause).toBe("unrepairable-errors");
+    expect(outcome.problems[0]).toContain("import-failed");
+    expect(outcome.rounds.repairs).toBe(0);
+    expect(outcome.draft).toEqual(validDag);
     // Only the initial draft turn was paid for — no repair turn was sent.
     expect(requests.length).toBe(1);
   });
@@ -342,12 +346,50 @@ describe("runCompose", () => {
       describeBroken,
     );
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("gauntlet-failed");
-      expect(outcome.problems[0]).toContain("describe-failed");
-      expect(outcome.rounds.repairs).toBe(0);
-      if (outcome.reason === "gauntlet-failed") expect(outcome.draft).toEqual(validDag);
+    if (outcome.ok || outcome.reason !== "gauntlet-failed") {
+      throw new Error(`expected gauntlet-failed, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.cause).toBe("unrepairable-errors");
+    expect(outcome.problems[0]).toContain("describe-failed");
+    expect(outcome.rounds.repairs).toBe(0);
+    expect(outcome.draft).toEqual(validDag);
+    // Only the initial draft turn was paid for — no repair turn was sent.
+    expect(requests.length).toBe(1);
+  });
+
+  it("a MIXED repairable+unrepairable verdict short-circuits to gauntlet-failed, surfacing both", async () => {
+    const root = join(tmpRoot, "mixed-verdict-shortcircuit");
+    // One unrepairable error is enough to short-circuit — a co-occurring
+    // REPAIRABLE error must not pull the verdict into the paid repair loop
+    // (mutation pin: `unrepairable.length > 0` — not `=== errors.length`),
+    // and it must still be SURFACED in the terminal problems, never dropped.
+    const mixed = async (): Promise<GauntletResult> => ({
+      ok: false,
+      errors: [
+        { kind: "import-failed", message: "Cannot find package '@fuguejs/framework'" },
+        repairableError("co-occurring key mismatch"),
+      ],
+      advisories: [],
+    });
+    const { client, requests } = scriptedLlm([draft(validDag), draft(validDag)]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      io,
+      mixed,
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "gauntlet-failed") {
+      throw new Error(`expected gauntlet-failed, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.cause).toBe("unrepairable-errors");
+    expect(outcome.rounds.repairs).toBe(0);
+    // Unrepairable errors lead; the repairable one rides along after.
+    expect(outcome.problems[0]).toContain("import-failed");
+    expect(outcome.problems.join("\n")).toContain("fan-in-key-mismatch");
+    expect(outcome.draft).toEqual(validDag);
     // Only the initial draft turn was paid for — no repair turn was sent.
     expect(requests.length).toBe(1);
   });
@@ -367,7 +409,7 @@ describe("runCompose", () => {
     const { io } = scriptedIo(["yes"]);
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
-    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     expect(outcome.rounds.repairs).toBe(1);
     // The repair prompt carried the structured schema problems, not prose.
     expect(requests[1]).toContain("failed schema validation");
@@ -386,10 +428,10 @@ describe("runCompose", () => {
       io,
     );
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("llm-error");
-      expect(outcome.problems[0]).toContain("past the round limit");
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.problems[0]).toContain("past the round limit");
   });
 
   it("write-failed carries the accepted draft as typed data so the work is never lost", async () => {
@@ -451,7 +493,7 @@ describe("runCompose", () => {
       io,
       failFirstCheckPerDraft,
     );
-    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     expect(outcome.rounds.repairs).toBe(2);
     expect(outcome.rounds.refinements).toBe(1);
   });
@@ -463,11 +505,13 @@ describe("runCompose", () => {
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("aborted");
-      // Telemetry rides along on the failure arms too.
-      expect(outcome.rounds).toEqual({ questions: 0, repairs: 0, refinements: 0 });
+    if (outcome.ok || outcome.reason !== "aborted") {
+      throw new Error(`expected aborted, got ${JSON.stringify(outcome)}`);
     }
+    // An explicit abort answer is a USER decision, not a dead stream.
+    expect(outcome.cause).toBe("user");
+    // Telemetry rides along on the failure arms too.
+    expect(outcome.rounds).toEqual({ questions: 0, repairs: 0, refinements: 0 });
     expect(await Bun.file(join(root, "dags", "assist", "compose-briefing", "dag.ts")).exists()).toBe(false);
   });
 
@@ -481,7 +525,11 @@ describe("runCompose", () => {
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+    if (outcome.ok || outcome.reason !== "aborted") {
+      throw new Error(`expected aborted, got ${JSON.stringify(outcome)}`);
+    }
+    // A dead stream is distinguishable from a user decision.
+    expect(outcome.cause).toBe("input-closed");
     // The dead terminal stopped the loop: exactly the one question turn, no
     // draft/gauntlet round against nobody.
     expect(requests).toHaveLength(1);
@@ -499,7 +547,10 @@ describe("runCompose", () => {
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+    if (outcome.ok || outcome.reason !== "aborted") {
+      throw new Error(`expected aborted, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.cause).toBe("input-closed");
     // Exactly the one questions turn — the dead terminal must not trigger a
     // draft/gauntlet round against nobody.
     expect(requests).toHaveLength(1);
@@ -513,7 +564,7 @@ describe("runCompose", () => {
     const { io, said, asked } = scriptedIo(["", "   ", "yes"]);
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
-    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     // Exactly the one draft turn — blank input never became a
     // "Refinement request: " round.
     expect(requests).toHaveLength(1);
@@ -529,7 +580,10 @@ describe("runCompose", () => {
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+    if (outcome.ok || outcome.reason !== "aborted") {
+      throw new Error(`expected aborted, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.cause).toBe("input-closed");
     expect(await Bun.file(join(root, "dags", "assist", "compose-briefing", "dag.ts")).exists()).toBe(false);
   });
 
@@ -558,10 +612,10 @@ describe("runCompose", () => {
     const { io } = scriptedIo([]);
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, erroringAfter([]), io);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("llm-error");
-      expect(outcome.problems[0]).toContain("socket hang up");
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.problems[0]).toContain("socket hang up");
   });
 
   it("a transport error after a proven draft carries that draft as typed data", async () => {
@@ -653,10 +707,10 @@ describe("runCompose", () => {
       io,
     );
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("repair-exhausted");
-      expect(outcome.problems.join("\n")).toContain("ghost");
+    if (outcome.ok || outcome.reason !== "repair-exhausted") {
+      throw new Error(`expected repair-exhausted, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.problems.join("\n")).toContain("ghost");
   });
 
   it("a gauntlet-repair turn that returns questions fails closed as llm-error", async () => {
@@ -676,10 +730,10 @@ describe("runCompose", () => {
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io, alwaysFail);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("llm-error");
-      expect(outcome.problems.join("\n")).toContain("expected a corrected draft, got questions");
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.problems.join("\n")).toContain("expected a corrected draft, got questions");
   });
 
   it("a refinement turn that returns questions fails closed as llm-error, keeping the proven draft", async () => {
@@ -714,10 +768,10 @@ describe("runCompose", () => {
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
     expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.reason).toBe("llm-error");
-      expect(outcome.problems.join("\n")).toContain("got questions");
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
     }
+    expect(outcome.problems.join("\n")).toContain("got questions");
   });
 
   it("a THROWING scaffold write fails closed as write-failed with the accepted draft", async () => {
@@ -742,7 +796,7 @@ describe("runCompose", () => {
     const advisory = {
       kind: "redundant-passthrough" as const,
       message: "identity-shaped transform",
-      nodeId: "join-all",
+      nodeId: nodeId("join-all"),
     };
     // Real gauntlet (so the DescribedDag / Mermaid render is genuine) with the
     // advisory tacked onto the ok verdict — codegen'd drafts are advisory-clean
@@ -755,7 +809,7 @@ describe("runCompose", () => {
     const { io, said } = scriptedIo(["yes"]);
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io, okWithAdvisory);
-    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     // (a) the ok outcome's NewResult carries the accepted verdict's advisories
     // (the contract runNewFrom honors — compose must not drop them).
     expect(outcome.result.advisories).toEqual([advisory]);
@@ -774,7 +828,7 @@ describe("runCompose", () => {
     const { io } = scriptedIo(["yes"]);
 
     const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
-    if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
     expect(outcome.rounds.repairs).toBe(1);
     expect(outcome.result.team as string).toBe("assist");
     // The repair prompt carried the team rule, structured like schema problems.
@@ -794,7 +848,7 @@ describe("runCompose", () => {
       const { io } = scriptedIo([answer]);
 
       const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
-      if (!outcome.ok) throw new Error(`${outcome.reason}: ${outcome.problems.join("; ")}`);
+      if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
       expect(outcome.result.files).toContain(join("dags", "assist", "compose-briefing", "dag.ts"));
     });
   });
@@ -808,13 +862,46 @@ describe("runCompose", () => {
 
       const outcome = await runCompose({ intent: mustIntent("briefing"), team: assist, root }, client, io);
       expect(outcome.ok).toBe(false);
-      if (!outcome.ok) expect(outcome.reason).toBe("aborted");
+      if (outcome.ok || outcome.reason !== "aborted") {
+        throw new Error(`expected aborted, got ${JSON.stringify(outcome)}`);
+      }
+      expect(outcome.cause).toBe("user");
       // Exactly the one draft turn — the "no"-family never reaches the
       // refinement branch and its paid LLM call.
       expect(requests).toHaveLength(1);
       expect(existsSync(join(root, "dags"))).toBe(false);
     });
   });
+});
+
+// The accept-prompt classifier is pure and closed: yes/y/accept accept,
+// no/abort/quit/exit abort (both case-insensitive), and EVERYTHING else is —
+// by design — a refinement request carrying the text verbatim (an explicit
+// arm, not a fallthrough).
+describe("classifyAnswer", () => {
+  const rows: readonly (readonly [string, AnswerClass])[] = [
+    ["yes", { kind: "accept" }],
+    ["y", { kind: "accept" }],
+    ["accept", { kind: "accept" }],
+    ["YES", { kind: "accept" }],
+    ["Accept", { kind: "accept" }],
+    ["abort", { kind: "abort" }],
+    ["no", { kind: "abort" }],
+    ["quit", { kind: "abort" }],
+    ["exit", { kind: "abort" }],
+    ["EXIT", { kind: "abort" }],
+    ["rename it to v2", { kind: "refine", text: "rename it to v2" }],
+    // A near-miss of the accept vocabulary is NOT an accept — the regexes are
+    // anchored, so extra words make it a refinement.
+    ["yes please", { kind: "refine", text: "yes please" }],
+    // …and a near-miss of the abort vocabulary is NOT an abort.
+    ["nope", { kind: "refine", text: "nope" }],
+  ];
+  for (const [text, expected] of rows) {
+    it(`classifies ${JSON.stringify(text)} as ${expected.kind}`, () => {
+      expect(classifyAnswer(text)).toEqual(expected);
+    });
+  }
 });
 
 // The system prompt's kind/shape vocabulary is DERIVED from the identifiers.ts
@@ -1115,6 +1202,42 @@ describe("runGauntlet", () => {
     // every schema serialized cleanly (consumers never branch on presence).
     if (result.ok) expect(result.warnings).toEqual([]);
     // The whole .fugue-compose base is removed once the last draft dir is gone.
+    expect(existsSync(join(root, ".fugue-compose"))).toBe(false);
+  });
+
+  it("a failing lint threads BOTH its errors and its advisories onto the verdict, and staging is cleaned", async () => {
+    // Mutation pin for the lint-fail arm (gauntlet.ts): the verdict must carry
+    // `lint.errors` AND `lint.advisories` verbatim — a regression that drops
+    // either (e.g. `advisories: []`) silently loses the lint's hints exactly
+    // where the caller needs them. Exercised through the injectable lint seam
+    // (generated code is lint-clean by construction).
+    const root = join(tmpRoot, "gauntlet-lint-fails");
+    await mkdir(root, { recursive: true });
+    const lintError = {
+      kind: "fan-in-key-mismatch" as const,
+      nodeId: nodeId("join-all"),
+      message: "simulated key mismatch",
+      missingKeys: ["fetch-weather"],
+      extraKeys: ["ghost"],
+    };
+    const advisory = {
+      kind: "redundant-passthrough" as const,
+      message: "identity-shaped transform",
+      nodeId: nodeId("final"),
+    };
+    const failingLint = async (path: string) => ({
+      ok: false as const,
+      path,
+      errors: [lintError],
+      advisories: [advisory],
+    });
+    const result = await runGauntlet(validDag, root, { lint: failingLint });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toEqual([lintError]);
+      expect(result.advisories).toEqual([advisory]);
+    }
+    // The staging dir (and the empty base) are cleaned despite the failure.
     expect(existsSync(join(root, ".fugue-compose"))).toBe(false);
   });
 

@@ -93,6 +93,26 @@ export const SINGLE_LINE = new RegExp(`^[^${LINE_TERMINATOR_CLASS}]+$`);
  */
 export const LINE_TERMINATORS = new RegExp(`[${LINE_TERMINATOR_CLASS}]+`, "g");
 
+/**
+ * The `{{` prompt-placeholder opener. The runtime prompt renderer
+ * (`interpolatePrompt`, `nodes/llm.ts`) replaceAll-substitutes any literal
+ * `{{field}}` whose name matches a buildInput var — so authored free text
+ * that codegen splices into a generated prompt BODY (node purpose, enum
+ * values) must never contain `{{`, or a purpose like "… {{text}} …" would
+ * silently splice runtime input into the prompt while passing the entire
+ * gauntlet (which never renders prompts). Single-sourced here (mirroring
+ * `SINGLE_LINE` / `LINE_TERMINATORS`) so the schema rejection (`authored.ts`)
+ * and the emission-site scrub (`authored-codegen.ts` promptText()) can never
+ * disagree on the sequence.
+ */
+export const TEMPLATE_OPEN = /\{\{/;
+
+/**
+ * Global matcher for the emission-site scrub (safe to share despite the `g`
+ * flag: only used with `String.replace`, which does not depend on `lastIndex`).
+ */
+export const TEMPLATE_OPENERS = /\{\{/g;
+
 export const pascalCase = (kebab: string): string =>
   kebab
     .split("-")
@@ -224,10 +244,17 @@ export const SHAPE_HELPER_NAME = {
 } as const;
 
 /**
- * Import names emitted independent of node kinds/shape: `z` (zod), `ok`, the
- * llm extras `confidence` + `LlmNodeDef`, and the `DagRegistration` contract
- * type. Type-only imports still reserve their name — TypeScript rejects a
- * const that redeclares an imported binding, type-only or not.
+ * Fixed-SPELLING import names — names whose spelling never depends on node
+ * ids or the DAG name. EMISSION is gated per name (`buildImports`): `z` and
+ * the `DagRegistration` type are always emitted; `ok` only when a
+ * fetch/transform/source node needs a placeholder body; `confidence` and the
+ * `LlmNodeDef` type only when an llm node is present. RESERVATION is
+ * unconditional — all five names sit in `RESERVED_IDENTIFIERS` regardless of
+ * kinds/shape (the same conservatism as `generatedIdentifiersFor`: a
+ * refinement that adds the first llm node must not introduce a collision the
+ * schema already accepted). Type-only imports still reserve their name —
+ * TypeScript rejects a const that redeclares an imported binding, type-only
+ * or not.
  */
 export const FIXED_IMPORT_NAME = {
   zod: "z",

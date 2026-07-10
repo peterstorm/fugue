@@ -13,6 +13,7 @@
 import type { DescribedDag, DescribedEdge } from "../describe/index.js";
 import { runDescribe } from "./describe.js";
 import { LINE_TERMINATORS } from "./identifiers.js";
+import { DAG_INPUT } from "../types/ids.js";
 import { assertNever, type LintError } from "./types.js";
 
 export type VisualizeResult =
@@ -31,7 +32,8 @@ export type VisualizeResult =
     }
   | { readonly ok: false; readonly path: string; readonly errors: readonly LintError[] };
 
-const INPUT_ID = "$input";
+// The reserved virtual edge source carrying the DAG request — imported from
+// `types/ids.ts` (the sentinel's single home) rather than re-declared here.
 
 // Mermaid node ids must avoid `:`/`$` and other specials — map ids to safe
 // tokens. Two properties the encoding must hold:
@@ -47,7 +49,7 @@ const INPUT_ID = "$input";
 const escapeIdChar = (c: string): string =>
   c === "_" ? "__" : c === ":" ? "_c" : c === "-" ? "_d" : `_x${c.charCodeAt(0).toString(16)}_`;
 const safeId = (id: string): string =>
-  id === INPUT_ID ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
+  id === DAG_INPUT ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 
 // Labels sit inside Mermaid's double-quoted `["…"]` / `-->|"…"|` syntax: a `"`
 // would close the quote, and a JS line terminator (`LINE_TERMINATORS` — the
@@ -88,7 +90,7 @@ export const describedToMermaid = (dag: DescribedDag): string => {
   lines.push("---", `title: "${escapeLabel(`${dag.id}${caps}`)}"`, "---");
   lines.push("flowchart TD");
 
-  if (dag.edges.some((e) => e.from === INPUT_ID)) {
+  if (dag.edges.some((e) => e.from === DAG_INPUT)) {
     lines.push(`    dag_input(["$input (request)"])`);
   }
 

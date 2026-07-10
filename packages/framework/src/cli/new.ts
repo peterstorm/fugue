@@ -48,7 +48,7 @@ import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "./identifiers.js";
 import { resolveRoot } from "./paths.js";
 import { freshRegistryEntry, serializeRegistry, type RegistryEntry } from "./prompts.js";
-import type { LintAdvisory, NewResult } from "./types.js";
+import { formatLintError, type LintAdvisory, type NewResult } from "./types.js";
 
 export interface NewOptions {
   // BRANDED (`Kebab`, `parseNewArgs` is the producer) — mirrors `name`'s
@@ -506,7 +506,10 @@ export const runNewFrom = async (
     };
   }
   if (!verdict.ok) {
-    return { ok: false, problems: verdict.errors.map((e) => `${e.kind}: ${e.message}`) };
+    // formatLintError keeps the arms' diagnostic payload (import-failed stack,
+    // dag-definition-error/describe-failed detail) — the terminal envelope is
+    // the only surviving record, so it must not flatten data away.
+    return { ok: false, problems: verdict.errors.map(formatLintError) };
   }
   // Same rule for the scaffold write (mirrors runCompose's write-failed arm):
   // a throwing write is an environment failure, not a framework bug — fold it

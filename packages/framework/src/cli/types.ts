@@ -4,6 +4,7 @@
 // proceed or surface the structured `errors`/`problems` payload.
 
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type {
   DescribedDag,
   DescribedNode,
@@ -101,7 +102,10 @@ export type LintAdvisory =
        */
       readonly kind: "redundant-passthrough";
       readonly message: string;
-      readonly nodeId: string;
+      // Branded — the producer (`analyzeDag`) reads it off a validated
+      // `DagDef` node, so the wire type carries the proof instead of widening
+      // back to a bare string. Serializes to identical JSON.
+      readonly nodeId: NodeId;
     };
 
 /**
@@ -149,7 +153,9 @@ export type LintError =
        * it at lint time, the single most likely DAG wiring mistake.
        */
       readonly kind: "fan-in-key-mismatch";
-      readonly nodeId: string;
+      // Branded — same rationale as `LintAdvisory.redundant-passthrough`:
+      // the producer holds a validated `DagDef` node id. Identical JSON.
+      readonly nodeId: NodeId;
       readonly message: string;
       /** Incoming source ids with no matching schema key. */
       readonly missingKeys: readonly string[];
@@ -167,6 +173,24 @@ export type LintError =
       readonly kind: "analyzer-failed";
       readonly message: string;
     };
+
+/**
+ * Flatten a `LintError` to a single problem string for TERMINAL outcomes
+ * (`runCompose`'s gauntlet-failed / repair-exhausted arms, `runNewFrom`'s
+ * problems envelope), keeping the diagnostic payload the arms carry: the
+ * `import-failed` stack and the `dag-definition-error` / `describe-failed`
+ * `detail` would otherwise be dropped exactly where they matter most — the
+ * repair-round feedback path already ships the full objects to the LLM, so
+ * only the terminal flattening loses data without this.
+ */
+export const formatLintError = (e: LintError): string => {
+  const head = `${e.kind}: ${e.message}`;
+  if ("stack" in e && e.stack !== undefined) return `${head}\n${e.stack}`;
+  // JSON (not a prose re-format): `detail` is a FrameworkError whose arms
+  // carry structured fields (nodeId, stack, …) — keep all of them.
+  if ("detail" in e) return `${head}\ndetail: ${JSON.stringify(e.detail)}`;
+  return head;
+};
 
 /**
  * One entry in the built-in capability catalogue emitted by `fugue

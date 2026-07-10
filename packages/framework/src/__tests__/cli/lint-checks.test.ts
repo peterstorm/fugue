@@ -54,7 +54,7 @@ describe("B1 — fan-in-key-mismatch", () => {
     const e = errors[0]!;
     expect(e.kind).toBe("fan-in-key-mismatch");
     if (e.kind === "fan-in-key-mismatch") {
-      expect(e.nodeId).toBe("join");
+      expect(e.nodeId as string).toBe("join");
       expect(e.missingKeys).toEqual(["fetch-b"]); // incoming with no key
       expect(e.extraKeys).toEqual(["fetch-bee"]); // key with no incoming
     }
@@ -255,7 +255,7 @@ describe("B2 — redundant-passthrough", () => {
     expect(advisories.length).toBe(1);
     const a = advisories[0]!;
     if (a.kind === "redundant-passthrough") {
-      expect(a.nodeId).toBe("read-request");
+      expect(a.nodeId as string).toBe("read-request");
       expect(a.message).toContain("DAG_INPUT");
     }
   });

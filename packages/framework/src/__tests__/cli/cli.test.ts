@@ -84,7 +84,7 @@ describe("runLint", () => {
       const e = result.errors.find((x) => x.kind === "fan-in-key-mismatch");
       expect(e).toBeDefined();
       if (e && e.kind === "fan-in-key-mismatch") {
-        expect(e.nodeId).toBe("join");
+        expect(e.nodeId as string).toBe("join");
         expect(e.missingKeys).toContain("right");
         expect(e.extraKeys).toContain("WRONG");
       }
@@ -122,7 +122,7 @@ describe("runLint", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const carriers = result.advisories.flatMap((a) =>
-        a.kind === "redundant-passthrough" ? [a.nodeId] : [],
+        a.kind === "redundant-passthrough" ? [a.nodeId as string] : [],
       );
       expect(carriers).toContain("read-request");
     }
