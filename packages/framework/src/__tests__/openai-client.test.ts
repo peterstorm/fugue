@@ -284,6 +284,54 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
+  it("response.status failed → node-crash carrying error.code/message, retriability from the code (sendStructured)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 3, output_tokens: 0 },
+        status: "failed",
+        error: { code: "invalid_prompt", message: "prompt was rejected" },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "failed-struct" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: failed");
+        expect(result.error.message).toContain("error.code: invalid_prompt");
+        expect(result.error.message).toContain("prompt was rejected");
+      }
+    }
+  });
+
+  it("response.status failed with rate_limit_exceeded → transient (sendStructured)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: {},
+        status: "failed",
+        error: { code: "rate_limit_exceeded", message: "slow down" },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "failed-rl" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+    }
+  });
+
   it("response.status incomplete (truncation) → NON-retriable on the JSON-parse and schema-failure arms", async () => {
     // Truncated output that is no longer valid JSON.
     handler = async () =>
@@ -652,6 +700,58 @@ describe("OpenAILlmClient.sendWithTools", () => {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toMatch(/400/);
       }
+    }
+  });
+
+  it("response.status failed → node-crash carrying error.code/message + usage (sendWithTools)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 2 },
+        status: "failed",
+        error: { code: "invalid_prompt", message: "prompt was rejected" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "failed-tools" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        // invalid_prompt is deterministic — retrying repeats it.
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: failed");
+        expect(result.error.message).toContain("error.code: invalid_prompt");
+        expect(result.error.message).toContain("prompt was rejected");
+        expect(result.error.usage).toEqual({ tokensIn: 7, tokensOut: 2 });
+      }
+    }
+  });
+
+  it("response.status failed with a server_error code → RETRIABLE node-crash (sendWithTools)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+        status: "failed",
+        error: { code: "server_error", message: "internal failure mid-generation" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "failed-5xx" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("retriable");
+      expect(result.error.message).toContain("error.code: server_error");
     }
   });
 

@@ -217,6 +217,30 @@ describe("AnthropicLlmClient.sendStructured", () => {
     }
   });
 
+  it("stop_reason refusal → NON-retriable node-crash (sendStructured)", async () => {
+    const refused = {
+      ...makeTextResponse(""),
+      content: [],
+      stop_reason: "refusal",
+    } as unknown as Anthropic.Message;
+    const client = new AnthropicLlmClient(makeStub(async () => refused));
+    const result = await client.sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "claude-test",
+      schema: Schema,
+      nodeId: "refuse-struct" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("stop_reason: refusal");
+      }
+    }
+  });
+
   it("out-of-range/non-finite temperature → typed validation error before any request is sent", async () => {
     let calls = 0;
     const client = new AnthropicLlmClient(
@@ -618,6 +642,31 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("stop_reason: max_tokens");
         // The truncated turn still burned tokens — they must be attributed.
+        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+      }
+    }
+  });
+
+  it("stop_reason refusal → NON-retriable node-crash naming the stop_reason, carrying usage", async () => {
+    // A refusal has no tool_use and no text; without an explicit arm it falls
+    // through to the loop's context-free "no text content to parse" retriable
+    // arm. Retrying a deterministic refusal is pure waste.
+    const refused = {
+      ...makeTextResponse(""),
+      content: [],
+      stop_reason: "refusal",
+    } as unknown as Anthropic.Message;
+    const client = new AnthropicLlmClient(makeStub(async () => refused));
+    const result = await client.sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "claude-test", tools: [], schema: Schema, nodeId: "refuse-tools" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("stop_reason: refusal");
         expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
       }
     }

@@ -168,9 +168,12 @@ export class AnthropicLlmClient implements LlmClient {
       // `stop_reason === "max_tokens"` means the output was TRUNCATED at the
       // fixed ANTHROPIC_MAX_TOKENS cap — retrying the identical request hits
       // the identical cap, so it is a deterministic (non-retriable) failure.
-      // Every other stop_reason on these arms is transient model behavior.
+      // `stop_reason === "refusal"` is likewise deterministic — the model
+      // declined and would decline the identical request again. Every other
+      // stop_reason on these arms is transient model behavior.
       const truncated = response.stop_reason === "max_tokens";
-      const retriability = truncated ? ("non-retriable" as const) : ("retriable" as const);
+      const nonRetriable = truncated || response.stop_reason === "refusal";
+      const retriability = nonRetriable ? ("non-retriable" as const) : ("retriable" as const);
 
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
@@ -280,6 +283,24 @@ export class AnthropicLlmClient implements LlmClient {
             retriability: "non-retriable",
             nodeId: req.nodeId,
             message: `Anthropic response truncated at the ${ANTHROPIC_MAX_TOKENS}-token cap (stop_reason: max_tokens)`,
+            usage: {
+              tokensIn: response.usage.input_tokens,
+              tokensOut: response.usage.output_tokens,
+            },
+          });
+        }
+
+        // `stop_reason === "refusal"` — the model declined to generate (e.g.
+        // safety). There is no tool_use or text block, so without this arm the
+        // turn falls through to the loop's context-free "no text content to
+        // parse" retriable arm, losing the stop_reason and blindly retrying a
+        // deterministic refusal. Non-retriable; the turn's usage rides along.
+        if (response.stop_reason === "refusal") {
+          return err({
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: req.nodeId,
+            message: `Anthropic declined to generate a response (stop_reason: refusal)`,
             usage: {
               tokensIn: response.usage.input_tokens,
               tokensOut: response.usage.output_tokens,

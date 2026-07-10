@@ -113,13 +113,27 @@ describe("httpFailureToError", () => {
     }
   });
 
-  test("property: over 400–599, exactly 429 is transient, other 4xx non-retriable, 5xx retriable", () => {
+  test("408/409 → transient (request timeout / conflict are transient by RFC)", () => {
+    for (const status of [408, 409]) {
+      const result = httpFailureToError(status, "retry me", nodeId);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("transient");
+        if (result.error.kind === "transient") {
+          expect(result.error.message).toBe(`HTTP ${status}: retry me`);
+        }
+      }
+    }
+  });
+
+  test("property: over 400–599, 408/409/429 are transient, other 4xx non-retriable, 5xx retriable", () => {
+    const transientStatuses = new Set([408, 409, 429]);
     fc.assert(
       fc.property(fc.integer({ min: 400, max: 599 }), (status) => {
         const result = httpFailureToError(status, "body", nodeId);
         if (result.ok) return false;
         const e = result.error;
-        if (status === 429) return e.kind === "transient";
+        if (transientStatuses.has(status)) return e.kind === "transient";
         if (status < 500) return e.kind === "node-crash" && e.retriability === "non-retriable";
         return e.kind === "node-crash" && e.retriability === "retriable";
       }),
@@ -201,6 +215,17 @@ describe("classifyLlmError", () => {
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.retriability).toBe("retriable");
+    }
+  });
+
+  test("duck-typed 408/409 → transient (matches the raw-HTTP policy)", () => {
+    for (const status of [408, 409]) {
+      const e = Object.assign(new Error(`transient ${status}`), { status });
+      const result = classifyLlmError(e, nodeId);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("transient");
+      }
     }
   });
 

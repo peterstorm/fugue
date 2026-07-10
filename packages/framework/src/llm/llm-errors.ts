@@ -19,7 +19,8 @@ export const truncateErrorBody = (body: string, maxLen = 200): string =>
 
 /**
  * The ONE HTTP failure policy, shared by every client's non-OK response arm:
- * - 429 → `transient` (rate limit — retriable by kind);
+ * - 429, 408, 409 → `transient` (rate limit / request timeout / conflict —
+ *   transient by RFC and retried by both providers' own SDKs);
  * - other 4xx → NON-retriable `node-crash` (a deterministic client error —
  *   retrying burns the budget without changing the outcome);
  * - everything else (5xx, and malformed-success bodies reported with their
@@ -28,13 +29,15 @@ export const truncateErrorBody = (body: string, maxLen = 200): string =>
  * `HTTP <status>` plus the (truncated) body so the failure is debuggable
  * from the error alone.
  */
+const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
+
 export const httpFailureToError = (
   status: number,
   bodyText: string,
   nodeId: NodeId,
 ): Result<never, FrameworkError> => {
   const message = `HTTP ${status}: ${truncateErrorBody(bodyText)}`;
-  if (status === 429) {
+  if (TRANSIENT_HTTP_STATUSES.has(status)) {
     return err({ kind: "transient", nodeId, message });
   }
   if (status >= 400 && status < 500) {
@@ -133,18 +136,27 @@ export const classifyLlmError = (
     });
   }
   // Duck-typed HTTP status (SDK errors carry `.status`, e.g. Anthropic's
-  // AuthenticationError/BadRequestError): a non-429 4xx is a deterministic
-  // client error — non-retriable, the same policy `httpFailureToError`
-  // applies on the raw-HTTP path (429 was handled above via `isRateLimit`).
+  // AuthenticationError/BadRequestError): 408/409 are transient (matching the
+  // raw-HTTP policy; 429 was handled above via `isRateLimit`), and any other
+  // 4xx is a deterministic client error — non-retriable.
   const status = (e as { status?: unknown })?.status;
-  if (typeof status === "number" && status >= 400 && status < 500) {
-    return err({
-      kind: "node-crash",
-      retriability: "non-retriable",
-      nodeId,
-      message: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
-    });
+  if (typeof status === "number") {
+    if (status === 408 || status === 409) {
+      return err({
+        kind: "transient",
+        nodeId,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+    if (status >= 400 && status < 500) {
+      return err({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        nodeId,
+        message: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined,
+      });
+    }
   }
   return err({
     kind: "node-crash",

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -50,6 +51,32 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
   const json = zodToJsonSchema(schema);
   return withAdditionalPropertiesFalse(json);
 };
+
+/**
+ * Classify a `response.status === "failed"` Responses body. The API populates
+ * `error.code` / `error.message` on this arm; without an explicit check it
+ * would sail past the `incomplete` short-circuit into the generic no-text /
+ * malformed-success arm as a retriable node-crash, losing the provider's
+ * stated reason and retrying a deterministic failure. Retriability is derived
+ * from the code: `rate_limit_exceeded` → transient, `server_error` → retriable
+ * node-crash, any other code (invalid_prompt, content policy, …) →
+ * non-retriable. The turn's usage rides along on the node-crash arms so the
+ * tool loop still attributes the burned tokens.
+ */
+function responseFailedError(
+  response: ResponsesApiResponse,
+  nodeId: NodeId,
+  usage?: { readonly tokensIn: number; readonly tokensOut: number },
+): Result<never, FrameworkError> {
+  const code = response.error?.code;
+  const detail = response.error?.message ?? truncateErrorBody(JSON.stringify(response));
+  const message = `Responses API failed (response.status: failed${code ? `, error.code: ${code}` : ""}): ${detail}`;
+  if (code === "rate_limit_exceeded") {
+    return err({ kind: "transient", nodeId, message });
+  }
+  const retriability = code === "server_error" ? ("retriable" as const) : ("non-retriable" as const);
+  return err({ kind: "node-crash", retriability, nodeId, message, ...(usage ? { usage } : {}) });
+}
 
 const toolToOpenAiSpec = (tool: ToolDef<any, any>): Record<string, unknown> => ({
   type: "function",
@@ -265,6 +292,17 @@ export class OpenAILlmClient implements LlmClient {
       const response = httpResult.response;
       const output = response.output ?? [];
 
+      // `response.status === "failed"` carries the API's own error.code /
+      // error.message — classify it explicitly (retriability derived from the
+      // code) rather than letting it fall through to the generic no-text arm
+      // as a blindly-retriable crash that discards the stated reason.
+      if (response.status === "failed") {
+        return responseFailedError(response, req.nodeId, {
+          tokensIn: response.usage?.input_tokens ?? 0,
+          tokensOut: response.usage?.output_tokens ?? 0,
+        });
+      }
+
       // `response.status === "incomplete"` means the output was TRUNCATED
       // (token cap) — retrying the identical request hits the identical cap,
       // so it is a deterministic (non-retriable) failure on every arm below
@@ -415,6 +453,14 @@ export class OpenAILlmClient implements LlmClient {
         const output: readonly ResponsesOutputItem[] = response.output ?? [];
         const tokensIn = response.usage?.input_tokens ?? 0;
         const tokensOut = response.usage?.output_tokens ?? 0;
+
+        // `response.status === "failed"` carries the API's own error.code /
+        // error.message — classify it explicitly (retriability from the code)
+        // instead of letting the empty output fall through to the loop's
+        // context-free "no text content to parse" retriable arm.
+        if (response.status === "failed") {
+          return responseFailedError(response, req.nodeId, { tokensIn, tokensOut });
+        }
 
         // `response.status === "incomplete"` means this turn's output was
         // TRUNCATED (token cap) — the tool calls / final answer are

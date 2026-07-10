@@ -75,12 +75,22 @@ export interface ResponsesUsage {
   readonly output_tokens?: number;
 }
 
+/** The `error` object a `status: "failed"` Responses body carries. */
+export interface ResponsesApiError {
+  readonly code?: string;
+  readonly message?: string;
+}
+
 export interface ResponsesApiResponse {
   readonly id?: string;
   readonly model?: string;
   readonly status?: string;
   readonly output?: readonly ResponsesOutputItem[];
   readonly usage?: ResponsesUsage;
+  /** Populated when `status === "failed"` — the API's stated failure reason. */
+  readonly error?: ResponsesApiError | null;
+  /** Populated when `status === "incomplete"` — e.g. `{ reason: "max_output_tokens" }`. */
+  readonly incomplete_details?: { readonly reason?: string } | null;
 }
 
 // ---------------------------------------------------------------------------
