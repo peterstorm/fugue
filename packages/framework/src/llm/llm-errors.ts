@@ -1,8 +1,12 @@
-// Shared LLM client error classification.
+// Shared LLM client error policy.
 //
 // Both AnthropicLlmClient and OpenAILlmClient need identical logic for
-// distinguishing abort, rate-limit, timeout, and generic crash errors.
-// Centralised here so the clients only carry provider-specific code.
+// distinguishing abort, rate-limit, timeout, and generic crash errors
+// (`classifyLlmError`). This module also owns the shared HTTP failure policy
+// (`httpFailureToError` / `TRANSIENT_HTTP_STATUSES`), pre-flight temperature
+// validation (`validateTemperature`), and error-body truncation
+// (`truncateErrorBody`). Centralised here so the clients only carry
+// provider-specific code.
 
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -17,8 +21,14 @@ export const isAbort = (e: unknown): boolean =>
 export const truncateErrorBody = (body: string, maxLen = 200): string =>
   body.length > maxLen ? body.slice(0, maxLen) + "…[truncated]" : body;
 
+/** 429 / 408 / 409 — transient by RFC and retried by both providers' own SDKs. */
+const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
+
 /**
- * The ONE HTTP failure policy, shared by every client's non-OK response arm:
+ * The ONE HTTP failure policy for non-OK responses on the raw-HTTP path
+ * (today: the OpenAI client's `postResponses` arms; the Anthropic client
+ * rides its SDK's thrown errors through `classifyLlmError`, whose duck-typed
+ * status arm applies the same classification):
  * - 429, 408, 409 → `transient` (rate limit / request timeout / conflict —
  *   transient by RFC and retried by both providers' own SDKs);
  * - other 4xx → NON-retriable `node-crash` (a deterministic client error —
@@ -27,10 +37,9 @@ export const truncateErrorBody = (body: string, maxLen = 200): string =>
  *   2xx status) → retriable `node-crash` (server-side, MAY be worth a retry).
  * Pure — `status`/`bodyText` in, typed error out; the message always carries
  * `HTTP <status>` plus the (truncated) body so the failure is debuggable
- * from the error alone.
+ * from the error alone, and the transient arm carries the typed `httpStatus`
+ * so consumers can branch on it without string-matching the message.
  */
-const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
-
 export const httpFailureToError = (
   status: number,
   bodyText: string,
@@ -38,7 +47,7 @@ export const httpFailureToError = (
 ): Result<never, FrameworkError> => {
   const message = `HTTP ${status}: ${truncateErrorBody(bodyText)}`;
   if (TRANSIENT_HTTP_STATUSES.has(status)) {
-    return err({ kind: "transient", nodeId, message });
+    return err({ kind: "transient", nodeId, message, httpStatus: status });
   }
   if (status >= 400 && status < 500) {
     return err({ kind: "node-crash", retriability: "non-retriable", nodeId, message });
@@ -129,23 +138,28 @@ export const classifyLlmError = (
     return err({ kind: "aborted", reason: "signal" });
   }
   if (isRateLimit(e)) {
+    // `isRateLimit` only fires on `.status === 429` — carry it as the typed
+    // `httpStatus` so consumers can branch without string-matching.
     return err({
       kind: "transient",
       nodeId,
       message: e instanceof Error ? e.message : String(e),
+      httpStatus: 429,
     });
   }
   // Duck-typed HTTP status (SDK errors carry `.status`, e.g. Anthropic's
-  // AuthenticationError/BadRequestError): 408/409 are transient (matching the
-  // raw-HTTP policy; 429 was handled above via `isRateLimit`), and any other
-  // 4xx is a deterministic client error — non-retriable.
+  // AuthenticationError/BadRequestError): the shared TRANSIENT_HTTP_STATUSES
+  // policy applies (429 was already intercepted above via `isRateLimit` and
+  // classifies identically if it ever reached here), and any other 4xx is a
+  // deterministic client error — non-retriable.
   const status = (e as { status?: unknown })?.status;
   if (typeof status === "number") {
-    if (status === 408 || status === 409) {
+    if (TRANSIENT_HTTP_STATUSES.has(status)) {
       return err({
         kind: "transient",
         nodeId,
         message: e instanceof Error ? e.message : String(e),
+        httpStatus: status,
       });
     }
     if (status >= 400 && status < 500) {

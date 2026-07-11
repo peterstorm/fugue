@@ -926,6 +926,50 @@ describe("runCompose", () => {
     }
   });
 
+  it("maxQuestionRounds: 0 is a legal boundary budget — the first turn already forbids questions", async () => {
+    // Zero must pass requireRoundBudget (non-negative integer) and then bite
+    // immediately: the FIRST turn carries the no-more-questions instruction,
+    // and a model that asks anyway fails closed without burning a question
+    // round or an io.ask.
+    const root = join(tmpRoot, "zero-questions");
+    const { client, requests } = scriptedLlm([{ action: "questions", questions: ["Which sources?"] }]);
+    const { io, asked } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root, maxQuestionRounds: 0 },
+      client,
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.problems).toEqual(["model kept asking questions past the round limit"]);
+    expect(outcome.rounds.questions).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain("No more questions — produce the draft now.");
+    expect(asked).toHaveLength(0);
+  });
+
+  it("maxRepairRounds: 0 is a legal boundary budget — the first invalid draft fails closed without a paid repair turn", async () => {
+    const root = join(tmpRoot, "zero-repairs");
+    const { client, requests } = scriptedLlm([draft({ nope: true })]);
+    const { io } = scriptedIo([]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root, maxRepairRounds: 0 },
+      client,
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "repair-exhausted") {
+      throw new Error(`expected repair-exhausted, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.rounds.repairs).toBe(0);
+    // Exactly the one drafting turn — a zero budget buys zero repair calls.
+    expect(requests).toHaveLength(1);
+  });
+
   const abortVariants = ["no", "quit", "exit", "No", "EXIT"] as const;
   abortVariants.forEach((answer, i) => {
     it(`abort variant '${answer}' aborts without burning an LLM round`, async () => {

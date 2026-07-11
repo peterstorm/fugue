@@ -1,7 +1,9 @@
 // Scaffold templates for `fugue new` (C3). Pure string builders — no I/O.
 //
 // Every template is a parameterized copy of a lint-tested golden example
-// (`docs/examples/01-04`, `08`, `09`, `10`), so the generated `dag.ts` is compliant
+// (`packages/framework/docs/examples/`: `01-linear.ts`–`04-router.ts`,
+// `08-multi-source-join.ts`, `09-dag-factory-seams.ts`,
+// `10-human-review.ts`), so the generated `dag.ts` is compliant
 // by construction: current model ids, `frameworkError.*` (never raw `err`
 // literals), correct fan-in schemas keyed by source-node id, bucketed
 // confidence via the spread-override pattern, and `$input` edges for the

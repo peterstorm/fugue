@@ -307,15 +307,48 @@ describe("OpenAILlmClient.sendStructured", () => {
         expect(result.error.message).toContain("response.status: failed");
         expect(result.error.message).toContain("error.code: invalid_prompt");
         expect(result.error.message).toContain("prompt was rejected");
+        // The failed body reported usage — it rides the error so the burned
+        // tokens stay attributable (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
       }
     }
   });
 
-  it("response.status failed with rate_limit_exceeded → transient (sendStructured)", async () => {
+  it("response.status failed with error:null → NON-retriable node-crash with the body-snapshot fallback, no fabricated usage", async () => {
+    // The API contract says `error` is populated on the failed arm — when it
+    // is null anyway, the truncated body snapshot is the only diagnostic, and
+    // an unknown code stays NON-retriable (fail closed, don't burn retries).
+    handler = async () =>
+      jsonResponse({ output: [], status: "failed", error: null });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "failed-null" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: failed");
+        // No error.code — the code segment must be absent entirely…
+        expect(result.error.message).not.toContain("error.code");
+        // …and the (truncated) body snapshot is the fallback detail.
+        expect(result.error.message).toContain('"status":"failed"');
+        // The body reported no usage — none may be fabricated ({0,0} would
+        // make "no attributable tokens" representable two ways).
+        expect(result.error.usage).toBeUndefined();
+      }
+    }
+  });
+
+  it("response.status failed with rate_limit_exceeded → transient carrying the failed turn's usage (sendStructured)", async () => {
     handler = async () =>
       jsonResponse({
         output: [],
-        usage: {},
+        usage: { input_tokens: 5, output_tokens: 1 },
         status: "failed",
         error: { code: "rate_limit_exceeded", message: "slow down" },
       });
@@ -329,6 +362,11 @@ describe("OpenAILlmClient.sendStructured", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        // A rate-limited turn still burned tokens — the transient arm must
+        // carry them so budget settlement sees them (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 5, tokensOut: 1 });
+      }
     }
   });
 
@@ -749,9 +787,68 @@ describe("OpenAILlmClient.sendWithTools", () => {
       RUNTIME,
     );
     expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.retriability).toBe("retriable");
-      expect(result.error.message).toContain("error.code: server_error");
+    if (!result.ok) {
+      // Hard assertion (not a soft guard) — a reclassified arm must FAIL
+      // here, never pass vacuously by skipping the narrowed block.
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("error.code: server_error");
+      }
+    }
+  });
+
+  it("response.status failed with rate_limit_exceeded → transient carrying the failed turn's usage (sendWithTools)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 4, output_tokens: 1 },
+        status: "failed",
+        error: { code: "rate_limit_exceeded", message: "slow down" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "failed-rl-tools" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.message).toContain("error.code: rate_limit_exceeded");
+        // The rate-limited turn's tokens must not escape budget accounting —
+        // the transient arm carries them through the loop (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 4, tokensOut: 1 });
+      }
+    }
+  });
+
+  it("residual terminal status with empty output → node-crash naming the status + body snapshot (sendWithTools)", async () => {
+    // e.g. status "cancelled": not failed/incomplete (both short-circuited),
+    // no tool calls, no text. Without the residual-status arm this reached
+    // the loop's context-free "no text content to parse" error, losing the
+    // status. Retriability is unchanged — retriable, like the arm it
+    // replaces; only the diagnosability improves.
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 3, output_tokens: 0 },
+        status: "cancelled",
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "cancelled-tools" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("response.status: cancelled");
+        // The truncated body snapshot rides along for diagnosis…
+        expect(result.error.message).toContain('"status":"cancelled"');
+        // …and the turn's usage stays attributed (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+      }
     }
   });
 
@@ -764,6 +861,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         output: [makeMessageOutput('{"greeting": "cut off')],
         usage: { input_tokens: 9, output_tokens: 4 },
         status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
       });
     const result = await makeClient().sendWithTools<SchemaType>(
       {
@@ -782,6 +880,9 @@ describe("OpenAILlmClient.sendWithTools", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("response.status: incomplete");
+        // The API's stated truncation cause is surfaced, distinguishing a
+        // token cap from a content filter without a body dump.
+        expect(result.error.message).toContain("reason: max_output_tokens");
         // The truncated turn still burned tokens — they must be attributed.
         expect(result.error.usage).toEqual({ tokensIn: 9, tokensOut: 4 });
       }

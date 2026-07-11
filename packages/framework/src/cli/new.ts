@@ -463,9 +463,12 @@ ${dag.nodes.some((n) => n.kind === "llm") ? `bun node_modules/@fuguejs/framework
  * re-reads — nothing consumes it automatically today). The description is
  * proven through the validation gauntlet (codegen → defineDag import → lint →
  * describe, in a staging dir) BEFORE anything is written — same guarantee `fugue
- * compose` gives every draft; the gauntlet's non-fatal advisories ride along
- * on the success result. Same failure envelope as `runNew` — author errors
- * return `{ ok: false, problems }`, framework bugs propagate.
+ * compose` gives every draft; the gauntlet's non-fatal advisories and
+ * `describe`-pass warnings ride along on the success result. Every failure —
+ * author errors AND environment throws from the gauntlet or the scaffold
+ * write — lands in the same `{ ok: false, problems }` envelope as `runNew`:
+ * the bin prints the result as stdout JSON, so nothing may escape as a raw
+ * throw.
  */
 export const runNewFrom = async (
   options: NewFromOptions,

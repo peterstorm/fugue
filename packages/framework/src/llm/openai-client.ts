@@ -60,8 +60,10 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
  * stated reason and retrying a deterministic failure. Retriability is derived
  * from the code: `rate_limit_exceeded` → transient, `server_error` → retriable
  * node-crash, any other code (invalid_prompt, content policy, …) →
- * non-retriable. The turn's usage rides along on the node-crash arms so the
- * tool loop still attributes the burned tokens.
+ * non-retriable. The turn's usage — threaded by callers only when the failed
+ * body actually reports one ("absent means no attributable tokens", see
+ * types/errors.ts) — rides along on EVERY arm so a failed turn's burned
+ * tokens never escape budget accounting (FR-W0-001).
  */
 function responseFailedError(
   response: ResponsesApiResponse,
@@ -69,14 +71,26 @@ function responseFailedError(
   usage?: { readonly tokensIn: number; readonly tokensOut: number },
 ): Result<never, FrameworkError> {
   const code = response.error?.code;
-  const detail = response.error?.message ?? truncateErrorBody(JSON.stringify(response));
+  const detail = truncateErrorBody(response.error?.message ?? JSON.stringify(response));
   const message = `Responses API failed (response.status: failed${code ? `, error.code: ${code}` : ""}): ${detail}`;
   if (code === "rate_limit_exceeded") {
-    return err({ kind: "transient", nodeId, message });
+    return err({ kind: "transient", nodeId, message, ...(usage ? { usage } : {}) });
   }
   const retriability = code === "server_error" ? ("retriable" as const) : ("non-retriable" as const);
   return err({ kind: "node-crash", retriability, nodeId, message, ...(usage ? { usage } : {}) });
 }
+
+/**
+ * Annotation for `response.status === "incomplete"` messages. Names the API's
+ * stated reason (`incomplete_details.reason`) when present, so the two
+ * truncation causes (`max_output_tokens` vs `content_filter`) are
+ * distinguishable from the error message alone — mirrors how `error.code`
+ * is surfaced on the failed arm.
+ */
+const incompleteDetail = (response: ResponsesApiResponse): string =>
+  `response.status: incomplete${
+    response.incomplete_details?.reason ? `, reason: ${response.incomplete_details.reason}` : ""
+  }`;
 
 const toolToOpenAiSpec = (tool: ToolDef<any, any>): Record<string, unknown> => ({
   type: "function",
@@ -297,10 +311,19 @@ export class OpenAILlmClient implements LlmClient {
       // code) rather than letting it fall through to the generic no-text arm
       // as a blindly-retriable crash that discards the stated reason.
       if (response.status === "failed") {
-        return responseFailedError(response, req.nodeId, {
-          tokensIn: response.usage?.input_tokens ?? 0,
-          tokensOut: response.usage?.output_tokens ?? 0,
-        });
+        // Usage is threaded only when the failed body actually reports it —
+        // "absent means no attributable tokens" (types/errors.ts); stamping
+        // a fabricated `{0, 0}` would make that state representable two ways.
+        return responseFailedError(
+          response,
+          req.nodeId,
+          response.usage
+            ? {
+                tokensIn: response.usage.input_tokens ?? 0,
+                tokensOut: response.usage.output_tokens ?? 0,
+              }
+            : undefined,
+        );
       }
 
       // `response.status === "incomplete"` means the output was TRUNCATED
@@ -337,7 +360,7 @@ export class OpenAILlmClient implements LlmClient {
           kind: "node-crash",
           retriability,
           nodeId: req.nodeId,
-          message: `Not valid JSON (${parseMsg})${truncated ? " (response.status: incomplete)" : ""}: ${rawText.slice(0, 200)}`,
+          message: `Not valid JSON (${parseMsg})${truncated ? ` (${incompleteDetail(response)})` : ""}: ${rawText.slice(0, 200)}`,
         });
       }
 
@@ -347,7 +370,7 @@ export class OpenAILlmClient implements LlmClient {
           kind: "node-crash",
           retriability,
           nodeId: req.nodeId,
-          message: `Schema validation failed${truncated ? " (response.status: incomplete)" : ""}: ${parsed.error.message}`,
+          message: `Schema validation failed${truncated ? ` (${incompleteDetail(response)})` : ""}: ${parsed.error.message}`,
         });
       }
 
@@ -459,7 +482,14 @@ export class OpenAILlmClient implements LlmClient {
         // instead of letting the empty output fall through to the loop's
         // context-free "no text content to parse" retriable arm.
         if (response.status === "failed") {
-          return responseFailedError(response, req.nodeId, { tokensIn, tokensOut });
+          // Usage only when the failed body reports it — see the
+          // sendStructured arm for the "absent means no attributable
+          // tokens" contract.
+          return responseFailedError(
+            response,
+            req.nodeId,
+            response.usage ? { tokensIn, tokensOut } : undefined,
+          );
         }
 
         // `response.status === "incomplete"` means this turn's output was
@@ -473,7 +503,7 @@ export class OpenAILlmClient implements LlmClient {
             kind: "node-crash",
             retriability: "non-retriable",
             nodeId: req.nodeId,
-            message: `Responses API returned an incomplete (truncated) response (response.status: incomplete): ${truncateErrorBody(JSON.stringify(response))}`,
+            message: `Responses API returned an incomplete (truncated) response (${incompleteDetail(response)}): ${truncateErrorBody(JSON.stringify(response))}`,
             usage: { tokensIn, tokensOut },
           });
         }
@@ -485,6 +515,24 @@ export class OpenAILlmClient implements LlmClient {
 
         const toolCalls = parseToolCalls(output);
         const textContent = toolCalls.length === 0 ? extractFinalText(output) : undefined;
+
+        // A terminal turn with neither tool calls nor text is a malformed
+        // success. The failed/incomplete statuses short-circuit above; every
+        // RESIDUAL status (cancelled, queued, …) would otherwise hand
+        // `textContent: undefined` to the loop's context-free "no text
+        // content to parse" arm, losing the status. Mirror sendStructured's
+        // no-text arm: name the status and snapshot the (truncated) body so
+        // the unknown terminal state is diagnosable from the error alone.
+        // Classification is unchanged — retriable, like the arm it replaces.
+        if (toolCalls.length === 0 && textContent === undefined) {
+          return err({
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: req.nodeId,
+            message: `Responses API returned no tool calls and no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
+            ...(response.usage ? { usage: { tokensIn, tokensOut } } : {}),
+          });
+        }
 
         return ok({
           toolCalls,

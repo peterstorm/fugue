@@ -39,7 +39,7 @@ import {
   setLlmRequestAttributes,
   setLlmResponseAttributes,
 } from "./spans.js";
-import { classifyLlmError, validateTemperature } from "./llm-errors.js";
+import { classifyLlmError, truncateErrorBody, validateTemperature } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
 
@@ -170,7 +170,8 @@ export class AnthropicLlmClient implements LlmClient {
       // the identical cap, so it is a deterministic (non-retriable) failure.
       // `stop_reason === "refusal"` is likewise deterministic — the model
       // declined and would decline the identical request again. Every other
-      // stop_reason on these arms is transient model behavior.
+      // stop_reason on these arms is retriable (non-deterministic) model
+      // behavior.
       const truncated = response.stop_reason === "max_tokens";
       const nonRetriable = truncated || response.stop_reason === "refusal";
       const retriability = nonRetriable ? ("non-retriable" as const) : ("retriable" as const);
@@ -315,6 +316,27 @@ export class AnthropicLlmClient implements LlmClient {
 
         const toolCalls = parseToolCalls(response);
         const textContent = toolCalls.length === 0 ? lastTextBlock(response) : undefined;
+
+        // A terminal turn with neither tool_use nor text is a malformed
+        // success. max_tokens / refusal short-circuit above; every RESIDUAL
+        // stop_reason (pause_turn, …) would otherwise hand `textContent:
+        // undefined` to the loop's context-free "no text content to parse"
+        // arm, losing the stop_reason. Name it and snapshot the (truncated)
+        // content so the unknown terminal state is diagnosable from the
+        // error alone (mirrors the OpenAI client's residual-status arm).
+        // Classification is unchanged — retriable, like the arm it replaces.
+        if (toolCalls.length === 0 && textContent === undefined) {
+          return err({
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: req.nodeId,
+            message: `Anthropic response contained no tool_use and no text block (stop_reason: ${response.stop_reason ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response.content))}`,
+            usage: {
+              tokensIn: response.usage.input_tokens,
+              tokensOut: response.usage.output_tokens,
+            },
+          });
+        }
 
         return ok({
           toolCalls,

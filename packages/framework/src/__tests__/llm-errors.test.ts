@@ -76,6 +76,8 @@ describe("httpFailureToError", () => {
       if (result.error.kind === "transient") {
         expect(result.error.nodeId).toBe(nodeId);
         expect(result.error.message).toBe("HTTP 429: rate limited");
+        // The typed httpStatus lets consumers branch without string-matching.
+        expect(result.error.httpStatus).toBe(429);
       }
     }
   });
@@ -121,6 +123,7 @@ describe("httpFailureToError", () => {
         expect(result.error.kind).toBe("transient");
         if (result.error.kind === "transient") {
           expect(result.error.message).toBe(`HTTP ${status}: retry me`);
+          expect(result.error.httpStatus).toBe(status);
         }
       }
     }
@@ -190,6 +193,8 @@ describe("classifyLlmError", () => {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
         expect(result.error.message).toBe("Too Many Requests");
+        // isRateLimit only fires on .status === 429 — carried as typed data.
+        expect(result.error.httpStatus).toBe(429);
       }
     }
   });
@@ -225,6 +230,12 @@ describe("classifyLlmError", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe("transient");
+        if (result.error.kind === "transient") {
+          // The SDK error's own message passes through verbatim (not a
+          // synthesized one), and the typed httpStatus rides along.
+          expect(result.error.message).toBe(`transient ${status}`);
+          expect(result.error.httpStatus).toBe(status);
+        }
       }
     }
   });

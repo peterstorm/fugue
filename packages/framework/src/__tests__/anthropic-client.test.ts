@@ -672,6 +672,33 @@ describe("AnthropicLlmClient.sendWithTools", () => {
     }
   });
 
+  it("residual stop_reason with no content (e.g. pause_turn) → node-crash naming the stop_reason + body snapshot", async () => {
+    // Not max_tokens/refusal (both short-circuited), no tool_use, no text.
+    // Without the residual arm this reached the loop's context-free "no text
+    // content to parse" error, losing the stop_reason. Retriability is
+    // unchanged — retriable, like the arm it replaces.
+    const paused = {
+      ...makeTextResponse(""),
+      content: [],
+      stop_reason: "pause_turn",
+    } as unknown as Anthropic.Message;
+    const client = new AnthropicLlmClient(makeStub(async () => paused));
+    const result = await client.sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "claude-test", tools: [], schema: Schema, nodeId: "paused-tools" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("stop_reason: pause_turn");
+        // The turn's usage stays attributed even on the residual arm.
+        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+      }
+    }
+  });
+
   it("SDK throws non-rate-limit error → node-crash (regression for §6.10)", async () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => { throw new Error("connection refused"); }),
