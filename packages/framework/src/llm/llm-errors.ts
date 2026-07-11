@@ -37,8 +37,9 @@ const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
  *   2xx status) → retriable `node-crash` (server-side, MAY be worth a retry).
  * Pure — `status`/`bodyText` in, typed error out; the message always carries
  * `HTTP <status>` plus the (truncated) body so the failure is debuggable
- * from the error alone, and the transient arm carries the typed `httpStatus`
- * so consumers can branch on it without string-matching the message.
+ * from the error alone, and EVERY arm carries the typed `httpStatus` (all
+ * failures here are HTTP-origin by construction) so consumers can branch on
+ * it without string-matching the message.
  */
 export const httpFailureToError = (
   status: number,
@@ -52,7 +53,7 @@ export const httpFailureToError = (
   if (status >= 400 && status < 500) {
     return err({ kind: "node-crash", retriability: "non-retriable", nodeId, message, httpStatus: status });
   }
-  return err({ kind: "node-crash", retriability: "retriable", nodeId, message });
+  return err({ kind: "node-crash", retriability: "retriable", nodeId, message, httpStatus: status });
 };
 
 /**
@@ -140,8 +141,9 @@ export const classifyLlmError = (
   // Duck-typed HTTP status (SDK errors carry `.status`, e.g. Anthropic's
   // RateLimitError/AuthenticationError/BadRequestError): the shared
   // TRANSIENT_HTTP_STATUSES policy applies — 429 (rate limit), 408, and 409
-  // classify as `transient` carrying the typed `httpStatus`; any other 4xx is
-  // a deterministic client error — non-retriable. (The 429 case was formerly
+  // classify as `transient`, any other 4xx as a deterministic non-retriable
+  // client error, and everything else (5xx) as a retriable server-side crash —
+  // every arm carrying the typed `httpStatus`. (The 429 case was formerly
   // a dedicated `isRateLimit` arm; it is fully subsumed here — same kind,
   // message, and httpStatus — so the redundant arm and its `429` literal are
   // gone. `isRateLimit` itself stays exported as a standalone predicate.)
@@ -165,6 +167,18 @@ export const classifyLlmError = (
         httpStatus: status,
       });
     }
+    // Any remaining duck-typed status (5xx, or an SDK oddity outside 4xx) is
+    // still HTTP-origin: a retriable server-side crash that carries the typed
+    // `httpStatus` (mirrors httpFailureToError's final arm) so consumers can
+    // branch on it without string-matching the message.
+    return err({
+      kind: "node-crash",
+      retriability: "retriable",
+      nodeId,
+      message: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
+      httpStatus: status,
+    });
   }
   return err({
     kind: "node-crash",

@@ -176,6 +176,14 @@ export class AnthropicLlmClient implements LlmClient {
       const nonRetriable = truncated || response.stop_reason === "refusal";
       const retriability = nonRetriable ? ("non-retriable" as const) : ("retriable" as const);
 
+      // The turn's usage rides along on both terminal error arms below so a
+      // malformed success / schema failure still attributes the burned tokens
+      // (FR-W0-001) — mirrors the sendWithTools arms.
+      const usage = {
+        tokensIn: response.usage.input_tokens,
+        tokensOut: response.usage.output_tokens,
+      };
+
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
         return err({
@@ -183,6 +191,7 @@ export class AnthropicLlmClient implements LlmClient {
           retriability,
           nodeId: req.nodeId,
           message: `Anthropic response did not contain a tool_use block (stop_reason: ${response.stop_reason ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response.content))}`,
+          usage,
         });
       }
 
@@ -193,6 +202,7 @@ export class AnthropicLlmClient implements LlmClient {
           retriability,
           nodeId: req.nodeId,
           message: `Schema validation failed (stop_reason: ${response.stop_reason ?? "unknown"}): ${parsed.error.message}`,
+          usage,
         });
       }
 

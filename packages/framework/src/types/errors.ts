@@ -88,9 +88,10 @@ export type FrameworkError =
        */
       readonly retriability: "retriable" | "non-retriable";
       /**
-       * HTTP status code when this non-retriable crash originated from an HTTP
-       * response (a deterministic 4xx client error — e.g. 401/400/404 — on the
-       * raw-HTTP path or a duck-typed SDK error). Lets consumers branch on
+       * HTTP status code when this crash originated from an HTTP response —
+       * a deterministic 4xx client error (non-retriable, e.g. 401/400/404), a
+       * 5xx server error (retriable), or a malformed-success 2xx body — on the
+       * raw-HTTP path or a duck-typed SDK error. Lets consumers branch on
        * `httpStatus === 401` instead of string-matching `HTTP 401` out of the
        * message. Absent on non-HTTP `node-crash` producers (iteration limit,
        * schema mismatch, thrown exception with no `.status`).

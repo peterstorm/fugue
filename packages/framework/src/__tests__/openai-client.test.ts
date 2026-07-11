@@ -258,8 +258,9 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("missing output_text → node-crash with nodeId, snapshotting status + body", async () => {
-    handler = async () => jsonResponse({ output: [], usage: {}, status: "incomplete" });
+  it("missing output_text → node-crash with nodeId, snapshotting status + body, carrying the turn's usage", async () => {
+    handler = async () =>
+      jsonResponse({ output: [], usage: { input_tokens: 3, output_tokens: 0 }, status: "incomplete" });
     const result = await makeClient().sendStructured<SchemaType>({
       system: "s",
       user: "u",
@@ -280,6 +281,9 @@ describe("OpenAILlmClient.sendStructured", () => {
         expect(result.error.message).toContain('"output":[]');
         // status incomplete = truncation — deterministic, non-retriable.
         expect(result.error.retriability).toBe("non-retriable");
+        // Fb: the malformed success still burned tokens — the in-scope
+        // response.usage must ride the error (FR-W0-001), not be dropped.
+        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
       }
     }
   });
@@ -590,7 +594,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("non-JSON output → node-crash", async () => {
+  it("non-JSON output → node-crash carrying the turn's usage", async () => {
     handler = async () =>
       jsonResponse({
         output: [makeMessageOutput("not json at all")],
@@ -606,10 +610,28 @@ describe("OpenAILlmClient.sendStructured", () => {
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.message).toMatch(/Not valid JSON/);
+      // Fb: the failed parse still burned tokens — the in-scope
+      // response.usage rides the error (FR-W0-001).
+      expect(result.error.usage).toEqual({ tokensIn: 1, tokensOut: 1 });
+    }
+
+    // …and when the body omits usage entirely, none is fabricated ("absent
+    // means no attributable tokens", types/errors.ts).
+    handler = async () => jsonResponse({ output: [makeMessageOutput("still not json")] });
+    const noUsage = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    });
+    expect(noUsage.ok).toBe(false);
+    if (!noUsage.ok && noUsage.error.kind === "node-crash") {
+      expect(noUsage.error.usage).toBeUndefined();
     }
   });
 
-  it("schema validation failure → node-crash with nodeId", async () => {
+  it("schema validation failure → node-crash with nodeId, carrying the turn's usage", async () => {
     handler = async () =>
       jsonResponse({
         output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
@@ -626,6 +648,9 @@ describe("OpenAILlmClient.sendStructured", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
+      // Fb: the failed validation still burned tokens — the in-scope
+      // response.usage rides the error (FR-W0-001).
+      expect(result.error.usage).toEqual({ tokensIn: 1, tokensOut: 1 });
     }
   });
 

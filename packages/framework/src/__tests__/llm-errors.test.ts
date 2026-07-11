@@ -105,6 +105,24 @@ describe("httpFailureToError", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("retriable");
         expect(result.error.message).toContain("HTTP 200");
+        // Every httpFailureToError arm is HTTP-origin — the typed status
+        // rides along even on the retriable fall-through.
+        expect(result.error.httpStatus).toBe(200);
+      }
+    }
+  });
+
+  test("500 → RETRIABLE node-crash carrying the typed httpStatus (HTTP-origin, not dropped)", () => {
+    const result = httpFailureToError(500, "internal", nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        // A 5xx crash is just as HTTP-origin as a 4xx one — consumers must be
+        // able to branch on `httpStatus === 500` without string-matching the
+        // message, on the retriable arm too.
+        expect(result.error.httpStatus).toBe(500);
       }
     }
   });
@@ -132,16 +150,17 @@ describe("httpFailureToError", () => {
     }
   });
 
-  test("property: over 400–599, 408/409/429 are transient, other 4xx non-retriable, 5xx retriable", () => {
+  test("property: over 400–599, 408/409/429 are transient, other 4xx non-retriable, 5xx retriable — httpStatus on EVERY arm", () => {
     const transientStatuses = new Set([408, 409, 429]);
     fc.assert(
       fc.property(fc.integer({ min: 400, max: 599 }), (status) => {
         const result = httpFailureToError(status, "body", nodeId);
         if (result.ok) return false;
         const e = result.error;
-        if (transientStatuses.has(status)) return e.kind === "transient";
-        if (status < 500) return e.kind === "node-crash" && e.retriability === "non-retriable";
-        return e.kind === "node-crash" && e.retriability === "retriable";
+        if (transientStatuses.has(status)) return e.kind === "transient" && e.httpStatus === status;
+        if (status < 500)
+          return e.kind === "node-crash" && e.retriability === "non-retriable" && e.httpStatus === status;
+        return e.kind === "node-crash" && e.retriability === "retriable" && e.httpStatus === status;
       }),
     );
   });
@@ -221,14 +240,34 @@ describe("classifyLlmError", () => {
         }
       }
     }
-    // …while a duck-typed 5xx stays a retriable generic crash — and, being the
-    // retriable arm (not HTTP-origin non-retriable), carries NO httpStatus.
+    // …while a duck-typed 5xx stays a RETRIABLE crash that is still
+    // HTTP-origin: the typed httpStatus must survive classification (it was
+    // formerly dropped on this arm — consumers had to string-match "500").
     const e5xx = Object.assign(new Error("server error"), { status: 500 });
     const result = classifyLlmError(e5xx, nodeId);
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.retriability).toBe("retriable");
-      expect(result.error.httpStatus).toBeUndefined();
+      expect(result.error.httpStatus).toBe(500);
+    }
+  });
+
+  test("duck-typed 5xx (500/502/503) → RETRIABLE node-crash carrying the typed httpStatus", () => {
+    // Fa: an HTTP-origin retriable (server-side) crash must not drop its
+    // status on the classifyLlmError path — mirrors httpFailureToError's
+    // final arm, so the two classification seams can never disagree.
+    for (const status of [500, 502, 503]) {
+      const e = Object.assign(new Error(`server error ${status}`), { status });
+      const result = classifyLlmError(e, nodeId);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.retriability).toBe("retriable");
+          expect(result.error.message).toBe(`server error ${status}`);
+          expect(result.error.httpStatus).toBe(status);
+        }
+      }
     }
   });
 

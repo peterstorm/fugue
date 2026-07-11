@@ -624,6 +624,70 @@ describe("AuthoredDag schema", () => {
     expect(prompt.body).toContain("text: {{text}}");
   });
 
+  it("rejects '@fugue-body' in purpose/description/enum values (integrity-marker injection)", () => {
+    // F1: free text splices into `//` comments that sit BETWEEN the
+    // @fugue-body regions structuralProjection collapses before hashing. A
+    // literal `@fugue-body` token could forge a fake START marker (excluding
+    // structure from the hash — fail-OPEN) or a fake END marker (breaking the
+    // hash once the real body is implemented — fail-CLOSED). The schema must
+    // reject the token everywhere, matching the '{{' rejection above.
+    const purpose = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (purpose.nodes[0] as { purpose: string }).purpose = "pwn // @fugue-body-start pwn";
+    const p = parseAuthoredDag(purpose);
+    expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.problems.join("\n")).toContain("must not contain '@fugue-body'");
+
+    const desc = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (desc as { description: string }).description = "a @fugue-body-end b";
+    expect(parseAuthoredDag(desc).ok).toBe(false);
+
+    const field = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (field.input.fields[0] as { description?: string }).description = "a @fugue-body b";
+    expect(parseAuthoredDag(field).ok).toBe(false);
+
+    const enumValue = structuredClone(FIXTURES.router!) as AuthoredDagInput;
+    const bucket = outputOf(enumValue.nodes[0]!).fields[1]! as {
+      type: { kind: string; values: readonly string[] };
+    };
+    bucket.type = { kind: "enum", values: ["@fugue-body-start", "large"] };
+    expect(parseAuthoredDag(enumValue).ok).toBe(false);
+  });
+
+  it("comment()/promptText() neuter '@fugue-body' → '＠fugue-body' at the emission sites (defense-in-depth)", () => {
+    // The schema (above) is the first line of defense — bypass the brand
+    // deliberately (mirroring the '{{' scrub tests) to prove the second layer
+    // holds on its own: were a hostile purpose ever to reach codegen, the
+    // emitted module must not contain a forged marker in comment position.
+    const hostile = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (hostile.nodes[0] as { purpose: string }).purpose = "pwn // @fugue-body-start pwn";
+    const scaffold = buildAuthoredScaffold(hostile as unknown as AuthoredDag);
+    // The scrubbed token stays human-legible (full-width ＠, U+FF20)…
+    expect(scaffold.dagTs).toContain("＠fugue-body-start");
+    // …and ONLY the machine-emitted markers survive: exactly one region per
+    // fetch/transform node (linear fixture = 2), so no forged region can
+    // widen or split the projection.
+    expect(scaffold.dagTs.match(/\/\/ @fugue-body-start/g)).toHaveLength(2);
+    expect(scaffold.dagTs.match(/\/\/ @fugue-body-end/g)).toHaveLength(2);
+
+    // With the scrub holding, a structural edit is STILL flagged: the
+    // projected hash of the emitted module changes when structure changes.
+    const baseline = createHash("sha256")
+      .update(structuralProjection(scaffold.dagTs), "utf-8")
+      .digest("hex");
+    const rewired = scaffold.dagTs.replace("z.object({", "z.object({ injected: z.string(),");
+    expect(
+      createHash("sha256").update(structuralProjection(rewired), "utf-8").digest("hex"),
+    ).not.toBe(baseline);
+
+    // promptText mirrors comment(): an llm node's hostile purpose reaches the
+    // prompt body neutered, never as the live marker token.
+    const hostileLlm = structuredClone(FIXTURES["llm-after-review"]!) as AuthoredDagInput;
+    (hostileLlm.nodes[2] as { purpose: string }).purpose = "pwn @fugue-body-end pwn";
+    const prompt = buildAuthoredScaffold(hostileLlm as unknown as AuthoredDag).prompts[0]!;
+    expect(prompt.body).toContain("Task: pwn ＠fugue-body-end pwn");
+    expect(prompt.body).not.toContain("@fugue-body");
+  });
+
   it("promptText() scrub survives odd/overlapping brace runs — no '{{' re-created", () => {
     // The literal-pair replacement (`{{` → `{ {`) re-created `{{` from odd
     // runs: `"{{{text}}"` → `"{ {{text}}"`, still a live placeholder. The
@@ -970,6 +1034,29 @@ describe("authored codegen survives the gauntlet", () => {
     // …but rewiring STRUCTURE (a schema field, outside the markers) DOES break it.
     const rewired = content.replace("z.object({", "z.object({ injected: z.string(),");
     expect(createHash("sha256").update(structuralProjection(bodyOf(rewired)), "utf-8").digest("hex")).not.toBe(m![1]);
+
+    // F2 mutation-killers at the scaffold level. The linear fixture emits TWO
+    // regions (fetch + transform); the non-global `implemented` replace above
+    // only ever exercised the FIRST, so a `g`-flag-dropping mutant (collapse
+    // only the first region) survived. Implementing the SECOND region's body
+    // must preserve the hash too.
+    const regions = [...content.matchAll(/\/\/ @fugue-body-start[\s\S]*?\/\/ @fugue-body-end/g)];
+    expect(regions).toHaveLength(2);
+    const second = regions[1]!;
+    const secondImplemented =
+      content.slice(0, second.index) +
+      "// @fugue-body-start\n  transform: (i) => ok({ summary: summarize(i) }),\n  // @fugue-body-end" +
+      content.slice(second.index + second[0].length);
+    expect(createHash("sha256").update(structuralProjection(bodyOf(secondImplemented)), "utf-8").digest("hex")).toBe(m![1]);
+
+    // …and editing structure BETWEEN the two regions must break it. A
+    // lazy→greedy mutant collapses from the first start marker to the LAST
+    // end marker, swallowing this edit into the excluded span — it must fail
+    // here. (`id: "summarize"` sits after region 1's end, before region 2's
+    // start.)
+    const betweenEdited = content.replace('id: "summarize",', 'id: "hijacked",');
+    expect(betweenEdited).not.toBe(content);
+    expect(createHash("sha256").update(structuralProjection(bodyOf(betweenEdited)), "utf-8").digest("hex")).not.toBe(m![1]);
   });
 
   it("human-review gates surface as humanReview in describe", async () => {
@@ -1353,6 +1440,143 @@ describe("authored codegen survives the gauntlet", () => {
     const result = await runNewFrom({ from: fromPath, force: false, root }, okWithWarning);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.warnings).toEqual([warning]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// structuralProjection — the loom cross-repo contract, pinned directly.
+//
+// The projection is HALF of a two-repo agreement: loom's
+// fugue-generated-integrity engine rule re-implements the identical collapse
+// (same regex semantics: lazy, global, replaced by the START marker) and the
+// identical hash (sha256 over the projection, utf-8, hex). Every test above
+// exercises the projection SELF-REFERENTIALLY (project twice, compare), which
+// mutation testing showed lets lazy→greedy, g-flag-removal, and
+// replacement-token mutants survive. These tests assert EXACT projected
+// strings and a pinned golden digest, so any drift in the collapse semantics
+// fails HERE, in fugue, before it silently breaks loom's wave gate.
+// ---------------------------------------------------------------------------
+
+/**
+ * GOLDEN VECTOR — pinned byte-for-byte in BOTH repos (here and in loom's
+ * fugue-generated-integrity rule tests). Deliberately ASCII-only. Do not
+ * reformat: the digest below is sha256(structuralProjection(this), "utf-8").
+ */
+const GOLDEN_MODULE_BODY =
+  'import { z } from "zod";\n' +
+  "\n" +
+  "const FetchRecordSchema = z.object({\n" +
+  "  id: z.string(),\n" +
+  "});\n" +
+  "\n" +
+  "// fetch-record - Load the record\n" +
+  "const fetchRecordNode = fetchNode({\n" +
+  '  id: "fetch-record",\n' +
+  "  outputSchema: FetchRecordSchema,\n" +
+  "  // @fugue-body-start\n" +
+  '  fetch: async () => ok({ id: "todo" }),\n' +
+  "  // @fugue-body-end\n" +
+  "});\n" +
+  "\n" +
+  "const SummarizeSchema = z.object({\n" +
+  "  summary: z.string(),\n" +
+  "});\n" +
+  "\n" +
+  "// summarize - Summarize the record\n" +
+  "const summarizeNode = transformNode({\n" +
+  '  id: "summarize",\n' +
+  "  inputSchema: FetchRecordSchema,\n" +
+  "  outputSchema: SummarizeSchema,\n" +
+  "  // @fugue-body-start\n" +
+  '  transform: (input) => ok({ summary: "todo" }),\n' +
+  "  // @fugue-body-end\n" +
+  "});\n";
+
+/** The exact projection of GOLDEN_MODULE_BODY: each region (start marker
+ *  through end marker, inclusive) collapsed to the bare start marker. */
+const GOLDEN_PROJECTION =
+  'import { z } from "zod";\n' +
+  "\n" +
+  "const FetchRecordSchema = z.object({\n" +
+  "  id: z.string(),\n" +
+  "});\n" +
+  "\n" +
+  "// fetch-record - Load the record\n" +
+  "const fetchRecordNode = fetchNode({\n" +
+  '  id: "fetch-record",\n' +
+  "  outputSchema: FetchRecordSchema,\n" +
+  "  // @fugue-body-start\n" +
+  "});\n" +
+  "\n" +
+  "const SummarizeSchema = z.object({\n" +
+  "  summary: z.string(),\n" +
+  "});\n" +
+  "\n" +
+  "// summarize - Summarize the record\n" +
+  "const summarizeNode = transformNode({\n" +
+  '  id: "summarize",\n' +
+  "  inputSchema: FetchRecordSchema,\n" +
+  "  outputSchema: SummarizeSchema,\n" +
+  "  // @fugue-body-start\n" +
+  "});\n";
+
+/** sha256 hex of GOLDEN_PROJECTION — the digest a `// @fugue-integrity
+ *  sha256:<hex>` banner over GOLDEN_MODULE_BODY would carry. */
+const GOLDEN_DIGEST = "7ae6384572c018a34302af5fbb2b3f2ce1a8f7fd2f6dbc537fae9c33cfff6054";
+
+describe("structuralProjection (loom cross-repo contract)", () => {
+  it("collapses each region independently, preserving structure between them (EXACT output)", () => {
+    // Two regions with DISTINCT bodies and structure between them, asserted
+    // against the exact projected string:
+    //   lazy→greedy   — a greedy match swallows `const between = 1;` into one
+    //                   region and the exact output loses it → FAIL.
+    //   g-flag removal — only the first region collapses; `body-two` survives
+    //                   into the output → FAIL.
+    //   replacement    — anything but the bare START marker as the
+    //                   replacement token changes the output → FAIL.
+    const input =
+      "// @fugue-body-start\n" +
+      "body-one\n" +
+      "// @fugue-body-end\n" +
+      "const between = 1;\n" +
+      "// @fugue-body-start\n" +
+      "body-two\n" +
+      "// @fugue-body-end\n" +
+      "const after = 2;\n";
+    expect(structuralProjection(input)).toBe(
+      "// @fugue-body-start\n" +
+        "const between = 1;\n" +
+        "// @fugue-body-start\n" +
+        "const after = 2;\n",
+    );
+  });
+
+  it("a body carrying the literal end marker fails CLOSED (region ends early, tail lands in the hash)", () => {
+    // Not a bypass: the lazy match stops at the FIRST end marker, so the
+    // body's tail (and the real end marker) become part of the projection —
+    // the stamped hash breaks the moment such a body is written.
+    const sabotaged =
+      "// @fugue-body-start\n" +
+      "implemented();\n" +
+      "// @fugue-body-end\n" +
+      "trailing();\n" +
+      "// @fugue-body-end\n";
+    expect(structuralProjection(sabotaged)).toBe(
+      "// @fugue-body-start\ntrailing();\n// @fugue-body-end\n",
+    );
+  });
+
+  it("GOLDEN VECTOR: pinned module body → pinned projection → pinned sha256 digest", () => {
+    // Byte-for-byte agreement with loom's fugue-generated-integrity rule.
+    // If this fails, the collapse semantics drifted — fix the code, do NOT
+    // re-pin the vector without updating loom's copy in the same change.
+    expect(structuralProjection(GOLDEN_MODULE_BODY)).toBe(GOLDEN_PROJECTION);
+    expect(
+      createHash("sha256").update(structuralProjection(GOLDEN_MODULE_BODY), "utf-8").digest("hex"),
+    ).toBe(GOLDEN_DIGEST);
+    // Idempotence: projecting a projection is a no-op (loom hashes files that
+    // may already be implemented OR still placeholder-bodied).
+    expect(structuralProjection(GOLDEN_PROJECTION)).toBe(GOLDEN_PROJECTION);
   });
 });
 

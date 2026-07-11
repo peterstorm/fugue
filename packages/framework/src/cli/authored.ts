@@ -19,6 +19,7 @@
 
 import { z } from "zod";
 import {
+  FUGUE_BODY_MARKER,
   IDENT,
   JS_RESERVED_WORDS,
   RESERVED_IDENTIFIERS,
@@ -68,6 +69,21 @@ const NO_TEMPLATE_OPEN = {
   message:
     "must not contain '{{' (the runtime prompt-placeholder opener — it would splice runtime input into the generated prompt)",
 } as const;
+// Free text also splices into `//` comments that sit BETWEEN the `@fugue-body`
+// integrity markers `structuralProjection` collapses before hashing. A purpose
+// or description carrying the literal `@fugue-body` token could inject a fake
+// start marker (excluding a node's id/schema/imports from the hash — structural
+// tampering undetected, fail-OPEN) or a fake end marker (breaking the hash the
+// moment a human implements the real placeholder body, fail-CLOSED). The schema
+// rejects the token everywhere. FUGUE_BODY_MARKER is single-sourced in
+// `identifiers.ts` alongside the FUGUE_BODY_MARKERS scrub codegen's `comment()`
+// / `promptText()` apply as defense-in-depth — one sequence, so the two layers
+// can never disagree on it.
+const NO_FUGUE_BODY_MARKER = {
+  check: (s: string): boolean => !FUGUE_BODY_MARKER.test(s),
+  message:
+    "must not contain '@fugue-body' (the integrity-projection marker — it would poison the structural hash of the generated module)",
+} as const;
 
 export const FieldTypeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("string") }).strict(),
@@ -88,7 +104,8 @@ export const FieldTypeSchema = z.discriminatedUnion("kind", [
             .string()
             .min(1)
             .regex(SINGLE_LINE, "must be a single line")
-            .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message),
+            .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+            .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message),
         )
         .min(2)
         .readonly(),
@@ -111,6 +128,7 @@ export const FieldSpecSchema = z
       .min(1)
       .regex(SINGLE_LINE, "must be a single line")
       .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+      .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message)
       .optional(),
   })
   .strict()
@@ -197,7 +215,8 @@ const nodePurpose = z
   .string()
   .min(1)
   .regex(SINGLE_LINE, "must be a single line")
-  .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message);
+  .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+  .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message);
 
 /**
  * The `output` slot for kinds that require one. Zod's default missing-key
@@ -380,7 +399,8 @@ const BaseAuthoredDagSchema = z
       .string()
       .min(1)
       .regex(SINGLE_LINE, "must be a single line")
-      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message),
+      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+      .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message),
     /** DAG input schema (the request). */
     input: SchemaSpecSchema,
     nodes: z.array(AuthoredNodeSchema).min(1),

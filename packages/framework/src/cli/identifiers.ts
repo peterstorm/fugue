@@ -117,14 +117,40 @@ export const TEMPLATE_OPEN = /\{\{/;
  */
 export const TEMPLATE_OPENERS = /\{(?=\{)/g;
 
+/**
+ * The `@fugue-body` integrity-marker token. `structuralProjection`
+ * (`authored-codegen.ts`) collapses everything between `// @fugue-body-start`
+ * and `// @fugue-body-end` before hashing, so free text that codegen splices
+ * into a `//` comment (node purpose, dag description, field descriptions, enum
+ * values) must never carry the token: an injected fake START would exclude a
+ * node's id/schema/imports from the integrity hash (structural tampering goes
+ * undetected — fail-OPEN), and a fake END would break the hash the moment a
+ * human implements the real placeholder body (fail-CLOSED). Single-sourced here
+ * (mirroring `SINGLE_LINE` / `TEMPLATE_OPEN`) so the schema rejection
+ * (`authored.ts` NO_FUGUE_BODY_MARKER) and the emission-site scrub
+ * (`authored-codegen.ts` comment() / promptText()) can never disagree on the
+ * sequence.
+ */
+export const FUGUE_BODY_MARKER = /@fugue-body/;
+
+/**
+ * Global matcher for the emission-site scrub (safe to share despite the `g`
+ * flag: only used with `String.replace`, which does not depend on `lastIndex`).
+ * Matches the literal `@fugue-body` token; the scrub replaces the leading `@`
+ * with a full-width `＠` (U+FF20) so the token no longer parses as a marker
+ * while staying human-legible in the emitted comment.
+ */
+export const FUGUE_BODY_MARKERS = /@(?=fugue-body)/g;
+
 // Narrowed to the branded `KebabIdent` — the module's invariant is "only a
 // parsed KebabIdent is safe to reshape into a JS identifier". A bare `string`
 // param would let an unvalidated name (`2fast`, `default`, `a b`) slip in and
 // produce an illegal identifier; taking `KebabIdent` makes that
-// unrepresentable. `pascalCase` is module-private (no external callers — the
-// name constructors below are its only callers and already hold a
-// `KebabIdent`); `camelCase` stays exported for the parse-time reserved-word
-// check in `authored.ts`, but narrowed the same way.
+// unrepresentable. `pascalCase` is module-private (no external callers — its
+// only callers are `camelCase` just below and the name constructors further
+// down, all of which already hold a `KebabIdent`); `camelCase` stays exported
+// for the parse-time reserved-word check in `authored.ts`, but narrowed the
+// same way.
 const pascalCase = (kebab: KebabIdent): string =>
   kebab
     .split("-")

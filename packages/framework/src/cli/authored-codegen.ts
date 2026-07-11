@@ -47,6 +47,7 @@ import {
   DAG_CONST_NAME,
   DEFAULT_MODEL_NAME,
   FIXED_IMPORT_NAME,
+  FUGUE_BODY_MARKERS,
   IDENT,
   INPUT_SCHEMA_NAME,
   LINE_TERMINATORS,
@@ -82,8 +83,17 @@ const key = (name: string): string => (IDENT.test(name) ? name : JSON.stringify(
  * multi-line purpose / description fields — this is the defense-in-depth at
  * the emission site, scrubbing with the SAME character class so the two
  * layers can never disagree on the set.
+ *
+ * A comment also lands BETWEEN the `@fugue-body` markers `structuralProjection`
+ * collapses before hashing, so an injected literal `@fugue-body` token would
+ * forge a marker region (fail-open structural tampering or a fail-closed hash
+ * break). The schema already rejects the token in every free-text field — this
+ * mirrors that as an emission-site scrub, neutering `@fugue-body` → `＠fugue-body`
+ * (`FUGUE_BODY_MARKERS`, single-sourced in `identifiers.ts`) so the two layers
+ * can never disagree on the sequence.
  */
-const comment = (text: string): string => text.replace(LINE_TERMINATORS, " ");
+const comment = (text: string): string =>
+  text.replace(LINE_TERMINATORS, " ").replace(FUGUE_BODY_MARKERS, "＠");
 
 /**
  * Every free-text interpolation into a PROMPT BODY goes through here: a
@@ -98,8 +108,15 @@ const comment = (text: string): string => text.replace(LINE_TERMINATORS, " ");
  * replacement only inserts a space after it — idempotent over odd/overlapping
  * brace runs (`{{{text}}`, `{{{{`), where replacing the literal pair would
  * re-create a live `{{`.
+ *
+ * Prompt bodies do not sit inside the `@fugue-body` regions, but authored free
+ * text (node purpose, enum values) reaches BOTH a prompt AND a `//` comment, so
+ * this mirrors `comment()`'s `@fugue-body` scrub (`FUGUE_BODY_MARKERS`,
+ * single-sourced in `identifiers.ts`) to keep the two emission surfaces
+ * identically hardened behind the schema.
  */
-const promptText = (text: string): string => text.replace(TEMPLATE_OPENERS, "{ ");
+const promptText = (text: string): string =>
+  text.replace(TEMPLATE_OPENERS, "{ ").replace(FUGUE_BODY_MARKERS, "＠");
 
 const zodExpr = (t: FieldType): string =>
   match(t)
@@ -172,9 +189,21 @@ const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comm
  * body). `structuralProjection` collapses each marked region so the integrity
  * hash covers the machine-owned STRUCTURE (imports, schemas, ids, wiring,
  * registration) but NOT the body you are instructed to implement — resolving
- * the "DO NOT EDIT" ⇄ "implement the placeholders" contradiction. loom's
- * `fugue-generated-integrity` rule applies the SAME projection before hashing;
- * the cross-repo coupling is these two marker strings plus the collapse rule.
+ * the "DO NOT EDIT" ⇄ "implement the placeholders" contradiction.
+ *
+ * CROSS-REPO COUPLING SURFACE — loom's `fugue-generated-integrity` engine rule
+ * (loom/engine `src/linter/programmatic/fugue-generated-integrity.ts`) is a
+ * consumer of, and depends byte-for-byte on, all four of:
+ *   1. the banner line format `// @fugue-integrity sha256:<64-hex>` (lowercase
+ *      hex, on its own line — stamped by `stampGenerated` in new.ts);
+ *   2. the COMMENT-ONLY PRELUDE: every line above that banner line is blank or
+ *      a `//` comment (the rule fails closed on real code above the banner,
+ *      which would escape the hash);
+ *   3. these two marker strings, exactly;
+ *   4. the collapse rule (`structuralProjection` below): sha256 over the
+ *      projection of everything AFTER the banner line, utf-8, hex.
+ * Neither repo imports the other — a drift in any of the four silently breaks
+ * loom's wave-gate verification.
  */
 export const FUGUE_BODY_START = "// @fugue-body-start";
 export const FUGUE_BODY_END = "// @fugue-body-end";
@@ -182,10 +211,13 @@ export const FUGUE_BODY_END = "// @fugue-body-end";
 /** Everything between a body-start and the next body-end (inclusive) collapses
  *  to one canonical marker: the region's COUNT and ORDER stay in the hash (a
  *  node body cannot be added/removed/reordered undetected) while its CONTENTS
- *  are free to implement. A body region carrying the literal end marker, or
- *  code deliberately wrapped in fake markers to escape the hash, is the same
- *  deliberate circumvention as stripping the banner — outside the accidental-
- *  edit threat model this rule targets. */
+ *  are free to implement. A body that carries the literal end marker fails
+ *  CLOSED — the lazy match ends the region early, the body's tail lands in the
+ *  projection, and the hash breaks (a false positive, not a bypass). The
+ *  actual circumvention is fail-OPEN: deliberately wrapping hand-edited
+ *  STRUCTURE in fake markers so it escapes the projection — that, like
+ *  stripping the banner outright, is outside the accidental-edit threat model
+ *  this rule targets. */
 export const structuralProjection = (body: string): string =>
   body.replace(
     new RegExp(`${FUGUE_BODY_START}[\\s\\S]*?${FUGUE_BODY_END}`, "g"),

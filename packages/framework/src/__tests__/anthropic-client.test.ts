@@ -170,6 +170,10 @@ describe("AnthropicLlmClient.sendStructured", () => {
         // the error alone, not just from the stop_reason.
         expect(result.error.message).toContain("BODY_MARKER_9f3a");
         expect(result.error.retriability).toBe("retriable");
+        // Fb: the malformed success still burned tokens — the in-scope
+        // response.usage rides the error (FR-W0-001), mirroring the
+        // sendWithTools terminal arms. makeTextResponse uses baseUsage().
+        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
       }
     }
   });
@@ -319,9 +323,9 @@ describe("AnthropicLlmClient.sendStructured", () => {
     expect(calls).toBe(0);
   });
 
-  it("schema validation failure → node-crash with nodeId", async () => {
+  it("schema validation failure → node-crash with nodeId, carrying the turn's usage", async () => {
     const client = new AnthropicLlmClient(
-      makeStub(async () => makeToolUseResponse({ wrong: "shape" })),
+      makeStub(async () => makeToolUseResponse({ wrong: "shape" }, 12, 7)),
     );
     const result = await client.sendStructured<SchemaType>({
       system: "s",
@@ -334,6 +338,9 @@ describe("AnthropicLlmClient.sendStructured", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
+      // Fb: the failed validation still burned tokens — the in-scope
+      // response.usage rides the error (FR-W0-001).
+      expect(result.error.usage).toEqual({ tokensIn: 12, tokensOut: 7 });
     }
   });
 

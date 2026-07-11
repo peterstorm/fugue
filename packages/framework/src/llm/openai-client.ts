@@ -327,13 +327,26 @@ export class OpenAILlmClient implements LlmClient {
       }
 
       // `response.status === "incomplete"` means the output was TRUNCATED or
-      // filtered (see `incomplete_details.reason`: `max_output_tokens` vs
-      // `content_filter`) — deterministic either way, so a retry of the
-      // identical request reproduces the identical incomplete result. Hence a
-      // non-retriable failure on every arm below (mirrors the Anthropic
-      // stop_reason max_tokens treatment).
+      // filtered (see `incomplete_details.reason`). `max_output_tokens` is
+      // deterministic — the identical request hits the identical cap.
+      // `content_filter` is NOT guaranteed to reproduce (filtering depends on
+      // the sampled output), but it signals a policy response to this input,
+      // so retrying against the budget is not worth it. Hence a non-retriable
+      // failure on every arm below (mirrors the Anthropic stop_reason
+      // max_tokens treatment).
       const truncated = response.status === "incomplete";
       const retriability = truncated ? ("non-retriable" as const) : ("retriable" as const);
+
+      // The turn's usage rides along on every terminal error arm below so a
+      // malformed success / parse failure still attributes the burned tokens
+      // (FR-W0-001) — threaded only when the body actually reports one
+      // ("absent means no attributable tokens", types/errors.ts).
+      const usage = response.usage
+        ? {
+            tokensIn: response.usage.input_tokens ?? 0,
+            tokensOut: response.usage.output_tokens ?? 0,
+          }
+        : undefined;
 
       const messageBlock = output.find(isMessageBlock);
       const textPart = messageBlock?.content.find(isOutputTextPart);
@@ -348,6 +361,7 @@ export class OpenAILlmClient implements LlmClient {
           retriability,
           nodeId: req.nodeId,
           message: `Responses API returned no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
+          ...(usage ? { usage } : {}),
         });
       }
 
@@ -363,6 +377,7 @@ export class OpenAILlmClient implements LlmClient {
           retriability,
           nodeId: req.nodeId,
           message: `Not valid JSON (${parseMsg})${truncated ? ` (${incompleteDetail(response)})` : ""}: ${rawText.slice(0, 200)}`,
+          ...(usage ? { usage } : {}),
         });
       }
 
@@ -373,16 +388,14 @@ export class OpenAILlmClient implements LlmClient {
           retriability,
           nodeId: req.nodeId,
           message: `Schema validation failed${truncated ? ` (${incompleteDetail(response)})` : ""}: ${parsed.error.message}`,
+          ...(usage ? { usage } : {}),
         });
       }
 
-      const tokensIn = response.usage?.input_tokens ?? 0;
-      const tokensOut = response.usage?.output_tokens ?? 0;
-
       return ok({
         output: parsed.data as O,
-        tokensIn,
-        tokensOut,
+        tokensIn: usage?.tokensIn ?? 0,
+        tokensOut: usage?.tokensOut ?? 0,
         thinking,
         rawText,
       });
@@ -495,11 +508,13 @@ export class OpenAILlmClient implements LlmClient {
         }
 
         // `response.status === "incomplete"` means this turn's output was
-        // TRUNCATED or filtered (see `incomplete_details.reason`:
-        // `max_output_tokens` vs `content_filter`) — the tool calls / final
-        // answer are unreliable and, deterministic either way, retrying the
-        // identical request reproduces the identical incomplete result. Hence
-        // a non-retriable failure (mirrors the Anthropic stop_reason max_tokens
+        // TRUNCATED or filtered (see `incomplete_details.reason`) — the tool
+        // calls / final answer are unreliable. `max_output_tokens` is
+        // deterministic (the identical request hits the identical cap);
+        // `content_filter` is NOT guaranteed to reproduce (filtering depends
+        // on the sampled output) but signals a policy response to this input,
+        // so retrying against the budget is not worth it. Hence a
+        // non-retriable failure (mirrors the Anthropic stop_reason max_tokens
         // treatment). The turn's own usage rides along so the loop still
         // attributes the burned tokens.
         if (response.status === "incomplete") {
