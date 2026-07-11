@@ -326,10 +326,12 @@ export class OpenAILlmClient implements LlmClient {
         );
       }
 
-      // `response.status === "incomplete"` means the output was TRUNCATED
-      // (token cap) — retrying the identical request hits the identical cap,
-      // so it is a deterministic (non-retriable) failure on every arm below
-      // (mirrors the Anthropic stop_reason max_tokens treatment).
+      // `response.status === "incomplete"` means the output was TRUNCATED or
+      // filtered (see `incomplete_details.reason`: `max_output_tokens` vs
+      // `content_filter`) — deterministic either way, so a retry of the
+      // identical request reproduces the identical incomplete result. Hence a
+      // non-retriable failure on every arm below (mirrors the Anthropic
+      // stop_reason max_tokens treatment).
       const truncated = response.status === "incomplete";
       const retriability = truncated ? ("non-retriable" as const) : ("retriable" as const);
 
@@ -493,11 +495,13 @@ export class OpenAILlmClient implements LlmClient {
         }
 
         // `response.status === "incomplete"` means this turn's output was
-        // TRUNCATED (token cap) — the tool calls / final answer are
-        // unreliable and retrying the identical request hits the identical
-        // cap, so it is a deterministic (non-retriable) failure (mirrors the
-        // Anthropic stop_reason max_tokens treatment). The turn's own usage
-        // rides along so the loop still attributes the burned tokens.
+        // TRUNCATED or filtered (see `incomplete_details.reason`:
+        // `max_output_tokens` vs `content_filter`) — the tool calls / final
+        // answer are unreliable and, deterministic either way, retrying the
+        // identical request reproduces the identical incomplete result. Hence
+        // a non-retriable failure (mirrors the Anthropic stop_reason max_tokens
+        // treatment). The turn's own usage rides along so the loop still
+        // attributes the burned tokens.
         if (response.status === "incomplete") {
           return err({
             kind: "node-crash",

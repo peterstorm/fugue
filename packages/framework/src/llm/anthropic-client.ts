@@ -182,7 +182,7 @@ export class AnthropicLlmClient implements LlmClient {
           kind: "node-crash",
           retriability,
           nodeId: req.nodeId,
-          message: `Anthropic response did not contain a tool_use block (stop_reason: ${response.stop_reason ?? "unknown"})`,
+          message: `Anthropic response did not contain a tool_use block (stop_reason: ${response.stop_reason ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response.content))}`,
         });
       }
 

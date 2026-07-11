@@ -16,7 +16,10 @@ export type MissingCapability = {
 /**
  * Tokens consumed by a call that ultimately failed. Carried on the error
  * variants emitted by the tool-use loop (`node-crash`, `transient`, `aborted`)
- * so that the partial usage burned across already-completed turns is
+ * and the clients' terminal-status short-circuits (e.g. OpenAI
+ * `sendStructured`'s `status:"failed"` arm, which attaches usage via
+ * `responseFailedError` outside any loop) so that the partial usage burned
+ * across already-completed turns — or a single non-looping call — is
  * representable on the `Err` path and can be metered UNCONDITIONALLY (FR-W0-001:
  * 100% attribution). Absent (`undefined`) means the failure consumed no
  * attributable tokens (e.g. an upfront validation error before any turn ran).
@@ -84,6 +87,15 @@ export type FrameworkError =
        * and goes through the standard backoff path.
        */
       readonly retriability: "retriable" | "non-retriable";
+      /**
+       * HTTP status code when this non-retriable crash originated from an HTTP
+       * response (a deterministic 4xx client error — e.g. 401/400/404 — on the
+       * raw-HTTP path or a duck-typed SDK error). Lets consumers branch on
+       * `httpStatus === 401` instead of string-matching `HTTP 401` out of the
+       * message. Absent on non-HTTP `node-crash` producers (iteration limit,
+       * schema mismatch, thrown exception with no `.status`).
+       */
+      readonly httpStatus?: number;
       /**
        * Tokens already consumed by the failed call. The tool-use loop populates
        * this from its accumulated cross-turn totals so a crash (iteration limit,

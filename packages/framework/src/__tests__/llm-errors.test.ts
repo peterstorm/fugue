@@ -90,6 +90,9 @@ describe("httpFailureToError", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toBe("HTTP 401: unauthorized");
+        // FIX 4: an HTTP-origin node-crash carries the typed httpStatus so
+        // consumers branch on `httpStatus === 401` without string-matching.
+        expect(result.error.httpStatus).toBe(401);
       }
     }
   });
@@ -193,7 +196,9 @@ describe("classifyLlmError", () => {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
         expect(result.error.message).toBe("Too Many Requests");
-        // isRateLimit only fires on .status === 429 — carried as typed data.
+        // 429 classifies via the shared TRANSIENT_HTTP_STATUSES arm (the
+        // former dedicated isRateLimit arm was redundant and removed) —
+        // still transient, still carrying httpStatus 429 as typed data.
         expect(result.error.httpStatus).toBe(429);
       }
     }
@@ -211,15 +216,30 @@ describe("classifyLlmError", () => {
         if (result.error.kind === "node-crash") {
           expect(result.error.retriability).toBe("non-retriable");
           expect(result.error.message).toBe(`client error ${status}`);
+          // FIX 4: HTTP-origin non-retriable crash carries the typed status.
+          expect(result.error.httpStatus).toBe(status);
         }
       }
     }
-    // …while a duck-typed 5xx stays a retriable generic crash.
+    // …while a duck-typed 5xx stays a retriable generic crash — and, being the
+    // retriable arm (not HTTP-origin non-retriable), carries NO httpStatus.
     const e5xx = Object.assign(new Error("server error"), { status: 500 });
     const result = classifyLlmError(e5xx, nodeId);
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.retriability).toBe("retriable");
+      expect(result.error.httpStatus).toBeUndefined();
+    }
+  });
+
+  test("non-HTTP node-crash (thrown Error, no .status) omits httpStatus", () => {
+    // FIX 4: the httpStatus field is present ONLY on HTTP-origin crashes;
+    // a plain thrown error with no `.status` must not fabricate one.
+    const result = classifyLlmError(new Error("boom"), nodeId);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("retriable");
+      expect(result.error.httpStatus).toBeUndefined();
     }
   });
 

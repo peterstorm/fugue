@@ -145,8 +145,11 @@ describe("AnthropicLlmClient.sendStructured", () => {
     expect("temperature" in (seen[1] ?? {})).toBe(false);
   });
 
-  it("missing tool_use block → RETRIABLE node-crash naming the stop_reason", async () => {
-    const client = new AnthropicLlmClient(makeStub(async () => makeTextResponse("just text")));
+  it("missing tool_use block → RETRIABLE node-crash naming the stop_reason + snapshotting the body", async () => {
+    // A distinctive body marker so the assertion pins the SNAPSHOT, not just
+    // the stop_reason. Dropping the `truncateErrorBody(JSON.stringify(...))`
+    // suffix (FIX 2) makes the marker vanish from the message and this fail.
+    const client = new AnthropicLlmClient(makeStub(async () => makeTextResponse("BODY_MARKER_9f3a")));
     const result = await client.sendStructured<SchemaType>({
       system: "s",
       user: "u",
@@ -162,6 +165,10 @@ describe("AnthropicLlmClient.sendStructured", () => {
         // The stop_reason is the primary diagnostic for a tool_use-less
         // response — the message must carry it.
         expect(result.error.message).toContain("stop_reason: end_turn");
+        // FIX 2: the response body is snapshotted into the message (mirrors
+        // the sendWithTools residual arm) so the failure is diagnosable from
+        // the error alone, not just from the stop_reason.
+        expect(result.error.message).toContain("BODY_MARKER_9f3a");
         expect(result.error.retriability).toBe("retriable");
       }
     }

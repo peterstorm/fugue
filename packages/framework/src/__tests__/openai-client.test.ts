@@ -418,6 +418,56 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
+  it("response.status incomplete surfaces incomplete_details.reason on the JSON-parse and schema-failure arms", async () => {
+    // Pins the `incompleteDetail(response)` call sites (openai-client.ts
+    // ~:365/:375). The API distinguishes two truncation causes
+    // (`max_output_tokens` vs `content_filter`); the stated reason must reach
+    // the error message so a filter is not misread as a token cap. Dropping
+    // the `${truncated ? \` (${incompleteDetail(response)})\` : ""}` suffix (or
+    // reducing incompleteDetail to the bare status) must FAIL these.
+    // JSON-parse arm — content_filter reason.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput('{"greeting": "cut off')],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+        incomplete_details: { reason: "content_filter" },
+      });
+    const r1 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-json-reason" as NodeId,
+    });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok && r1.error.kind === "node-crash") {
+      expect(r1.error.message).toContain("Not valid JSON");
+      expect(r1.error.message).toContain("reason: content_filter");
+    }
+
+    // Schema-failure arm — max_output_tokens reason.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      });
+    const r2 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-schema-reason" as NodeId,
+    });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok && r2.error.kind === "node-crash") {
+      expect(r2.error.message).toContain("Schema validation failed");
+      expect(r2.error.message).toContain("reason: max_output_tokens");
+    }
+  });
+
   it("HTTP 200 with a non-JSON body → node-crash carrying HTTP 200 + the body snapshot", async () => {
     // A proxy interstitial / HTML error page on a 200 must not escape as a
     // raw SyntaxError from `.json()` — it takes the same hardened
@@ -774,6 +824,34 @@ describe("OpenAILlmClient.sendWithTools", () => {
     }
   });
 
+  it("response.status failed WITHOUT usage → node-crash with no usage (usage stays absent when the body omits it)", async () => {
+    // Pins openai-client.ts:~493 `response.usage ? {...} : undefined`. A body
+    // that reports no usage must yield `error.usage === undefined` — "absent
+    // means no attributable tokens" (types/errors.ts). Mutating the ternary to
+    // unconditionally stamp `{tokensIn, tokensOut}` (a fabricated `{0,0}`)
+    // must FAIL this assertion.
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        // NO `usage` key at all.
+        status: "failed",
+        error: { code: "invalid_prompt", message: "prompt was rejected" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "failed-no-usage" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("error.code: invalid_prompt");
+        expect(result.error.usage).toBeUndefined();
+      }
+    }
+  });
+
   it("response.status failed with a server_error code → RETRIABLE node-crash (sendWithTools)", async () => {
     handler = async () =>
       jsonResponse({
@@ -848,6 +926,32 @@ describe("OpenAILlmClient.sendWithTools", () => {
         expect(result.error.message).toContain('"status":"cancelled"');
         // …and the turn's usage stays attributed (FR-W0-001).
         expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+      }
+    }
+  });
+
+  it("residual terminal status WITHOUT usage → node-crash with no usage (usage stays absent when the body omits it)", async () => {
+    // Pins openai-client.ts:~537 `...(response.usage ? { usage } : {})`. A
+    // residual-status turn whose body reports no usage must leave `error.usage`
+    // undefined. Mutating the spread to unconditionally attach `{ usage }`
+    // (a fabricated `{0,0}`) must FAIL this assertion.
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        // NO `usage` key at all.
+        status: "cancelled",
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "cancelled-no-usage" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("response.status: cancelled");
+        expect(result.error.usage).toBeUndefined();
       }
     }
   });

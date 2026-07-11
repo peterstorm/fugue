@@ -117,13 +117,21 @@ export const TEMPLATE_OPEN = /\{\{/;
  */
 export const TEMPLATE_OPENERS = /\{(?=\{)/g;
 
-export const pascalCase = (kebab: string): string =>
+// Narrowed to the branded `KebabIdent` — the module's invariant is "only a
+// parsed KebabIdent is safe to reshape into a JS identifier". A bare `string`
+// param would let an unvalidated name (`2fast`, `default`, `a b`) slip in and
+// produce an illegal identifier; taking `KebabIdent` makes that
+// unrepresentable. `pascalCase` is module-private (no external callers — the
+// name constructors below are its only callers and already hold a
+// `KebabIdent`); `camelCase` stays exported for the parse-time reserved-word
+// check in `authored.ts`, but narrowed the same way.
+const pascalCase = (kebab: KebabIdent): string =>
   kebab
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join("");
 
-export const camelCase = (kebab: string): string => {
+export const camelCase = (kebab: KebabIdent): string => {
   const pascal = pascalCase(kebab);
   return pascal.charAt(0).toLowerCase() + pascal.slice(1);
 };

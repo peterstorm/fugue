@@ -161,31 +161,68 @@ interface NodePlan {
 
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
 
+// ---------------------------------------------------------------------------
+// Integrity: structure is machine-owned, placeholder bodies are yours
+// ---------------------------------------------------------------------------
+
+/**
+ * Markers delimiting a HUMAN-OWNED placeholder body inside an otherwise
+ * machine-generated declaration. Only `fetch` / `source` / `transform` nodes
+ * emit them (llm `buildInput` is generated glue, human-review gates have no
+ * body). `structuralProjection` collapses each marked region so the integrity
+ * hash covers the machine-owned STRUCTURE (imports, schemas, ids, wiring,
+ * registration) but NOT the body you are instructed to implement — resolving
+ * the "DO NOT EDIT" ⇄ "implement the placeholders" contradiction. loom's
+ * `fugue-generated-integrity` rule applies the SAME projection before hashing;
+ * the cross-repo coupling is these two marker strings plus the collapse rule.
+ */
+export const FUGUE_BODY_START = "// @fugue-body-start";
+export const FUGUE_BODY_END = "// @fugue-body-end";
+
+/** Everything between a body-start and the next body-end (inclusive) collapses
+ *  to one canonical marker: the region's COUNT and ORDER stay in the hash (a
+ *  node body cannot be added/removed/reordered undetected) while its CONTENTS
+ *  are free to implement. A body region carrying the literal end marker, or
+ *  code deliberately wrapped in fake markers to escape the hash, is the same
+ *  deliberate circumvention as stripping the banner — outside the accidental-
+ *  edit threat model this rule targets. */
+export const structuralProjection = (body: string): string =>
+  body.replace(
+    new RegExp(`${FUGUE_BODY_START}[\\s\\S]*?${FUGUE_BODY_END}`, "g"),
+    FUGUE_BODY_START,
+  );
+
 // The placeholder-body emitters take the output spec explicitly: the caller
 // has already narrowed `p.node` by kind, so `p.node.output` is a plain field
-// access — no non-null assertion anywhere.
+// access — no non-null assertion anywhere. The body property (comment + the
+// async callback) is wrapped in @fugue-body markers so implementing it does not
+// trip the integrity hash; id/schemas stay outside the markers and hashed.
 
 const fetchNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
 const ${p.ref} = ${NODE_FACTORY_NAME.fetch}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
+  ${FUGUE_BODY_START}
   // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
   fetch: async (_input) =>
     ok({
 ${defaultsObject(outSpec, "      ")}
     }),
+  ${FUGUE_BODY_END}
 });`;
 
 const sourceNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
 const ${p.ref} = ${NODE_FACTORY_NAME.source}({
   id: ${JSON.stringify(p.node.id)},
   outputSchema: ${p.outName},
+  ${FUGUE_BODY_START}
   // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
   fetch: async () =>
     ok({
 ${defaultsObject(outSpec, "      ")}
     }),
+  ${FUGUE_BODY_END}
 });`;
 
 const transformNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
@@ -193,11 +230,13 @@ const ${p.ref} = ${NODE_FACTORY_NAME.transform}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
+  ${FUGUE_BODY_START}
   // Placeholder — map the real values for: ${comment(p.node.purpose)}
   transform: (_input) =>
     ok({
 ${defaultsObject(outSpec, "      ")}
     }),
+  ${FUGUE_BODY_END}
 });`;
 
 const humanReviewNode = (p: NodePlan): string => `${purposeComment(p.node)}
@@ -486,9 +525,10 @@ ${cases}
   const header = `// ${dag.name} — ${comment(dag.description)}
 //
 // Generated deterministically from dag.authored.json (via \`fugue new --from\`
-// or \`fugue compose\`). The STRUCTURE is authoritative — edit
-// dag.authored.json and regenerate rather than rewiring by hand. Node bodies
-// marked "Placeholder" are yours to implement.`;
+// or \`fugue compose\`). The STRUCTURE is authoritative and integrity-hashed —
+// edit dag.authored.json and regenerate rather than rewiring by hand. Node
+// bodies between the "@fugue-body" markers are yours to implement: they are
+// EXCLUDED from the integrity hash, so filling them in is expected and safe.`;
 
   const dagBinding = hasLlm
     ? `${llmFactoryPreamble(dag.name)}

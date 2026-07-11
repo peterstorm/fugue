@@ -50,7 +50,7 @@ export const httpFailureToError = (
     return err({ kind: "transient", nodeId, message, httpStatus: status });
   }
   if (status >= 400 && status < 500) {
-    return err({ kind: "node-crash", retriability: "non-retriable", nodeId, message });
+    return err({ kind: "node-crash", retriability: "non-retriable", nodeId, message, httpStatus: status });
   }
   return err({ kind: "node-crash", retriability: "retriable", nodeId, message });
 };
@@ -137,21 +137,14 @@ export const classifyLlmError = (
   if (aborted) {
     return err({ kind: "aborted", reason: "signal" });
   }
-  if (isRateLimit(e)) {
-    // `isRateLimit` only fires on `.status === 429` — carry it as the typed
-    // `httpStatus` so consumers can branch without string-matching.
-    return err({
-      kind: "transient",
-      nodeId,
-      message: e instanceof Error ? e.message : String(e),
-      httpStatus: 429,
-    });
-  }
   // Duck-typed HTTP status (SDK errors carry `.status`, e.g. Anthropic's
-  // AuthenticationError/BadRequestError): the shared TRANSIENT_HTTP_STATUSES
-  // policy applies (429 was already intercepted above via `isRateLimit` and
-  // classifies identically if it ever reached here), and any other 4xx is a
-  // deterministic client error — non-retriable.
+  // RateLimitError/AuthenticationError/BadRequestError): the shared
+  // TRANSIENT_HTTP_STATUSES policy applies — 429 (rate limit), 408, and 409
+  // classify as `transient` carrying the typed `httpStatus`; any other 4xx is
+  // a deterministic client error — non-retriable. (The 429 case was formerly
+  // a dedicated `isRateLimit` arm; it is fully subsumed here — same kind,
+  // message, and httpStatus — so the redundant arm and its `429` literal are
+  // gone. `isRateLimit` itself stays exported as a standalone predicate.)
   const status = (e as { status?: unknown })?.status;
   if (typeof status === "number") {
     if (TRANSIENT_HTTP_STATUSES.has(status)) {
@@ -169,6 +162,7 @@ export const classifyLlmError = (
         nodeId,
         message: e instanceof Error ? e.message : String(e),
         stack: e instanceof Error ? e.stack : undefined,
+        httpStatus: status,
       });
     }
   }
