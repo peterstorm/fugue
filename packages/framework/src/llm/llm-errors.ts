@@ -25,6 +25,28 @@ export const truncateErrorBody = (body: string, maxLen = 200): string =>
 const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
 
 /**
+ * The ONE status→classification decision, single-sourced so the two HTTP-origin
+ * failure paths — `httpFailureToError` (raw-HTTP responses) and the duck-typed
+ * status arm of `classifyLlmError` (SDK-thrown errors) — can never diverge on
+ * which statuses are transient vs non-retriable vs retriable. Message and stack
+ * shaping stay at each call site (they differ: HTTP path has a body, SDK path
+ * has an exception with a stack); only the policy lives here.
+ * - 429 / 408 / 409 → `transient`;
+ * - other 4xx → NON-retriable `node-crash` (deterministic client error);
+ * - everything else (5xx, malformed-2xx) → retriable `node-crash`.
+ */
+type HttpErrorClass =
+  | { readonly kind: "transient" }
+  | { readonly kind: "node-crash"; readonly retriability: "retriable" | "non-retriable" };
+
+const classifyHttpStatus = (status: number): HttpErrorClass =>
+  TRANSIENT_HTTP_STATUSES.has(status)
+    ? { kind: "transient" }
+    : status >= 400 && status < 500
+      ? { kind: "node-crash", retriability: "non-retriable" }
+      : { kind: "node-crash", retriability: "retriable" };
+
+/**
  * The ONE HTTP failure policy for non-OK responses on the raw-HTTP path
  * (today: the OpenAI client's `postResponses` arms; the Anthropic client
  * rides its SDK's thrown errors through `classifyLlmError`, whose duck-typed
@@ -47,13 +69,10 @@ export const httpFailureToError = (
   nodeId: NodeId,
 ): Result<never, FrameworkError> => {
   const message = `HTTP ${status}: ${truncateErrorBody(bodyText)}`;
-  if (TRANSIENT_HTTP_STATUSES.has(status)) {
-    return err({ kind: "transient", nodeId, message, httpStatus: status });
-  }
-  if (status >= 400 && status < 500) {
-    return err({ kind: "node-crash", retriability: "non-retriable", nodeId, message, httpStatus: status });
-  }
-  return err({ kind: "node-crash", retriability: "retriable", nodeId, message, httpStatus: status });
+  const cls = classifyHttpStatus(status);
+  return cls.kind === "transient"
+    ? err({ kind: "transient", nodeId, message, httpStatus: status })
+    : err({ kind: "node-crash", retriability: cls.retriability, nodeId, message, httpStatus: status });
 };
 
 /**
@@ -149,36 +168,23 @@ export const classifyLlmError = (
   // gone. `isRateLimit` itself stays exported as a standalone predicate.)
   const status = (e as { status?: unknown })?.status;
   if (typeof status === "number") {
-    if (TRANSIENT_HTTP_STATUSES.has(status)) {
-      return err({
-        kind: "transient",
-        nodeId,
-        message: e instanceof Error ? e.message : String(e),
-        httpStatus: status,
-      });
-    }
-    if (status >= 400 && status < 500) {
-      return err({
-        kind: "node-crash",
-        retriability: "non-retriable",
-        nodeId,
-        message: e instanceof Error ? e.message : String(e),
-        stack: e instanceof Error ? e.stack : undefined,
-        httpStatus: status,
-      });
-    }
-    // Any remaining duck-typed status (5xx, or an SDK oddity outside 4xx) is
-    // still HTTP-origin: a retriable server-side crash that carries the typed
-    // `httpStatus` (mirrors httpFailureToError's final arm) so consumers can
-    // branch on it without string-matching the message.
-    return err({
-      kind: "node-crash",
-      retriability: "retriable",
-      nodeId,
-      message: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
-      httpStatus: status,
-    });
+    // Same shared `classifyHttpStatus` policy as httpFailureToError — 429/408/409
+    // transient, other 4xx non-retriable, everything else (5xx, or an SDK oddity
+    // outside 4xx) a retriable server-side crash — every arm carrying the typed
+    // `httpStatus`. This path keeps the exception's own message and stack (the
+    // transient arm carries neither retriability nor stack, as before).
+    const message = e instanceof Error ? e.message : String(e);
+    const cls = classifyHttpStatus(status);
+    return cls.kind === "transient"
+      ? err({ kind: "transient", nodeId, message, httpStatus: status })
+      : err({
+          kind: "node-crash",
+          retriability: cls.retriability,
+          nodeId,
+          message,
+          stack: e instanceof Error ? e.stack : undefined,
+          httpStatus: status,
+        });
   }
   return err({
     kind: "node-crash",

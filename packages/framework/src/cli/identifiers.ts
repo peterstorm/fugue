@@ -130,17 +130,29 @@ export const TEMPLATE_OPENERS = /\{(?=\{)/g;
  * (`authored.ts` NO_FUGUE_BODY_MARKER) and the emission-site scrub
  * (`authored-codegen.ts` comment() / promptText()) can never disagree on the
  * sequence.
+ *
+ * The literal token is the SINGLE source: the two matchers below and the region
+ * delimiters `FUGUE_BODY_START` / `FUGUE_BODY_END` (`authored-codegen.ts`, built
+ * as `// ${FUGUE_BODY_TOKEN}-start|-end`) are all DERIVED from it, so the token
+ * exists in exactly one place and the schema check, scrub, and codegen markers
+ * cannot drift. (The token has no regex-special characters, so building the
+ * matchers with `new RegExp` is exact — same patterns as the former literals.)
  */
-export const FUGUE_BODY_MARKER = /@fugue-body/;
+export const FUGUE_BODY_TOKEN = "@fugue-body";
+
+export const FUGUE_BODY_MARKER = new RegExp(FUGUE_BODY_TOKEN);
 
 /**
  * Global matcher for the emission-site scrub (safe to share despite the `g`
  * flag: only used with `String.replace`, which does not depend on `lastIndex`).
- * Matches the literal `@fugue-body` token; the scrub replaces the leading `@`
- * with a full-width `＠` (U+FF20) so the token no longer parses as a marker
- * while staying human-legible in the emitted comment.
+ * Matches the token's leading `@` (a lookahead asserts the rest follows); the
+ * scrub replaces just that `@` with a full-width `＠` (U+FF20) so the token no
+ * longer parses as a marker while staying human-legible in the emitted comment.
  */
-export const FUGUE_BODY_MARKERS = /@(?=fugue-body)/g;
+export const FUGUE_BODY_MARKERS = new RegExp(
+  `${FUGUE_BODY_TOKEN[0]}(?=${FUGUE_BODY_TOKEN.slice(1)})`,
+  "g",
+);
 
 // Narrowed to the branded `KebabIdent` — the module's invariant is "only a
 // parsed KebabIdent is safe to reshape into a JS identifier". A bare `string`
