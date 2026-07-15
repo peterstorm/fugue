@@ -1,0 +1,14 @@
+# Generated DAG artifacts carry a tamper-evident `@fugue-integrity sha256:…`
+# stamp (packages/framework/src/cli/authored-codegen.ts `stampGenerated`),
+# verified by loom's fugue-generated-integrity lint rule. The hash is computed
+# over the file's raw UTF-8 bytes with NO line-ending normalization, so the
+# contract is LF-canonical: a CRLF rewrite of a pristine generated file (Windows
+# checkout with core.autocrlf=true, or an EOL-normalizing editor) would fail the
+# hash — fail-CLOSED (a false tamper flag at the wave gate, never a bypass), but
+# still a spurious failure. Pin the generated artifacts to LF so the byte stream
+# git materializes matches the byte stream that was hashed on every platform.
+#
+# Scoped to `dags/` directories so the hand-written framework source
+# (packages/framework/src/types/dag.ts) is not swept in.
+**/dags/**/dag.ts            text eol=lf
+**/dags/**/dag.authored.json text eol=lf
