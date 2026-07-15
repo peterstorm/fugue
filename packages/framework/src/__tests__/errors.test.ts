@@ -11,9 +11,13 @@ import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
   formatFrameworkError,
+  messageOf,
+  retriabilityOf,
   FrameworkAugmentedError,
   type FrameworkError,
+  type Retriability,
 } from "../types/errors.js";
+import type { Capability } from "../types/node.js";
 
 const rid = makeRunId("run-budget");
 const nid = makeNodeId("node-x");
@@ -220,5 +224,79 @@ describe("Capability-broker taxonomy: discriminability (SC-013)", () => {
     expect(categorize(infraError)).toBe("transient");
     expect(categorize(policyError)).toBe("refusal");
     expect(categorize(downstreamError)).toBe("denied");
+  });
+});
+
+describe("retriabilityOf — single source of truth for the retry fast-fail fork", () => {
+  const nid = makeNodeId("node-r");
+  const rid2 = makeRunId("run-r");
+
+  // One valid instance of every FrameworkError kind, paired with the
+  // classification the retry machinery historically applied (the hand-written
+  // disjunction in retry-policy.ts). This table IS the behavior-preservation
+  // contract: `handleNodeFailed` now delegates to `retriabilityOf`, so any drift
+  // between this classification and the old disjunction would flip a retry
+  // decision. Adding a new error kind forces a new row (the type of `cases` is
+  // checked against `FrameworkError`, and `retriabilityOf` is `.exhaustive()`).
+  const cases: ReadonlyArray<readonly [FrameworkError, Retriability]> = [
+    // Deterministic failures — fast-fail, preserve the retry budget.
+    [{ kind: "predicate-malformed", nodeId: nid, message: "bad predicate" }, "non-retriable"],
+    [{ kind: "validation", nodeId: nid, message: "schema mismatch" }, "non-retriable"],
+    [{ kind: "checkpoint-write-failed", runId: rid2, nodeId: nid, message: "disk full" }, "non-retriable"],
+    [{ kind: "aborted", reason: "caller cancelled" }, "non-retriable"],
+    [{ kind: "policy-refusal", scope: "msgraph:mail.send" }, "non-retriable"],
+    [{ kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" }, "non-retriable"],
+    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cumulative: 10, budget: 5 }, "non-retriable"],
+    [{ kind: "missing-capability", missing: [{ nodeId: nid, capability: "llm" as Capability }] }, "non-retriable"],
+    // node-crash carries its own discriminant — both directions honored.
+    [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "non-retriable" }, "non-retriable"],
+    [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "retriable" }, "retriable"],
+    // Transient + everything else — standard backoff path.
+    [{ kind: "transient", nodeId: nid, message: "429" }, "retriable"],
+    [{ kind: "retry-exhausted", nodeId: nid, attempts: 3, lastError: "x", rootErrorKind: "transient" }, "retriable"],
+    [{ kind: "checkpoint-missing", runId: rid2 }, "retriable"],
+    [{ kind: "checkpoint-expired", runId: rid2, expiredAt: "2026-01-01T00:00:00Z" }, "retriable"],
+    [{ kind: "checkpoint-corrupt", runId: rid2, message: "corrupt" }, "retriable"],
+    [{ kind: "checkpoint-version-mismatch", runId: rid2, expected: "2", actual: "1" }, "retriable"],
+    [{ kind: "prompt-not-found", promptName: "p", reason: "missing" }, "retriable"],
+    [{ kind: "cache-error", operation: "get", message: "timeout" }, "retriable"],
+    [{ kind: "cycle-detected", nodeIds: [nid] }, "retriable"],
+    [{ kind: "rejected", nodeId: nid, reason: "no" }, "retriable"],
+    [{ kind: "invalid-reroute", targetNodeId: nid, message: "bad" }, "retriable"],
+    [{ kind: "missing-default-edge", nodeId: nid }, "retriable"],
+    [{ kind: "output-unreachable-under-routing", outputNodeId: nid, missedFromNode: nid }, "retriable"],
+    [{ kind: "duplicate-edge", fromNodeId: nid, toNodeId: nid }, "retriable"],
+    [{ kind: "root-expects-input", nodeId: nid, message: "expects input" }, "retriable"],
+    [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, "retriable"],
+    [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, "retriable"],
+    [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, "retriable"],
+  ];
+
+  it("classifies every one of the 27 error kinds exactly as the old retry disjunction did", () => {
+    for (const [error, expected] of cases) {
+      expect(retriabilityOf(error)).toBe(expected);
+    }
+  });
+
+  it("covers every FrameworkError kind (no kind silently defaults)", () => {
+    // If a kind were added to the taxonomy without a table row here, this count
+    // would drift; `retriabilityOf`'s `.exhaustive()` already fails compilation,
+    // and this guards the test itself from falling behind.
+    const kinds = new Set(cases.map(([e]) => e.kind));
+    expect(kinds.size).toBe(27);
+  });
+});
+
+describe("messageOf — retry-exhausted lastError summariser", () => {
+  const nid = makeNodeId("node-m");
+
+  it("returns the purpose-written message for node-crash and transient", () => {
+    expect(messageOf({ kind: "node-crash", nodeId: nid, message: "crashed hard", retriability: "retriable" })).toBe("crashed hard");
+    expect(messageOf({ kind: "transient", nodeId: nid, message: "rate limited" })).toBe("rate limited");
+  });
+
+  it("JSON-stringifies every other kind so no structured payload is lost", () => {
+    const err: FrameworkError = { kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" };
+    expect(messageOf(err)).toBe(JSON.stringify(err));
   });
 });

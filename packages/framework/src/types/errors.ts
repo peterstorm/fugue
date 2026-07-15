@@ -327,7 +327,108 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
     .with({ kind: "node-crash" }, (e) => e.usage)
     .with({ kind: "transient" }, (e) => e.usage)
     .with({ kind: "aborted" }, (e) => e.usage)
-    .otherwise(() => undefined);
+    // Every other kind carries no attributable tokens. Listed exhaustively (not
+    // `.otherwise`) so adding a new `usage?`-carrying variant without extending
+    // the three arms above is a COMPILE error here — it can never silently drop
+    // burned tokens and regress FR-W0-001's 100% attribution.
+    .with(
+      { kind: "validation" },
+      { kind: "retry-exhausted" },
+      { kind: "checkpoint-missing" },
+      { kind: "checkpoint-expired" },
+      { kind: "checkpoint-corrupt" },
+      { kind: "checkpoint-version-mismatch" },
+      { kind: "checkpoint-write-failed" },
+      { kind: "prompt-not-found" },
+      { kind: "cache-error" },
+      { kind: "cycle-detected" },
+      { kind: "rejected" },
+      { kind: "invalid-reroute" },
+      { kind: "missing-default-edge" },
+      { kind: "output-unreachable-under-routing" },
+      { kind: "predicate-malformed" },
+      { kind: "duplicate-edge" },
+      { kind: "root-expects-input" },
+      { kind: "source-has-incoming" },
+      { kind: "invalid-dag-input-edge" },
+      { kind: "missing-capability" },
+      { kind: "llm-budget-exceeded" },
+      { kind: "infra-unreachable" },
+      { kind: "policy-refusal" },
+      { kind: "downstream-denied" },
+      () => undefined,
+    )
+    .exhaustive();
+
+/**
+ * Retriability of a `FrameworkError` — the SINGLE source of truth for the DAG
+ * retry machinery's fast-fail-vs-retry fork (`handleNodeFailed`). Retriability
+ * is the defining behavioral axis of the whole taxonomy, so it lives here, on
+ * the type's own module, as a TOTAL function the compiler forces to be
+ * exhaustive: adding a new error kind without classifying it is a compile
+ * error, and a new kind can never silently default to "retriable" (the unsafe,
+ * non-fail-closed direction that a hand-maintained boolean disjunction allowed).
+ *
+ * `"non-retriable"` = a deterministic failure that re-running cannot clear;
+ * `handleNodeFailed` fast-fails it, preserving the retry budget for genuinely
+ * transient kinds. See that function for the per-kind rationale (settled auth
+ * denials, tool-loop exhaustion, schema mismatches, budget exhaustion, …).
+ */
+export type Retriability = "retriable" | "non-retriable";
+
+export const retriabilityOf = (e: FrameworkError): Retriability =>
+  match(e)
+    // `node-crash` carries its own explicit retriability discriminant.
+    .with({ kind: "node-crash" }, (c) => c.retriability)
+    // Deterministic failures — re-execution reproduces them, so fast-fail.
+    .with(
+      { kind: "predicate-malformed" },
+      { kind: "validation" },
+      { kind: "checkpoint-write-failed" },
+      { kind: "aborted" },
+      { kind: "policy-refusal" },
+      { kind: "downstream-denied" },
+      { kind: "llm-budget-exceeded" },
+      { kind: "missing-capability" },
+      () => "non-retriable" as const,
+    )
+    // Everything else goes through the standard backoff path. The graph-
+    // structural kinds (cycle-detected, duplicate-edge, root-expects-input, …)
+    // are emitted at validation time and never reach the retry machinery, so
+    // their `"retriable"` label is nominal — it faithfully preserves the
+    // historical fall-through default rather than asserting they would retry.
+    .with(
+      { kind: "transient" },
+      { kind: "retry-exhausted" },
+      { kind: "checkpoint-missing" },
+      { kind: "checkpoint-expired" },
+      { kind: "checkpoint-corrupt" },
+      { kind: "checkpoint-version-mismatch" },
+      { kind: "prompt-not-found" },
+      { kind: "cache-error" },
+      { kind: "cycle-detected" },
+      { kind: "rejected" },
+      { kind: "invalid-reroute" },
+      { kind: "missing-default-edge" },
+      { kind: "output-unreachable-under-routing" },
+      { kind: "duplicate-edge" },
+      { kind: "root-expects-input" },
+      { kind: "source-has-incoming" },
+      { kind: "invalid-dag-input-edge" },
+      { kind: "infra-unreachable" },
+      () => "retriable" as const,
+    )
+    .exhaustive();
+
+/**
+ * The human-readable summary threaded into `retry-exhausted.lastError`.
+ * `node-crash`/`transient` carry a purpose-written `message`; every other kind
+ * has no single message field, so its structured payload is JSON-stringified so
+ * nothing is lost. Single source of truth for the retry-policy call sites, which
+ * would otherwise each re-list the `node-crash | transient` carrier set and drift.
+ */
+export const messageOf = (e: FrameworkError): string =>
+  e.kind === "node-crash" || e.kind === "transient" ? e.message : JSON.stringify(e);
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —

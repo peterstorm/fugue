@@ -11,12 +11,6 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import {
-  dispatchToolCallsWithSpans,
-  type ToolCall,
-  type ToolDispatchResult,
-} from "./tool-dispatch.js";
-import { fwLogger } from "../logger.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 import { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
 import {
@@ -28,19 +22,13 @@ import {
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
 import type {
-  FunctionCallBlock,
-  MessageBlock,
-  ReasoningBlock,
   ResponsesOutputItem,
-  FunctionCallOutputItem,
   ConversationItem,
   ResponsesApiResponse,
 } from "./openai-types.js";
 import {
-  isFunctionCallBlock,
   isMessageBlock,
   isOutputTextPart,
-  isReasoningBlock,
   parseToolCalls,
   buildToolResultItems,
   extractFinalText,

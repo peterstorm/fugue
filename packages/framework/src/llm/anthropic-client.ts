@@ -27,11 +27,7 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import {
-  dispatchToolCallsWithSpans,
-  type ToolCall,
-  type ToolDispatchResult,
-} from "./tool-dispatch.js";
+import type { ToolCall, ToolDispatchResult } from "./tool-dispatch.js";
 import { zodToJsonSchema } from "./zod-schema.js";
 import {
   withLlmSpan,
