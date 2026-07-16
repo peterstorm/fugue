@@ -86,7 +86,7 @@ export type FrameworkError =
        * schema mismatches, prompt-defect loops). `"retriable"` is the default
        * and goes through the standard backoff path.
        */
-      readonly retriability: "retriable" | "non-retriable";
+      readonly retriability: Retriability;
       /**
        * HTTP status code when this crash originated from an HTTP response —
        * a deterministic 4xx client error (non-retriable, e.g. 401/400/404), a
@@ -422,13 +422,52 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
 
 /**
  * The human-readable summary threaded into `retry-exhausted.lastError`.
- * `node-crash`/`transient` carry a purpose-written `message`; every other kind
- * has no single message field, so its structured payload is JSON-stringified so
- * nothing is lost. Single source of truth for the retry-policy call sites, which
- * would otherwise each re-list the `node-crash | transient` carrier set and drift.
+ * `node-crash`/`transient` carry a purpose-written `message` that IS the whole
+ * human story (their other fields are just `nodeId`), so it is returned bare.
+ * Every other kind is JSON-stringified: several DO carry a `message`/`reason`,
+ * but alongside equally-load-bearing context (`checkpoint-corrupt` has `runId`,
+ * `downstream-denied` has `resource`, …), so serialising the whole value loses
+ * nothing — `formatFrameworkError` is the pretty single-line renderer where a
+ * human-facing summary is wanted. Exhaustive (ts-pattern `.exhaustive()`) so a
+ * new kind is a compile error here rather than silently inheriting the
+ * JSON-stringify arm, and so this stays the single source of truth for the
+ * retry-policy call sites (which would otherwise re-list the carrier set and drift).
  */
 export const messageOf = (e: FrameworkError): string =>
-  e.kind === "node-crash" || e.kind === "transient" ? e.message : JSON.stringify(e);
+  match(e)
+    .with({ kind: "node-crash" }, { kind: "transient" }, (c) => c.message)
+    // Every other kind: serialise the whole value so no context field is lost.
+    // Enumerated (not `.otherwise()`) so `.exhaustive()` turns a new kind into a
+    // compile error here rather than silently folding it into JSON-stringify.
+    .with(
+      { kind: "predicate-malformed" },
+      { kind: "validation" },
+      { kind: "checkpoint-write-failed" },
+      { kind: "aborted" },
+      { kind: "policy-refusal" },
+      { kind: "downstream-denied" },
+      { kind: "llm-budget-exceeded" },
+      { kind: "missing-capability" },
+      { kind: "retry-exhausted" },
+      { kind: "checkpoint-missing" },
+      { kind: "checkpoint-expired" },
+      { kind: "checkpoint-corrupt" },
+      { kind: "checkpoint-version-mismatch" },
+      { kind: "prompt-not-found" },
+      { kind: "cache-error" },
+      { kind: "cycle-detected" },
+      { kind: "rejected" },
+      { kind: "invalid-reroute" },
+      { kind: "missing-default-edge" },
+      { kind: "output-unreachable-under-routing" },
+      { kind: "duplicate-edge" },
+      { kind: "root-expects-input" },
+      { kind: "source-has-incoming" },
+      { kind: "invalid-dag-input-edge" },
+      { kind: "infra-unreachable" },
+      (rest) => JSON.stringify(rest),
+    )
+    .exhaustive();
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —

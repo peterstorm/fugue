@@ -9,7 +9,7 @@
 // provider-specific code.
 
 import type { Result } from "../types/result.js";
-import type { FrameworkError } from "../types/errors.js";
+import type { FrameworkError, Retriability } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { err } from "../types/result.js";
 
@@ -37,7 +37,7 @@ const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
  */
 type HttpErrorClass =
   | { readonly kind: "transient" }
-  | { readonly kind: "node-crash"; readonly retriability: "retriable" | "non-retriable" };
+  | { readonly kind: "node-crash"; readonly retriability: Retriability };
 
 const classifyHttpStatus = (status: number): HttpErrorClass =>
   TRANSIENT_HTTP_STATUSES.has(status)
