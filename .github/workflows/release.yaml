@@ -4,12 +4,20 @@
 #   1. Bump versions (keep them in lockstep) and commit.
 #   2. git tag v0.1.0 && git push --tags
 #
-# Auth: npm OIDC trusted publishing — no NPM_TOKEN secret. One-time setup per
-# package on npmjs.com (package → Settings → Trusted Publisher → GitHub
-# Actions: owner/repo + workflow filename `release.yaml`). Note: npm only lets
-# you configure a trusted publisher on a package that already exists, so the
-# very first publish of each package is manual (`bun publish` from a logged-in
-# shell); every release after that runs through here with provenance.
+# Auth: npm OIDC trusted publishing — no NPM_TOKEN secret. All 9 @fuguejs/*
+# packages already exist on npmjs and have a trusted publisher configured
+# (package → Settings → Trusted Publisher → GitHub Actions: owner/repo +
+# workflow filename `release.yaml`), so every release runs through here with
+# provenance — no manual step.
+#
+# NEW PACKAGE ONLY: npm lets you configure a trusted publisher only on a
+# package that already exists, so the very FIRST publish of a brand-new package
+# is manual (`bun publish` from a logged-in shell); configure its trusted
+# publisher immediately after, then all subsequent releases run through here.
+# (History: @fuguejs/oracle and @fuguejs/http-auth were manually first-published
+# at 0.3.0 but their trusted publisher was configured only at 0.4.0 — the
+# workflow had skipped them at 0.3.0 as already-on-registry, so the missing
+# config surfaced as an ENEEDAUTH on the first genuinely-new version it pushed.)
 #
 # Packages ship TypeScript source (bun-first distribution). `bun pm pack`
 # rewrites `workspace:*` ranges to the real versions at pack time; the tarball
