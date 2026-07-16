@@ -42,6 +42,18 @@ export interface LlmRequest<O> {
    * streaming, not yet implemented). OpenAI maps it to `reasoning.effort: "high"`.
    */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
+  /**
+   * Sampling temperature in [0, 1] — the providers' common denominator
+   * (Anthropic caps sampling at 1.0; OpenAI accepts up to 2 but this seam
+   * pins the portable range). Both clients reject a non-finite or
+   * out-of-range value pre-flight as a typed `validation` error before
+   * anything reaches the wire. Omitted → the provider's default.
+   * Deterministic drafting loops (e.g. `fugue compose`) pin this to 0 so
+   * structured turns are as reproducible as the provider allows. Cannot be
+   * combined with `thinking` on OpenAI — the client rejects the pair
+   * pre-flight the same way.
+   */
+  readonly temperature?: number;
   readonly signal?: AbortSignal;
   /**
    * DAG node identifier for error reporting. Required so failures attribute
@@ -128,7 +140,10 @@ export interface SendWithToolsRequest<O> {
   readonly maxIterations?: number;
   /** Total wall-clock deadline across all turns (ms). Default: unlimited. Exceed → Err({ kind: "transient" }). */
   readonly deadlineMs?: number;
-  /** Anthropic-only — extended thinking. Ignored by other providers. */
+  /**
+   * Anthropic ignores this in `sendWithTools` (extended thinking requires
+   * streaming, not yet implemented). OpenAI maps it to `reasoning.effort: "high"`.
+   */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   /** Cancellation. Aborted mid-loop returns Err({ kind: "aborted" }). */
   readonly signal?: AbortSignal;

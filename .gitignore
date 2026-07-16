@@ -24,6 +24,9 @@ __pycache__/
 # Loom orchestration state (machine-local)
 .claude/state/
 
+# fugue compose/new --from gauntlet staging dirs (always cleaned up, but never commit strays)
+.fugue-compose/
+
 # cortex memory plugin scratch
 .cortex_extract.json
 

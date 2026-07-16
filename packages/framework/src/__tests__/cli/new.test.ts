@@ -14,7 +14,24 @@ import { parse as parseYaml } from "yaml";
 import { runLint } from "../../cli/lint.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
+import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "../../cli/identifiers.js";
 import { SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
+
+// `NewOptions.name` / `TemplateCtx.name` are branded (`KebabIdent`) — parse
+// test names through the single smart constructor, never cast.
+const mustName = (raw: string): KebabIdent => {
+  const parsed = parseKebabIdent(raw);
+  if (parsed === null) throw new Error(`not a KebabIdent: ${raw}`);
+  return parsed;
+};
+
+// `NewOptions.team` is branded (`Kebab`) — parse test teams through the single
+// smart constructor, never cast (mirrors `mustName`).
+const mustTeam = (raw: string): Kebab => {
+  const parsed = parseKebab(raw);
+  if (parsed === null) throw new Error(`not a Kebab: ${raw}`);
+  return parsed;
+};
 
 // NB: this package can't import `@fuguejs/host/contract` (host depends on
 // framework, not the reverse). The generated dag.ts references DagRegistration
@@ -54,8 +71,8 @@ describe("generated scaffolds lint clean", () => {
       const label = `${shape}${llm ? " --llm" : ""}`;
       it(`${label} → dag.ts lints, fugue.yaml parses${llm ? ", prompts check green" : ""}`, async () => {
         const root = join(tmpRoot, `lint-${shape}-${llm ? "llm" : "plain"}`);
-        const name = `scaffold-${shape}`;
-        const result = await runNew({ team: "demo", name, shape, llm, review: false, force: false, root });
+        const name = mustName(`scaffold-${shape}`);
+        const result = await runNew({ team: mustTeam("demo"), name, shape, llm, review: false, force: false, root });
         if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
 
         const dagDir = join(root, "dags", "demo", name);
@@ -100,8 +117,8 @@ describe("human-review scaffolds (--review)", () => {
     const label = `linear --review${llm ? " --llm" : ""}`;
     it(`${label} → dag.ts lints and carries a human-review gate`, async () => {
       const root = join(tmpRoot, `review-${llm ? "llm" : "plain"}`);
-      const name = "scaffold-review";
-      const result = await runNew({ team: "demo", name, shape: "linear", llm, review: true, force: false, root });
+      const name = mustName("scaffold-review");
+      const result = await runNew({ team: mustTeam("demo"), name, shape: "linear", llm, review: true, force: false, root });
       if (!result.ok) throw new Error(`runNew failed: ${result.problems.join("; ")}`);
       expect(result.review).toBe(true);
 
@@ -136,7 +153,7 @@ describe("human-review scaffolds (--review)", () => {
 // --------------------------------------------------------------------------
 
 describe("generated content guarantees", () => {
-  const ctx = (llm: boolean) => ({ name: "x", team: "t", pascal: "X", llm });
+  const ctx = (llm: boolean) => ({ name: mustName("x"), team: mustTeam("t"), llm });
 
   for (const shape of SHAPES) {
     it(`${shape} --llm pins a current, non-dated model id`, () => {
@@ -167,7 +184,7 @@ describe("generated content guarantees", () => {
 describe("runNew file layout", () => {
   it("writes dag.ts, fugue.yaml, README.md under dags/<team>/<name>", async () => {
     const root = join(tmpRoot, "layout");
-    const result = await runNew({ team: "leads", name: "my-dag", shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("leads"), name: mustName("my-dag"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
       // The no-`--review` case carries the literal `false` (stable-JSON contract),
@@ -185,7 +202,7 @@ describe("runNew file layout", () => {
 
   it("--llm adds prompts/<name>.txt and a synced registry.json", async () => {
     const root = join(tmpRoot, "layout-llm");
-    const result = await runNew({ team: "leads", name: "opener", shape: "sources", llm: true, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("leads"), name: mustName("opener"), shape: "sources", llm: true, review: false, force: false, root });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.files).toContain(join("dags", "leads", "opener", "prompts", "opener.txt"));
@@ -199,7 +216,7 @@ describe("runNew file layout", () => {
 
   it("--owner sets the fugue.yaml owner", async () => {
     const root = join(tmpRoot, "owner");
-    await runNew({ team: "leads", name: "owned", shape: "linear", llm: false, review: false, owner: "peter.hansen", force: false, root });
+    await runNew({ team: mustTeam("leads"), name: mustName("owned"), shape: "linear", llm: false, review: false, owner: "peter.hansen", force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "owned", "fugue.yaml"), "utf-8");
     expect(yaml).toContain("owner: peter.hansen");
   });
@@ -209,7 +226,7 @@ describe("runNew file layout", () => {
     // keys. The value is emitted double-quoted (JSON-escaped) by construction.
     const root = join(tmpRoot, "owner-hostile");
     const owner = "evil: true\ninjected: pwned";
-    await runNew({ team: "leads", name: "h", shape: "linear", llm: false, review: false, owner, force: false, root });
+    await runNew({ team: mustTeam("leads"), name: mustName("h"), shape: "linear", llm: false, review: false, owner, force: false, root });
     const yaml = await readFile(join(root, "dags", "leads", "h", "fugue.yaml"), "utf-8");
     // The whole owner sits inside one quoted scalar; the newline is escaped, so
     // `injected:` never appears as its own top-level mapping line.
@@ -217,9 +234,22 @@ describe("runNew file layout", () => {
     expect(yaml).not.toMatch(/^injected: pwned$/m);
   });
 
+  it("emits a YAML-coercible team through yamlScalar so it parses back as a STRING", async () => {
+    // KEBAB admits YAML-coercible words (`true`/`null`/`0`/`1e5`) — a raw
+    // `team: ${ctx.team}` would parse back as boolean true, silently changing
+    // the value the host reads. The team must route through yamlScalar (which
+    // quotes it), exactly like owner. Pins the round-12 fix.
+    const root = join(tmpRoot, "team-coercible");
+    await runNew({ team: mustTeam("true"), name: mustName("coerce"), shape: "linear", llm: false, review: false, force: false, root });
+    const yaml = await readFile(join(root, "dags", "true", "coerce", "fugue.yaml"), "utf-8");
+    const parsed = parseYaml(yaml) as { team: unknown };
+    expect(typeof parsed.team).toBe("string");
+    expect(parsed.team).toBe("true");
+  });
+
   it("the LLM factory shape exports create<Pascal>Dag", async () => {
     const root = join(tmpRoot, "factory");
-    await runNew({ team: "leads", name: "lead-opener", shape: "sources", llm: true, review: false, force: false, root });
+    await runNew({ team: mustTeam("leads"), name: mustName("lead-opener"), shape: "sources", llm: true, review: false, force: false, root });
     const dagTs = await readFile(join(root, "dags", "leads", "lead-opener", "dag.ts"), "utf-8");
     expect(dagTs).toContain("export const createLeadOpenerDag");
   });
@@ -265,7 +295,7 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "existing.txt"), "keep me", "utf-8");
 
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.problems[0]).toContain("--force");
   });
@@ -276,31 +306,101 @@ describe("runNew overwrite guard", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "dag.ts"), "// stale", "utf-8");
 
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: true, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
     expect(result.ok).toBe(true);
     const dagTs = await readFile(join(dir, "dag.ts"), "utf-8");
     expect(dagTs).not.toBe("// stale");
+  });
+
+  it("--force removes a leftover dag.authored.json sidecar (tool-owned, shape mode never writes one)", async () => {
+    // A prior --from/compose scaffold leaves a dag.authored.json sidecar. A
+    // shape-mode --force regeneration must remove it — otherwise a later
+    // `fugue new --from dag.authored.json --force` silently resurrects the
+    // OLD DAG, breaking the documented regen fixed point.
+    const root = join(tmpRoot, "guard-force-sidecar");
+    const dir = join(root, "dags", "t", "x");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "dag.authored.json"), `{"fugueAuthored":1}`, "utf-8");
+    // A user file outside the tool-owned set must SURVIVE (never rm -rf).
+    await writeFile(join(dir, "notes.md"), "mine", "utf-8");
+
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(result.ok).toBe(true);
+    const entries = await readdir(dir);
+    expect(entries).not.toContain("dag.authored.json");
+    expect(entries).toContain("notes.md");
+    expect(entries).toContain("dag.ts");
+  });
+
+  it("--force treats generated prompts/ as tool-owned: an --llm scaffold force-regenerated without --llm drops the stale prompt artifacts", async () => {
+    // regen(a) then regen(b, --force) must equal a fresh regen(b) for
+    // everything the tool writes — a stale prompts/ from the --llm scaffold
+    // would otherwise fail `fugue prompts check` forever.
+    const root = join(tmpRoot, "guard-force-prompts");
+    const first = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: true, review: false, force: false, root });
+    expect(first.ok).toBe(true);
+    const dir = join(root, "dags", "t", "x");
+    // A user file inside prompts/ must SURVIVE the reconciliation (never rm -rf).
+    await writeFile(join(dir, "prompts", "notes.md"), "mine", "utf-8");
+
+    const second = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(second.ok).toBe(true);
+    // Tool-owned artifacts gone; the user file (and thus the dir) kept.
+    const entries = await readdir(join(dir, "prompts"));
+    expect(entries).toEqual(["notes.md"]);
+  });
+
+  it("--force with no leftover user files removes the now-promptless prompts/ dir entirely (fixed point)", async () => {
+    const root = join(tmpRoot, "guard-force-prompts-clean");
+    const first = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: true, review: false, force: false, root });
+    expect(first.ok).toBe(true);
+    const second = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(second.ok).toBe(true);
+    // Identical to a fresh non-llm scaffold: no prompts/ dir at all.
+    await expect(readdir(join(root, "dags", "t", "x", "prompts"))).rejects.toThrow();
   });
 
   it("scaffolds into an empty existing dir without --force", async () => {
     const root = join(tmpRoot, "guard-empty");
     const dir = join(root, "dags", "t", "x");
     await mkdir(dir, { recursive: true });
-    const result = await runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
     expect(result.ok).toBe(true);
   });
 
-  it("propagates a non-ENOENT stat error rather than treating the target as safe-to-write", async () => {
+  it("folds a throwing write batch into the problems envelope, keeping the stdout-JSON contract", async () => {
+    // `dag.ts` pre-exists as a DIRECTORY, so the batch's writeFile fails with
+    // EISDIR mid-write. That is an environment failure — it must land in the
+    // `{ ok: false, problems }` envelope (mirrors runNewFrom's write-failed
+    // arm), never crash past the machine-readable contract.
+    const root = join(tmpRoot, "write-envelope");
+    await mkdir(join(root, "dags", "t", "x", "dag.ts"), { recursive: true });
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: true, root });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.problems[0]).toContain("write failed");
+      // Environment failures keep the STACK, not just the message.
+      expect(result.problems[0]).toContain("at ");
+    }
+  });
+
+  it("folds a non-ENOENT stat error into the problems envelope rather than treating the target as safe-to-write", async () => {
     // `dags` is a regular file, so readdir(dags/t/x) fails with ENOTDIR — we
-    // *cannot verify* emptiness, so isDirNonEmpty must rethrow (not report
-    // safe-to-write) and runNew must surface it rather than scaffold over it.
+    // *cannot verify* emptiness, so isDirNonEmpty rethrows (not report
+    // safe-to-write) and runNew must fold it into the `{ ok: false, problems }`
+    // envelope (the bin prints stdout JSON — an escaping throw would break the
+    // machine-readable contract like any other environment failure).
     const root = join(tmpRoot, "guard-notdir");
     await mkdir(root, { recursive: true });
     await writeFile(join(root, "dags"), "i am a file, not a directory", "utf-8");
 
-    await expect(
-      runNew({ team: "t", name: "x", shape: "linear", llm: false, review: false, force: false, root }),
-    ).rejects.toThrow();
+    const result = await runNew({ team: mustTeam("t"), name: mustName("x"), shape: "linear", llm: false, review: false, force: false, root });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.problems[0]).toContain("cannot verify");
+      // Environment failures keep the STACK, not just the message.
+      expect(result.problems[0]).toContain("at ");
+    }
   });
 });
 
@@ -312,10 +412,10 @@ describe("parseNewArgs", () => {
   it("parses a full invocation", () => {
     const parsed = parseNewArgs(["leads/my-dag", "--shape", "sources", "--llm", "--owner", "p.h"]);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
+    if (parsed.ok && "options" in parsed) {
       expect(parsed.options).toMatchObject({
         team: "leads",
-        name: "my-dag",
+        name: mustName("my-dag"),
         shape: "sources",
         llm: true,
         owner: "p.h",
@@ -327,13 +427,13 @@ describe("parseNewArgs", () => {
   it("accepts flags before the positional", () => {
     const parsed = parseNewArgs(["--shape", "linear", "leads/x"]);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.options).toMatchObject({ team: "leads", name: "x", shape: "linear" });
+    if (parsed.ok && "options" in parsed) expect(parsed.options).toMatchObject({ team: "leads", name: mustName("x"), shape: "linear" });
   });
 
   it("parses --review on a linear shape", () => {
     const parsed = parseNewArgs(["leads/x", "--shape", "linear", "--review"]);
     expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.options.review).toBe(true);
+    if (parsed.ok && "options" in parsed) expect(parsed.options.review).toBe(true);
   });
 
   it("rejects --review with a non-linear shape", () => {
@@ -374,6 +474,32 @@ describe("parseNewArgs", () => {
     if (!parsed.ok) expect(parsed.problems.join()).toContain("kebab");
   });
 
+  // The name PascalCases into emitted identifiers (`create<Pascal>Dag`,
+  // `<Pascal>DagOpts`) — a digit-leading name would scaffold `export
+  // interface 2fastDagOpts {`, a SyntaxError, under ok: true (template
+  // scaffolds never run the gauntlet). Must be rejected at the arg boundary
+  // with the rule named, in both llm and non-llm mode.
+  for (const [label, args] of [
+    ["without --llm", ["team/2fast", "--shape", "linear"]],
+    ["with --llm", ["team/2fast", "--shape", "linear", "--llm"]],
+  ] as const) {
+    it(`rejects a digit-leading name ${label}, naming the JS-identifier rule`, () => {
+      const parsed = parseNewArgs(args);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) {
+        const all = parsed.problems.join("\n");
+        expect(all).toContain("name '2fast' must be kebab-case starting with a letter");
+        expect(all).toContain("JS identifier");
+      }
+    });
+  }
+
+  it("still accepts digit-bearing names whose first segment starts with a letter", () => {
+    const parsed = parseNewArgs(["leads/v2-sync", "--shape", "linear"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.mode === "shape") expect(parsed.options.name as string).toBe("v2-sync");
+  });
+
   it("rejects an unknown flag", () => {
     const parsed = parseNewArgs(["leads/x", "--shape", "linear", "--turbo"]);
     expect(parsed.ok).toBe(false);
@@ -385,6 +511,53 @@ describe("parseNewArgs", () => {
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.problems.length).toBeGreaterThanOrEqual(2);
   });
+
+  it("a repeated value-taking flag is last-wins (pinned)", () => {
+    // Duplicate flags are not rejected — the LAST occurrence binds (matches
+    // getopt convention). Pinned so a future "reject duplicates" change is a
+    // deliberate decision, not drift.
+    const parsed = parseNewArgs(["leads/x", "--shape", "router", "--shape", "linear", "--owner", "a", "--owner", "b"]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.mode === "shape") {
+      expect(parsed.options.shape).toBe("linear");
+      expect(parsed.options.owner).toBe("b");
+    }
+  });
+});
+
+describe("parseNewArgs --from", () => {
+  it("parses --from with --owner/--dir/--force into the from variant (mode discriminant)", () => {
+    const parsed = parseNewArgs(["--from", "x.authored.json", "--owner", "p.h", "--dir", "root", "--force"]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.mode !== "from") throw new Error("expected the --from variant");
+    expect(parsed.from).toBe("x.authored.json");
+    expect(parsed.owner).toBe("p.h");
+    expect(parsed.root).toBe("root");
+    expect(parsed.force).toBe(true);
+  });
+
+  it("shape mode carries mode: 'shape' (the discriminant the bin dispatches on)", () => {
+    const parsed = parseNewArgs(["leads/x", "--shape", "linear"]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.mode !== "shape") throw new Error("expected the shape variant");
+    expect(parsed.options.shape).toBe("linear");
+  });
+
+  // name/team/shape/nodes all come from the authored file — the shape-mode
+  // arguments are contradictions, and each must be rejected loudly.
+  const exclusions: readonly (readonly [string, readonly string[]])[] = [
+    ["<team>/<name>", ["leads/x", "--from", "x.authored.json"]],
+    ["--shape", ["--from", "x.authored.json", "--shape", "linear"]],
+    ["--llm", ["--from", "x.authored.json", "--llm"]],
+    ["--review", ["--from", "x.authored.json", "--review"]],
+  ];
+  for (const [what, args] of exclusions) {
+    it(`rejects --from combined with ${what}`, () => {
+      const parsed = parseNewArgs(args);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.problems.join("\n")).toContain("--from");
+    });
+  }
 });
 
 // --------------------------------------------------------------------------
@@ -401,6 +574,35 @@ describe("fugue new (subprocess)", () => {
     const json = JSON.parse(stdout) as { ok: boolean; files?: string[] };
     expect(json.ok).toBe(true);
     expect(json.files).toContain(join("dags", "demo", "cli-dag", "dag.ts"));
+  });
+
+  it("dispatches --from mode: deterministic codegen from an authored file", async () => {
+    const root = join(tmpRoot, "bin-from");
+    await mkdir(root, { recursive: true });
+    const fromPath = join(root, "cli.authored.json");
+    await writeFile(
+      fromPath,
+      JSON.stringify({
+        fugueAuthored: 1,
+        name: "bin-from-dag",
+        team: "demo",
+        description: "bin --from dispatch",
+        input: { fields: [{ name: "id", type: { kind: "string" } }] },
+        nodes: [
+          { id: "fetch-x", kind: "fetch", purpose: "x", output: { fields: [{ name: mustName("x"), type: { kind: "string" } }] } },
+          { id: "shape-x", kind: "transform", purpose: "y", output: { fields: [{ name: "y", type: { kind: "string" } }] } },
+        ],
+        structure: { shape: "linear", order: ["fetch-x", "shape-x"] },
+      }),
+      "utf-8",
+    );
+    const { exitCode, stdout } = await runBin(["new", "--from", fromPath, "--dir", root]);
+    expect(exitCode).toBe(0);
+    const json = JSON.parse(stdout) as { ok: boolean; name?: string; files?: string[] };
+    expect(json.ok).toBe(true);
+    // The sidecar proves --from mode ran (shape mode never writes one).
+    expect(json.name).toBe("bin-from-dag");
+    expect(json.files).toContain(join("dags", "demo", "bin-from-dag", "dag.authored.json"));
   });
 
   it("exits 1 and emits problems JSON on bad args", async () => {

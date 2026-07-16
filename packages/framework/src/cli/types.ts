@@ -1,20 +1,33 @@
 // CLI result types — stable JSON shapes consumed by both human readers and
 // machine harnesses (LLM authoring tools). These are intentionally simple
 // discriminated unions so callers can pattern-match on `ok` and either
-// proceed or surface the structured `errors` payload.
+// proceed or surface the structured `errors`/`problems` payload.
 
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import type {
   DescribedDag,
   DescribedNode,
   DescribedEdge,
 } from "../describe/index.js";
 import type { Shape } from "./new-templates.js";
+import { SHAPE_HELPER_NAME, type Kebab, type KebabIdent } from "./identifiers.js";
 
 // Re-export the shared describe shapes so existing CLI consumers keep their
 // import path. The canonical home is `@fuguejs/framework`'s `describe` module —
 // the host's `GET /dags/:id/manifest` handler imports from there directly.
 export type { DescribedDag, DescribedNode, DescribedEdge };
+
+/**
+ * Exhaustiveness backstop for `switch`es over closed unions whose return type
+ * is INFERRED (no annotation to catch a missing case): the default branch
+ * calls this, so adding a union member without a case is a compile error at
+ * the switch — and an impossible runtime value still fails loudly instead of
+ * falling through to `undefined`.
+ */
+export const assertNever = (value: never): never => {
+  throw new Error(`unreachable: ${JSON.stringify(value)}`);
+};
 
 /**
  * Lint outcome: either the DAG file imports cleanly and validates, or one or
@@ -38,19 +51,29 @@ export type LintResult =
     };
 
 /**
- * The shape-helper constructor each scaffold `Shape` corresponds to. `satisfies
- * Record<Shape, string>` makes this exhaustive over `Shape` (and therefore over
- * `DagProvenance`, its single source) — adding a shape without a helper name, or
- * naming one that isn't a shape, is a compile error. `ShapeHelper` is the union
- * of constructor names, derived rather than re-listed.
+ * The shape-helper constructor each scaffold `Shape` corresponds to. The
+ * catalogue itself lives in `identifiers.ts` (`SHAPE_HELPER_NAME`, the
+ * import-free single source codegen also emits from); the `satisfies
+ * Record<Shape, string>` here makes it exhaustive over `Shape` (and therefore
+ * over `DagProvenance` — both derive from the canonical `DAG_SHAPES` tuple in
+ * `types/dag.ts`) — adding a shape without a helper name, or naming one that
+ * isn't a shape, is a compile error. `ShapeHelper` is the union of
+ * constructor names, derived rather than re-listed.
  */
-export const SHAPE_HELPER = {
-  linear: "defineLinearDag",
-  "fan-out": "defineFanOut",
-  diamond: "defineDiamond",
-  router: "defineRouter",
-  sources: "defineSources",
-} as const satisfies Record<Shape, string>;
+export const SHAPE_HELPER = SHAPE_HELPER_NAME satisfies Record<Shape, string>;
+
+/**
+ * Exact-key backstop for the `satisfies` above: `Record<Shape, string>` only
+ * proves every `Shape` HAS a helper — an EXTRA key in `SHAPE_HELPER_NAME`
+ * (a helper naming something that isn't a shape) would slip through because
+ * excess-property checking doesn't apply to a non-literal reference. This
+ * alias resolves to `never` (a compile error at its own annotation) the
+ * moment `SHAPE_HELPER_NAME` grows a key outside `Shape`.
+ */
+type _NoExtraShapes = Exclude<keyof typeof SHAPE_HELPER_NAME, Shape> extends never ? true : never;
+// Anchor the check so the alias is used (and survives unused-type lint).
+const _noExtraShapes: _NoExtraShapes = true;
+void _noExtraShapes;
 
 /** A DAG shape-helper constructor name (`defineLinearDag` … `defineSources`). */
 export type ShapeHelper = (typeof SHAPE_HELPER)[Shape];
@@ -69,14 +92,20 @@ export type LintAdvisory =
   | {
       /**
        * B2 (advisory): a transform node whose input and output schemas are the
-       * SAME reference (a pass-through / identity-shaped transform). Pre-0.2.0
-       * this was the `read-request` idiom — a node existing only to carry the
-       * DAG request past wave 1. The fix is a `DAG_INPUT` edge straight to the
-       * consumer; the pass-through node can then be deleted.
+       * SAME reference (a pass-through / identity-shaped transform) AND whose
+       * sole incoming source is `DAG_INPUT` — the legacy request-carrier
+       * idiom. Both conjuncts are required: a legitimate A→A transform fed by
+       * another node does not fire. Pre-0.2.0 this was the `read-request`
+       * idiom — a node existing only to carry the DAG request past wave 1.
+       * The fix is a `DAG_INPUT` edge straight to the consumer; the
+       * pass-through node can then be deleted.
        */
       readonly kind: "redundant-passthrough";
       readonly message: string;
-      readonly nodeId: string;
+      // Branded — the producer (`analyzeDag`) reads it off a validated
+      // `DagDef` node, so the wire type carries the proof instead of widening
+      // back to a bare string. Serializes to identical JSON.
+      readonly nodeId: NodeId;
     };
 
 /**
@@ -124,7 +153,9 @@ export type LintError =
        * it at lint time, the single most likely DAG wiring mistake.
        */
       readonly kind: "fan-in-key-mismatch";
-      readonly nodeId: string;
+      // Branded — same rationale as `LintAdvisory.redundant-passthrough`:
+      // the producer holds a validated `DagDef` node id. Identical JSON.
+      readonly nodeId: NodeId;
       readonly message: string;
       /** Incoming source ids with no matching schema key. */
       readonly missingKeys: readonly string[];
@@ -144,6 +175,24 @@ export type LintError =
     };
 
 /**
+ * Flatten a `LintError` to a single problem string for TERMINAL outcomes
+ * (`runCompose`'s gauntlet-failed / repair-exhausted arms, `runNewFrom`'s
+ * problems envelope), keeping the diagnostic payload the arms carry: the
+ * `import-failed` stack and the `dag-definition-error` / `describe-failed`
+ * `detail` would otherwise be dropped exactly where they matter most — the
+ * repair-round feedback path already ships the full objects to the LLM, so
+ * only the terminal flattening loses data without this.
+ */
+export const formatLintError = (e: LintError): string => {
+  const head = `${e.kind}: ${e.message}`;
+  if ("stack" in e && e.stack !== undefined) return `${head}\n${e.stack}`;
+  // JSON (not a prose re-format): `detail` is a FrameworkError whose arms
+  // carry structured fields (nodeId, stack, …) — keep all of them.
+  if ("detail" in e) return `${head}\ndetail: ${JSON.stringify(e.detail)}`;
+  return head;
+};
+
+/**
  * One entry in the built-in capability catalogue emitted by `fugue
  * capabilities`. Stable JSON shape: `name` is what goes in a node's
  * `requires`, `clientType` names the value injected into `ctx[name]`.
@@ -161,7 +210,7 @@ export interface CapabilityCatalogEntry {
  *
  * Always `ok: true` — the catalogue is static framework data with no failure
  * mode — but the field is kept so machine consumers branch on `ok` uniformly
- * across all three CLI commands.
+ * across all CLI commands.
  *
  * `builtin` lists capabilities the framework ships. Adapter-provided
  * capabilities (e.g. `documents`, `db`) are deployment-specific: they exist
@@ -191,8 +240,12 @@ export type NewResult =
       /** Absolute path of the generated DAG directory. */
       readonly dir: string;
       readonly shape: Shape;
-      readonly team: string;
-      readonly name: string;
+      // Branded — kept from the source AuthoredDag (`team: Kebab`,
+      // `name: KebabIdent`) rather than widened back to bare `string`, so the
+      // wire outcome carries proof the KEBAB rules passed. Serializes to
+      // identical JSON.
+      readonly team: Kebab;
+      readonly name: KebabIdent;
       readonly llm: boolean;
       /** Whether a human-review gate (ADR-0060) was scaffolded. */
       readonly review: boolean;
@@ -200,24 +253,57 @@ export type NewResult =
       readonly files: readonly string[];
       /** Ordered, copy-pasteable follow-up commands for the author. */
       readonly nextSteps: readonly string[];
+      /**
+       * Non-fatal lint advisories the proving gauntlet raised (`--from` /
+       * compose). Template scaffolds don't run the gauntlet, so this is `[]`
+       * there. Always an array — consumers never branch on presence.
+       */
+      readonly advisories: readonly LintAdvisory[];
+      /**
+       * Non-fatal warnings the proving gauntlet's `describe` pass carried
+       * through (schema-serialization warnings — see `DescribeResult.warnings`
+       * and `GauntletResult.warnings`). Threaded here so the structured stdout
+       * outcome carries them end-to-end instead of surviving only via stderr.
+       * Template scaffolds don't run the gauntlet, so this is `[]` there.
+       * Always an array — consumers never branch on presence.
+       */
+      readonly warnings: readonly string[];
     }
   | {
+      // No `warnings`/`advisories` on the failure arm by design: they are
+      // properties of a PRODUCED artifact, and nothing was written here. The
+      // asymmetry is the invariant — do not "fix" it by adding empty arrays.
       readonly ok: false;
       readonly problems: readonly string[];
     };
 
 /**
- * Describe outcome: a structured summary of a valid DAG file. Always wraps
- * a lint pass — a file that fails to lint also fails to describe, surfacing
- * the same `LintError` array.
+ * Describe outcome: a structured summary of a valid DAG file. Wraps the
+ * IMPORT path (`importDagFile`, which runs `defineDag`'s structural
+ * validation) and reuses the `LintError` shapes for its failures — but it
+ * does NOT re-run the `analyzeDag` schema checks `fugue lint` adds, so a DAG
+ * with e.g. a fan-in-key-mismatch fails lint yet still describes.
  */
 export type DescribeResult =
   | {
       readonly ok: true;
       readonly path: string;
       readonly dag: DescribedDag;
+      /**
+       * Non-fatal schema-serialization warnings — the affected schema ships
+       * as `null` inside `dag`. Always an array (empty when none), so
+       * consumers never branch on presence; also echoed to stderr for
+       * subprocess callers.
+       */
+      readonly warnings: readonly string[];
     }
   | {
+      // No `warnings` on the failure arm. On the import-failed path that is
+      // genuine — the import failed before schema serialization ran, so none
+      // exist. On the describe-failed path, schema warnings may have
+      // accumulated before assembly failed; they are DELIBERATELY dropped
+      // along with the failed payload. Asymmetry mirrors `NewResult` — not an
+      // oversight.
       readonly ok: false;
       readonly path: string;
       readonly errors: readonly LintError[];

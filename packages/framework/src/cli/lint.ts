@@ -1,34 +1,44 @@
 // fugue lint — import a DAG file, capture any DagDefinitionError, return a
-// structured result. Pure function — never prints, never exits. The bin
-// entry (`bin/fugue.ts`) handles I/O.
+// structured result. No printing, no exiting — returns structured results only;
+// the bin entry (`bin/fugue.ts`) handles I/O. (The import step is the imperative
+// shell — see the `importDagFile` note below — feeding the pure verdict builder.)
 //
-// The lint check is deliberately minimal: if `import(path)` succeeds and the
-// module has a default export with a `.dag` field that is a branded DagDef,
-// the file is valid. `defineDag` itself runs at import time, so anything
-// caught here is what `defineDag` already validated. The CLI's job is to
-// surface the resulting `DagDefinitionError` as machine-readable JSON.
+// The lint check has two halves. First, the import surfaces what `defineDag`
+// already validated at module-load time (topology, registration shape) as a
+// machine-readable `DagDefinitionError`. Second, `analyzeDag` runs schema-
+// aware structural checks `defineDag` deliberately does NOT perform: fan-in
+// key mismatches are errors, pass-through/shape hints are advisories, and a
+// crashed analyzer is itself an `analyzer-failed` error. A lint-green file
+// therefore proves buildability AND fan-in soundness, not just importability.
 
-import { resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DagDefinitionError } from "../executor/define-dag.js";
 import type { DagDef } from "../types/dag.js";
 import { analyzeDag } from "./lint-checks.js";
+import { resolveRoot } from "./paths.js";
 import type { LintAdvisory, LintError, LintResult } from "./types.js";
-
-const toAbsolute = (path: string): string =>
-  isAbsolute(path) ? path : resolve(process.cwd(), path);
 
 /**
  * Result of importing a DAG file. Shared between `runLint` and `runDescribe`
- * so we only `await import()` the file once per CLI invocation — re-imports
- * of a module whose first evaluation threw can return a record with the
- * default binding in TDZ on Bun, which would lose the original error.
+ * as the single import seam because of a Bun hazard: re-importing a module
+ * whose first evaluation THREW can return a record whose default binding is
+ * in TDZ, surfacing a ReferenceError instead of the original error. Repeat
+ * imports of a SUCCESSFULLY evaluated module are harmless cache hits (the
+ * gauntlet path imports the same staged file twice) — the seam exists so a
+ * failed evaluation is only ever imported once and its real error captured.
  */
 export type ImportedDagFile =
   | {
       readonly ok: true;
       readonly path: string;
+      /** The registration record (route/meta/inputSchema live here, untyped). */
       readonly defaultExport: Record<string, unknown>;
+      /**
+       * The registration's `.dag`, already checked object-shaped — the ONE
+       * cast to `DagDef` lives at that check, so consumers (`runLint`,
+       * `runDescribe`) never re-cast from the raw record.
+       */
+      readonly dag: DagDef;
     }
   | {
       readonly ok: false;
@@ -42,7 +52,10 @@ export type ImportedDagFile =
  * default export, no `.dag` field) as discriminated `LintError` values.
  */
 export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
-  const absolute = toAbsolute(path);
+  // `importDagFile` is the imperative shell (it `await import()`s the file), so
+  // the `process.cwd()` env read stays here at the boundary — `resolveRoot` is
+  // the pure core fed the cwd explicitly.
+  const absolute = resolveRoot(path, process.cwd());
   // Note: this CLI is intended to be invoked as a subprocess (one DAG file
   // per run). When re-used within a single process across multiple files,
   // each file imports cleanly. Bun caches a module's *failed* evaluation
@@ -114,12 +127,16 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
     ok: true,
     path: absolute,
     defaultExport: defaultExport as Record<string, unknown>,
+    // The single checked cast: `dagField` is present and object-shaped (the
+    // guard above). Deep validation is `@fuguejs/host`'s contract.
+    dag: dagField as DagDef,
   };
 };
 
 /**
  * Run lint against a DAG file path. Returns a structured result describing
- * either success or the first failure encountered.
+ * either success or the accumulated errors (`checkFanInKeys` accumulates one
+ * per mismatched fan-in node — the author sees every fix at once).
  */
 export const runLint = async (path: string): Promise<LintResult> => {
   const imported = await importDagFile(path);
@@ -136,7 +153,7 @@ export const runLint = async (path: string): Promise<LintResult> => {
   let errors: readonly LintError[] = [];
   let advisories: readonly LintAdvisory[] = [];
   try {
-    const analysis = analyzeDag(imported.defaultExport.dag as DagDef);
+    const analysis = analyzeDag(imported.dag);
     errors = analysis.errors;
     advisories = analysis.advisories;
   } catch (e) {

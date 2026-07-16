@@ -189,8 +189,54 @@ describe("OpenAILlmClient.sendStructured", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.nodeId).toBe(N("n"));
         expect(result.error.message).toMatch(/500/);
+        // 5xx is server-side — the retry budget MAY be spent on it.
+        expect(result.error.retriability).toBe("retriable");
       }
     }
+  });
+
+  it("non-429 4xx → node-crash NON-retriable (deterministic client error, retrying burns budget)", async () => {
+    for (const status of [400, 401, 422]) {
+      handler = async () => jsonResponse({ error: "client error" }, status);
+      const result = await makeClient().sendStructured<SchemaType>({
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        schema: Schema,
+        nodeId: "n" as NodeId,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.retriability).toBe("non-retriable");
+          expect(result.error.message).toMatch(new RegExp(String(status)));
+        }
+      }
+    }
+  });
+
+  it("a throwing schema construction stays inside the Result boundary as a typed validation error", async () => {
+    // buildJsonSchema over a non-schema throws — the pre-flight wrap must
+    // convert that into a typed validation error, never an escaped exception,
+    // and nothing may reach the wire (mirrors the sendWithTools pin below).
+    handler = async () => jsonResponse({ output: [] });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: {} as unknown as z.ZodType<SchemaType>,
+      nodeId: "bad-schema" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("bad-schema"));
+        expect(result.error.message).toMatch(/Schema construction failed/);
+      }
+    }
+    expect(fetchCalls).toHaveLength(0);
   });
 
   it("AbortError → aborted", async () => {
@@ -212,8 +258,9 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("missing output_text → node-crash with nodeId", async () => {
-    handler = async () => jsonResponse({ output: [], usage: {} });
+  it("missing output_text → node-crash with nodeId, snapshotting status + body, carrying the turn's usage", async () => {
+    handler = async () =>
+      jsonResponse({ output: [], usage: { input_tokens: 3, output_tokens: 0 }, status: "incomplete" });
     const result = await makeClient().sendStructured<SchemaType>({
       system: "s",
       user: "u",
@@ -222,9 +269,276 @@ describe("OpenAILlmClient.sendStructured", () => {
       nodeId: "missing" as NodeId,
     });
     expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.nodeId).toBe(N("missing"));
+    if (!result.ok) {
+      // Hard assertion (not a soft guard) — a reclassified arm must FAIL
+      // here, never pass vacuously by skipping the narrowed block.
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("missing"));
+        // A malformed 200 must be debuggable from this error alone: the
+        // response's own status and a truncated body snapshot ride along.
+        expect(result.error.message).toContain("response.status: incomplete");
+        expect(result.error.message).toContain('"output":[]');
+        // status incomplete = truncation — deterministic, non-retriable.
+        expect(result.error.retriability).toBe("non-retriable");
+        // Fb: the malformed success still burned tokens — the in-scope
+        // response.usage must ride the error (FR-W0-001), not be dropped.
+        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+      }
     }
+  });
+
+  it("response.status failed → node-crash carrying error.code/message, retriability from the code (sendStructured)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 3, output_tokens: 0 },
+        status: "failed",
+        error: { code: "invalid_prompt", message: "prompt was rejected" },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "failed-struct" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: failed");
+        expect(result.error.message).toContain("error.code: invalid_prompt");
+        expect(result.error.message).toContain("prompt was rejected");
+        // The failed body reported usage — it rides the error so the burned
+        // tokens stay attributable (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+      }
+    }
+  });
+
+  it("response.status failed with error:null → NON-retriable node-crash with the body-snapshot fallback, no fabricated usage", async () => {
+    // The API contract says `error` is populated on the failed arm — when it
+    // is null anyway, the truncated body snapshot is the only diagnostic, and
+    // an unknown code stays NON-retriable (fail closed, don't burn retries).
+    handler = async () =>
+      jsonResponse({ output: [], status: "failed", error: null });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "failed-null" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: failed");
+        // No error.code — the code segment must be absent entirely…
+        expect(result.error.message).not.toContain("error.code");
+        // …and the (truncated) body snapshot is the fallback detail.
+        expect(result.error.message).toContain('"status":"failed"');
+        // The body reported no usage — none may be fabricated ({0,0} would
+        // make "no attributable tokens" representable two ways).
+        expect(result.error.usage).toBeUndefined();
+      }
+    }
+  });
+
+  it("response.status failed with rate_limit_exceeded → transient carrying the failed turn's usage (sendStructured)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 5, output_tokens: 1 },
+        status: "failed",
+        error: { code: "rate_limit_exceeded", message: "slow down" },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "failed-rl" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        // A rate-limited turn still burned tokens — the transient arm must
+        // carry them so budget settlement sees them (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 5, tokensOut: 1 });
+      }
+    }
+  });
+
+  it("response.status incomplete (truncation) → NON-retriable on the JSON-parse and schema-failure arms", async () => {
+    // Truncated output that is no longer valid JSON.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput('{"greeting": "cut off')],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+      });
+    const r1 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-json" as NodeId,
+    });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) {
+      expect(r1.error.kind).toBe("node-crash");
+      if (r1.error.kind === "node-crash") {
+        expect(r1.error.retriability).toBe("non-retriable");
+        expect(r1.error.message).toContain("response.status: incomplete");
+      }
+    }
+
+    // Truncated output that parses but no longer matches the schema.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+      });
+    const r2 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-schema" as NodeId,
+    });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) {
+      expect(r2.error.kind).toBe("node-crash");
+      if (r2.error.kind === "node-crash") {
+        expect(r2.error.retriability).toBe("non-retriable");
+        expect(r2.error.message).toContain("response.status: incomplete");
+      }
+    }
+  });
+
+  it("response.status incomplete surfaces incomplete_details.reason on the JSON-parse and schema-failure arms", async () => {
+    // Pins the `incompleteDetail(response)` call sites (openai-client.ts
+    // ~:365/:375). The API distinguishes two truncation causes
+    // (`max_output_tokens` vs `content_filter`); the stated reason must reach
+    // the error message so a filter is not misread as a token cap. Dropping
+    // the `${truncated ? \` (${incompleteDetail(response)})\` : ""}` suffix (or
+    // reducing incompleteDetail to the bare status) must FAIL these.
+    // JSON-parse arm — content_filter reason.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput('{"greeting": "cut off')],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+        incomplete_details: { reason: "content_filter" },
+      });
+    const r1 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-json-reason" as NodeId,
+    });
+    expect(r1.ok).toBe(false);
+    if (!r1.ok && r1.error.kind === "node-crash") {
+      expect(r1.error.message).toContain("Not valid JSON");
+      expect(r1.error.message).toContain("reason: content_filter");
+    }
+
+    // Schema-failure arm — max_output_tokens reason.
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      });
+    const r2 = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "trunc-schema-reason" as NodeId,
+    });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok && r2.error.kind === "node-crash") {
+      expect(r2.error.message).toContain("Schema validation failed");
+      expect(r2.error.message).toContain("reason: max_output_tokens");
+    }
+  });
+
+  it("HTTP 200 with a non-JSON body → node-crash carrying HTTP 200 + the body snapshot", async () => {
+    // A proxy interstitial / HTML error page on a 200 must not escape as a
+    // raw SyntaxError from `.json()` — it takes the same hardened
+    // malformed-success arm as any other HTTP failure.
+    handler = async () =>
+      new Response("<html>gateway maintenance</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "non-json-200" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("non-json-200"));
+        expect(result.error.message).toContain("HTTP 200");
+        expect(result.error.message).toContain("gateway maintenance");
+        expect(result.error.retriability).toBe("retriable");
+      }
+    }
+  });
+
+  it("out-of-range/non-finite temperature → typed validation error before any request is sent", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    for (const temperature of [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.5]) {
+      const result = await makeClient().sendStructured<SchemaType>({
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        schema: Schema,
+        nodeId: "temp-node" as NodeId,
+        temperature,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("validation");
+        if (result.error.kind === "validation") {
+          expect(result.error.nodeId).toBe(N("temp-node"));
+          expect(result.error.message).toMatch(/temperature/);
+        }
+      }
+    }
+    // None of the rejected requests reached the wire…
+    expect(fetchCalls).toHaveLength(0);
+    // …while the boundary values of the documented [0, 1] range are legal.
+    for (const temperature of [0, 1]) {
+      const result = await makeClient().sendStructured<SchemaType>({
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        schema: Schema,
+        nodeId: "temp-node" as NodeId,
+        temperature,
+      });
+      expect(result.ok).toBe(true);
+    }
+    expect(fetchCalls).toHaveLength(2);
   });
 
   // Wave 7 §7.4 — typed traversal regression: unknown output item types
@@ -280,7 +594,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     }
   });
 
-  it("non-JSON output → node-crash", async () => {
+  it("non-JSON output → node-crash carrying the turn's usage", async () => {
     handler = async () =>
       jsonResponse({
         output: [makeMessageOutput("not json at all")],
@@ -296,10 +610,28 @@ describe("OpenAILlmClient.sendStructured", () => {
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.message).toMatch(/Not valid JSON/);
+      // Fb: the failed parse still burned tokens — the in-scope
+      // response.usage rides the error (FR-W0-001).
+      expect(result.error.usage).toEqual({ tokensIn: 1, tokensOut: 1 });
+    }
+
+    // …and when the body omits usage entirely, none is fabricated ("absent
+    // means no attributable tokens", types/errors.ts).
+    handler = async () => jsonResponse({ output: [makeMessageOutput("still not json")] });
+    const noUsage = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    });
+    expect(noUsage.ok).toBe(false);
+    if (!noUsage.ok && noUsage.error.kind === "node-crash") {
+      expect(noUsage.error.usage).toBeUndefined();
     }
   });
 
-  it("schema validation failure → node-crash with nodeId", async () => {
+  it("schema validation failure → node-crash with nodeId, carrying the turn's usage", async () => {
     handler = async () =>
       jsonResponse({
         output: [makeMessageOutput(JSON.stringify({ wrong: "shape" }))],
@@ -316,7 +648,64 @@ describe("OpenAILlmClient.sendStructured", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
+      // Fb: the failed validation still burned tokens — the in-scope
+      // response.usage rides the error (FR-W0-001).
+      expect(result.error.usage).toEqual({ tokensIn: 1, tokensOut: 1 });
     }
+  });
+
+  it("threads req.temperature into the wire body, and omits it when absent", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput(JSON.stringify({ greeting: "hi" }))],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+
+    const base = {
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "test-node" as NodeId,
+    };
+    // A pinned temperature reaches the wire (compose pins 0 for determinism)…
+    await makeClient().sendStructured<SchemaType>({ ...base, temperature: 0 });
+    const first = JSON.parse(fetchCalls[0]!.init.body as string);
+    expect(first.temperature).toBe(0);
+    // …and an absent temperature stays ABSENT (provider default) — never a
+    // fabricated value.
+    await makeClient().sendStructured<SchemaType>(base);
+    const second = JSON.parse(fetchCalls[1]!.init.body as string);
+    expect("temperature" in second).toBe(false);
+  });
+
+  it("thinking + temperature → typed validation error before any request is sent", async () => {
+    // Reasoning models reject `temperature` alongside `reasoning` with an
+    // opaque HTTP 400 — the illegal combination is caught at the seam as a
+    // validation FrameworkError (never silently dropped, never a node-crash).
+    handler = async () => {
+      throw new Error("should never reach the wire");
+    };
+    const result = await makeClient().sendStructured<SchemaType>({
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      schema: Schema,
+      nodeId: "reasoning-node" as NodeId,
+      thinking: { type: "enabled", budgetTokens: 1024 },
+      temperature: 0,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("reasoning-node"));
+        expect(result.error.message).toMatch(/temperature/);
+        expect(result.error.message).toMatch(/thinking/);
+      }
+    }
+    // The request never left the process.
+    expect(fetchCalls).toHaveLength(0);
   });
 
   it("text.format is wired as json_schema with strict=true", async () => {
@@ -355,6 +744,33 @@ const makeTool = (
 }) as ToolDef<unknown, unknown>;
 
 describe("OpenAILlmClient.sendWithTools", () => {
+  it("a throwing schema construction stays inside the Result boundary as a typed validation error", async () => {
+    // zodToJsonSchema over a non-schema throws — the pre-flight wrap must
+    // convert that into a typed validation error, never an escaped exception,
+    // and nothing may reach the wire.
+    handler = async () => jsonResponse({ output: [] });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: {} as unknown as z.ZodType<SchemaType>,
+        nodeId: "bad-schema" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.nodeId).toBe(N("bad-schema"));
+        expect(result.error.message).toMatch(/Schema construction failed/);
+      }
+    }
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it("pre-aborted signal → aborted", async () => {
     handler = async () => jsonResponse({ output: [] });
     const ctrl = new AbortController();
@@ -374,6 +790,231 @@ describe("OpenAILlmClient.sendWithTools", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  it("non-429 4xx → node-crash NON-retriable (sendWithTools arm)", async () => {
+    handler = async () => jsonResponse({ error: "bad request" }, 400);
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "test-node" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toMatch(/400/);
+      }
+    }
+  });
+
+  it("response.status failed → node-crash carrying error.code/message + usage (sendWithTools)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 2 },
+        status: "failed",
+        error: { code: "invalid_prompt", message: "prompt was rejected" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "failed-tools" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        // invalid_prompt is deterministic — retrying repeats it.
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: failed");
+        expect(result.error.message).toContain("error.code: invalid_prompt");
+        expect(result.error.message).toContain("prompt was rejected");
+        expect(result.error.usage).toEqual({ tokensIn: 7, tokensOut: 2 });
+      }
+    }
+  });
+
+  it("response.status failed WITHOUT usage → node-crash with no usage (usage stays absent when the body omits it)", async () => {
+    // Pins openai-client.ts:~493 `response.usage ? {...} : undefined`. A body
+    // that reports no usage must yield `error.usage === undefined` — "absent
+    // means no attributable tokens" (types/errors.ts). Mutating the ternary to
+    // unconditionally stamp `{tokensIn, tokensOut}` (a fabricated `{0,0}`)
+    // must FAIL this assertion.
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        // NO `usage` key at all.
+        status: "failed",
+        error: { code: "invalid_prompt", message: "prompt was rejected" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "failed-no-usage" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("error.code: invalid_prompt");
+        expect(result.error.usage).toBeUndefined();
+      }
+    }
+  });
+
+  it("response.status failed with a server_error code → RETRIABLE node-crash (sendWithTools)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+        status: "failed",
+        error: { code: "server_error", message: "internal failure mid-generation" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "failed-5xx" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // Hard assertion (not a soft guard) — a reclassified arm must FAIL
+      // here, never pass vacuously by skipping the narrowed block.
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("error.code: server_error");
+      }
+    }
+  });
+
+  it("response.status failed with rate_limit_exceeded → transient carrying the failed turn's usage (sendWithTools)", async () => {
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 4, output_tokens: 1 },
+        status: "failed",
+        error: { code: "rate_limit_exceeded", message: "slow down" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "failed-rl-tools" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      if (result.error.kind === "transient") {
+        expect(result.error.message).toContain("error.code: rate_limit_exceeded");
+        // The rate-limited turn's tokens must not escape budget accounting —
+        // the transient arm carries them through the loop (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 4, tokensOut: 1 });
+      }
+    }
+  });
+
+  it("residual terminal status with empty output → node-crash naming the status + body snapshot (sendWithTools)", async () => {
+    // e.g. status "cancelled": not failed/incomplete (both short-circuited),
+    // no tool calls, no text. Without the residual-status arm this reached
+    // the loop's context-free "no text content to parse" error, losing the
+    // status. Retriability is unchanged — retriable, like the arm it
+    // replaces; only the diagnosability improves.
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        usage: { input_tokens: 3, output_tokens: 0 },
+        status: "cancelled",
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "cancelled-tools" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("response.status: cancelled");
+        // The truncated body snapshot rides along for diagnosis…
+        expect(result.error.message).toContain('"status":"cancelled"');
+        // …and the turn's usage stays attributed (FR-W0-001).
+        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+      }
+    }
+  });
+
+  it("residual terminal status WITHOUT usage → node-crash with no usage (usage stays absent when the body omits it)", async () => {
+    // Pins openai-client.ts:~537 `...(response.usage ? { usage } : {})`. A
+    // residual-status turn whose body reports no usage must leave `error.usage`
+    // undefined. Mutating the spread to unconditionally attach `{ usage }`
+    // (a fabricated `{0,0}`) must FAIL this assertion.
+    handler = async () =>
+      jsonResponse({
+        output: [],
+        // NO `usage` key at all.
+        status: "cancelled",
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      { system: "s", user: "u", model: "gpt-test", tools: [], schema: Schema, nodeId: "cancelled-no-usage" as NodeId },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("retriable");
+        expect(result.error.message).toContain("response.status: cancelled");
+        expect(result.error.usage).toBeUndefined();
+      }
+    }
+  });
+
+  it("response.status incomplete (truncation) → NON-retriable node-crash carrying the turn's usage", async () => {
+    // A truncated turn's tool calls / final answer are unreliable, and
+    // retrying the identical request hits the identical cap (mirrors the
+    // Anthropic stop_reason max_tokens treatment on sendWithTools).
+    handler = async () =>
+      jsonResponse({
+        output: [makeMessageOutput('{"greeting": "cut off')],
+        usage: { input_tokens: 9, output_tokens: 4 },
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      });
+    const result = await makeClient().sendWithTools<SchemaType>(
+      {
+        system: "s",
+        user: "u",
+        model: "gpt-test",
+        tools: [],
+        schema: Schema,
+        nodeId: "trunc-tools" as NodeId,
+      },
+      RUNTIME,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("response.status: incomplete");
+        // The API's stated truncation cause is surfaced, distinguishing a
+        // token cap from a content filter without a body dump.
+        expect(result.error.message).toContain("reason: max_output_tokens");
+        // The truncated turn still burned tokens — they must be attributed.
+        expect(result.error.usage).toEqual({ tokensIn: 9, tokensOut: 4 });
+      }
     }
   });
 

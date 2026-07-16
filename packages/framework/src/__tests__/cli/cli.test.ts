@@ -1,7 +1,7 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { resolve } from "node:path";
 import { runLint } from "../../cli/lint.js";
-import { runDescribe } from "../../cli/describe.js";
+import { parseRegistrationMeta, runDescribe } from "../../cli/describe.js";
 import { runCapabilities } from "../../cli/capabilities.js";
 import { BUILTIN_CAPABILITY_KEYS } from "../../types/node.js";
 
@@ -84,7 +84,7 @@ describe("runLint", () => {
       const e = result.errors.find((x) => x.kind === "fan-in-key-mismatch");
       expect(e).toBeDefined();
       if (e && e.kind === "fan-in-key-mismatch") {
-        expect(e.nodeId).toBe("join");
+        expect(e.nodeId as string).toBe("join");
         expect(e.missingKeys).toContain("right");
         expect(e.extraKeys).toContain("WRONG");
       }
@@ -122,7 +122,7 @@ describe("runLint", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const carriers = result.advisories.flatMap((a) =>
-        a.kind === "redundant-passthrough" ? [a.nodeId] : [],
+        a.kind === "redundant-passthrough" ? [a.nodeId as string] : [],
       );
       expect(carriers).toContain("read-request");
     }
@@ -179,6 +179,31 @@ describe("runDescribe", () => {
     // No human-review on these nodes, no prompts referenced
     expect(result.dag.nodes.every((n) => !n.humanReview)).toBe(true);
     expect(result.dag.prompts).toEqual([]);
+
+    // `warnings` is non-optional on the ok arm — always an array, empty when
+    // every schema serialized cleanly (consumers never branch on presence).
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("carries schema-serialization failures on the ok result's warnings (schema ships as null)", async () => {
+    // The fixture's registration inputSchema is z.void() — unrepresentable in
+    // JSON Schema. The describe stays ok (best-effort), the affected schema
+    // is null, and the failure reaches BOTH the machine-readable `warnings`
+    // and stderr (for subprocess callers).
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runDescribe(fixturePath("schema-warning.ts"));
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.dag.inputSchema).toBeNull();
+        expect(result.warnings).toHaveLength(1);
+        expect(result.warnings[0]).toContain("inputSchema");
+      }
+      const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(written).toContain("[fugue describe] inputSchema");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("sets outputSchema from the output node's schema", async () => {
@@ -201,6 +226,19 @@ describe("runDescribe", () => {
     expect(result.dag.outputSchema).toBeNull();
   });
 
+  it("still describes a DAG that fails lint (fan-in-key-mismatch) — describe skips analyzeDag", async () => {
+    // The documented lint/describe divergence: describe wraps only the import
+    // path (defineDag's structural validation) and does NOT re-run the
+    // analyzeDag schema checks, so a fan-in-key-mismatch fails lint (covered
+    // above) yet still describes — drawing the wrong-but-importable topology
+    // is often how the mistake is found.
+    const result = await runDescribe(fixturePath("manual-fan-in-mismatch.ts"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.dag.nodes.map((n) => n.id)).toContain("join");
+    }
+  });
+
   it("propagates lint errors as describe errors", async () => {
     // Uses a *separate* invalid-DAG fixture (`-2`) so this test doesn't share
     // a poisoned module-cache entry with the runLint test above. Bun caches
@@ -212,6 +250,39 @@ describe("runDescribe", () => {
     if (!result.ok) {
       expect(result.errors[0]!.kind).toBe("dag-definition-error");
     }
+  });
+});
+
+describe("parseRegistrationMeta", () => {
+  // The degrade contract: missing/mis-typed meta fields fall back to the same
+  // defaults the manifest endpoint uses ("" / "0.0.0") — never a throw. The
+  // registration's `meta` is untyped user input, so every shape must degrade.
+  it("returns the defaults for a missing meta record", () => {
+    expect(parseRegistrationMeta(undefined)).toEqual({ description: "", version: "0.0.0" });
+    expect(parseRegistrationMeta(null)).toEqual({ description: "", version: "0.0.0" });
+  });
+
+  it("returns the defaults for a non-object meta value", () => {
+    expect(parseRegistrationMeta("meta")).toEqual({ description: "", version: "0.0.0" });
+    expect(parseRegistrationMeta(42)).toEqual({ description: "", version: "0.0.0" });
+  });
+
+  it("degrades mis-typed fields individually, keeping well-typed siblings", () => {
+    expect(parseRegistrationMeta({ description: 7, version: "1.2.3" })).toEqual({
+      description: "",
+      version: "1.2.3",
+    });
+    expect(parseRegistrationMeta({ description: "real", version: { major: 1 } })).toEqual({
+      description: "real",
+      version: "0.0.0",
+    });
+  });
+
+  it("passes through well-typed fields verbatim", () => {
+    expect(parseRegistrationMeta({ description: "d", version: "9.9.9" })).toEqual({
+      description: "d",
+      version: "9.9.9",
+    });
   });
 });
 
@@ -297,6 +368,18 @@ describe("fugue bin (subprocess)", () => {
     const { exitCode, stderr } = await runBin(["bogus", fixturePath("valid-dag.ts")]);
     expect(exitCode).toBe(2);
     expect(stderr).toContain("Unknown command");
+  });
+
+  it("exits 2 on a bad prompts subcommand", async () => {
+    const { exitCode, stderr } = await runBin(["prompts", "bogus", "some-dir"]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("requires a subcommand");
+  });
+
+  it("exits 2 when prompts is given no dag directory", async () => {
+    const { exitCode, stderr } = await runBin(["prompts", "sync"]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("exactly one <dagDir>");
   });
 
   it("--help exits 0 with usage on stdout", async () => {

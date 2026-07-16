@@ -3,6 +3,7 @@
 
 import type { DagMachineContextPersisted } from "./types.js";
 import type { FrameworkError } from "../types/errors.js";
+import { messageOf, retriabilityOf } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { WaveDoneResult } from "./wave-resolution.js";
 
@@ -72,18 +73,11 @@ export const handleNodeFailed = (
   //     each retry re-fires the mint (duplicate audit records, real egress once
   //     the cache window lapses). The run-start variant aborts before the retry
   //     machinery exists, so it never reaches this branch.
+  // The per-kind classification is single-sourced in `retriabilityOf` (an
+  // exhaustive match on the taxonomy) so a new error kind is forced to declare
+  // its retriability rather than silently inheriting the retriable default.
   // Transition straight to terminal failed with the original error preserved.
-  if (
-    error.kind === "predicate-malformed" ||
-    error.kind === "validation" ||
-    error.kind === "checkpoint-write-failed" ||
-    error.kind === "aborted" ||
-    error.kind === "policy-refusal" ||
-    error.kind === "downstream-denied" ||
-    error.kind === "llm-budget-exceeded" ||
-    error.kind === "missing-capability" ||
-    (error.kind === "node-crash" && error.retriability === "non-retriable")
-  ) {
+  if (retriabilityOf(error) === "non-retriable") {
     return {
       state: { kind: "failed", error },
       context: ctx,
@@ -142,10 +136,7 @@ export const handleNodeFailed = (
   // underlying error's `kind` on `rootErrorKind` so consumers can tell a
   // rate-limit storm (`transient`) from a deterministic failure (`node-crash`)
   // without parsing `lastError`.
-  const lastError =
-    error.kind === "node-crash" || error.kind === "transient"
-      ? error.message
-      : JSON.stringify(error);
+  const lastError = messageOf(error);
   const exhaustedRetries = new Map(ctxWithCoFailed.retries);
   exhaustedRetries.set(nodeId, currentAttempts + 1);
   const exhaustedCtx: DagMachineContextPersisted = { ...ctxWithCoFailed, retries: exhaustedRetries };
@@ -216,9 +207,7 @@ export const handleHookCrash = (
 
   // Retry budget exhausted — use `retry-exhausted` (same shape as handleNodeFailed)
   // so consumers have one discriminant for all budget-exhaustion cases.
-  const lastError = error.kind === "node-crash" || error.kind === "transient"
-    ? error.message
-    : JSON.stringify(error);
+  const lastError = messageOf(error);
   const exhaustedRetries = new Map(ctx.retries);
   exhaustedRetries.set(nodeId, currentAttempts + 1);
   const exhaustedCtx: DagMachineContextPersisted = { ...ctx, retries: exhaustedRetries };

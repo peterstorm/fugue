@@ -1,17 +1,102 @@
-// Shared LLM client error classification.
+// Shared LLM client error policy.
 //
 // Both AnthropicLlmClient and OpenAILlmClient need identical logic for
-// distinguishing abort, rate-limit, timeout, and generic crash errors.
-// Centralised here so the clients only carry provider-specific code.
+// distinguishing abort, rate-limit, timeout, and generic crash errors
+// (`classifyLlmError`). This module also owns the shared HTTP failure policy
+// (`httpFailureToError` / `TRANSIENT_HTTP_STATUSES`), pre-flight temperature
+// validation (`validateTemperature`), and error-body truncation
+// (`truncateErrorBody`). Centralised here so the clients only carry
+// provider-specific code.
 
 import type { Result } from "../types/result.js";
-import type { FrameworkError } from "../types/errors.js";
+import type { FrameworkError, Retriability } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { err } from "../types/result.js";
 
 /** True when `e` is an AbortError (caller cancellation or timeout). */
 export const isAbort = (e: unknown): boolean =>
   e instanceof Error && e.name === "AbortError";
+
+/** Safely truncate API error body to prevent data leakage through error propagation paths. */
+export const truncateErrorBody = (body: string, maxLen = 200): string =>
+  body.length > maxLen ? body.slice(0, maxLen) + "…[truncated]" : body;
+
+/** 429 / 408 / 409 — transient by RFC and retried by both providers' own SDKs. */
+const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 409, 429]);
+
+/**
+ * The ONE status→classification decision, single-sourced so the two HTTP-origin
+ * failure paths — `httpFailureToError` (raw-HTTP responses) and the duck-typed
+ * status arm of `classifyLlmError` (SDK-thrown errors) — can never diverge on
+ * which statuses are transient vs non-retriable vs retriable. Message and stack
+ * shaping stay at each call site (they differ: HTTP path has a body, SDK path
+ * has an exception with a stack); only the policy lives here.
+ * - 429 / 408 / 409 → `transient`;
+ * - other 4xx → NON-retriable `node-crash` (deterministic client error);
+ * - everything else (5xx, malformed-2xx) → retriable `node-crash`.
+ */
+type HttpErrorClass =
+  | { readonly kind: "transient" }
+  | { readonly kind: "node-crash"; readonly retriability: Retriability };
+
+const classifyHttpStatus = (status: number): HttpErrorClass =>
+  TRANSIENT_HTTP_STATUSES.has(status)
+    ? { kind: "transient" }
+    : status >= 400 && status < 500
+      ? { kind: "node-crash", retriability: "non-retriable" }
+      : { kind: "node-crash", retriability: "retriable" };
+
+/**
+ * The ONE HTTP failure policy for non-OK responses on the raw-HTTP path
+ * (today: the OpenAI client's `postResponses` arms; the Anthropic client
+ * rides its SDK's thrown errors through `classifyLlmError`, whose duck-typed
+ * status arm applies the same classification):
+ * - 429, 408, 409 → `transient` (rate limit / request timeout / conflict —
+ *   transient by RFC and retried by both providers' own SDKs);
+ * - other 4xx → NON-retriable `node-crash` (a deterministic client error —
+ *   retrying burns the budget without changing the outcome);
+ * - everything else (5xx, and malformed-success bodies reported with their
+ *   2xx status) → retriable `node-crash` (server-side, MAY be worth a retry).
+ * Pure — `status`/`bodyText` in, typed error out; the message always carries
+ * `HTTP <status>` plus the (truncated) body so the failure is debuggable
+ * from the error alone, and EVERY arm carries the typed `httpStatus` (all
+ * failures here are HTTP-origin by construction) so consumers can branch on
+ * it without string-matching the message.
+ */
+export const httpFailureToError = (
+  status: number,
+  bodyText: string,
+  nodeId: NodeId,
+): Result<never, FrameworkError> => {
+  const message = `HTTP ${status}: ${truncateErrorBody(bodyText)}`;
+  const cls = classifyHttpStatus(status);
+  return cls.kind === "transient"
+    ? err({ kind: "transient", nodeId, message, httpStatus: status })
+    : err({ kind: "node-crash", retriability: cls.retriability, nodeId, message, httpStatus: status });
+};
+
+/**
+ * Pre-flight validation of `LlmRequest.temperature`. The documented range is
+ * [0, 1] — the providers' common denominator (Anthropic caps sampling at 1.0;
+ * OpenAI accepts up to 2, but this seam pins the portable range so a request
+ * never means different things per provider). A non-finite or out-of-range
+ * value is a deterministic caller error: reject at the seam as a typed
+ * `validation` failure (non-retriable by kind) instead of an opaque provider
+ * HTTP 400 — mirrors the OpenAI thinking+temperature conflict pre-flight.
+ * Returns `null` when the request is valid.
+ */
+export const validateTemperature = (
+  temperature: number | undefined,
+  nodeId: NodeId,
+): Result<never, FrameworkError> | null =>
+  temperature !== undefined &&
+  (!Number.isFinite(temperature) || temperature < 0 || temperature > 1)
+    ? err({
+        kind: "validation",
+        nodeId,
+        message: `temperature must be a finite number in [0, 1], got ${temperature}`,
+      })
+    : null;
 
 /**
  * Duck-typed 429 detection. The Anthropic SDK throws `RateLimitError` with
@@ -72,12 +157,34 @@ export const classifyLlmError = (
   if (aborted) {
     return err({ kind: "aborted", reason: "signal" });
   }
-  if (isRateLimit(e)) {
-    return err({
-      kind: "transient",
-      nodeId,
-      message: e instanceof Error ? e.message : String(e),
-    });
+  // Duck-typed HTTP status (SDK errors carry `.status`, e.g. Anthropic's
+  // RateLimitError/AuthenticationError/BadRequestError): the shared
+  // TRANSIENT_HTTP_STATUSES policy applies — 429 (rate limit), 408, and 409
+  // classify as `transient`, any other 4xx as a deterministic non-retriable
+  // client error, and everything else (5xx) as a retriable server-side crash —
+  // every arm carrying the typed `httpStatus`. (The 429 case was formerly
+  // a dedicated `isRateLimit` arm; it is fully subsumed here — same kind,
+  // message, and httpStatus — so the redundant arm and its `429` literal are
+  // gone. `isRateLimit` itself stays exported as a standalone predicate.)
+  const status = (e as { status?: unknown })?.status;
+  if (typeof status === "number") {
+    // Same shared `classifyHttpStatus` policy as httpFailureToError — 429/408/409
+    // transient, other 4xx non-retriable, everything else (5xx, or an SDK oddity
+    // outside 4xx) a retriable server-side crash — every arm carrying the typed
+    // `httpStatus`. This path keeps the exception's own message and stack (the
+    // transient arm carries neither retriability nor stack, as before).
+    const message = e instanceof Error ? e.message : String(e);
+    const cls = classifyHttpStatus(status);
+    return cls.kind === "transient"
+      ? err({ kind: "transient", nodeId, message, httpStatus: status })
+      : err({
+          kind: "node-crash",
+          retriability: cls.retriability,
+          nodeId,
+          message,
+          stack: e instanceof Error ? e.stack : undefined,
+          httpStatus: status,
+        });
   }
   return err({
     kind: "node-crash",

@@ -1,16 +1,42 @@
 // Scaffold templates for `fugue new` (C3). Pure string builders — no I/O.
 //
 // Every template is a parameterized copy of a lint-tested golden example
-// (`docs/examples/01-04`, `08`, `09`), so the generated `dag.ts` is compliant
+// (`packages/framework/docs/examples/`: `01-linear.ts`–`04-router.ts`,
+// `08-multi-source-join.ts`, `09-dag-factory-seams.ts`,
+// `10-human-review.ts`), so the generated `dag.ts` is compliant
 // by construction: current model ids, `frameworkError.*` (never raw `err`
 // literals), correct fan-in schemas keyed by source-node id, bucketed
 // confidence via the spread-override pattern, and `$input` edges for the
 // request. `new.test.ts` lints every (shape × llm) combination to keep that
 // promise honest — a template that stops linting fails the build.
+//
+// RELATIONSHIP TO `authored-codegen.ts` (deliberate, not drift): this module
+// and `buildAuthoredScaffold` are BOTH dag.ts generators, kept separate on
+// purpose. These templates are HUMAN-EDUCATION scaffolds — realistic example
+// bodies (`fetch: async (input) => ok({ id: input.id, ... })`), an
+// `err(frameworkError.validation(...))` error-path demonstration, curated
+// prompts, and teaching comments — the starting point a person edits.
+// `authored-codegen` is the MACHINE half: it derives everything from an
+// AuthoredDag and emits placeholder bodies, generic prompts, and the
+// regenerate-from-`dag.authored.json` workflow; collapsing `fugue new
+// --shape` onto canned AuthoredDag presets would replace the teaching
+// scaffold with "todo" placeholders. What the two must never let drift is the
+// SHARED IDIOM SURFACE, so that lives in exactly one place: the identifier
+// constructors in `identifiers.ts`, and — here, consumed by both —
+// `DEFAULT_MODEL`, `llmConfidenceReturn`, `llmFactoryPreamble`,
+// `llmDagFactoryOpen`, and `registration`.
 
 import { match } from "ts-pattern";
 import { parse as parseYaml } from "yaml";
 import { DAG_SHAPES } from "../types/dag.js";
+import {
+  DEFAULT_MODEL_NAME,
+  REGISTRATION_CONST_NAME,
+  dagFactoryName,
+  dagOptsInterfaceName,
+  type Kebab,
+  type KebabIdent,
+} from "./identifiers.js";
 
 /**
  * The topologies `fugue new --shape` can scaffold — one per DAG shape. Sourced
@@ -19,13 +45,31 @@ import { DAG_SHAPES } from "../types/dag.js";
 export const SHAPES = DAG_SHAPES;
 export type Shape = (typeof SHAPES)[number];
 
+/**
+ * The sole `Shape` producer for raw CLI input: the membership check IS the
+ * narrowing, so no call site ever pairs a non-narrowing `includes` with a
+ * separate `as Shape` cast (parse, don't validate).
+ */
+export const parseShape = (raw: string): Shape | null =>
+  (SHAPES as readonly string[]).includes(raw) ? (raw as Shape) : null;
+
 export interface TemplateCtx {
-  /** DAG id / directory name (kebab-case). */
-  readonly name: string;
-  /** Owning team (from the `<team>/<name>` path). */
-  readonly team: string;
-  /** PascalCase of `name`, for the factory identifier (`create<Pascal>Dag`). */
-  readonly pascal: string;
+  /**
+   * DAG id / directory name. BRANDED (`KebabIdent`): the name feeds the
+   * `dagFactoryName` / `dagOptsInterfaceName` constructors, which PascalCase
+   * it into emitted JS identifiers — the brand proves the first segment
+   * starts with a letter, so a `2fast` scaffold (a SyntaxError) is
+   * unrepresentable.
+   */
+  readonly name: KebabIdent;
+  /** Owning team (from the `<team>/<name>` path). BRANDED (`Kebab`): the
+   * team feeds generated markdown and `fugue.yaml`, so identifier/path safety
+   * is structural, not caller discipline — matching `name`'s brand on the same
+   * type. Kebab-safety is NOT YAML-scalar-safety, though: the KEBAB regex admits
+   * `true`/`false`/`null`/`0`/`007`/`1e5`, which YAML would coerce to a
+   * boolean/null/number, so `team` is emitted via `yamlScalar` (like `owner`) to
+   * keep such values as strings. */
+  readonly team: Kebab;
   /** Whether to scaffold an LLM node + prompt. */
   readonly llm: boolean;
   /**
@@ -53,10 +97,10 @@ export interface Scaffold {
 
 // A current model id — kept in one place so a model-id bump touches one line.
 // See `@fuguejs/framework/docs/llm-dag-authoring.md` ("Model ids").
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 /** Shared `frameworkError.*` confidence/spread-override boilerplate for LLM nodes. */
-const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { mode: "none" }\`. Spread-override the
+export const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { mode: "none" }\`. Spread-override the
   // field to emit the model's self-reported BUCKET through the framework's
   // typed confidence channel — never a number (see docs/llm-dag-authoring.md).
   return {
@@ -67,8 +111,32 @@ const llmConfidenceReturn = `  // createLlmNode defaults \`confidence: { mode: "
     },
   };`;
 
-const registration = (ctx: TemplateCtx, dagExpr: string, description: string): string =>
-  `const registration: DagRegistration = {
+/**
+ * The DagOpts interface + pinned-model const every `--llm` factory scaffold
+ * opens with. ONE emitter for the idiom — the golden templates and
+ * `authored-codegen` (the two dag.ts generators; see the module header) both
+ * interpolate this, so the factory-seam text cannot drift between them, and
+ * the interface/const names come from the `identifiers.ts` constructors the
+ * collision accounting is built from.
+ */
+export const llmFactoryPreamble = (name: KebabIdent): string =>
+  `export interface ${dagOptsInterfaceName(name)} {
+  /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
+  readonly model?: string;
+}
+
+const ${DEFAULT_MODEL_NAME} = ${JSON.stringify(DEFAULT_MODEL)};`;
+
+/**
+ * The exported factory signature every `--llm` scaffold binds its structure
+ * to: `export const create<Pascal>Dag = (opts: <Pascal>DagOpts = {}) =>`.
+ * Shared for the same no-drift reason as `llmFactoryPreamble`.
+ */
+export const llmDagFactoryOpen = (name: KebabIdent): string =>
+  `export const ${dagFactoryName(name)} = (opts: ${dagOptsInterfaceName(name)} = {}) =>`;
+
+export const registration = (ctx: TemplateCtx, dagExpr: string, description: string): string =>
+  `const ${REGISTRATION_CONST_NAME}: DagRegistration = {
   dag: ${dagExpr},
   inputSchema: InputSchema,
   route: "/${ctx.name}",
@@ -78,7 +146,7 @@ const registration = (ctx: TemplateCtx, dagExpr: string, description: string): s
   },
 };
 
-export default registration;
+export default ${REGISTRATION_CONST_NAME};
 `;
 
 // ---------------------------------------------------------------------------
@@ -162,7 +230,7 @@ const review = createHumanReviewNode({
 `
     : "";
   const dagTs = `// ${ctx.name} — linear pipeline ending in an LLM node${ctx.review ? " + a human-review gate" : ""}, built as a
-// FACTORY so the model seam is injectable (production calls \`create${ctx.pascal}Dag()\`;
+// FACTORY so the model seam is injectable (production calls \`${dagFactoryName(ctx.name)}()\`;
 // a test passes a fake model id + FakeLlmClient). Generated by \`fugue new --llm\`.
 
 import { z } from "zod";
@@ -176,12 +244,7 @@ ${ctx.review ? "  createHumanReviewNode,\n" : ""}  createLlmNode,
 import type { LlmNodeDef } from "@fuguejs/framework";
 import type { DagRegistration } from "@fuguejs/host/contract";
 
-export interface ${ctx.pascal}DagOpts {
-  /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
-  readonly model?: string;
-}
-
-const DEFAULT_MODEL = "${DEFAULT_MODEL}";
+${llmFactoryPreamble(ctx.name)}
 
 const InputSchema = z.object({ id: z.string() });
 const RecordSchema = z.object({ id: z.string(), text: z.string() });
@@ -212,13 +275,13 @@ const createSummarize = (
 ${llmConfidenceReturn}
 };
 ${reviewBlock}
-export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
+${llmDagFactoryOpen(ctx.name)}
   defineLinearDag({
     id: "${ctx.name}",
     nodes: [fetchRecord, createSummarize(opts.model ?? DEFAULT_MODEL)${ctx.review ? ", review" : ""}],
   });
 
-${registration(ctx, `create${ctx.pascal}Dag()`, `Linear LLM pipeline scaffold for ${ctx.name}. Fetch a record, then summarize it.`)}`;
+${registration(ctx, `${dagFactoryName(ctx.name)}()`, `Linear LLM pipeline scaffold for ${ctx.name}. Fetch a record, then summarize it.`)}`;
 
   return {
     dagTs,
@@ -332,12 +395,7 @@ import {
 import type { LlmNodeDef } from "@fuguejs/framework";
 import type { DagRegistration } from "@fuguejs/host/contract";
 
-export interface ${ctx.pascal}DagOpts {
-  /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
-  readonly model?: string;
-}
-
-const DEFAULT_MODEL = "${DEFAULT_MODEL}";
+${llmFactoryPreamble(ctx.name)}
 
 const InputSchema = z.object({ id: z.string() });
 const TriggerSchema = z.object({ id: z.string(), label: z.string() });
@@ -389,7 +447,7 @@ const merge = createTransformNode({
   transform: (fanIn) => ok({ analysis: fanIn.analyze.analysis, b: fanIn["fetch-b"].b }),
 });
 
-export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
+${llmDagFactoryOpen(ctx.name)}
   ${helper}({
     id: "${ctx.name}",
     source: trigger,
@@ -397,7 +455,7 @@ export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
     join: merge,
   });
 
-${registration(ctx, `create${ctx.pascal}Dag()`, `${kind} LLM scaffold for ${ctx.name}: an LLM branch + a deterministic branch, merged.`)}`;
+${registration(ctx, `${dagFactoryName(ctx.name)}()`, `${kind} LLM scaffold for ${ctx.name}: an LLM branch + a deterministic branch, merged.`)}`;
 
   return {
     dagTs,
@@ -503,12 +561,7 @@ import {
 import type { LlmNodeDef } from "@fuguejs/framework";
 import type { DagRegistration } from "@fuguejs/host/contract";
 
-export interface ${ctx.pascal}DagOpts {
-  /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
-  readonly model?: string;
-}
-
-const DEFAULT_MODEL = "${DEFAULT_MODEL}";
+${llmFactoryPreamble(ctx.name)}
 
 const InputSchema = z.object({ message: z.string() });
 const IntentSchema = z.object({
@@ -552,7 +605,7 @@ const handleOther = createTransformNode({
   transform: () => ok({ reply: "Routed to a human." }),
 });
 
-export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
+${llmDagFactoryOpen(ctx.name)}
   defineRouter({
     id: "${ctx.name}",
     classifier: createClassify(opts.model ?? DEFAULT_MODEL),
@@ -569,7 +622,7 @@ export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
     default: handleOther, // REQUIRED
   });
 
-${registration(ctx, `create${ctx.pascal}Dag()`, `Router LLM scaffold for ${ctx.name}: an LLM classifier routes a message to a handler.`)}`;
+${registration(ctx, `${dagFactoryName(ctx.name)}()`, `Router LLM scaffold for ${ctx.name}: an LLM classifier routes a message to a handler.`)}`;
 
   return {
     dagTs,
@@ -698,12 +751,7 @@ import {
 import type { LlmNodeDef } from "@fuguejs/framework";
 import type { DagRegistration } from "@fuguejs/host/contract";
 
-export interface ${ctx.pascal}DagOpts {
-  /** Model seam; defaults to a current id. Tests pass a fake id + FakeLlmClient. */
-  readonly model?: string;
-}
-
-const DEFAULT_MODEL = "${DEFAULT_MODEL}";
+${llmFactoryPreamble(ctx.name)}
 
 const InputSchema = z.object({ region: z.string() });
 
@@ -760,7 +808,7 @@ const assemble = createTransformNode({
     ok({ region: input.$input.region, summary: input.synthesize.summary }),
 });
 
-export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
+${llmDagFactoryOpen(ctx.name)}
   defineSources({
     id: "${ctx.name}",
     sources: [fetchA, fetchB],
@@ -768,7 +816,7 @@ export const create${ctx.pascal}Dag = (opts: ${ctx.pascal}DagOpts = {}) =>
     assemble,
   });
 
-${registration(ctx, `create${ctx.pascal}Dag()`, `Multi-source LLM join scaffold for ${ctx.name}: parallel sources → LLM synthesis → assemble.`)}`;
+${registration(ctx, `${dagFactoryName(ctx.name)}()`, `Multi-source LLM join scaffold for ${ctx.name}: parallel sources → LLM synthesis → assemble.`)}`;
 
   return {
     dagTs,
@@ -798,8 +846,11 @@ export const buildScaffold = (shape: Shape, ctx: TemplateCtx): Scaffold =>
 
 // A plain (unquoted) YAML scalar is only a SYNTAX-safe shape candidate: it must
 // start alphanumeric and contain no character that changes YAML meaning (`:`,
-// `#`, newlines, leading/trailing space, indicators). `team` is path-derived and
-// kebab-constrained so it is always safe; `owner` is freeform author input.
+// `#`, newlines, leading/trailing space, indicators). Both `team` (path-derived,
+// kebab-constrained) and `owner` (freeform author input) are routed through
+// `yamlScalar`: the KEBAB regex still admits YAML-coercible values (`true`,
+// `false`, `null`, `0`, `007`, `1e5`), which the core schema would coerce to a
+// boolean/null/number, so kebab-safety is NOT scalar-safety.
 // Passing this regex is necessary but NOT sufficient — a syntactically-plain
 // `0`/`true`/`null`/`1.5` parses back as a number/boolean/null, not the original
 // string (see the round-trip guard in `yamlScalar`).
@@ -836,19 +887,19 @@ export const yamlScalar = (value: string): string => {
 /** `fugue.yaml` — team from the `<team>/<name>` path; owner optional. */
 export const fugueYaml = (ctx: TemplateCtx, owner?: string): string =>
   owner !== undefined
-    ? `team: ${ctx.team}\nowner: ${yamlScalar(owner)}\n`
-    : `team: ${ctx.team}\n# owner: your.name   # optional — individual owner within the team\n`;
+    ? `team: ${yamlScalar(ctx.team)}\nowner: ${yamlScalar(owner)}\n`
+    : `team: ${yamlScalar(ctx.team)}\n# owner: your.name   # optional — individual owner within the team\n`;
 
 /** Per-DAG README stub: what it does, route, and the verification loop. */
 export const readme = (ctx: TemplateCtx, shape: Shape): string =>
   `# ${ctx.name}
 
-> Scaffolded by \`fugue new ${ctx.team}/${ctx.name} --shape ${shape}${ctx.llm ? " --llm" : ""}\`.
+> Scaffolded by \`fugue new ${ctx.team}/${ctx.name} --shape ${shape}${ctx.llm ? " --llm" : ""}${ctx.review ? " --review" : ""}\`.
 > Replace this description, the placeholder schemas, and the node bodies.
 
 **Team:** ${ctx.team}
 **Route:** \`/${ctx.name}\`
-**Shape:** ${shape}${ctx.llm ? " (LLM)" : ""}
+**Shape:** ${shape}${ctx.llm ? " (LLM)" : ""}${ctx.review ? " (human-review gate)" : ""}
 
 ## What it does
 
@@ -857,7 +908,7 @@ TODO — describe the request, the sources/steps, and the response.
 ## Verify
 
 \`\`\`bash
-bun node_modules/@fuguejs/framework/bin/fugue.ts lint     dags/${ctx.team}/${ctx.name}/dag.ts
+bun node_modules/@fuguejs/framework/bin/fugue.ts lint      dags/${ctx.team}/${ctx.name}/dag.ts
 bun node_modules/@fuguejs/framework/bin/fugue.ts describe  dags/${ctx.team}/${ctx.name}/dag.ts
 ${ctx.llm ? `bun node_modules/@fuguejs/framework/bin/fugue.ts prompts check dags/${ctx.team}/${ctx.name}\n` : ""}bun test
 \`\`\`

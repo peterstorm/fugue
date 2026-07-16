@@ -18,7 +18,7 @@
     "fugue": "./bin/fugue.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bin.json",
     "test": "bun test --path-ignore-patterns='dist/**'"
   },
   "dependencies": {

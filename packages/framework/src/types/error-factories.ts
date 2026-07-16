@@ -6,7 +6,7 @@
 
 import { nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
 import type { NodeId, RunId } from "./ids.js";
-import type { FrameworkError, MissingCapability } from "./errors.js";
+import type { FrameworkError, MissingCapability, Retriability } from "./errors.js";
 import type { Capability } from "./node.js";
 
 const toNodeId = (nid: string | NodeId): NodeId => brandNodeId(nid as string);
@@ -20,7 +20,7 @@ export const frameworkError = {
     ({ kind: "validation", nodeId: toNodeId(nid), message, ...(path !== undefined ? { path } : {}) }),
 
   nodeCrash: (nid: string | NodeId, message: string, opts?: {
-    retriability?: "retriable" | "non-retriable";
+    retriability?: Retriability;
     stack?: string;
   }): FrameworkError => ({
     kind: "node-crash",

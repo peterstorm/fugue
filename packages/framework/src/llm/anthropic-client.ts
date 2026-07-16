@@ -27,11 +27,7 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
-import {
-  dispatchToolCallsWithSpans,
-  type ToolCall,
-  type ToolDispatchResult,
-} from "./tool-dispatch.js";
+import type { ToolCall, ToolDispatchResult } from "./tool-dispatch.js";
 import { zodToJsonSchema } from "./zod-schema.js";
 import {
   withLlmSpan,
@@ -39,7 +35,7 @@ import {
   setLlmRequestAttributes,
   setLlmResponseAttributes,
 } from "./spans.js";
-import { classifyLlmError } from "./llm-errors.js";
+import { classifyLlmError, truncateErrorBody, validateTemperature } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop } from "./tool-use-loop.js";
 
@@ -114,10 +110,27 @@ export class AnthropicLlmClient implements LlmClient {
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // Pre-flight: an out-of-range/non-finite temperature is a deterministic
+    // caller error — typed validation failure before anything reaches the wire.
+    const temperatureError = validateTemperature(req.temperature, req.nodeId);
+    if (temperatureError !== null) return temperatureError;
+
+    // Pre-flight: schema construction is deterministic — non-retriable on
+    // failure (mirrors OpenAI's sendStructured pre-flight).
+    let jsonSchema: ReturnType<typeof zodToJsonSchema>;
+    try {
+      jsonSchema = zodToJsonSchema(req.schema);
+    } catch (e) {
+      return err({
+        kind: "validation",
+        nodeId: req.nodeId,
+        message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+
     const t = createTimeoutSignal(this.requestTimeoutMs, req.signal);
 
     try {
-      const jsonSchema = zodToJsonSchema(req.schema);
       const toolDef = {
         name: "structured_output",
         description: "Return the structured output",
@@ -131,6 +144,7 @@ export class AnthropicLlmClient implements LlmClient {
         messages: [{ role: "user", content: req.user }],
         tools: [toolDef],
         tool_choice: { type: "tool", name: "structured_output" },
+        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       };
 
       const response = await withLlmSpan(
@@ -147,13 +161,33 @@ export class AnthropicLlmClient implements LlmClient {
       const thinkingBlock = response.content.find((b) => b.type === "thinking");
       const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
 
+      // `stop_reason === "max_tokens"` means the output was TRUNCATED at the
+      // fixed ANTHROPIC_MAX_TOKENS cap — retrying the identical request hits
+      // the identical cap, so it is a deterministic (non-retriable) failure.
+      // `stop_reason === "refusal"` is likewise deterministic — the model
+      // declined and would decline the identical request again. Every other
+      // stop_reason on these arms is retriable (non-deterministic) model
+      // behavior.
+      const truncated = response.stop_reason === "max_tokens";
+      const nonRetriable = truncated || response.stop_reason === "refusal";
+      const retriability = nonRetriable ? ("non-retriable" as const) : ("retriable" as const);
+
+      // The turn's usage rides along on both terminal error arms below so a
+      // malformed success / schema failure still attributes the burned tokens
+      // (FR-W0-001) — mirrors the sendWithTools arms.
+      const usage = {
+        tokensIn: response.usage.input_tokens,
+        tokensOut: response.usage.output_tokens,
+      };
+
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
-          message: "Anthropic response did not contain a tool_use block",
+          message: `Anthropic response did not contain a tool_use block (stop_reason: ${response.stop_reason ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response.content))}`,
+          usage,
         });
       }
 
@@ -161,9 +195,10 @@ export class AnthropicLlmClient implements LlmClient {
       if (!parsed.success) {
         return err({
           kind: "node-crash",
-          retriability: "retriable",
+          retriability,
           nodeId: req.nodeId,
-          message: `Schema validation failed: ${parsed.error.message}`,
+          message: `Schema validation failed (stop_reason: ${response.stop_reason ?? "unknown"}): ${parsed.error.message}`,
+          usage,
         });
       }
 
@@ -193,8 +228,21 @@ export class AnthropicLlmClient implements LlmClient {
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
     const maxIterations = req.maxIterations ?? 10;
-    const system = appendSchemaInstruction(req.system, req.schema as z.ZodType<any>);
-    const toolSpecs = req.tools.map(toolToAnthropicSpec);
+    // Pre-flight: schema/tool-spec construction (zodToJsonSchema) is
+    // deterministic — a throw here must stay inside the Result boundary as a
+    // typed non-retriable validation error (mirrors sendStructured).
+    let system: string;
+    let toolSpecs: Anthropic.Tool[];
+    try {
+      system = appendSchemaInstruction(req.system, req.schema as z.ZodType<any>);
+      toolSpecs = req.tools.map(toolToAnthropicSpec);
+    } catch (e) {
+      return err({
+        kind: "validation",
+        nodeId: req.nodeId,
+        message: `Schema construction failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
     const toolChoice = toolChoiceToAnthropic(req.toolChoice);
     const messages: AnthropicMessage[] = [{ role: "user", content: req.user }];
 
@@ -230,6 +278,43 @@ export class AnthropicLlmClient implements LlmClient {
           t.cleanup();
         }
 
+        // `stop_reason === "max_tokens"` means this turn's output was
+        // TRUNCATED at the fixed ANTHROPIC_MAX_TOKENS cap — the tool calls /
+        // final answer are unreliable and retrying the identical request hits
+        // the identical cap, so it is a deterministic (non-retriable) failure
+        // (mirrors sendStructured). The turn's own usage rides along so the
+        // loop still attributes the burned tokens (FR-W0-001).
+        if (response.stop_reason === "max_tokens") {
+          return err({
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: req.nodeId,
+            message: `Anthropic response truncated at the ${ANTHROPIC_MAX_TOKENS}-token cap (stop_reason: max_tokens)`,
+            usage: {
+              tokensIn: response.usage.input_tokens,
+              tokensOut: response.usage.output_tokens,
+            },
+          });
+        }
+
+        // `stop_reason === "refusal"` — the model declined to generate (e.g.
+        // safety). There is no tool_use or text block, so without this arm the
+        // turn falls through to the loop's context-free "no text content to
+        // parse" retriable arm, losing the stop_reason and blindly retrying a
+        // deterministic refusal. Non-retriable; the turn's usage rides along.
+        if (response.stop_reason === "refusal") {
+          return err({
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: req.nodeId,
+            message: `Anthropic declined to generate a response (stop_reason: refusal)`,
+            usage: {
+              tokensIn: response.usage.input_tokens,
+              tokensOut: response.usage.output_tokens,
+            },
+          });
+        }
+
         const thinkingBlock = response.content.find((b) => b.type === "thinking");
         const thinking = thinkingBlock?.type === "thinking" ? thinkingBlock.thinking : undefined;
 
@@ -237,6 +322,27 @@ export class AnthropicLlmClient implements LlmClient {
 
         const toolCalls = parseToolCalls(response);
         const textContent = toolCalls.length === 0 ? lastTextBlock(response) : undefined;
+
+        // A terminal turn with neither tool_use nor text is a malformed
+        // success. max_tokens / refusal short-circuit above; every RESIDUAL
+        // stop_reason (pause_turn, …) would otherwise hand `textContent:
+        // undefined` to the loop's context-free "no text content to parse"
+        // arm, losing the stop_reason. Name it and snapshot the (truncated)
+        // content so the unknown terminal state is diagnosable from the
+        // error alone (mirrors the OpenAI client's residual-status arm).
+        // Classification is unchanged — retriable, like the arm it replaces.
+        if (toolCalls.length === 0 && textContent === undefined) {
+          return err({
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: req.nodeId,
+            message: `Anthropic response contained no tool_use and no text block (stop_reason: ${response.stop_reason ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response.content))}`,
+            usage: {
+              tokensIn: response.usage.input_tokens,
+              tokensOut: response.usage.output_tokens,
+            },
+          });
+        }
 
         return ok({
           toolCalls,
