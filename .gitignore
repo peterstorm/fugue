@@ -24,6 +24,17 @@ __pycache__/
 # Loom orchestration state (machine-local)
 .claude/state/
 
+# Ephemeral run evidence. These directories hold the events, checkpoints,
+# contexts, transcripts, and receipts of individual Wave Gate, panel, and
+# orchestration runs. They are audit data for a run in flight, not source:
+# committing them would fold a run's own evidence into the change it audits.
+.claude/reviews/review-and-fix-runs/
+.claude/reviews/packets/
+.claude/reviews/panel-runs/
+.claude/specs/*/panel-runs/
+.claude/**/orchestration-runs/
+.claude/**/wave-gate-runs/
+
 # fugue compose/new --from gauntlet staging dirs (always cleaned up, but never commit strays)
 .fugue-compose/
 
