@@ -37,12 +37,19 @@ describe("compositeNodeKey — canonical folding (AD-1)", () => {
 
   it("returns the bare nodeId when index AND attempt are both absent — opts ignored", () => {
     expect(compositeNodeKey(N("read-node"), {})).toBe("read-node");
-    // A namespace alone must NOT switch to composite form: AD-1 folds whenever
-    // index and attempt are both absent, so behavior stays byte-identical.
-    expect(compositeNodeKey(N("read-node"), { namespace: "sub" })).toBe("read-node");
-    // At the folding boundary even an out-of-contract namespace is ignored
-    // (the file backend re-validates before calling; here opts are inert).
-    expect(compositeNodeKey(N("read-node"), { namespace: "@@@bad" })).toBe("read-node");
+  });
+
+  it("rejects a namespace supplied without index/attempt as ambiguous (AD-1)", () => {
+    // A namespace alone can only mean the caller meant a composite address
+    // but forgot its addressing component: silently folding would store the
+    // entry under the bare canonical nodeId and discard the intent, so the
+    // shape is refused instead (parse, don't validate).
+    expect(() => compositeNodeKey(N("read-node"), { namespace: "sub" })).toThrow(
+      /namespace.*without index\/attempt.*ambiguous/,
+    );
+    expect(() => compositeNodeKey(N("read-node"), { namespace: "@@@bad" })).toThrow(/ambiguous/);
+    // With an addressing component present, the namespace participates.
+    expect(compositeNodeKey(N("read-node"), { namespace: "sub", index: 0 })).toBe("sub@read-node@0@0");
   });
 
   it("keeps ids with every ID_PATTERN character verbatim", () => {
@@ -220,9 +227,6 @@ describe("round-trip — parse(encode(a)) deep-equals a", () => {
     expectRoundTrip({ nodeId: "read-node" }, { form: "canonical", nodeId: "read-node" });
     expectRoundTrip({ nodeId: "ns:node-1_x" }, { form: "canonical", nodeId: "ns:node-1_x" });
     expectRoundTrip({ nodeId: id128 }, { form: "canonical", nodeId: id128 });
-    // opts that fold (index/attempt both absent) round-trip as canonical —
-    // even with a namespace that would only matter in composite form.
-    expectRoundTrip({ nodeId: "read-node", opts: { namespace: "sub" } }, { form: "canonical", nodeId: "read-node" });
   });
 
   it("composite addresses", () => {
@@ -349,9 +353,15 @@ describe("fast-check properties", () => {
   const isCanonical = (a: { readonly index?: number; readonly attempt?: number }): boolean =>
     a.index === undefined && a.attempt === undefined;
 
+  /** Valid addresses only: a namespace WITHOUT index/attempt is ambiguous and
+   *  refused by the codec (AD-1 — the shape is unrepresentable). */
+  const isValidAddress = (a: { readonly namespace?: string; readonly index?: number; readonly attempt?: number }): boolean =>
+    !isCanonical(a) || a.namespace === undefined;
+
   it("parse(encode(a)) = a for every generated valid address", () => {
     fc.assert(
       fc.property(addressArb, (a) => {
+        fc.pre(isValidAddress(a));
         const key = compositeNodeKey(N(a.nodeId), toOpts(a));
         const parsed = parseCompositeNodeKey(key);
         const expected: ParsedCompositeNodeKey = isCanonical(a)
@@ -370,10 +380,11 @@ describe("fast-check properties", () => {
   });
 
   it("addresses equal under the codec's normalization map to the same key (determinism)", () => {
-    // Canonical form: opts are inert — a namespace alone never changes the
-    // key, so {namespace: "sub"} and {} are the SAME address.
-    expect(compositeNodeKey(N("read-node"))).toBe(compositeNodeKey(N("read-node"), { namespace: "sub" }));
-    expect(compositeNodeKey(N("read-node"), {})).toBe(compositeNodeKey(N("read-node"), { namespace: "dag" }));
+    // Canonical form: the opts record is inert — `{}` and `undefined` are the
+    // SAME address. (A namespace alone is rejected as ambiguous, so the
+    // canonical form can never carry namespace intent.)
+    expect(compositeNodeKey(N("read-node"))).toBe(compositeNodeKey(N("read-node"), {}));
+    expect(() => compositeNodeKey(N("read-node"), { namespace: "sub" })).toThrow(/ambiguous/);
     // Composite form: absent components and explicit defaults are the same
     // address — the twins the old `?? null` property key counted as distinct.
     expect(compositeNodeKey(N("read-node"), { index: 1 })).toBe(
@@ -434,6 +445,7 @@ describe("fast-check properties", () => {
     fc.assert(
       fc.property(addressArb, (a) => {
         if (!isCanonical(a)) return; // property scope: canonical (folded) addresses only
+        fc.pre(isValidAddress(a)); // namespace-alone is not a valid address
         const key = compositeNodeKey(N(a.nodeId), toOpts(a));
         expect(key).toBe(a.nodeId);
         expect(key.includes("@")).toBe(false);
@@ -445,6 +457,7 @@ describe("fast-check properties", () => {
   it("any composite key is unparseable as canonical and vice versa (form disjointness)", () => {
     fc.assert(
       fc.property(addressArb, (a) => {
+        fc.pre(isValidAddress(a));
         const key = compositeNodeKey(N(a.nodeId), toOpts(a));
         const parsed = parseCompositeNodeKey(key);
         if (parsed === null) throw new Error("encoder output must always parse");

@@ -58,6 +58,22 @@ describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
     expect(formatFrameworkError(error)).toContain("bad/node");
   });
 
+  it("renders a hostile multi-KB invalid id bounded: structured bytes preserved, log line truncated", () => {
+    const huge = "x".repeat(200_000);
+    const error: FrameworkError = {
+      kind: "checkpoint-write-failed",
+      runId: makeRunId("checkpoint_invalid_run"),
+      nodeId: makeNodeId("checkpoint_invalid_node"),
+      invalidRunId: huge,
+      message: "boundary rejected",
+    };
+
+    expect(error.invalidRunId).toBe(huge); // structured consumers keep raw bytes
+    const rendered = formatFrameworkError(error);
+    expect(rendered.length).toBeLessThan(500); // never an unbounded log line
+    expect(rendered).toContain("checkpoint write failed");
+  });
+
   it("formats a metadata failure with its grammar-valid internal node location", () => {
     const error: FrameworkError = {
       kind: "checkpoint-write-failed",

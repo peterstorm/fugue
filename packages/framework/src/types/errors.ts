@@ -6,7 +6,7 @@ import type { RunId, NodeId } from "./ids.js";
 // `FrameworkError` from this module) — safe: type imports erase at compile
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
-import { safeErrorMessage } from "./safe-error.js";
+import { safeDiagnosticRender, safeErrorMessage } from "./safe-error.js";
 
 /** A single unsatisfied capability declaration: which node required which capability. */
 export type MissingCapability = {
@@ -607,8 +607,12 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "checkpoint-corrupt" }, (e) => `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`)
     .with({ kind: "checkpoint-version-mismatch" }, (e) => `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`)
     .with({ kind: "checkpoint-write-failed" }, (e) => {
-      const run = e.invalidRunId ?? e.runId;
-      const node = e.invalidNodeId ?? e.nodeId;
+      // Additive invalid-id fields preserve the rejected RAW bytes for
+      // structured consumers, but the rendered message must stay bounded: a
+      // hostile multi-KB id must not flood the log line (the same module
+      // truncates hostile diagnostics everywhere else via safeDiagnosticRender).
+      const run = e.invalidRunId === undefined ? e.runId : safeDiagnosticRender(e.invalidRunId);
+      const node = e.invalidNodeId === undefined ? e.nodeId : safeDiagnosticRender(e.invalidNodeId);
       return `checkpoint write failed for run '${run}' node '${node}': ${e.message}`;
     })
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)

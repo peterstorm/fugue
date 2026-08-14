@@ -116,6 +116,49 @@ export function checkpointerSuite(
       }
     });
 
+    test("saveNode/setMeta snapshot at write time: post-call caller mutation cannot rewrite stored state", async () => {
+      // Write-time snapshot parity across every backend: file/Redis serialize
+      // at write time; in-memory detaches on both write paths (saveNode and
+      // setMeta). A caller mutating its own objects after a successful write
+      // must never silently rewrite stored checkpoint state.
+      const runId = "alias-snapshot";
+      const startedAt = new Date("2025-01-01T00:00:00Z");
+      const setResult = await cp.setMeta(R(runId), {
+        dagId: D("dag-alias"),
+        startedAt,
+        nodeCount: 1,
+      });
+      expect(setResult.ok).toBe(true);
+
+      const nodeState: NodeState = {
+        nodeId: N("n1"),
+        output: { text: "hello" },
+        completedAt: new Date("2025-06-01T12:00:00Z"),
+      };
+      const saveResult = await cp.saveNode(R(runId), "n1", nodeState);
+      expect(saveResult.ok).toBe(true);
+
+      // Mutate the caller-owned inputs AFTER the successful writes...
+      startedAt.setFullYear(1999);
+      (nodeState.output as { text: string }).text = "mutated";
+      nodeState.completedAt.setFullYear(1999);
+
+      // ...the stored checkpoint must be unaffected.
+      const loadResult = await cp.load(R(runId));
+      expect(loadResult.ok).toBe(true);
+      if (!loadResult.ok || loadResult.value === null) throw new Error("expected loaded checkpoint");
+      expect(loadResult.value.meta.startedAt.toISOString()).toBe("2025-01-01T00:00:00.000Z");
+      expect(loadResult.value.nodes["n1"].output).toEqual({ text: "hello" });
+      expect(loadResult.value.nodes["n1"].completedAt.toISOString()).toBe("2025-06-01T12:00:00.000Z");
+
+      // Mutating the LOADED snapshot must not corrupt the stored state either.
+      (loadResult.value.nodes["n1"].output as { text: string }).text = "post-load-mutation";
+      const secondLoad = await cp.load(R(runId));
+      expect(secondLoad.ok).toBe(true);
+      if (!secondLoad.ok || secondLoad.value === null) throw new Error("expected reloaded checkpoint");
+      expect(secondLoad.value.nodes["n1"].output).toEqual({ text: "hello" });
+    });
+
     test("multiple nodes saved, all present in load", async () => {
       const meta: RunMeta = { dagId: "dag-2" as DagId, startedAt: new Date(), nodeCount: 3 };
       await cp.setMeta(R("run-3"), meta);

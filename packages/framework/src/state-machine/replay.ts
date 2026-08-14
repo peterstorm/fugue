@@ -15,9 +15,15 @@ import type { Machine, RecordedEvent } from "./types.js";
  *
  * This is the ONLY place where envelopes are unwrapped and the `E` cast
  * is made: `replayEvents` and the resume agreement proof's strict-prefix
- * scan (`resume.ts`) share this step, so the transition+unwrap
- * implementation cannot drift between the full replay and the scan (and
- * the `as E` cast lives in exactly one file).
+ * scan (`resume-proof.ts` `proveResumeAgreement`) share this step, so the
+ * transition+unwrap implementation cannot drift between the full replay and
+ * the scan (and the `as E` cast lives in exactly one file).
+ *
+ * Unwrap narrowing (`isRecordedEvent`) is deliberately structural — an entry
+ * carrying `recordedAtMs` + `event` (+ optional `synthetic`) is treated as
+ * an envelope; a raw machine event payload that happens to match that exact
+ * shape is unwrapped too (in-scope consumers always pass real envelopes, so
+ * this remains a documented narrowing contract, not a reachable hazard).
  *
  * Pure — no executor, no I/O, no side effects. May throw only because
  * `machine.transition` throws (hostile/version-drifted event payloads);
@@ -146,11 +152,19 @@ export const replayEventSlice = <S, E, C>(
 // ---------------------------------------------------------------------------
 
 function isRecordedEvent(v: unknown): v is RecordedEvent<unknown> {
+  // Envelope discrimination by shape: `RecordedEvent` is exactly
+  // `{ recordedAtMs, event, synthetic? }`. A raw event payload carrying the
+  // same keys cannot be distinguished structurally — the typed overloads
+  // keep envelope vs. raw-event callers apart at compile time; this runtime
+  // check only needs to agree with the envelope the readers construct.
   return (
     typeof v === "object" &&
     v !== null &&
     "recordedAtMs" in v &&
     typeof (v as { recordedAtMs: unknown }).recordedAtMs === "number" &&
-    "event" in v
+    "event" in v &&
+    ("synthetic" in v
+      ? typeof (v as { synthetic: unknown }).synthetic === "boolean"
+      : true)
   );
 }

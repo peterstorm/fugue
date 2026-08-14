@@ -422,6 +422,77 @@ describe("withFileLock — stale steal and ownership", () => {
     expect(readdirSync(join(dir, "append.lock.fence"))).toEqual([]); // tomb was consumed
   });
 
+  // Live-tomb reconcile coverage (ADR-0078 module contract: "an unrestorable
+  // live tomb blocks acquisition rather than allowing a second holder"). The
+  // hooks force every recorded pid to probe LIVE, so a tomb-* entry can be
+  // constructed deterministically without real PID reuse — pinning (a) the
+  // restore into an empty owner path, (b) the fail-closed fence when another
+  // owner exists, and (c) the non-ENOENT restore-failure rethrow.
+  const liveTomb = (fence: string, name: string, pid: string, token: string): string => {
+    mkdirSync(fence, { recursive: true });
+    const tomb = join(fence, name);
+    mkdirSync(tomb);
+    writeFileSync(join(tomb, "pid"), pid);
+    writeFileSync(join(tomb, "owner"), token);
+    return tomb;
+  };
+  const liveOwnerHooks = {
+    readOwnerPid: (ownerPath: string) => readFileSync(join(ownerPath, "pid"), "utf-8"),
+    probeOwnerProcess: () => {}, // every recorded pid proves alive
+  };
+
+  test("a live tomb is restored into an empty owner path and acquisition stays fenced", async () => {
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    // A reaper crashed AFTER renaming the victim lock into a tomb, and the
+    // victim is still alive: the next reaper must restore the tomb into the
+    // empty owner path (never delete a live lock) and remain fenced.
+    liveTomb(join(dir, "append.lock.fence"), "tomb-live-1", String(process.pid), "victim-token");
+
+    expect(await stealStaleFileLock(lockPath, liveOwnerHooks)).toBe(false);
+    expect(existsSync(lockPath)).toBe(true); // restored, not deleted
+    expect(readFileSync(join(lockPath, "pid"), "utf-8")).toBe(String(process.pid));
+    expect(readFileSync(join(lockPath, "owner"), "utf-8")).toBe("victim-token");
+    expect(readdirSync(join(dir, "append.lock.fence")).filter((n) => n.startsWith("tomb-"))).toEqual([]);
+  });
+
+  test("an unrestorable live tomb stays as a fail-closed fence when another owner exists", async () => {
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "pid"), String(process.pid));
+    writeFileSync(join(lockPath, "owner"), "current-token");
+    const tomb = liveTomb(
+      join(dir, "append.lock.fence"),
+      "tomb-live-2",
+      String(process.pid),
+      "victim-token",
+    );
+
+    // The owner path is occupied, so the live tomb cannot be restored; it
+    // must REMAIN as a durable fence (births refuse while a tomb exists).
+    expect(await stealStaleFileLock(lockPath, liveOwnerHooks)).toBe(false);
+    expect(existsSync(tomb)).toBe(true);
+    expect(readFileSync(join(lockPath, "pid"), "utf-8")).toBe(String(process.pid));
+    expect(readFileSync(join(lockPath, "owner"), "utf-8")).toBe("current-token");
+  });
+
+  test("a live-tomb restore failure with an unexpected errno rethrows instead of swallowing", async () => {
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    const fence = join(dir, "append.lock.fence");
+    liveTomb(fence, "tomb-live-3", String(process.pid), "victim-token");
+
+    // Remove directory write permission: the restore rename now fails with
+    // EACCES — NOT one of the tolerated ENOENT/EEXIST/ENOTEMPTY races.
+    chmodSync(fence, 0o500);
+    try {
+      await expect(stealStaleFileLock(lockPath, liveOwnerHooks)).rejects.toThrow();
+    } finally {
+      chmodSync(fence, 0o700);
+    }
+  });
+
   test("a holder that dies mid-wait is reaped by the next attempt (staleness re-probed per attempt)", async () => {
     const dir = tempDir();
     const lockPath = join(dir, "append.lock");

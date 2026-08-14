@@ -44,6 +44,23 @@ export interface CompositeNodeKeyOpts {
   readonly attempt?: number;
 }
 
+/**
+ * A composite address requires an addressing component: `namespace` alone
+ * (without `index` or `attempt`) is caller error — the encoder would silently
+ * discard it and store under the bare canonical `nodeId`, so the caller's
+ * composite intent would be unrepresentable and a later composite save with
+ * `index: 0` would land on a DIFFERENT durable entry. Illegal shapes are made
+ * unrepresentable instead of silently folded (parse, don't validate).
+ */
+const assertNoNamespaceAlone = (opts: CompositeNodeKeyOpts): void => {
+  if (opts.namespace !== undefined && opts.index === undefined && opts.attempt === undefined) {
+    throw new Error(
+      `Invalid composite node key opts: namespace "${opts.namespace}" without index/attempt is ambiguous — ` +
+        "a namespace-only address would be silently folded into the canonical nodeId; supply index and/or attempt to address a composite entry",
+    );
+  }
+};
+
 const isIdComponent = (value: unknown): boolean =>
   // The typeof guard mirrors `ids.ts`'s `validate()`: `RegExp.prototype.test`
   // coerces non-strings, so `ID_PATTERN.test(42)` would return true and a
@@ -75,7 +92,9 @@ const assertIndexOrAttempt = (kind: "index" | "attempt", value: number): void =>
  *
  * Canonical folding: with `index` AND `attempt` both absent (or no opts at
  * all) the result is exactly `nodeId` — no separators, no namespace, nothing
- * appended. With either present, the result is the composite form
+ * appended. A `namespace` supplied WITHOUT `index`/`attempt` is rejected as
+ * ambiguous (the intent would be silently discarded). With either present,
+ * the result is the composite form
  * `${namespace ?? "dag"}@${nodeId}@${index ?? 0}@${attempt ?? 0}`; missing
  * components default to `DEFAULT_NODE_NAMESPACE` and `0`.
  *
@@ -96,8 +115,11 @@ export const compositeNodeKey = (nodeId: NodeId, opts?: CompositeNodeKeyOpts): s
   // key that contained "@" would break the collision-freedom invariant.
   assertIdComponent("nodeId", nodeId);
 
+  if (opts !== undefined) assertNoNamespaceAlone(opts);
+
   // Canonical folding: index AND attempt both absent ⇒ bare nodeId. The opts
-  // are ignored entirely (AD-1), so a namespace alone never changes the key.
+  // are ignored entirely (AD-1), so a namespace alone never changes the key
+  // (and is rejected above as ambiguous caller error).
   if (opts?.index === undefined && opts?.attempt === undefined) {
     return nodeId;
   }

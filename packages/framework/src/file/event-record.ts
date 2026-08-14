@@ -94,9 +94,11 @@
 // `parseFileEventRecord` returns `Result<FileEventRecord, string>` because
 // on-disk data may be corrupt through no fault of the caller.
 //
-// Pure module — no I/O (INV-1; only framework core imports: `layout.js`
-// constants, `state-machine/serialize.js` `toJson`/`serializeValue`,
-// `types/result.js`).
+// Pure module — no I/O (INV-1; only framework-core imports — no Node
+// built-ins: `layout.js` constants, `state-machine/serialize.js`
+// (`toJson`/`serializeValue`/`deserializeValue`/`deepJsonEqual`/
+// `validateSerializedValueGrammar`), `types/result.js`, `types/safe-error.js`,
+// `./boundary-error.js`).
 
 import {
   JOURNAL_SCHEMA_VERSION,
@@ -330,11 +332,12 @@ const renderPathSegment = (key: PropertyKey): string => {
 
 /**
  * Maximum nesting depth of a journal record's value tree — the shared depth
- * ceiling of every walk in the codec: the read-side pre-scans
- * (`findPollutionKey` on the RAW record, `findReservedTagKey` on the
- * deserialized event), the write-boundary pre-scan (`assertLosslessEvent`)
- * and — by construction — the serializer/deserializer recursion those walks
- * guard (`serializeValue`, `deserializeValue`, `deepJsonEqual`, `toJson`).
+ * ceiling of every walk in the codec: the read-side pre-scan (the shared
+ * raw-JSON serializer-grammar gate `validateSerializedValueGrammar` on the
+ * record, `findReservedTagKey` on the deserialized event), the write-boundary
+ * pre-scan (`assertLosslessEvent`) and — by construction — the
+ * serializer/deserializer recursion those walks guard (`serializeValue`,
+ * `deserializeValue`, `deepJsonEqual`, `toJson`).
  * Depth counts property hops from the scan root: the record fields and the
  * `event` value sit at depth 1, the event's children at depth 2, … A value
  * whose deepest chain exceeds the ceiling fails closed (FR-009): on the
@@ -348,6 +351,10 @@ const renderPathSegment = (key: PropertyKey): string => {
  * well under 50 levels) clear it by an order of magnitude. The write and
  * read boundaries count identically — both start at the record level — so
  * the writer can never emit a record the strict reader rejects on depth.
+ * The checkpoint codec observes the SAME domain: `serializeFileCheckpoint`
+ * pre-scans the whole `{schemaVersion, data}` envelope (envelope at depth 1)
+ * and the resume-proof read gate passes `initialDepth: 1`, so equivalent
+ * checkpoint payloads are counted identically on both boundaries too.
  */
 export const MAX_SAFE_RECORD_DEPTH = 512;
 
@@ -726,85 +733,8 @@ export const assertLosslessEvent = (event: unknown): void => {
 };
 
 // ---------------------------------------------------------------------------
-// Raw-JSON read-pipeline entry (fail-closed prototype-pollution pre-scan)
+// Raw-JSON read-pipeline entry (fail-closed canonical-grammar pre-scan)
 // ---------------------------------------------------------------------------
-
-/**
- * Fail-closed read-side pre-scan: walk a PLAIN-JSON value (the output of
- * `JSON.parse`, before `deserializeValue` runs) and return the first
- * prototype-pollution-filtered key (`__proto__`/`constructor`/`prototype`)
- * as a `hit`, a `too-deep` depth violation, or `clean`. `deserializeValue`
- * silently ERASES these keys (prototype-pollution defense — the same set
- * the write pre-scan rejects), so an on-disk record containing one would
- * read back truncated with no error; the strict reader must detect the key
- * BEFORE deserialization erases it. Exact-keyed: a `"constructor"` string
- * VALUE, a `"key_constructor"` key, or a Map key are data and pass.
- * `JSON.parse` output has no accessors and no cycles, so plain property
- * reads are safe here.
- *
- * ITERATIVE (explicit stack, no JS recursion): a hostile record nested
- * ~50k deep parses fine in V8's iterative JSON.parse but overflowed the
- * call stack in the previous recursive walk, escaping the read seam as a
- * raw RangeError. The walk now cannot overflow at ANY depth, and a record
- * whose chain exceeds `MAX_SAFE_RECORD_DEPTH` fails closed with a
- * `too-deep` verdict (the caller wraps it in a typed FR-009 error naming
- * the source). Depth counts hops from the record root (the `event` value
- * sits at depth 1), matching the write side's count exactly.
- *
- * Exported for the checkpoint-envelope seam in `resume.ts`: the checkpoint
- * decode path runs the SAME raw-JSON pollution pre-scan (parity with the
- * strict record codec) before `deserializeValue` erases pollution keys.
- */
-export const findPollutionKey = (value: unknown): ScanVerdict => {
-  const stack: Array<{
-    readonly value: unknown;
-    readonly depth: number;
-    readonly chain: PathLink | null;
-  }> = [{ value, depth: 0, chain: null }];
-  while (stack.length > 0) {
-    const frame = stack.pop();
-    if (frame === undefined) break;
-    if (frame.value === null || typeof frame.value !== "object") continue;
-    if (frame.depth > MAX_SAFE_RECORD_DEPTH) {
-      return {
-        kind: "too-deep",
-        depth: frame.depth,
-        path: renderChain(frame.chain, "record"),
-      };
-    }
-    if (Array.isArray(frame.value)) {
-      // Push in reverse so the pop order is left-to-right (DFS order).
-      for (let i = frame.value.length - 1; i >= 0; i--) {
-        stack.push({
-          value: frame.value[i],
-          depth: frame.depth + 1,
-          chain: { text: renderPathSegment(i), parent: frame.chain },
-        });
-      }
-      continue;
-    }
-    const obj = frame.value as Record<string, unknown>;
-    for (const key of Object.keys(obj)) {
-      if (POLLUTION_FILTERED_KEYS.has(key)) {
-        return {
-          kind: "hit",
-          key,
-          path: renderChain({ text: renderPathSegment(key), parent: frame.chain }, "record"),
-        };
-      }
-    }
-    const keys = Object.keys(obj);
-    for (let i = keys.length - 1; i >= 0; i--) {
-      const key = keys[i];
-      stack.push({
-        value: obj[key],
-        depth: frame.depth + 1,
-        chain: { text: renderPathSegment(key), parent: frame.chain },
-      });
-    }
-  }
-  return { kind: "clean" };
-};
 
 /**
  * The single raw-JSON entry point of the file event-record READ pipeline

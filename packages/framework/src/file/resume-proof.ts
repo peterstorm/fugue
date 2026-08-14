@@ -262,6 +262,12 @@ export const proveResumeAgreement = <S, E, C>(
   // every nested raw object before the decoder can reinterpret a reserved tag
   // or erase a sibling/pollution field, and enforces the same bounded canonical
   // Map/Set/Date/undefined grammar used by event records and node outputs.
+  // `initialDepth: 1` counts the checkpoint envelope at depth 1 — exactly the
+  // depth at which the write codec's losslessness pre-scan starts
+  // (`assertLosslessEvent(payload)` in checkpoint-record.ts), so the write
+  // and read boundaries share ONE depth domain: a checkpoint the writer can
+  // produce is never rejected as too deep by resume, and one the writer
+  // refuses is refused here too (FR-009 identical counting).
   let rawEnvelope: unknown;
   try {
     rawEnvelope = JSON.parse(checkpointJson);
@@ -276,6 +282,7 @@ export const proveResumeAgreement = <S, E, C>(
   const grammar = validateSerializedValueGrammar(rawEnvelope, {
     rootPath: "checkpoint",
     maxDepth: MAX_SAFE_RECORD_DEPTH,
+    initialDepth: 1,
   });
   if (!grammar.ok) {
     return err(

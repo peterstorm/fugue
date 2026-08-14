@@ -1508,10 +1508,10 @@ describe("prototype-pollution keys — fail-closed at the raw-JSON read seam (FR
 describe("hostile record depth — fail closed with FR-009 context, never a raw RangeError", () => {
   // Depth-overflow regression: a hostile
   // record whose event nests ~50k deep (~100KB) parses fine in V8's
-  // iterative JSON.parse, but the RECURSIVE walks — findPollutionKey at the
-  // raw seam, findReservedTagKey in parseFileEventRecord,
-  // assertLosslessEvent on the write side — overflowed the JS call stack
-  // and escaped:
+  // iterative JSON.parse, but the RECURSIVE walks — the raw seam
+  // (`validateSerializedValueGrammar` on parsed JSON), findReservedTagKey in
+  // parseFileEventRecord, assertLosslessEvent on the write side — overflowed
+  // the JS call stack and escaped:
   //   - read: a raw RangeError through tryParseEventRecordJson →
   //     readFileEventRecords, breaking the Result<_, FrameworkError>
   //     contract and the typed cache-error classification FR-009 promises

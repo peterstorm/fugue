@@ -858,18 +858,33 @@ describe("FileCheckpointer — composite addressing (FR-022, AD-1)", () => {
     expect(result.value.corruptNodeIds).toBeUndefined();
   });
 
-  it("folds a namespace-only save onto the canonical key (index and attempt both absent)", async () => {
+  it("rejects a namespace-only save with a typed checkpoint-write-failed (index and attempt both absent)", async () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-fold"), META());
     await cp.saveNode(R("run-fold"), "n1", node("n1", "canonical"));
-    await cp.saveNode(R("run-fold"), "n1", node("n1", "namespaced"), { namespace: "other" });
 
+    // A namespace without index/attempt is an ambiguous composite address
+    // (AD-1): the codec refuses to silently discard it and store under the
+    // bare canonical nodeId — the file backend converts the refusal into a
+    // typed error, never a raw throw.
+    const result = await cp.saveNode(R("run-fold"), "n1", node("n1", "namespaced"), {
+      namespace: "other",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-write-failed");
+      if (result.error.kind === "checkpoint-write-failed") {
+        expect(result.error.message).toMatch(/without index\/attempt/);
+      }
+    }
+
+    // Unaffected: only the canonical entry exists and its value is intact.
     expect(readdirSync(nodesDirOf(directory, "run-fold"))).toEqual([`${keyDigest("n1")}.json`]);
-    const result = await cp.load(R("run-fold"));
-    if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(Object.keys(result.value.nodes)).toEqual(["n1"]);
-    expect(result.value.nodes["n1"].output).toBe("namespaced");
+    const loaded = await cp.load(R("run-fold"));
+    if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
+    expect(Object.keys(loaded.value.nodes)).toEqual(["n1"]);
+    expect(loaded.value.nodes["n1"].output).toBe("canonical");
   });
 
   it("never collides a composite key with a canonical nodeId of the same spelling", async () => {

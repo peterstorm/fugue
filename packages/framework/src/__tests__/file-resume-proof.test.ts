@@ -47,6 +47,7 @@
 import { describe, it, expect } from "bun:test";
 import { proveResumeAgreement } from "../file/resume-proof.js";
 import type { ResumeProofArgs } from "../file/resume-proof.js";
+import { serializeFileCheckpoint } from "../file/checkpoint-record.js";
 import type { Machine, RecordedEvent } from "../state-machine/types.js";
 import { toJson } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
@@ -418,6 +419,58 @@ describe("proveResumeAgreement — checkpoint envelope decode gates", () => {
     if (result.error.kind !== "checkpoint-corrupt") return;
     expect(result.error.message).toContain("checkpoint.json");
     expect(result.error.message).toContain("state and context");
+  });
+
+  it("checkpoint depth parity: the write and read boundaries count the envelope identically (initialDepth 1)", () => {
+    // The envelope `{schemaVersion, data}` sits at depth 1 on BOTH
+    // boundaries: the write pre-scan (`assertLosslessEvent(payload)` starts
+    // at the envelope in checkpoint-record.ts) and the resume read gate
+    // (`validateSerializedValueGrammar` with `initialDepth: 1`). A data
+    // chain of 510 nested containers reaches exactly depth 512 — the shared
+    // `MAX_SAFE_RECORD_DEPTH` ceiling; 511 containers would reach 513 and
+    // must fail closed on BOTH sides (the event codec pins the same
+    // identical-counting invariant for journal records).
+    const deepArrayValue = (depth: number): unknown => {
+      const root: unknown[] = [];
+      let cur = root;
+      for (let i = 0; i < depth - 1; i++) {
+        const next: unknown[] = [];
+        (cur as unknown[]).push(next);
+        cur = next;
+      }
+      (cur as unknown[]).push(1);
+      return root;
+    };
+    const state = { kind: "pending" as const, count: 0 };
+
+    // Write boundary: exactly-at-ceiling data is accepted; one past throws.
+    expect(() =>
+      serializeFileCheckpoint({ state, context: deepArrayValue(510) }),
+    ).not.toThrow();
+    expect(() =>
+      serializeFileCheckpoint({ state, context: deepArrayValue(511) }),
+    ).toThrow(/safe depth ceiling/);
+
+    // Read boundary — the same ceiling-depth payload passes the proof's raw
+    // grammar gate and reaches full agreement with the empty log (genesis),
+    // proving the gate did NOT reject it as too deep...
+    const at = prove({
+      events: [],
+      checkpointJson: checkpointJson(state, deepArrayValue(510) as C),
+    });
+    expect(at.ok).toBe(true);
+
+    // ...while one level past the ceiling fails closed naming the depth
+    // ceiling, exactly like the writer (identical counting).
+    const past = prove({
+      events: [],
+      checkpointJson: checkpointJson(state, deepArrayValue(511) as C),
+    });
+    expect(past.ok).toBe(false);
+    if (!past.ok) {
+      if (past.error.kind !== "checkpoint-corrupt") throw new Error("expected checkpoint-corrupt");
+      expect(past.error.message).toContain("safe depth ceiling 512");
+    }
   });
 
   it("violates the complete raw serializer grammar before parseCheckpoint (ambiguous tags, pollution keys, excessive depth)", () => {

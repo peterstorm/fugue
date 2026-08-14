@@ -1,9 +1,12 @@
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { RunId } from "../types/ids.js";
+import type { NodeId, RunId } from "../types/ids.js";
 import { ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
+import { ID_PATTERN, __brandNodeId } from "../types/ids.js";
+import { frameworkError } from "../types/error-factories.js";
+import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 
 // Mirrors the Redis checkpointer's 24-hour TTL. Production runs longer than
 // this should re-checkpoint anyway; the in-memory implementation enforces the
@@ -76,7 +79,9 @@ export interface RunState {
  * addressing (AD-1, see `composite-node-key.ts`).
  *
  * Canonical folding: when `index` AND `attempt` are BOTH absent, the entry is
- * stored under the bare `nodeId` — byte-identical to pre-extension behavior.
+ * stored under the bare `nodeId` — byte-identical to pre-extension behavior
+ * (a `namespace` supplied without either is rejected as ambiguous caller
+ * error by `compositeNodeKey`).
  * Composite-capable backends (currently the file backend) store an entry with
  * either component under
  * `${namespace ?? "dag"}@${nodeId}@${index ?? 0}@${attempt ?? 0}`, a distinct
@@ -124,6 +129,43 @@ export interface Checkpointer {
 // --- InMemoryCheckpointer ---
 
 import { err } from "../types/result.js";
+
+/**
+ * Grammar-valid placeholder for a rejected raw `nodeId` — truthful branding
+ * (parity with the file backend's `checkpoint-write-failed` construction): a
+ * raw id that fails `ID_PATTERN` never inhabits the branded `nodeId` field;
+ * the rejected bytes are preserved additively in `invalidNodeId`, rendered
+ * through the total bounded diagnostic renderer.
+ */
+const INVALID_NODE_ID: NodeId = __brandNodeId("checkpoint_invalid_node");
+
+/**
+ * Typed `checkpoint-write-failed` for the in-memory adapter that never throws
+ * on a hostile raw `nodeId` — the port's `nodeId` parameter is an unvalidated
+ * string, so branding it unconditionally would turn a cloneable-state refusal
+ * into a second raw rejection (FR-040).
+ */
+const checkpointWriteFailed = (
+  runId: RunId,
+  nodeIdRaw: string,
+  message: string,
+): FrameworkError =>
+  ID_PATTERN.test(nodeIdRaw)
+    ? { kind: "checkpoint-write-failed", runId, nodeId: nodeIdRaw as NodeId, message }
+    : {
+        kind: "checkpoint-write-failed",
+        runId,
+        nodeId: INVALID_NODE_ID,
+        message,
+        invalidNodeId: safeDiagnosticRender(nodeIdRaw),
+      };
+
+/** Typed `cache-error` mapper for the in-memory adapter's I/O-free failure classes. */
+const cacheError = (operation: string, error: unknown): FrameworkError => ({
+  kind: "cache-error",
+  operation,
+  message: safeErrorMessage(error),
+});
 
 /**
  * Internal storage shape. `createdAt` is split out so the checkpointer owns
@@ -202,7 +244,15 @@ export class InMemoryCheckpointer implements Checkpointer {
 
     // Mirror the Redis TTL semantics — past-TTL meta is reported as
     // `checkpoint-expired` so callers see the same surface across backends.
-    if (this.now() - createdAt.getTime() > TTL_SECONDS * 1000) {
+    // The injected clock is an untrusted seam (hostile tests/proxies): a
+    // throwing clock must become a typed error, never a raw rejection.
+    let expired: boolean;
+    try {
+      expired = this.now() - createdAt.getTime() > TTL_SECONDS * 1000;
+    } catch (error) {
+      return err(cacheError("checkpoint:load", error));
+    }
+    if (expired) {
       return err({
         kind: "checkpoint-expired",
         runId,
@@ -210,10 +260,22 @@ export class InMemoryCheckpointer implements Checkpointer {
       });
     }
 
-    return ok({
-      meta: this.detachStored(meta, "checkpoint meta"),
-      nodes: this.detachStored(this.nodes.get(runId) ?? {}, `checkpoint nodes for ${runId}`),
-    });
+    try {
+      return ok({
+        meta: this.detachStored(meta, "checkpoint meta"),
+        nodes: this.detachStored(this.nodes.get(runId) ?? {}, `checkpoint nodes for ${runId}`),
+      });
+    } catch (error) {
+      // Stored state that cannot be detached is stored-state corruption: the
+      // file backend's read side reports the equivalent class as
+      // `checkpoint-corrupt`, and ADR-0080 forbids a raw rejection here.
+      return err(
+        frameworkError.checkpointCorrupt(
+          runId,
+          `stored checkpoint state could not be detached: ${safeErrorMessage(error)}`,
+        ),
+      );
+    }
   }
 
   async saveNode(
@@ -225,21 +287,50 @@ export class InMemoryCheckpointer implements Checkpointer {
     // FR-023: options are intentionally unobserved. In-memory behavior remains
     // identical to the pre-extension implementation: the bare nodeId is the
     // only key and no log, warning, validation, or other side effect occurs.
+    // Non-cloneable state is refused with a typed error — the file backend
+    // maps the same value class to `checkpoint-write-failed` (FR-040,
+    // ADR-0080); the port must never reject with a raw Error.
     const existing = this.nodes.get(runId) ?? {};
-    this.nodes.set(runId, { ...existing, [nodeId]: this.detachStored(state, `node state for ${nodeId}`) });
+    let detached: NodeState;
+    try {
+      detached = this.detachStored(state, `node state for ${nodeId}`);
+    } catch (error) {
+      return err(
+        checkpointWriteFailed(
+          runId,
+          nodeId,
+          `state for node ${nodeId} is not cloneable (stored checkpoint state is never aliased by reference): ${safeErrorMessage(error)}`,
+        ),
+      );
+    }
+    this.nodes.set(runId, { ...existing, [nodeId]: detached });
     return ok(undefined);
   }
 
   async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
+    // Snapshot the caller's meta at WRITE time (parity with file/Redis, which
+    // serialize at setMeta): storing references would let caller mutation
+    // silently rewrite stored checkpoint state after a successful ok(undefined)
+    // — the same aliasing class `detachStored` exists to prevent.
+    let detached: RunMeta;
+    let createdAt: Date;
+    try {
+      detached = this.detachStored(meta, "checkpoint meta");
+      // The injected clock is an untrusted seam; a throwing clock must become
+      // a typed error, never a raw rejection.
+      createdAt = new Date(this.now());
+    } catch (error) {
+      return err(cacheError("checkpoint:setMeta", error));
+    }
     // Always stamp the writer's framework version unless the caller supplied
     // their own (lets tests construct stale-version payloads). Matches
     // `RedisCheckpointer.setMeta` exactly so backend swap is transparent.
     this.metas.set(runId, {
       meta: {
-        ...meta,
-        frameworkVersion: meta.frameworkVersion ?? FRAMEWORK_VERSION,
+        ...detached,
+        frameworkVersion: detached.frameworkVersion ?? FRAMEWORK_VERSION,
       },
-      createdAt: new Date(this.now()),
+      createdAt,
     });
     return ok(undefined);
   }

@@ -2,6 +2,7 @@ import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -89,9 +90,22 @@ export class FakeLlmClient implements LlmClient {
   async sendStructured<O>(
     req: LlmRequest<O>,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
-    const raw = this.responses instanceof Map
-      ? this.responses.get(req.model) ?? this.responses.get(req.system)
-      : this.responses(req);
+    // The response provider is caller code (and possibly a hostile Proxy): a
+    // throw must become a typed node-crash, never a raw rejection (FR-040 —
+    // the real clients keep every LLM seam inside the Result boundary).
+    let raw: unknown;
+    try {
+      raw = this.responses instanceof Map
+        ? this.responses.get(req.model) ?? this.responses.get(req.system)
+        : this.responses(req);
+    } catch (error) {
+      return err({
+        kind: "node-crash",
+        retriability: "retriable",
+        nodeId: req.nodeId,
+        message: `FakeLlmClient: response provider threw: ${safeErrorMessage(error)}`,
+      });
+    }
 
     if (raw === undefined) {
       return err({
@@ -106,11 +120,23 @@ export class FakeLlmClient implements LlmClient {
       return err(raw);
     }
 
+    let rawText: string;
+    try {
+      rawText = JSON.stringify(raw);
+    } catch (error) {
+      return err({
+        kind: "node-crash",
+        retriability: "retriable",
+        nodeId: req.nodeId,
+        message: `FakeLlmClient: response is not JSON-serializable: ${safeErrorMessage(error)}`,
+      });
+    }
+
     return ok({
       output: raw as O,
       tokensIn: 100,
       tokensOut: 50,
-      rawText: JSON.stringify(raw),
+      rawText,
     });
   }
 
@@ -133,7 +159,7 @@ export class FakeLlmClient implements LlmClient {
       return err({
         kind: "validation",
         nodeId: req.nodeId,
-        message: e instanceof Error ? e.message : String(e),
+        message: safeErrorMessage(e),
       });
     }
 
@@ -151,12 +177,25 @@ export class FakeLlmClient implements LlmClient {
         return err({ kind: "aborted", reason: "signal" });
       }
 
-      const turnSpec: FakeTurn | undefined = arrayScript
-        ? arrayScript[turn]
-        : (this.withToolsScript as Exclude<FakeWithToolsScript, readonly FakeTurn[]>)(
-            req,
-            { turn, toolResults: lastToolResults },
-          );
+      // The script is caller code: a throw must become a typed node-crash
+      // (the real clients map script/tool-dispatch failures into the typed
+      // node-crash machinery; the fake must not green-light raw rejections).
+      let turnSpec: FakeTurn | undefined;
+      try {
+        turnSpec = arrayScript
+          ? arrayScript[turn]
+          : (this.withToolsScript as Exclude<FakeWithToolsScript, readonly FakeTurn[]>)(
+              req,
+              { turn, toolResults: lastToolResults },
+            );
+      } catch (error) {
+        return err({
+          kind: "node-crash",
+          retriability: "retriable",
+          nodeId: req.nodeId,
+          message: `FakeLlmClient: withToolsScript threw at turn ${turn}: ${safeErrorMessage(error)}`,
+        });
+      }
 
       if (!turnSpec) {
         return err({
@@ -170,26 +209,36 @@ export class FakeLlmClient implements LlmClient {
       const tokensIn = turnSpec.tokensIn ?? 10;
       const tokensOut = turnSpec.tokensOut ?? 5;
 
-      await withLlmSpan(
-        ctx.tracer ?? null,
-        { provider: "fake", model: req.model, operation: "chat" },
-        async () => {
-          totalTokensIn += tokensIn;
-          totalTokensOut += tokensOut;
-          setLlmUsageAttributes(tokensIn, tokensOut);
-          if (
-            turnSpec.responseId ||
-            turnSpec.responseModel ||
-            turnSpec.finishReason
-          ) {
-            setLlmResponseAttributes({
-              model: turnSpec.responseModel,
-              id: turnSpec.responseId,
-              finishReasons: turnSpec.finishReason ? [turnSpec.finishReason] : undefined,
-            });
-          }
-        },
-      );
+      try {
+        await withLlmSpan(
+          ctx.tracer ?? null,
+          { provider: "fake", model: req.model, operation: "chat" },
+          async () => {
+            totalTokensIn += tokensIn;
+            totalTokensOut += tokensOut;
+            setLlmUsageAttributes(tokensIn, tokensOut);
+            if (
+              turnSpec.responseId ||
+              turnSpec.responseModel ||
+              turnSpec.finishReason
+            ) {
+              setLlmResponseAttributes({
+                model: turnSpec.responseModel,
+                id: turnSpec.responseId,
+                finishReasons: turnSpec.finishReason ? [turnSpec.finishReason] : undefined,
+              });
+            }
+          },
+        );
+      } catch (error) {
+        // A hostile tracer must not escape the Result boundary.
+        return err({
+          kind: "node-crash",
+          retriability: "retriable",
+          nodeId: req.nodeId,
+          message: `FakeLlmClient: span/tracer threw at turn ${turn}: ${safeErrorMessage(error)}`,
+        });
+      }
 
       if (turnSpec.type === "final") {
         if (turnSpec.thinking !== undefined) lastThinking = turnSpec.thinking;
@@ -222,12 +271,23 @@ export class FakeLlmClient implements LlmClient {
         });
       }
 
-      lastToolResults = await dispatchToolCallsWithSpans(
-        turnSpec.calls,
-        req.tools,
-        ctx,
-        { model: req.model },
-      );
+      try {
+        lastToolResults = await dispatchToolCallsWithSpans(
+          turnSpec.calls,
+          req.tools,
+          ctx,
+          { model: req.model },
+        );
+      } catch (error) {
+        // Tool EXECUTION failures are already per-call is_error results;
+        // anything that throws here (dispatch seam, tracer) stays typed.
+        return err({
+          kind: "node-crash",
+          retriability: "retriable",
+          nodeId: req.nodeId,
+          message: `FakeLlmClient: tool dispatch threw at turn ${turn}: ${safeErrorMessage(error)}`,
+        });
+      }
     }
 
     return err({
