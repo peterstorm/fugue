@@ -252,8 +252,7 @@ describe("fugue visualize --raw (subprocess)", () => {
   });
 
   it("a raw failure goes to stderr as JSON with exit 1, stdout stays clean", async () => {
-    const brokenPath = join(tmpRoot, "broken-raw.ts");
-    await Bun.write(brokenPath, "export default {};");
+    const brokenPath = resolve(__dirname, "fixtures", "missing-dag-field.ts");
     const { exitCode, stdout, stderr } = await runBin(["visualize", brokenPath, "--raw"]);
     expect(exitCode).toBe(1);
     expect(stdout).toBe("");

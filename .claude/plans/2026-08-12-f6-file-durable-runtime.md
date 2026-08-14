@@ -58,7 +58,7 @@ Node filenames are digested because composite nodeKeys (`dag@<128>@<10>@<10>` wo
 
 Freshness side: `freshnessDir/<sha256hex(resource)>.json` — see AD-5.
 
-Atomicity: every durable write is `atomicWriteFile` — write to `path.tmp.<pid>` in the same directory, `renameSync` onto the final path, unlink the tmp on failure. Readers list only `*.json`, so orphaned tmp files are invisible. Crash model = process crash (rename is the commit point); power-loss durability would additionally require fsync, which Loom's proven reference also omits — flagged as host-shell hardening beyond this pass, not silently claimed.
+Atomicity: every durable write is `atomicWriteFile` — write to a caller-owned `path.tmp.<unique-token>` in the same directory, `renameSync` onto the final path, unlink only that temp on failure. Readers list only `*.json`, so orphaned tmp files are invisible. Per-attempt temp ownership also prevents same-process/same-target writes from contending on one process-scoped path. Crash model = process crash (rename is the commit point); power-loss durability would additionally require fsync, which Loom's proven reference also omits — flagged as host-shell hardening beyond this pass, not silently claimed.
 
 **Why:** the validated behavioral reference (Loom's journal has been exercised by real orchestration runs) determines the failure model; the digest adaptation fixes a genuine NAME_MAX defect in the raw scheme while preserving every property the layout exists for.
 
@@ -104,7 +104,7 @@ Documented contract on the public surface (`createFileJob`):
 **Rejected:**
 - An in-process mutex only — does not serialize the crash/resume boundary where an old writer process may still be alive.
 - Lock-free appends relying on unique tmp names + retry — two concurrent appends with different keys could observe the same listing and claim the same sequence (the exact hazard Loom's comment documents).
-- O_NOFOLLOW/anchored-path hardening (Loom's production `RunDirHandle`) — the run-directory is caller-supplied; symlink anchoring is the host shell's concern, documented in Security notes (brainstorm open question 2, resolved: parity + documentation for F6).
+- Full descriptor-relative O_NOFOLLOW traversal (Loom's production `RunDirHandle`) — portable Node does not expose openat-style path traversal. The shipped Checkpointer nevertheless rejects pre-existing symlinks at its supplied base and managed run/nodes/file entries, proves canonical parent containment, and rechecks directory identity around writes; malicious concurrent rename substitution remains a documented host-shell concern. The job journal retains its non-adversarial caller-supplied-directory contract.
 
 ### AD-5: File FreshnessIndex — digest-addressed latest-write files with lazy TTL parity
 
@@ -246,8 +246,8 @@ Every path construction in the backend goes through validation first and `join` 
 
 ```
 export const atomicWriteFile = (path: string, contents: string): void;
-// writeFileSync(`${path}.tmp.${process.pid}`, contents) → renameSync(tmp, path);
-// on rename failure: unlink tmp if present, rethrow.
+// writeFileSync(`${path}.tmp.${uniqueToken()}`, contents) → renameSync(tmp, path);
+// each call owns a distinct same-directory temp; on failure unlink only that temp, rethrow.
 
 export const withFileLock = <T>(lockPath: string, fn: () => T | Promise<T>): Promise<T>;
 // rename-born directory lock at `${lockPath}.lock`: stage pid file in a private birth dir,
@@ -514,7 +514,7 @@ The shared `checkpointerSuite` is the antidote to per-backend drift (spec risk "
 ## Security & NFR Notes
 
 - **Trust boundary (primary risk):** identifiers and address components are re-validated at the filesystem boundary (FR-016, FR-029, NFR-010): runId/nodeId/namespace against `ID_PATTERN` (`^[A-Za-z0-9_:-]{1,128}$`), index/attempt as non-negative safe integers, dedupKey against its 256-char charset at append. Paths are built with `join` AFTER validation — raw identifiers never reach a path string. Every failure is typed (`checkpoint-write-failed` on the write side, `cache-error` on the load side / freshness). The one unbounded port value (freshness `resource`) is addressed by digest only — no path is ever derived from it (AD-5). Hostile-identifier tests (`../`, absolute paths, NUL, charset violations) assert nothing is created outside the caller-supplied directory.
-- **Symlink anchoring:** the plain dir-lock and tmp+rename primitives do NOT carry O_NOFOLLOW discipline (Loom's production `RunDirHandle` does); the run directory is caller-supplied and the single-writer contract assumes a non-adversarial filesystem. Anchoring is documented as host-shell hardening, exactly as in Loom's own split. This pass ships the parity primitives (brainstorm open question 2, resolved).
+- **Symlink anchoring:** the plain job-journal dir-lock and tmp+rename primitive do not carry descriptor-relative O_NOFOLLOW discipline (Loom's production `RunDirHandle` does); that surface assumes a caller-protected, non-adversarial run directory. The Checkpointer is stricter: its supplied base and managed run/nodes entries are `lstat`/`realpath`-verified as non-symlink directories under their canonical parent, readable files must be regular non-symlinks, and directory identity is rechecked around writes. Portable Node cannot eliminate a malicious concurrent rename race without openat-style APIs, so that residual is not silently claimed away.
 - **Durability model:** process-crash durability (kill -9, exceptions) is fully covered by tmp+rename — rename is the commit point, and readers only ever see `*.json`. Power-loss durability (fsync before rename) is a documented residual shared with the Loom reference (AD-2). The crash-window test (SC-002) proves resume never silently proceeds on corruption (NFR-001/002).
 - **Performance:** appends are O(files-in-events-dir) under the lock — appropriate for run journals (hundreds to low thousands of transitions); the resume proof is O(n) single-pass (AD-3); TTL expiry is lazy at load/findConflict only — no background work of any kind (FR-044).
 - **Observability:** `fwLogger().warn` on every dropped corrupt checkpoint node entry (runId + nodeKey) and on corrupt freshness entries, mirroring `RedisCheckpointer.load` / `decodeMember`; `corruptNodeIds` surfaced on `RunState` (FR-028) — callers can always distinguish "never ran" from "ran but stored corrupt".

@@ -8,6 +8,34 @@
 import type { Machine, RecordedEvent } from "./types.js";
 
 /**
+ * ONE fold step of an event-log replay: apply a single entry — a raw
+ * event `E` or a `RecordedEvent` envelope (unwrapped automatically, the
+ * timestamp metadata is irrelevant to the fold) — to a machine state
+ * through the pure transition function.
+ *
+ * This is the ONLY place where envelopes are unwrapped and the `E` cast
+ * is made: `replayEvents` and the resume agreement proof's strict-prefix
+ * scan (`resume.ts`) share this step, so the transition+unwrap
+ * implementation cannot drift between the full replay and the scan (and
+ * the `as E` cast lives in exactly one file).
+ *
+ * Pure — no executor, no I/O, no side effects. May throw only because
+ * `machine.transition` throws (hostile/version-drifted event payloads);
+ * callers at I/O boundaries use a total exception-to-`Result` mapper whose
+ * diagnostics are safe for arbitrary thrown values (FR-040).
+ */
+export const foldStep = <S, E, C>(
+  current: { state: S; context: C },
+  entry: E | RecordedEvent<unknown>,
+  machine: Machine<S, E, C>,
+): { state: S; context: C } => {
+  // Envelope or raw event — same machine API. The cast is confined to this
+  // one step; every replay consumer folds through it.
+  const event = (isRecordedEvent(entry) ? entry.event : entry) as E;
+  return machine.transition(current.state, event, current.context);
+};
+
+/**
  * Rebuild state by replaying a sequence of events through the pure
  * transition function starting from an initial checkpoint.
  *
@@ -33,9 +61,7 @@ export function replayEvents<S, E, C>(
 ): { state: S; context: C } {
   let current = initial;
   for (const entry of events) {
-    // Envelope or raw event — same machine API.
-    const event = (isRecordedEvent(entry) ? entry.event : entry) as E;
-    current = machine.transition(current.state, event, current.context);
+    current = foldStep(current, entry, machine);
   }
   return current;
 }

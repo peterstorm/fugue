@@ -3,11 +3,14 @@ import type { FrameworkError } from "../types/errors.js";
 import type { RunId } from "../types/ids.js";
 import { ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
+import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
 
 // Mirrors the Redis checkpointer's 24-hour TTL. Production runs longer than
 // this should re-checkpoint anyway; the in-memory implementation enforces the
 // same contract so tests that drive both backends through `checkpointerSuite`
-// observe the same expiry behaviour. ADR-0017.
+// observe the same expiry behaviour. TTL evaluation is lazy at read time
+// (load-order parity with the Redis backend) — not ADR-0017, which is the
+// framework-version-mismatch contract enforced in `load` below.
 const TTL_SECONDS = 86_400;
 
 // --- Domain types ---
@@ -45,16 +48,41 @@ export interface NodeState {
 
 export interface RunState {
   readonly meta: RunMeta;
+  /**
+   * Stored node entries keyed by the STORED nodeKey — the canonical `nodeId`
+   * for canonical saves, or the composite key
+   * `${namespace}@${nodeId}@${index}@${attempt}` for composite saves (AD-1;
+   * encode/decode via `compositeNodeKey`/`parseCompositeNodeKey`). `NodeState.nodeId`
+   * inside each entry still names the real node, so mapped/fan-out instances
+   * of the same node appear as separate entries under distinct composite keys
+   * in backends that implement composite addressing (the file backend). The
+   * in-memory and Redis backends collapse composite saves onto the bare
+   * `nodeId` key instead (FR-023: they ignore `SaveNodeOpts` entirely).
+   */
   readonly nodes: Record<string, NodeState>;
   /**
-   * Node ids whose stored entry deserialize failed and were silently dropped
-   * from `nodes`. Empty / absent on a clean load. Surfaced so resume callers
-   * can distinguish "node never ran" from "node ran but checkpoint corrupt".
+   * Backend-specific addresses of stored entries that could not be decoded and
+   * were dropped from `nodes`. Redis reports hash-field node ids; the file
+   * backend reports a recoverable stored nodeKey, or the digest filename when
+   * no address can be recovered. Empty / absent on a clean load.
    */
   readonly corruptNodeIds?: readonly string[];
 }
 
 // --- Checkpointer interface ---
+
+/**
+ * Per-call options for `Checkpointer.saveNode` — composite checkpoint
+ * addressing (AD-1, see `composite-node-key.ts`).
+ *
+ * Canonical folding: when `index` AND `attempt` are BOTH absent, the entry is
+ * stored under the bare `nodeId` — byte-identical to pre-extension behavior.
+ * When either is present, the entry is stored under
+ * `${namespace ?? "dag"}@${nodeId}@${index ?? 0}@${attempt ?? 0}`, a distinct
+ * durable key so indexed fan-out instances (F1) and subgraph namespaces (F8)
+ * never overwrite each other or the canonical entry.
+ */
+export type SaveNodeOpts = CompositeNodeKeyOpts;
 
 /** Per-call options for `Checkpointer.load`. */
 export interface CheckpointerLoadOpts {
@@ -76,7 +104,18 @@ export interface Checkpointer {
     runId: RunId,
     opts?: CheckpointerLoadOpts,
   ): Promise<Result<RunState | null, FrameworkError>>;
-  saveNode(runId: RunId, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>>;
+  /**
+   * Persist a node's terminal state under `runId`.
+   *
+   * The optional 4th argument enables composite addressing (AD-1): with
+   * `index`/`attempt` both absent the entry is stored under the canonical
+   * `nodeId` key (existing behavior, byte-identical); with either present the
+   * entry is stored under the composite key (see `SaveNodeOpts`). The
+   * in-memory and Redis backends ignore `opts` exactly as today (FR-023);
+   * composite addressing is a versioned opt-in implemented by the file
+   * backend. `load` returns entries keyed by the stored nodeKey.
+   */
+  saveNode(runId: RunId, nodeId: string, state: NodeState, opts?: SaveNodeOpts): Promise<Result<void, FrameworkError>>;
   setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>>;
 }
 
@@ -86,8 +125,9 @@ import { err } from "../types/result.js";
 
 /**
  * Internal storage shape. `createdAt` is split out so the checkpointer owns
- * the timestamp the same way the Redis variant does (server-side stamped on
- * setMeta, evaluated against `TTL_SECONDS` on load). Held in a separate field
+ * the timestamp the same way the Redis variant does (stamped at write time by
+ * the writer process in `setMeta`, evaluated against `TTL_SECONDS` on load).
+ * Held in a separate field
  * rather than smuggled onto `RunMeta` so the public type stays clean.
  */
 interface StoredMeta {
@@ -149,7 +189,15 @@ export class InMemoryCheckpointer implements Checkpointer {
     return ok({ meta, nodes: this.nodes.get(runId) ?? {} });
   }
 
-  async saveNode(runId: RunId, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
+  async saveNode(
+    runId: RunId,
+    nodeId: string,
+    state: NodeState,
+    _opts?: SaveNodeOpts,
+  ): Promise<Result<void, FrameworkError>> {
+    // FR-023: options are intentionally unobserved. In-memory behavior remains
+    // identical to the pre-extension implementation: the bare nodeId is the
+    // only key and no log, warning, validation, or other side effect occurs.
     const existing = this.nodes.get(runId) ?? {};
     this.nodes.set(runId, { ...existing, [nodeId]: state });
     return ok(undefined);

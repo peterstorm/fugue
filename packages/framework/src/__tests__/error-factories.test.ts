@@ -124,6 +124,19 @@ describe("frameworkError factories", () => {
     });
   });
 
+  describe("checkpointWriteFailed", () => {
+    it("preserves the required branded runId/nodeId shape after narrowing", () => {
+      const error = frameworkError.checkpointWriteFailed("run-write", "node-write", "disk full");
+      expect(error.kind).toBe("checkpoint-write-failed");
+      if (error.kind === "checkpoint-write-failed") {
+        expect(String(error.runId)).toBe("run-write");
+        expect(String(error.nodeId)).toBe("node-write");
+        expect(error.invalidRunId).toBeUndefined();
+        expect(error.invalidNodeId).toBeUndefined();
+      }
+    });
+  });
+
   describe("rejected", () => {
     it("produces kind=rejected", () => {
       const e = frameworkError.rejected("n", "quality too low");

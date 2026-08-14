@@ -18,6 +18,14 @@ import {
   type Retriability,
 } from "../types/errors.js";
 import type { Capability } from "../types/node.js";
+import {
+  probeErrorCode,
+  safeDiagnosticRender,
+  safeErrorMessage,
+  safeErrorMessageWithCodeProbe,
+  UNPRINTABLE_ERROR,
+  UNPRINTABLE_VALUE,
+} from "../types/safe-error.js";
 
 const rid = makeRunId("run-budget");
 const nid = makeNodeId("node-x");
@@ -29,6 +37,40 @@ const budgetError: FrameworkError = {
   cumulative: 1200,
   budget: 1000,
 };
+
+describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
+  it("keeps legacy branded locations required while preferring invalid raw diagnostics", () => {
+    const error: FrameworkError = {
+      kind: "checkpoint-write-failed",
+      runId: makeRunId("checkpoint_invalid_run"),
+      nodeId: makeNodeId("checkpoint_invalid_node"),
+      invalidRunId: "../escape",
+      invalidNodeId: "bad/node",
+      message: "boundary rejected",
+    };
+
+    // Discriminant narrowing preserves the established required source shape.
+    expect(String(error.runId)).toBe("checkpoint_invalid_run");
+    expect(String(error.nodeId)).toBe("checkpoint_invalid_node");
+    expect(error.invalidRunId).toBe("../escape");
+    expect(error.invalidNodeId).toBe("bad/node");
+    expect(formatFrameworkError(error)).toContain("../escape");
+    expect(formatFrameworkError(error)).toContain("bad/node");
+  });
+
+  it("formats a metadata failure with its grammar-valid internal node location", () => {
+    const error: FrameworkError = {
+      kind: "checkpoint-write-failed",
+      runId: rid,
+      nodeId: makeNodeId("checkpoint_meta"),
+      message: "meta write failed",
+    };
+
+    expect(formatFrameworkError(error)).toBe(
+      "checkpoint write failed for run 'run-budget' node 'checkpoint_meta': meta write failed",
+    );
+  });
+});
 
 describe("FrameworkError: llm-budget-exceeded", () => {
   it("is discriminable on kind and carries the structured payload", () => {
@@ -287,6 +329,104 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
   });
 });
 
+describe("safeErrorMessage — hostile thrown-value matrix", () => {
+  it("is total without instanceof, unguarded message reads, or coercion leaks", () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const nullPrototype = Object.assign(Object.create(null) as object, {
+      message: "null prototype failure",
+    });
+    const throwingMessage = Object.defineProperty({}, "message", {
+      get: () => { throw new Error("message unavailable"); },
+    });
+    const coercionTraps = Object.defineProperties({}, {
+      toString: {
+        get: () => { throw new Error("toString unavailable"); },
+      },
+      [Symbol.toPrimitive]: {
+        get: () => { throw new Error("Symbol.toPrimitive unavailable"); },
+      },
+    });
+    const hostileInstanceof = new Proxy({}, {
+      getPrototypeOf: () => { throw new Error("prototype unavailable"); },
+    });
+
+    const corpus: readonly unknown[] = [
+      revoked.proxy,
+      nullPrototype,
+      throwingMessage,
+      coercionTraps,
+      hostileInstanceof,
+    ];
+    for (const hostile of corpus) {
+      expect(() => safeErrorMessage(hostile)).not.toThrow();
+      expect(typeof safeErrorMessage(hostile)).toBe("string");
+    }
+    expect(safeErrorMessage(revoked.proxy)).toBe(UNPRINTABLE_ERROR);
+    expect(safeErrorMessage(nullPrototype)).toBe("null prototype failure");
+  });
+});
+
+describe("total Node errno diagnostics", () => {
+  it("returns a discriminated code/absence result without invoking Proxy has traps", () => {
+    let hasCalls = 0;
+    const coded = new Proxy({ code: "ENOENT" }, {
+      has: () => {
+        hasCalls += 1;
+        throw new Error("has trap must not run");
+      },
+    });
+
+    expect(probeErrorCode(coded)).toEqual({ kind: "code", code: "ENOENT" });
+    expect(probeErrorCode(new Error("ordinary"))).toEqual({ kind: "absent" });
+    expect(probeErrorCode(null)).toEqual({ kind: "absent" });
+    expect(hasCalls).toBe(0);
+  });
+
+  it("captures throwing code getters as safe actionable inspection diagnostics", () => {
+    const primary = new Error("primary filesystem failure");
+    Object.defineProperty(primary, "code", {
+      get: () => { throw new Error("code getter exploded"); },
+    });
+
+    const probe = probeErrorCode(primary);
+    expect(probe).toEqual({
+      kind: "inspection-failed",
+      diagnostic: "code getter exploded",
+    });
+    expect(safeErrorMessageWithCodeProbe(primary, probe)).toBe(
+      "primary filesystem failure (error code inspection failed: code getter exploded)",
+    );
+  });
+
+  it("is total for Proxy get traps, revoked Proxies, and hostile thrown trap values", () => {
+    const revokedThrown = Proxy.revocable({}, {});
+    revokedThrown.revoke();
+    const hostileGet = new Proxy(new Error("primary proxy failure"), {
+      get(target, property, receiver) {
+        if (property === "code") throw revokedThrown.proxy;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const revokedError = Proxy.revocable({}, {});
+    revokedError.revoke();
+
+    for (const hostile of [hostileGet, revokedError.proxy] as const) {
+      expect(() => probeErrorCode(hostile)).not.toThrow();
+      const probe = probeErrorCode(hostile);
+      expect(probe.kind).toBe("inspection-failed");
+      expect(() => safeErrorMessageWithCodeProbe(hostile, probe)).not.toThrow();
+      expect(safeErrorMessageWithCodeProbe(hostile, probe)).toContain(
+        "error code inspection failed",
+      );
+    }
+    expect(probeErrorCode(hostileGet)).toEqual({
+      kind: "inspection-failed",
+      diagnostic: UNPRINTABLE_ERROR,
+    });
+  });
+});
+
 describe("messageOf — retry-exhausted lastError summariser", () => {
   const nid = makeNodeId("node-m");
 
@@ -298,5 +438,44 @@ describe("messageOf — retry-exhausted lastError summariser", () => {
   it("JSON-stringifies every other kind so no structured payload is lost", () => {
     const err: FrameworkError = { kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" };
     expect(messageOf(err)).toBe(JSON.stringify(err));
+  });
+
+  it("is total for hostile unknown values, throwing Error.message getters, revocation, and cycles", () => {
+    const throwingMessage = new Error("hidden");
+    Object.defineProperty(throwingMessage, "message", {
+      configurable: true,
+      get: () => { throw new Error("message unavailable"); },
+    });
+    const allTraps = new Proxy({}, {
+      get: () => { throw new Error("get unavailable"); },
+      getPrototypeOf: () => { throw new Error("prototype unavailable"); },
+      ownKeys: () => { throw new Error("keys unavailable"); },
+    });
+    const throwingCoercion = Object.defineProperties({}, {
+      toString: { get: () => { throw new Error("toString unavailable"); } },
+      [Symbol.toPrimitive]: {
+        get: () => { throw new Error("Symbol.toPrimitive unavailable"); },
+      },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const cyclic: Record<string, unknown> = { kind: "checkpoint-missing" };
+    cyclic.self = cyclic;
+    const corpus: readonly unknown[] = [
+      allTraps,
+      throwingCoercion,
+      throwingMessage,
+      revoked.proxy,
+      cyclic,
+    ];
+
+    for (const hostile of corpus) {
+      expect(() => messageOf(hostile)).not.toThrow();
+      expect(typeof messageOf(hostile)).toBe("string");
+      expect(() => safeDiagnosticRender(hostile)).not.toThrow();
+      expect(typeof safeDiagnosticRender(hostile)).toBe("string");
+    }
+    expect(messageOf(revoked.proxy)).toBe(UNPRINTABLE_ERROR);
+    expect(safeDiagnosticRender(revoked.proxy)).toBe(UNPRINTABLE_VALUE);
   });
 });

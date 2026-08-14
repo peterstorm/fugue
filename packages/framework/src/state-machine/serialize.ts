@@ -3,7 +3,7 @@
 // through JSON without information loss (required for checkpoint persistence).
 
 import type { Result } from "../types/result.js";
-import { tryCatch } from "../types/result.js";
+import { err, ok, tryCatch } from "../types/result.js";
 
 const MAP_TAG = "__map__";
 const SET_TAG = "__set__";
@@ -14,6 +14,237 @@ type SerializedMap = { __map__: Array<[unknown, unknown]> };
 type SerializedSet = { __set__: unknown[] };
 type SerializedDate = { __date__: string };
 type SerializedUndefined = { __undefined__: true };
+
+const RESERVED_TAGS = [MAP_TAG, SET_TAG, DATE_TAG, UNDEFINED_TAG] as const;
+type ReservedTag = (typeof RESERVED_TAGS)[number];
+
+const POLLUTION_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+const isReservedTag = (key: string): key is ReservedTag =>
+  RESERVED_TAGS.some((tag) => tag === key);
+
+const serializedPath = (parent: string, key: string | number): string =>
+  typeof key === "number"
+    ? `${parent}[${key}]`
+    : /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
+      ? `${parent}.${key}`
+      : `${parent}[${JSON.stringify(key)}]`;
+
+/** SameValueZero identity for primitives after deserialization. Objects return
+ * null because distinct object identities may have byte-identical serialized
+ * shapes while remaining distinct Map keys or Set values. */
+const primitiveSameValueZeroIdentity = (value: unknown): string | null => {
+  if (value === null) return "null";
+  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
+  if (typeof value === "boolean") return `boolean:${value}`;
+  if (typeof value === "number") return `number:${Object.is(value, -0) ? 0 : value}`;
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 1 &&
+    (value as Record<string, unknown>)[UNDEFINED_TAG] === true
+  ) {
+    return "undefined";
+  }
+  return null;
+};
+
+export interface SerializedGrammarOptions {
+  /** Diagnostic root, for example `record` or `output`. */
+  readonly rootPath: string;
+  /** Maximum property/tag hops admitted before recursive deserialization. */
+  readonly maxDepth: number;
+  /** Root depth in the caller's containing envelope. Defaults to zero. */
+  readonly initialDepth?: number;
+}
+
+/**
+ * Validate a raw JSON value against the exact canonical grammar emitted by
+ * `serializeValue`, before `deserializeValue` may reinterpret tagged objects
+ * or erase pollution keys.
+ *
+ * The iterative validator rejects pollution keys at every depth; reserved-tag
+ * objects with siblings or multiple tags; malformed Map tuples, Set payloads,
+ * Date strings, and undefined markers; duplicate primitive Map keys / Set
+ * values that deserialization would collapse; non-finite or negative-zero raw
+ * numbers that the serializer never emits; and excessive nesting. Expected
+ * failures are returned as `Result` strings so persistence adapters can map
+ * them to their own typed corruption errors.
+ */
+export const validateSerializedValueGrammar = (
+  value: unknown,
+  options: SerializedGrammarOptions,
+): Result<void, string> => {
+  const initialDepth = options.initialDepth ?? 0;
+  if (!Number.isSafeInteger(options.maxDepth) || options.maxDepth < 0) {
+    return err(`maxDepth must be a non-negative safe integer, got ${String(options.maxDepth)}`);
+  }
+  if (!Number.isSafeInteger(initialDepth) || initialDepth < 0) {
+    return err(`initialDepth must be a non-negative safe integer, got ${String(initialDepth)}`);
+  }
+
+  const stack: Array<{
+    readonly value: unknown;
+    readonly path: string;
+    readonly depth: number;
+  }> = [{ value, path: options.rootPath, depth: initialDepth }];
+
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    if (frame === undefined) break;
+    if (frame.value === undefined) {
+      return err(`${frame.path} is raw undefined; canonical serialization requires {${UNDEFINED_TAG}:true}`);
+    }
+    if (typeof frame.value === "number") {
+      if (!Number.isFinite(frame.value)) {
+        return err(`${frame.path} is a non-finite number that canonical JSON serialization never emits`);
+      }
+      if (Object.is(frame.value, -0)) {
+        return err(`${frame.path} is -0; canonical serialization normalizes -0 to 0`);
+      }
+      continue;
+    }
+    if (
+      frame.value === null ||
+      typeof frame.value === "string" ||
+      typeof frame.value === "boolean"
+    ) {
+      continue;
+    }
+    if (typeof frame.value !== "object") {
+      return err(`${frame.path} has non-JSON type ${typeof frame.value}`);
+    }
+    // Depth counts nested containers, matching serializeValue's recursive
+    // calls and the file codec's established boundary. Primitive leaves do
+    // not add another recursive frame.
+    if (frame.depth > options.maxDepth) {
+      return err(
+        `${options.rootPath} nesting exceeds the safe depth ceiling ${options.maxDepth} at ${frame.path} (depth ${frame.depth})`,
+      );
+    }
+
+    if (Array.isArray(frame.value)) {
+      for (let index = frame.value.length - 1; index >= 0; index--) {
+        stack.push({
+          value: frame.value[index],
+          path: serializedPath(frame.path, index),
+          depth: frame.depth + 1,
+        });
+      }
+      continue;
+    }
+
+    const record = frame.value as Record<string, unknown>;
+    const keys = Object.keys(record);
+    const pollutionKey = keys.find((key) => POLLUTION_KEYS.has(key));
+    if (pollutionKey !== undefined) {
+      return err(
+        `${serializedPath(frame.path, pollutionKey)} contains prototype-pollution-filtered key ${JSON.stringify(pollutionKey)}; deserialization would silently erase it`,
+      );
+    }
+
+    const tags = keys.filter(isReservedTag);
+    if (tags.length === 0) {
+      for (let index = keys.length - 1; index >= 0; index--) {
+        const key = keys[index];
+        stack.push({
+          value: record[key],
+          path: serializedPath(frame.path, key),
+          depth: frame.depth + 1,
+        });
+      }
+      continue;
+    }
+    if (tags.length !== 1 || keys.length !== 1) {
+      return err(
+        `${frame.path} is an ambiguous serializer-tag object: reserved tag objects must contain exactly one canonical tag field, got ${keys.map((key) => JSON.stringify(key)).join(", ")}`,
+      );
+    }
+
+    const tag = tags[0];
+    const payload = record[tag];
+    if (tag === UNDEFINED_TAG) {
+      if (payload !== true) {
+        return err(`${frame.path}.${UNDEFINED_TAG} must be exactly true`);
+      }
+      continue;
+    }
+    if (tag === DATE_TAG) {
+      if (typeof payload !== "string") {
+        return err(`${frame.path}.${DATE_TAG} must be an ISO string`);
+      }
+      const date = new Date(payload);
+      if (!Number.isFinite(date.getTime()) || date.toISOString() !== payload) {
+        return err(
+          `${frame.path}.${DATE_TAG} must be the canonical ISO timestamp emitted by Date#toISOString, got ${JSON.stringify(payload)}`,
+        );
+      }
+      continue;
+    }
+    if (!Array.isArray(payload)) {
+      return err(`${frame.path}.${tag} must be an array`);
+    }
+
+    if (tag === SET_TAG) {
+      const primitiveValues = new Set<string>();
+      for (let index = payload.length - 1; index >= 0; index--) {
+        const rawValue = payload[index];
+        const identity = primitiveSameValueZeroIdentity(rawValue);
+        if (identity !== null) {
+          if (primitiveValues.has(identity)) {
+            return err(
+              `${frame.path}.${SET_TAG}[${index}] duplicates a primitive Set value; canonical Set serialization cannot contain duplicate primitive values`,
+            );
+          }
+          primitiveValues.add(identity);
+        }
+        stack.push({
+          value: rawValue,
+          path: `${frame.path}.${SET_TAG}[${index}]`,
+          depth: frame.depth + 1,
+        });
+      }
+      continue;
+    }
+
+    const primitiveKeys = new Set<string>();
+    for (let index = payload.length - 1; index >= 0; index--) {
+      const entry = payload[index];
+      if (!Array.isArray(entry) || entry.length !== 2) {
+        return err(
+          `${frame.path}.${MAP_TAG}[${index}] must be an exact two-element [key, value] tuple`,
+        );
+      }
+      const rawKey = entry[0];
+      const identity = primitiveSameValueZeroIdentity(rawKey);
+      if (identity !== null) {
+        if (primitiveKeys.has(identity)) {
+          return err(
+            `${frame.path}.${MAP_TAG}[${index}][0] duplicates a primitive Map key; canonical Map serialization cannot contain duplicate primitive keys`,
+          );
+        }
+        primitiveKeys.add(identity);
+      }
+      stack.push({
+        value: entry[1],
+        path: `${frame.path}.${MAP_TAG}[${index}][1]`,
+        depth: frame.depth + 1,
+      });
+      stack.push({
+        value: rawKey,
+        path: `${frame.path}.${MAP_TAG}[${index}][0]`,
+        depth: frame.depth + 1,
+      });
+    }
+  }
+
+  return ok(undefined);
+};
 
 /** Serialize a value to a plain JSON-safe object, preserving Map/Set/Date/undefined. */
 export const serializeValue = (value: unknown): unknown => {

@@ -11,6 +11,7 @@
     ".": "./src/index.ts",
     "./advanced": "./src/advanced.ts",
     "./bullmq": "./src/bullmq.ts",
+    "./file": "./src/file.ts",
     "./redis": "./src/redis.ts",
     "./testing": "./src/testing.ts"
   },

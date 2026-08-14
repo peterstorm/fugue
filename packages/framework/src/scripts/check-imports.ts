@@ -1,28 +1,41 @@
 /**
- * Boundary-import checker
+ * Source-boundary checker
  *
  * Enforces:
  *   - state-machine/** MUST NOT import bullmq, ioredis, or queue-bullmq/**
  *   - dag-runtime/**   MUST NOT import bullmq, ioredis, or queue-bullmq/**
+ *   - file/** and src/file.ts (the @fuguejs/framework/file backend) may import only canonical node:fs, node:crypto, and node:path among Node built-ins; bare and subpath spellings are rejected
+ *   - file/** and src/file.ts MUST NOT import bullmq, ioredis, or queue-bullmq
  *   - Only queue-bullmq/** may import bullmq and ioredis
+ *   - file/** implementation modules MUST NOT call the public string-typed
+ *     frameworkError.cacheError factory directly; boundary-error.ts is the
+ *     sole bridge into the backend-local FileOperation vocabulary
  *
  * Scans all .ts files (excluding .d.ts) under packages/framework/src/.
- * Detects `import`, `import type`, and dynamic `import(...)` forms.
+ * Import restrictions recognize static ESM/CommonJS forms. The file-error
+ * vocabulary audit uses the TypeScript AST and imported bindings, so comments,
+ * strings, unrelated objects, and renamed imports cannot create a false pass
+ * or a blanket-substring false positive.
  *
  * Exposed as a library; the boundary check runs in `__tests__/boundary-imports.test.ts`.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { builtinModules } from "node:module";
+import { dirname, join, normalize, relative } from "node:path";
+import ts from "typescript";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface Violation {
-  file: string;
-  line: number;
-  importSpecifier: string;
+  readonly file: string;
+  readonly line: number;
+  /** Imported module or source expression that crossed the boundary. */
+  readonly importSpecifier: string;
+  /** Human-readable boundary rationale and remediation guidance. */
+  readonly reason: string;
 }
 
 export interface CheckResult {
@@ -35,8 +48,9 @@ export interface CheckResult {
 
 interface BoundaryRule {
   /**
-   * Files that the rule applies to. Each entry is either a directory prefix
-   * (interpreted as `${entry}/`) or a specific relative file path under `src/`.
+   * Files that the rule applies to. Each entry is a directory prefix, an exact
+   * relative `.ts` path, or a single-`*` prefix/suffix pattern. Patterns keep
+   * growing file families gated without stale per-file enumeration.
    */
   scope: string[];
   /**
@@ -87,6 +101,33 @@ const RULES: BoundaryRule[] = [
     forbiddenModules: ["bullmq", "ioredis", "queue-bullmq"],
     reason:
       "scheduler/** must remain transport-agnostic — durable backends are wired by callers.",
+  },
+  // The file backend (`src/file/` + the `src/file.ts` subpath barrel) is a
+  // zero-dependency durable-runtime port (FR-041/FR-042): it must never drag
+  // broker/queue modules into its import graph (FR-043/SC-006). Relative
+  // specifiers are matched by RESOLVING them against the importing file's
+  // directory and testing the resolved path's segments (see
+  // `isForbiddenSpecifier`) — `../queue-bullmq/...` from `file/` and
+  // `./queue-bullmq/...` from the `file.ts` barrel resolve to a path whose
+  // segments contain `queue-bullmq`, and the resolution covers ANY number of
+  // `../` hops, so depth-N relative imports cannot bypass the bare-name ban.
+  // Hard-fail gate via `__tests__/boundary-imports.test.ts`; a stray broker
+  // import blocks immediately. The single-wildcard test pattern covers every
+  // current and future `file-*.test.ts`, avoiding an enumeration that silently
+  // falls behind as backend surfaces grow.
+  {
+    scope: [
+      "file",
+      "file.ts",
+      "__tests__/file-*.test.ts",
+    ],
+    forbiddenModules: [
+      "bullmq",
+      "ioredis",
+      "queue-bullmq",
+    ],
+    reason:
+      "file/ and src/file.ts are the zero-dependency filesystem backend — broker imports are forbidden (FR-041/FR-043), bare or relative at any depth.",
   },
   // The executor/ ↔ dag-runtime/ cycle is broken: shared utilities live in
   // shared/; executor/ wraps dag-runtime/ as the public API layer. The reverse
@@ -158,9 +199,79 @@ const RULES: BoundaryRule[] = [
   },
 ];
 
-/** True when `relPath` matches a `scope` entry (either dir prefix or exact file). */
+/** Production file-backend scope governed by FR-041's exact Node built-in allow-list. */
+const FILE_BACKEND_SCOPE = ["file", "file.ts"] as const;
+const FILE_IMPLEMENTATION_SCOPE = ["file"] as const;
+const FILE_CACHE_ERROR_BRIDGE = "file/boundary-error.ts";
+const FILE_BACKEND_NODE_BUILTINS = ["node:fs", "node:crypto", "node:path"] as const;
+const NODE_SCHEME = "node:";
+
+/**
+ * Node exposes the authoritative built-in inventory through `node:module`.
+ * Normalize that inventory to scheme-free names so canonical (`node:fs`) and
+ * legacy bare (`fs`) spellings, including real subpaths such as
+ * `fs/promises`, are classified as the same capability before policy is
+ * applied. A `node:` spelling is still treated as a built-in namespace even
+ * when the running Node/Bun version does not yet list that particular module,
+ * so a newly added built-in cannot bypass the deny-by-default rule.
+ */
+const NODE_BUILTIN_NAMES = new Set(
+  builtinModules.map((specifier) =>
+    specifier.startsWith(NODE_SCHEME) ? specifier.slice(NODE_SCHEME.length) : specifier
+  ),
+);
+
+interface NormalizedNodeBuiltin {
+  readonly canonical: string;
+  readonly usesCanonicalSpelling: boolean;
+}
+
+const normalizeNodeBuiltin = (specifier: string): NormalizedNodeBuiltin | null => {
+  const usesCanonicalSpelling = specifier.startsWith(NODE_SCHEME);
+  const bareName = usesCanonicalSpelling
+    ? specifier.slice(NODE_SCHEME.length)
+    : specifier;
+  if (!usesCanonicalSpelling && !NODE_BUILTIN_NAMES.has(bareName)) return null;
+  return { canonical: `${NODE_SCHEME}${bareName}`, usesCanonicalSpelling };
+};
+
+/**
+ * FR-041 policy decision: allowed built-ins MUST use canonical `node:`
+ * spelling. Bare `fs`/`crypto`/`path` are rejected with a direct replacement;
+ * all other built-ins and every built-in subpath are rejected in either
+ * spelling. This avoids environment-dependent package-vs-core resolution and
+ * makes the source-level allow-list exact and auditable.
+ */
+const fileNodeBuiltinReason = (
+  specifier: string,
+  builtin: NormalizedNodeBuiltin,
+): string => {
+  const allowList = FILE_BACKEND_NODE_BUILTINS.join(", ");
+  const canonicalIsAllowed = FILE_BACKEND_NODE_BUILTINS.includes(
+    builtin.canonical as (typeof FILE_BACKEND_NODE_BUILTINS)[number],
+  );
+
+  if (!builtin.usesCanonicalSpelling && canonicalIsAllowed) {
+    return `FR-041 requires canonical Node built-in spelling in file/ and src/file.ts; replace "${specifier}" with "${builtin.canonical}". Only the exact canonical specifiers ${allowList} are allowed.`;
+  }
+
+  const normalized = builtin.canonical === specifier
+    ? ""
+    : ` (normalized as "${builtin.canonical}")`;
+  return `FR-041 forbids Node built-in "${specifier}"${normalized} in file/ and src/file.ts; only the exact canonical specifiers ${allowList} are allowed (built-in subpaths are not approved). Move that capability outside the dependency-free file backend or use an existing framework-relative port.`;
+};
+
+/** True when `relPath` matches a directory, exact file, or one-star pattern. */
 function inScope(relPath: string, scope: readonly string[]): boolean {
   return scope.some((entry) => {
+    const wildcard = entry.indexOf("*");
+    if (wildcard !== -1) {
+      // RULES are source constants. Fail closed for malformed multi-star
+      // entries rather than granting a broader-than-reviewed match.
+      if (entry.indexOf("*", wildcard + 1) !== -1) return false;
+      return relPath.startsWith(entry.slice(0, wildcard)) &&
+        relPath.endsWith(entry.slice(wildcard + 1));
+    }
     if (entry.endsWith(".ts")) return relPath === entry;
     return relPath.startsWith(entry + "/");
   });
@@ -202,6 +313,14 @@ function walkTs(dir: string): string[] {
 const IMPORT_RE =
   /(?:import\s+(?:type\s+)?[^'"]*from\s+|import\s*\()['"]([^'"]+)['"]/g;
 
+// Matches the side-effect import form:
+//   import "specifier"
+//   import 'specifier'
+// (no `from` clause — IMPORT_RE requires one, so `import "bullmq";` was
+// silently invisible to the checker; a side-effect import still drags the
+// module into the import graph, so it must be flagged like any other form.)
+const SIDE_EFFECT_IMPORT_RE = /\bimport\s+['"]([^'"]+)['"]/g;
+
 // Matches:
 //   export { Foo } from "specifier"
 //   export type { Foo } from "specifier"
@@ -230,10 +349,194 @@ function extractImports(source: string): Array<{ specifier: string; line: number
   }
 
   collectMatches(IMPORT_RE);
+  collectMatches(SIDE_EFFECT_IMPORT_RE);
   collectMatches(EXPORT_FROM_RE);
   collectMatches(REQUIRE_RE);
 
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// File cache-error vocabulary audit — AST + imported-binding aware
+// ---------------------------------------------------------------------------
+
+interface FrameworkErrorImports {
+  readonly namedBindings: ReadonlySet<string>;
+  readonly namespaceBindings: ReadonlySet<string>;
+}
+
+/**
+ * Record local names that can denote the public `frameworkError` value.
+ * Named imports are followed through aliases; namespace imports are retained
+ * so `errors.frameworkError.cacheError(...)` is covered too. The call audit
+ * deliberately starts from imports rather than text, avoiding false positives
+ * for comments, string literals, and unrelated local objects.
+ */
+const frameworkErrorImports = (sourceFile: ts.SourceFile): FrameworkErrorImports => {
+  const namedBindings = new Set<string>();
+  const namespaceBindings = new Set<string>();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings === undefined) continue;
+
+    if (ts.isNamespaceImport(bindings)) {
+      namespaceBindings.add(bindings.name.text);
+      continue;
+    }
+
+    for (const element of bindings.elements) {
+      const importedName = element.propertyName?.text ?? element.name.text;
+      if (importedName === "frameworkError") namedBindings.add(element.name.text);
+    }
+  }
+
+  return { namedBindings, namespaceBindings };
+};
+
+/** Strip syntax-only wrappers without changing the expression being audited. */
+const unwrapExpression = (expression: ts.Expression): ts.Expression => {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+};
+
+interface StaticMember {
+  readonly owner: ts.Expression;
+  readonly name: string;
+}
+
+/** Read dot or literal-bracket access (`x.y` / `x["y"]`) uniformly. */
+const staticMember = (expression: ts.Expression): StaticMember | null => {
+  const unwrapped = unwrapExpression(expression);
+  if (ts.isPropertyAccessExpression(unwrapped)) {
+    return { owner: unwrapExpression(unwrapped.expression), name: unwrapped.name.text };
+  }
+  if (ts.isElementAccessExpression(unwrapped)) {
+    const argument = unwrapped.argumentExpression;
+    if (argument !== undefined && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))) {
+      return { owner: unwrapExpression(unwrapped.expression), name: argument.text };
+    }
+  }
+  return null;
+};
+
+const isImportedFrameworkError = (
+  expression: ts.Expression,
+  imports: FrameworkErrorImports,
+): boolean => {
+  const unwrapped = unwrapExpression(expression);
+  if (ts.isIdentifier(unwrapped)) return imports.namedBindings.has(unwrapped.text);
+
+  const member = staticMember(unwrapped);
+  return member !== null &&
+    member.name === "frameworkError" &&
+    ts.isIdentifier(member.owner) &&
+    imports.namespaceBindings.has(member.owner.text);
+};
+
+/**
+ * Find direct calls to the public, string-typed cache-error constructor in a
+ * file-backend implementation. `file/boundary-error.ts` is intentionally the
+ * only excluded production definition: tests live outside file/** and remain
+ * free to prove the public factory's compatibility contract.
+ */
+const findFileCacheErrorBypasses = (
+  source: string,
+  relPath: string,
+): readonly Violation[] => {
+  if (!inScope(relPath, FILE_IMPLEMENTATION_SCOPE) || relPath === FILE_CACHE_ERROR_BRIDGE) {
+    return [];
+  }
+
+  const sourceFile = ts.createSourceFile(
+    relPath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const imports = frameworkErrorImports(sourceFile);
+  if (imports.namedBindings.size === 0 && imports.namespaceBindings.size === 0) return [];
+
+  const violations: Violation[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const calledMember = staticMember(node.expression);
+      if (
+        calledMember !== null &&
+        calledMember.name === "cacheError" &&
+        isImportedFrameworkError(calledMember.owner, imports)
+      ) {
+        const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          importSpecifier: "frameworkError.cacheError",
+          reason:
+            "file/** must construct cache failures through fileCacheError/fileOperationError from ./boundary-error.js so operation names remain inside the closed FileOperation vocabulary; only file/boundary-error.ts may bridge to the public string-typed frameworkError.cacheError factory.",
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return violations;
+};
+
+// ---------------------------------------------------------------------------
+// Forbidden-specifier matching
+// ---------------------------------------------------------------------------
+
+/**
+ * True when `specifier` (as written in `relPath`, relative to `srcDir`) is
+ * forbidden by the rule's `forbiddenModules`:
+ *
+ * - Bare/absolute specifiers keep the legacy match: trailing-slash entries
+ *   are namespace prefixes (`@opentelemetry/`), bare entries match exact +
+ *   child (`bullmq`, `bullmq/whatever`).
+ * - RELATIVE specifiers (`./…`, `../…`) are RESOLVED against the importing
+ *   file's directory, and the RESOLVED path's segments are tested for a
+ *   forbidden module segment. Enumerating one-level prefixes (`"../bullmq"`)
+ *   was a bypass: `file/sub/x.ts` importing `../../queue-bullmq/adapter.js`
+ *   matched no literal prefix and slipped through with 0 violations. Resolution
+ *   is depth-independent — any number of `../` hops collapses into the real
+ *   target path, so a forbidden module can never be reached by adding hops.
+ *   The resolved path escapes `srcDir` only via leading `..` segments, which
+ *   normalize above `srcDir` and are still checked segment-by-segment (a src
+ *   file reaching UP into a sibling package's directory is exactly the broker
+ *   import this gate exists for).
+ */
+function isForbiddenSpecifier(
+  specifier: string,
+  relPath: string,
+  forbiddenModules: readonly string[],
+): boolean {
+  if (specifier.startsWith("./") || specifier.startsWith("../")) {
+    const resolved = normalize(join(dirname(relPath), specifier)).replaceAll("\\", "/");
+    return forbiddenModules.some((mod) => {
+      // The module's segment name: strip leading `../`/`./` hops and a
+      // trailing namespace slash, so `"../queue-bullmq"` and `"queue-bullmq"`
+      // both name the segment `queue-bullmq` to look for in the resolved path.
+      const segment = mod.replace(/^(?:\.\.?\/)+/, "").replace(/\/$/, "");
+      return resolved.split("/").includes(segment);
+    });
+  }
+  return forbiddenModules.some(
+    (mod) =>
+      mod.endsWith("/")
+        ? specifier === mod.slice(0, -1) || specifier.startsWith(mod)
+        : specifier === mod || specifier.startsWith(mod + "/"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -256,19 +559,37 @@ export function checkImports(srcDir: string): CheckResult {
 
     const source = readFileSync(file, "utf-8");
     const imports = extractImports(source);
+    const isFileBackendSource = inScope(relPath, FILE_BACKEND_SCOPE);
+
+    violations.push(...findFileCacheErrorBypasses(source, relPath));
 
     for (const { specifier, line } of imports) {
+      const nodeBuiltin = isFileBackendSource
+        ? normalizeNodeBuiltin(specifier)
+        : null;
+      if (
+        nodeBuiltin !== null &&
+        (!nodeBuiltin.usesCanonicalSpelling ||
+          !FILE_BACKEND_NODE_BUILTINS.includes(
+            nodeBuiltin.canonical as (typeof FILE_BACKEND_NODE_BUILTINS)[number],
+          ))
+      ) {
+        violations.push({
+          file: relPath,
+          line,
+          importSpecifier: specifier,
+          reason: fileNodeBuiltinReason(specifier, nodeBuiltin),
+        });
+      }
+
       for (const rule of applicableRules) {
-        const isForbidden = rule.forbiddenModules.some(
-          (mod) =>
-            // Trailing-slash entries are interpreted as namespace prefixes
-            // (e.g., `@opentelemetry/`); bare entries match exact + child.
-            mod.endsWith("/")
-              ? specifier === mod.slice(0, -1) || specifier.startsWith(mod)
-              : specifier === mod || specifier.startsWith(mod + "/"),
-        );
-        if (isForbidden) {
-          violations.push({ file: relPath, line, importSpecifier: specifier });
+        if (isForbiddenSpecifier(specifier, relPath, rule.forbiddenModules)) {
+          violations.push({
+            file: relPath,
+            line,
+            importSpecifier: specifier,
+            reason: rule.reason ?? `Import ${specifier} is forbidden by this module boundary.`,
+          });
         }
       }
     }

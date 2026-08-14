@@ -1,6 +1,7 @@
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import { isFrameworkError } from "../types/errors.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -23,15 +24,6 @@ import {
 export type FakeResponseProvider =
   | Map<string, unknown | FrameworkError>
   | ((req: LlmRequest<any>) => unknown | FrameworkError);
-
-function isFrameworkError(value: unknown): value is FrameworkError {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "kind" in value &&
-    typeof (value as Record<string, unknown>).kind === "string"
-  );
-}
 
 /**
  * One scripted turn of `sendWithTools`. Either the model emits tool calls

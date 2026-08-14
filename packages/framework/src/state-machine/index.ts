@@ -7,7 +7,7 @@ export type { Machine, Executor, JobLike, RecordedEvent, KernelRunOpts, TraceEve
 export { runStateMachine } from "./runner.js";
 
 // Replay
-export { replayEvents, replayEventsUntil, replayEventSlice } from "./replay.js";
+export { foldStep, replayEvents, replayEventsUntil, replayEventSlice } from "./replay.js";
 
 // Serialization helpers
 export { serializeValue, deserializeValue, toJson, fromJson } from "./serialize.js";

@@ -6,6 +6,7 @@ import type { RunId, NodeId } from "./ids.js";
 // `FrameworkError` from this module) — safe: type imports erase at compile
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
+import { safeErrorMessage } from "./safe-error.js";
 
 /** A single unsatisfied capability declaration: which node required which capability. */
 export type MissingCapability = {
@@ -68,8 +69,17 @@ export type FrameworkError =
     }
   | {
       readonly kind: "checkpoint-write-failed";
+      /**
+       * Required for public source compatibility. Persistence boundaries use
+       * grammar-valid internal location identifiers when a rejected raw value
+       * cannot truthfully inhabit a brand; the raw value is then carried by
+       * `invalidRunId` / `invalidNodeId`.
+       */
       readonly runId: RunId;
       readonly nodeId: NodeId;
+      /** Present only when the corresponding raw boundary value was invalid. */
+      readonly invalidRunId?: string;
+      readonly invalidNodeId?: string;
       readonly message: string;
     }
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
@@ -316,6 +326,66 @@ export type FrameworkError =
 export type FrameworkErrorKind = FrameworkError["kind"];
 
 /**
+ * Every `FrameworkError["kind"]` literal as a runtime set — the closed
+ * discriminant domain of `isFrameworkError`. Indexed by the union type
+ * (`Set<FrameworkError["kind"]>`), so a typo'd kind is a COMPILE error;
+ * a new kind must be registered here or the guard fails closed on it (a
+ * not-yet-registered kind is not recognized as a typed framework error,
+ * which is the conservative direction: it is never relabeled as typed).
+ */
+const FRAMEWORK_ERROR_KINDS: ReadonlySet<string> = new Set<FrameworkError["kind"]>([
+  "validation",
+  "retry-exhausted",
+  "checkpoint-missing",
+  "checkpoint-expired",
+  "checkpoint-corrupt",
+  "checkpoint-version-mismatch",
+  "checkpoint-write-failed",
+  "prompt-not-found",
+  "cache-error",
+  "node-crash",
+  "cycle-detected",
+  "aborted",
+  "rejected",
+  "invalid-reroute",
+  "transient",
+  "missing-default-edge",
+  "output-unreachable-under-routing",
+  "predicate-malformed",
+  "duplicate-edge",
+  "root-expects-input",
+  "source-has-incoming",
+  "invalid-dag-input-edge",
+  "missing-capability",
+  "llm-budget-exceeded",
+  "infra-unreachable",
+  "policy-refusal",
+  "downstream-denied",
+]);
+
+/**
+ * Runtime type guard for `FrameworkError` — narrows an unknown value (a
+ * caught throw, a boundary-crossing payload) to the typed union by
+ * discriminant inspection: the value must be an object carrying a string
+ * `kind` that is a member of the CLOSED `FrameworkError["kind"]` set.
+ * Anything else — a plain `Error`, a hostile object carrying an off-union
+ * `kind` string — is NOT a typed framework error and must not be relabeled
+ * as one by a boundary that only ever throws typed values (e.g. the file
+ * journal's `readCheckpoint`, AD-6).
+ */
+export const isFrameworkError = (value: unknown): value is FrameworkError => {
+  try {
+    if (typeof value !== "object" || value === null || !("kind" in value)) return false;
+    const kind = Reflect.get(value, "kind");
+    return typeof kind === "string" && FRAMEWORK_ERROR_KINDS.has(kind);
+  } catch {
+    // A revoked/hostile Proxy is not safely inspectable and therefore cannot
+    // be admitted as a typed framework error.
+    return false;
+  }
+};
+
+/**
  * Extract the partial token usage carried by a failed call, if any. Only the
  * tool-use-loop error variants (`node-crash`, `transient`, `aborted`) carry
  * usage; every other kind reads as `undefined` (no attributable tokens). Lets
@@ -432,42 +502,56 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
  * new kind is a compile error here rather than silently inheriting the
  * JSON-stringify arm, and so this stays the single source of truth for the
  * retry-policy call sites (which would otherwise re-list the carrier set and drift).
+ *
+ * The runtime input is intentionally `unknown`: JavaScript callers and caught
+ * failures can bypass the static union. Hostile/cyclic values fall through to
+ * the independently guarded total formatter instead of throwing a second
+ * error while the first is being summarized.
  */
-export const messageOf = (e: FrameworkError): string =>
-  match(e)
-    .with({ kind: "node-crash" }, { kind: "transient" }, (c) => c.message)
-    // Every other kind: serialise the whole value so no context field is lost.
-    // Enumerated (not `.otherwise()`) so `.exhaustive()` turns a new kind into a
-    // compile error here rather than silently folding it into JSON-stringify.
-    .with(
-      { kind: "predicate-malformed" },
-      { kind: "validation" },
-      { kind: "checkpoint-write-failed" },
-      { kind: "aborted" },
-      { kind: "policy-refusal" },
-      { kind: "downstream-denied" },
-      { kind: "llm-budget-exceeded" },
-      { kind: "missing-capability" },
-      { kind: "retry-exhausted" },
-      { kind: "checkpoint-missing" },
-      { kind: "checkpoint-expired" },
-      { kind: "checkpoint-corrupt" },
-      { kind: "checkpoint-version-mismatch" },
-      { kind: "prompt-not-found" },
-      { kind: "cache-error" },
-      { kind: "cycle-detected" },
-      { kind: "rejected" },
-      { kind: "invalid-reroute" },
-      { kind: "missing-default-edge" },
-      { kind: "output-unreachable-under-routing" },
-      { kind: "duplicate-edge" },
-      { kind: "root-expects-input" },
-      { kind: "source-has-incoming" },
-      { kind: "invalid-dag-input-edge" },
-      { kind: "infra-unreachable" },
-      (rest) => JSON.stringify(rest),
-    )
-    .exhaustive();
+export const messageOf = (e: unknown): string => {
+  try {
+    return match(e as FrameworkError)
+      .with({ kind: "node-crash" }, { kind: "transient" }, (c) => c.message)
+      // Every other kind: serialise the whole value so no context field is lost.
+      // Enumerated (not `.otherwise()`) so `.exhaustive()` turns a new kind into a
+      // compile error here rather than silently folding it into JSON-stringify.
+      .with(
+        { kind: "predicate-malformed" },
+        { kind: "validation" },
+        { kind: "checkpoint-write-failed" },
+        { kind: "aborted" },
+        { kind: "policy-refusal" },
+        { kind: "downstream-denied" },
+        { kind: "llm-budget-exceeded" },
+        { kind: "missing-capability" },
+        { kind: "retry-exhausted" },
+        { kind: "checkpoint-missing" },
+        { kind: "checkpoint-expired" },
+        { kind: "checkpoint-corrupt" },
+        { kind: "checkpoint-version-mismatch" },
+        { kind: "prompt-not-found" },
+        { kind: "cache-error" },
+        { kind: "cycle-detected" },
+        { kind: "rejected" },
+        { kind: "invalid-reroute" },
+        { kind: "missing-default-edge" },
+        { kind: "output-unreachable-under-routing" },
+        { kind: "duplicate-edge" },
+        { kind: "root-expects-input" },
+        { kind: "source-has-incoming" },
+        { kind: "invalid-dag-input-edge" },
+        { kind: "infra-unreachable" },
+        (rest) => JSON.stringify(rest),
+      )
+      .exhaustive();
+  } catch {
+    // Exhaustive matching and JSON serialization are only total for values
+    // that truly satisfy FrameworkError. Runtime callers may still hand us a
+    // cyclic object or hostile Proxy; diagnostics must never throw while
+    // formatting the original failure.
+    return safeErrorMessage(e);
+  }
+};
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —
@@ -497,7 +581,11 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "checkpoint-expired" }, (e) => `checkpoint for run '${e.runId}' expired at ${e.expiredAt}`)
     .with({ kind: "checkpoint-corrupt" }, (e) => `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`)
     .with({ kind: "checkpoint-version-mismatch" }, (e) => `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`)
-    .with({ kind: "checkpoint-write-failed" }, (e) => `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`)
+    .with({ kind: "checkpoint-write-failed" }, (e) => {
+      const run = e.invalidRunId ?? e.runId;
+      const node = e.invalidNodeId ?? e.nodeId;
+      return `checkpoint write failed for run '${run}' node '${node}': ${e.message}`;
+    })
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
     .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): cumulative ${e.cumulative} tokens reached budget ${e.budget}`)
     .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}' (hop '${e.hop}'): ${e.message}`)
