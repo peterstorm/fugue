@@ -18,7 +18,7 @@
  *   acquisition failing cleanly at the documented ~5s ceiling, and
  *   pid-plus-token ownership-checked release.
  *
- * Advisory-remediation coverage: a forced failure of the birth-staging
+ * Cleanup-masking regression coverage: a forced failure of the birth-staging
  * cleanup is warned and never masks the original ENOTEMPTY (the acquire retry
  * loop continues instead of aborting), and a forced failure of the
  * tomb-reap cleanup still reports the steal as successful (a successful reap
@@ -766,6 +766,48 @@ describe("file-lock diagnostics", () => {
     expect(warnings[0]).toContain(lockPath);
   });
 
+  test("an EACCES owner-metadata probe is retained in the terminal acquire failure", async () => {
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const lockPath = join(tempDir(), "append.lock");
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "pid"), String(process.pid));
+
+    const error = await acquireFileLock(lockPath, {
+      readOwnerPid: () => { throw errnoFailure("EACCES", "pid metadata denied"); },
+    }).then(
+      () => null,
+      (failure: unknown) => failure,
+    );
+
+    expect(error).toMatchObject({ kind: "cache-error", operation: "acquireFileLock" });
+    expect((error as Error).message).toContain("last blocking owner probe");
+    expect((error as Error).message).toContain("read pid metadata");
+    expect((error as Error).message).toContain("EACCES");
+    expect(warnings.length).toBeGreaterThan(0);
+  }, 15_000);
+
+  test("an EIO process probe is retained in the terminal acquire failure", async () => {
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const lockPath = join(tempDir(), "append.lock");
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "pid"), String(process.pid));
+
+    const error = await acquireFileLock(lockPath, {
+      probeOwnerProcess: () => { throw errnoFailure("EIO", "process table unavailable"); },
+    }).then(
+      () => null,
+      (failure: unknown) => failure,
+    );
+
+    expect(error).toMatchObject({ kind: "cache-error", operation: "acquireFileLock" });
+    expect((error as Error).message).toContain("last blocking owner probe");
+    expect((error as Error).message).toContain("probe owner process");
+    expect((error as Error).message).toContain("EIO");
+    expect(warnings.length).toBeGreaterThan(0);
+  }, 15_000);
+
   test("the expected EPERM live-process probe remains silent", async () => {
     const warnings: string[] = [];
     recordingLogger(warnings);
@@ -902,10 +944,10 @@ describe("file-lock diagnostics", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Advisory remediation — cleanup failures must never mask the original signal
+// Cleanup-failure regression — cleanup must never mask the original signal
 // ---------------------------------------------------------------------------
 
-describe("cleanup-failure masking — advisory remediation", () => {
+describe("cleanup-failure masking regressions", () => {
   test("a forced birth-staging cleanup failure is warned and the original ENOTEMPTY still surfaces as a retry (acquire completes)", async () => {
     const warnings: string[] = [];
     setFrameworkLogger({

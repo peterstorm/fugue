@@ -83,7 +83,7 @@ const assertIndexOrAttempt = (kind: "index" | "attempt", value: number): void =>
  * validated id at compile time, but the codec's output contract (canonical ⇔
  * 0 separators, composite ⇔ exactly 3) is enforced at runtime too, so a
  * bypassed brand can never mint an unparseable key. Violations throw — the
- * planned file backend MUST re-validate identifiers with typed errors
+ * file backend MUST re-validate identifiers with typed errors
  * (`checkpoint-write-failed`) before calling this, so a throw here means a
  * caller violated the contract.
  *

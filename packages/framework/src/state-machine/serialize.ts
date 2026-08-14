@@ -347,7 +347,14 @@ export const deserializeValue = (value: unknown): unknown => {
 export const toJson = (value: unknown): string =>
   JSON.stringify(serializeValue(value));
 
-/** Deserialize from JSON string — inverse of toJson. Throws on malformed JSON. */
+/**
+ * Deserialize JSON emitted by `toJson` for the supported collision-free,
+ * lossless value domain. Plain objects must not use the reserved serializer
+ * tag keys (`__map__`, `__set__`, `__date__`, `__undefined__`): tag-shaped
+ * objects are intentionally decoded as their Map/Set/Date/undefined values,
+ * so `fromJson(toJson(value))` is not an identity for such ambiguous inputs.
+ * Throws on malformed JSON or malformed tagged values.
+ */
 export const fromJson = (json: string): unknown =>
   deserializeValue(JSON.parse(json));
 

@@ -248,6 +248,11 @@ const eventDigestOfUnchecked = (record: {
       `eventDigestOf: sequence must be a non-negative safe integer — the same domain guard as eventFileName — got ${record.sequence}`,
     );
   }
+  if (record.sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
+    throw new Error(
+      `eventDigestOf: sequence ${record.sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the digest and filename layers share one durable sequence domain`,
+    );
+  }
   return record.dedupKey !== ""
     ? keyDigest(record.dedupKey)
     : keyDigest(`${record.sequence}|${toJson(record.event)}`);

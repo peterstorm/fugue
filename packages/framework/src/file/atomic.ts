@@ -119,21 +119,25 @@ export interface FileLockTestHooks {
   readonly inspectReleasePath?: (lockPath: string) => void;
 }
 
+type OwnerProbeResult =
+  | Readonly<{ stale: true; diagnostic?: never }>
+  | Readonly<{ stale: false; diagnostic?: string }>;
+
 const warnUnexpectedOwnerFailure = (
   ownerPath: string,
   operation: "read pid metadata" | "probe owner process",
   error: unknown,
   probe: ErrorCodeProbe,
-): void => {
-  warnWithoutThrowing(
-    `[FileLock] could not ${operation} for ${ownerPath}; treating owner as live: ${safeErrorMessageWithCodeProbe(error, probe)}`,
-  );
+): string => {
+  const diagnostic = `could not ${operation} for ${ownerPath}: ${safeErrorMessageWithCodeProbe(error, probe)}`;
+  warnWithoutThrowing(`[FileLock] ${diagnostic}; treating owner as live`);
+  return diagnostic;
 };
 
-const ownerIsStale = (
+const ownerStaleness = (
   ownerPath: string,
   hooks: FileLockTestHooks = {},
-): boolean => {
+): OwnerProbeResult => {
   let rawPid: string;
   try {
     rawPid = hooks.readOwnerPid?.(ownerPath)
@@ -142,27 +146,30 @@ const ownerIsStale = (
     const probe = probeErrorCode(error);
     // A missing pid is a legacy/torn owner. Every other metadata failure is
     // insufficient evidence of death: warn with the cause and fail closed.
-    if (probe.kind === "code" && probe.code === "ENOENT") return true;
-    warnUnexpectedOwnerFailure(ownerPath, "read pid metadata", error, probe);
-    return false;
+    if (probe.kind === "code" && probe.code === "ENOENT") return { stale: true };
+    return {
+      stale: false,
+      diagnostic: warnUnexpectedOwnerFailure(ownerPath, "read pid metadata", error, probe),
+    };
   }
 
   const pid = Number(rawPid.trim());
-  if (!Number.isInteger(pid) || pid <= 0) return true;
+  if (!Number.isInteger(pid) || pid <= 0) return { stale: true };
 
   try {
     if (hooks.probeOwnerProcess !== undefined) hooks.probeOwnerProcess(pid);
     else process.kill(pid, 0);
-    return false;
+    return { stale: false };
   } catch (error) {
     const probe = probeErrorCode(error);
-    if (probe.kind === "code" && probe.code === "ESRCH") return true;
+    if (probe.kind === "code" && probe.code === "ESRCH") return { stale: true };
     // EPERM is expected proof that another user's process exists. Any other
     // probe failure remains fail-closed but explains why acquisition blocked.
-    if (!(probe.kind === "code" && probe.code === "EPERM")) {
-      warnUnexpectedOwnerFailure(ownerPath, "probe owner process", error, probe);
-    }
-    return false;
+    if (probe.kind === "code" && probe.code === "EPERM") return { stale: false };
+    return {
+      stale: false,
+      diagnostic: warnUnexpectedOwnerFailure(ownerPath, "probe owner process", error, probe),
+    };
   }
 };
 
@@ -222,7 +229,7 @@ const activeIntents = (
 ): readonly string[] => {
   const active: string[] = [];
   for (const intent of protocolEntries(lockPath, prefix)) {
-    if (ownerIsStale(intent, hooks)) {
+    if (ownerStaleness(intent, hooks).stale) {
       removeUniqueProtocolEntry(intent, "stale protocol intent");
     } else {
       active.push(intent);
@@ -293,7 +300,7 @@ const reconcileTombs = (
   hooks: FileLockTestHooks = {},
 ): boolean => {
   for (const tomb of protocolEntries(lockPath, TOMB_PREFIX)) {
-    if (ownerIsStale(tomb, hooks)) {
+    if (ownerStaleness(tomb, hooks).stale) {
       removeUniqueProtocolEntry(tomb, "stale lock tomb");
       continue;
     }
@@ -327,7 +334,7 @@ const fencedReap = async (
     if (!reconcileTombs(lockPath, hooks)) return false;
     if (!existsSync(lockPath)) return true;
 
-    const stale = ownerIsStale(lockPath, hooks);
+    const stale = ownerStaleness(lockPath, hooks).stale;
     await hooks.afterStableOwnerProbe?.(stale);
     if (!stale) return false;
 
@@ -343,7 +350,7 @@ const fencedReap = async (
     // Defense in depth against PID reuse or a legacy owner becoming readable:
     // never delete a tomb that now proves live. Births are still fenced, so a
     // restore cannot race a newly born owner.
-    if (!ownerIsStale(tomb, hooks)) {
+    if (!ownerStaleness(tomb, hooks).stale) {
       try {
         renameSync(tomb, lockPath);
       } catch (error) {
@@ -386,10 +393,17 @@ export const acquireFileLock = async (
   try {
     const ownershipToken = uniqueToken();
     let staleHookRan = false;
+    let lastProbeDiagnostic: string | undefined;
     for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt++) {
       if (tryFencedBirth(lockPath, ownershipToken, hooks)) return ownershipToken;
 
-      if (existsSync(lockPath) && ownerIsStale(lockPath, hooks)) {
+      const ownerProbe = existsSync(lockPath)
+        ? ownerStaleness(lockPath, hooks)
+        : undefined;
+      if (ownerProbe?.diagnostic !== undefined) {
+        lastProbeDiagnostic = ownerProbe.diagnostic;
+      }
+      if (ownerProbe?.stale === true) {
         if (!staleHookRan) {
           staleHookRan = true;
           await hooks.afterUnfencedStaleProbe?.();
@@ -406,7 +420,7 @@ export const acquireFileLock = async (
     throw fileOperationError(
       "acquireFileLock",
       lockPath,
-      `Could not acquire lock after ${MAX_ACQUIRE_ATTEMPTS} attempts`,
+      `Could not acquire lock after ${MAX_ACQUIRE_ATTEMPTS} attempts${lastProbeDiagnostic === undefined ? "" : `; last blocking owner probe: ${lastProbeDiagnostic}`}`,
     );
   } catch (error) {
     throw fileOperationError("acquireFileLock", lockPath, error);

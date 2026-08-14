@@ -490,6 +490,11 @@ describe("eventDigestOf — keyed vs keyless (AD-2)", () => {
     expect(() => eventDigestOf({ dedupKey: "k", sequence: -1.5, event })).toThrow(
       /non-negative safe integer/,
     );
+    for (const dedupKey of ["", "k"]) {
+      expect(() => eventDigestOf({ dedupKey, sequence: 1_000_000, event })).toThrow(
+        /6-digit lexicographic ceiling 999999/,
+      );
+    }
   });
 
   it("still accepts the boundary of the domain (0 and the 6-digit ceiling)", () => {

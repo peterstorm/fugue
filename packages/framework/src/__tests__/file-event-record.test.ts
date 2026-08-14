@@ -24,7 +24,7 @@
 //     prototype-pollution pre-scan at the raw-JSON seam (deserializeValue
 //     would silently erase `__proto__`/`constructor`/`prototype` keys, so
 //     the scan rejects the record BEFORE deserialization, never truncated)
-//   - hostile record DEPTH (silent-failure-hunter-10/11/13): 50k-deep
+//   - hostile record depth overflow: 50k-deep
 //     records (arrays and objects) through the real pipeline, the raw
 //     seam, and the direct API fail closed with the typed cache-error /
 //     err naming the safe depth ceiling — never a raw RangeError — while
@@ -39,13 +39,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tryFromJson } from "../state-machine/serialize.js";
-import type { FileEventRecord } from "../file/event-record.js";
+import type { DedupKey, FileEventRecord, JournalSequence } from "../file/event-record.js";
 import {
   DEDUP_KEY_PATTERN,
   isDedupKey,
   assertLosslessEvent,
   serializeFileEventRecord,
+  parseDedupKey,
   parseFileEventRecord,
+  parseJournalSequence,
   tryParseEventRecordJson,
   MAX_SAFE_RECORD_DEPTH,
 } from "../file/event-record.js";
@@ -56,6 +58,17 @@ import { isFrameworkError } from "../types/errors.js";
 
 /** Realistic source naming (FR-009: failures name the file they came from). */
 const SOURCE = "events/000042-1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890.json";
+
+/** Compile-time proof that durable parsed primitives cannot be forged. */
+const assertOpaqueRecordFields = (_record: FileEventRecord): void => {
+  // @ts-expect-error — only parseJournalSequence/parser output carries the brand.
+  const sequence: JournalSequence = 1;
+  // @ts-expect-error — only parseDedupKey/parser output carries the brand.
+  const dedupKey: DedupKey = "key";
+  void sequence;
+  void dedupKey;
+};
+void assertOpaqueRecordFields;
 
 const asCacheError = (
   error: unknown,
@@ -132,6 +145,24 @@ const expectRejected = (
     expect(r.error, `error ${JSON.stringify(r.error)} should mention ${JSON.stringify(s)}`).toContain(s);
   }
 };
+
+describe("opaque durable event-record fields", () => {
+  it("smart constructors preserve valid values and reject invalid runtime primitives", () => {
+    const zero = parseJournalSequence(0);
+    const ceiling = parseJournalSequence(999_999);
+    expect(zero.ok && Number(zero.value)).toBe(0);
+    expect(ceiling.ok && Number(ceiling.value)).toBe(999_999);
+    expect(parseJournalSequence(1_000_000)).toMatchObject({ ok: false });
+    expect(parseJournalSequence(1.5)).toMatchObject({ ok: false });
+
+    const keyless = parseDedupKey("");
+    const keyed = parseDedupKey("agent:run-1");
+    expect(keyless.ok && String(keyless.value)).toBe("");
+    expect(keyed.ok && String(keyed.value)).toBe("agent:run-1");
+    expect(parseDedupKey("a|b")).toMatchObject({ ok: false });
+    expect(parseDedupKey(42)).toMatchObject({ ok: false });
+  });
+});
 
 describe("serializeFileEventRecord — byte-exact schema via toJson", () => {
   it("emits the exact 5-field record JSON (byte-identical ProgramEventRecord schema)", () => {
@@ -932,14 +963,18 @@ describe("parseFileEventRecord — valid records", () => {
     const raw = validRecord();
     const r = parseFileEventRecord(raw, SOURCE);
     if (!r.ok) throw new Error(`expected ok, got ${r.error}`);
-    const expected: FileEventRecord = {
-      schemaVersion: 1,
+    const expected = {
+      schemaVersion: 1 as const,
       sequence: 7,
       dedupKey: "agent:run-1",
       recordedAtMs: 1_700_000_000_000,
       event: { kind: "step", n: 2 },
     };
-    expect(r.value).toEqual(expected);
+    expect({
+      ...r.value,
+      sequence: Number(r.value.sequence),
+      dedupKey: String(r.value.dedupKey),
+    }).toEqual(expected);
   });
 
   it("accepts the keyless form (dedupKey: '') and boundary values", () => {
@@ -1113,7 +1148,7 @@ describe("parseFileEventRecord — FR-015 256-char bound", () => {
   it("accepts exactly 256 chars, rejects 257 chars", () => {
     const r256 = parseFileEventRecord({ ...validRecord(), dedupKey: "k".repeat(256) }, SOURCE);
     expect(r256.ok).toBe(true);
-    if (r256.ok) expect(r256.value.dedupKey).toBe("k".repeat(256));
+    if (r256.ok) expect(String(r256.value.dedupKey)).toBe("k".repeat(256));
 
     const r257 = parseFileEventRecord({ ...validRecord(), dedupKey: "k".repeat(257) }, SOURCE);
     expect(r257.ok).toBe(false);
@@ -1471,7 +1506,7 @@ describe("prototype-pollution keys — fail-closed at the raw-JSON read seam (FR
 });
 
 describe("hostile record depth — fail closed with FR-009 context, never a raw RangeError", () => {
-  // Verified pre-fix escapes (silent-failure-hunter-10/11/13): a hostile
+  // Depth-overflow regression: a hostile
   // record whose event nests ~50k deep (~100KB) parses fine in V8's
   // iterative JSON.parse, but the RECURSIVE walks — findPollutionKey at the
   // raw seam, findReservedTagKey in parseFileEventRecord,
@@ -1761,8 +1796,8 @@ describe("fast-check properties", () => {
         if (!parsed.ok) throw new Error(`valid record rejected: ${parsed.error}`);
 
         expect(parsed.value.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
-        expect(parsed.value.sequence).toBe(rec.sequence);
-        expect(parsed.value.dedupKey).toBe(rec.dedupKey);
+        expect(Number(parsed.value.sequence)).toBe(rec.sequence);
+        expect(String(parsed.value.dedupKey)).toBe(rec.dedupKey);
         expect(parsed.value.recordedAtMs).toBe(rec.recordedAtMs);
         expect(parsed.value.event).toEqual(rec.event);
 

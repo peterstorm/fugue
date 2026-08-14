@@ -192,7 +192,7 @@ describe("createFileJournal.appendEvent — layout", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1, 2]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1, 2]);
     expect(records.value.every((r) => r.event)).toBe(true);
   });
 
@@ -216,8 +216,8 @@ describe("createFileJournal.appendEvent — layout", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((record) => record.sequence)).toEqual([0, 1]);
-    expect(records.value.map((record) => record.dedupKey)).toEqual(["", ""]);
+    expect(records.value.map((record) => Number(record.sequence))).toEqual([0, 1]);
+    expect(records.value.map((record) => String(record.dedupKey))).toEqual(["", ""]);
     expect(records.value.map((record) => record.event)).toEqual([event, event]);
   });
 });
@@ -237,8 +237,8 @@ describe("createFileJournal.appendEvent — keyed dedup", () => {
     expect(records.ok).toBe(true);
     if (!records.ok) return;
     expect(records.value).toHaveLength(1);
-    expect(records.value[0].sequence).toBe(0);
-    expect(records.value[0].dedupKey).toBe("t:abcd");
+    expect(Number(records.value[0].sequence)).toBe(0);
+    expect(String(records.value[0].dedupKey)).toBe("t:abcd");
     expect(records.value[0].event).toEqual({ type: "STEP" });
   });
 
@@ -269,7 +269,7 @@ describe("createFileJournal.appendEvent — keyed dedup", () => {
     expect(records.ok).toBe(true);
     if (!records.ok) return;
     expect(records.value).toHaveLength(1);
-    expect(records.value[0].sequence).toBe(0);
+    expect(Number(records.value[0].sequence)).toBe(0);
     expect(records.value[0].event).toEqual({ type: "STEP" });
   });
 
@@ -285,7 +285,7 @@ describe("createFileJournal.appendEvent — keyed dedup", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1]);
     expect((records.value[0].event as { type: string }).type).toBe("STEP");
     expect((records.value[1].event as { type: string }).type).toBe("DONE");
   });
@@ -300,8 +300,8 @@ describe("createFileJournal.appendEvent — keyed dedup", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1, 2]);
-    expect(records.value.map((r) => r.dedupKey)).toEqual(["ka", "", "kc"]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1, 2]);
+    expect(records.value.map((r) => String(r.dedupKey))).toEqual(["ka", "", "kc"]);
   });
 });
 
@@ -326,7 +326,7 @@ describe("createFileJournal.appendEvent — concurrency", () => {
     // The lock serializes appends: sequences are exactly 0..N-1, each file
     // matches its content (the strict reader already proved that), and every
     // event survived — nothing was lost or duplicated under interleaving.
-    expect(records.value.map((r) => r.sequence)).toEqual(Array.from({ length: N }, (_, i) => i));
+    expect(records.value.map((r) => Number(r.sequence))).toEqual(Array.from({ length: N }, (_, i) => i));
     const tags = records.value.map((r) => (r.event as { i: number }).i).sort((a, b) => a - b);
     expect(tags).toEqual(Array.from({ length: N }, (_, i) => i));
   });
@@ -360,6 +360,16 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     expect(journal.readCheckpoint()).toBe(second.json);
   });
 
+  it("writeCheckpoint creates a nonexistent nested run directory on the first write", async () => {
+    const parent = tempDir();
+    const dir = join(parent, "nested", "run");
+    const checkpoint = serializeFileCheckpoint({ state: "first", context: { n: 1 } });
+
+    await createFileJournal(dir).writeCheckpoint(checkpoint);
+
+    expect(readFileSync(join(dir, "checkpoint.json"), "utf-8")).toBe(checkpoint.json);
+  });
+
   it("writeCheckpoint rejects a forged/raw runtime input with typed operation/path", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);
@@ -372,6 +382,15 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     const typed = asCacheError(failure, "writeCheckpoint");
     expect(typed.message).toContain(join(dir, "checkpoint.json"));
     expect(journal.readCheckpoint()).toBeNull();
+  });
+
+  it("writeProgress creates a nonexistent nested run directory on the first write", async () => {
+    const parent = tempDir();
+    const dir = join(parent, "nested", "run");
+
+    await createFileJournal(dir).writeProgress(25);
+
+    expect(JSON.parse(readFileSync(join(dir, PROGRESS_FILE), "utf-8"))).toEqual({ percent: 25 });
   });
 
   it("writeProgress persists { percent } and overwrites atomically", async () => {
@@ -439,7 +458,7 @@ describe("tmp litter and leftover lock dirs are invisible", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1]);
 
     // A new append must not deadlock on the stale lock (stale-steal) and must
     // count only `*.json` files: sequence 2, not 4.
@@ -447,7 +466,7 @@ describe("tmp litter and leftover lock dirs are invisible", () => {
     const after = readFileEventRecords(dir);
     expect(after.ok).toBe(true);
     if (!after.ok) return;
-    expect(after.value.map((r) => r.sequence)).toEqual([0, 1, 2]);
+    expect(after.value.map((r) => Number(r.sequence))).toEqual([0, 1, 2]);
   });
 });
 
@@ -949,7 +968,7 @@ describe("createFileJournal.appendEvent — lock release outcomes", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1]);
     expect((records.value[1].event as { type: string }).type).toBe("AFTER");
   });
 });
@@ -1271,7 +1290,7 @@ describe("createFileJournal.appendEvent — cross-process lock serialization (AD
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual(Array.from({ length: 30 }, (_, i) => i));
+    expect(records.value.map((r) => Number(r.sequence))).toEqual(Array.from({ length: 30 }, (_, i) => i));
     const tags = records.value
       .map((r) => `${(r.event as { id: string; i: number }).id}:${(r.event as { id: string; i: number }).i}`)
       .sort();

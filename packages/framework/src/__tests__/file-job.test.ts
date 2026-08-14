@@ -240,7 +240,7 @@ describe("createFileJob — durability across fresh instances", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1]);
     const envelopes = readFileEvents(dir);
     expect(envelopes.ok).toBe(true);
     if (!envelopes.ok) return;
@@ -252,8 +252,8 @@ describe("createFileJob — durability across fresh instances", () => {
     const after = readFileEventRecords(dir);
     expect(after.ok).toBe(true);
     if (!after.ok) return;
-    expect(after.value.map((r) => r.sequence)).toEqual([0, 1, 2]);
-    expect(after.value[2].dedupKey).toBe("post:1");
+    expect(after.value.map((r) => Number(r.sequence))).toEqual([0, 1, 2]);
+    expect(String(after.value[2].dedupKey)).toBe("post:1");
     expect(createFileJournal(dir).readCheckpoint()).toContain('"succeeded"');
   });
 });

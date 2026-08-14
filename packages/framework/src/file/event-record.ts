@@ -121,6 +121,19 @@ import { fileOperationError } from "./boundary-error.js";
 // Type
 // ---------------------------------------------------------------------------
 
+declare const journalSequenceBrand: unique symbol;
+declare const dedupKeyBrand: unique symbol;
+
+/** Validated position in the durable journal's six-digit sequence domain. */
+export type JournalSequence = number & {
+  readonly [journalSequenceBrand]: "JournalSequence";
+};
+
+/** Validated keyed dedup identity, or the explicit keyless empty sentinel. */
+export type DedupKey = string & {
+  readonly [dedupKeyBrand]: "DedupKey";
+};
+
 /** One immutable event record as stored in the journal (AD-2 schema). */
 export interface FileEventRecord {
   /** Journal schema version — pinned to `JOURNAL_SCHEMA_VERSION` (1). */
@@ -131,9 +144,9 @@ export interface FileEventRecord {
    * layer (`eventFileName`) share one sequence domain, so a 7-digit
    * sequence can never sort before a 6-digit one in a listing.
    */
-  readonly sequence: number;
+  readonly sequence: JournalSequence;
   /** "" (keyless) or an FR-015 key: `^[A-Za-z0-9:_-]{1,256}$`, no "|". */
-  readonly dedupKey: string;
+  readonly dedupKey: DedupKey;
   /** Wall-clock milliseconds of the append; must be finite. Negative finite
    * values ARE accepted — pre-epoch timestamps are representable (pinned
    * contract: the check is finite-ness, not sign). */
@@ -220,8 +233,29 @@ const dedupKeyError = (value: unknown): string | null => {
  * read side share one rule. DERIVED from `dedupKeyError` — one rule, two
  * views; there is no second encoding to drift.
  */
-export const isDedupKey = (value: unknown): value is string =>
+export const isDedupKey = (value: unknown): value is DedupKey =>
   dedupKeyError(value) === null;
+
+/** Parse a hostile runtime value into the journal's durable sequence type. */
+export const parseJournalSequence = (
+  value: unknown,
+): Result<JournalSequence, string> => {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    return err(`sequence must be a non-negative safe integer, got ${render(value)} (FR-009)`);
+  }
+  if (value > MAX_LEXICOGRAPHIC_SEQUENCE) {
+    return err(
+      `sequence ${render(value)} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the codec and naming layer share one sequence domain (FR-009)`,
+    );
+  }
+  return ok(value as JournalSequence);
+};
+
+/** Parse a hostile runtime value into the journal's durable dedup-key type. */
+export const parseDedupKey = (value: unknown): Result<DedupKey, string> => {
+  const failure = dedupKeyError(value);
+  return failure === null ? ok(value as DedupKey) : err(failure);
+};
 
 /**
  * Parse the optional append-boundary value into the durable representation.
@@ -234,11 +268,8 @@ export const isDedupKey = (value: unknown): value is string =>
  */
 export const parseOptionalDedupKey = (
   value: unknown,
-): Result<string, string> => {
-  if (value === undefined) return ok("");
-  const failure = dedupKeyError(value);
-  return failure === null ? ok(value as string) : err(failure);
-};
+): Result<DedupKey, string> =>
+  parseDedupKey(value === undefined ? "" : value);
 
 /**
  * Structural equality over serializeValue canonical forms — the FR-009
@@ -1075,25 +1106,13 @@ const parseFileEventRecordUnchecked = (
     );
   }
 
-  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) {
-    return err(
-      `${source}: sequence must be a non-negative safe integer, got ${render(sequence)} (FR-009)`,
-    );
-  }
-  if (sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
-    return err(
-      `${source}: sequence ${render(sequence)} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the codec and the naming layer share one sequence domain, so a 7-digit sequence can never sort before a 6-digit one (FR-009)`,
-    );
-  }
+  const parsedSequence = parseJournalSequence(sequence);
+  if (!parsedSequence.ok) return err(`${source}: ${parsedSequence.error}`);
 
-  // Single FR-015 encoding: the guard IS `isDedupKey` (derived from
-  // `dedupKeyError`), and the rejection message comes from the same
-  // `dedupKeyError` — there is no second rule to drift.
-  if (!isDedupKey(dedupKey)) {
-    return err(
-      `${source}: ${dedupKeyError(dedupKey) ?? `dedupKey ${render(dedupKey)} is not a valid FR-015 key`}`,
-    );
-  }
+  // Single FR-015 encoding: the smart constructor derives its rejection from
+  // `dedupKeyError`, so the runtime check and opaque type cannot drift.
+  const parsedDedupKey = parseDedupKey(dedupKey);
+  if (!parsedDedupKey.ok) return err(`${source}: ${parsedDedupKey.error}`);
 
   if (typeof recordedAtMs !== "number" || !Number.isFinite(recordedAtMs)) {
     return err(
@@ -1122,8 +1141,8 @@ const parseFileEventRecordUnchecked = (
 
   return ok({
     schemaVersion: JOURNAL_SCHEMA_VERSION,
-    sequence,
-    dedupKey,
+    sequence: parsedSequence.value,
+    dedupKey: parsedDedupKey.value,
     recordedAtMs,
     event,
   });

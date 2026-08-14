@@ -77,10 +77,12 @@ export interface RunState {
  *
  * Canonical folding: when `index` AND `attempt` are BOTH absent, the entry is
  * stored under the bare `nodeId` — byte-identical to pre-extension behavior.
- * When either is present, the entry is stored under
+ * Composite-capable backends (currently the file backend) store an entry with
+ * either component under
  * `${namespace ?? "dag"}@${nodeId}@${index ?? 0}@${attempt ?? 0}`, a distinct
  * durable key so indexed fan-out instances (F1) and subgraph namespaces (F8)
- * never overwrite each other or the canonical entry.
+ * never overwrite each other or the canonical entry. In-memory and Redis
+ * intentionally ignore these options and fold to bare `nodeId` (FR-023).
  */
 export type SaveNodeOpts = CompositeNodeKeyOpts;
 

@@ -621,7 +621,7 @@ describe("resumeFileJob — completed journal round-trip (US1)", () => {
     const records = readFileEventRecords(dir);
     expect(records.ok).toBe(true);
     if (!records.ok) return;
-    expect(records.value.map((r) => r.sequence)).toEqual([0, 1]);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1]);
     expect(
       (JSON.parse(readFileSync(join(dir, CHECKPOINT_FILE), "utf-8")).data as { state: S }).state,
     ).toEqual({ kind: "succeeded", count: 1 });

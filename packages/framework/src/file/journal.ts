@@ -68,7 +68,11 @@ import {
   eventFileName,
   eventDigestOf,
 } from "./layout.js";
-import { parseOptionalDedupKey, serializeFileEventRecord } from "./event-record.js";
+import {
+  parseJournalSequence,
+  parseOptionalDedupKey,
+  serializeFileEventRecord,
+} from "./event-record.js";
 import type { FileEventRecord } from "./event-record.js";
 import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
@@ -335,21 +339,23 @@ export const createFileJournal = (
           if (existing.some((name) => name.endsWith(`-${digest}.json`))) return;
         }
 
+        const parsedSequence = parseJournalSequence(existing.length);
+        if (!parsedSequence.ok) {
+          // Preserve the established capacity-specific message while routing
+          // every successful record construction through the opaque smart
+          // constructor. Other failures are impossible for an array length.
+          if (existing.length > MAX_LEXICOGRAPHIC_SEQUENCE) {
+            throw journalCapacityError("appendEvent", directory, existing.length);
+          }
+          throw fileOperationError("appendEvent", directory, parsedSequence.error);
+        }
         const record: FileEventRecord = {
           schemaVersion: JOURNAL_SCHEMA_VERSION,
-          sequence: existing.length,
+          sequence: parsedSequence.value,
           dedupKey: key,
           recordedAtMs: now(),
           event,
         };
-
-        // AD-6 capacity ceiling: use the existing typed infrastructure kind
-        // (`cache-error`) with append operation/context. This runs BEFORE the
-        // caller-bug serialization surface, so capacity exhaustion can never be
-        // mistaken for a raw invariant violation.
-        if (record.sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
-          throw journalCapacityError("appendEvent", directory, record.sequence);
-        }
 
         let json: string;
         try {
@@ -394,6 +400,7 @@ export const createFileJournal = (
       throw fileOperationError("writeCheckpoint", checkpointPath, error);
     }
     try {
+      mkdirSync(directory, { recursive: true });
       atomicWriteFile(checkpointPath, validCommit.json);
     } catch (error) {
       throw fsFailure("writeCheckpoint", directory, error);
@@ -418,6 +425,7 @@ export const createFileJournal = (
     }
     const json = toJson({ percent });
     try {
+      mkdirSync(directory, { recursive: true });
       atomicWriteFile(progressPath, json);
     } catch (error) {
       throw fsFailure("writeProgress", directory, error);

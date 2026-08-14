@@ -488,7 +488,7 @@ describe("SC-006 extractImports — synthetic fixtures (FR-082)", () => {
     expect(violations).toHaveLength(0);
   });
 
-  // ---- SC-006 relative-specifier bypass coverage (refutation fix) ----
+  // ---- SC-006 relative-specifier bypass regression coverage ----
 
   it("detects file/ importing broker via ../queue-bullmq/ relative specifier", () => {
     const dir = setup({
@@ -556,7 +556,7 @@ describe("SC-006 extractImports — synthetic fixtures (FR-082)", () => {
     expect(checkImports(dir).violations).toHaveLength(0);
   });
 
-  // ---- depth-N relative resolution (advisory remediation) ----
+  // ---- depth-N relative-resolution regression coverage ----
 
   it("detects a DEPTH-N relative broker import in a nested file/ module (resolved-path segment match)", () => {
     // `../../queue-bullmq/adapter.js` from `file/sub/x.ts` matches no literal
@@ -596,7 +596,7 @@ describe("SC-006 extractImports — synthetic fixtures (FR-082)", () => {
     expect(violations).toHaveLength(0);
   });
 
-  // ---- side-effect import form (silent-failure-hunter remediation) ----
+  // ---- side-effect import-form regression coverage ----
 
   it("detects the side-effect import form (`import \"bullmq\";`) in file/", () => {
     // A side-effect import has no `from` clause, so the from-requiring
