@@ -20,7 +20,7 @@
 //      shared strict reader (`readFileEvents`, FR-009). A missing events
 //      directory reads as an EMPTY log (`ok([])`); any corrupt record,
 //      sequence break, or filename mismatch fails closed here with the file
-//      named in the message (AD-3 step 2). Every reader failure is
+//      named in the message (AD-3 step 1). Every reader failure is
 //      re-tagged `checkpoint-corrupt` per AD-6 (below): the log cannot be
 //      proven ⇒ fail closed.
 //   2. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
@@ -117,7 +117,7 @@ export interface ResumeFileJobArgs<S, E, C> {
    * executor is NEVER consulted. */
   readonly machine: Machine<S, E, C>;
   /** The run's genesis data — the empty-prefix state of the proof (AD-3
-   * step 5 includes the empty prefix = genesis as benign lag). */
+   * step 7 includes the empty prefix = genesis as benign lag). */
   readonly genesis: { state: S; context: C };
   /**
    * The caller's strict decoder for the checkpoint's `data` payload
@@ -168,7 +168,7 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    shared strict reader (FR-009). A missing events directory reads as an
   //    EMPTY log (`ok([])`); any corrupt record, sequence break, or filename
   //    mismatch fails closed here with the file named in the message (AD-3
-  //    step 2). Every reader failure is re-tagged `checkpoint-corrupt` per
+  //    step 1). Every reader failure is re-tagged `checkpoint-corrupt` per
   //    AD-6 (see the module header): the log cannot be proven ⇒ fail closed.
   const events = readFileEvents(directory);
   if (!events.ok) {

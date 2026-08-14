@@ -19,17 +19,14 @@
 // FR-009 losslessness is enforced AT THE WRITE BOUNDARY by
 // `assertLosslessEvent`, a recursive pre-scan of the event value that runs
 // FIRST in `serializeFileEventRecord` and rejects anything the serializer
-// cannot represent losslessly: accessor properties (an own accessor
-// descriptor — a `get` — is rejected BY INSPECTION alone: the pre-scan
-// never invokes getters, so their values are unverifiable, and `toJson`
-// WOULD invoke them), symbol-keyed or non-enumerable own properties,
-// JSON-less values (WeakMap/WeakSet/RegExp/Promise/class instances/typed
-// arrays/boxed primitives), prototype-pollution-filtered keys
-// (`__proto__`/`constructor`/`prototype`), the literal reserved tag
-// keys (`__map__`/`__set__`/`__date__`/`__undefined__`) that serialize.ts
-// uses as its internal markers, custom `toJSON` methods, BigInt, functions,
-// symbols, invalid Dates, and circular references — each with a message
-// naming the offending kind and path. These losses are invisible to a
+// cannot represent losslessly — the FULL rejection inventory (own accessor
+// properties, symbol-keyed or non-enumerable own properties, JSON-less
+// values, prototype-pollution-filtered keys, literal reserved tag keys,
+// custom `toJSON` methods, BigInt, functions, symbols, invalid Dates,
+// circular references, and depth-ceiling violations) is the canonical
+// contract documented once on `assertLosslessEvent`'s pre-scan; every doc
+// site in this module points there instead of re-enumerating. These losses
+// are invisible to a
 // round-trip comparison because `serializeValue` strips/drops identically
 // on BOTH sides, so the pre-scan makes silent loss UNREPRESENTABLE at the
 // write boundary: no event shape the pre-scan lets through is discarded by
@@ -110,6 +107,7 @@ import {
   serializeValue,
   tryFromJson,
   deserializeValue,
+  deepJsonEqual,
   validateSerializedValueGrammar,
 } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
@@ -156,14 +154,11 @@ export interface FileEventRecord {
    * read path treats an undefined event as missing, and the write side
    * refuses it). The write boundary pre-scans the event recursively
    * (`assertLosslessEvent`, FR-009) and rejects any value the serializer
-   * cannot represent losslessly — own accessor properties (an accessor
-   * `get` descriptor is rejected by inspection; the pre-scan never
-   * invokes getters), symbol-keyed or non-enumerable properties, JSON-less
-   * values (WeakMap/RegExp/class instances/typed arrays/...),
-   * prototype-pollution-filtered keys
-   * (`__proto__`/`constructor`/`prototype`), literal reserved tag keys
-   * (`__map__`/`__set__`/`__date__`/`__undefined__`), custom `toJSON`,
-   * BigInt, functions, symbols, invalid Dates, and circular references.
+   * cannot represent losslessly — see the canonical FR-009 rejection
+   * inventory in `assertLosslessEvent`'s contract (own accessors,
+   * symbol-keyed/non-enumerable properties, JSON-less values,
+   * pollution-filtered keys, literal reserved tag keys, custom `toJSON`,
+   * BigInt, functions, symbols, invalid Dates, circular references).
    * The round-trip check backstops the remaining coercion (non-finite
    * numbers → `null`). Map/Set/Date values survive the round-trip.
    */
@@ -273,47 +268,10 @@ export const parseOptionalDedupKey = (
 
 /**
  * Structural equality over serializeValue canonical forms — the FR-009
- * losslessness verdict. `serializeValue` output is JSON-safe (primitives,
- * arrays, plain objects, `{__undefined__:true}` markers) EXCEPT that NaN is
- * preserved as itself, so equality must treat NaN as equal to NaN (JSON
- * would coerce it to `null` — exactly one of the silent mutations the
- * round-trip check exists to catch). -0 stays equal to 0 — the DOCUMENTED
- * accepted coercion (JSON normalizes the sign of zero; the comparison is
- * deliberately `===`, not `Object.is`, so `-0` never trips the gate).
+ * losslessness verdict. The single shared definition lives in
+ * `state-machine/serialize.ts` (`deepJsonEqual`), shared with the
+ * checkpoint codec so the two FR-009 gates can never drift apart.
  */
-const deepJsonEqual = (a: unknown, b: unknown): boolean => {
-  if (a === b) return true;
-  if (typeof a === "number" && typeof b === "number") {
-    return Number.isNaN(a) && Number.isNaN(b);
-  }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (!deepJsonEqual(a[i], b[i])) return false;
-    }
-    return true;
-  }
-  if (
-    typeof a === "object" && a !== null && typeof b === "object" && b !== null &&
-    !Array.isArray(a) && !Array.isArray(b)
-  ) {
-    const ka = Object.keys(a);
-    const kb = Object.keys(b);
-    if (ka.length !== kb.length) return false;
-    for (const key of ka) {
-      if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-      if (!deepJsonEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) {
-        return false;
-      }
-    }
-    return true;
-  }
-  return false;
-};
-
-// ---------------------------------------------------------------------------
-// FR-009 write-boundary pre-scan
-// ---------------------------------------------------------------------------
 
 /**
  * Literal keys that `state-machine/serialize.ts` uses as its internal
@@ -762,7 +720,8 @@ export const assertLosslessEvent = (event: unknown): void => {
   try {
     assertLosslessEventUnchecked(event);
   } catch (error) {
-    throw fileOperationError("assertLosslessEvent", "event payload", error);
+    // Deterministic: re-running the pre-scan on the same value reproduces it.
+    throw fileOperationError("assertLosslessEvent", "event payload", error, "permanent");
   }
 };
 
@@ -907,15 +866,12 @@ export const tryParseEventRecordJson = (
  *
  * The event value is PRE-SCANNED FIRST (`assertLosslessEvent`, FR-009): a
  * recursive walk rejects anything the serializer cannot represent
- * losslessly — own accessor properties (rejected by descriptor inspection;
- * the pre-scan never invokes getters), symbol-keyed or non-enumerable own
- * properties, JSON-less
- * values (WeakMap/WeakSet/RegExp/Promise/class instances/typed arrays/
- * boxed primitives), prototype-pollution-filtered keys
- * (`__proto__`/`constructor`/`prototype`), literal reserved tag keys
- * (`__map__`/`__set__`/`__date__`/`__undefined__`), custom `toJSON`
- * methods, BigInt, functions, symbols, invalid Dates, and circular
- * references — each with a message naming the offending kind and path.
+ * losslessly — the canonical rejection inventory is `assertLosslessEvent`'s
+ * contract (own accessor properties, symbol-keyed or non-enumerable own
+ * properties, JSON-less values, prototype-pollution-filtered keys,
+ * literal reserved tag keys, custom `toJSON` methods, BigInt, functions,
+ * symbols, invalid Dates, circular references, depth ceiling) — each
+ * rejection names the offending kind and path.
  * These losses are invisible to a round-trip comparison (`serializeValue`
  * drops the same things on both sides), so they are refused BEFORE any
  * JSON is produced: silent loss is unrepresentable at the write boundary.
@@ -1050,7 +1006,9 @@ export const serializeFileEventRecord = (
   try {
     return serializeFileEventRecordUnchecked(sequence, dedupKey, recordedAtMs, event);
   } catch (error) {
-    throw fileOperationError("serializeFileEventRecord", "event record", error);
+    // Deterministic: the same record (bad dedupKey, non-lossless event,
+    // past-ceiling sequence) fails identically on every retry.
+    throw fileOperationError("serializeFileEventRecord", "event record", error, "permanent");
   }
 };
 

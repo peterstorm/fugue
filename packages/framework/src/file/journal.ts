@@ -82,6 +82,7 @@ import { safeDiagnosticRender } from "../types/safe-error.js";
 import {
   fileCacheError,
   fileOperationError,
+  fileThrownValueMessage,
   type FileOperation,
 } from "./boundary-error.js";
 
@@ -124,6 +125,8 @@ export const journalCapacityError = (
   fileCacheError(
     operation,
     `${operation} failed for run directory ${directory}: sequence ${sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} (${EVENTS_DIR} listing) — journal capacity exhausted`,
+    // Deterministic: re-running the append reproduces the same ceiling.
+    "permanent",
   );
 
 // ---------------------------------------------------------------------------
@@ -299,10 +302,13 @@ export const createFileJournal = (
     // getters, Proxies, and stateful conversion hooks cannot execute here.
     const parsedKey = parseOptionalDedupKey(suppliedDedupKey);
     if (!parsedKey.ok) {
+      // Deterministic FR-015 violation — the same key fails identically on
+      // every retry, so the retry machinery must fast-fail it.
       throw fileOperationError(
         "appendEvent",
         `run directory ${directory}`,
         `${parsedKey.error}; value is not FR-015-valid — expected omitted/undefined, explicit keyless "", or keyed ^[A-Za-z0-9:_-]{1,256}$ with no "|"; if this came from runStateMachine's "|"-bearing fallback, inject a digest-based computeDedupKey`,
+        "permanent",
       );
     }
     const key = parsedKey.value;
@@ -349,11 +355,32 @@ export const createFileJournal = (
           }
           throw fileOperationError("appendEvent", directory, parsedSequence.error);
         }
+        // The injected clock is stamped inside the append critical section
+        // and is the one dependency that can fail without touching the
+        // filesystem — name it explicitly so a throwing or non-finite clock
+        // is diagnosed as a clock failure, not misattributed to the lock
+        // machinery or the record codec (parity with the checkpointer and
+        // freshness-index clock guards).
+        let recordedAtMs: number;
+        try {
+          recordedAtMs = now();
+          if (!Number.isFinite(recordedAtMs)) {
+            throw new Error(
+              `clock returned a non-finite timestamp ${safeDiagnosticRender(recordedAtMs)}`,
+            );
+          }
+        } catch (error) {
+          throw fileOperationError(
+            "appendEvent",
+            `run directory ${directory}`,
+            `clock failed while stamping the append: ${fileThrownValueMessage(error)}`,
+          );
+        }
         const record: FileEventRecord = {
           schemaVersion: JOURNAL_SCHEMA_VERSION,
           sequence: parsedSequence.value,
           dedupKey: key,
-          recordedAtMs: now(),
+          recordedAtMs,
           event,
         };
 
@@ -397,7 +424,14 @@ export const createFileJournal = (
       }
       validCommit = commit;
     } catch (error) {
-      throw fileOperationError("writeCheckpoint", checkpointPath, error);
+      // Deterministic caller bug (not an opaque commit) — retrying cannot
+      // clear it; the TypeError's rendered value stays in the message.
+      throw fileOperationError(
+        "writeCheckpoint",
+        checkpointPath,
+        error,
+        "permanent",
+      );
     }
     try {
       mkdirSync(directory, { recursive: true });
@@ -421,6 +455,8 @@ export const createFileJournal = (
         "writeProgress",
         progressPath,
         `percent must be a finite number in [0, 100], got ${safeDiagnosticRender(percent)}`,
+        // Deterministic: the same value fails identically on retry.
+        "permanent",
       );
     }
     const json = toJson({ percent });

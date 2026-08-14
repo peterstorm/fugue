@@ -146,6 +146,28 @@ export class InMemoryCheckpointer implements Checkpointer {
     this.now = opts?.now ?? Date.now;
   }
 
+  /**
+   * Detach checkpoint state before it crosses the port boundary. `load` must
+   * never hand out live internal references, and `saveNode` must never store
+   * the caller's object by reference — otherwise caller mutation would bypass
+   * `saveNode`'s snapshot/validation semantics and silently rewrite stored
+   * checkpoint state (the file/Redis backends cannot be mutated through
+   * `load` at all: they read durable bytes). Stored node states are snapshot
+   * data by contract, so — mirroring the file backend's losslessness gate —
+   * a value that cannot be detached is refused loudly instead of aliased.
+   */
+  private detachStored<T>(value: T, what: string): T {
+    try {
+      return structuredClone(value);
+    } catch (error) {
+      throw new Error(
+        `${what} must be a cloneable snapshot value (stored checkpoint state is never aliased by reference): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   async load(
     runId: RunId,
     opts?: CheckpointerLoadOpts,
@@ -188,7 +210,10 @@ export class InMemoryCheckpointer implements Checkpointer {
       });
     }
 
-    return ok({ meta, nodes: this.nodes.get(runId) ?? {} });
+    return ok({
+      meta: this.detachStored(meta, "checkpoint meta"),
+      nodes: this.detachStored(this.nodes.get(runId) ?? {}, `checkpoint nodes for ${runId}`),
+    });
   }
 
   async saveNode(
@@ -201,7 +226,7 @@ export class InMemoryCheckpointer implements Checkpointer {
     // identical to the pre-extension implementation: the bare nodeId is the
     // only key and no log, warning, validation, or other side effect occurs.
     const existing = this.nodes.get(runId) ?? {};
-    this.nodes.set(runId, { ...existing, [nodeId]: state });
+    this.nodes.set(runId, { ...existing, [nodeId]: this.detachStored(state, `node state for ${nodeId}`) });
     return ok(undefined);
   }
 

@@ -288,6 +288,51 @@ export const serializeValue = (value: unknown): unknown => {
   return value;
 };
 
+/**
+ * Structural equality over `serializeValue` canonical forms — the ONE shared
+ * FR-009 losslessness verdict. `serializeValue` output is JSON-safe
+ * (primitives, arrays, plain objects, `{__undefined__:true}` markers) EXCEPT
+ * that NaN is preserved as itself, so equality must treat NaN as equal to NaN
+ * (JSON would coerce it to `null` — exactly one of the silent mutations the
+ * round-trip check exists to catch). -0 stays equal to 0 — the DOCUMENTED
+ * accepted coercion (JSON normalizes the sign of zero; the comparison is
+ * deliberately `===`, not `Object.is`, so `-0` never trips the gate).
+ *
+ * Shared by the event-record codec (`serializeFileEventRecord` round-trip
+ * verdict) and the checkpoint codec (`serializeFileCheckpoint` bytes-⇔-
+ * snapshot verdict): a single definition so the two FR-009 gates can never
+ * drift apart.
+ */
+export const deepJsonEqual = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true;
+  if (typeof a === "number" && typeof b === "number") {
+    return Number.isNaN(a) && Number.isNaN(b);
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepJsonEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (
+    typeof a === "object" && a !== null && typeof b === "object" && b !== null &&
+    !Array.isArray(a) && !Array.isArray(b)
+  ) {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const key of ka) {
+      if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+      if (!deepJsonEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+};
+
 /** Deserialize a value produced by serializeValue, restoring Map/Set/Date/undefined. */
 export const deserializeValue = (value: unknown): unknown => {
   if (value === null || value === undefined) return value;

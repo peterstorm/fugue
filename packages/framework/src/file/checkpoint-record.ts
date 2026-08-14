@@ -11,7 +11,7 @@
 // installs after the bytes commit, so caller-owned references can never make
 // the in-memory snapshot diverge from checkpoint.json.
 
-import { serializeValue, toJson, tryFromJson } from "../state-machine/serialize.js";
+import { deepJsonEqual, serializeValue, toJson, tryFromJson } from "../state-machine/serialize.js";
 import { tryCatch } from "../types/result.js";
 import { fileOperationError, fileThrownValueMessage } from "./boundary-error.js";
 import { assertLosslessEvent } from "./event-record.js";
@@ -39,35 +39,11 @@ export const isFileCheckpointCommit = (
 ): value is FileCheckpointCommit<unknown, unknown> =>
   typeof value === "object" && value !== null && issuedCommits.has(value);
 
-/**
- * Structural equality over canonical `serializeValue` forms. NaN equals NaN
- * so the JSON round-trip can expose its coercion to null; -0 intentionally
- * equals 0 because JSON canonicalizes that one documented representation.
- */
-const deepEqual = (left: unknown, right: unknown): boolean => {
-  if (left === right) return true;
-  if (typeof left === "number" && typeof right === "number") {
-    return Number.isNaN(left) && Number.isNaN(right);
-  }
-  if (Array.isArray(left) && Array.isArray(right)) {
-    return left.length === right.length && left.every((value, index) => deepEqual(value, right[index]));
-  }
-  if (
-    typeof left === "object" && left !== null &&
-    typeof right === "object" && right !== null &&
-    !Array.isArray(left) && !Array.isArray(right)
-  ) {
-    const leftKeys = Object.keys(left);
-    const rightKeys = Object.keys(right);
-    return leftKeys.length === rightKeys.length && leftKeys.every((key) =>
-      Object.prototype.hasOwnProperty.call(right, key) &&
-      deepEqual(
-        (left as Record<string, unknown>)[key],
-        (right as Record<string, unknown>)[key],
-      ));
-  }
-  return false;
-};
+// Structural equality over canonical `serializeValue` forms — the SHARED
+// `deepJsonEqual` from state-machine/serialize.ts (the one FR-009 verdict
+// definition shared with the event-record codec). NaN equals NaN so the JSON
+// round-trip can expose its coercion to null; -0 intentionally equals 0
+// because JSON canonicalizes that one documented representation.
 
 const serializeFileCheckpointUnchecked = <S, C>(
   data: FileCheckpointData<S, C>,
@@ -102,7 +78,7 @@ const serializeFileCheckpointUnchecked = <S, C>(
   }
 
   const detached = (roundTrip.value as { readonly data: FileCheckpointData<S, C> }).data;
-  if (!deepEqual(serializeValue(detached), serializeValue(data))) {
+  if (!deepJsonEqual(serializeValue(detached), serializeValue(data))) {
     throw new Error(
       "checkpoint data is not lossless through toJson — JSON silently drops or mutates non-JSON values (for example, non-finite numbers become null); refusing to persist bytes that diverge from caller state (FR-009)",
     );

@@ -53,7 +53,7 @@ import {
   keyDigest,
 } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError } from "../types/errors.js";
+import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
@@ -140,6 +140,9 @@ describe("createFileJournal — closed typed throwing shell", () => {
     const typed = asCacheError(failure, "appendEvent");
     expect(typed.message).toContain(dir);
     expect(typed.message).toMatch(/unprintable|Proxy|revoked/i);
+    // The injected clock is the failing dependency — the diagnostic must
+    // name it instead of misattributing the failure to the lock machinery.
+    expect(typed.message).toMatch(/clock/);
 
     const eventsDir = join(dir, EVENTS_DIR);
     mkdirSync(join(eventsDir, APPEND_LOCK), { recursive: true });
@@ -765,6 +768,10 @@ describe("createFileJournal.appendEvent — capacity ceiling classification (AD-
     expect(typed.message).toContain(dir);
     expect(typed.message).toContain(String(MAX_LEXICOGRAPHIC_SEQUENCE + 1));
     expect(typed.message).toContain("capacity exhausted");
+    // Deterministic — the retry machinery must fast-fail it (ADR-0080's
+    // taxonomy contract: a re-run of the append reproduces the ceiling).
+    expect(typed.failureClass).toBe("permanent");
+    expect(retriabilityOf(full)).toBe("non-retriable");
   });
 
   // Hitting the ceiling end-to-end would require a 1,000,000-entry listing.
@@ -1232,6 +1239,60 @@ describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
     expect(readdirSync(dir).sort()).toEqual(beforeNames);
     expect(listEventFiles(dir)).toEqual(beforeFiles);
     expect(beforeFiles.map((name) => readFileSync(join(dir, EVENTS_DIR, name), "utf-8"))).toEqual(beforeBytes);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cache-error failure-class classification (ADR-0080): deterministic
+// failures carry `failureClass: "permanent"` so `retriabilityOf` fast-fails
+// them; environment failures stay unclassified (retriable).
+// ---------------------------------------------------------------------------
+
+describe("cache-error failure-class classification (permanent vs transient)", () => {
+  it("FR-015 dedupKey violations and invalid progress are permanent through the typed shell", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+
+    // FR-015: "a|b" violates AD-2 keyed/keyless digest disjointness.
+    const appendFailure = await journal.appendEvent({ type: "X" }, "a|b").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const appended = asCacheError(appendFailure as FrameworkError, "appendEvent");
+    expect(appended.failureClass).toBe("permanent");
+    expect(retriabilityOf(appended)).toBe("non-retriable");
+
+    // Invalid progress value — deterministic caller bug.
+    let progressFailure: unknown;
+    try {
+      await journal.writeProgress(101);
+    } catch (error) {
+      progressFailure = error;
+    }
+    const progressed = asCacheError(progressFailure as FrameworkError, "writeProgress");
+    expect(progressed.failureClass).toBe("permanent");
+    expect(retriabilityOf(progressed)).toBe("non-retriable");
+  });
+
+  it("environment failures (lock acquire EACCES) stay retriable", async () => {
+    // Root cannot manufacture EACCES via chmod (see the sibling tests).
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "A" }, "k0");
+    const eventsDir = join(dir, EVENTS_DIR);
+    chmodSync(eventsDir, 0o000); // lock acquire fails EACCES before any write
+    try {
+      const failure = await journal.appendEvent({ type: "B" }, "k1").then(
+        () => null,
+        (error: unknown) => error,
+      );
+      const typed = asCacheError(failure as FrameworkError, "appendEvent");
+      expect(typed.failureClass).toBeUndefined();
+      expect(retriabilityOf(typed)).toBe("retriable");
+    } finally {
+      chmodSync(eventsDir, 0o700);
+    }
   });
 });
 

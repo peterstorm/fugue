@@ -27,6 +27,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -773,6 +774,45 @@ describe("FileCheckpointer — load failure precedence", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("Dropping corrupt checkpoint entry");
     expect(warnings[0]).toContain(`nodeKey=${keyDigest("corrupt-node")}.json`);
+  });
+
+  it("a non-ENOENT nodes/ listing failure (readdir EACCES) fails typed cache-error(load) naming the directory", async () => {
+    // Runs as root (e.g. containers): permission bits are not enforced, so
+    // chmod cannot manufacture an EACCES — the sibling EACCES tests in the
+    // journal suite follow the same skip convention.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const directory = freshDirectory();
+    const checkpointer = createFileCheckpointer(directory, { now: () => nowMs });
+    const meta: RunMeta = {
+      dagId: "dag-1",
+      startedAt: new Date(nowMs),
+      nodeCount: 0,
+    };
+    const setResult = await checkpointer.setMeta(R("run-order"), meta);
+    if (!setResult.ok) throw new Error("expected setMeta to succeed");
+    // A saved node materializes `nodes/` (setMeta alone leaves it absent).
+    const nodeState: NodeState = {
+      nodeId: "n1",
+      output: { kept: true },
+      completedAt: new Date(nowMs),
+    };
+    const saveResult = await checkpointer.saveNode(R("run-order"), "n1", nodeState);
+    if (!saveResult.ok) throw new Error("expected saveNode to succeed");
+    const nodesDir = join(directory, R("run-order"), NODES_DIR);
+    chmodSync(nodesDir, 0o000); // rwx stripped — readdirSync fails EACCES even for the owner
+    try {
+      const result = await checkpointer.load(R("run-order"));
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected a typed failure");
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind !== "cache-error") throw new Error("unreachable");
+      expect(result.error.operation).toBe("load");
+      expect(result.error.message).toContain(nodesDir);
+      expect(result.error.message).toMatch(/EACCES|permission denied/i);
+      expect(warnings).toEqual([]);
+    } finally {
+      chmodSync(nodesDir, 0o700); // restore so afterEach cleanup can rm
+    }
   });
 });
 

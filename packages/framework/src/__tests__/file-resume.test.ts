@@ -633,7 +633,7 @@ describe("resumeFileJob — completed journal round-trip (US1)", () => {
 // AD-3 prefix semantics — the benign lag window
 // ---------------------------------------------------------------------------
 
-describe("resumeFileJob — strict-prefix benign lag (AD-3 step 5)", () => {
+describe("resumeFileJob — strict-prefix benign lag (AD-3 step 7)", () => {
   it("a checkpoint of the genesis state with a non-empty log is the empty-prefix lag; resume returns the replay", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir, { now: () => 7 });

@@ -87,7 +87,7 @@ These invariants and FR-030/FR-031/FR-032 are exercised in `packages/framework/s
 - Redis can lower an identical member's score and reselect from retained ZSET history; the file backend deliberately keeps the higher live singleton, so physical and command-by-command Redis parity are not provided.
 - Every write acquires a filesystem lock and performs a read/compare/atomic-write transaction, adding contention and I/O compared with an in-memory latest-value assignment.
 - Expired singleton files remain physically present until the consumer removes the directory or a later write replaces them; there is no built-in disk reclamation.
-- Corruption is asymmetric by operation: lookup warns and treats the record as absent for Redis parity, whereas write fails closed to preserve forensic bytes; callers must monitor warnings to detect degraded conflict coverage.
+- Corruption is asymmetric by operation: lookup warns and treats the record as absent for Redis parity, whereas write fails closed to preserve forensic bytes; callers must monitor warnings to detect degraded conflict coverage. Operational note: after any integrity incident, investigate `[FileFreshnessIndex] Dropping corrupt freshness entry` warnings — an absent `findConflict` result observed alongside such warnings is provisional, not a clean no-conflict verdict.
 - SHA-256 filenames obscure resources during manual inspection and carry a negligible theoretical collision risk.
 - Atomic rename provides process-crash atomicity but, without `fsync`, does not claim durability across sudden host power loss.
 

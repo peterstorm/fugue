@@ -62,20 +62,41 @@ export type FileOperation =
 export const fileCacheError = (
   operation: FileOperation,
   message: string,
-): FrameworkError => publicFrameworkError.cacheError(operation, message);
+  failureClass?: "transient" | "permanent",
+): FrameworkError =>
+  failureClass === undefined
+    ? publicFrameworkError.cacheError(operation, message)
+    : publicFrameworkError.cacheError(operation, message, failureClass);
 
-/** Construct the closed typed throwing-shell failure used by file operations. */
+/**
+ * Construct the closed typed throwing-shell failure used by file operations.
+ *
+ * `failureClass` is the additive permanent/transient discriminant (see
+ * `FrameworkError`'s `cache-error`): deterministic failures that re-running
+ * cannot clear are marked `"permanent"` so `retriabilityOf` fast-fails them.
+ * When omitted, the class is INFERRED from a wrapped cache-error carrying an
+ * explicit class — so the public boundary error preserves the classification
+ * of the inner failure (e.g. an `appendEvent` fs-wrap around a permanent
+ * codec rejection stays permanent) instead of erasing it.
+ */
 export const fileOperationError = (
   operation: FileOperation,
   location: unknown,
   reason: unknown,
-): FrameworkError =>
-  fileCacheError(
+  failureClass?: "transient" | "permanent",
+): FrameworkError => {
+  const inferred = failureClass ??
+    (isFrameworkError(reason) && reason.kind === "cache-error"
+      ? reason.failureClass
+      : undefined);
+  return fileCacheError(
     operation,
     `${operation} failed at ${
       typeof location === "string" ? location : safeDiagnosticRender(location)
     }: ${fileThrownValueMessage(reason)}`,
+    inferred,
   );
+};
 
 /**
  * Best-effort diagnostics for low-level cleanup paths. Logger behavior is

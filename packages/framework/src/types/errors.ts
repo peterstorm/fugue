@@ -83,7 +83,24 @@ export type FrameworkError =
       readonly message: string;
     }
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
-  | { readonly kind: "cache-error"; readonly operation: string; readonly message: string }
+  | {
+      readonly kind: "cache-error";
+      readonly operation: string;
+      readonly message: string;
+      /**
+       * Explicit failure-class discriminant (additive): `"permanent"` marks a
+       * deterministic failure that re-running cannot clear (journal capacity
+       * exhaustion, FR-015 dedup-key violations, invalid progress values,
+       * non-lossless event/checkpoint values, malformed filename inputs),
+       * so `retriabilityOf` can fast-fail it instead of burning the retry
+       * budget. `"transient"`/absent = environment-class failures (fs/lock)
+       * that replay may clear. Populated by the file backend's error shell;
+       * the taxonomy's contract — a new kind can never silently default to
+       * `retriable` — is what this discriminant restores for the closed
+       * `cache-error` kind whose operation vocabulary mixes both classes.
+       */
+      readonly failureClass?: "transient" | "permanent";
+    }
   | {
       readonly kind: "node-crash";
       readonly nodeId: NodeId;
@@ -460,6 +477,11 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
       { kind: "downstream-denied" },
       { kind: "llm-budget-exceeded" },
       { kind: "missing-capability" },
+      // `cache-error` carries an explicit discriminant where the operation
+      // vocabulary mixes deterministic and environment failures: a
+      // `"permanent"` class is a deterministic failure like the kinds above
+      // (capacity, FR-015, losslessness — re-running reproduces it).
+      { kind: "cache-error", failureClass: "permanent" },
       () => "non-retriable" as const,
     )
     // Everything else goes through the standard backoff path. The graph-
@@ -493,7 +515,10 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
 /**
  * The human-readable summary threaded into `retry-exhausted.lastError`.
  * `node-crash`/`transient` carry a purpose-written `message` that IS the whole
- * human story (their other fields are just `nodeId`), so it is returned bare.
+ * human story (their other fields — `node-crash`'s `nodeId`/`retriability`/
+ * `httpStatus`/`usage`/`stack` and `transient`'s `httpStatus`/`usage` — are
+ * structured discriminants for programmatic branching, not part of the
+ * human failure story), so it is returned bare.
  * Every other kind is JSON-stringified: several DO carry a `message`/`reason`,
  * but alongside equally-load-bearing context (`checkpoint-corrupt` has `runId`,
  * `downstream-denied` has `resource`, …), so serialising the whole value loses

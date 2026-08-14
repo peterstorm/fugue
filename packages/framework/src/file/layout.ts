@@ -11,9 +11,9 @@
 //
 // AD-2 digest-filename adaptation: record filenames carry the sha256 hex digest
 // of an identifier, never the identifier itself. A spec-valid 256-char
-// dedupKey (or a composite checkpoint nodeKey, `dag@<128>@<16>@<16>` — 291
-// bytes, the true worst case once namespace and nodeId (128 each) and the
-// 16-digit safe-integer index/attempt fields are all at their ceilings)
+// dedupKey (or a composite checkpoint nodeKey, `namespace@nodeId@index@attempt`
+// — up to 291 bytes in the true worst case: 128-char namespace AND 128-char
+// nodeId plus 16-digit safe-integer index/attempt fields)
 // would exceed NAME_MAX (255) in a literal `<key>.json` filename;
 // `<NNNNNN>-<64-hex>.json` is always 76 bytes for sequences under the
 // 6-digit lexicographic ceiling (see `eventFileName`). The digest is REQUIRED —
@@ -154,7 +154,8 @@ export const keyDigest = (key: string): string => {
       .update(isWellFormedUtf16(key) ? key : encodeIllFormedUtf16(key))
       .digest("hex");
   } catch (error) {
-    throw fileOperationError("keyDigest", "digest input", error);
+    // Deterministic: an unhashable/ill-formed key fails identically on retry.
+    throw fileOperationError("keyDigest", "digest input", error, "permanent");
   }
 };
 
@@ -162,6 +163,17 @@ export const keyDigest = (key: string): string => {
  * `eventFileName` rejects any value past 999999, so padding beyond 6 digits
  * is unreachable). */
 const pad6 = (sequence: number): string => String(sequence).padStart(6, "0");
+
+/**
+ * The 6-digit lexicographic sequence ceiling (999999) — the shared sequence
+ * domain of the NAMING layer (`eventFileName`, `eventDigestOf`) and the
+ * CODEC (`serializeFileEventRecord` throws and `parseFileEventRecord` errs
+ * on any sequence past it, naming the rule). `"1000000-…"` would sort
+ * before `"999999-…"` in a listing, silently breaking sorted-listing =
+ * append order, so the ceiling is enforced everywhere a sequence becomes
+ * durable — never truncated, never silently out-of-order (AD-2).
+ */
+export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
 
 /**
  * Event-record filename for the journal: `${pad6(sequence)}-${digest}.json`.
@@ -178,18 +190,6 @@ const pad6 = (sequence: number): string => String(sequence).padStart(6, "0");
  * functional-core rules): a malformed sequence or digest would otherwise
  * silently corrupt the durable log's ordering/dedup keys.
  */
-
-/**
- * The 6-digit lexicographic sequence ceiling (999999) — the shared sequence
- * domain of the NAMING layer (`eventFileName`, `eventDigestOf`) and the
- * CODEC (`serializeFileEventRecord` throws and `parseFileEventRecord` errs
- * on any sequence past it, naming the rule). `"1000000-…"` would sort
- * before `"999999-…"` in a listing, silently breaking sorted-listing =
- * append order, so the ceiling is enforced everywhere a sequence becomes
- * durable — never truncated, never silently out-of-order (AD-2).
- */
-export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
-
 const eventFileNameUnchecked = (sequence: number, digest: string): string => {
   if (!Number.isSafeInteger(sequence) || sequence < 0) {
     throw new Error(
@@ -213,7 +213,9 @@ export const eventFileName = (sequence: number, digest: string): string => {
   try {
     return eventFileNameUnchecked(sequence, digest);
   } catch (error) {
-    throw fileOperationError("eventFileName", "event filename", error);
+    // Deterministic: an out-of-domain sequence/digest fails identically on
+    // every retry — never a transient environment condition.
+    throw fileOperationError("eventFileName", "event filename", error, "permanent");
   }
 };
 

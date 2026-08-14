@@ -119,6 +119,12 @@ export const frameworkError = {
   promptNotFound: (promptName: string, reason: string): FrameworkError =>
     ({ kind: "prompt-not-found", promptName, reason }),
 
-  cacheError: (operation: string, message: string): FrameworkError =>
-    ({ kind: "cache-error", operation, message }),
+  cacheError: (
+    operation: string,
+    message: string,
+    failureClass?: "transient" | "permanent",
+  ): FrameworkError =>
+    failureClass === undefined
+      ? { kind: "cache-error", operation, message }
+      : { kind: "cache-error", operation, message, failureClass },
 } as const;

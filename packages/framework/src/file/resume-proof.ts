@@ -9,7 +9,9 @@
 // (the strictly-read event log and the raw checkpoint JSON) and hands them
 // in; every outcome here is decideable from those inputs alone (FR-011).
 //
-// The proof (AD-3):
+// The proof (AD-3). Step numbers cited as `AD-3 step N` in this module and
+// its tests follow ADR-0077's shipped-implementation enumeration (1 read
+// events → 8 checkpoint-corrupt; agreement = 6, strict-prefix/genesis lag = 7):
 //
 //   1. Full replay through the PURE machine (`replayEvents` — the executor
 //      is never re-invoked, FR-011/NFR-002) ⇒ `replayed`. No checkpoint.json
@@ -169,7 +171,7 @@ export interface ResumeProofArgs<S, E, C> {
    * The executor is NEVER consulted. */
   readonly machine: Machine<S, E, C>;
   /** The run's genesis data — the empty-prefix state of the proof (AD-3
-   * step 3 includes the empty prefix = genesis as benign lag). */
+   * step 7 includes the empty prefix = genesis as benign lag). */
   readonly genesis: { state: S; context: C };
   /**
    * The caller's strict decoder for the checkpoint's `data` payload
@@ -346,7 +348,7 @@ export const proveResumeAgreement = <S, E, C>(
   }
   const checkpointData = decodedAttempt.value.value;
 
-  // 4. Agreement (AD-3 step 2): the checkpoint equals the FULL replay ⇒
+  // 4. Agreement (AD-3 step 6): the checkpoint equals the FULL replay ⇒
   //    resume from `replayed`. Context is deliberately not compared — the
   //    log alone determines the resumed state (FR-010).
   //
@@ -375,7 +377,7 @@ export const proveResumeAgreement = <S, E, C>(
   const checkpointKey = checkpointKeyResult.value;
   if (checkpointKey === replayedKey) return ok(replayed);
 
-  // 5. Single-pass strict-prefix scan (AD-3 step 3): fold the log while
+  // 5. Single-pass strict-prefix scan (AD-3 step 7): fold the log while
   //    comparing each intermediate state key to the checkpoint key. The
   //    empty prefix (genesis) is the state before any event; the FULL replay
   //    (the last transition's result) was already decided by step 4, so the

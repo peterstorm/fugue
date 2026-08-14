@@ -302,6 +302,10 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     [{ kind: "checkpoint-version-mismatch", runId: rid2, expected: "2", actual: "1" }, "retriable"],
     [{ kind: "prompt-not-found", promptName: "p", reason: "missing" }, "retriable"],
     [{ kind: "cache-error", operation: "get", message: "timeout" }, "retriable"],
+    // cache-error's explicit failure-class discriminant overrides the default:
+    // deterministic file-backend failures must fast-fail like the other
+    // deterministic kinds instead of burning the retry budget.
+    [{ kind: "cache-error", operation: "appendEvent", message: "capacity exhausted", failureClass: "permanent" }, "non-retriable"],
     [{ kind: "cycle-detected", nodeIds: [nid] }, "retriable"],
     [{ kind: "rejected", nodeId: nid, reason: "no" }, "retriable"],
     [{ kind: "invalid-reroute", targetNodeId: nid, message: "bad" }, "retriable"],

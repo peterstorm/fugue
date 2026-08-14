@@ -130,6 +130,7 @@ const cacheFailure = (
   digest: string | null,
   error: unknown,
   codeProbe?: ErrorCodeProbe,
+  failureClass?: "transient" | "permanent",
 ): FrameworkError =>
   fileCacheError(
     operation,
@@ -138,6 +139,7 @@ const cacheFailure = (
         ? safeErrorMessage(error)
         : safeErrorMessageWithCodeProbe(error, codeProbe)
     }`,
+    failureClass,
   );
 
 /** Snapshot each accessor-backed event field once before validating any value. */
@@ -396,6 +398,20 @@ const warnCorrupt = (
   }
 };
 
+/**
+ * Freshness-index factory options (the port itself lives in
+ * `types/freshness.ts`).
+ *
+ * Corrupt-singleton semantics (ADR-0079, caller observability): a stored
+ * freshness entry that fails the strict codec is warned
+ * (`[FileFreshnessIndex] Dropping corrupt freshness entry …`) and observed
+ * as ABSENT by `findConflict` — Redis drop-with-warning parity, since the
+ * event log, not this cache, is authoritative. `recordWrite` fails closed
+ * on the same corruption class. Callers enforcing write-once/integrity
+ * decisions off `findConflict` must treat an `ok(null)` as provisional
+ * while corruption warnings are emitted; the corrupted file is never
+ * silently replaced by a stale write.
+ */
 export interface FileFreshnessIndexOptions {
   /** Clock stamping writes and evaluating the lazy 24h TTL. */
   readonly now?: () => number;
@@ -434,7 +450,8 @@ const createFileFreshnessIndexUnchecked = (
       try {
         const prepared = prepareFreshnessWrite(event);
         if (!prepared.ok) {
-          return err(cacheFailure("freshness:recordWrite", null, prepared.error));
+          // Deterministic: the same invalid event fails identically on retry.
+          return err(cacheFailure("freshness:recordWrite", null, prepared.error, undefined, "permanent"));
         }
 
         const resourceDigest = keyDigest(prepared.value.resource);
@@ -460,11 +477,16 @@ const createFileFreshnessIndexUnchecked = (
             const text = readFileSync(recordPath, "utf-8");
             const parsed = parseStoredFreshnessEntry(text, prepared.value.resource);
             if (!parsed.ok) {
+              // Deterministic fail-closed (ADR-0079): the corrupted bytes
+              // reproduce the same rejection on every retry — retrying can
+              // neither clear them nor make the write safe.
               return err(
                 cacheFailure(
                   "freshness:recordWrite",
                   resourceDigest,
                   `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, resourceDigest, parsed.error)}`,
+                  undefined,
+                  "permanent",
                 ),
               );
             }

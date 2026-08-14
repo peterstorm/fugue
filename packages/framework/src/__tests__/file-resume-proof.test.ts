@@ -16,7 +16,7 @@
  *   state; the decoder is consulted exactly once; no checkpoint
  *   (`checkpointJson: null`) resumes from the pure replay without touching
  *   the decoder; proof inputs are never mutated.
- * - Strict-prefix lag (AD-3 step 5): empty-prefix (genesis) lag, lag by one,
+ * - Strict-prefix lag (AD-3 step 7): empty-prefix (genesis) lag, lag by one,
  *   lag by the last strict prefix, and checkpoint-only runs (empty log +
  *   genesis-agreeing checkpoint resume to genesis).
  * - Disagreement (FR-010): a checkpoint matching no prefix fails closed with
@@ -139,10 +139,10 @@ const prove = (
   });
 
 // ---------------------------------------------------------------------------
-// Full agreement — the checkpoint equals the full replay (AD-3 step 2)
+// Full agreement — the checkpoint equals the full replay (AD-3 step 6)
 // ---------------------------------------------------------------------------
 
-describe("proveResumeAgreement — full agreement (AD-3 step 2)", () => {
+describe("proveResumeAgreement — full agreement (AD-3 step 6)", () => {
   it("resumes from the log replay when the checkpoint equals the full replay, consulting the decoder exactly once", () => {
     let parseCalls = 0;
     const result = prove({
@@ -195,10 +195,10 @@ describe("proveResumeAgreement — full agreement (AD-3 step 2)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Strict-prefix lag — the benign append-before-checkpoint window (AD-3 step 3)
+// Strict-prefix lag — the benign append-before-checkpoint window (AD-3 step 7)
 // ---------------------------------------------------------------------------
 
-describe("proveResumeAgreement — strict-prefix benign lag (AD-3 step 3)", () => {
+describe("proveResumeAgreement — strict-prefix benign lag (AD-3 step 7)", () => {
   const threeStepsThenDone = (): readonly RecordedEvent<unknown>[] =>
     stepLog(3).concat([recorded({ type: "DONE" }, 4_000)]);
 
