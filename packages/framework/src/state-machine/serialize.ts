@@ -302,35 +302,49 @@ export const serializeValue = (value: unknown): unknown => {
  * verdict) and the checkpoint codec (`serializeFileCheckpoint` bytes-⇔-
  * snapshot verdict): a single definition so the two FR-009 gates can never
  * drift apart.
- */
+ *
+ * ITERATIVE (explicit pair queue) — total over arbitrary input at ANY depth:
+ * a hostile unbounded-depth pair cannot overflow the call stack, matching the
+ * iterative posture of the read-side pre-scans. Semantics are identical to
+ * the historical recursive walk (structural equality over canonical
+ * `serializeValue` forms, NaN-equals-NaN, `-0`-equals-`0`). */
 export const deepJsonEqual = (a: unknown, b: unknown): boolean => {
   if (a === b) return true;
-  if (typeof a === "number" && typeof b === "number") {
-    return Number.isNaN(a) && Number.isNaN(b);
-  }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (!deepJsonEqual(a[i], b[i])) return false;
+  const pending: Array<readonly [unknown, unknown]> = [[a, b]];
+  while (pending.length > 0) {
+    const entry = pending.pop()!;
+    const x = entry[0];
+    const y = entry[1];
+    if (x === y) continue;
+    if (typeof x === "number" && typeof y === "number") {
+      if (!(Number.isNaN(x) && Number.isNaN(y))) return false;
+      continue;
     }
-    return true;
-  }
-  if (
-    typeof a === "object" && a !== null && typeof b === "object" && b !== null &&
-    !Array.isArray(a) && !Array.isArray(b)
-  ) {
-    const ka = Object.keys(a);
-    const kb = Object.keys(b);
-    if (ka.length !== kb.length) return false;
-    for (const key of ka) {
-      if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-      if (!deepJsonEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) {
-        return false;
+    if (Array.isArray(x) && Array.isArray(y)) {
+      if (x.length !== y.length) return false;
+      for (let i = 0; i < x.length; i++) {
+        pending.push([x[i], y[i]]);
       }
+      continue;
     }
-    return true;
+    if (
+      typeof x === "object" && x !== null && typeof y === "object" && y !== null &&
+      !Array.isArray(x) && !Array.isArray(y)
+    ) {
+      const kx = Object.keys(x);
+      const ky = Object.keys(y);
+      if (kx.length !== ky.length) return false;
+      const xRec = x as Record<string, unknown>;
+      const yRec = y as Record<string, unknown>;
+      for (const key of kx) {
+        if (!Object.prototype.hasOwnProperty.call(y, key)) return false;
+        pending.push([xRec[key], yRec[key]]);
+      }
+      continue;
+    }
+    return false;
   }
-  return false;
+  return true;
 };
 
 /** Deserialize a value produced by serializeValue, restoring Map/Set/Date/undefined. */

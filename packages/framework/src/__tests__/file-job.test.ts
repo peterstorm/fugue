@@ -39,7 +39,7 @@ import {
 } from "../file.js"; // the @fuguejs/framework/file barrel under test
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError } from "../types/errors.js";
+import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -391,6 +391,21 @@ describe("createFileJob.updateData — checkpoint losslessness (FR-009)", () => 
     // — the exact silent mutation the backstop exists to refuse.
     expect(createFileJournal(dir).readCheckpoint()).toBeNull();
     expect(job.data).toEqual(genesis());
+  });
+
+  it("non-lossless checkpoint rejections are classified permanent (deterministic — retriabilityOf fast-fails)", async () => {
+    const dir = tempDir();
+    const job = createFileJob<S, C>({ directory: dir, initial: genesis() });
+
+    const error = await job
+      .updateData({ state: { kind: "pending", count: 0, fn: () => 1 } as unknown as S, context: { value: 1 } })
+      .then(() => null, (e: unknown) => e);
+    const typed = asCacheError(error, "updateData");
+    // The checkpoint-side twin of the event codec's permanent class: the same
+    // payload reproduces every rejection identically, so the retry machinery
+    // must not re-execute the transition to budget exhaustion (ADR-0080).
+    expect(typed.failureClass).toBe("permanent");
+    expect(retriabilityOf(typed)).toBe("non-retriable");
   });
 
   it("a valid updateData still commits and advances after the losslessness gate", async () => {

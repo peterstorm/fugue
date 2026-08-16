@@ -59,7 +59,17 @@ import type { RecordedEvent } from "../state-machine/types.js";
 // Strict core — returns a precise fail-closed string error (source named)
 // ---------------------------------------------------------------------------
 
-type StrictResult = Result<readonly FileEventRecord[], string>;
+type StrictReadFailure = Readonly<{
+  readonly message: string;
+  /**
+   * Set only for deterministic on-disk conditions (corrupt record, broken
+   * sequence, filename/digest mismatch) that re-running cannot clear. Fs I/O
+   * failures leave it absent — the environment class that replay may clear.
+   */
+  readonly permanent?: true;
+}>;
+
+type StrictResult = Result<readonly FileEventRecord[], StrictReadFailure>;
 
 const prefixOf = (sequence: number): string => String(sequence).padStart(6, "0");
 
@@ -80,9 +90,9 @@ const readStrict = (directory: string): StrictResult => {
     // getter cannot escape and its inspection failure remains diagnostic.
     const codeProbe = probeErrorCode(error);
     if (codeProbe.kind === "code" && codeProbe.code === "ENOENT") return ok([]);
-    return err(
-      `read ${eventsDir}: ${safeErrorMessageWithCodeProbe(error, codeProbe)}`,
-    );
+    return err({
+      message: `read ${eventsDir}: ${safeErrorMessageWithCodeProbe(error, codeProbe)}`,
+    });
   }
 
   const records: FileEventRecord[] = [];
@@ -92,40 +102,43 @@ const readStrict = (directory: string): StrictResult => {
     try {
       contents = readFileSync(source, "utf-8");
     } catch (error) {
-      return err(`${source}: read failed: ${safeErrorMessage(error)} (FR-009)`);
+      return err({ message: `${source}: read failed: ${safeErrorMessage(error)} (FR-009)` });
     }
     // Raw-JSON seam: `tryParseEventRecordJson` validates the complete exact
     // serializer grammar BEFORE `deserializeValue` may reinterpret tags or
     // erase sibling/pollution fields, then restores Map/Set/Date/undefined.
     const raw = tryParseEventRecordJson(contents, source);
-    if (!raw.ok) return err(raw.error);
+    if (!raw.ok) return err({ message: raw.error, permanent: true });
     const parsed = parseFileEventRecord(raw.value, source);
-    if (!parsed.ok) return err(parsed.error);
+    if (!parsed.ok) return err({ message: parsed.error, permanent: true });
     const record = parsed.value;
 
     // 1. Filename prefix ↔ content sequence (FR-009).
     if (!name.startsWith(`${prefixOf(record.sequence)}-`)) {
-      return err(
-        `${source}: filename prefix "${name.slice(0, 6)}" does not match record sequence ${record.sequence} (FR-009)`,
-      );
+      return err({
+        message: `${source}: filename prefix "${name.slice(0, 6)}" does not match record sequence ${record.sequence} (FR-009)`,
+        permanent: true,
+      });
     }
 
     // 2. Strictly contiguous sequences: the i-th record (sorted listing =
     // append order) must carry sequence i. A gap, a duplicate, or a
     // mis-sorted file is authoritative-log corruption, never a silent drop.
     if (record.sequence !== records.length) {
-      return err(
-        `${source}: sequence ${record.sequence} breaks strict contiguity — expected ${records.length} (FR-009)`,
-      );
+      return err({
+        message: `${source}: sequence ${record.sequence} breaks strict contiguity — expected ${records.length} (FR-009)`,
+        permanent: true,
+      });
     }
 
     // 3. Filename digest ↔ content recompute (AD-2 tamper/tear check).
     // `eventFileName` re-validates both sides, so this equality is exact.
     const expected = eventFileName(record.sequence, eventDigestOf(record));
     if (name !== expected) {
-      return err(
-        `${source}: filename digest does not match the recomputed content digest (expected ${expected}, FR-009)`,
-      );
+      return err({
+        message: `${source}: filename digest does not match the recomputed content digest (expected ${expected}, FR-009)`,
+        permanent: true,
+      });
     }
 
     records.push(record);
@@ -137,9 +150,14 @@ const readStrict = (directory: string): StrictResult => {
 // Public readers
 // ---------------------------------------------------------------------------
 
-/** Tag a strict-read failure with the entry-point operation (AD-6). */
-const failure = (operation: FileOperation, reason: string): FrameworkError =>
-  fileCacheError(operation, reason);
+/** Tag a strict-read failure with the entry-point operation (AD-6).
+ *
+ * The class comes from the failure's own construction site, never from its
+ * message text: strict reads fail either on deterministic on-disk conditions
+ * (corruption — `permanent`, re-running cannot clear it) or on genuine fs I/O
+ * (environment class — left unclassified, replay may clear it). */
+const failure = (operation: FileOperation, reason: StrictReadFailure): FrameworkError =>
+  fileCacheError(operation, reason.message, reason.permanent === true ? "permanent" : undefined);
 
 /**
  * Strictly read every validated `FileEventRecord` of the journal, in append

@@ -1,5 +1,5 @@
 /**
- * SC-006 — Boundary-import check (FR-082)
+ * SC-006 — Boundary-import check (FR-043)
  *
  * Asserts that state-machine/**, dag-runtime/**, scheduler/**, and the
  * zero-dependency file backend (file/** + the src/file.ts subpath barrel)
@@ -98,7 +98,7 @@ describe("SC-006 gate integrity pins", () => {
 // Synthetic-fixture tests — negative coverage to ensure extractImports works
 // ---------------------------------------------------------------------------
 
-describe("SC-006 extractImports — synthetic fixtures (FR-082)", () => {
+describe("SC-006 extractImports — synthetic fixtures (FR-043)", () => {
   let tmpDir: string;
 
   function setup(files: Record<string, string>): string {

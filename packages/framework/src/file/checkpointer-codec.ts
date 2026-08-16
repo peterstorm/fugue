@@ -70,8 +70,10 @@ export const META_RECORD_NODE_ID: NodeId = __brandNodeId("checkpoint_meta");
 const INVALID_RUN_ID: RunId = __brandRunId("checkpoint_invalid_run");
 const INVALID_NODE_ID: NodeId = __brandNodeId("checkpoint_invalid_node");
 
-/** Compact rendering of an identifier for error messages — a hostile 10 KB
- * "runId" must not flood the log line that rejects it. */
+/** Compact rendering of an identifier for error messages. Note: string
+ * inputs are preserved UNMODIFIED — the rejected bytes must survive into the
+ * additive `invalidRunId` / `invalidNodeId` diagnostics. Log-line bounding is
+ * `safeDiagnosticRender`'s job (`render` below); never log the raw field. */
 const stringOf = (value: unknown): string => {
   if (typeof value === "string") return value;
   try {

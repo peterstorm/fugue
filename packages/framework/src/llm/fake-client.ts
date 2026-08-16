@@ -242,22 +242,47 @@ export class FakeLlmClient implements LlmClient {
 
       if (turnSpec.type === "final") {
         if (turnSpec.thinking !== undefined) lastThinking = turnSpec.thinking;
-        const parsed = req.schema.safeParse(turnSpec.content);
-        if (!parsed.success) {
+        // FR-040: the final payload is hostile until proven otherwise. A
+        // throwing getter during `safeParse`, or `JSON.stringify` on
+        // cyclic/BigInt content accepted by an `unknown`-typed schema arm,
+        // must become a typed node-crash — never a raw rejection across the
+        // LlmClient port (parity with the `sendStructured`-path guard).
+        try {
+          const parsed = req.schema.safeParse(turnSpec.content);
+          if (!parsed.success) {
+            return err({
+              kind: "node-crash",
+              retriability: "retriable",
+              nodeId: req.nodeId,
+              message: `Schema validation failed: ${parsed.error.message}`,
+            });
+          }
+          let rawText: string;
+          try {
+            rawText = JSON.stringify(turnSpec.content);
+          } catch (error) {
+            return err({
+              kind: "node-crash",
+              retriability: "retriable",
+              nodeId: req.nodeId,
+              message: `FakeLlmClient: final content is not JSON-serializable: ${safeErrorMessage(error)}`,
+            });
+          }
+          return ok({
+            output: parsed.data as O,
+            tokensIn: totalTokensIn,
+            tokensOut: totalTokensOut,
+            thinking: lastThinking,
+            rawText,
+          });
+        } catch (error) {
           return err({
             kind: "node-crash",
             retriability: "retriable",
             nodeId: req.nodeId,
-            message: `Schema validation failed: ${parsed.error.message}`,
+            message: `FakeLlmClient: schema validation threw at final turn: ${safeErrorMessage(error)}`,
           });
         }
-        return ok({
-          output: parsed.data as O,
-          tokensIn: totalTokensIn,
-          tokensOut: totalTokensOut,
-          thinking: lastThinking,
-          rawText: JSON.stringify(turnSpec.content),
-        });
       }
 
       // tool_use turn — dispatch all calls in parallel.

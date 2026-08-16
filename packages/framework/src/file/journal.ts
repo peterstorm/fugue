@@ -95,8 +95,19 @@ import {
  * failing operation and the run directory named in the message. `throw`
  * is the honest surface — the JobLike port has no error channel.
  */
-const fsFailure = (operation: FileOperation, directory: string, error: unknown): FrameworkError =>
-  fileOperationError(operation, `run directory ${directory}`, error);
+/**
+ * Wrap a low-level failure as a typed `cache-error` naming the run directory.
+ * `failureClass` marks the deterministic rejection sites (`"permanent"` —
+ * re-running the append cannot clear them); I/O sites leave it absent
+ * (environment class that replay may clear).
+ */
+const fsFailure = (
+  operation: FileOperation,
+  directory: string,
+  error: unknown,
+  failureClass?: "transient" | "permanent",
+): FrameworkError =>
+  fileOperationError(operation, `run directory ${directory}`, error, failureClass);
 
 /**
  * The event-file naming contract (AD-2), exactly the output shape of
@@ -273,6 +284,9 @@ export const createFileJournal = (
           new Error(
             `${entryPath} does not match the event-file naming contract (eventFileName: 6-digit zero-padded sequence + "-" + 64-hex digest + ".json") — a foreign or stale *.json entry would silently inflate the sequence and commit a record the strict reader rejects; fail closed at append time (FR-009)`,
           ),
+          // Deterministic: the foreign entry reproduces the identical rejection
+          // on every retry of the same append; only manual removal clears it.
+          "permanent",
         );
       }
       let isRegular: boolean;
@@ -288,6 +302,9 @@ export const createFileJournal = (
           new Error(
             `${entryPath} is not a regular file — a directory (or other non-regular file) wearing a record name is listed by the name-only *.json filter but must not be counted as an event: it would silently inflate the sequence and could dedup a keyed append as a no-op; fail closed at append time, parity with the strict reader (FR-009)`,
           ),
+          // Deterministic: the squatting entry reproduces the identical rejection
+          // on every retry of the same append; only manual removal clears it.
+          "permanent",
         );
       }
     }

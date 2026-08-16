@@ -1115,3 +1115,59 @@ describe("cleanup-failure masking regressions", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Post-rename liveness re-probe (ADR-0078, defense in depth): after the
+// victim lock is renamed to a tomb, the reaper re-probes the TOMB before
+// deleting it — a PID that now proves live (PID reuse, or a legacy owner
+// becoming readable) is restored to the canonical path and the acquisition
+// stays fenced. This was the single untested safety branch of the lock suite.
+// ---------------------------------------------------------------------------
+
+describe("stealStaleFileLock — post-rename liveness re-probe (never delete a live tomb)", () => {
+  test("a tomb that proves live on the re-probe is restored and the acquisition stays fenced", async () => {
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    mkdirSync(lockPath);
+    // The pid value is irrelevant — every liveness probe is hook-driven.
+    writeFileSync(join(lockPath, "pid"), "4242");
+    let probes = 0;
+
+    const result = await stealStaleFileLock(lockPath, {
+      probeOwnerProcess: (pid: number) => {
+        probes += 1;
+        if (probes === 1) {
+          // First probe (the canonical lock): the owner reads as dead, so the
+          // reaper displaces it into a tomb.
+          const dead: NodeJS.ErrnoException = new Error(`kill ${pid} failed: ESRCH`);
+          dead.code = "ESRCH";
+          throw dead;
+        }
+        // Second probe (the TOMB, after the victim rename): the same pid now
+        // proves alive — PID reuse or a legacy owner becoming readable.
+      },
+    });
+
+    // Acquisition stayed fenced: the reaper gave up rather than deleting a
+    // lock that now proves live.
+    expect(result).toBe(false);
+    expect(probes).toBe(2);
+    // The tomb was RESTORED to the canonical lock path — mutual exclusion is
+    // intact, nothing was deleted.
+    expect(existsSync(lockPath)).toBe(true);
+    const fence = join(dir, "append.lock.fence");
+    const tombs = existsSync(fence) ? readdirSync(fence).filter((n) => n.startsWith("tomb-")) : [];
+    expect(tombs).toEqual([]);
+  });
+
+  test("atomicWriteFile rejects empty and NUL-bearing paths (defense-in-depth guard)", () => {
+    const dir = tempDir();
+    // The public factories reject NUL-bearing directories before any path is
+    // constructed; this pins the last-line guard itself so a refactor cannot
+    // silently drop it.
+    expect(() => atomicWriteFile("", "{}")).toThrow();
+    expect(() => atomicWriteFile(join(dir, "bad\u0000name"), "{}")).toThrow();
+    // No tmp litter from the rejected calls.
+    expect(readdirSync(dir)).toEqual([]);
+  });
+});

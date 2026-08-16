@@ -94,7 +94,7 @@ const deepFreeze = <T>(value: T): T => {
  *   snapshot; a failed write leaves the snapshot unchanged. The payload
  *   crosses the FR-009 write boundary exactly like an event
  *   (`assertLosslessEvent` pre-scan + round-trip verification — see
- *   `serializeCheckpoint`), so a function-valued/BigInt/cyclic/non-finite
+ *   `serializeFileCheckpoint`), so a function-valued/BigInt/cyclic/non-finite
  *   state or context throws typed `cache-error(updateData)` naming the
  *   checkpoint path instead of being silently dropped or leaking an engine
  *   exception.
@@ -164,7 +164,7 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
      * re-derives the same dedupKey as a no-op.
      *
      * The checkpoint payload crosses the FR-009 write boundary exactly like
-     * an event (`serializeCheckpoint`): `assertLosslessEvent` pre-scan +
+     * an event (`serializeFileCheckpoint`): `assertLosslessEvent` pre-scan +
      * round-trip verification. Every rejection is typed
      * `cache-error(updateData)` with checkpoint-path context.
      */

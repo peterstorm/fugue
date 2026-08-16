@@ -38,7 +38,7 @@ import * as fc from "fast-check";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { tryFromJson } from "../state-machine/serialize.js";
+import { tryFromJson, deepJsonEqual } from "../state-machine/serialize.js";
 import type { DedupKey, FileEventRecord, JournalSequence } from "../file/event-record.js";
 import {
   DEDUP_KEY_PATTERN,
@@ -1813,5 +1813,106 @@ describe("fast-check properties", () => {
       }),
       { numRuns: 500 },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hostile-boundary diagnostic discipline: error-message construction runs
+// while handling an earlier failure, so rendering an untrusted value must
+// never execute `toJSON`/getter traps (the same contract `dedupKeyError`
+// enforces in this module — `render` previously attempted `JSON.stringify`
+// on non-primitives, which executes traps before its catch can fire).
+// ---------------------------------------------------------------------------
+
+describe("rejection diagnostics — hostile value rendering is trap-free", () => {
+  it("a throwing toJSON on a rejected sequence value does not execute during error construction", () => {
+    let trapExecuted = false;
+    const hostile = {
+      toJSON: () => {
+        trapExecuted = true;
+        throw new Error("toJSON trap fired");
+      },
+    };
+
+    const result = parseJournalSequence(hostile);
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.error).toMatch(/FR-009/);
+      expect(result.error.length).toBeGreaterThan(0);
+    }
+    expect(trapExecuted).toBe(false);
+  });
+
+  it("a throwing toJSON GETTER on a rejected value does not execute during error construction", () => {
+    let trapExecuted = false;
+    const hostile: Record<PropertyKey, unknown> = {};
+    Object.defineProperty(hostile, "toJSON", {
+      get: () => {
+        trapExecuted = true;
+        throw new Error("getter trap fired");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+
+    const result = parseJournalSequence(hostile);
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.error).toMatch(/FR-009/);
+    }
+    expect(trapExecuted).toBe(false);
+  });
+
+  it("a hostile sequence field on a rejected record renders without executing traps", () => {
+    let trapExecuted = false;
+    const hostile = {
+      toJSON: () => {
+        trapExecuted = true;
+        throw new Error("toJSON trap fired");
+      },
+    };
+
+    // A record whose `sequence` is a non-numeric hostile object is rejected
+    // by `parseJournalSequence`; the rejection message renders the value.
+    const raw = { schemaVersion: JOURNAL_SCHEMA_VERSION, sequence: hostile, dedupKey: "", recordedAtMs: 5, event: {} };
+    const result = parseFileEventRecord(raw, SOURCE);
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.error).toMatch(/sequence/);
+    }
+    expect(trapExecuted).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `deepJsonEqual` totality — the shared FR-009 verdict helper is exported,
+// so it must be safe at ANY depth, not only for the 512-pre-bounded inputs
+// of the in-scope codecs. The iterative walk cannot overflow the call stack:
+// a hostile unbounded-depth pair previously died as a raw RangeError outside
+// any Result channel.
+// ---------------------------------------------------------------------------
+
+describe("deepJsonEqual — total over unbounded-depth hostile input", () => {
+  const buildDeep = (leaf: string, depth: number): unknown => {
+    let value: unknown = leaf;
+    for (let i = 0; i < depth; i += 1) value = [value];
+    return value;
+  };
+
+  it("a ~20k-deep hostile pair decides without overflowing the stack", () => {
+    expect(() => deepJsonEqual(buildDeep("a", 20_000), buildDeep("b", 20_000))).not.toThrow();
+    expect(deepJsonEqual(buildDeep("a", 20_000), buildDeep("b", 20_000))).toBe(false);
+    expect(deepJsonEqual(buildDeep("a", 20_000), buildDeep("a", 20_000))).toBe(true);
+  });
+
+  it("keeps the canonical-form semantics (NaN-equals-NaN, structural mismatch)", () => {
+    expect(deepJsonEqual({ a: [1, Number.NaN] }, { a: [1, Number.NaN] })).toBe(true);
+    expect(deepJsonEqual({ a: [1, Number.NaN] }, { a: [1, 2] })).toBe(false);
+    expect(deepJsonEqual({ a: 1 }, { a: 2 })).toBe(false);
+    expect(deepJsonEqual([1, 2], { 0: 1, 1: 2 })).toBe(false);
+    expect(deepJsonEqual(undefined, undefined)).toBe(true);
   });
 });

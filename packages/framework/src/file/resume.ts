@@ -68,9 +68,10 @@
 //     record corruption AND genuine fs read failures (EACCES/ENOTDIR...).
 //     AD-6's surface for resume has no `cache-error` row, and a log that
 //     cannot be strictly read cannot prove anything: every reader failure is
-//     re-tagged `checkpoint-corrupt` with the reader's message preserved
-//     verbatim (it already names the file and the reason, and distinguishes
-//     corruption from I/O by its text).
+//     re-tagged `checkpoint-corrupt` with the reader's failure preserved as
+//     the `message` field inside the JSON-serialized `cache-error` value
+//     (kind/operation/message — so the file and reason survive, plus the
+//     operation context; the bare message string is not what rides through).
 //   - The pure machine is NOT trusted to be throw-free on hostile-but-
 //     codec-valid input — that guard is the proof module's job (every
 //     machine/decoder callback seam, FR-040); this shell additionally maps

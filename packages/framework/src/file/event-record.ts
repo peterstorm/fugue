@@ -19,15 +19,11 @@
 // FR-009 losslessness is enforced AT THE WRITE BOUNDARY by
 // `assertLosslessEvent`, a recursive pre-scan of the event value that runs
 // FIRST in `serializeFileEventRecord` and rejects anything the serializer
-// cannot represent losslessly — the FULL rejection inventory (own accessor
-// properties, symbol-keyed or non-enumerable own properties, JSON-less
-// values, prototype-pollution-filtered keys, literal reserved tag keys,
-// custom `toJSON` methods, BigInt, functions, symbols, invalid Dates,
-// circular references, and depth-ceiling violations) is the canonical
-// contract documented once on `assertLosslessEvent`'s pre-scan; every doc
-// site in this module points there instead of re-enumerating. These losses
-// are invisible to a
-// round-trip comparison because `serializeValue` strips/drops identically
+// cannot represent losslessly. Its pre-scan contract is the SINGLE canonical
+// FR-009 rejection inventory for this module: every other doc site here
+// points to it instead of re-enumerating, because copies drift (a copy that
+// forgets an item reads as an accepted loss). These losses are invisible to
+// a round-trip comparison because `serializeValue` strips/drops identically
 // on BOTH sides, so the pre-scan makes silent loss UNREPRESENTABLE at the
 // write boundary: no event shape the pre-scan lets through is discarded by
 // `toJson`. The round-trip check then backstops the coercion class the
@@ -157,10 +153,7 @@ export interface FileEventRecord {
    * refuses it). The write boundary pre-scans the event recursively
    * (`assertLosslessEvent`, FR-009) and rejects any value the serializer
    * cannot represent losslessly — see the canonical FR-009 rejection
-   * inventory in `assertLosslessEvent`'s contract (own accessors,
-   * symbol-keyed/non-enumerable properties, JSON-less values,
-   * pollution-filtered keys, literal reserved tag keys, custom `toJSON`,
-   * BigInt, functions, symbols, invalid Dates, circular references).
+   * inventory in `assertLosslessEvent`'s contract.
    * The round-trip check backstops the remaining coercion (non-finite
    * numbers → `null`). Map/Set/Date values survive the round-trip.
    */
@@ -179,7 +172,11 @@ export interface FileEventRecord {
 export const DEDUP_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,256}$/;
 
 /** Compact rendering of a raw field value for error messages — long strings
- * are truncated so a hostile 256+ char key cannot flood the log. */
+ * are truncated so a hostile 256+ char key cannot flood the log. Non-
+ * primitive values go straight to the total `safeDiagnosticRender`: the
+ * hostile-boundary discipline `dedupKeyError` below enforces applies here
+ * too — `JSON.stringify` on an untrusted value executes `toJSON`/getter
+ * traps, and diagnostics are part of the hostile runtime boundary. */
 const render = (value: unknown): string => {
   if (typeof value === "string") {
     const shown =
@@ -190,13 +187,7 @@ const render = (value: unknown): string => {
   if (value === null || typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  try {
-    const json = JSON.stringify(value);
-    if (json === undefined) return String(value);
-    return json.length > 80 ? `${json.slice(0, 80)}…` : json;
-  } catch {
-    return safeDiagnosticRender(value);
-  }
+  return safeDiagnosticRender(value);
 };
 
 /**
@@ -391,14 +382,15 @@ const renderChain = (chain: PathLink | null, root: string): string => {
 };
 
 /**
- * Verdict of an iterative read-side scan (pollution / reserved-tag): a
- * `hit` (the offending key + rendered path), a `too-deep` depth violation
+ * Verdict of the iterative read-side reserved-tag scan (`findReservedTagKey`):
+ * a `hit` (the offending key + rendered path), a `too-deep` depth violation
  * (the record fails closed — FR-009), or a `clean` pass.
  *
- * Exported so the checkpoint-envelope seam in `resume.ts` can reuse the
- * pollution scan's verdict shape without re-implementing it.
+ * Module-private: the pollution-key defense lives in the shared
+ * `validateSerializedValueGrammar` gate at the raw seam, so this verdict has
+ * no consumer outside this module.
  */
-export type ScanVerdict =
+type ScanVerdict =
   | { readonly kind: "hit"; readonly key: string; readonly path: string }
   | { readonly kind: "too-deep"; readonly depth: number; readonly path: string }
   | { readonly kind: "clean" };

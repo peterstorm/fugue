@@ -102,6 +102,13 @@ export const serializeFileCheckpoint = <S, C>(
   try {
     return serializeFileCheckpointUnchecked(data);
   } catch (error) {
-    throw fileOperationError("serializeFileCheckpoint", "checkpoint data", error);
+    // Deterministic: every rejection in the unchecked codec (losslessness
+    // pre-scan, toJson, round-trip parse, envelope shape, deep-equal verdict)
+    // reproduces identically for the same payload — re-running the transition
+    // cannot clear it. Marked permanent so `retriabilityOf` fast-fails instead
+    // of burning the retry budget (the event-side twin
+    // `serializeFileEventRecord` carries the same class; the taxonomy example
+    // in `types/errors.ts` names this exact class).
+    throw fileOperationError("serializeFileCheckpoint", "checkpoint data", error, "permanent");
   }
 };

@@ -688,6 +688,12 @@ describe("createFileJournal.appendEvent — writer-side listing contract", () =>
     expect(typed.operation).toBe("appendEvent");
     expect(typed.message).toContain("README.json");
     expect(typed.message).toMatch(/naming contract/);
+    // Deterministic: the foreign entry reproduces the identical rejection on
+    // every retry of the same append — classified permanent so
+    // `retriabilityOf` fast-fails instead of burning the retry budget
+    // (ADR-0080; same class as the sibling journalCapacityError pin).
+    expect(typed.failureClass).toBe("permanent");
+    expect(retriabilityOf(typed)).toBe("non-retriable");
     // Fail fast: the failed append committed NOTHING — the listing gained no
     // record beyond the pre-existing foreign entry.
     expect(listEventFiles(dir)).toEqual([...before, "README.json"].sort());
@@ -746,6 +752,10 @@ describe("createFileJournal.appendEvent — a directory squatting on a record na
     // The error names the squatted entry — not a generic failure.
     expect(typed.message).toContain(squatName);
     expect(typed.message).toMatch(/not a regular file/);
+    // Same deterministic class as the naming-contract rejection: only manual
+    // removal of the squatting entry clears it.
+    expect(typed.failureClass).toBe("permanent");
+    expect(retriabilityOf(typed)).toBe("non-retriable");
     // NOT a successful no-op: no record was skipped AND none was committed.
     expect(readdirSync(eventsDir).filter((n) => n.endsWith(".json"))).toEqual([squatName]);
   });
@@ -1046,8 +1056,38 @@ describe("readFileEvents — genuine fs failures fail closed with typed cache-er
       expect(failure.operation).toBe("readFileEvents");
       expect(failure.message).toContain(name);
       expect(failure.message).toMatch(/read failed/);
+      // A genuine fs I/O failure is the environment class: it stays
+      // UNCLASSIFIED (retriabilityOf retriable) — unlike deterministic
+      // on-disk corruption, which is classified permanent at its
+      // construction site (ADR-0080).
+      expect(failure.failureClass).toBeUndefined();
+      expect(retriabilityOf(failure)).toBe("retriable");
     } else {
       throw new Error("expected the squatted record read to fail closed");
+    }
+  });
+
+  it("a corrupt record file is classified permanent (deterministic — retriabilityOf fast-fails)", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "A" }, "k0");
+    const eventsDir = join(dir, EVENTS_DIR);
+    const name = listEventFiles(dir)[0];
+    // Overwrite the record with bytes the strict grammar rejects: the same
+    // bytes reproduce the identical rejection on every re-read, so the class
+    // is permanent, not retriable.
+    writeFileSync(join(eventsDir, name), "{ not json");
+
+    const result = readFileEventRecords(dir);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const failure = asCacheError(result.error);
+      expect(failure.operation).toBe("readFileEventRecords");
+      expect(failure.message).toContain(name);
+      expect(failure.failureClass).toBe("permanent");
+      expect(retriabilityOf(failure)).toBe("non-retriable");
+    } else {
+      throw new Error("expected the corrupt record read to fail closed");
     }
   });
 });
