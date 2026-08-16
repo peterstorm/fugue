@@ -54,7 +54,7 @@
 //
 // Import discipline (INV-1): `node:fs`, `node:path` only among node built-ins.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
 import {
@@ -78,7 +78,7 @@ import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
 import type { FrameworkError } from "../types/errors.js";
-import { safeDiagnosticRender } from "../types/safe-error.js";
+import { probeErrorCode, safeDiagnosticRender } from "../types/safe-error.js";
 import {
   fileCacheError,
   fileOperationError,
@@ -178,9 +178,12 @@ export interface FileJournal {
    * `null`-coerced percent. */
   writeProgress(percent: number): Promise<void>;
   /** Raw contents of `checkpoint.json` (the `writeCheckpoint` shape
-   * contract), or `null` when absent. Parsing is the caller's business (the
-   * resume layer's strict `parseCheckpoint`). Throws a typed `FrameworkError`
-   * on fs failure. */
+   * contract), or `null` when the file is genuinely ABSENT (ENOENT only).
+   * An existing-but-unreadable file is an fs failure, not absence: every
+   * other errno (EACCES, ENOTDIR, …) throws a typed `FrameworkError` —
+   * reporting a permission-broken run directory as "no checkpoint" would
+   * be a silent fresh start. Parsing is the caller's business (the resume
+   * layer's strict `parseCheckpoint`). */
   readCheckpoint(): string | null;
 }
 
@@ -387,10 +390,14 @@ export const createFileJournal = (
             );
           }
         } catch (error) {
+          // Deterministic: a clock that throws or stamps non-finite fails
+          // identically on every retry of the same append — the same class
+          // the other code-constructed invariant rejections pin "permanent".
           throw fileOperationError(
             "appendEvent",
             `run directory ${directory}`,
             `clock failed while stamping the append: ${fileThrownValueMessage(error)}`,
+            "permanent",
           );
         }
         const record: FileEventRecord = {
@@ -487,9 +494,14 @@ export const createFileJournal = (
 
   const readCheckpoint = (): string | null => {
     try {
-      if (!existsSync(checkpointPath)) return null;
       return readFileSync(checkpointPath, "utf-8");
     } catch (error) {
+      // Absence is ENOENT ONLY: `existsSync` swallows EACCES/ENOTDIR and
+      // would misreport a permission-broken directory as "no checkpoint".
+      // The sibling strict readers (event-log.ts, file/checkpointer.ts)
+      // probe the same way.
+      const probe = probeErrorCode(error);
+      if (probe.kind === "code" && probe.code === "ENOENT") return null;
       throw fsFailure("readCheckpoint", directory, error);
     }
   };

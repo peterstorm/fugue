@@ -789,11 +789,9 @@ export const tryParseEventRecordJson = (
  * The event value is PRE-SCANNED FIRST (`assertLosslessEvent`, FR-009): a
  * recursive walk rejects anything the serializer cannot represent
  * losslessly — the canonical rejection inventory is `assertLosslessEvent`'s
- * contract (own accessor properties, symbol-keyed or non-enumerable own
- * properties, JSON-less values, prototype-pollution-filtered keys,
- * literal reserved tag keys, custom `toJSON` methods, BigInt, functions,
- * symbols, invalid Dates, circular references, depth ceiling) — each
- * rejection names the offending kind and path.
+ * contract; see that function's doc for the full list (per the module
+ * header's pointer policy, copies drift) — each rejection names the
+ * offending kind and path.
  * These losses are invisible to a round-trip comparison (`serializeValue`
  * drops the same things on both sides), so they are refused BEFORE any
  * JSON is produced: silent loss is unrepresentable at the write boundary.

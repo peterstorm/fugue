@@ -92,7 +92,7 @@ Start with these to understand the runtime as it stands today:
 | [0072](0072-resource-enforcement-single-pod-admission-heap-cap.md) | Resource enforcement — single pod + supervisor admission + per-worker heap cap | Accepted |
 | [0073](0073-tenant-branded-principal-extended-error-taxonomy.md) | Tenant as first-class branded principal + extended per-tenant error taxonomy | Accepted |
 | [0074](0074-per-tenant-hitl-queue-depth-enforcement.md) | Per-tenant HITL queue-depth enforcement via a durable active-run index SET | Accepted |
-| [0075](0075-composite-checkpoint-node-key-encoding-with-canonical-folding.md) | Composite checkpoint node-key encoding with canonical folding | Accepted |
+| [0075](0075-composite-checkpoint-node-key-encoding-with-canonical-folding.md) | Composite checkpoint node-key encoding with canonical folding | Accepted (amended 2026-08-14) |
 | [0076](0076-on-disk-layout-programjournal-parity-with-the-digest-filename-adaptation.md) | On-disk layout — ProgramJournal parity with the digest-filename adaptation | Accepted |
 | [0077](0077-resume-agreement-proof-log-authoritative-checkpoint-may-lag.md) | Resume agreement proof — log authoritative, checkpoint may lag | Accepted |
 | [0078](0078-journal-single-writer-contract-and-append-serialization.md) | Journal single-writer contract and append serialization | Accepted |

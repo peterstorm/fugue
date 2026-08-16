@@ -17,7 +17,7 @@ The stored address also had to be deterministic, reversible, and unambiguous. Va
 
 1. **An `@`-delimited string key with canonical folding**
    - Pros: Preserves bare `nodeId` keys for existing calls; remains compatible with `Record<string, NodeState>`; uses a separator outside the valid identifier alphabet; is deterministic, reversible, and collision-free across normalized addresses.
-   - Cons: Establishes a positional string grammar; namespace-only options intentionally fold away; composite persistence is initially supported only by the file backend.
+   - Cons: Establishes a positional string grammar; namespace-only options intentionally fold away (superseded by the 2026-08-14 Amendment below — they are now rejected); composite persistence is initially supported only by the file backend.
 
 2. **A `:`-delimited key such as `namespace:nodeId:index:attempt`**
    - Pros: Human-readable and visually consistent with identifiers already used by the framework.
@@ -38,7 +38,7 @@ The port in [`checkpoint/checkpointer.ts`](../../packages/framework/src/checkpoi
 
 The pure codec in [`checkpoint/composite-node-key.ts`](../../packages/framework/src/checkpoint/composite-node-key.ts) defines these invariants:
 
-- If both `index` and `attempt` are absent, `compositeNodeKey` returns exactly `nodeId`. A supplied namespace alone does not change the address. This is the canonical form required by FR-021.
+- If both `index` and `attempt` are absent, `compositeNodeKey` returns exactly `nodeId`. A supplied namespace alone does not change the address. This is the canonical form required by FR-021. (Amended 2026-08-14: a namespace alone is now **rejected** as ambiguous caller error rather than folded — see the Amendment below.)
 - If either `index` or `attempt` is present, the result is `` `${namespace}@${nodeId}@${index}@${attempt}` ``, with namespace defaulting to `dag` and each missing numeric component defaulting to `0`. An explicitly supplied zero selects composite form.
 - Namespace and node ID components use the framework ID grammar. Index and attempt are non-negative safe integers. The file persistence boundary validates all supplied fields before encoding.
 - `@` cannot occur in a valid canonical node ID or component. Canonical keys therefore have zero separators and composite keys exactly three, making the forms disjoint. Distinct normalized composite tuples produce distinct strings; omitted values and their explicit defaults intentionally denote the same normalized address.
@@ -61,6 +61,10 @@ The shipped file implementation in [`file/checkpointer.ts`](../../packages/frame
 - A namespace alone cannot create a distinct entry; callers must provide `index` or `attempt` to select composite form.
 - The positional key grammar and reserved `@` separator become compatibility constraints. Adding components or changing normalization requires a versioned design change.
 - Loaded node maps may contain both bare and composite string keys, so consumers that enumerate nodes must inspect stored keys rather than assume every key equals `NodeState.nodeId`.
+
+## Amendment (2026-08-14)
+
+**Namespace-only `SaveNodeOpts` are rejected, not folded.** The Decision bullet above ("a supplied namespace alone does not change the address") described the original encoder behavior. During the 2026-08-14 standalone-review remediation (`.claude/plans/2026-08-14-pr-remediation-215348.md`, advisory `type-design-analyzer-1/5`, accepted), the silent fold was changed to a contract violation: `compositeNodeKey` now **throws** when `namespace` is present without `index` or `attempt` (`assertNoNamespaceAlone` in `checkpoint/composite-node-key.ts`), because a namespace-only address would be silently discarded while a later composite save with `index: 0` would land on a different durable entry — the caller's composite intent would be unrepresentable. The file backend maps the throw to a typed `checkpoint-write-failed`. The pin is `composite-node-key.test.ts` — "rejects a namespace supplied without index/attempt as ambiguous (AD-1)". The Consequences negative bullet ("A namespace alone cannot create a distinct entry; callers must provide `index` or `attempt` to select composite form") already states the amended contract; the canonical-fold behavior for omitted `index`/`attempt` (bare `nodeId`, byte-identical for existing consumers) is unchanged.
 
 ## Related
 

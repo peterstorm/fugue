@@ -53,7 +53,7 @@ import type { RunId } from "../types/ids.js";
 import { __brandRunIdUnchecked } from "../types/ids.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError } from "../types/errors.js";
+import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
 /**
  * Brand a HOSTILE string as a `RunId` without validating it — `R()` (and the
@@ -2147,7 +2147,46 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
       expect(loadResult.error.kind).toBe("cache-error");
       if (loadResult.error.kind !== "cache-error") throw new Error("unreachable");
       expect(loadResult.error.operation).toBe("load");
+
+      // A throwing injected clock is deterministic — every retry of the same
+      // operation reproduces it, so both rejections are pinned permanent
+      // (retriabilityOf fast-fails instead of burning the retry budget).
+      expect(writeResult.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(writeResult.error)).toBe("non-retriable");
+      expect(loadResult.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(loadResult.error)).toBe("non-retriable");
     }
+  });
+
+  it("non-finite clock timestamps on setMeta and load are permanent cache-errors", async () => {
+    const directory = freshDirectory();
+    const runId = "run-nan-clock";
+    const nanClock = createFileCheckpointer(directory, { now: () => Number.NaN });
+
+    const writeResult = await nanClock.setMeta(R(runId), META());
+    expect(writeResult.ok).toBe(false);
+    if (writeResult.ok) throw new Error("expected typed rejection");
+    expect(writeResult.error.kind).toBe("cache-error");
+    if (writeResult.error.kind !== "cache-error") throw new Error("unreachable");
+    expect(writeResult.error.operation).toBe("setMeta");
+    expect(writeResult.error.failureClass).toBe("permanent");
+    expect(retriabilityOf(writeResult.error)).toBe("non-retriable");
+
+    writeRawMeta(directory, runId, JSON.stringify({
+      dagId: "d",
+      startedAt: "2025-01-01T00:00:00.000Z",
+      nodeCount: 1,
+      createdAt: new Date().toISOString(),
+      frameworkVersion: FRAMEWORK_VERSION,
+    }));
+    const loadResult = await nanClock.load(R(runId));
+    expect(loadResult.ok).toBe(false);
+    if (loadResult.ok) throw new Error("expected typed rejection");
+    expect(loadResult.error.kind).toBe("cache-error");
+    if (loadResult.error.kind !== "cache-error") throw new Error("unreachable");
+    expect(loadResult.error.operation).toBe("load");
+    expect(loadResult.error.failureClass).toBe("permanent");
+    expect(retriabilityOf(loadResult.error)).toBe("non-retriable");
   });
 
   it("validates the directory eagerly with typed cache-error(createFileCheckpointer)", () => {

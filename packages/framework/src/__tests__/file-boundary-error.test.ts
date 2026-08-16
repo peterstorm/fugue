@@ -6,6 +6,7 @@ import {
 } from "../file/boundary-error.js";
 import { frameworkError } from "../types/error-factories.js";
 import type { FrameworkError } from "../types/errors.js";
+import { retriabilityOf } from "../types/errors.js";
 
 const FILE_OPERATION_TYPECHECK_COVERAGE = [
   "acquireFileLock",
@@ -97,5 +98,38 @@ describe("file boundary error operation vocabulary", () => {
       operation: "consumer-defined-operation",
       message: "external adapter failure",
     });
+  });
+});
+
+describe("fileOperationError — permanent-class inference (the load-bearing ADR-0080 link)", () => {
+  it("preserves an inner permanent cache-error class when no explicit class is given", () => {
+    // The appendEvent fs-wrap around a permanent codec rejection must stay
+    // permanent — a regression erasing the inner class would mislabel a
+    // deterministic append rejection retriable with no test failing.
+    const inner = fileCacheError("serializeFileEventRecord", "non-lossless event", "permanent");
+    const wrapped = fileOperationError("appendEvent", "/runs/r1", inner);
+    expect(wrapped).toMatchObject({ kind: "cache-error", operation: "appendEvent" });
+    expect(wrapped.kind === "cache-error" && wrapped.failureClass).toBe("permanent");
+    expect(retriabilityOf(wrapped)).toBe("non-retriable");
+  });
+
+  it("an explicit failureClass wins over the inferred inner class", () => {
+    const inner = fileCacheError("serializeFileEventRecord", "non-lossless event", "permanent");
+    const wrapped = fileOperationError("appendEvent", "/runs/r1", inner, "transient");
+    expect(wrapped.kind === "cache-error" && wrapped.failureClass).toBe("transient");
+    expect(retriabilityOf(wrapped)).toBe("retriable");
+  });
+
+  it("does not infer a class from untyped reasons or non-cache-error typed values", () => {
+    const fromString = fileOperationError("readCheckpoint", "/runs/r1", "disk full");
+    expect(fromString.kind === "cache-error" && fromString.failureClass).toBeUndefined();
+    expect(retriabilityOf(fromString)).toBe("retriable");
+
+    const fromNonCache = fileOperationError(
+      "readCheckpoint",
+      "/runs/r1",
+      frameworkError.checkpointCorrupt("run-1", "hostile payload"),
+    );
+    expect(fromNonCache.kind === "cache-error" && fromNonCache.failureClass).toBeUndefined();
   });
 });

@@ -98,8 +98,8 @@ export const replayEventsUntil = <S, E, C>(
     );
   }
   const filtered = events.filter((e) => e.recordedAtMs < untilMs);
-  // Cast the inner event type at the boundary — the machine parameterization
-  // (E) is the source of truth. Same pattern as JSON.parse → cast → use.
+  // The envelope unwrap + `as E` cast lives in `foldStep` (its JSDoc marks
+  // it the single cast site); this boundary delegates to `replayEvents`.
   return replayEvents(filtered, machine, initial);
 };
 

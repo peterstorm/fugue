@@ -858,6 +858,38 @@ describe("file-lock diagnostics", () => {
     expect(warnings.length).toBeGreaterThan(0);
   }, 15_000);
 
+  test("a live tomb blocking every acquire attempt is named in the terminal acquire failure", async () => {
+    // The obscure-debugging trap: a live tomb (reaper suspended mid-reap)
+    // plus a live foreign owner blocks every attempt with NO owner-probe
+    // warning — the timeout must name the blocking fence entry or the
+    // operator gets an unexplained ~5s timeout loop pointing nowhere.
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, "pid"), String(process.pid));
+    writeFileSync(join(lockPath, "owner"), "foreign-token");
+    const tomb = join(dir, "append.lock.fence", "tomb-live-reaper");
+    mkdirSync(tomb, { recursive: true });
+    writeFileSync(join(tomb, "pid"), String(process.pid));
+    writeFileSync(join(tomb, "owner"), "victim-token");
+
+    const error = await acquireFileLock(lockPath).then(
+      () => null,
+      (failure: unknown) => failure,
+    );
+
+    expect(error).toMatchObject({ kind: "cache-error", operation: "acquireFileLock" });
+    const message = (error as Error).message;
+    expect(message).toContain("Could not acquire lock after 50 attempts");
+    expect(message).toContain("blocking fence entries");
+    expect(message).toContain("tomb-live-reaper");
+    // Fail-closed: the live owner and its tomb are untouched.
+    expect(existsSync(lockPath)).toBe(true);
+    expect(existsSync(tomb)).toBe(true);
+  }, 15_000);
+
   test("an EIO process probe is retained in the terminal acquire failure", async () => {
     const warnings: string[] = [];
     recordingLogger(warnings);
@@ -1168,6 +1200,23 @@ describe("stealStaleFileLock — post-rename liveness re-probe (never delete a l
     expect(() => atomicWriteFile("", "{}")).toThrow();
     expect(() => atomicWriteFile(join(dir, "bad\u0000name"), "{}")).toThrow();
     // No tmp litter from the rejected calls.
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("atomicWriteFile rejects non-string contents with a typed cache-error (last-line guard)", () => {
+    // Every internal caller passes strings; this pins the guard itself so a
+    // refactor cannot silently drop it, and the typed surface (FR-040): the
+    // raw string throw is converted to the AD-6 typed failure.
+    const dir = tempDir();
+    let failure: unknown = null;
+    try {
+      atomicWriteFile(join(dir, "x.json"), 42 as unknown as string);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ kind: "cache-error", operation: "atomicWriteFile" });
+    expect((failure as Error).message).toContain("contents must be a string");
+    // No file or tmp litter from the rejected call.
     expect(readdirSync(dir)).toEqual([]);
   });
 });

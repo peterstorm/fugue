@@ -34,7 +34,7 @@ import type {
 } from "../types/freshness.js";
 import { resourceName, witness } from "../types/freshness.js";
 import { D, N, R } from "./_id-helpers.js";
-import { isFrameworkError } from "../types/errors.js";
+import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -660,6 +660,36 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
 });
 
 describe("createFileFreshnessIndex — strict codec and typed failures", () => {
+  it("a non-finite injected clock is a permanent rejection on recordWrite and findConflict", async () => {
+    const directory = tempDirectory();
+    const resource = "clock:non-finite";
+    // Seed a valid singleton with a healthy clock, then point a broken clock
+    // at the same directory: the clock gate fires on both operations.
+    await createFileFreshnessIndex(directory, { now: () => 1_000 })
+      .recordWrite(writeEvent(resource, "seed", 900));
+
+    const index = createFileFreshnessIndex(directory, { now: () => Number.NaN });
+
+    const write = await index.recordWrite(writeEvent(resource, "must-not-write", 1_100));
+    expect(write.ok).toBe(false);
+    if (write.ok) throw new Error("expected typed rejection");
+    expect(write.error.kind).toBe("cache-error");
+    if (write.error.kind === "cache-error") {
+      expect(write.error.operation).toBe("freshness:recordWrite");
+      expect(write.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(write.error)).toBe("non-retriable");
+    }
+
+    const found = await index.findConflict(W(resource, "seed"), 0);
+    expect(found.ok).toBe(false);
+    if (found.ok) throw new Error("expected typed rejection");
+    expect(found.error.kind).toBe("cache-error");
+    if (found.error.kind === "cache-error") {
+      expect(found.error.operation).toBe("freshness:findConflict");
+      expect(found.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(found.error)).toBe("non-retriable");
+    }
+  });
   it("explicitly rejects append/member-set and extra-field persisted shapes", async () => {
     const directory = tempDirectory();
     const resource = "codec:singleton-only";
@@ -705,6 +735,15 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       const bytes = readFileSync(path, "utf-8");
       const write = await index.recordWrite(writeEvent(resource, "must-not-replace", 1_100));
       expect(write.ok).toBe(false);
+      if (write.ok) throw new Error("expected typed rejection");
+      // The strict-codec rejection is deterministic — pin the permanent
+      // class so a regression relabeling it retriable cannot slip through.
+      expect(write.error.kind).toBe("cache-error");
+      if (write.error.kind === "cache-error") {
+        expect(write.error.operation).toBe("freshness:recordWrite");
+        expect(write.error.failureClass).toBe("permanent");
+        expect(retriabilityOf(write.error)).toBe("non-retriable");
+      }
       expect(readFileSync(path, "utf-8")).toBe(bytes);
     }
     expect(warnings).toHaveLength(rejected.length);

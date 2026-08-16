@@ -227,3 +227,29 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     if (result.ok) expect(result.value.output).toEqual({ result: 1 });
   });
 });
+
+describe("FakeLlmClient — Map provider lookup order", () => {
+  test("a Map provider falls back to the system-prompt key when the model key is absent", async () => {
+    // Pins the documented lookup order `responses.get(req.model) ??
+    // responses.get(req.system)`: a Map keyed by the system prompt resolves
+    // when the model key is absent (a Map keyed by model wins when present).
+    const client = new FakeLlmClient(new Map<string, unknown>([
+      ["sys", { result: 7 }],
+    ]));
+    const hit = await client.sendStructured(structuredReq("model-not-in-map"));
+    expect(hit.ok).toBe(true);
+    if (hit.ok) {
+      expect(hit.value.output).toEqual({ result: 7 });
+      expect(hit.value.rawText).toBe('{"result":7}');
+    }
+
+    const miss = await client.sendStructured(structuredReq("other-model"));
+    // "sys" is the request's system prompt, so even an unknown model resolves
+    // through the fallback key.
+    expect(miss.ok).toBe(true);
+
+    const none = await client.sendStructured({ ...structuredReq("other-model"), system: "absent" });
+    expect(none.ok).toBe(false);
+    if (!none.ok) expect(none.error.kind).toBe("node-crash");
+  });
+});

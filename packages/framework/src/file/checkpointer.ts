@@ -150,7 +150,8 @@ type FileCheckpointerCacheOperation = Extract<
 const checkpointerCacheError = (
   operation: FileCheckpointerCacheOperation,
   message: string,
-): FrameworkError => fileCacheError(operation, message);
+  failureClass?: "transient" | "permanent",
+): FrameworkError => fileCacheError(operation, message, failureClass);
 
 // ---------------------------------------------------------------------------
 // Backend (imperative shell)
@@ -327,10 +328,13 @@ const createFileCheckpointerUnchecked = (
       try {
         createdAtMs = now();
       } catch (error) {
+        // Deterministic: a throwing injected clock fails identically on every
+        // retry — pin "permanent" like the other code-constructed rejections.
         return err(
           checkpointerCacheError(
             "setMeta",
             `setMeta clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
+            "permanent",
           ),
         );
       }
@@ -339,6 +343,7 @@ const createFileCheckpointerUnchecked = (
           checkpointerCacheError(
             "setMeta",
             `setMeta clock returned a non-representable timestamp for run ${render(runId)}: ${render(createdAtMs)}`,
+            "permanent",
           ),
         );
       }
@@ -534,10 +539,13 @@ const createFileCheckpointerUnchecked = (
       try {
         nowMs = now();
       } catch (error) {
+        // Deterministic: a throwing injected clock fails identically on every
+        // retry — pin "permanent" like the other code-constructed rejections.
         return err(
           checkpointerCacheError(
             "load",
             `load clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
+            "permanent",
           ),
         );
       }
@@ -546,6 +554,7 @@ const createFileCheckpointerUnchecked = (
           checkpointerCacheError(
             "load",
             `load clock returned a non-representable timestamp for run ${render(runId)}: ${render(nowMs)}`,
+            "permanent",
           ),
         );
       }

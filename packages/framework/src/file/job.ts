@@ -74,13 +74,27 @@ export interface CreateFileJobArgs<S, C> extends FileJournalOptions {
  */
 const deepFreeze = <T>(value: T): T => {
   if (value !== null && typeof value === "object") {
-    for (const key of Object.getOwnPropertyNames(value)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
+    // `Reflect.ownKeys` — not `Object.getOwnPropertyNames` — so objects
+    // nested under SYMBOL keys are frozen too: `structuredClone` preserves
+    // own symbol properties, so they are part of the snapshot the contract
+    // promises is fully immutable.
+    for (const key of Reflect.ownKeys(value)) {
+      deepFreeze((value as Record<PropertyKey, unknown>)[key]);
     }
     Object.freeze(value);
   }
   return value;
 };
+
+/**
+ * Test-only: exposes the snapshot freeze primitive so the symbol-keyed
+ * guarantee can be pinned directly. The FR-009 boundary rejects
+ * symbol-keyed state at both the factory seed and `updateData`, so the
+ * public `data` getter can never reach a symbol-keyed clone — the seam
+ * exists only so a future snapshot source cannot silently weaken the
+ * "fully immutable" contract without a test failing.
+ */
+export const __testDeepFreeze = deepFreeze;
 
 /**
  * Construct the durable `JobLike<S, unknown, C>` over a file journal.

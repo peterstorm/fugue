@@ -12,5 +12,5 @@ export { foldStep, replayEvents, replayEventsUntil, replayEventSlice } from "./r
 // Serialization helpers
 export { serializeValue, deserializeValue, toJson, fromJson } from "./serialize.js";
 
-// Re-export Result/ok/err from types — Gap-1 fix
+// Re-export Result/ok/err from types
 export { type Result, type Ok, type Err, ok, err, isOk, isErr, andThen, map, mapErr, unwrapOr } from "../types/result.js";

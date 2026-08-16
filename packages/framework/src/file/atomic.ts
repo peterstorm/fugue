@@ -38,7 +38,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   type ErrorCodeProbe,
   probeErrorCode,
@@ -417,10 +417,21 @@ export const acquireFileLock = async (
       }
       await sleep(RETRY_MS);
     }
+    // Name the blocking protocol state on timeout: a live tomb (reaper
+    // suspended mid-reap) plus a live foreign owner blocks every attempt
+    // with no owner-probe warning, so without this the operator gets an
+    // unexplained timeout loop with no pointer to the fence directory.
+    const blockingFenceEntries = [
+      ...protocolEntries(lockPath, TOMB_PREFIX),
+      ...protocolEntries(lockPath, BIRTH_PREFIX),
+      ...protocolEntries(lockPath, REAP_PREFIX),
+    ].map((entry) => basename(entry));
     throw fileOperationError(
       "acquireFileLock",
       lockPath,
-      `Could not acquire lock after ${MAX_ACQUIRE_ATTEMPTS} attempts${lastProbeDiagnostic === undefined ? "" : `; last blocking owner probe: ${lastProbeDiagnostic}`}`,
+      `Could not acquire lock after ${MAX_ACQUIRE_ATTEMPTS} attempts` +
+        `${blockingFenceEntries.length > 0 ? `; blocking fence entries: ${blockingFenceEntries.join(", ")}` : ""}` +
+        `${lastProbeDiagnostic === undefined ? "" : `; last blocking owner probe: ${lastProbeDiagnostic}`}`,
     );
   } catch (error) {
     throw fileOperationError("acquireFileLock", lockPath, error);

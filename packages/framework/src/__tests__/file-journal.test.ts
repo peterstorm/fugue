@@ -46,6 +46,7 @@ import {
 } from "../file.js";
 import { journalCapacityError } from "../file/journal.js";
 import {
+  CHECKPOINT_FILE,
   EVENTS_DIR,
   PROGRESS_FILE,
   APPEND_LOCK,
@@ -385,6 +386,37 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     const typed = asCacheError(failure, "writeCheckpoint");
     expect(typed.message).toContain(join(dir, "checkpoint.json"));
     expect(journal.readCheckpoint()).toBeNull();
+  });
+
+  it("readCheckpoint: absent is null; existing-but-unreadable is a typed fs failure, never absence", () => {
+    // ENOENT is the ONLY absence verdict — `existsSync` would swallow
+    // EACCES/ENOTDIR and misreport a permission-broken directory as
+    // "no checkpoint" (a silent fresh start one layer below the protected
+    // resume path).
+    const dir = tempDir();
+    expect(createFileJournal(dir).readCheckpoint()).toBeNull();
+
+    // Root cannot manufacture EACCES via chmod (see the sibling tests).
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const blocked = tempDir();
+    const journal = createFileJournal(blocked);
+    const commit = serializeFileCheckpoint({ state: "s", context: null });
+    let failure: unknown = null;
+    return journal.writeCheckpoint(commit).then(() => {
+      expect(createFileJournal(blocked).readCheckpoint()).toBe(commit.json);
+      chmodSync(join(blocked, CHECKPOINT_FILE), 0o000);
+      try {
+        createFileJournal(blocked).readCheckpoint();
+      } catch (error) {
+        failure = error;
+      } finally {
+        chmodSync(join(blocked, CHECKPOINT_FILE), 0o600);
+      }
+      const typed = asCacheError(failure, "readCheckpoint");
+      // Environment class: an unreadable file may clear on retry.
+      expect(typed.failureClass).toBeUndefined();
+      expect(typed.message).toContain(blocked);
+    });
   });
 
   it("writeProgress creates a nonexistent nested run directory on the first write", async () => {
@@ -886,6 +918,12 @@ describe("createFileJournal.appendEvent — non-serializable events fail identic
     // neither append ever commits, so both serialize the same record).
     expect(keylessTyped.message).toBe(keyedTyped.message);
     expect(keyedTyped.message).toContain(dir);
+    // `fileOperationError` class inference: the inner permanent class must
+    // survive the fs-wrap — a regression erasing it would mislabel a
+    // deterministic append rejection retriable with no test failing.
+    expect(keyedTyped.failureClass).toBe("permanent");
+    expect(retriabilityOf(keyedTyped)).toBe("non-retriable");
+    expect(keylessTyped.failureClass).toBe("permanent");
     // Nothing was persisted.
     expect(listEventFiles(dir)).toEqual([]);
   });
@@ -1289,6 +1327,31 @@ describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
 // ---------------------------------------------------------------------------
 
 describe("cache-error failure-class classification (permanent vs transient)", () => {
+  it("code-constructed clock rejections are permanent (a broken injected clock is deterministic)", async () => {
+    // Throwing clock — the injected dependency fails identically on every retry.
+    const dir = tempDir();
+    const journal = createFileJournal(dir, { now: () => { throw new Error("clock boom"); } });
+    const thrown = await journal.appendEvent({ type: "X" }, "clock-throws").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const thrownTyped = asCacheError(thrown as FrameworkError, "appendEvent");
+    expect(thrownTyped.failureClass).toBe("permanent");
+    expect(retriabilityOf(thrownTyped)).toBe("non-retriable");
+
+    // Non-finite timestamp — the codec-constructed invariant rejection.
+    const dir2 = tempDir();
+    const journal2 = createFileJournal(dir2, { now: () => Number.NaN });
+    const nonFinite = await journal2.appendEvent({ type: "X" }, "clock-nan").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const nonFiniteTyped = asCacheError(nonFinite as FrameworkError, "appendEvent");
+    expect(nonFiniteTyped.failureClass).toBe("permanent");
+    expect(retriabilityOf(nonFiniteTyped)).toBe("non-retriable");
+    expect(nonFiniteTyped.message).toMatch(/clock/);
+  });
+
   it("FR-015 dedupKey violations and invalid progress are permanent through the typed shell", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);

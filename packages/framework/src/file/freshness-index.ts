@@ -463,11 +463,16 @@ const createFileFreshnessIndexUnchecked = (
         return await withFileLock(lockPath, () => {
           const nowMs = now();
           if (!isFiniteNumber(nowMs)) {
+            // Deterministic: a non-finite injected clock fails identically on
+            // every retry — pin "permanent" like the other code-constructed
+            // invariant rejections.
             return err(
               cacheFailure(
                 "freshness:recordWrite",
                 resourceDigest,
                 "clock must return a finite timestamp",
+                undefined,
+                "permanent",
               ),
             );
           }
@@ -541,11 +546,16 @@ const createFileFreshnessIndexUnchecked = (
 
         const nowMs = now();
         if (!isFiniteNumber(nowMs)) {
+          // Deterministic: a non-finite injected clock fails identically on
+          // every retry — pin "permanent" like the other code-constructed
+          // invariant rejections.
           return err(
             cacheFailure(
               "freshness:findConflict",
               digest,
               "clock must return a finite timestamp",
+              undefined,
+              "permanent",
             ),
           );
         }

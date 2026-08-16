@@ -38,6 +38,7 @@ import {
   type CreateFileJobArgs,
 } from "../file.js"; // the @fuguejs/framework/file barrel under test
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "../file/layout.js";
+import { __testDeepFreeze } from "../file/job.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
@@ -519,6 +520,28 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     const typed = asCacheError(failure, "createFileJob");
     expect(typed.message).toContain("losslessly serializable");
     expect(typed.message).toContain("FR-009");
+  });
+
+  it("deepFreeze freezes objects nested under symbol keys too (fully-immutable contract)", () => {
+    // The FR-009 boundary rejects symbol-keyed state at both the factory
+    // seed and updateData, so the public `data` getter can never reach a
+    // symbol-keyed clone; the primitive is pinned directly so a future
+    // snapshot source cannot silently weaken the contract.
+    const nestedKey = Symbol("nested");
+    const frozen = __testDeepFreeze({
+      a: 1,
+      [nestedKey]: { inner: { deep: true } },
+    });
+    expect(Object.isFrozen(frozen)).toBe(true);
+    const underSymbol = frozen[nestedKey] as { inner: { deep: boolean } };
+    expect(Object.isFrozen(underSymbol)).toBe(true);
+    expect(Object.isFrozen(underSymbol.inner)).toBe(true);
+    try {
+      underSymbol.inner.deep = false;
+    } catch {
+      /* frozen — throws in strict mode; value check below is the real pin */
+    }
+    expect(underSymbol.inner.deep).toBe(true);
   });
 });
 
