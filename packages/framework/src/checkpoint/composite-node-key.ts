@@ -68,7 +68,16 @@ const isIdComponent = (value: unknown): boolean =>
   // failing closed.
   typeof value === "string" && ID_PATTERN.test(value);
 
-const isNonNegativeSafeInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+/**
+ * Non-negative safe integer — ONE encoding of the domain, exported so every
+ * boundary that validates a counted component (composite index/attempt,
+ * stored `nodeCount`) shares the same rule. `typeof` first: `Number.isSafeInteger`
+ * coerces non-strings, so a bypassed brand smuggling an object would mint
+ * junk instead of failing closed (same discipline as `isIdComponent` above
+ * and `ids.ts`'s `validate()`).
+ */
+export const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 const assertIdComponent = (kind: string, value: string): void => {
   if (!isIdComponent(value)) {

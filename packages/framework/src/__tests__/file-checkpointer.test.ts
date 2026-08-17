@@ -39,7 +39,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createFileCheckpointer, META_RECORD_NODE_ID } from "../file/checkpointer.js";
+import { createFileCheckpointer } from "../file/checkpointer.js";
+import { META_RECORD_NODE_ID } from "../file/checkpointer-codec.js";
 import {
   createFileCheckpointer as barrelCreateFileCheckpointer,
   META_RECORD_NODE_ID as barrelMetaRecordNodeId,

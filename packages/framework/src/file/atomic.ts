@@ -48,8 +48,10 @@ import {
 import {
   fileOperationError,
   fileThrownValueMessage,
+  isFileBackendPathString,
   warnWithoutThrowing,
 } from "./boundary-error.js";
+import { isFrameworkError } from "../types/errors.js";
 
 let tokenCounter = 0;
 const uniqueToken = (): string =>
@@ -67,7 +69,7 @@ export const atomicWriteFile = (
 ): void => {
   let temporary: string | null = null;
   try {
-    if (typeof path !== "string" || path.length === 0 || path.includes("\u0000")) {
+    if (!isFileBackendPathString(path)) {
       throw "path must be a non-empty NUL-free string";
     }
     if (typeof contents !== "string") {
@@ -447,6 +449,13 @@ export const acquireFileLock = async (
         `${lastProbeDiagnostic === undefined ? "" : `; last blocking owner probe: ${lastProbeDiagnostic}`}`,
     );
   } catch (error) {
+    // An already-typed failure (the terminal timeout throw above, or a typed
+    // failure from a fenced-reap/owner-probe seam in the loop body) carries
+    // its own precise operation, location, and inferred failureClass —
+    // re-wrapping it here only double-nests the diagnostic ("acquireFileLock
+    // failed at <path>: cache acquireFileLock failed at <path>: …"). Let it
+    // ride through once; wrap only what is not yet typed.
+    if (isFrameworkError(error)) throw error;
     throw fileOperationError("acquireFileLock", lockPath, error);
   }
 };

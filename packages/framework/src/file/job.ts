@@ -49,6 +49,7 @@ import { serializeFileCheckpoint } from "./checkpoint-record.js";
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "./layout.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError, fileThrownValueMessage } from "./boundary-error.js";
+import { isFrameworkError } from "../types/errors.js";
 
 export interface CreateFileJobArgs<S, C> extends FileJournalOptions {
   /** Run directory — the journal lives under it (see single-writer contract
@@ -235,6 +236,15 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
             "permanent",
           );
         }
+        // Every journal `appendEvent` throw is already a typed
+        // cache-error(appendEvent) with this SAME operation and location
+        // (fsFailure in journal.ts) and its failureClass already inferred
+        // from the inner typed value — re-wrapping here only double-nests
+        // the diagnostic ("appendEvent failed at run directory D: cache
+        // appendEvent failed at run directory D: …"). Let the typed error
+        // ride through unchanged; wrap only an unexpected raw throw so the
+        // JobLike port's never-raw contract (AD-6) stays total.
+        if (isFrameworkError(error)) throw error;
         throw fileOperationError("appendEvent", `run directory ${directory}`, error);
       }
     },

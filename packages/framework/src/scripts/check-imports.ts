@@ -158,14 +158,11 @@ const RULES: BoundaryRule[] = [
   // `dag-runtime/` during pass 3. Anything in `shared/` is consumed by both
   // the executor and the dag-runtime — pulling OTel or observer/tracing
   // plumbing in here would re-introduce the cycle the move was meant to break.
+  // (2026-08: `shared/make-node-context.ts` once needed an exclusion for its
+  // `./defaults.js` wiring; it now imports `../types/` only and triggers no
+  // rule, so no scopeExcludes entry is required.)
   {
     scope: ["shared"],
-    scopeExcludes: [
-      // `make-node-context.ts` wires the stubs from `./defaults.js` into a
-      // NodeContext factory. `defaults.ts` imports from `../types/` only (no
-      // observer/ or tracing/ dependency). Kept here as documentation — the
-      // file does not actually trigger any rule.
-    ],
     forbiddenModules: [
       "@opentelemetry/",
       "../observer",

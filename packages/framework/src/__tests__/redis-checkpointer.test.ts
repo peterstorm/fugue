@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Redis from "ioredis";
-import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
-import type { RunMeta } from "../checkpoint/checkpointer.js";
+import { InMemoryCheckpointer, TTL_SECONDS } from "../checkpoint/checkpointer.js";
+import type { CheckpointerLoadOpts, RunMeta } from "../checkpoint/checkpointer.js";
 import type { RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
@@ -382,6 +382,117 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     expect(loaded.value.nodes["__proto__"].nodeId).toBe("__proto__");
     // The map itself was never re-parented by the `__proto__` entry.
     expect(Object.getPrototypeOf(loaded.value.nodes)).toBe(Object.prototype);
+  });
+
+  // Round-8 (silent-failure-hunter-1): the caller-owned `load` opts bag is a
+  // hostile seam — parity with the file backend's `parseLoadOpts` snapshot-once
+  // discipline. A throwing `expectedDagFingerprint` getter used to reject the
+  // load promise RAW (the reads ran outside any guard), which a host routing
+  // all backends through one `load(runId, opts)` helper would see as an
+  // unclassifiable rejection while file/Redis handle the same opts fine.
+  test("a throwing expectedDagFingerprint getter is a typed cache-error(checkpoint:load), never a raw rejection", async () => {
+    const cp = new InMemoryCheckpointer();
+    await cp.setMeta(R("loadopts-hostile"), {
+      dagId: D("d"),
+      startedAt: new Date(),
+      nodeCount: 1,
+    });
+    const hostile = {
+      get expectedDagFingerprint() {
+        throw new Error("opts getter exploded");
+      },
+    };
+    const result = await cp.load(R("loadopts-hostile"), hostile as unknown as CheckpointerLoadOpts);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind === "cache-error") {
+        expect(result.error.operation).toBe("checkpoint:load");
+        expect(result.error.message).toContain("could not inspect options");
+      }
+    }
+  });
+
+  test("load reads expectedDagFingerprint exactly once (a stateful getter cannot make the gate and the comparison disagree)", async () => {
+    const cp = new InMemoryCheckpointer();
+    await cp.setMeta(R("fingerprint-stateful"), {
+      dagId: D("d"),
+      startedAt: new Date(),
+      nodeCount: 1,
+      dagFingerprint: "v1",
+    });
+    let reads = 0;
+    const stateful = {
+      get expectedDagFingerprint() {
+        reads += 1;
+        return reads === 1 ? "v1" : "v2";
+      },
+    };
+    const result = await cp.load(R("fingerprint-stateful"), stateful as unknown as CheckpointerLoadOpts);
+    // Snapshot-once: the gate and the comparison both see the FIRST value
+    // ("v1" === stored "v1" → accepted). A multi-read implementation would
+    // compare the second read ("v2") against the stored "v1" and reject.
+    expect(result.ok).toBe(true);
+    expect(reads).toBe(1);
+  });
+
+  // Round-8 (pr-test-analyzer-4): the shared suite only exercises
+  // strictly-past-TTL meta, so a `>` → `>=` regression in the in-memory
+  // comparison could not fail any test. Pin the exact boundary the file
+  // backend pins (file-checkpointer.test.ts "lazy TTL (FR-027)"): exactly at
+  // TTL still live, one millisecond past rejected.
+  test("the in-memory TTL boundary: exactly 24h accepted, one millisecond past rejected", async () => {
+    const created = new Date("2025-01-01T00:00:00.000Z");
+    let nowMs = created.getTime() + TTL_SECONDS * 1000;
+    const cp = new InMemoryCheckpointer({ now: () => nowMs });
+    await cp.setMeta(R("ttl-boundary"), {
+      dagId: D("d"),
+      startedAt: created,
+      nodeCount: 1,
+    });
+    const rawMap = cp.__testRawMetas();
+    const stored = rawMap.get("ttl-boundary");
+    if (stored === undefined) throw new Error("missing ttl-boundary meta");
+    rawMap.set("ttl-boundary", { ...stored, createdAt: created });
+
+    const atBoundary = await cp.load(R("ttl-boundary"));
+    expect(atBoundary.ok).toBe(true); // exactly at TTL: still live (strict >)
+
+    nowMs += 1; // one millisecond past
+    const past = await cp.load(R("ttl-boundary"));
+    expect(past.ok).toBe(false);
+    if (!past.ok) {
+      expect(past.error.kind).toBe("checkpoint-expired");
+      if (past.error.kind === "checkpoint-expired") {
+        expect(past.error.expiredAt).toBe(created.toISOString());
+      }
+    }
+  });
+
+  // Round-8 (architecture-tech-lead-5): the setMeta write-failure kind mapping
+  // is now an explicit port decision documented on the `Checkpointer.setMeta`
+  // interface — for metadata that cannot be stored, in-memory keeps the
+  // pre-existing frozen `cache-error` kind while the file backend's ADR-0080
+  // row maps the same input class to `checkpoint-write-failed`. Pin the
+  // in-memory row here; the file twin is pinned in file-checkpointer.test.ts.
+  test("setMeta with unreadable metadata is a typed cache-error(checkpoint:setMeta), never a raw rejection", async () => {
+    const cp = new InMemoryCheckpointer();
+    const hostile: Record<string, unknown> = {};
+    Object.defineProperty(hostile, "dagId", {
+      get: () => {
+        throw new Error("meta getter exploded");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const result = await cp.setMeta(R("setmeta-hostile"), hostile as unknown as RunMeta);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind === "cache-error") {
+        expect(result.error.operation).toBe("checkpoint:setMeta");
+      }
+    }
   });
 });
 

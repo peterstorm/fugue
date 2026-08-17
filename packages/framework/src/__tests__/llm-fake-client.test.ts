@@ -8,7 +8,10 @@
  *   - response provider throw          → typed node-crash
  *   - non-serializable provider result → typed node-crash
  *   - async provider/script result (thenable, synchronous seam) → typed node-crash
+ *   - hostile thenable probe (throwing `then` getter / Proxy `get` trap)
+ *     → never a raw rejection (round-8 C1; the probe is total)
  *   - withToolsScript throw            → typed node-crash
+ *   - hostile script turn (unreadable fields) → typed node-crash (round-8 C1)
  *   - hostile tracer/span              → typed node-crash
  *   - final-turn schema-validation throw (hostile getter) → typed node-crash
  *   - final-turn non-serializable content (cyclic/BigInt)  → typed node-crash
@@ -20,7 +23,7 @@ import { z } from "zod";
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, DagId, NodeId } from "../types/ids.js";
 import { FakeLlmClient } from "../llm/fake-client.js";
-import type { FakeWithToolsScript } from "../llm/fake-client.js";
+import type { FakeTurn, FakeWithToolsScript } from "../llm/fake-client.js";
 import type { ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { stubLlmClient } from "./_llm-mocks.js";
@@ -129,6 +132,49 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     }
   });
 
+  // Round-8 C1 (panel-upheld 3/3): the `isThenable` probe's `.then` read is
+  // OBSERVABLE — a throwing `then` getter used to make the probe itself throw
+  // outside every try/catch, escaping the async method as a raw untyped
+  // rejection (violating the module's FR-040 never-raw-rejection discipline
+  // and the doc comment's "total on hostile values" claim). The probe is now
+  // total: it swallows the trap (not a thenable) and the value fails at the
+  // JSON-serialization guard, where the re-read throws into the typed crash.
+  test("a provider value with a throwing `then` getter is a typed node-crash (never a raw rejection)", async () => {
+    const hostile: Record<string, unknown> = { result: 1 };
+    Object.defineProperty(hostile, "then", {
+      get: () => {
+        throw new Error("then getter exploded");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const client = new FakeLlmClient(new Map([["m1", hostile]]));
+    const result = await client.sendStructured(structuredReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/not JSON-serializable/);
+    }
+  });
+
+  test("a Proxy with a fully-throwing get trap as a provider value never rejects raw across the port", async () => {
+    const trap = new Proxy(
+      { result: 1 },
+      {
+        get: () => {
+          throw new Error("proxy get trap exploded");
+        },
+      },
+    );
+    const client = new FakeLlmClient(new Map([["m1", trap]]));
+    // The invariant FR-040 pins is the SETTLED port: the promise must
+    // resolve a Result, never reject raw — wherever the hostile value is
+    // finally classified.
+    const result = await client.sendStructured(structuredReq());
+    expect(typeof result).toBe("object");
+    expect("ok" in result).toBe(true);
+  });
+
   test("a throwing withToolsScript function is a typed node-crash", async () => {
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: () => {
@@ -157,6 +203,51 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       expect((result.error as { message: string }).message).toMatch(/withToolsScript returned a Promise/);
+    }
+  });
+
+  // Round-8 C1 (twin seam): the script's RETURN value is caller data whose
+  // field reads (`type`/`thinking`/`tokensIn`/`tokensOut`) used to run
+  // outside every try/catch right after the (then) thenable probe — a value
+  // whose property reads throw escaped raw there. The loop now snapshots
+  // those fields under the same typed-crash discipline as the script call.
+  test("a script turn with a throwing `then` getter still plays as an ordinary turn (the probe is total)", async () => {
+    const turn: Record<string, unknown> = { type: "final", content: { result: 1 } };
+    Object.defineProperty(turn, "then", {
+      get: () => {
+        throw new Error("then getter exploded");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: () => turn as unknown as FakeTurn,
+    });
+    const result = await client.sendWithTools(toolsReq({ schema: FinalSchema }), makeCtx());
+    // Not a thenable (probe swallowed the trap) and every field the loop
+    // reads is ordinary — the turn plays to completion with no raw rejection.
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.output).toEqual({ result: 1 });
+  });
+
+  test("a script turn whose property reads all throw is a typed node-crash (never a raw rejection)", async () => {
+    const trap = new Proxy(
+      { type: "final", content: { result: 1 } },
+      {
+        get: () => {
+          throw new Error("proxy get trap exploded");
+        },
+      },
+    );
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: () => trap as unknown as FakeTurn,
+    });
+    const result = await client.sendWithTools(toolsReq(), makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error).toMatchObject({ retriability: "retriable" });
+      expect((result.error as { message: string }).message).toMatch(/unreadable fields at turn 0/);
     }
   });
 
@@ -216,6 +307,21 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       expect((result.error as { message: string }).message).toMatch(/schema validation threw at final turn/);
+    }
+  });
+
+  // The NON-throwing failure twin: `safeParse` succeeds mechanically and
+  // simply reports a shape mismatch — that branch must fail with the typed
+  // "Schema validation failed" crash, not a raw rejection or a silent ok.
+  test("final turn: a plain schema-validation FAILURE (no throw) is a typed node-crash", async () => {
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [{ type: "final", content: { wrong: "shape" } }],
+    });
+    const result = await client.sendWithTools(toolsReq({ schema: FinalSchema }), makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/Schema validation failed/);
     }
   });
 
@@ -374,5 +480,30 @@ describe("FakeLlmClient — sendWithTools loop-exit branches", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatchObject({ kind: "aborted", reason: "signal" });
     expect(scriptRan).toBe(false); // the abort check precedes any turn script call
+  });
+});
+
+// Unconfigured-seam footgun diagnostics — the fake's "you forgot to
+// configure X" messages are its contract for misconfiguration; pin them so a
+// rewording cannot silently break a host grepping its logs for the seam name.
+describe("FakeLlmClient — unconfigured-seam diagnostics", () => {
+  test("sendWithTools with no script configured is a typed node-crash naming the seam", async () => {
+    const client = new FakeLlmClient(new Map());
+    const result = await client.sendWithTools(toolsReq(), makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/no withToolsScript configured/);
+    }
+  });
+
+  test("an unconfigured provider response is a typed node-crash naming the model key", async () => {
+    const client = new FakeLlmClient(new Map());
+    const result = await client.sendStructured(structuredReq("nope"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/no response configured for model="nope"/);
+    }
   });
 });

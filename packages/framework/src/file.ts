@@ -53,9 +53,11 @@ export {
 } from "./file/event-record.js";
 export type { FileEventRecord } from "./file/event-record.js";
 // Durable Checkpointer over per-run meta.json + nodes/<digest>.json.
-// The metadata diagnostic constant remains exported for source compatibility.
-export { createFileCheckpointer, META_RECORD_NODE_ID } from "./file/checkpointer.js";
+export { createFileCheckpointer } from "./file/checkpointer.js";
 export type { FileCheckpointerOptions } from "./file/checkpointer.js";
+// The metadata diagnostic constant lives with the codec that constructs the
+// write-failed values it addresses (2026-08-14 codec separation).
+export { META_RECORD_NODE_ID } from "./file/checkpointer-codec.js";
 // Durable FreshnessIndex with one digest-addressed atomic latest-write
 // singleton per resource and lazy TTL (AD-5).
 export { createFileFreshnessIndex } from "./file/freshness-index.js";

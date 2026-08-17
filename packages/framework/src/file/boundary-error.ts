@@ -101,6 +101,17 @@ export const fileOperationError = (
 };
 
 /**
+ * Path-string domain gate for the file backend's entry points (AD-6): a
+ * brand-bypassed non-string, empty, or NUL-bearing path must fail closed at
+ * the factory/operation boundary, before it can reach `join`/fs as a raw
+ * TypeError. ONE encoding for every file-backend entry point (atomic.ts,
+ * journal.ts, checkpointer.ts, freshness-index.ts); the per-site DIAGNOSTIC
+ * stays at each call site (the message names the site-specific field).
+ */
+export const isFileBackendPathString = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && !value.includes("\u0000");
+
+/**
  * Best-effort diagnostics for low-level cleanup paths. Logger behavior is
  * untrusted too: a host logger must never replace the primary filesystem
  * failure or break lock release with a raw throw.

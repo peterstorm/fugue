@@ -85,14 +85,25 @@ export type FakeWithToolsScript =
  * that an accidentally-`async` function type-checks, and a thenable payload
  * must fail LOUDLY — `JSON.stringify(promise)` is `"{}"`, which would
  * silently resolve an empty (wrong) response. Total on hostile values: only
- * an object with a function `then` is thenable; a throwing `then` getter is
- * not a thenable (the read itself is not observable here) and flows into the
- * existing JSON-serialization guard.
+ * an object whose `then` read SUCCEEDS and is a function is thenable. A
+ * throwing `then` getter or Proxy `get` trap makes the probe catch instead
+ * of reject — the value is then not a thenable, and it flows into the
+ * existing JSON-serialization guard, where the re-read of `then` throws and
+ * becomes a typed node-crash (never a raw rejection across the LlmClient
+ * port, FR-040 — parity with the real clients).
  */
-const isThenable = (value: unknown): boolean =>
-  value !== null &&
-  typeof value === "object" &&
-  typeof (value as { then?: unknown }).then === "function";
+const isThenable = (value: unknown): boolean => {
+  if (value === null || typeof value !== "object") return false;
+  try {
+    return typeof (value as { then?: unknown }).then === "function";
+  } catch {
+    // A throwing `then` getter / Proxy `get` trap is not a thenable — the
+    // trap is swallowed here (NOT rejected raw) and the value fails at the
+    // JSON-serialization guard instead, where the re-read throws into the
+    // typed crash builder.
+    return false;
+  }
+};
 
 export interface FakeLlmClientOpts {
   /**
@@ -248,8 +259,31 @@ export class FakeLlmClient implements LlmClient {
         );
       }
 
-      const tokensIn = turnSpec.tokensIn ?? 10;
-      const tokensOut = turnSpec.tokensOut ?? 5;
+      // The returned turn is caller data: a value whose property reads throw
+      // (hostile getter / Proxy `get` trap) must fail here as a typed
+      // node-crash, not reject raw when the loop below reads its fields
+      // (FR-040 — the `sendStructured` twin's post-probe observations are
+      // total/guarded; this seam's field reads were the remaining raw hole).
+      let turnType: FakeTurn["type"] | undefined;
+      let turnThinking: string | undefined;
+      let tokensIn: number;
+      let tokensOut: number;
+      try {
+        turnType = turnSpec.type;
+        // `thinking` is final-turn-only on the union; read it through the
+        // shared optional shape — it is `undefined` on tool_use turns by
+        // construction, and this read is what keeps a hostile getter on the
+        // field inside the guarded block.
+        turnThinking = (turnSpec as { thinking?: string }).thinking;
+        tokensIn = turnSpec.tokensIn ?? 10;
+        tokensOut = turnSpec.tokensOut ?? 5;
+      } catch (error) {
+        return err(
+          crash(
+            `FakeLlmClient: withToolsScript returned a turn with unreadable fields at turn ${turn}: ${safeErrorMessage(error)}`,
+          ),
+        );
+      }
 
       try {
         await withLlmSpan(
@@ -277,21 +311,25 @@ export class FakeLlmClient implements LlmClient {
         return err(crash(`FakeLlmClient: span/tracer threw at turn ${turn}: ${safeErrorMessage(error)}`));
       }
 
-      if (turnSpec.type === "final") {
-        if (turnSpec.thinking !== undefined) lastThinking = turnSpec.thinking;
+      if (turnType === "final") {
+        // The snapshot proved the discriminant (`type === "final"`); recover
+        // the narrowed union arm for the payload reads below (every read
+        // stays inside the guarded FR-040 region).
+        const finalTurn = turnSpec as FakeFinalTurn;
+        if (turnThinking !== undefined) lastThinking = turnThinking;
         // FR-040: the final payload is hostile until proven otherwise. A
         // throwing getter during `safeParse`, or `JSON.stringify` on
         // cyclic/BigInt content accepted by an `unknown`-typed schema arm,
         // must become a typed node-crash — never a raw rejection across the
         // LlmClient port (parity with the `sendStructured`-path guard).
         try {
-          const parsed = req.schema.safeParse(turnSpec.content);
+          const parsed = req.schema.safeParse(finalTurn.content);
           if (!parsed.success) {
             return err(crash(`Schema validation failed: ${parsed.error.message}`));
           }
           let rawText: string;
           try {
-            rawText = JSON.stringify(turnSpec.content);
+            rawText = JSON.stringify(finalTurn.content);
           } catch (error) {
             return err(crash(`FakeLlmClient: final content is not JSON-serializable: ${safeErrorMessage(error)}`));
           }
@@ -313,9 +351,11 @@ export class FakeLlmClient implements LlmClient {
         return err(crash("FakeLlmClient: tool_use turn emitted while toolChoice='none'"));
       }
 
+      // The snapshot discriminant rules out `final`; recover the tool arm.
+      const toolTurn = turnSpec as FakeToolUseTurn;
       try {
         lastToolResults = await dispatchToolCallsWithSpans(
-          turnSpec.calls,
+          toolTurn.calls,
           req.tools,
           ctx,
           { model: req.model },

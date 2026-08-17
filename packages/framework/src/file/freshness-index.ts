@@ -51,6 +51,7 @@ import {
 import {
   fileCacheError,
   fileOperationError,
+  isFileBackendPathString,
   type FileOperation,
 } from "./boundary-error.js";
 
@@ -271,45 +272,39 @@ const parseStoredFreshnessEntry = (
     return err("entry must contain exactly the AD-5 singleton fields");
   }
 
-  const rawEntry = {
-    writtenAtMs: raw.writtenAtMs,
-    runId: raw.runId,
-    nodeId: raw.nodeId,
-    newWitness: raw.newWitness,
-    succeededAtMs: raw.succeededAtMs,
-  } as const;
-  if (!isFiniteNumber(rawEntry.writtenAtMs)) return err("writtenAtMs must be finite");
-  if (!isBoundaryIdString(rawEntry.runId)) return err("runId does not match the framework ID boundary");
-  if (!isBoundaryIdString(rawEntry.nodeId)) return err("nodeId does not match the framework ID boundary");
-  if (!isPlainRecord(rawEntry.newWitness)) return err("newWitness must be an object");
-  if (!hasExactKeys(rawEntry.newWitness, ["kind", "resource", "value"])) {
+  // `raw` is `JSON.parse` output — no getters, traps, or stateful accessors
+  // (unlike the caller-owned objects the `snapshot*` helpers guard) — so the
+  // exact-key gate above is the single shape fact; read the fields directly
+  // instead of mirroring them into a shadow record.
+  const { writtenAtMs, runId, nodeId, newWitness, succeededAtMs } = raw;
+  if (!isFiniteNumber(writtenAtMs)) return err("writtenAtMs must be finite");
+  if (!isBoundaryIdString(runId)) return err("runId does not match the framework ID boundary");
+  if (!isBoundaryIdString(nodeId)) return err("nodeId does not match the framework ID boundary");
+  if (!isPlainRecord(newWitness)) return err("newWitness must be an object");
+  if (!hasExactKeys(newWitness, ["kind", "resource", "value"])) {
     return err("newWitness must contain exactly kind, resource, and value");
   }
 
-  const rawWitness = {
-    kind: rawEntry.newWitness.kind,
-    resource: rawEntry.newWitness.resource,
-    value: rawEntry.newWitness.value,
-  } as const;
-  if (!isWitnessKind(rawWitness.kind)) return err("newWitness.kind is not a WitnessKind");
-  if (!isNonEmptyString(rawWitness.resource)) return err("newWitness.resource must be non-empty");
-  if (rawWitness.resource !== expectedResource) {
+  const { kind, resource, value } = newWitness;
+  if (!isWitnessKind(kind)) return err("newWitness.kind is not a WitnessKind");
+  if (!isNonEmptyString(resource)) return err("newWitness.resource must be non-empty");
+  if (resource !== expectedResource) {
     return err("digest/content resource disagreement");
   }
-  if (!isNonEmptyString(rawWitness.value)) return err("newWitness.value must be non-empty");
-  if (!isFiniteNumber(rawEntry.succeededAtMs)) return err("succeededAtMs must be finite");
+  if (!isNonEmptyString(value)) return err("newWitness.value must be non-empty");
+  if (!isFiniteNumber(succeededAtMs)) return err("succeededAtMs must be finite");
 
   return ok({
-    writtenAtMs: rawEntry.writtenAtMs,
-    resource: rawWitness.resource,
-    runId: __brandRunId(rawEntry.runId),
-    nodeId: __brandNodeId(rawEntry.nodeId),
+    writtenAtMs: writtenAtMs,
+    resource: resource,
+    runId: __brandRunId(runId),
+    nodeId: __brandNodeId(nodeId),
     newWitness: __brandWitness({
-      kind: rawWitness.kind,
-      resource: rawWitness.resource,
-      value: rawWitness.value,
+      kind: kind,
+      resource: resource,
+      value: value,
     }),
-    succeededAtMs: rawEntry.succeededAtMs,
+    succeededAtMs: succeededAtMs,
   });
 };
 
@@ -417,7 +412,7 @@ const createFileFreshnessIndexUnchecked = (
   directory: string,
   opts: FileFreshnessIndexOptions = {},
 ): FreshnessIndex => {
-  if (typeof directory !== "string" || directory.length === 0 || directory.includes("\u0000")) {
+  if (!isFileBackendPathString(directory)) {
     throw `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`;
   }
   const now = parseFileFactoryClock(opts);

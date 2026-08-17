@@ -339,6 +339,19 @@ export const proveResumeAgreement = <S, E, C>(
     `${checkpointPath}: parseCheckpoint threw while decoding the checkpoint payload`,
     () => {
       const decoded = parseCheckpoint(record.data);
+      // A decoder that FORGETS the Result wrapper (returns the bare
+      // `{ state, context }` payload) would otherwise fall into the rejected
+      // arm with `decoded.error === undefined` — resume would still fail
+      // closed and typed, but the reason the operator greps for would read
+      // `<checkpoint path>: undefined`. Name the off-contract RETURN instead
+      // of its (absent) error. A throwing `ok`/`error` accessor still throws
+      // here and is handled by the guard above.
+      if (decoded === null || typeof decoded !== "object" || !("ok" in decoded)) {
+        return {
+          kind: "rejected",
+          message: `parseCheckpoint returned a non-Result value ${safeDiagnosticRender(decoded)}; it must return ok(data) or err(message)`,
+        } as const;
+      }
       return decoded.ok
         ? ({ kind: "decoded", value: decoded.value } as const)
         : ({ kind: "rejected", message: safeErrorMessage(decoded.error) } as const);

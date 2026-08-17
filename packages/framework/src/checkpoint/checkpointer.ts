@@ -131,6 +131,27 @@ export interface Checkpointer {
   setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>>;
 }
 
+/**
+ * `setMeta` write-failure kind mapping — an explicit port decision, not an
+ * accident of sequencing (round-8 remediation): for the SAME input class
+ * (metadata that cannot be stored — a non-cloneable value, an unreadable
+ * getter-bearing bag), each backend's failure kind is:
+ *
+ * | backend   | kind                                          |
+ * |-----------|-----------------------------------------------|
+ * | file      | `checkpoint-write-failed` (ADR-0080)          |
+ * | in-memory | `cache-error`, operation `checkpoint:setMeta` |
+ * | Redis     | `cache-error`, operation `setMeta`            |
+ *
+ * The file backend's row is mandated by ADR-0080's surface table (nothing
+ * was written, and it is that backend's honest write-failure kind); the
+ * in-memory and Redis rows are the pre-existing kinds frozen by FR-001/
+ * FR-042. A backend-swap caller classifying `setMeta` failures by kind must
+ * expect this divergence — it is pinned per backend (`file-checkpointer.
+ * test.ts` for file; the hostile-totality suite in `redis-checkpointer.
+ * test.ts` for in-memory).
+ */
+
 // --- InMemoryCheckpointer ---
 
 /**
@@ -201,7 +222,11 @@ const checkpointWriteFailed = (
 };
 
 /** Typed `cache-error` mapper for the in-memory adapter's I/O-free failure
- * classes. `failureClass` is the additive permanent/transient discriminant
+ * classes — a single-call delegation to the public `frameworkError.cacheError`
+ * factory (byte-identical shape in both arms; one encoding instead of a
+ * private copy that could drift). The file backend cannot use that factory
+ * (its boundary stays off the public string-typed shape).
+ * `failureClass` is the additive permanent/transient discriminant
  * (parity with the file backend's `checkpointerCacheError`): deterministic
  * rejections — like a non-finite injected clock — are pinned `"permanent"` so
  * `retriabilityOf` fast-fails them instead of burning the retry budget. */
@@ -209,12 +234,8 @@ const cacheError = (
   operation: string,
   message: string,
   failureClass?: "transient" | "permanent",
-): FrameworkError => ({
-  kind: "cache-error",
-  operation,
-  message,
-  ...(failureClass === undefined ? {} : { failureClass }),
-});
+): FrameworkError =>
+  frameworkError.cacheError(operation, message, failureClass);
 
 /**
  * Internal storage shape. `createdAt` is split out so the checkpointer owns
@@ -267,6 +288,21 @@ export class InMemoryCheckpointer implements Checkpointer {
     if (!stored) return ok(null);
     const { meta, createdAt } = stored;
 
+    // The caller-owned `opts` bag is a hostile seam (parity with the file
+    // backend's `parseLoadOpts` snapshot-once discipline): read
+    // `expectedDagFingerprint` EXACTLY ONCE under a guard — a throwing
+    // accessor getter must become a typed `cache-error`, never a raw
+    // rejection, and a stateful getter (different value per read) must not
+    // be able to make the gate and the comparison disagree.
+    let expectedDagFingerprint: string | undefined;
+    try {
+      expectedDagFingerprint = opts?.expectedDagFingerprint;
+    } catch (error) {
+      return err(
+        cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
+      );
+    }
+
     // ADR-0017 — reject checkpoints produced by a different framework
     // version. The Redis path performs the same check; the in-memory variant
     // used to skip it, hiding cross-version-replay bugs from unit tests that
@@ -280,12 +316,12 @@ export class InMemoryCheckpointer implements Checkpointer {
       });
     }
 
-    if (opts?.expectedDagFingerprint !== undefined) {
-      if (meta.dagFingerprint !== opts.expectedDagFingerprint) {
+    if (expectedDagFingerprint !== undefined) {
+      if (meta.dagFingerprint !== expectedDagFingerprint) {
         return err({
           kind: "checkpoint-version-mismatch",
           runId,
-          expected: opts.expectedDagFingerprint,
+          expected: expectedDagFingerprint,
           actual: meta.dagFingerprint,
         });
       }

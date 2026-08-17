@@ -85,6 +85,7 @@ import {
   fileCacheError,
   fileOperationError,
   fileThrownValueMessage,
+  isFileBackendPathString,
   type FileOperation,
 } from "./boundary-error.js";
 
@@ -203,7 +204,7 @@ export const createFileJournal = (
     // `parseFileFactoryClock` already does) and the single outer catch wraps
     // once at `"factory configuration"`, structurally identical to the
     // `createFileCheckpointer` / `createFileFreshnessIndex` factories.
-    if (typeof directory !== "string" || directory.length === 0 || directory.includes("\u0000")) {
+    if (!isFileBackendPathString(directory)) {
       throw new Error(
         `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`,
       );
@@ -229,13 +230,15 @@ export const createFileJournal = (
    * output shape in layout.ts: 6-digit zero-padded sequence + `-` + 64-hex
    * digest + `.json`) and its entry type
    * (must be a regular file): a foreign `*.json` entry (e.g. `README.json`),
-   * a deleted/renamed record, or a non-regular file squatting on a record
-   * name would otherwise silently inflate `sequence = count` (and a squat
-   * could dedup a keyed append as a no-op), committing a record the
+   * a renamed (externally moved) record, or a non-regular file squatting on
+   * a record name would otherwise silently inflate `sequence = count` (and
+   * a squat could dedup a keyed append as a no-op), committing a record the
    * journal's own strict reader rejects at resume time — the failure
-   * deferred from append-time to read-time. Fail fast instead, with a typed
-   * `cache-error` naming the offending entry (fail-fast parity with the
-   * strict reader in `event-log.ts`).
+   * deferred from append-time to read-time. (A DELETED record, by contrast,
+   * cannot appear in the durable listing at all: it produces a contiguity
+   * gap that the strict reader catches, not a count inflation.) Fail fast
+   * instead, with a typed `cache-error` naming the offending entry
+   * (fail-fast parity with the strict reader in `event-log.ts`).
    */
   const listEventFiles = (): readonly string[] => {
     let names: string[];

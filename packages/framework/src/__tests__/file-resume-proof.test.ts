@@ -421,6 +421,27 @@ describe("proveResumeAgreement — checkpoint envelope decode gates", () => {
     expect(result.error.message).toContain("state and context");
   });
 
+  // Round-8 (silent-failure-hunter-2): a decoder that FORGETS the Result
+  // wrapper (returns the bare `{ state, context }` payload) used to fall into
+  // the rejected arm with `decoded.error === undefined`, so the reason the
+  // operator greps for read `<checkpoint.json>: undefined`. The off-contract
+  // RETURN is now named explicitly — resume still fails closed and typed.
+  it("a parseCheckpoint that returns a non-Result value ⇒ checkpoint-corrupt naming the off-contract return", () => {
+    const result = prove({
+      events: stepLog(1),
+      checkpointJson: checkpointJson({ kind: "pending", count: 1 }, { value: 1 }),
+      parseCheckpoint: ((data: unknown) => data as { state: S; context: C }) as unknown as typeof parseCheckpoint,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("checkpoint-corrupt");
+    if (result.error.kind !== "checkpoint-corrupt") return;
+    expect(result.error.message).toContain("checkpoint.json");
+    expect(result.error.message).toContain("non-Result value");
+    expect(result.error.message).toContain("must return ok(data) or err(message)");
+  });
+
   it("checkpoint depth parity: the write and read boundaries count the envelope identically (initialDepth 1)", () => {
     // The envelope `{schemaVersion, data}` sits at depth 1 on BOTH
     // boundaries: the write pre-scan (`assertLosslessEvent(payload)` starts

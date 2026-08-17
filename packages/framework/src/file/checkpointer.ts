@@ -126,15 +126,9 @@ import { fwLogger } from "../logger.js";
 import {
   fileCacheError,
   fileOperationError,
+  isFileBackendPathString,
   type FileOperation,
 } from "./boundary-error.js";
-
-/** Source-compatibility re-export: the metadata diagnostic constant lives
- * with the codec that constructs the write-failed values (2026-08-14
- * codec-separation remediation). The barrel
- * (`src/file.ts`) and existing classification consumers import it from this
- * module. */
-export { META_RECORD_NODE_ID } from "./checkpointer-codec.js";
 
 /** Compact, total rendering for shell-side diagnostics (FR-040). The codec
  * module owns the aliases used inside strict parsers; the shell needs its own
@@ -287,7 +281,7 @@ const createFileCheckpointerUnchecked = (
   // malformed JavaScript callers fail at factory construction, rather than
   // reaching `join`/`readFileSync` later and escaping a port method as a raw
   // path TypeError.
-  if (typeof directory !== "string" || directory.length === 0 || directory.includes("\u0000")) {
+  if (!isFileBackendPathString(directory)) {
     throw new TypeError(
       `createFileCheckpointer directory must be a non-empty NUL-free string, got ${render(directory)}`,
     );

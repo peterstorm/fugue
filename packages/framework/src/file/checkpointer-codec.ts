@@ -40,7 +40,10 @@ import type {
   RunMeta,
   SaveNodeOpts,
 } from "../checkpoint/checkpointer.js";
-import { parseCompositeNodeKey } from "../checkpoint/composite-node-key.js";
+import {
+  isNonNegativeSafeInteger,
+  parseCompositeNodeKey,
+} from "../checkpoint/composite-node-key.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import {
   deserializeValue,
@@ -261,7 +264,7 @@ export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): strin
   if (!isValidDate(startedAt)) {
     throw new Error(`meta.startedAt must be a valid Date, got ${render(startedAt)}`);
   }
-  if (!Number.isSafeInteger(nodeCount) || typeof nodeCount !== "number" || nodeCount < 0) {
+  if (!isNonNegativeSafeInteger(nodeCount)) {
     throw new Error(
       `meta.nodeCount must be a non-negative safe integer, got ${render(nodeCount)}`,
     );
@@ -325,7 +328,7 @@ export const parseStoredMeta = (
   if (typeof dagId !== "string") return err(`dagId must be a string, got ${render(dagId)}`);
   if (typeof startedAt !== "string") return err(`startedAt must be a string, got ${render(startedAt)}`);
   if (typeof createdAt !== "string") return err(`createdAt must be a string, got ${render(createdAt)}`);
-  if (typeof nodeCount !== "number" || !Number.isSafeInteger(nodeCount) || nodeCount < 0) {
+  if (!isNonNegativeSafeInteger(nodeCount)) {
     return err(`nodeCount must be a non-negative safe integer, got ${render(nodeCount)}`);
   }
   if (subject !== undefined && typeof subject !== "string") {
@@ -361,10 +364,6 @@ type CanonicalSerializedValue =
   | string
   | readonly CanonicalSerializedValue[]
   | { readonly [key: string]: CanonicalSerializedValue };
-
-const OUTPUT_RESERVED_TAG_KEYS: ReadonlySet<string> = RESERVED_TAG_KEYS;
-
-const OUTPUT_POLLUTION_KEYS: ReadonlySet<string> = POLLUTION_KEYS;
 
 const canonicalRecord = (
   entries: readonly (readonly [string, CanonicalSerializedValue])[],
@@ -518,10 +517,10 @@ export const materializeCanonicalOutput = (output: unknown): CanonicalSerialized
         if (typeof key !== "string") {
           throw new Error(`${path} has a symbol-keyed property that JSON would omit`);
         }
-        if (OUTPUT_POLLUTION_KEYS.has(key)) {
+        if (POLLUTION_KEYS.has(key)) {
           throw new Error(`${outputPath(path, key)} is filtered as a prototype-pollution key`);
         }
-        if (OUTPUT_RESERVED_TAG_KEYS.has(key)) {
+        if (RESERVED_TAG_KEYS.has(key)) {
           throw new Error(`${outputPath(path, key)} is a reserved serializer tag in a plain object`);
         }
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -776,9 +775,6 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
 // ---------------------------------------------------------------------------
 // Boundary validation helpers (FR-016)
 // ---------------------------------------------------------------------------
-
-const isNonNegativeSafeInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 const SAVE_NODE_OPTION_FIELDS: ReadonlySet<string> = new Set([
   "namespace",
