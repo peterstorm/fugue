@@ -26,8 +26,12 @@ import {
  * Scripted response source for `FakeLlmClient`.
  *
  * Map resolution order (documented here; pinned by the Map-lookup test):
- * `responses.get(req.model) ?? responses.get(req.system)` — the model key
- * wins when present, otherwise the system-prompt key is the fallback.
+ * `responses.has(req.model) ? responses.get(req.model) : responses.get(req.system)`
+ * — the model key wins when OWNED by the Map, otherwise the system-prompt key
+ * is the fallback. Ownership (`has`), not truthiness (`??`): a configured
+ * `null` under the model key is a legal response — the function form can
+ * express one (`(req) => null` round-trips to `ok({ output: null, … })`) — and
+ * the Map form must not silently substitute the system-key fixture for it.
  *
  * The seam is SYNCHRONOUS: the payload type is `unknown`-wide, so an
  * accidentally-`async` function type-checks, and a returned Promise would
@@ -144,7 +148,9 @@ export class FakeLlmClient implements LlmClient {
     let raw: unknown;
     try {
       raw = this.responses instanceof Map
-        ? this.responses.get(req.model) ?? this.responses.get(req.system)
+        ? this.responses.has(req.model)
+          ? this.responses.get(req.model)
+          : this.responses.get(req.system)
         : this.responses(req);
     } catch (error) {
       return err(crash(`FakeLlmClient: response provider threw: ${safeErrorMessage(error)}`));

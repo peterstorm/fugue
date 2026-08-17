@@ -74,8 +74,17 @@ export type FrameworkError =
        * grammar-valid internal location identifiers when a rejected raw value
        * cannot truthfully inhabit a brand; the raw value is then carried by
        * `invalidRunId` / `invalidNodeId`.
+       *
+       * CONSUMER CONTRACT: inspect `invalidRunId` FIRST — when present, this
+       * field is a fabricated internal placeholder, not the address of a real
+       * run; attribute the failure to the raw value in `invalidRunId`.
        */
       readonly runId: RunId;
+      /**
+       * CONSUMER CONTRACT: inspect `invalidNodeId` FIRST — when present, this
+       * field is a fabricated internal placeholder, not the address of a real
+       * node; attribute the failure to the raw value in `invalidNodeId`.
+       */
       readonly nodeId: NodeId;
       /** Present only when the corresponding raw boundary value was invalid. */
       readonly invalidRunId?: string;

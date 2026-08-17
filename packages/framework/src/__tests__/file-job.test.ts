@@ -595,3 +595,43 @@ describe("createFileJob — kernel without computeDedupKey (default fallback key
     expect(events.value).toEqual([]);
   });
 });
+
+// Round-9 A4 (pr-test-analyzer-3 / round-8 A13) — ride-through nesting pin.
+// `job.ts`'s appendEvent catch lets an already-typed journal rejection RIDE
+// THROUGH unchanged (`if (isFrameworkError(error)) throw error;`); the round-8
+// plan concedes "no test pins the double-nested text". The `|`-hint branch
+// above pins ITS OWN rewrap, so this pin exercises the PLAIN ride-through
+// branch: a non-`|` FR-015-invalid key is rejected by the JOURNAL's boundary
+// (typed cache-error, permanent) and must reach the caller with the operation
+// prefix EXACTLY ONCE — a regression to re-wrapping in job.ts would read
+// "appendEvent failed at run directory D: cache appendEvent failed at run
+// directory D: …" with every suite still green.
+describe("createFileJob — appendEvent ride-through (round-8 A13 nesting)", () => {
+  it("propagates the journal's own typed rejection un-nested (prefix exactly once)", async () => {
+    const dir = tempDir();
+    const job = createFileJob<S, C>({ directory: dir, initial: genesis() });
+    // "bad key" — FR-015-invalid (whitespace) but NOT the "|" class, so the
+    // journal rejects it at parseOptionalDedupKey BEFORE any mkdir/lock/I/O
+    // and the job's catch takes the plain ride-through branch.
+    const error = await job.appendEvent({ type: "STEP" }, "bad key").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const typed = asCacheError(error, "appendEvent");
+    expect(typed.failureClass).toBe("permanent");
+    expect(retriabilityOf(typed)).toBe("non-retriable");
+    // The JOURNAL's own FR-015 diagnostic content, verbatim — and NOT the
+    // job-level "|"-hint rewrap (which would name KernelRunOpts.computeDedupKey
+    // as the caller-bug fix).
+    expect(typed.message).toContain("value is not FR-015-valid");
+    expect(typed.message).not.toContain("provide KernelRunOpts.computeDedupKey");
+    // Nesting depth: the operation prefix appears EXACTLY ONCE — the journal's
+    // message, unrewrapped by the JobLike shell (round-8 A13 ride-through).
+    expect(typed.message.split("appendEvent failed at").length - 1).toBe(1);
+    // And nothing durable was written.
+    const events = readFileEvents(dir);
+    expect(events.ok).toBe(true);
+    if (!events.ok) return;
+    expect(events.value).toEqual([]);
+  });
+});

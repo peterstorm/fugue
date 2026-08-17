@@ -141,6 +141,33 @@ describe("compositeNodeKey — hostile inputs rejected (typed throws)", () => {
       expect(() => compositeNodeKey(N("read-node"), { attempt: bad as number })).toThrow();
     });
   }
+
+  // Round-9 C1/A2 — typeof-first ordering + total-message pins. `Number.isSafeInteger`
+  // never traps (non-coercing), but the conjunction's TAIL (`value >= 0`) applies
+  // ToNumber: a re-ordered guard would trap on a `valueOf`-bearing hostile and the
+  // codec would reject RAW with the hostile's own error text. The rejection must
+  // name the CODEC'S rule — "expected a non-negative safe integer" — proving the
+  // guard rejected before any coercion was observed. The `toString` twin pins the
+  // message template's totality: `String(value)` calls the value's `toString`, so
+  // the pre-round-9 diagnostic trapped inside the codec's own rejection (raw
+  // "toString exploded"); `safeDiagnosticRender` renders via the object tag first.
+  const throwingValueOf = { valueOf: () => { throw new Error("valueOf exploded"); } };
+  const throwingToString = { toString: () => { throw new Error("toString exploded"); } };
+  for (const hostile of [throwingValueOf, throwingToString]) {
+    for (const kind of ["index", "attempt"] as const) {
+      it(`rejects a throwing-hook ${kind} with the codec's own typed message (never a raw trap)`, () => {
+        expect(() => compositeNodeKey(N("read-node"), { [kind]: hostile as unknown as number }))
+          .toThrow("expected a non-negative safe integer");
+        // And the hostile's error text must not escape — that would be a raw trap.
+        try {
+          compositeNodeKey(N("read-node"), { [kind]: hostile as unknown as number });
+          throw new Error("expected the codec to reject the hostile value");
+        } catch (error) {
+          expect((error as Error).message).not.toContain("exploded");
+        }
+      });
+    }
+  }
 });
 
 describe("parseCompositeNodeKey — classification", () => {

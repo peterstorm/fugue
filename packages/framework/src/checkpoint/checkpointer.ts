@@ -221,22 +221,6 @@ const checkpointWriteFailed = (
   };
 };
 
-/** Typed `cache-error` mapper for the in-memory adapter's I/O-free failure
- * classes — a single-call delegation to the public `frameworkError.cacheError`
- * factory (byte-identical shape in both arms; one encoding instead of a
- * private copy that could drift). The file backend cannot use that factory
- * (its boundary stays off the public string-typed shape).
- * `failureClass` is the additive permanent/transient discriminant
- * (parity with the file backend's `checkpointerCacheError`): deterministic
- * rejections — like a non-finite injected clock — are pinned `"permanent"` so
- * `retriabilityOf` fast-fails them instead of burning the retry budget. */
-const cacheError = (
-  operation: string,
-  message: string,
-  failureClass?: "transient" | "permanent",
-): FrameworkError =>
-  frameworkError.cacheError(operation, message, failureClass);
-
 /**
  * Internal storage shape. `createdAt` is split out so the checkpointer owns
  * the timestamp the same way the Redis variant does (stamped at write time by
@@ -299,7 +283,7 @@ export class InMemoryCheckpointer implements Checkpointer {
       expectedDagFingerprint = opts?.expectedDagFingerprint;
     } catch (error) {
       return err(
-        cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
+        frameworkError.cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
       );
     }
 
@@ -316,15 +300,13 @@ export class InMemoryCheckpointer implements Checkpointer {
       });
     }
 
-    if (expectedDagFingerprint !== undefined) {
-      if (meta.dagFingerprint !== expectedDagFingerprint) {
-        return err({
-          kind: "checkpoint-version-mismatch",
-          runId,
-          expected: expectedDagFingerprint,
-          actual: meta.dagFingerprint,
-        });
-      }
+    if (expectedDagFingerprint !== undefined && meta.dagFingerprint !== expectedDagFingerprint) {
+      return err({
+        kind: "checkpoint-version-mismatch",
+        runId,
+        expected: expectedDagFingerprint,
+        actual: meta.dagFingerprint,
+      });
     }
 
     // Mirror the Redis TTL semantics — past-TTL meta is reported as
@@ -339,11 +321,11 @@ export class InMemoryCheckpointer implements Checkpointer {
     try {
       nowMs = this.now();
     } catch (error) {
-      return err(cacheError("checkpoint:load", safeErrorMessage(error)));
+      return err(frameworkError.cacheError("checkpoint:load", safeErrorMessage(error)));
     }
     if (!Number.isFinite(nowMs) || Number.isNaN(new Date(nowMs).getTime())) {
       return err(
-        cacheError(
+        frameworkError.cacheError(
           "checkpoint:load",
           `load clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(nowMs)}`,
           "permanent",
@@ -436,18 +418,21 @@ export class InMemoryCheckpointer implements Checkpointer {
       detached = this.detachStored(meta, "checkpoint meta");
       const createdAtMs = this.now();
       // The injected clock is an untrusted seam: a throwing clock must become
-      // a typed error, never a raw rejection, and a non-finite clock output
-      // must fail closed too — `new Date(NaN)` is an invalid `Date` that would
-      // be stored silently and make every `load` TTL comparison a NaN
-      // comparison that is always `false` (the file backend's twin rejects the
-      // identical input as a permanent `cache-error`; pinned in
+      // a typed error, never a raw rejection, and a non-representable clock
+      // output must fail closed too. The `isFinite` disjunct catches
+      // NaN/infinity; the `new Date` disjunct catches the other class — a
+      // FINITE timestamp outside the ±8.64e15 (±100,000-year) Time Value range
+      // yields an Invalid `Date` that would be stored silently and make every
+      // `load` TTL comparison a NaN comparison that is always `false`,
+      // silently voiding the FR-027 expiry (the file backend's twin rejects
+      // the identical input as a permanent `cache-error`; pinned in
       // `redis-checkpointer.test.ts`).
       if (
         !Number.isFinite(createdAtMs) ||
         Number.isNaN(new Date(createdAtMs).getTime())
       ) {
         return err(
-          cacheError(
+          frameworkError.cacheError(
             "checkpoint:setMeta",
             `setMeta clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(createdAtMs)}`,
             "permanent",
@@ -456,7 +441,7 @@ export class InMemoryCheckpointer implements Checkpointer {
       }
       createdAt = new Date(createdAtMs);
     } catch (error) {
-      return err(cacheError("checkpoint:setMeta", safeErrorMessage(error)));
+      return err(frameworkError.cacheError("checkpoint:setMeta", safeErrorMessage(error)));
     }
     // Always stamp the writer's framework version unless the caller supplied
     // their own (lets tests construct stale-version payloads). Matches

@@ -47,7 +47,7 @@ None.
 | FR-012 | Terminal-failed state never persisted as checkpoint; not resumable | Covered — AD-3 (failed-state key in no prefix replay) + terminal-failed test |
 | FR-013 | Appends serialized (sequence = happens-before even when interleaved); single-writer contract enforced by design and documented | Covered — AD-4 lock + documented contract on `createFileJob` |
 | FR-014 | No recoverable state ⇒ typed `checkpoint-missing`, never silent fresh start | Covered — AD-3 step 1 |
-| FR-015 | `dedupKey` charset `^[A-Za-z0-9:_-]{1,256}$` at persistence boundary; typed rejection | Covered — `isBoundaryId`, record parse, charset validated at append (Security notes) |
+| FR-015 | `dedupKey` charset `^[A-Za-z0-9:_-]{1,256}$` at persistence boundary; typed rejection | Covered — `DEDUP_KEY_PATTERN` / `dedupKeyError` in `file/event-record.ts`, record parse, charset validated at append (Security notes) |
 | FR-016 | Job-side identifiers re-validated (`^[A-Za-z0-9_:-]{1,128}$`); no path escape, fail closed | Covered — boundary validator + `join`-after-validation discipline; hostile-identifier tests |
 | FR-020 | File Checkpointer implements full port (`load`, `saveNode`, `setMeta`), durable, per-run dir; passes entire shared `checkpointerSuite` | Covered — Phase 4; zero carve-outs |
 | FR-021 | Backend-agnostic composite node-key extension `(namespace, nodeId, index, attempt)`, default `"dag"`, canonical fallback = plain `nodeId` | Covered — AD-1 exactly |

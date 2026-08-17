@@ -886,6 +886,12 @@ describe("file-lock diagnostics", () => {
     expect(message).toContain("Could not acquire lock after 50 attempts");
     expect(message).toContain("blocking fence entries");
     expect(message).toContain("tomb-live-reaper");
+    // Round-9 A3 (round-8 A8 ride-through property): the terminal timeout's typed
+    // error rides through the catch UNWRAPPED — `toContain` alone passes the
+    // pre-A8 double-nested shape ("acquireFileLock failed at <path>: cache
+    // acquireFileLock failed at <path>: …") identically, so assert the operation
+    // prefix appears EXACTLY ONCE.
+    expect(message.split("acquireFileLock failed at").length - 1).toBe(1);
     // Fail-closed: the live owner and its tomb are untouched.
     expect(existsSync(lockPath)).toBe(true);
     expect(existsSync(tomb)).toBe(true);

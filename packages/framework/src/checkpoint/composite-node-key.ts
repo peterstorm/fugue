@@ -21,6 +21,7 @@
 
 import type { NodeId } from "../types/ids.js";
 import { ID_PATTERN } from "../types/ids.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
 
 /** Default namespace applied when a composite save omits `namespace`. */
 export const DEFAULT_NODE_NAMESPACE = "dag";
@@ -72,9 +73,14 @@ const isIdComponent = (value: unknown): boolean =>
  * Non-negative safe integer — ONE encoding of the domain, exported so every
  * boundary that validates a counted component (composite index/attempt,
  * stored `nodeCount`) shares the same rule. `typeof` first: `Number.isSafeInteger`
- * coerces non-strings, so a bypassed brand smuggling an object would mint
- * junk instead of failing closed (same discipline as `isIdComponent` above
- * and `ids.ts`'s `validate()`).
+ * performs NO type coercion (it returns `false` for any non-`number` input —
+ * the non-coercing ES6 twin of the legacy global), so the coercion hazard in
+ * this conjunction is the TAIL — `value >= 0` applies ToNumber, and a
+ * bypassed brand smuggling a `valueOf`-bearing object would throw a raw trap
+ * there instead of failing closed. `typeof` keeps that comparison off hostile
+ * values (and supplies the type-predicate narrowing) — the same discipline as
+ * `isIdComponent` above and `ids.ts`'s `validate()`, where the coercion is
+ * real: `RegExp.prototype.test` coerces via ToString.
  */
 export const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -89,8 +95,13 @@ const assertIdComponent = (kind: string, value: string): void => {
 
 const assertIndexOrAttempt = (kind: "index" | "attempt", value: number): void => {
   if (typeof value !== "number" || !isNonNegativeSafeInteger(value)) {
+    // The codec's contract is TYPED throws: the diagnostic names the codec's
+    // rule, never the hostile value's own error text. `safeDiagnosticRender`
+    // is total — it renders objects via the object tag before any guarded
+    // coercion, so a hostile `toString`/`valueOf` cannot trap inside this
+    // codec's own message construction (round-9 A2 pin).
     throw new Error(
-      `Invalid composite node key ${kind}: expected a non-negative safe integer, got ${typeof value === "number" ? String(value) : `${typeof value} (${String(value)})`}`,
+      `Invalid composite node key ${kind}: expected a non-negative safe integer, got ${safeDiagnosticRender(value)}`,
     );
   }
 };

@@ -176,7 +176,7 @@ None outstanding. The full interview was pre-completed: scenario priorities, sco
 - ADR-0017 — framework-version mismatch rejection semantics (`checkpoint-version-mismatch`).
 - ADR-0025 — freshness witness contract (`FreshnessIndex` port semantics).
 - Kernel state-machine — `replayEvents` pure fold, `Runner` append-before-checkpoint ordering (runner FR-005), `computeDedupKey` injection.
-- Shared `checkpointerSuite` — currently defined in `__tests__/redis-checkpointer.test.ts`; becomes parametrized over backends (in-memory, Redis, file).
+- Shared `checkpointerSuite` — defined in `__tests__/_checkpointer-suite.ts`, parametrized over backends (in-memory, Redis, file).
 - `FRAMEWORK_VERSION` and the existing `FrameworkError` kind taxonomy.
 - Loom's proven `ProgramJournal` (`claude-plugins/loom/engine/src/orchestration/fugue-program-runtime.ts`) as the validated behavioral reference.
 

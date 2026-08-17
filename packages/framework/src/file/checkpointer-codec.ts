@@ -891,10 +891,11 @@ export const parseLoadOpts = (
     );
   }
 
-  const hasFingerprint = ownKeys.some((key) => key === "expectedDagFingerprint");
-  const expectedDagFingerprint = hasFingerprint
-    ? loadOpts.expectedDagFingerprint
-    : undefined;
+  // The exact-key gate above already proved `ownKeys` is `[]` or exactly
+  // `["expectedDagFingerprint"]`, so a single direct read IS the presence
+  // check: it yields `undefined` exactly when the key is absent, with one
+  // property observation (round-8 A1 single-read parity).
+  const expectedDagFingerprint = loadOpts.expectedDagFingerprint;
   if (expectedDagFingerprint !== undefined && typeof expectedDagFingerprint !== "string") {
     return err(
       `expectedDagFingerprint must be a string when present, got ${render(expectedDagFingerprint)}`,

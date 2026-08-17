@@ -380,9 +380,10 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
 
 describe("FakeLlmClient — Map provider lookup order", () => {
   test("a Map provider falls back to the system-prompt key when the model key is absent", async () => {
-    // Pins the documented lookup order `responses.get(req.model) ??
-    // responses.get(req.system)`: a Map keyed by the system prompt resolves
-    // when the model key is absent (a Map keyed by model wins when present).
+    // Pins the documented lookup order `responses.has(req.model) ?
+    // responses.get(req.model) : responses.get(req.system)`: a Map keyed by
+    // the system prompt resolves when the model key is ABSENT from the Map
+    // (a model key owned by the Map wins — see the round-9 null pin below).
     const client = new FakeLlmClient(new Map<string, unknown>([
       ["sys", { result: 7 }],
     ]));
@@ -401,6 +402,35 @@ describe("FakeLlmClient — Map provider lookup order", () => {
     const none = await client.sendStructured({ ...structuredReq("other-model"), system: "absent" });
     expect(none.ok).toBe(false);
     if (!none.ok) expect(none.error.kind).toBe("node-crash");
+  });
+
+  // Round-9 A1 (silent-failure-hunter-1): OWNERSHIP, not truthiness. The
+  // pre-round-9 `responses.get(req.model) ?? responses.get(req.system)`
+  // treated a configured `null` under the model key as "absent" and silently
+  // substituted the system-key fixture — a silently swapped test oracle with
+  // no error anywhere. `null` is a legal response: the function form
+  // expresses it (`(req) => null` round-trips to `ok({ output: null, … })`),
+  // so the Map form must honor it too.
+  test("a null configured under the model key wins over the system-key fallback (has, not ??)", async () => {
+    const client = new FakeLlmClient(new Map<string, unknown>([
+      ["m1", null],
+      ["sys", { result: 7 }],
+    ]));
+    const result = await client.sendStructured(structuredReq("m1"));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.output).toBe(null);
+      expect(result.value.rawText).toBe("null");
+    }
+  });
+
+  test("a null configured under the model key is a response, not a fallback miss", async () => {
+    const client = new FakeLlmClient(new Map<string, unknown>([
+      ["m1", null],
+    ]));
+    const result = await client.sendStructured(structuredReq("m1"));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.output).toBe(null);
   });
 });
 

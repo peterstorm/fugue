@@ -1669,6 +1669,45 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     }
   });
 
+  // Round-9 A2 (pr-test-analyzer-1) — hostile-HOOK totality at the port seams.
+  // `isNonNegativeSafeInteger` is the ONE shared rule, and its typeof-first
+  // ordering is what keeps the ToNumber comparison (`value >= 0`) off hostile
+  // values. A re-ordered guard would trap on a throwing hook: `parseSaveNodeBoundary`
+  // runs OUTSIDE saveNode's try/catch, so that trap would reject RAW across the
+  // port (FR-040); `serializeMeta` (setMeta) sits inside the typed boundary, so
+  // its regression would at best smuggle the hostile's own error text into the
+  // diagnostic. Both seams must reject with the rule's OWN wording ("non-negative
+  // safe integer"), never the hostile's "exploded" text.
+  const throwingValueOf = { valueOf: () => { throw new Error("valueOf exploded"); } };
+  it("rejects a throwing-hook composite index/attempt on saveNode (typed, never a raw rejection)", async () => {
+    const directory = freshDirectory();
+    const cp = createFileCheckpointer(directory);
+    await cp.setMeta(R("run-h5"), META());
+    for (const opts of [{ index: throwingValueOf }, { attempt: throwingValueOf }]) {
+      const result = await cp.saveNode(R("run-h5"), "n1", node("n1", 1), opts as never);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected a rejection");
+      expect(result.error.kind).toBe("checkpoint-write-failed");
+      if (result.error.kind !== "checkpoint-write-failed") throw new Error("unreachable");
+      expect(result.error.message).toContain("non-negative safe integer");
+      expect(result.error.message).not.toContain("exploded");
+    }
+    expect(existsSync(nodesDirOf(directory, "run-h5"))).toBe(false);
+  });
+
+  it("rejects a throwing-hook nodeCount on setMeta (typed, never a raw rejection)", async () => {
+    const directory = freshDirectory();
+    const cp = createFileCheckpointer(directory);
+    const result = await cp.setMeta(R("run-h6"), META({ nodeCount: throwingValueOf as never }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a rejection");
+    expect(result.error.kind).toBe("checkpoint-write-failed");
+    if (result.error.kind !== "checkpoint-write-failed") throw new Error("unreachable");
+    expect(result.error.message).toContain("nodeCount must be a non-negative safe integer");
+    expect(result.error.message).not.toContain("exploded");
+    expect(existsSync(join(directory, "run-h6"))).toBe(false);
+  });
+
   it("parses the complete hostile SaveNodeOpts runtime matrix before any write", async () => {
     class OptionsInstance {
       readonly index = 1;
