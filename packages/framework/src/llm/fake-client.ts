@@ -3,6 +3,7 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
+import { __brandNodeId, type NodeId } from "../types/ids.js";
 import type {
   LlmClient,
   LlmRequest,
@@ -109,6 +110,58 @@ const isThenable = (value: unknown): boolean => {
   }
 };
 
+/**
+ * Fabricated, grammar-valid node id for a node-crash whose request's own
+ * `nodeId` read threw or was missing (hostile request object). Mirrors the
+ * checkpoint-write-failed truthful-branding policy: a typed error always
+ * carries a grammar-valid id and the message carries the true cause — never
+ * a raw rejection (FR-040). The `llm_` namespace keeps the placeholder out of
+ * the real-node id space for metering attribution.
+ */
+const UNKNOWN_NODE_ID: NodeId = __brandNodeId("llm_unknown_node");
+
+/**
+ * Total read of one field of a possibly-hostile request/context object. The
+ * read is the seam: a throwing getter or Proxy `get` trap — and a missing
+ * field — become `fallback`, never a raw throw (FR-040). `req`/`ctx` arrive
+ * across the LlmClient port from caller (or test-fixture) code and are
+ * hostile until proven otherwise; every unguarded field read is a
+ * raw-rejection hole, and the `crash` builders are the sharpest of them —
+ * they run from catch blocks, where a second throw would replace the typed
+ * rejection with a raw one.
+ */
+const readHostileField = <T,>(host: object, key: string, fallback: T): T => {
+  try {
+    const value = Reflect.get(host, key);
+    return value === undefined ? fallback : (value as T);
+  } catch {
+    return fallback;
+  }
+};
+
+/**
+ * Total per-turn abort probe: `signal` and `aborted` are each independently
+ * hostile reads (a throwing getter on either must not reject raw, FR-040).
+ * An unreadable or absent signal reads as NOT aborted — the probe is an
+ * escape hatch for a live abort, and an unreadable state cannot claim one;
+ * a broken fixture surfaces itself at the next guarded seam. Truthiness
+ * matches the plain `signal?.aborted` semantics the port contract implies.
+ */
+const signalAborted = (host: object): boolean => {
+  let signal: unknown;
+  try {
+    signal = Reflect.get(host, "signal");
+  } catch {
+    return false;
+  }
+  if (signal === null || typeof signal !== "object") return false;
+  try {
+    return Boolean(Reflect.get(signal, "aborted"));
+  } catch {
+    return false;
+  }
+};
+
 export interface FakeLlmClientOpts {
   /**
    * Per-call script for `sendWithTools`. If an array, plays back in order;
@@ -132,14 +185,22 @@ export class FakeLlmClient implements LlmClient {
   async sendStructured<O>(
     req: LlmRequest<O>,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // FR-040 field reads of the hostile request: `nodeId` and `model` are
+    // snapshotted under the total read ONCE (the `crash` builder and the
+    // unguarded message sites below read the snapshots, never the request —
+    // the builder runs from catch blocks, where a second throw would replace
+    // the typed rejection with a raw one). `req.system` is read only inside
+    // the provider guard below, so it needs no snapshot.
+    const nodeId = readHostileField(req, "nodeId", UNKNOWN_NODE_ID);
+    const model = readHostileField(req, "model", "");
     // One encoding for this method's guarded seams: the deterministic
-    // retriable node-crash bound to `req.nodeId` (the deliberate
+    // retriable node-crash bound to the request's node id (the deliberate
     // non-retriable iteration-limit site in `sendWithTools` stays explicit
     // instead of hiding in the builder).
     const crash = (message: string) => ({
       kind: "node-crash",
       retriability: "retriable",
-      nodeId: req.nodeId,
+      nodeId,
       message,
     }) as const;
     // The response provider is caller code (and possibly a hostile Proxy): a
@@ -148,8 +209,8 @@ export class FakeLlmClient implements LlmClient {
     let raw: unknown;
     try {
       raw = this.responses instanceof Map
-        ? this.responses.has(req.model)
-          ? this.responses.get(req.model)
+        ? this.responses.has(model)
+          ? this.responses.get(model)
           : this.responses.get(req.system)
         : this.responses(req);
     } catch (error) {
@@ -157,7 +218,7 @@ export class FakeLlmClient implements LlmClient {
     }
 
     if (raw === undefined) {
-      return err(crash(`FakeLlmClient: no response configured for model="${req.model}"`));
+      return err(crash(`FakeLlmClient: no response configured for model="${model}"`));
     }
 
     if (isFrameworkError(raw)) {
@@ -175,6 +236,26 @@ export class FakeLlmClient implements LlmClient {
       );
     }
 
+    // The declared schema IS the contract of `O` (parity with the
+    // `withTools` final-turn seam, where the check runs BEFORE
+    // serialization): a fixture violating it must fail here with a typed
+    // node-crash, not silently pass the `raw as O` cast — the cast is
+    // uncheckable across the `unknown` seam, so the fake validates exactly
+    // what the real clients' response contract would have enforced.
+    let output: O;
+    try {
+      const parsed = req.schema.safeParse(raw);
+      if (!parsed.success) {
+        return err(crash(`Schema validation failed: ${parsed.error.message}`));
+      }
+      output = parsed.data as O;
+    } catch (error) {
+      return err(crash(`FakeLlmClient: schema validation threw: ${safeErrorMessage(error)}`));
+    }
+
+    // `rawText` is the raw payload as the provider emitted it (provenance —
+    // not a serialization of the parsed output), exactly as the withTools
+    // final-turn seam records `finalTurn.content`.
     let rawText: string;
     try {
       rawText = JSON.stringify(raw);
@@ -183,7 +264,7 @@ export class FakeLlmClient implements LlmClient {
     }
 
     return ok({
-      output: raw as O,
+      output,
       tokensIn: 100,
       tokensOut: 50,
       rawText,
@@ -194,14 +275,25 @@ export class FakeLlmClient implements LlmClient {
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // FR-040 field reads of the hostile request: `nodeId` is snapshotted
+    // under the total read ONCE (the `crash` builder, the validation exit,
+    // and the iteration-limit exit all read the snapshot, never the request
+    // — the builder runs from catch blocks, where a second throw would
+    // replace the typed rejection with a raw one); `maxIterations` is
+    // snapshotted at the same seam (an unreadable limit keeps the default).
+    // Per-turn live reads (signal, toolChoice) stay per turn but go through
+    // total probes; `req.tools`/`req.schema`/`req.model` are read only inside
+    // guarded regions below and need no snapshot.
+    const nodeId = readHostileField(req, "nodeId", UNKNOWN_NODE_ID);
+    const maxIterations = readHostileField(req, "maxIterations", undefined) ?? 10;
     // One encoding for this method's guarded seams (see the twin builder in
-    // `sendStructured`): deterministic retriable node-crash bound to
-    // `req.nodeId`; the non-retriable iteration-limit exit below stays
+    // `sendStructured`): deterministic retriable node-crash bound to the
+    // request's node id; the non-retriable iteration-limit exit below stays
     // explicit as the deliberate exception.
     const crash = (message: string) => ({
       kind: "node-crash",
       retriability: "retriable",
-      nodeId: req.nodeId,
+      nodeId,
       message,
     }) as const;
     if (this.withToolsScript === undefined) {
@@ -213,12 +305,11 @@ export class FakeLlmClient implements LlmClient {
     } catch (e) {
       return err({
         kind: "validation",
-        nodeId: req.nodeId,
+        nodeId,
         message: safeErrorMessage(e),
       });
     }
 
-    const maxIterations = req.maxIterations ?? 10;
     let totalTokensIn = 0;
     let totalTokensOut = 0;
     let lastThinking: string | undefined;
@@ -228,7 +319,9 @@ export class FakeLlmClient implements LlmClient {
       : null;
 
     for (let turn = 0; turn < maxIterations; turn++) {
-      if (req.signal?.aborted || ctx.signal?.aborted) {
+      // Live per-turn probe through the total reads: a throwing `signal`
+      // getter on either side cannot reject raw (FR-040).
+      if (signalAborted(req) || signalAborted(ctx)) {
         return err({ kind: "aborted", reason: "signal" });
       }
 
@@ -353,7 +446,7 @@ export class FakeLlmClient implements LlmClient {
 
       // tool_use turn — dispatch all calls in parallel.
       // toolChoice = "none" disables tools entirely.
-      if (req.toolChoice === "none") {
+      if (readHostileField(req, "toolChoice", undefined) === "none") {
         return err(crash("FakeLlmClient: tool_use turn emitted while toolChoice='none'"));
       }
 
@@ -376,7 +469,7 @@ export class FakeLlmClient implements LlmClient {
     return err({
       kind: "node-crash",
       retriability: "non-retriable",
-      nodeId: req.nodeId,
+      nodeId,
       message: `Tool-call iteration limit (${maxIterations}) reached`,
     });
   }

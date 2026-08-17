@@ -135,7 +135,7 @@ import {
 } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
 import { ok, err, tryCatch } from "../types/result.js";
-import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
+import { safeDiagnosticRender, safeDiagnosticString, safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
 
 // ---------------------------------------------------------------------------
@@ -1036,7 +1036,7 @@ export const parseFileEventRecord = (
     return parseFileEventRecordUnchecked(raw, source);
   } catch (error) {
     return err(
-      `${safeDiagnosticRender(source)}: event-record inspection failed: ${safeErrorMessage(error)} (FR-040)`,
+      `${safeDiagnosticString(source)}: event-record inspection failed: ${safeErrorMessage(error)} (FR-040)`,
     );
   }
 };

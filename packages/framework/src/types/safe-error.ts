@@ -66,6 +66,25 @@ export const safeDiagnosticRender = (value: unknown): string => {
 };
 
 /**
+ * Total, non-truncated rendering for diagnostics that carry a KNOWN string
+ * (a file path, a request id): JSON-escaped, so quotes, backslashes, and
+ * control characters cannot break the surrounding message, with NO length
+ * cap — `safeDiagnosticRender`'s 60-char cap exists for arbitrary untrusted
+ * values and would truncate legal-but-long paths in exactly the rare branch
+ * where the full name is the diagnostic. A string is a `JSON.stringify`
+ * domain with no `toJSON` hook, so the encode itself cannot throw; the guard
+ * keeps this module's total-fallback discipline.
+ */
+export const safeDiagnosticString = (value: string): string => {
+  try {
+    const json = JSON.stringify(value);
+    return typeof json === "string" ? json : UNPRINTABLE_VALUE;
+  } catch {
+    return UNPRINTABLE_VALUE;
+  }
+};
+
+/**
  * Total human message for an arbitrary caught value. A string-valued
  * `message` is preferred, but reading it is itself guarded. Coercion and
  * object-tag fallbacks are independently guarded before the constant final

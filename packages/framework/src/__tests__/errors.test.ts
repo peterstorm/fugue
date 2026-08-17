@@ -7,6 +7,7 @@
  * - `infra-unreachable` / `policy-refusal` / `downstream-denied` (FR-X-001/002)
  * - capability-broker taxonomy discriminability (SC-013)
  * - `retriabilityOf` — the single source of truth for the retry fast-fail fork
+ * - `usageOfError` — the FR-W0-001 token-attribution contract (which kinds carry `usage`)
  * - `safeErrorMessage` hostile thrown-value matrix
  * - total Node errno diagnostics
  * - `messageOf` retry-exhausted lastError summariser
@@ -23,14 +24,17 @@ import {
   formatFrameworkError,
   messageOf,
   retriabilityOf,
+  usageOfError,
   FrameworkAugmentedError,
   type FrameworkError,
+  type PartialTokenUsage,
   type Retriability,
 } from "../types/errors.js";
 import type { Capability } from "../types/node.js";
 import {
   probeErrorCode,
   safeDiagnosticRender,
+  safeDiagnosticString,
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
   UNPRINTABLE_ERROR,
@@ -359,6 +363,79 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
   });
 });
 
+describe("usageOfError — FR-W0-001 token-attribution contract", () => {
+  const nid = makeNodeId("node-u");
+  const rid2 = makeRunId("run-u");
+  const used = { tokensIn: 7, tokensOut: 3 };
+
+  // The contract: ONLY `node-crash`, `transient`, and `aborted` carry `usage`
+  // (the tool-use-loop variants that can burn tokens before failing); every
+  // other kind reads `undefined`. The usage-carrying rows pin BOTH directions
+  // — passthrough of the exact partial totals, and `undefined` when absent —
+  // because the loop's budget accounting branches on the presence/absence of
+  // the value, not merely on the kind. Every non-carrying kind gets an explicit
+  // row (not `.otherwise`-style silence): a regression that moves an arm
+  // between the two sides of `usageOfError`'s exhaustive `match` compiles
+  // cleanly (both sides stay exhaustive), so this table is the pin.
+  const cases: ReadonlyArray<readonly [FrameworkError, PartialTokenUsage | undefined]> = [
+    // The three usage-carrying kinds — passthrough AND absence, per kind.
+    [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "retriable", usage: used }, used],
+    [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "non-retriable" }, undefined],
+    [{ kind: "transient", nodeId: nid, message: "429", usage: used }, used],
+    [{ kind: "transient", nodeId: nid, message: "429" }, undefined],
+    [{ kind: "aborted", reason: "caller cancelled", usage: used }, used],
+    [{ kind: "aborted", reason: "caller cancelled" }, undefined],
+    // Every other kind reads undefined — one row per kind.
+    [{ kind: "validation", nodeId: nid, message: "schema mismatch" }, undefined],
+    [{ kind: "checkpoint-write-failed", runId: rid2, nodeId: nid, message: "disk full" }, undefined],
+    [{ kind: "policy-refusal", scope: "msgraph:mail.send" }, undefined],
+    [{ kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" }, undefined],
+    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cumulative: 10, budget: 5 }, undefined],
+    [{ kind: "missing-capability", missing: [{ nodeId: nid, capability: "llm" as Capability }] }, undefined],
+    [{ kind: "retry-exhausted", nodeId: nid, attempts: 3, lastError: "x", rootErrorKind: "transient" }, undefined],
+    [{ kind: "checkpoint-missing", runId: rid2 }, undefined],
+    [{ kind: "checkpoint-expired", runId: rid2, expiredAt: "2026-01-01T00:00:00Z" }, undefined],
+    [{ kind: "checkpoint-corrupt", runId: rid2, message: "corrupt" }, undefined],
+    [{ kind: "checkpoint-version-mismatch", runId: rid2, expected: "2", actual: "1" }, undefined],
+    [{ kind: "prompt-not-found", promptName: "p", reason: "missing" }, undefined],
+    [{ kind: "cache-error", operation: "get", message: "timeout" }, undefined],
+    [{ kind: "cache-error", operation: "appendEvent", message: "capacity exhausted", failureClass: "permanent" }, undefined],
+    [{ kind: "cycle-detected", nodeIds: [nid] }, undefined],
+    [{ kind: "rejected", nodeId: nid, reason: "no" }, undefined],
+    [{ kind: "invalid-reroute", targetNodeId: nid, message: "bad" }, undefined],
+    [{ kind: "missing-default-edge", nodeId: nid }, undefined],
+    [{ kind: "output-unreachable-under-routing", outputNodeId: nid, missedFromNode: nid }, undefined],
+    [{ kind: "predicate-malformed", nodeId: nid, message: "bad predicate" }, undefined],
+    [{ kind: "duplicate-edge", fromNodeId: nid, toNodeId: nid }, undefined],
+    [{ kind: "root-expects-input", nodeId: nid, message: "expects input" }, undefined],
+    [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, undefined],
+    [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, undefined],
+    [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, undefined],
+  ];
+
+  it("attributes usage exactly on the three tool-use-loop kinds and nowhere else", () => {
+    for (const [error, expected] of cases) {
+      expect(usageOfError(error)).toEqual(expected);
+    }
+  });
+
+  it("covers every FrameworkError kind (no kind silently defaults)", () => {
+    // Same guard as the `retriabilityOf` block: a new kind without a row here
+    // would drift the count; `usageOfError`'s `.exhaustive()` fails
+    // compilation first, and this guards the table itself.
+    const kinds = new Set(cases.map(([e]) => e.kind));
+    expect(kinds.size).toBe(27);
+  });
+
+  it("returns the caller's exact partial totals, not a copy or a mutation sink", () => {
+    // Passthrough is reference-identity: the metering shell must attribute the
+    // SAME partials the loop accumulated (a silent copy would break identity
+    // comparisons the budget code is allowed to make).
+    const withUsage: FrameworkError = { kind: "transient", nodeId: nid, message: "429", usage: used };
+    expect(usageOfError(withUsage)).toBe(used);
+  });
+});
+
 describe("safeErrorMessage — hostile thrown-value matrix", () => {
   it("is total without instanceof, unguarded message reads, or coercion leaks", () => {
     const revoked = Proxy.revocable({}, {});
@@ -507,5 +584,46 @@ describe("messageOf — retry-exhausted lastError summariser", () => {
     }
     expect(messageOf(revoked.proxy)).toBe(UNPRINTABLE_ERROR);
     expect(safeDiagnosticRender(revoked.proxy)).toBe(UNPRINTABLE_VALUE);
+  });
+});
+
+describe("safeDiagnosticString — total, non-truncated rendering for known strings (FR-040)", () => {
+  // Round-10 A7 (type-design-analyzer): the `parseFileEventRecord` catch-all
+  // rendered its `source` path through `safeDiagnosticRender`, whose 60-char
+  // cap truncates legal-but-long run-directory paths in exactly the branch
+  // where the full name is the diagnostic. `safeDiagnosticString` keeps the
+  // escape-only half of that rendering (JSON quoting — quotes, backslashes,
+  // and control characters cannot break the surrounding message) and drops
+  // the cap.
+
+  const longPath =
+    "/var/lib/fugue/runs/2026-08-17/standalone-2026-08-17-171928-f6-file-durable-runtime/events/node-a1b2c3/000042-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.json";
+
+  it("preserves a string past the 60-char cap in full (the deliberate divergence from safeDiagnosticRender)", () => {
+    expect(longPath.length).toBeGreaterThan(60);
+    const rendered = safeDiagnosticString(longPath);
+    // JSON-quoted, complete, and not the truncated form.
+    expect(rendered).toBe(JSON.stringify(longPath));
+    expect(rendered).not.toContain("…(");
+    // The cap still applies to the arbitrary-value renderer — pin the
+    // divergence so the two renderers cannot be conflated later.
+    expect(safeDiagnosticRender(longPath)).toContain("…(");
+  });
+
+  it("escapes quotes, backslashes, and control characters (no structural injection)", () => {
+    const hostile = 'a"quote\\back\nnew\rline\ttab';
+    const rendered = safeDiagnosticString(hostile);
+    // The rendered form is a self-contained JSON string literal: parsing it
+    // back yields exactly the original — quotes and escapes cannot break out
+    // of the surrounding `\`${rendered}: message\`` interpolation.
+    expect(JSON.parse(rendered)).toBe(hostile);
+    expect(rendered).not.toContain("\n");
+  });
+
+  it("is total on every string (empty included) and never throws", () => {
+    expect(() => safeDiagnosticString("")).not.toThrow();
+    expect(safeDiagnosticString("")).toBe('""');
+    expect(() => safeDiagnosticString("a")).not.toThrow();
+    expect(safeDiagnosticString("a")).toBe('"a"');
   });
 });

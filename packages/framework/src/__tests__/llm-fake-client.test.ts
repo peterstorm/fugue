@@ -376,6 +376,202 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.output).toEqual({ result: 1 });
   });
+
+  // Round-10 A0 (silent-failure-hunter): the REQUEST itself is caller data —
+  // a hostile getter on `req.nodeId` used to throw from the `crash` builder,
+  // which is invoked from inside catch blocks, where the second throw
+  // replaces the typed rejection with a raw one (the sharpest FR-040 hole in
+  // the module). The builder now reads an entry-snapshot taken under the
+  // total read; a failing read yields the namespaced placeholder id and the
+  // typed error still settles across the port.
+  test("a request with a throwing nodeId getter is a typed node-crash with the placeholder id (never a raw rejection)", async () => {
+    const hostileReq = new Proxy(structuredReq(), {
+      get(target, prop) {
+        if (prop === "nodeId") throw new Error("nodeId getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    const client = new FakeLlmClient(new Map()); // no "m1" key — forces the crash path
+    const result = await client.sendStructured(hostileReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error).toMatchObject({ nodeId: "llm_unknown_node" });
+      expect((result.error as { message: string }).message).toMatch(/no response configured/);
+    }
+  });
+
+  test("a request with a throwing model getter is a typed node-crash (never a raw rejection)", async () => {
+    const hostileReq = new Proxy(structuredReq(), {
+      get(target, prop) {
+        if (prop === "model") throw new Error("model getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    const client = new FakeLlmClient(new Map());
+    const result = await client.sendStructured(hostileReq);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // The entry snapshot absorbs the throw (total read — the model reads
+      // as ""), so the failure surfaces at the configuration check, still a
+      // typed crash bound to the request's REAL node id (its read succeeded).
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error).toMatchObject({ nodeId: "test-node" });
+      expect((result.error as { message: string }).message).toMatch(/no response configured/);
+    }
+  });
+
+  test("an unconfigured sendWithTools request with a throwing nodeId getter is a typed node-crash (never a raw rejection)", async () => {
+    const hostileReq = new Proxy(toolsReq(), {
+      get(target, prop) {
+        if (prop === "nodeId") throw new Error("nodeId getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    const client = new FakeLlmClient(new Map()); // no withToolsScript — forces the crash path
+    const result = await client.sendWithTools(hostileReq, makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error).toMatchObject({ nodeId: "llm_unknown_node" });
+      expect((result.error as { message: string }).message).toMatch(/no withToolsScript configured/);
+    }
+  });
+
+  test("a request with a throwing maxIterations getter plays with the default limit (never a raw rejection)", async () => {
+    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
+      get(target, prop) {
+        if (prop === "maxIterations") throw new Error("maxIterations getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [{ type: "final", content: { result: 1 } }],
+    });
+    const result = await client.sendWithTools(hostileReq, makeCtx());
+    // The unreadable limit reads as the default (10); the one-turn script
+    // completes inside it — nothing rejected raw.
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.output).toEqual({ result: 1 });
+  });
+
+  // The per-turn abort probe re-reads a LIVE signal every turn (a mid-loop
+  // abort must still stop the loop), so the totality must hold per read — a
+  // throwing `signal` getter on the request or the context cannot reject raw.
+  test("a request whose signal getter throws is not a raw rejection (the abort probe is total)", async () => {
+    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
+      get(target, prop) {
+        if (prop === "signal") throw new Error("signal getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [{ type: "final", content: { result: 1 } }],
+    });
+    const result = await client.sendWithTools(hostileReq, makeCtx());
+    // The unreadable signal reads as NOT aborted; the script plays to
+    // completion and the port settles.
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.output).toEqual({ result: 1 });
+  });
+
+  test("a context whose signal getter throws is not a raw rejection (the abort probe is total)", async () => {
+    const hostileCtx = new Proxy(makeCtx(), {
+      get(target, prop) {
+        if (prop === "signal") throw new Error("ctx signal getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [{ type: "final", content: { result: 1 } }],
+    });
+    const result = await client.sendWithTools(toolsReq({ schema: FinalSchema }), hostileCtx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.output).toEqual({ result: 1 });
+  });
+
+  test("a request with a throwing toolChoice getter never rejects raw (the tool_use branch reads it total)", async () => {
+    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
+      get(target, prop) {
+        if (prop === "toolChoice") throw new Error("toolChoice getter exploded");
+        return Reflect.get(target, prop);
+      },
+    });
+    // A tool_use turn is what reads `toolChoice`; an empty call list makes
+    // dispatch a no-op and the loop advances to the script's end — proving
+    // the read was total (no raw escape) and not equal to "none".
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [({ type: "tool_use", calls: [] }) as unknown as FakeTurn],
+    });
+    const result = await client.sendWithTools(hostileReq, makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      // The failure is the script's exhaustion AFTER the total read — not a
+      // raw throw from the read itself.
+      expect((result.error as { message: string }).message).toMatch(/script ran out at turn 1/);
+    }
+  });
+
+  // Round-10 A6 (type-design-analyzer): `sendStructured` used to return
+  // `raw as O` with no validation, while the `withTools` final-turn seam
+  // runs `req.schema.safeParse` — a fixture violating the declared schema
+  // silently passed the cast. The fake now validates the toolless path too.
+  test("a sendStructured fixture violating the declared schema is a typed node-crash (never a silent O cast)", async () => {
+    const client = new FakeLlmClient(new Map([["m1", { wrong: "shape" }]]));
+    const result = await client.sendStructured({
+      system: "sys",
+      user: "user",
+      model: "m1",
+      schema: FinalSchema,
+      nodeId: "test-node" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/Schema validation failed/);
+    }
+  });
+
+  test("a sendStructured fixture whose schema validation throws is a typed node-crash (the safeParse seam is guarded)", async () => {
+    const hostile: Record<string, unknown> = {};
+    Object.defineProperty(hostile, "result", {
+      get: () => {
+        throw new Error("getter exploded during sendStructured schema validation");
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    const client = new FakeLlmClient(new Map([["m1", hostile]]));
+    const result = await client.sendStructured({
+      system: "sys",
+      user: "user",
+      model: "m1",
+      schema: FinalSchema,
+      nodeId: "test-node" as NodeId,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/schema validation threw/);
+    }
+  });
+
+  test("sendStructured returns the schema-parsed output, not the raw fixture (zod strip semantics)", async () => {
+    // `z.object` strips unknown keys: the port contract is the Parsed shape,
+    // so a fixture carrying extra keys must come back without them — the
+    // same `parsed.data as O` the withTools final-turn seam returns.
+    const client = new FakeLlmClient(new Map([["m1", { result: 1, extra: 2 }]]));
+    const result = await client.sendStructured({
+      system: "sys",
+      user: "user",
+      model: "m1",
+      schema: FinalSchema,
+      nodeId: "test-node" as NodeId,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.output).toEqual({ result: 1 });
+  });
 });
 
 describe("FakeLlmClient — Map provider lookup order", () => {

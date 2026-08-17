@@ -1921,6 +1921,39 @@ describe("rejection diagnostics — hostile value rendering is trap-free", () =>
     }
     expect(trapExecuted).toBe(false);
   });
+
+  // Round-10 A7 (type-design-analyzer): the defense-in-depth catch-all used
+  // to render `source` through `safeDiagnosticRender`, whose 60-char cap
+  // truncates legal-but-long run-directory paths in exactly the branch where
+  // the full name is the diagnostic (every normal rejection branch
+  // interpolates the full path). The catch-all now uses the escape-only,
+  // non-truncating `safeDiagnosticString`.
+  it("the catch-all branch preserves a long (>60-char) source path in full, escaped", () => {
+    // A hostile `ownKeys` trap throws inside `Object.keys(record)` — the
+    // one interior operation the unchecked parser cannot pre-guard, which is
+    // what the result-preserving shell's catch exists for.
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys: () => {
+          throw new Error("ownKeys trap exploded");
+        },
+      },
+    );
+    const longSource =
+      "/var/lib/fugue/runs/2026-08-17/standalone-2026-08-17-171928-f6-file-durable-runtime/events/node-a1b2c3/000042-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.json";
+    expect(longSource.length).toBeGreaterThan(60);
+
+    const result = parseFileEventRecord(hostile, longSource);
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      // The full path, JSON-escaped at the head — not the truncated
+      // `…(N chars)` form — and the FR-040 shell signature.
+      expect(result.error.startsWith(`"${longSource}": event-record inspection failed`)).toBe(true);
+      expect(result.error).toMatch(/FR-040/);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

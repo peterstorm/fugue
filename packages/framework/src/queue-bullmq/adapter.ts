@@ -1,6 +1,7 @@
 // createBullMQBackend — QueueBackend adapter over BullMQ Queue/Worker
 // Validates inputs, wraps BullMQ jobs as JobLike, manages worker lifecycle
-// Only queue-bullmq/** may import bullmq/ioredis (enforced by check-imports.ts)
+// bullmq is imported only by queue-bullmq/**; ioredis is additionally imported by the
+// three named Redis adapter files (see the check-imports.ts Enforces list)
 
 import { Queue, Worker } from "bullmq";
 import type { ConnectionOptions } from "bullmq";

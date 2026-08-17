@@ -11,10 +11,11 @@
 //
 //   1. prefix ↔ content sequence — `NNNNNN` must equal `pad6(record.sequence)`
 //   2. strictly contiguous sequences — the i-th record must have `sequence === i`
-//      (a gap or a duplicate fails closed; a 7-digit prefix — a sequence past
-//      the 999999 lexicographic ceiling — is rejected EARLIER by the codec's
-//      own ceiling gate in `parseFileEventRecord`, before the listing order
-//      could be misread as append order)
+//      (a gap or a duplicate fails closed; a 7-digit prefix is rejected
+//      EARLIER by `parseEventFileName`'s 6-digit shape gate (check 1 above),
+//      which structurally bounds the sequence at the 999999 lexicographic
+//      ceiling even when the content sequence is within it, before the
+//      listing order could be misread as append order)
 //   3. filename digest ↔ content recompute — the suffix must equal
 //      `eventDigestOf(record)` (keyed: `sha256hex(dedupKey)`; keyless:
 //      `sha256hex(sequence|toJson(event))`), a stronger tamper/tear check

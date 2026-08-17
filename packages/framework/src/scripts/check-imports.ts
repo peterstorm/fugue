@@ -1,12 +1,39 @@
 /**
  * Source-boundary checker
  *
- * Enforces:
+ * Enforces (one bullet per rule — the paired SC-006 gate test in
+ * `__tests__/boundary-imports.test.ts` pins the complete set, so this list
+ * and the RULES array cannot drift apart silently):
  *   - state-machine/** MUST NOT import bullmq, ioredis, or queue-bullmq/**
+ *     (the kernel; transport adapters belong outside it)
  *   - dag-runtime/**   MUST NOT import bullmq, ioredis, or queue-bullmq/**
- *   - file/** and src/file.ts (the @fuguejs/framework/file backend) may import only canonical node:fs, node:crypto, and node:path among Node built-ins; bare and subpath spellings are rejected
- *   - file/** and src/file.ts MUST NOT import bullmq, ioredis, or queue-bullmq
- *   - Only queue-bullmq/** may import bullmq and ioredis
+ *     (transport-agnostic; durable backends are wired by the shell)
+ *   - scheduler/**     MUST NOT import bullmq, ioredis, or queue-bullmq/**
+ *     (transport-agnostic; durable backends are wired by callers)
+ *   - state-machine/** and dag-runtime/** pure-core modules MUST NOT import
+ *     @opentelemetry/ (the named dag-runtime shell files are the exemption)
+ *   - file/** and src/file.ts (and __tests__/file-*.test.ts) MUST NOT import
+ *     bullmq, ioredis, or queue-bullmq — bare or relative at any depth
+ *   - file/** and src/file.ts (the @fuguejs/framework/file backend) may import only
+ *     canonical node:fs, node:crypto, and node:path among Node built-ins; bare
+ *     and subpath spellings are rejected
+ *   - ioredis anti-leak: index.ts, advanced.ts, testing.ts, and the
+ *     intermediate cache/** and checkpoint/** barrels MUST NOT import ioredis —
+ *     EXCEPT the three Redis adapter files themselves (cache/redis-cache.ts,
+ *     checkpoint/redis-checkpointer.ts, checkpoint/redis-freshness-index.ts),
+ *     which import it directly; queue-bullmq/** is the only other importer.
+ *     ioredis has NO repo-wide ban and no "queue-bullmq only" rule — only the
+ *     /redis and /bullmq subpath barrels are the permitted consumer entry
+ *     points, and the main barrel stays Redis-free so default-bundle consumers
+ *     do not pay for it
+ *   - bullmq is imported only by queue-bullmq/** (no repo-wide ban exists for
+ *     it beyond the state-machine/dag-runtime/scheduler/file rules above)
+ *   - dag-runtime/** MUST NOT import ../executor (executor wraps dag-runtime,
+ *     not the other way)
+ *   - types/** MUST NOT import runtime or utility modules (../dag-runtime,
+ *     ../shared, ../executor; the types/index.ts barrel keeps its own
+ *     narrower rule)
+ *   - shared/** MUST NOT import @opentelemetry/, ../observer, or ../tracing
  *   - file/** implementation modules MUST NOT call the public string-typed
  *     frameworkError.cacheError factory directly; boundary-error.ts is the
  *     sole bridge into the backend-local FileOperation vocabulary
