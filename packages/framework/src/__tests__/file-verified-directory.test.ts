@@ -1,7 +1,9 @@
 /**
  * Direct tests for `src/file/verified-directory.ts` — the verified-directory
- * containment policy of the file backend (advisory A8 of the 2026-08-14 PR
- * remediation), extracted from the checkpointer adapter.
+ * containment policy of the file backend, extracted from the checkpointer
+ * adapter during the 2026-08-14 codec separation remediation (pure core split
+ * from the I/O shell) — see review run
+ * `.claude/reviews/review-and-fix-runs/standalone-2026-08-14-f6-file-durable-runtime`.
  *
  * The policy establishes a directory as a NON-SYMLINK TRUST ANCHOR (canonical
  * realpath + device/inode) before I/O, rejects pre-existing substitutions,

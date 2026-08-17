@@ -7,7 +7,7 @@ import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
 import { D, R } from "./_id-helpers.js";
-import { formatFrameworkError } from "../types/errors.js";
+import { formatFrameworkError, retriabilityOf } from "../types/errors.js";
 
 // The backend-neutral contract lives in `_checkpointer-suite.ts`. This file
 // supplies each backend's raw-state bypass and retains only Redis-specific
@@ -288,6 +288,69 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     const loadResult = await cp.load(R("clock-2"));
     expect(loadResult.ok).toBe(false);
     if (!loadResult.ok) expect(loadResult.error.kind).toBe("cache-error");
+  });
+
+  // Non-finite clock output (NaN/±Infinity) is the SILENT twin of the
+  // throwing-clock class above: `new Date(NaN)` is an invalid `Date` that
+  // used to be stored with `ok(undefined)` and no signal, and the `load` TTL
+  // comparison became a NaN comparison that is always `false` — an expired
+  // checkpoint was served and never expired, while the file backend's twin
+  // rejects the identical input as a `permanent` cache-error (pinned in
+  // `file-checkpointer.test.ts`). Both rejections are deterministic — every
+  // retry reproduces them — so both are pinned permanent.
+  test("a non-finite injected clock fails closed with a permanent cache-error on both setMeta and load", async () => {
+    const cp = new InMemoryCheckpointer({ now: () => Number.NaN });
+    const meta: RunMeta = {
+      dagId: D("d"),
+      startedAt: new Date("2025-01-01T00:00:00Z"),
+      nodeCount: 1,
+    };
+    const setResult = await cp.setMeta(R("nan-clock-1"), meta);
+    expect(setResult.ok).toBe(false);
+    if (!setResult.ok) {
+      expect(setResult.error.kind).toBe("cache-error");
+      if (setResult.error.kind === "cache-error") {
+        expect(setResult.error.operation).toBe("checkpoint:setMeta");
+        expect(setResult.error.failureClass).toBe("permanent");
+        expect(retriabilityOf(setResult.error)).toBe("non-retriable");
+      }
+    }
+
+    // ±Infinity takes the same branch through the `Number.isFinite` arm.
+    const infSetResult = await new InMemoryCheckpointer({
+      now: () => Number.POSITIVE_INFINITY,
+    }).setMeta(R("inf-clock-1"), meta);
+    expect(infSetResult.ok).toBe(false);
+    if (!infSetResult.ok) {
+      expect(infSetResult.error.kind).toBe("cache-error");
+      if (infSetResult.error.kind === "cache-error") {
+        expect(infSetResult.error.operation).toBe("checkpoint:setMeta");
+        expect(infSetResult.error.failureClass).toBe("permanent");
+      }
+    }
+
+    // Seed the NaN-clock instance's store via the raw bypass (setMeta cannot
+    // succeed under the broken clock), then load: the TTL probe must fail
+    // closed rather than silently compare NaN.
+    cp.__testRawMetas().set("nan-clock-2", {
+      meta: {
+        dagId: D("d"),
+        startedAt: new Date("2025-01-01T00:00:00Z"),
+        nodeCount: 1,
+        frameworkVersion: FRAMEWORK_VERSION,
+      },
+      createdAt: new Date(0),
+    });
+    const loadResult = await cp.load(R("nan-clock-2"));
+    expect(loadResult.ok).toBe(false);
+    if (!loadResult.ok) {
+      expect(loadResult.error.kind).toBe("cache-error");
+      if (loadResult.error.kind === "cache-error") {
+        expect(loadResult.error.operation).toBe("checkpoint:load");
+        expect(loadResult.error.failureClass).toBe("permanent");
+        expect(retriabilityOf(loadResult.error)).toBe("non-retriable");
+      }
+    }
   });
 
   // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a LEGAL

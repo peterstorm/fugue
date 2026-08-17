@@ -105,6 +105,14 @@ export const isBoundaryIdString = (value: unknown): value is string =>
  * (checkpointer-codec.ts, freshness-index.ts): an object that is not an
  * array. Null-prototype records remain plain. One encoding — the parsing
  * modules import this instead of keeping private copies that can drift.
+ *
+ * DELIBERATE LENIENCY vs `isPlainObject` (checkpointer-codec.ts): class
+ * instances (prototype ≠ `Object.prototype`/null) PASS here, so a
+ * `plainRecord: true` codec snapshot field does NOT imply a prototype-clean
+ * record — the call sites only need "object that is not an array", and
+ * prototype-cleaning happens in the codec pipeline's own stages. Use
+ * `isPlainObject` where a prototype-clean record is the contract (runtime
+ * configuration objects).
  */
 export const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);

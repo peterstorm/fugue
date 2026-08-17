@@ -75,9 +75,12 @@ export interface CreateFileJobArgs<S, C> extends FileJournalOptions {
 const deepFreeze = <T>(value: T): T => {
   if (value !== null && typeof value === "object") {
     // `Reflect.ownKeys` — not `Object.getOwnPropertyNames` — so objects
-    // nested under SYMBOL keys are frozen too: `structuredClone` preserves
-    // own symbol properties, so they are part of the snapshot the contract
-    // promises is fully immutable.
+    // nested under symbol keys are frozen too. The `data` getter's clone
+    // can never carry symbol-keyed properties in the current data flow —
+    // `structuredClone` omits symbol keys, and the FR-009 boundary rejects
+    // symbol-keyed state at seed/`updateData` — but the totality keeps the
+    // primitive correct for any future snapshot source that does carry
+    // them, pinned by `__testDeepFreeze`.
     for (const key of Reflect.ownKeys(value)) {
       deepFreeze((value as Record<PropertyKey, unknown>)[key]);
     }

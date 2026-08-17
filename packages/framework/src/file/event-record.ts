@@ -1013,7 +1013,21 @@ const parseFileEventRecordUnchecked = (
   });
 };
 
-/** Result-preserving public parser shell: hostile runtime values never throw. */
+/**
+ * Strict record parser for DESERIALIZED input — the second stage of the read
+ * pipeline. Its precondition is that `raw` already passed
+ * `tryParseEventRecordJson` (JSON.parse + the complete canonical
+ * serializer-grammar gate + `deserializeValue`): feeding raw `JSON.parse`
+ * output directly loses the raw-seam guarantees — the permissive decoder
+ * would restore tag-shaped objects that the reserved-tag scan then rejects
+ * as spurious corrupt, and `deserializeValue`'s pollution-key filtering
+ * would be skipped (it erases `__proto__`/`constructor`/`prototype` keys
+ * silently instead of the pre-scan rejecting them). Hosts parsing persisted
+ * record file TEXT should use `parseStoredEventRecord` — the composite text
+ * entry point exported beside this from the `file.ts` barrel.
+ *
+ * Result-preserving public parser shell: hostile runtime values never throw.
+ */
 export const parseFileEventRecord = (
   raw: unknown,
   source: string,
@@ -1025,6 +1039,29 @@ export const parseFileEventRecord = (
       `${safeDiagnosticRender(source)}: event-record inspection failed: ${safeErrorMessage(error)} (FR-040)`,
     );
   }
+};
+
+/**
+ * Public TEXT entry point for the forensic read path (the `file.ts` barrel
+ * exports this beside `parseFileEventRecord`): the exact per-file composition
+ * the strict reader (`readStrict` in `event-log.ts`) performs —
+ * `tryParseEventRecordJson` (JSON.parse + the complete canonical
+ * serializer-grammar gate + `deserializeValue`) followed by
+ * `parseFileEventRecord`. A host round-tripping a persisted record file
+ * through the public codec pair should use THIS: it keeps the fail-closed
+ * pollution-key guarantee of the raw seam and cannot emit the spurious
+ * corrupt verdict a Map/Set/Date-bearing record would trip if raw
+ * `JSON.parse` output were fed straight into `parseFileEventRecord` (the
+ * tag-shaped plain objects the grammar accepts are restored by
+ * `deserializeValue` before the record parser sees them).
+ */
+export const parseStoredEventRecord = (
+  text: string,
+  source: string,
+): Result<FileEventRecord, string> => {
+  const raw = tryParseEventRecordJson(text, source);
+  if (!raw.ok) return raw;
+  return parseFileEventRecord(raw.value, source);
 };
 
 /**
@@ -1119,8 +1156,12 @@ const findReservedTagKey = (event: unknown): ScanVerdict => {
       continue;
     }
     // Plain object (deserializeValue's output space): literal tag KEYS are
-    // the corrupt form; the values may hold further objects to walk.
-    for (const key of Object.keys(value)) {
+    // the corrupt form; the values may hold further objects to walk. One
+    // `Object.keys` snapshot serves both the reserved-tag scan and the
+    // reverse walk (synchronous walk — no mutation or re-entrancy between
+    // the two passes).
+    const keys = Object.keys(value);
+    for (const key of keys) {
       if (RESERVED_TAG_KEYS.has(key)) {
         return {
           kind: "hit",
@@ -1129,7 +1170,6 @@ const findReservedTagKey = (event: unknown): ScanVerdict => {
         };
       }
     }
-    const keys = Object.keys(value);
     for (let i = keys.length - 1; i >= 0; i--) {
       const key = keys[i];
       stack.push({

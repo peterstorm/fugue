@@ -17,7 +17,10 @@
  * - `createFileFreshnessIndex`, backed by one digest-addressed atomic
  *   latest-write singleton per resource, with deterministic Redis-compatible
  *   tie-breaking and lazy 24h TTL;
- * - the journal and record codecs used by hosts that need forensic reads.
+ * - the journal and record codecs used by hosts that need forensic reads —
+ *   `parseStoredEventRecord` is the text entry point (the full raw-seam →
+ *   strict-parser composition); `parseFileEventRecord` remains exported as
+ *   the deserialized-input stage.
  *
  * Associated option and record types are exported beside their constructors.
  * Result-bearing ports return `Result<_, FrameworkError>`; throwing-only
@@ -45,6 +48,7 @@ export {
   assertLosslessEvent,
   isDedupKey,
   parseFileEventRecord,
+  parseStoredEventRecord,
   serializeFileEventRecord,
 } from "./file/event-record.js";
 export type { FileEventRecord } from "./file/event-record.js";

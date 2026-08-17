@@ -199,18 +199,16 @@ export const createFileJournal = (
 ): FileJournal => {
   let now: () => number;
   try {
+    // One wrap per failure — the body throws plain diagnostic strings (as
+    // `parseFileFactoryClock` already does) and the single outer catch wraps
+    // once at `"factory configuration"`, structurally identical to the
+    // `createFileCheckpointer` / `createFileFreshnessIndex` factories.
     if (typeof directory !== "string" || directory.length === 0 || directory.includes("\u0000")) {
-      throw fileOperationError(
-        "createFileJournal",
-        "factory directory",
+      throw new Error(
         `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`,
       );
     }
-    try {
-      now = parseFileFactoryClock(opts);
-    } catch (error) {
-      throw fileOperationError("createFileJournal", `run directory ${directory}`, error);
-    }
+    now = parseFileFactoryClock(opts);
   } catch (error) {
     throw fileOperationError("createFileJournal", "factory configuration", error);
   }
@@ -474,5 +472,3 @@ export const createFileJournal = (
 
   return { appendEvent, writeCheckpoint, writeProgress, readCheckpoint };
 };
-
-export type { FileEventRecord };

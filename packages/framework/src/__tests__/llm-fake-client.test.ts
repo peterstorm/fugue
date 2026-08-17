@@ -7,6 +7,7 @@
  *
  *   - response provider throw          → typed node-crash
  *   - non-serializable provider result → typed node-crash
+ *   - async provider/script result (thenable, synchronous seam) → typed node-crash
  *   - withToolsScript throw            → typed node-crash
  *   - hostile tracer/span              → typed node-crash
  *   - final-turn schema-validation throw (hostile getter) → typed node-crash
@@ -19,6 +20,7 @@ import { z } from "zod";
 import { NoopObserver } from "../observer/observer.js";
 import type { RunId, DagId, NodeId } from "../types/ids.js";
 import { FakeLlmClient } from "../llm/fake-client.js";
+import type { FakeWithToolsScript } from "../llm/fake-client.js";
 import type { ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { stubLlmClient } from "./_llm-mocks.js";
@@ -102,6 +104,31 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     }
   });
 
+  // Synchronous seam: an accidentally-`async` provider type-checks (the
+  // return type is `unknown`-wide), and its Promise would stringify to "{}" —
+  // silently resolving an empty (wrong) response. The seam rejects thenables
+  // loudly instead (pinned for the function form, the Map-value form, and the
+  // withToolsScript twin).
+  test("an async response provider is a typed node-crash (not a silent empty response)", async () => {
+    const client = new FakeLlmClient(async () => ({ result: 1 }));
+    const result = await client.sendStructured(structuredReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/returned a Promise/);
+    }
+  });
+
+  test("a Promise stored as a Map provider value is a typed node-crash", async () => {
+    const client = new FakeLlmClient(new Map([["m1", Promise.resolve({ result: 1 })]]));
+    const result = await client.sendStructured(structuredReq());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/returned a Promise/);
+    }
+  });
+
   test("a throwing withToolsScript function is a typed node-crash", async () => {
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: () => {
@@ -113,6 +140,23 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       expect((result.error as { message: string }).message).toMatch(/withToolsScript threw/);
+    }
+  });
+
+  // The TS surface rejects an async script at compile time (`Promise<T>` is
+  // not a `FakeTurn`); this cast simulates a JS/`any` caller reaching the
+  // runtime seam guard — without it the Promise would fall through as a
+  // truthy turn with no `type`/`calls` and misattribute the failure deep in
+  // tool dispatch.
+  test("an async withToolsScript function is a typed node-crash (not a misattributed dispatch failure)", async () => {
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: (async () => ({ type: "final", content: { result: 1 } })) as unknown as FakeWithToolsScript,
+    });
+    const result = await client.sendWithTools(toolsReq(), makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect((result.error as { message: string }).message).toMatch(/withToolsScript returned a Promise/);
     }
   });
 

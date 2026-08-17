@@ -45,6 +45,7 @@ import {
   serializeFileEventRecord,
 } from "../file.js";
 import { journalCapacityError } from "../file/journal.js";
+import { asCacheError } from "./_cache-error-helpers.js";
 import {
   CHECKPOINT_FILE,
   EVENTS_DIR,
@@ -88,21 +89,6 @@ const eventsOf = (dir: string): readonly { type: string }[] => {
   return result.ok ? result.value.map((e) => e.event as { type: string }) : [];
 };
 
-/** Narrow a reader failure to the `cache-error` member for property assertions. */
-const asCacheError = (
-  error: unknown,
-  expectedOperation?: string,
-): Extract<FrameworkError, { readonly kind: "cache-error" }> => {
-  expect(isFrameworkError(error)).toBe(true);
-  if (!isFrameworkError(error) || error.kind !== "cache-error") {
-    throw new Error("expected a typed cache-error");
-  }
-  expect(error.kind).toBe("cache-error");
-  if (expectedOperation !== undefined) expect(error.operation).toBe(expectedOperation);
-  expect(error.message.length).toBeGreaterThan(0);
-  return error;
-};
-
 // ---------------------------------------------------------------------------
 // Closed typed factory/runtime boundary
 // ---------------------------------------------------------------------------
@@ -115,6 +101,7 @@ describe("createFileJournal — closed typed throwing shell", () => {
       [tempDir(), null],
       [tempDir(), { now: 7 }],
       [tempDir(), { typo: true }],
+      [tempDir(), new (class OptionsInstance {})()],
     ] as const) {
       let failure: unknown;
       try {
@@ -127,6 +114,27 @@ describe("createFileJournal — closed typed throwing shell", () => {
       }
       expect(asCacheError(failure, "createFileJournal").message.length).toBeGreaterThan(0);
     }
+  });
+
+  it("rejects a class-instance options bag on the PROTOTYPE branch (pinned by exact message)", () => {
+    class OptionsInstance {}
+    let failure: unknown;
+    try {
+      createFileJournal(
+        tempDir(),
+        new OptionsInstance() as unknown as Parameters<typeof createFileJournal>[1],
+      );
+    } catch (error) {
+      failure = error;
+    }
+    // The exact message isolates the prototype branch of
+    // `parseFileFactoryClock`: `null` takes the first-check message ("options
+    // must be a plain object, got …"), a class instance the bare branch
+    // message — the identical branch the stricter sibling parser pins in
+    // `file-checkpointer.test.ts`.
+    expect(asCacheError(failure, "createFileJournal").message).toBe(
+      "createFileJournal failed at factory configuration: options must be a plain object",
+    );
   });
 
   it("contains hostile clock throws and logger throws without raw leakage", async () => {

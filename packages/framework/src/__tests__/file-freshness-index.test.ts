@@ -170,6 +170,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       [tempDirectory(), null],
       [tempDirectory(), { now: 7 }],
       [tempDirectory(), { typo: true }],
+      [tempDirectory(), new (class OptionsInstance {})()],
     ] as const) {
       let failure: unknown;
       try {
@@ -188,6 +189,31 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       expect(failure.operation).toBe("createFileFreshnessIndex");
       expect(failure.message).toContain("factory configuration");
     }
+  });
+
+  it("rejects a class-instance options bag on the PROTOTYPE branch (pinned by exact message)", () => {
+    class OptionsInstance {}
+    let failure: unknown;
+    try {
+      createFileFreshnessIndex(
+        tempDirectory(),
+        new OptionsInstance() as unknown as Parameters<typeof createFileFreshnessIndex>[1],
+      );
+    } catch (error) {
+      failure = error;
+    }
+    // The exact message isolates the prototype branch of
+    // `parseFileFactoryClock`: `null` takes the first-check message ("options
+    // must be a plain object, got …"), a class instance the bare branch
+    // message — the identical branch the stricter sibling parser pins in
+    // `file-checkpointer.test.ts`.
+    expect(isFrameworkError(failure)).toBe(true);
+    if (!isFrameworkError(failure) || failure.kind !== "cache-error") {
+      throw new Error("expected typed freshness factory failure");
+    }
+    expect(failure.message).toBe(
+      "createFileFreshnessIndex failed at factory configuration: options must be a plain object",
+    );
   });
   it("is exported from the public file barrel", () => {
     expect(barrelCreateFileFreshnessIndex).toBe(createFileFreshnessIndex);

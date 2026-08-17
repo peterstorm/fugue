@@ -1,9 +1,19 @@
 /**
- * Tests for the `llm-budget-exceeded` FrameworkError variant (FR-W1-003).
+ * Shared error-taxonomy test surface for `FrameworkError` (`types/errors.ts`)
+ * and its total renderers — the blocks:
  *
- * Verifies the new variant is discriminable on `kind`, carries its structured
- * payload, formats to a legible single line, and round-trips through
- * FrameworkAugmentedError — without breaking the exhaustive `formatFrameworkError`.
+ * - `checkpoint-write-failed` diagnostics (truthful branding + `invalid*` facets)
+ * - `llm-budget-exceeded` (FR-W1-003)
+ * - `infra-unreachable` / `policy-refusal` / `downstream-denied` (FR-X-001/002)
+ * - capability-broker taxonomy discriminability (SC-013)
+ * - `retriabilityOf` — the single source of truth for the retry fast-fail fork
+ * - `safeErrorMessage` hostile thrown-value matrix
+ * - total Node errno diagnostics
+ * - `messageOf` retry-exhausted lastError summariser
+ *
+ * Each block verifies its variant is discriminable on `kind`, carries its
+ * structured payload, and formats to a legible single line — without breaking
+ * the exhaustive `formatFrameworkError`.
  */
 
 import { describe, it, expect } from "bun:test";

@@ -174,13 +174,16 @@ const RULES: BoundaryRule[] = [
     reason:
       "shared/** must not import OTel, observer/**, or tracing/**. Telemetry-aware helpers belong in dag-runtime/ (the only consumer). NoopObserver now lives in types/observer.ts so shared/ no longer needs the exemption.",
   },
-  // `types/` is a lower layer consumed by everything above it. It must not
-  // depend on `dag-runtime/` or `executor/` — those are higher layers.
+  // `types/index.ts` alone: the barrel re-exports `computeJsonPatch` from
+  // shared/ as part of the public API surface, so it keeps its own narrower
+  // rule (may import `../shared`; must not `../dag-runtime`/`../executor`).
+  // Every OTHER types/ file is governed by the full rule above — one rule per
+  // file, so a violation is reported exactly once.
   {
-    scope: ["types"],
+    scope: ["types/index.ts"],
     forbiddenModules: ["../dag-runtime", "../executor"],
     reason:
-      "types/ is a lower layer; it must not import from dag-runtime/ or executor/. Pure utilities belong in shared/.",
+      "types/index.ts is a lower layer; it must not import from dag-runtime/ or executor/. Pure utilities belong in shared/.",
   },
   // Anti-leak: the public main-barrel files and intermediate barrels in
   // cache/ and checkpoint/ must not pull `ioredis` into their import graph.

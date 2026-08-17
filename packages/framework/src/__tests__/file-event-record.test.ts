@@ -47,11 +47,14 @@ import {
   serializeFileEventRecord,
   parseDedupKey,
   parseFileEventRecord,
+  parseStoredEventRecord,
   parseJournalSequence,
   tryParseEventRecordJson,
   MAX_SAFE_RECORD_DEPTH,
 } from "../file/event-record.js";
+import { parseStoredEventRecord as barrelParseStoredEventRecord } from "../file.js";
 import { readFileEventRecords, readFileEvents } from "../file/event-log.js";
+import { asCacheError } from "./_cache-error-helpers.js";
 import { EVENTS_DIR, JOURNAL_SCHEMA_VERSION } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError } from "../types/errors.js";
@@ -69,19 +72,6 @@ const assertOpaqueRecordFields = (_record: FileEventRecord): void => {
   void dedupKey;
 };
 void assertOpaqueRecordFields;
-
-const asCacheError = (
-  error: unknown,
-  operation: string,
-): Extract<FrameworkError, { readonly kind: "cache-error" }> => {
-  expect(isFrameworkError(error)).toBe(true);
-  if (!isFrameworkError(error) || error.kind !== "cache-error") {
-    throw new Error("expected a typed cache-error");
-  }
-  expect(error.kind).toBe("cache-error");
-  expect(error.operation).toBe(operation);
-  return error;
-};
 
 /** Fresh temp directory + events/ subdir, removed after the test — for the
  * read-pipeline pollution tests (raw on-disk bytes, not write-side output). */
@@ -1501,6 +1491,52 @@ describe("prototype-pollution keys — fail-closed at the raw-JSON read seam (FR
     if (!r.ok) {
       expect(r.error).toContain(`${SOURCE}: not valid JSON:`);
       expect(r.error).toContain("(FR-009)");
+    }
+  });
+});
+
+describe("parseStoredEventRecord — the public text entry point (barrel forensic path)", () => {
+  it("is exported from the public file barrel", () => {
+    expect(barrelParseStoredEventRecord).toBe(parseStoredEventRecord);
+  });
+
+  it("round-trips a Map/Set/Date-bearing record file TEXT without a spurious corrupt verdict", () => {
+    // Regression pin for the shallow-fragment footgun: a legitimate
+    // Map/Set/Date record serializes to tag-shaped plain objects in raw
+    // JSON. The composite keeps the reader's full pipeline (grammar gate →
+    // deserializeValue → strict parse) and restores the types; the fragment
+    // stage alone, fed raw `JSON.parse` output, trips the reserved-tag scan
+    // as a literal tag key — a FALSE positive on valid input.
+    const event = new Map<string, unknown>([
+      ["set", new Set([1, 2, 3])],
+      ["when", new Date(1_700_000_000_000)],
+    ]);
+    const json = serializeFileEventRecord(3, "agent:run-9", 1_700_000_000_000, event);
+
+    const viaText = parseStoredEventRecord(json, SOURCE);
+    expect(viaText.ok).toBe(true);
+    if (viaText.ok) {
+      expect(viaText.value.event).toEqual(event);
+      expect(viaText.value.event).toBeInstanceOf(Map);
+    }
+
+    const viaFragment = parseFileEventRecord(JSON.parse(json), SOURCE);
+    expect(viaFragment.ok).toBe(false);
+    if (!viaFragment.ok) {
+      expect(viaFragment.error).toContain("literal reserved serializer tag key");
+    }
+  });
+
+  it("keeps the fail-closed pollution-key guarantee through the text seam", () => {
+    const polluted =
+      '{"schemaVersion":1,"sequence":0,"dedupKey":"","recordedAtMs":1,' +
+      '"event":{"__proto__":{"polluted":1}}}' ;
+    const result = parseStoredEventRecord(polluted, SOURCE);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("record.event.__proto__");
+      expect(result.error).toContain("prototype-pollution-filtered key");
+      expect(result.error).toContain("corrupt or hostile");
     }
   });
 });

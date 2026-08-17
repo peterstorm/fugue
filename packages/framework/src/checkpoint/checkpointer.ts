@@ -12,8 +12,9 @@ import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
  * The checkpointer port's 24-hour TTL contract (FR-027) — ONE encoding,
  * owned by the port file that specifies the expiry semantics. The in-memory
  * adapter below evaluates it lazily on `load`; the file backend consumes the
- * same constant through `file/layout.ts` (its TTL import), and the Redis
- * backend mirrors the same 24-hour contract. Production runs longer than
+ * same constant directly from this port file (`file/checkpointer.ts`,
+ * `file/freshness-index.ts`), and the Redis backend mirrors the same
+ * 24-hour contract. Production runs longer than
  * this should re-checkpoint anyway. TTL evaluation is lazy at read time
  * (load-order parity with the Redis backend) — not ADR-0017, which is the
  * framework-version-mismatch contract enforced in `load` below.
@@ -167,9 +168,11 @@ const INVALID_RUN_ID: RunId = __brandRunId("checkpoint_invalid_run");
  * strings, so branding them unconditionally would turn a cloneable-state
  * refusal into a second raw rejection (FR-040).
  *
- * Truthful branding, one encoding shared with the file backend's `writeFailed`
- * (checkpointer-codec.ts): a raw id that fails `ID_PATTERN` never inhabits the
- * branded field; the rejected RAW bytes are preserved additively in
+ * Truthful branding, in PARITY with the file backend's `writeFailed`
+ * (checkpointer-codec.ts) — the policy is manually mirrored in each layer, so
+ * any change to it must land on BOTH sides (the hostile-value corpus pins it
+ * per backend): a raw id that fails `ID_PATTERN` never inhabits the branded
+ * field; the rejected RAW bytes are preserved additively in
  * `invalidRunId`/`invalidNodeId` through the total `stringOf` renderer (no
  * pre-quoting or truncation — `formatFrameworkError` is the single bounding
  * point).
@@ -197,11 +200,20 @@ const checkpointWriteFailed = (
   };
 };
 
-/** Typed `cache-error` mapper for the in-memory adapter's I/O-free failure classes. */
-const cacheError = (operation: string, error: unknown): FrameworkError => ({
+/** Typed `cache-error` mapper for the in-memory adapter's I/O-free failure
+ * classes. `failureClass` is the additive permanent/transient discriminant
+ * (parity with the file backend's `checkpointerCacheError`): deterministic
+ * rejections — like a non-finite injected clock — are pinned `"permanent"` so
+ * `retriabilityOf` fast-fails them instead of burning the retry budget. */
+const cacheError = (
+  operation: string,
+  message: string,
+  failureClass?: "transient" | "permanent",
+): FrameworkError => ({
   kind: "cache-error",
   operation,
-  message: safeErrorMessage(error),
+  message,
+  ...(failureClass === undefined ? {} : { failureClass }),
 });
 
 /**
@@ -282,13 +294,27 @@ export class InMemoryCheckpointer implements Checkpointer {
     // Mirror the Redis TTL semantics — past-TTL meta is reported as
     // `checkpoint-expired` so callers see the same surface across backends.
     // The injected clock is an untrusted seam (hostile tests/proxies): a
-    // throwing clock must become a typed error, never a raw rejection.
-    let expired: boolean;
+    // throwing clock must become a typed error, never a raw rejection, and a
+    // non-finite clock output must fail closed too — a NaN TTL comparison is
+    // always `false`, which would silently void the FR-027 expiry (the file
+    // backend's twin rejects the identical input as a permanent `cache-error`;
+    // pinned in `redis-checkpointer.test.ts`).
+    let nowMs: number;
     try {
-      expired = this.now() - createdAt.getTime() > TTL_SECONDS * 1000;
+      nowMs = this.now();
     } catch (error) {
-      return err(cacheError("checkpoint:load", error));
+      return err(cacheError("checkpoint:load", safeErrorMessage(error)));
     }
+    if (!Number.isFinite(nowMs) || Number.isNaN(new Date(nowMs).getTime())) {
+      return err(
+        cacheError(
+          "checkpoint:load",
+          `load clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(nowMs)}`,
+          "permanent",
+        ),
+      );
+    }
+    const expired = nowMs - createdAt.getTime() > TTL_SECONDS * 1000;
     if (expired) {
       return err({
         kind: "checkpoint-expired",
@@ -372,11 +398,29 @@ export class InMemoryCheckpointer implements Checkpointer {
     let createdAt: Date;
     try {
       detached = this.detachStored(meta, "checkpoint meta");
-      // The injected clock is an untrusted seam; a throwing clock must become
-      // a typed error, never a raw rejection.
-      createdAt = new Date(this.now());
+      const createdAtMs = this.now();
+      // The injected clock is an untrusted seam: a throwing clock must become
+      // a typed error, never a raw rejection, and a non-finite clock output
+      // must fail closed too — `new Date(NaN)` is an invalid `Date` that would
+      // be stored silently and make every `load` TTL comparison a NaN
+      // comparison that is always `false` (the file backend's twin rejects the
+      // identical input as a permanent `cache-error`; pinned in
+      // `redis-checkpointer.test.ts`).
+      if (
+        !Number.isFinite(createdAtMs) ||
+        Number.isNaN(new Date(createdAtMs).getTime())
+      ) {
+        return err(
+          cacheError(
+            "checkpoint:setMeta",
+            `setMeta clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(createdAtMs)}`,
+            "permanent",
+          ),
+        );
+      }
+      createdAt = new Date(createdAtMs);
     } catch (error) {
-      return err(cacheError("checkpoint:setMeta", error));
+      return err(cacheError("checkpoint:setMeta", safeErrorMessage(error)));
     }
     // Always stamp the writer's framework version unless the caller supplied
     // their own (lets tests construct stale-version payloads). Matches

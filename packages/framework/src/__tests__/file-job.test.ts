@@ -41,6 +41,7 @@ import { CHECKPOINT_FILE, PROGRESS_FILE } from "../file/layout.js";
 import { __testDeepFreeze } from "../file/job.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
+import { asCacheError } from "./_cache-error-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -56,20 +57,6 @@ const tempDir = (): string => {
   const dir = mkdtempSync(join(tmpdir(), "file-job-"));
   cleanup.push(dir);
   return dir;
-};
-
-const asCacheError = (
-  error: unknown,
-  operation: string,
-): Extract<FrameworkError, { readonly kind: "cache-error" }> => {
-  expect(isFrameworkError(error)).toBe(true);
-  if (!isFrameworkError(error) || error.kind !== "cache-error") {
-    throw new Error("expected a typed cache-error");
-  }
-  expect(error.kind).toBe("cache-error");
-  expect(error.operation).toBe(operation);
-  expect(error.message.length).toBeGreaterThan(0);
-  return error;
 };
 
 // ---------------------------------------------------------------------------

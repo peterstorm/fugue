@@ -28,6 +28,12 @@ import {
  * Map resolution order (documented here; pinned by the Map-lookup test):
  * `responses.get(req.model) ?? responses.get(req.system)` — the model key
  * wins when present, otherwise the system-prompt key is the fallback.
+ *
+ * The seam is SYNCHRONOUS: the payload type is `unknown`-wide, so an
+ * accidentally-`async` function type-checks, and a returned Promise would
+ * stringify to `"{}"` — silently resolving an empty response. Thenables are
+ * therefore rejected with a typed node-crash at the seam (pinned in
+ * `llm-fake-client.test.ts`); return the value directly instead.
  */
 export type FakeResponseProvider =
   | Map<string, unknown | FrameworkError>
@@ -73,6 +79,20 @@ export type FakeWithToolsScript =
       req: SendWithToolsRequest<any>,
       ctx: FakeWithToolsTurnContext,
     ) => FakeTurn);
+
+/**
+ * Synchronous-seam guard: the provider/script return types are wide enough
+ * that an accidentally-`async` function type-checks, and a thenable payload
+ * must fail LOUDLY — `JSON.stringify(promise)` is `"{}"`, which would
+ * silently resolve an empty (wrong) response. Total on hostile values: only
+ * an object with a function `then` is thenable; a throwing `then` getter is
+ * not a thenable (the read itself is not observable here) and flows into the
+ * existing JSON-serialization guard.
+ */
+const isThenable = (value: unknown): boolean =>
+  value !== null &&
+  typeof value === "object" &&
+  typeof (value as { then?: unknown }).then === "function";
 
 export interface FakeLlmClientOpts {
   /**
@@ -125,6 +145,17 @@ export class FakeLlmClient implements LlmClient {
 
     if (isFrameworkError(raw)) {
       return err(raw);
+    }
+
+    // Synchronous seam: a thenable response (accidentally-`async` provider)
+    // would stringify to "{}" and silently resolve an empty response — reject
+    // it loudly with the typed crash instead.
+    if (isThenable(raw)) {
+      return err(
+        crash(
+          "FakeLlmClient: response provider returned a Promise — the provider seam is synchronous; return the value directly instead of an async provider",
+        ),
+      );
     }
 
     let rawText: string;
@@ -203,6 +234,18 @@ export class FakeLlmClient implements LlmClient {
 
       if (!turnSpec) {
         return err(crash(`FakeLlmClient: script ran out at turn ${turn}`));
+      }
+
+      // Synchronous seam (parity with the `sendStructured` guard): an
+      // accidentally-`async` script function returns a Promise, which would
+      // fall through as a truthy turn with no `type`/`calls` and misattribute
+      // the failure deep in tool dispatch — reject it loudly instead.
+      if (isThenable(turnSpec)) {
+        return err(
+          crash(
+            `FakeLlmClient: withToolsScript returned a Promise at turn ${turn} — the script seam is synchronous; return the turn directly instead of an async function`,
+          ),
+        );
       }
 
       const tokensIn = turnSpec.tokensIn ?? 10;

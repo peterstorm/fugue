@@ -58,15 +58,17 @@ export type FileOperation =
   | "writeCheckpoint"
   | "writeProgress";
 
-/** Preserve the public string field while constraining file-backend callers. */
+/** Preserve the public string field while constraining file-backend callers.
+ * The public factory already branches on `failureClass === undefined` and
+ * produces the identical object in both arms — delegate in one call; this
+ * wrapper's only job is narrowing `operation` to the closed `FileOperation`
+ * vocabulary. */
 export const fileCacheError = (
   operation: FileOperation,
   message: string,
   failureClass?: "transient" | "permanent",
 ): FrameworkError =>
-  failureClass === undefined
-    ? publicFrameworkError.cacheError(operation, message)
-    : publicFrameworkError.cacheError(operation, message, failureClass);
+  publicFrameworkError.cacheError(operation, message, failureClass);
 
 /**
  * Construct the closed typed throwing-shell failure used by file operations.
