@@ -1,7 +1,7 @@
 // createFileJob — the kernel's durable `JobLike` adapter over a FileJournal
 // (FR-001/FR-003).
 //
-// `createFileJob(directory, initial)` exposes the full kernel surface —
+// `createFileJob({ directory, initial, now? })` exposes the full kernel surface —
 // `data`, `updateData`, `updateProgress`, `appendEvent` — with the same
 // semantics as the in-memory/Redis adapters, but durable: a journal under
 // the caller-supplied directory that is fully recoverable in a fresh process
@@ -214,11 +214,20 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
       try {
         await journal.appendEvent(event, dedupKey);
       } catch (error) {
-        const reason =
-          typeof dedupKey === "string" && dedupKey.includes("|")
-            ? `${fileThrownValueMessage(error)}; the kernel fallback dedup key uses "|" — provide KernelRunOpts.computeDedupKey returning an FR-015-valid key`
-            : error;
-        throw fileOperationError("appendEvent", `run directory ${directory}`, reason);
+        if (typeof dedupKey === "string" && dedupKey.includes("|")) {
+          // The "|" key is rejected by parseOptionalDedupKey BEFORE any
+          // mkdir/lock/I/O, so the rejection here is ALWAYS the deterministic
+          // permanent FR-015 one — keep that class through the rewrap so
+          // retriabilityOf fast-fails instead of burning the retry budget
+          // (a string reason would infer no class at all, ADR-0080).
+          throw fileOperationError(
+            "appendEvent",
+            `run directory ${directory}`,
+            `${fileThrownValueMessage(error)}; the kernel fallback dedup key uses "|" — provide KernelRunOpts.computeDedupKey returning an FR-015-valid key`,
+            "permanent",
+          );
+        }
+        throw fileOperationError("appendEvent", `run directory ${directory}`, error);
       }
     },
   };

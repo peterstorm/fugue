@@ -34,6 +34,7 @@ import type {
   WitnessKind,
   WriteEntry,
 } from "../types/freshness.js";
+import { parseFileFactoryClock } from "./options.js";
 import { __brandWitness } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
@@ -424,25 +425,7 @@ const createFileFreshnessIndexUnchecked = (
   if (typeof directory !== "string" || directory.length === 0 || directory.includes("\u0000")) {
     throw `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`;
   }
-  if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
-    throw `options must be a plain object, got ${safeDiagnosticRender(opts)}`;
-  }
-  const prototype = Object.getPrototypeOf(opts);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw "options must be a plain object";
-  }
-  const keys = Reflect.ownKeys(opts);
-  const unsupported = keys.find((key) => key !== "now");
-  if (unsupported !== undefined) {
-    throw `unsupported option ${safeDiagnosticRender(unsupported)}; supported option is now`;
-  }
-  const configuredNow = keys.includes("now")
-    ? (opts as Record<string, unknown>).now
-    : undefined;
-  if (configuredNow !== undefined && typeof configuredNow !== "function") {
-    throw `options.now must be a function, got ${safeDiagnosticRender(configuredNow)}`;
-  }
-  const now = configuredNow === undefined ? Date.now : configuredNow as () => number;
+  const now = parseFileFactoryClock(opts);
 
   return {
     async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
@@ -520,10 +503,15 @@ const createFileFreshnessIndexUnchecked = (
       try {
         const parsedWitness = parseConditionedOn(conditionedOn);
         if (!parsedWitness.ok) {
-          return err(cacheFailure("freshness:findConflict", null, parsedWitness.error));
+          // Deterministic: the same conditioned-on value reproduces the
+          // identical rejection on every retry — pin "permanent" like the
+          // recordWrite twin's code-constructed rejections.
+          return err(cacheFailure("freshness:findConflict", null, parsedWitness.error, undefined, "permanent"));
         }
         if (!isFiniteNumber(sinceMs)) {
-          return err(cacheFailure("freshness:findConflict", null, "sinceMs must be finite"));
+          // Deterministic: a non-finite sinceMs fails identically on every
+          // retry — pin "permanent" like the recordWrite twin.
+          return err(cacheFailure("freshness:findConflict", null, "sinceMs must be finite", undefined, "permanent"));
         }
 
         digest = keyDigest(parsedWitness.value.resource);

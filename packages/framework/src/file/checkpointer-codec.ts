@@ -43,6 +43,9 @@ import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import {
   deserializeValue,
   validateSerializedValueGrammar,
+  POLLUTION_KEYS,
+  RESERVED_TAG_KEYS,
+  serializedPath as outputPath,
 } from "../state-machine/serialize.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, RunId } from "../types/ids.js";
@@ -370,25 +373,9 @@ type CanonicalSerializedValue =
   | readonly CanonicalSerializedValue[]
   | { readonly [key: string]: CanonicalSerializedValue };
 
-const OUTPUT_RESERVED_TAG_KEYS: ReadonlySet<string> = new Set([
-  "__map__",
-  "__set__",
-  "__date__",
-  "__undefined__",
-]);
+const OUTPUT_RESERVED_TAG_KEYS: ReadonlySet<string> = RESERVED_TAG_KEYS;
 
-const OUTPUT_POLLUTION_KEYS: ReadonlySet<string> = new Set([
-  "__proto__",
-  "constructor",
-  "prototype",
-]);
-
-const outputPath = (parent: string, key: string | number): string =>
-  typeof key === "number"
-    ? `${parent}[${key}]`
-    : /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
-      ? `${parent}.${key}`
-      : `${parent}[${JSON.stringify(key)}]`;
+const OUTPUT_POLLUTION_KEYS: ReadonlySet<string> = POLLUTION_KEYS;
 
 const canonicalRecord = (
   entries: readonly (readonly [string, CanonicalSerializedValue])[],

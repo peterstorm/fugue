@@ -39,12 +39,15 @@ export const isFileCheckpointCommit = (
 ): value is FileCheckpointCommit<unknown, unknown> =>
   typeof value === "object" && value !== null && issuedCommits.has(value);
 
-// Structural equality over canonical `serializeValue` forms — the SHARED
-// `deepJsonEqual` from state-machine/serialize.ts (the one FR-009 verdict
-// definition shared with the event-record codec). NaN equals NaN so the JSON
-// round-trip can expose its coercion to null; -0 intentionally equals 0
-// because JSON canonicalizes that one documented representation.
-
+/**
+ * Mint the `FileCheckpointCommit` capability: pre-scan the whole
+ * `{ schemaVersion, data }` envelope through the shared FR-009 losslessness
+ * gate, serialize it ONCE, round-trip verify the exact bytes, and take the
+ * deep-equal verdict — the returned `data` snapshot is reconstructed from
+ * those exact committed bytes, so in-memory state can never diverge from
+ * `checkpoint.json` (the shared `deepJsonEqual` semantics — NaN equals NaN,
+ * `-0` equals `0` — are documented on `state-machine/serialize.ts`).
+ */
 const serializeFileCheckpointUnchecked = <S, C>(
   data: FileCheckpointData<S, C>,
 ): FileCheckpointCommit<S, C> => {

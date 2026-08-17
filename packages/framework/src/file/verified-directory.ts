@@ -26,8 +26,7 @@
 //     verified parent is a regular non-symlink file whose canonical parent
 //     is the anchor path; returns the canonical path.
 //
-// These helpers throw raw `Error`/`TypeError` values with actionable
-// messages; the checkpointer shell converts every throw into its typed
+// These helpers throw raw `Error` values with actionable messages; the checkpointer shell converts every throw into its typed
 // `cache-error(load|saveNode|setMeta)` boundary, so nothing untyped crosses
 // the port (AD-6). Missing entries are distinguished ONLY by the caller:
 // `verifyDirectory(…, create: false)` returns `null` for ENOENT, while
@@ -61,12 +60,37 @@ const isMissingPathError = (error: unknown): boolean => {
  * final supplied base entry and every backend-managed descendant are checked;
  * portable Node does not expose openat-style traversal for pinning every
  * ancestor descriptor against a malicious concurrent rename.
+ *
+ * Return type is overload-proofed to the call's intent: a CREATING call
+ * (`create: true`) can only throw or return the frozen non-null anchor, so it
+ * returns `VerifiedDirectory` — a `null` there is an unrepresentable, type-
+ * level contradiction, not a runtime check. A non-creating probe returns
+ * `null` for the one legitimate absent case (ENOENT); every other failure
+ * throws.
  */
-export const verifyDirectory = (
+export function verifyDirectory(
+  path: string,
+  expectedParent: string | null,
+  create: true,
+): VerifiedDirectory;
+export function verifyDirectory(
+  path: string,
+  expectedParent: string | null,
+  create: false,
+): VerifiedDirectory | null;
+/** Boolean-typed call sites (wrappers that forward `create`) see the wide
+ * contract: the literal `true`/`false` overloads above narrow for direct
+ * callers. */
+export function verifyDirectory(
   path: string,
   expectedParent: string | null,
   create: boolean,
-): VerifiedDirectory | null => {
+): VerifiedDirectory | null;
+export function verifyDirectory(
+  path: string,
+  expectedParent: string | null,
+  create: boolean,
+): VerifiedDirectory | null {
   if (create) {
     try {
       mkdirSync(path, { recursive: expectedParent === null });
@@ -97,7 +121,7 @@ export const verifyDirectory = (
     );
   }
   return Object.freeze({ path: canonical, device: stat.dev, inode: stat.ino });
-};
+}
 
 export const assertDirectoryIdentity = (directory: VerifiedDirectory): void => {
   const stat = lstatSync(directory.path);

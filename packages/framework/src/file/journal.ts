@@ -79,6 +79,7 @@ import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
 import type { FrameworkError } from "../types/errors.js";
 import { probeErrorCode, safeDiagnosticRender } from "../types/safe-error.js";
+import { parseFileFactoryClock } from "./options.js";
 import {
   fileCacheError,
   fileOperationError,
@@ -90,11 +91,6 @@ import {
 // Errors (AD-6)
 // ---------------------------------------------------------------------------
 
-/**
- * Wrap an fs failure as the AD-6 typed throw: `cache-error` with the
- * failing operation and the run directory named in the message. `throw`
- * is the honest surface — the JobLike port has no error channel.
- */
 /**
  * Wrap a low-level failure as a typed `cache-error` naming the run directory.
  * `failureClass` marks the deterministic rejection sites (`"permanent"` —
@@ -209,41 +205,11 @@ export const createFileJournal = (
         `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`,
       );
     }
-    if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
-      throw fileOperationError(
-        "createFileJournal",
-        `run directory ${directory}`,
-        `options must be a plain object, got ${safeDiagnosticRender(opts)}`,
-      );
+    try {
+      now = parseFileFactoryClock(opts);
+    } catch (error) {
+      throw fileOperationError("createFileJournal", `run directory ${directory}`, error);
     }
-    const prototype = Object.getPrototypeOf(opts);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw fileOperationError(
-        "createFileJournal",
-        `run directory ${directory}`,
-        "options must be a plain object",
-      );
-    }
-    const keys = Reflect.ownKeys(opts);
-    const unsupported = keys.find((key) => key !== "now");
-    if (unsupported !== undefined) {
-      throw fileOperationError(
-        "createFileJournal",
-        `run directory ${directory}`,
-        `unsupported option ${safeDiagnosticRender(unsupported)}; supported option is now`,
-      );
-    }
-    const configuredNow = keys.includes("now")
-      ? (opts as Record<string, unknown>).now
-      : undefined;
-    if (configuredNow !== undefined && typeof configuredNow !== "function") {
-      throw fileOperationError(
-        "createFileJournal",
-        `run directory ${directory}`,
-        `options.now must be a function, got ${safeDiagnosticRender(configuredNow)}`,
-      );
-    }
-    now = configuredNow === undefined ? Date.now : configuredNow as () => number;
   } catch (error) {
     throw fileOperationError("createFileJournal", "factory configuration", error);
   }
@@ -367,13 +333,11 @@ export const createFileJournal = (
 
         const parsedSequence = parseJournalSequence(existing.length);
         if (!parsedSequence.ok) {
-          // Preserve the established capacity-specific message while routing
-          // every successful record construction through the opaque smart
-          // constructor. Other failures are impossible for an array length.
-          if (existing.length > MAX_LEXICOGRAPHIC_SEQUENCE) {
-            throw journalCapacityError("appendEvent", directory, existing.length);
-          }
-          throw fileOperationError("appendEvent", directory, parsedSequence.error);
+          // An array length is always a non-negative safe integer, so the
+          // parse can fail on the lexicographic ceiling ONLY — throw the
+          // capacity-specific rejection directly (it names the established
+          // message contract and the durable listing fact).
+          throw journalCapacityError("appendEvent", directory, existing.length);
         }
         // The injected clock is stamped inside the append critical section
         // and is the one dependency that can fail without touching the

@@ -139,9 +139,10 @@ export { META_RECORD_NODE_ID } from "./checkpointer-codec.js";
 const render = safeDiagnosticRender;
 const messageOf = safeErrorMessage;
 
-/** Checkpointer-only operation vocabulary. The narrower extraction makes a
- * cache operation typo fail both framework typechecks without narrowing the
- * public `FrameworkError` contract used by other adapters. */
+/** Checkpointer-only operation vocabulary. The `Extract<FileOperation, …>`
+ * narrowing makes a file-backend operation typo a compile error while leaving
+ * the public `cache-error.operation: string` contract used by other adapters
+ * untouched. */
 type FileCheckpointerCacheOperation = Extract<
   FileOperation,
   "load" | "saveNode" | "setMeta"
@@ -291,15 +292,15 @@ const createFileCheckpointerUnchecked = (
   const now = parseFileCheckpointerClock(opts);
 
   // Validated-id-only, symlink-rejecting path construction. Callers MUST have
-  // passed `isBoundaryId` before reaching here.
-  const runDirectoryOf = (
-    validRunId: string,
-    create: boolean,
-  ): VerifiedDirectory | null => {
+  // passed `isBoundaryId` before reaching here. Overload-proofed like
+  // verifyDirectory: a creating call can only throw or return the anchor.
+  function runDirectoryOf(validRunId: string, create: true): VerifiedDirectory;
+  function runDirectoryOf(validRunId: string, create: false): VerifiedDirectory | null;
+  function runDirectoryOf(validRunId: string, create: boolean): VerifiedDirectory | null {
     const base = verifyDirectory(directory, null, create);
     if (base === null) return null;
     return verifyDirectory(join(base.path, validRunId), base.path, create);
-  };
+  }
 
   return {
     async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
@@ -363,7 +364,6 @@ const createFileCheckpointerUnchecked = (
 
       try {
         const runDirectory = runDirectoryOf(runId, true);
-        if (runDirectory === null) throw new Error("run directory creation returned no directory");
         assertDirectoryIdentity(runDirectory);
         atomicWriteFile(join(runDirectory.path, META_FILE), json);
         assertDirectoryIdentity(runDirectory);
@@ -423,13 +423,11 @@ const createFileCheckpointerUnchecked = (
 
       try {
         const runDirectory = runDirectoryOf(runId, true);
-        if (runDirectory === null) throw new Error("run directory creation returned no directory");
         const nodesDirectory = verifyDirectory(
           join(runDirectory.path, NODES_DIR),
           runDirectory.path,
           true,
         );
-        if (nodesDirectory === null) throw new Error("nodes directory creation returned no directory");
         assertDirectoryIdentity(runDirectory);
         assertDirectoryIdentity(nodesDirectory);
         atomicWriteFile(join(nodesDirectory.path, `${keyDigest(nodeKey)}.json`), json);
@@ -589,80 +587,83 @@ const createFileCheckpointerUnchecked = (
 
       const nodes: Record<string, NodeState> = {};
       const corruptNodeIds: string[] = [];
-      // Sorted so the corrupt-address ordering is deterministic across
-      // platforms (readdir order is not specified).
-      for (const fileName of [...fileNames].sort()) {
-        // `.tmp.<unique-token>` crash litter (and anything else not claiming to be a
-        // record) is invisible to the reader — that IS the tmp+rename
-        // atomicity guarantee (FR-029), not a dropped entry.
-        if (!fileName.endsWith(".json")) continue;
+      // The listing block pairs `nodesDirectory` and `fileNames`: a non-empty
+      // listing implies a non-null directory, and an absent directory lists
+      // empty — so the wrap below is the single narrowing point, and the
+      // loop body never re-justifies a state that cannot occur.
+      if (nodesDirectory !== null) {
+        // Sorted so the corrupt-address ordering is deterministic across
+        // platforms (readdir order is not specified).
+        for (const fileName of [...fileNames].sort()) {
+          // `.tmp.<unique-token>` crash litter (and anything else not claiming to be a
+          // record) is invisible to the reader — that IS the tmp+rename
+          // atomicity guarantee (FR-029), not a dropped entry.
+          if (!fileName.endsWith(".json")) continue;
 
-        let nodeText: string;
-        try {
-          if (nodesDirectory === null) {
-            throw new Error("nodes directory disappeared after listing");
-          }
-          nodeText = readFileSync(verifyExistingFile(nodesDirectory, fileName), "utf-8");
-          assertDirectoryIdentity(nodesDirectory);
-          assertDirectoryIdentity(runDirectory);
-        } catch (error) {
-          // An unreadable path is an environment/I/O failure, not evidence
-          // that persisted bytes are malformed. Never warn/drop it as a
-          // corrupt node: the caller must see the failed load operation.
-          return err(
-            checkpointerCacheError(
-              "load",
-              `load failed to read node entry ${render(fileName)} for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
-            ),
-          );
-        }
-
-        let verdict: NodeEntryVerdict;
-        try {
-          verdict = parseNodeFile(fileName, nodeText);
-        } catch (error) {
-          // The pure parser returns a verdict for every expected malformed
-          // byte shape. A throw is therefore an implementation defect and is
-          // surfaced as a typed load failure, never mislabeled as corruption.
-          return err(
-            checkpointerCacheError(
-              "load",
-              `load hit an unexpected node parser failure for ${render(fileName)} in run ${render(runId)}: ${messageOf(error)}`,
-            ),
-          );
-        }
-
-        if (verdict.kind === "corrupt") {
-          const warning =
-            `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeKey=${verdict.address}: ${verdict.message}`;
+          let nodeText: string;
           try {
-            fwLogger().warn(warning);
+            nodeText = readFileSync(verifyExistingFile(nodesDirectory, fileName), "utf-8");
+            assertDirectoryIdentity(nodesDirectory);
+            assertDirectoryIdentity(runDirectory);
           } catch (error) {
+            // An unreadable path is an environment/I/O failure, not evidence
+            // that persisted bytes are malformed. Never warn/drop it as a
+            // corrupt node: the caller must see the failed load operation.
             return err(
               checkpointerCacheError(
                 "load",
-                `load failed to emit the required corrupt-node warning for run ${render(runId)} nodeKey=${render(verdict.address)}: ${messageOf(error)}`,
+                `load failed to read node entry ${render(fileName)} for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
               ),
             );
           }
-          corruptNodeIds.push(verdict.address);
-          continue;
+
+          let verdict: NodeEntryVerdict;
+          try {
+            verdict = parseNodeFile(fileName, nodeText);
+          } catch (error) {
+            // The pure parser returns a verdict for every expected malformed
+            // byte shape. A throw is therefore an implementation defect and is
+            // surfaced as a typed load failure, never mislabeled as corruption.
+            return err(
+              checkpointerCacheError(
+                "load",
+                `load hit an unexpected node parser failure for ${render(fileName)} in run ${render(runId)}: ${messageOf(error)}`,
+              ),
+            );
+          }
+
+          if (verdict.kind === "corrupt") {
+            const warning =
+              `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeKey=${verdict.address}: ${verdict.message}`;
+            try {
+              fwLogger().warn(warning);
+            } catch (error) {
+              return err(
+                checkpointerCacheError(
+                  "load",
+                  `load failed to emit the required corrupt-node warning for run ${render(runId)} nodeKey=${render(verdict.address)}: ${messageOf(error)}`,
+                ),
+              );
+            }
+            corruptNodeIds.push(verdict.address);
+            continue;
+          }
+          // `defineProperty`, not `nodes[key] = …`: `__proto__` is an
+          // ID_PATTERN-valid nodeId (`_` is in the charset), and plain assignment
+          // would hit `Object.prototype`'s `__proto__` SETTER — re-parenting the
+          // returned map instead of adding an entry, silently losing a stored
+          // node with no `corruptNodeIds` trace. A data descriptor always creates
+          // an OWN, enumerable property, so every stored address round-trips
+          // (US2) and the in-memory backend's computed-key semantics are matched
+          // exactly. The map keeps its ordinary prototype so callers comparing it
+          // against a plain object literal are unaffected.
+          Object.defineProperty(nodes, verdict.nodeKey, {
+            value: verdict.state,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
         }
-        // `defineProperty`, not `nodes[key] = …`: `__proto__` is an
-        // ID_PATTERN-valid nodeId (`_` is in the charset), and plain assignment
-        // would hit `Object.prototype`'s `__proto__` SETTER — re-parenting the
-        // returned map instead of adding an entry, silently losing a stored
-        // node with no `corruptNodeIds` trace. A data descriptor always creates
-        // an OWN, enumerable property, so every stored address round-trips
-        // (US2) and the in-memory backend's computed-key semantics are matched
-        // exactly. The map keeps its ordinary prototype so callers comparing it
-        // against a plain object literal are unaffected.
-        Object.defineProperty(nodes, verdict.nodeKey, {
-          value: verdict.state,
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
       }
 
       return ok({

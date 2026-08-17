@@ -22,6 +22,13 @@ import {
   setLlmResponseAttributes,
 } from "./spans.js";
 
+/**
+ * Scripted response source for `FakeLlmClient`.
+ *
+ * Map resolution order (documented here; pinned by the Map-lookup test):
+ * `responses.get(req.model) ?? responses.get(req.system)` — the model key
+ * wins when present, otherwise the system-prompt key is the fallback.
+ */
 export type FakeResponseProvider =
   | Map<string, unknown | FrameworkError>
   | ((req: LlmRequest<any>) => unknown | FrameworkError);

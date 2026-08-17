@@ -99,12 +99,6 @@ import { frameworkError } from "../types/error-factories.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
 
-/** Extract a diagnostic message from any `FrameworkError` — some variants
- * (e.g. `checkpoint-missing`) carry no `message` field, so the access is
- * narrowed rather than assumed. Used where a reader error's message (which
- * names the offending file and reason) must ride inside `checkpoint-corrupt`. */
-const errorMessageOf = (error: FrameworkError): string => messageOf(error);
-
 export interface ResumeFileJobArgs<S, E, C> {
   /** Run identity, carried on every typed error (`checkpoint-missing` /
    * `checkpoint-corrupt` include it as a field; the disagreement message
@@ -173,7 +167,11 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    AD-6 (see the module header): the log cannot be proven ⇒ fail closed.
   const events = readFileEvents(directory);
   if (!events.ok) {
-    return err(frameworkError.checkpointCorrupt(runId, errorMessageOf(events.error)));
+    // `messageOf` narrows: some `FrameworkError` variants (e.g.
+    // `checkpoint-missing`) carry no `message` field. The reader's message —
+    // which names the offending file and reason — must ride inside
+    // `checkpoint-corrupt`.
+    return err(frameworkError.checkpointCorrupt(runId, messageOf(events.error)));
   }
 
   // 2. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's

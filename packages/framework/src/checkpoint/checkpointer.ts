@@ -144,13 +144,19 @@ const INVALID_NODE_ID: NodeId = __brandNodeId("checkpoint_invalid_node");
  * on a hostile raw `nodeId` — the port's `nodeId` parameter is an unvalidated
  * string, so branding it unconditionally would turn a cloneable-state refusal
  * into a second raw rejection (FR-040).
+ *
+ * `typeof` guard before the pattern test (parity with the file backend's
+ * `writeFailed` and with `isIdComponent`/`isBoundaryId`): `RegExp.test`
+ * coerces non-strings, so a bypassed numeric brand would otherwise match
+ * `ID_PATTERN` and inhabit the branded `nodeId` field instead of routing
+ * through `INVALID_NODE_ID` + `invalidNodeId`.
  */
 const checkpointWriteFailed = (
   runId: RunId,
   nodeIdRaw: string,
   message: string,
 ): FrameworkError =>
-  ID_PATTERN.test(nodeIdRaw)
+  typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw)
     ? { kind: "checkpoint-write-failed", runId, nodeId: nodeIdRaw as NodeId, message }
     : {
         kind: "checkpoint-write-failed",

@@ -253,3 +253,82 @@ describe("FakeLlmClient — Map provider lookup order", () => {
     if (!none.ok) expect(none.error.kind).toBe("node-crash");
   });
 });
+
+// Every exit branch of the `sendWithTools` loop is typed and pinned: a
+// regression flipping any branch's retriability (especially the iteration
+// limit — the loop's ONLY non-retriable node-crash) would change retry
+// fast-fail behavior with no in-scope test failing.
+describe("FakeLlmClient — sendWithTools loop-exit branches", () => {
+  test("script exhaustion is a RETRIABLE node-crash naming the turn", async () => {
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: [],
+    });
+    const result = await client.sendWithTools(toolsReq(), makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error).toMatchObject({ retriability: "retriable" });
+      expect((result.error as { message: string }).message).toMatch(/script ran out at turn 0/);
+    }
+  });
+
+  test("the iteration limit is the loop's ONLY non-retriable node-crash", async () => {
+    const tool: ToolDef<{}, { ok: number }> = {
+      name: "spin",
+      description: "never finishes",
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.number() }),
+      run: async () => ({ ok: 1 }),
+    } as unknown as ToolDef<{}, { ok: number }>;
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: () => ({ type: "tool_use", calls: [{ id: "c1", name: "spin", input: {} }] }),
+    });
+    const result = await client.sendWithTools(
+      toolsReq({ tools: [tool], maxIterations: 2 }),
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      // The node's retry budget is exhausted by contract — re-running the
+      // identical scripted loop cannot clear it.
+      expect(result.error).toMatchObject({ retriability: "non-retriable" });
+      expect((result.error as { message: string }).message).toMatch(/iteration limit \(2\) reached/);
+    }
+  });
+
+  test("a tool_use turn under toolChoice='none' is a retriable node-crash", async () => {
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: () => ({ type: "tool_use", calls: [{ id: "c1", name: "x", input: {} }] }),
+    });
+    const result = await client.sendWithTools(
+      toolsReq({ toolChoice: "none" }),
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(result.error).toMatchObject({ retriability: "retriable" });
+      expect((result.error as { message: string }).message).toMatch(/toolChoice='none'/);
+    }
+  });
+
+  test("an already-aborted signal exits as typed aborted(signal), before any turn", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let scriptRan = false;
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: () => {
+        scriptRan = true;
+        return { type: "final", content: { result: 1 } };
+      },
+    });
+    const result = await client.sendWithTools(
+      toolsReq({ signal: controller.signal }),
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ kind: "aborted", reason: "signal" });
+    expect(scriptRan).toBe(false); // the abort check precedes any turn script call
+  });
+});

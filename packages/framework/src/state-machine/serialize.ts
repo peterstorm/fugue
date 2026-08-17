@@ -18,16 +18,30 @@ type SerializedUndefined = { __undefined__: true };
 const RESERVED_TAGS = [MAP_TAG, SET_TAG, DATE_TAG, UNDEFINED_TAG] as const;
 type ReservedTag = (typeof RESERVED_TAGS)[number];
 
-const POLLUTION_KEYS: ReadonlySet<string> = new Set([
+/**
+ * ONE encoding of the reserved tag-key set, shared with the file FR-009
+ * pre-scans (`event-record.ts`, `checkpointer-codec.ts`) so a change to the
+ * serializer's tag behavior can never silently desync the pre-scan guards.
+ * The const tuple above remains the single source for the tag values.
+ */
+export const RESERVED_TAG_KEYS: ReadonlySet<string> = new Set(RESERVED_TAGS);
+
+/**
+ * ONE encoding of the prototype-pollution keys `serializeValue` filters out
+ * of plain objects, shared with the file FR-009 pre-scans (which reject them
+ * at the write boundary instead of persisting them missing).
+ */
+export const POLLUTION_KEYS: ReadonlySet<string> = new Set([
   "__proto__",
   "constructor",
   "prototype",
 ]);
 
 const isReservedTag = (key: string): key is ReservedTag =>
-  RESERVED_TAGS.some((tag) => tag === key);
+  RESERVED_TAG_KEYS.has(key);
 
-const serializedPath = (parent: string, key: string | number): string =>
+/** Diagnostic path renderer shared with `checkpointer-codec.ts` (ONE rule). */
+export const serializedPath = (parent: string, key: string | number): string =>
   typeof key === "number"
     ? `${parent}[${key}]`
     : /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
@@ -279,7 +293,7 @@ export const serializeValue = (value: unknown): unknown => {
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      if (POLLUTION_KEYS.has(k)) continue;
       out[k] = serializeValue(v);
     }
     return out;
@@ -393,7 +407,7 @@ export const deserializeValue = (value: unknown): unknown => {
     // Plain object — filter prototype pollution vectors
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      if (POLLUTION_KEYS.has(k)) continue;
       out[k] = deserializeValue(v);
     }
     return out;

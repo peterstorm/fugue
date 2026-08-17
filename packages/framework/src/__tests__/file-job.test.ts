@@ -591,6 +591,15 @@ describe("createFileJob — kernel without computeDedupKey (default fallback key
     // Attributable: names the caller-bug fix, not just the invalid key.
     expect(message).toMatch(/computeDedupKey/);
     expect(message).toContain("fallback");
+    // The FR-015 rejection is DETERMINISTIC — every kernel-fallback key
+    // contains "|", so no retry can clear the gate. The JobLike boundary must
+    // carry the journal's permanent class through the attributable rewrap (a
+    // plain-string reason would infer no class at all) so retriabilityOf
+    // fast-fails instead of burning the node's retry budget (ADR-0080); the
+    // checkpoint-side twin pins the same class at "non-lossless checkpoint
+    // rejections are classified permanent".
+    expect(typed.failureClass).toBe("permanent");
+    expect(retriabilityOf(typed)).toBe("non-retriable");
     // Fail-fast: the append aborted before anything became durable.
     expect(createFileJournal(dir).readCheckpoint()).toBeNull();
     const events = readFileEvents(dir);

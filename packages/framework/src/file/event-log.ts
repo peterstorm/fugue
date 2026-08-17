@@ -102,7 +102,17 @@ const readStrict = (directory: string): StrictResult => {
     try {
       contents = readFileSync(source, "utf-8");
     } catch (error) {
-      return err({ message: `${source}: read failed: ${safeErrorMessage(error)} (FR-009)` });
+      // A non-regular entry (a directory or similar) wearing a record name is
+      // a deterministic squat — re-running cannot clear it — so pin
+      // "permanent", parity with the append-time gate in journal.ts
+      // listEventFiles; every other errno is an environment failure replay
+      // may clear (a rename racing the listing, a transient I/O fault).
+      const codeProbe = probeErrorCode(error);
+      const squattingEntry = codeProbe.kind === "code" && codeProbe.code === "ENOTDIR";
+      return err({
+        message: `${source}: read failed: ${safeErrorMessage(error)} (FR-009)`,
+        ...(squattingEntry ? { permanent: true } : {}),
+      });
     }
     // Raw-JSON seam: `tryParseEventRecordJson` validates the complete exact
     // serializer grammar BEFORE `deserializeValue` may reinterpret tags or

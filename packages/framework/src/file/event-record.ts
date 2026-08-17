@@ -100,6 +100,29 @@ import {
   JOURNAL_SCHEMA_VERSION,
   MAX_LEXICOGRAPHIC_SEQUENCE,
 } from "./layout.js";
+// The reserved-tag and pollution-key sets are the serializer's own (ONE
+// encoding in state-machine/serialize.ts, shared with the checkpointer
+// codec) so the FR-009 pre-scan guards can never drift from the serializer
+// behavior they protect:
+//
+// RESERVED_TAG_KEYS — literal keys `serializeValue` uses as internal
+// markers: it emits `{__map__:…}`/`{__set__:…}`/`{__date__:…}`/
+// `{__undefined__:true}` for Map/Set/Date/undefined values. A plain object
+// in a caller's event carrying one of these keys is ambiguous with a tagged
+// form — `{__map__: [[1,2]]}` reads back as a Map and
+// `{__undefined__:true}` reads back as undefined — so JSON would change its
+// TYPE or erase it on the round trip, invisibly to the (equally lossy)
+// digest recompute. The write boundary rejects them; the read boundary
+// rejects them too (domain agreement): the writer can never produce one in
+// a plain object. On the READ side, `raw` is `tryFromJson` output, so a
+// literal tag key in a plain object only exists as a MALFORMED tag
+// encoding — well-formed tag-shaped bytes deserialize to Map/Set/Date/
+// undefined and are legitimate events of those types (byte-identical).
+//
+// POLLUTION_KEYS — keys `serializeValue` silently filters out of plain
+// objects (prototype-pollution defense). A caller's event containing them
+// would be persisted with those properties missing — the pre-scan rejects
+// them at the write boundary instead.
 import {
   toJson,
   serializeValue,
@@ -107,6 +130,8 @@ import {
   deserializeValue,
   deepJsonEqual,
   validateSerializedValueGrammar,
+  POLLUTION_KEYS,
+  RESERVED_TAG_KEYS,
 } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
 import { ok, err, tryCatch } from "../types/result.js";
@@ -259,44 +284,6 @@ export const parseOptionalDedupKey = (
 ): Result<DedupKey, string> =>
   parseDedupKey(value === undefined ? "" : value);
 
-/**
- * Structural equality over serializeValue canonical forms — the FR-009
- * losslessness verdict. The single shared definition lives in
- * `state-machine/serialize.ts` (`deepJsonEqual`), shared with the
- * checkpoint codec so the two FR-009 gates can never drift apart.
- */
-
-/**
- * Literal keys that `state-machine/serialize.ts` uses as its internal
- * markers: `serializeValue` emits `{__map__:…}`/`{__set__:…}`/
- * `{__date__:…}`/`{__undefined__:true}` for Map/Set/Date/undefined values.
- * A plain object in a caller's event carrying one of these keys is
- * ambiguous with a tagged form — `{__map__: [[1,2]]}` reads back as a Map
- * and `{__undefined__:true}` reads back as undefined — so JSON would change
- * its TYPE or erase it on the round trip, invisibly to the (equally lossy)
- * digest recompute. The write boundary rejects them; the read boundary
- * rejects them too (domain agreement): the writer can never produce one in
- * a plain object. On the READ side, `raw` is `tryFromJson` output, so a
- * literal tag key in a plain object only exists as a MALFORMED tag
- * encoding — well-formed tag-shaped bytes deserialize to Map/Set/Date/
- * undefined and are legitimate events of those types (byte-identical).
- */
-const RESERVED_TAG_KEYS: ReadonlySet<string> = new Set([
-  "__map__",
-  "__set__",
-  "__date__",
-  "__undefined__",
-]);
-
-/** Keys that `serializeValue` silently filters out of plain objects
- * (prototype-pollution defense). A caller's event containing them would be
- * persisted with those properties missing — the pre-scan rejects them at
- * the write boundary instead. */
-const POLLUTION_FILTERED_KEYS: ReadonlySet<string> = new Set([
-  "__proto__",
-  "constructor",
-  "prototype",
-]);
 
 /** Human-kind of a rejected value — constructor name, else toString tag —
  * so pre-scan errors name what was rejected. */
@@ -673,7 +660,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       }
 
       for (const key of enumerable) {
-        if (POLLUTION_FILTERED_KEYS.has(key)) {
+        if (POLLUTION_KEYS.has(key)) {
           throw new Error(
             `serializeFileEventRecord: ${path} has key ${JSON.stringify(key)} — toJson filters it as a prototype-pollution vector, so it would be silently dropped from the persisted record (FR-009)`,
           );

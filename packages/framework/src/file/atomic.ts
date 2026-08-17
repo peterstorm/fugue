@@ -385,6 +385,12 @@ export const stealStaleFileLock = async (
 /**
  * Acquire `lockPath`. The returned plain token must be supplied to release;
  * this protects same-pid concurrent callers as well as cross-process owners.
+ *
+ * Bounded acquisition: at most `MAX_ACQUIRE_ATTEMPTS` (50) attempts with a
+ * `RETRY_MS` (100 ms) backoff — a ceiling of ≈5 s. On exhaustion this throws
+ * the typed `cache-error(acquireFileLock)` naming the lock path plus any
+ * blocking fence entries (live tombs / pending birth-reap intents) and the
+ * last blocking owner-probe diagnostic — never a hang, never a raw throw.
  */
 export const acquireFileLock = async (
   lockPath: string,
