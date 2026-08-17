@@ -22,7 +22,8 @@ import {
   createFileFreshnessIndex,
 } from "../file/freshness-index.js";
 import { createFileFreshnessIndex as barrelCreateFileFreshnessIndex } from "../file.js";
-import { TTL_SECONDS, keyDigest } from "../file/layout.js";
+import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
+import { keyDigest } from "../file/layout.js";
 import { __testEncodeMember as encodeRedisMember } from "../checkpoint/redis-freshness-index.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
@@ -747,6 +748,36 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       expect(readFileSync(path, "utf-8")).toBe(bytes);
     }
     expect(warnings).toHaveLength(rejected.length);
+  });
+
+  it("recordWrite over a non-JSON corrupt singleton fails closed with a permanent typed cache-error and leaves the corrupt bytes untouched (ADR-0079)", async () => {
+    // The strict-codec rejection variants are pinned above; this completes
+    // the matrix with the JSON.parse-level corruption a partial write or
+    // truncation produces — a regression making recordWrite treat a corrupt
+    // singleton as absent (silently overwriting it with a stale write) must
+    // fail here.
+    const directory = tempDirectory();
+    const resource = "corrupt:recordwrite";
+    const path = join(directory, `${keyDigest(resource)}.json`);
+    const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
+    await index.recordWrite(writeEvent(resource, "2", 900));
+
+    const corruptBytes = "not-json";
+    writeFileSync(path, corruptBytes);
+
+    const write = await index.recordWrite(writeEvent(resource, "3", 950));
+    expect(write.ok).toBe(false);
+    if (!write.ok) {
+      expect(write.error.kind).toBe("cache-error");
+      if (write.error.kind === "cache-error") {
+        expect(write.error.operation).toBe("freshness:recordWrite");
+        expect(write.error.failureClass).toBe("permanent");
+        expect(retriabilityOf(write.error)).toBe("non-retriable");
+        expect(write.error.message).toContain(keyDigest(resource));
+      }
+    }
+    // The corrupt bytes are preserved — never silently replaced.
+    expect(readFileSync(path, "utf-8")).toBe(corruptBytes);
   });
 
   it("warns and treats malformed or digest/content-disagreeing singletons as absent", async () => {

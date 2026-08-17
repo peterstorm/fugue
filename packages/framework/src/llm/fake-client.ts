@@ -97,6 +97,16 @@ export class FakeLlmClient implements LlmClient {
   async sendStructured<O>(
     req: LlmRequest<O>,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // One encoding for this method's guarded seams: the deterministic
+    // retriable node-crash bound to `req.nodeId` (the deliberate
+    // non-retriable iteration-limit site in `sendWithTools` stays explicit
+    // instead of hiding in the builder).
+    const crash = (message: string) => ({
+      kind: "node-crash",
+      retriability: "retriable",
+      nodeId: req.nodeId,
+      message,
+    }) as const;
     // The response provider is caller code (and possibly a hostile Proxy): a
     // throw must become a typed node-crash, never a raw rejection (FR-040 —
     // the real clients keep every LLM seam inside the Result boundary).
@@ -106,21 +116,11 @@ export class FakeLlmClient implements LlmClient {
         ? this.responses.get(req.model) ?? this.responses.get(req.system)
         : this.responses(req);
     } catch (error) {
-      return err({
-        kind: "node-crash",
-        retriability: "retriable",
-        nodeId: req.nodeId,
-        message: `FakeLlmClient: response provider threw: ${safeErrorMessage(error)}`,
-      });
+      return err(crash(`FakeLlmClient: response provider threw: ${safeErrorMessage(error)}`));
     }
 
     if (raw === undefined) {
-      return err({
-        kind: "node-crash",
-        retriability: "retriable",
-        nodeId: req.nodeId,
-        message: `FakeLlmClient: no response configured for model="${req.model}"`,
-      });
+      return err(crash(`FakeLlmClient: no response configured for model="${req.model}"`));
     }
 
     if (isFrameworkError(raw)) {
@@ -131,12 +131,7 @@ export class FakeLlmClient implements LlmClient {
     try {
       rawText = JSON.stringify(raw);
     } catch (error) {
-      return err({
-        kind: "node-crash",
-        retriability: "retriable",
-        nodeId: req.nodeId,
-        message: `FakeLlmClient: response is not JSON-serializable: ${safeErrorMessage(error)}`,
-      });
+      return err(crash(`FakeLlmClient: response is not JSON-serializable: ${safeErrorMessage(error)}`));
     }
 
     return ok({
@@ -151,13 +146,18 @@ export class FakeLlmClient implements LlmClient {
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+    // One encoding for this method's guarded seams (see the twin builder in
+    // `sendStructured`): deterministic retriable node-crash bound to
+    // `req.nodeId`; the non-retriable iteration-limit exit below stays
+    // explicit as the deliberate exception.
+    const crash = (message: string) => ({
+      kind: "node-crash",
+      retriability: "retriable",
+      nodeId: req.nodeId,
+      message,
+    }) as const;
     if (this.withToolsScript === undefined) {
-      return err({
-        kind: "node-crash",
-        retriability: "retriable",
-        nodeId: req.nodeId,
-        message: "FakeLlmClient: no withToolsScript configured",
-      });
+      return err(crash("FakeLlmClient: no withToolsScript configured"));
     }
 
     try {
@@ -196,21 +196,13 @@ export class FakeLlmClient implements LlmClient {
               { turn, toolResults: lastToolResults },
             );
       } catch (error) {
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: req.nodeId,
-          message: `FakeLlmClient: withToolsScript threw at turn ${turn}: ${safeErrorMessage(error)}`,
-        });
+        return err(
+          crash(`FakeLlmClient: withToolsScript threw at turn ${turn}: ${safeErrorMessage(error)}`),
+        );
       }
 
       if (!turnSpec) {
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: req.nodeId,
-          message: `FakeLlmClient: script ran out at turn ${turn}`,
-        });
+        return err(crash(`FakeLlmClient: script ran out at turn ${turn}`));
       }
 
       const tokensIn = turnSpec.tokensIn ?? 10;
@@ -239,12 +231,7 @@ export class FakeLlmClient implements LlmClient {
         );
       } catch (error) {
         // A hostile tracer must not escape the Result boundary.
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: req.nodeId,
-          message: `FakeLlmClient: span/tracer threw at turn ${turn}: ${safeErrorMessage(error)}`,
-        });
+        return err(crash(`FakeLlmClient: span/tracer threw at turn ${turn}: ${safeErrorMessage(error)}`));
       }
 
       if (turnSpec.type === "final") {
@@ -257,23 +244,13 @@ export class FakeLlmClient implements LlmClient {
         try {
           const parsed = req.schema.safeParse(turnSpec.content);
           if (!parsed.success) {
-            return err({
-              kind: "node-crash",
-              retriability: "retriable",
-              nodeId: req.nodeId,
-              message: `Schema validation failed: ${parsed.error.message}`,
-            });
+            return err(crash(`Schema validation failed: ${parsed.error.message}`));
           }
           let rawText: string;
           try {
             rawText = JSON.stringify(turnSpec.content);
           } catch (error) {
-            return err({
-              kind: "node-crash",
-              retriability: "retriable",
-              nodeId: req.nodeId,
-              message: `FakeLlmClient: final content is not JSON-serializable: ${safeErrorMessage(error)}`,
-            });
+            return err(crash(`FakeLlmClient: final content is not JSON-serializable: ${safeErrorMessage(error)}`));
           }
           return ok({
             output: parsed.data as O,
@@ -283,24 +260,14 @@ export class FakeLlmClient implements LlmClient {
             rawText,
           });
         } catch (error) {
-          return err({
-            kind: "node-crash",
-            retriability: "retriable",
-            nodeId: req.nodeId,
-            message: `FakeLlmClient: schema validation threw at final turn: ${safeErrorMessage(error)}`,
-          });
+          return err(crash(`FakeLlmClient: schema validation threw at final turn: ${safeErrorMessage(error)}`));
         }
       }
 
       // tool_use turn — dispatch all calls in parallel.
       // toolChoice = "none" disables tools entirely.
       if (req.toolChoice === "none") {
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: req.nodeId,
-          message: "FakeLlmClient: tool_use turn emitted while toolChoice='none'",
-        });
+        return err(crash("FakeLlmClient: tool_use turn emitted while toolChoice='none'"));
       }
 
       try {
@@ -313,12 +280,7 @@ export class FakeLlmClient implements LlmClient {
       } catch (error) {
         // Tool EXECUTION failures are already per-call is_error results;
         // anything that throws here (dispatch seam, tracer) stays typed.
-        return err({
-          kind: "node-crash",
-          retriability: "retriable",
-          nodeId: req.nodeId,
-          message: `FakeLlmClient: tool dispatch threw at turn ${turn}: ${safeErrorMessage(error)}`,
-        });
+        return err(crash(`FakeLlmClient: tool dispatch threw at turn ${turn}: ${safeErrorMessage(error)}`));
       }
     }
 

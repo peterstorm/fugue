@@ -25,7 +25,8 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
-import { TTL_SECONDS, isBoundaryId, keyDigest } from "./layout.js";
+import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
+import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import { fwLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type {
@@ -96,14 +97,8 @@ type RawWitnessSnapshot = Readonly<{
   value: unknown;
 }>;
 
-const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
-
-const isBoundaryIdString = (value: unknown): value is string =>
-  isBoundaryId(value);
 
 const isWitnessKind = (value: unknown): value is WitnessKind =>
   typeof value === "string" && Object.hasOwn(WITNESS_KIND_ALLOW_LIST, value);

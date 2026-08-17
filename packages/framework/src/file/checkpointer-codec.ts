@@ -1,6 +1,8 @@
 // Pure meta/node/options codecs for the file `Checkpointer` backend
 // (FR-016/FR-020..FR-029, AD-1/AD-2/AD-6), extracted from `checkpointer.ts`
-// (advisory A8 of the 2026-08-14 PR remediation).
+// during the 2026-08-14 codec-separation remediation (pure core split from
+// the I/O shell — review run
+// .claude/reviews/review-and-fix-runs/standalone-2026-08-14-f6-file-durable-runtime).
 //
 // This module is the PURE half of the adapter — the functional core:
 //
@@ -31,7 +33,7 @@
 // testable without a temp directory.
 
 import { MAX_SAFE_RECORD_DEPTH } from "./event-record.js";
-import { isBoundaryId, keyDigest } from "./layout.js";
+import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import type {
   CheckpointerLoadOpts,
   NodeState,
@@ -179,9 +181,6 @@ export interface RawSaveNodeOptsSnapshot {
   readonly attempt: unknown;
 }
 
-const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 /** Runtime configuration objects must be records, not merely object-like
  * values. Class instances carry behavior/prototype state outside the supported
  * option grammar and are therefore rejected at the boundary. Null-prototype
@@ -191,16 +190,6 @@ export const isPlainObject = (value: unknown): value is Record<string, unknown> 
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 };
-
-/**
- * `isBoundaryId` as a TYPE GUARD. `layout.ts` owns the rule and returns a
- * plain boolean (its callers are path builders, not parsers); this module
- * parses untrusted on-disk and job-side values, so the same check has to
- * NARROW — a validated id must come out of the guard as a `string`, never as
- * an `unknown` a later line re-asserts. One rule, two views; the predicate
- * delegates and never re-encodes the pattern.
- */
-const isBoundaryIdString = (value: unknown): value is string => isBoundaryId(value);
 
 export const isValidDate = (value: unknown): value is Date =>
   value instanceof Date && !Number.isNaN(value.getTime());
@@ -801,7 +790,7 @@ const SAVE_NODE_OPTION_FIELDS: ReadonlySet<string> = new Set([
  * Snapshot the `saveNode` runtime input once. This phase captures the complete
  * own-key set and reads each supported own field at most once; it does NOT
  * claim that the captured shape or values satisfy the options contract.
- * `saveNodeBoundaryViolation` performs that later parse step: it validates the
+ * `parseSaveNodeBoundary` performs that later parse step: it validates the
  * snapshot's shape/invariants and constructs the fresh canonical `SaveNodeOpts`
  * consumed by `compositeNodeKey`. No phase rereads the caller-owned object.
  */
@@ -827,8 +816,10 @@ export const snapshotSaveNodeOpts = (opts: unknown): RawSaveNodeOptsSnapshot | u
 
 /** Parse the snapshotted runtime boundary into canonical options. Once this
  * succeeds, all supported fields and invariants are established before path
- * construction or persistence (FR-016/FR-029). */
-export const saveNodeBoundaryViolation = (
+ * construction or persistence (FR-016/FR-029). Parse-named like its siblings
+ * (`parseLoadOpts`/`parseStoredMeta`/`parseNodeFile`): the Ok side carries the
+ * parsed canonical value, the Err side the boundary violation. */
+export const parseSaveNodeBoundary = (
   runId: unknown,
   nodeId: unknown,
   state: RawNodeSnapshot,

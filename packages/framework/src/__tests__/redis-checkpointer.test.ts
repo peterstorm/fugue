@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import Redis from "ioredis";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
 import type { RunMeta } from "../checkpoint/checkpointer.js";
+import type { RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
@@ -115,6 +116,147 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     const result = await cp.load(R("hostile-4"));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe("checkpoint-corrupt");
+  });
+
+  test("saveNode with a throwing-toString nodeId never rejects raw — typed refusal on non-cloneable state", async () => {
+    const cp = new InMemoryCheckpointer();
+    const hostileNodeId = {
+      toString: () => {
+        throw new Error("hostile toString");
+      },
+    } as unknown as string;
+    // Must RESOLVE with a typed err — a raw rejection (from the catch's own
+    // message template) is the FR-040 escape this test pins closed.
+    const result = await cp.saveNode(R("hostile-5"), hostileNodeId, {
+      nodeId: "n1",
+      output: { run: () => 42 },
+      completedAt: new Date(),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-write-failed");
+      if (result.error.kind === "checkpoint-write-failed") {
+        expect(formatFrameworkError(result.error).length).toBeLessThan(500);
+      }
+    }
+  });
+
+  test("saveNode with a brand-bypassed coercible non-string nodeId never rejects raw (total key coercion)", async () => {
+    const cp = new InMemoryCheckpointer();
+    // A non-string id whose `toString` succeeds coerces exactly as a raw
+    // computed key always did — the key is carried by the SAME total
+    // renderer (`stringOf`) so a hostile variant can only degrade, never
+    // throw out of the async port.
+    const coercibleNodeId = { toString: () => "coerced-key" } as unknown as string;
+    const result = await cp.saveNode(R("hostile-6"), coercibleNodeId, {
+      nodeId: "n1",
+      output: { value: 1 },
+      completedAt: new Date(),
+    });
+    expect(result.ok).toBe(true);
+    const loaded = await cp.load(R("hostile-6"));
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok && loaded.value !== null) {
+      expect(Object.hasOwn(loaded.value.nodes, "coerced-key")).toBe(true);
+    }
+  });
+
+  test("load with a hostile raw runId (throwing toString) + undetachable state is typed checkpoint-corrupt, never raw", async () => {
+    const cp = new InMemoryCheckpointer();
+    const hostileRunId = {
+      toString: () => {
+        throw new Error("hostile toString");
+      },
+    } as unknown as RunId;
+    // setMeta stores by object reference (no stringification), so load on the
+    // same reference reaches the stored-state catch with a raw runId: the
+    // error construction must be total (placeholder + rendered message), not a
+    // re-throw from toRunId re-validation.
+    const setResult = await cp.setMeta(hostileRunId, {
+      dagId: D("d"),
+      startedAt: new Date("2025-01-01T00:00:00Z"),
+      nodeCount: 1,
+    });
+    expect(setResult.ok).toBe(true);
+    const result = await cp.load(hostileRunId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-corrupt");
+      if (result.error.kind === "checkpoint-corrupt") {
+        expect(result.error.runId).toBe(R("checkpoint_invalid_run"));
+        expect(formatFrameworkError(result.error).length).toBeLessThan(500);
+      }
+    }
+  });
+
+  test("load with a plain non-string runId + undetachable state is typed checkpoint-corrupt (toRunId throw class)", async () => {
+    const cp = new InMemoryCheckpointer();
+    const numericRunId = 42 as unknown as RunId;
+    cp.__testRawMetas().set(numericRunId, {
+      meta: {
+        dagId: (() => "boom") as unknown as string,
+        startedAt: new Date("2025-01-01T00:00:00Z"),
+        nodeCount: 1,
+        frameworkVersion: FRAMEWORK_VERSION,
+      },
+      createdAt: new Date(), // current — the TTL check passes, the detach catch is reached
+    });
+    const result = await cp.load(numericRunId);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-corrupt");
+      if (result.error.kind === "checkpoint-corrupt") {
+        expect(result.error.runId).toBe(R("checkpoint_invalid_run"));
+      }
+    }
+  });
+
+  test("checkpoint-write-failed carries the REJECTED RAW bytes: invalidNodeId unmodified, invalidRunId on hostile runId, bounded single rendering", async () => {
+    const cp = new InMemoryCheckpointer();
+    // String invalid nodeId: the field preserves the raw string — no JSON
+    // quoting, no truncation (formatFrameworkError is the single bounding
+    // point and renders it once).
+    const longRaw = "bad-node!".padEnd(80, "x");
+    const result = await cp.saveNode(R("hostile-7"), longRaw, {
+      nodeId: "n1",
+      output: { run: () => 42 },
+      completedAt: new Date(),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-write-failed");
+      if (result.error.kind === "checkpoint-write-failed") {
+        expect(result.error.invalidNodeId).toBe(longRaw);
+        const rendered = formatFrameworkError(result.error);
+        // Bounded by the renderer…
+        expect(rendered.length).toBeLessThan(800);
+        // …and rendered ONCE: the renderer's truncation marker names the FULL
+        // 80-char raw length — if the field had been pre-truncated to 60
+        // chars, the marker could not say 80. The raw value appears verbatim
+        // inside the renderer's own quoting — never an escaped quote from a
+        // double render.
+        expect(rendered).toContain(longRaw.slice(0, 60));
+        expect(rendered).toContain("…(80 chars)");
+        expect(rendered).not.toContain('\\"');
+      }
+    }
+    // Hostile non-string runId: the invalidRunId facet the file backend's
+    // writeFailed already emits — parity on both fields.
+    const hostileRunId = { toString: () => "<unprintable>" } as unknown as RunId;
+    const result2 = await cp.saveNode(hostileRunId, "not a valid id!", {
+      nodeId: "n1",
+      output: { run: () => 42 },
+      completedAt: new Date(),
+    });
+    expect(result2.ok).toBe(false);
+    if (!result2.ok) {
+      expect(result2.error.kind).toBe("checkpoint-write-failed");
+      if (result2.error.kind === "checkpoint-write-failed") {
+        expect(result2.error.runId).toBe(R("checkpoint_invalid_run"));
+        expect(result2.error.invalidRunId).toBe("<unprintable>");
+        expect(result2.error.invalidNodeId).toBe("not a valid id!");
+      }
+    }
   });
 
   test("a throwing injected clock fails closed with a typed cache-error on both setMeta and load", async () => {

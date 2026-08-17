@@ -57,7 +57,8 @@
 // containment policy lives in `verified-directory.ts`; the pure stored-schema
 // codecs (meta/node serialization, options parsing, output canonicalization)
 // live in `checkpointer-codec.ts`. This module is the thin filesystem shell:
-// directory resolution, atomic writes, and typed error mapping only (A8).
+// directory resolution, atomic writes, and typed error mapping only (2026-08-14
+// codec-separation remediation — see checkpointer-codec.ts header).
 //
 // Failure surface (AD-6/FR-040): NOTHING throws across the port boundary.
 // Every failure returns `Result<_, FrameworkError>` using existing kinds —
@@ -73,14 +74,15 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
-import { META_FILE, NODES_DIR, TTL_SECONDS, isBoundaryId, keyDigest } from "./layout.js";
+import { META_FILE, NODES_DIR, isBoundaryId, keyDigest } from "./layout.js";
+import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import {
   isPlainObject,
   isValidDate,
   parseLoadOpts,
   parseNodeFile,
   parseStoredMeta,
-  saveNodeBoundaryViolation,
+  parseSaveNodeBoundary,
   serializeMeta,
   serializeNode,
   snapshotMeta,
@@ -128,7 +130,8 @@ import {
 } from "./boundary-error.js";
 
 /** Source-compatibility re-export: the metadata diagnostic constant lives
- * with the codec that constructs the write-failed values (A8). The barrel
+ * with the codec that constructs the write-failed values (2026-08-14
+ * codec-separation remediation). The barrel
  * (`src/file.ts`) and existing classification consumers import it from this
  * module. */
 export { META_RECORD_NODE_ID } from "./checkpointer-codec.js";
@@ -401,7 +404,7 @@ const createFileCheckpointerUnchecked = (
         );
       }
 
-      const parsedBoundary = saveNodeBoundaryViolation(runId, nodeId, rawState, rawSaveOpts);
+      const parsedBoundary = parseSaveNodeBoundary(runId, nodeId, rawState, rawSaveOpts);
       if (!parsedBoundary.ok) {
         return err(writeFailed(runId, nodeId, `saveNode rejected: ${parsedBoundary.error}`));
       }

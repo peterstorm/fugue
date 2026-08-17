@@ -449,6 +449,13 @@ const isImportedFrameworkError = (
  * file-backend implementation. `file/boundary-error.ts` is intentionally the
  * only excluded production definition: tests live outside file/** and remain
  * free to prove the public factory's compatibility contract.
+ *
+ * Coverage is import-derived, not textual: it catches the member call
+ * (`frameworkError.cacheError(…)` / `ns.frameworkError.cacheError(…)`) and
+ * the DESTRUCTURED local bindings that alias the same factory —
+ * `const { cacheError } = frameworkError; cacheError(…)` and
+ * `const cacheError = frameworkError.cacheError;` — which would otherwise be
+ * bare-identifier calls the member audit cannot attribute.
  */
 const findFileCacheErrorBypasses = (
   source: string,
@@ -468,9 +475,64 @@ const findFileCacheErrorBypasses = (
   const imports = frameworkErrorImports(sourceFile);
   if (imports.namedBindings.size === 0 && imports.namespaceBindings.size === 0) return [];
 
+  // Collect local bindings whose initializer derives from the imported
+  // `frameworkError` value (destructured element or direct member ref): a
+  // call through one of them is a call through the public factory.
+  const localCacheErrorBindings = new Set<string>();
+  const collectLocalCacheErrorBindings = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ts.isIdentifier(node.name)
+    ) {
+      const member = staticMember(unwrapExpression(node.initializer));
+      if (
+        member !== null &&
+        member.name === "cacheError" &&
+        isImportedFrameworkError(member.owner, imports)
+      ) {
+        localCacheErrorBindings.add(node.name.text);
+      }
+    }
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ts.isObjectBindingPattern(node.name)
+    ) {
+      const initial = unwrapExpression(node.initializer);
+      // A named `frameworkError` import is the factory value itself; a
+      // namespace import of the module exposes `cacheError` as a direct
+      // member — both are destructurable into the same factory.
+      const isFactoryValue =
+        ts.isIdentifier(initial) &&
+        (imports.namedBindings.has(initial.text) ||
+          imports.namespaceBindings.has(initial.text));
+      if (isFactoryValue) {
+        for (const element of node.name.elements) {
+          if (ts.isIdentifier(element.name) && element.name.text === "cacheError") {
+            localCacheErrorBindings.add(element.name.text);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, collectLocalCacheErrorBindings);
+  };
+  collectLocalCacheErrorBindings(sourceFile);
+
   const violations: Violation[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
+      const called = unwrapExpression(node.expression);
+      if (ts.isIdentifier(called) && localCacheErrorBindings.has(called.text)) {
+        const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+        violations.push({
+          file: relPath,
+          line: line + 1,
+          importSpecifier: "frameworkError.cacheError (destructured local binding)",
+          reason:
+            "file/** must construct cache failures through fileCacheError/fileOperationError from ./boundary-error.js so operation names remain inside the closed FileOperation vocabulary; a local binding derived from the imported frameworkError reaches the same public string-typed factory — only file/boundary-error.ts may bridge it.",
+        });
+      }
       const calledMember = staticMember(node.expression);
       if (
         calledMember !== null &&

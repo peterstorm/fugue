@@ -44,8 +44,9 @@ import {
   createFileCheckpointer as barrelCreateFileCheckpointer,
   META_RECORD_NODE_ID as barrelMetaRecordNodeId,
 } from "../file.js";
-import { META_FILE, NODES_DIR, TTL_SECONDS, keyDigest } from "../file/layout.js";
+import { META_FILE, NODES_DIR, keyDigest } from "../file/layout.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
+import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import type { Checkpointer, NodeState, RunMeta } from "../checkpoint/checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
 import { D, R } from "./_id-helpers.js";
@@ -1519,6 +1520,34 @@ describe("FileCheckpointer — canonical descendant containment", () => {
     const loaded = await createFileCheckpointer(base).load(R("run-meta-link"));
     expect(loaded).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "load" } });
   });
+
+  it("rejects a symlinked nodes/<digest>.json entry on load — typed cache-error(load), never a drop or corrupt verdict", async () => {
+    // End-to-end pin through the load shell (the helper-level symlink
+    // rejection is unit-tested in file-verified-directory.test.ts): a node
+    // entry that is a symlink to external bytes must fail the whole load
+    // with the typed operation error — the caller sees a failed read,
+    // never a silently dropped entry or a false corruption verdict.
+    const base = freshDirectory();
+    const outside = freshDirectory();
+    const runId = "run-node-file-link";
+    const cp = createFileCheckpointer(base);
+    expect((await cp.setMeta(R(runId), META())).ok).toBe(true);
+    expect((await cp.saveNode(R(runId), "n1", node("n1", 1))).ok).toBe(true);
+
+    const nodesDir = nodesDirOf(base, runId);
+    const entryName = `${keyDigest("n1")}.json`;
+    const externalNode = join(outside, entryName);
+    writeFileSync(externalNode, JSON.stringify({
+      nodeId: "n1",
+      output: "external",
+      completedAt: "2025-01-01T00:00:00.000Z",
+    }));
+    rmSync(join(nodesDir, entryName));
+    symlinkSync(externalNode, join(nodesDir, entryName), "file");
+
+    const loaded = await cp.load(R(runId));
+    expect(loaded).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "load" } });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2245,6 +2274,24 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
     );
 
     expectFactoryFailure(construct, /unsupported own key "nwo"; supported key is now/);
+  });
+
+  it("treats an own `now` key whose captured value is undefined as omission — the documented grammar edge (Date.now default)", async () => {
+    // `{ now: undefined }` produces a data descriptor with `value ===
+    // undefined` — the same state the parser cannot distinguish from
+    // omission. The documented grammar maps it to the Date.now default,
+    // NOT to the non-function rejection (which targets present non-functions).
+    const directory = freshDirectory();
+    const cp = createFileCheckpointer(
+      directory,
+      { now: undefined } as unknown as Parameters<typeof createFileCheckpointer>[1],
+    );
+    expect((await cp.setMeta(R("run-config-undefined-now"), META())).ok).toBe(true);
+    const stored = JSON.parse(
+      readFileSync(join(directory, "run-config-undefined-now", META_FILE), "utf-8"),
+    );
+    // Date.now was used (a recent wall-clock stamp), not a frozen clock.
+    expect(Math.abs(Date.parse(stored.createdAt) - Date.now())).toBeLessThan(5_000);
   });
 
   it("rejects symbol and non-enumerable unsupported own factory options", () => {

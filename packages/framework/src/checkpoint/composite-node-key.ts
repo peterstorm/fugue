@@ -148,7 +148,7 @@ export type ParsedCompositeNodeKey =
 // the safe-integer bound is enforced separately after the parse.
 const DECIMAL_FORM = /^(0|[1-9][0-9]*)$/;
 
-const parseDecimalComponent = (kind: "index" | "attempt", raw: string): number | null => {
+const parseDecimalComponent = (raw: string): number | null => {
   if (!DECIMAL_FORM.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) ? value : null;
@@ -196,9 +196,9 @@ export const parseCompositeNodeKey = (key: string): ParsedCompositeNodeKey | nul
 
   const [namespace, nodeId, indexRaw, attemptRaw] = key.split("@");
   if (!isIdComponent(namespace) || !isIdComponent(nodeId)) return null;
-  const index = parseDecimalComponent("index", indexRaw);
+  const index = parseDecimalComponent(indexRaw);
   if (index === null) return null;
-  const attempt = parseDecimalComponent("attempt", attemptRaw);
+  const attempt = parseDecimalComponent(attemptRaw);
   if (attempt === null) return null;
 
   return { form: "composite", namespace, nodeId, index, attempt };

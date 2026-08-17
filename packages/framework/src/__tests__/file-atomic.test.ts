@@ -691,9 +691,10 @@ describe("withFileLock — stale steal and ownership", () => {
 
     // Re-entrant acquisition can never succeed (the recorded pid is our own
     // live process, so the lock is never stale). The contract: fail cleanly
-    // after MAX_ACQUIRE_ATTEMPTS × RETRY_MS ≈ 5s — never hang, and never
-    // break the holder's exclusion. The ceiling is documented on
-    // `acquireFileLock`; this test pins the error and the bound.
+    // after MAX_ACQUIRE_ATTEMPTS × RETRY_MS ≈ 5s of backoff (the live-holder
+    // ceiling — no stale/tomb attempt nests a fencedReap barrier wait here)
+    // — never hang, and never break the holder's exclusion. The ceiling is
+    // documented on `acquireFileLock`; this test pins the error and the bound.
     const started = Date.now();
     await expect(acquireFileLock(lockPath)).rejects.toThrow(/after \d+ attempts/);
     const elapsed = Date.now() - started;

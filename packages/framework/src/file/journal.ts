@@ -67,6 +67,7 @@ import {
   keyDigest,
   eventFileName,
   eventDigestOf,
+  parseEventFileName,
 } from "./layout.js";
 import {
   parseJournalSequence,
@@ -106,14 +107,14 @@ const fsFailure = (
   fileOperationError(operation, `run directory ${directory}`, error, failureClass);
 
 /**
- * The event-file naming contract (AD-2), exactly the output shape of
- * `eventFileName` in `layout.ts`: a 6-digit zero-padded sequence, `-`, a
- * 64-lowercase-hex digest, `.json`. The writer's listing enforces the same
- * contract the strict reader's `eventFileName` recompute does (parity in
- * both directions): an entry that could never have been written by this
- * journal fails the append fast instead of silently inflating the sequence.
+ * The event-file naming contract (AD-2) is parsed through
+ * `parseEventFileName` in `layout.ts` — the single encoded inverse of
+ * `eventFileName`'s output shape (6-digit zero-padded sequence, `-`,
+ * 64-lowercase-hex digest, `.json`). The writer's listing enforces the same
+ * contract the strict reader consumes (parity in both directions): an entry
+ * that could never have been written by this journal fails the append fast
+ * instead of silently inflating the sequence.
  */
-const EVENT_FILE_NAME_PATTERN = /^\d{6}-[0-9a-f]{64}\.json$/;
 
 /**
  * Build the AD-6 typed failure for the journal's permanent capacity ceiling.
@@ -226,8 +227,9 @@ export const createFileJournal = (
    * there is no stat in the filter, so a DIRECTORY wearing a `*.json` name
    * IS listed (a name-only counter would count it). Every listed name is
    * therefore verified against the event-file naming contract
-   * (`EVENT_FILE_NAME_PATTERN` — the `eventFileName` output shape: 6-digit
-   * zero-padded sequence + `-` + 64-hex digest + `.json`) and its entry type
+   * (`parseEventFileName` — the single encoded inverse of the `eventFileName`
+   * output shape in layout.ts: 6-digit zero-padded sequence + `-` + 64-hex
+   * digest + `.json`) and its entry type
    * (must be a regular file): a foreign `*.json` entry (e.g. `README.json`),
    * a deleted/renamed record, or a non-regular file squatting on a record
    * name would otherwise silently inflate `sequence = count` (and a squat
@@ -246,7 +248,7 @@ export const createFileJournal = (
     }
     for (const name of names) {
       const entryPath = join(eventsDir, name);
-      if (!EVENT_FILE_NAME_PATTERN.test(name)) {
+      if (parseEventFileName(name) === null) {
         throw fsFailure(
           "appendEvent",
           directory,

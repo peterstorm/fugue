@@ -37,7 +37,7 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { EVENTS_DIR, eventDigestOf, eventFileName } from "./layout.js";
+import { EVENTS_DIR, eventDigestOf, eventFileName, parseEventFileName } from "./layout.js";
 import { parseFileEventRecord, tryParseEventRecordJson } from "./event-record.js";
 import type { FileEventRecord } from "./event-record.js";
 import type { Result } from "../types/result.js";
@@ -71,8 +71,6 @@ type StrictReadFailure = Readonly<{
 
 type StrictResult = Result<readonly FileEventRecord[], StrictReadFailure>;
 
-const prefixOf = (sequence: number): string => String(sequence).padStart(6, "0");
-
 /**
  * The single strict read path shared by both public readers. List `*.json`
  * in the events directory (sorted), then verify every record and its
@@ -102,13 +100,16 @@ const readStrict = (directory: string): StrictResult => {
     try {
       contents = readFileSync(source, "utf-8");
     } catch (error) {
-      // A non-regular entry (a directory or similar) wearing a record name is
-      // a deterministic squat — re-running cannot clear it — so pin
-      // "permanent", parity with the append-time gate in journal.ts
-      // listEventFiles; every other errno is an environment failure replay
-      // may clear (a rename racing the listing, a transient I/O fault).
+      // A directory (or symlink to one) squatting a record name is a
+      // deterministic squat — re-running cannot clear it, only manual
+      // removal — so pin "permanent", parity with the append-time gate in
+      // journal.ts listEventFiles. `readFileSync` on a directory throws
+      // EISDIR; ENOTDIR would require a path component to substitute between
+      // the successful listing and this read — a race, which is environment
+      // class. Every other errno is an environment failure replay may clear
+      // (a rename racing the listing, a transient I/O fault).
       const codeProbe = probeErrorCode(error);
-      const squattingEntry = codeProbe.kind === "code" && codeProbe.code === "ENOTDIR";
+      const squattingEntry = codeProbe.kind === "code" && codeProbe.code === "EISDIR";
       return err({
         message: `${source}: read failed: ${safeErrorMessage(error)} (FR-009)`,
         ...(squattingEntry ? { permanent: true } : {}),
@@ -123,8 +124,13 @@ const readStrict = (directory: string): StrictResult => {
     if (!parsed.ok) return err({ message: parsed.error, permanent: true });
     const record = parsed.value;
 
-    // 1. Filename prefix ↔ content sequence (FR-009).
-    if (!name.startsWith(`${prefixOf(record.sequence)}-`)) {
+    // 1. Filename prefix ↔ content sequence (FR-009). The name is parsed
+    // through the SAME encoded inverse of `eventFileName` the journal's
+    // listing gate uses (`parseEventFileName` in layout.ts) — no private
+    // padding re-encoding: a name the writer can never produce, or a name
+    // whose sequence disagrees with the content, fails here.
+    const parsedName = parseEventFileName(name);
+    if (parsedName === null || parsedName.sequence !== record.sequence) {
       return err({
         message: `${source}: filename prefix "${name.slice(0, 6)}" does not match record sequence ${record.sequence} (FR-009)`,
         permanent: true,

@@ -30,12 +30,13 @@ import {
   APPEND_LOCK,
   JOURNAL_SCHEMA_VERSION,
   MAX_LEXICOGRAPHIC_SEQUENCE,
-  TTL_SECONDS,
   isBoundaryId,
   keyDigest,
   eventFileName,
   eventDigestOf,
+  parseEventFileName,
 } from "../file/layout.js";
+import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 
 const NAME_MAX = 255;
 const ID_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-:";
@@ -98,6 +99,28 @@ describe("layout constants — the on-disk contract", () => {
     expect(JOURNAL_SCHEMA_VERSION).toBe(1);
     expect(TTL_SECONDS).toBe(86_400);
     expect(TTL_SECONDS).toBe(24 * 60 * 60); // matches Redis lazy-expiry window
+  });
+
+  it("parseEventFileName is the exact encoded inverse of eventFileName (single naming encoding)", () => {
+    const digest = "a".repeat(64);
+    for (const sequence of [0, 1, 42, 999_999]) {
+      const name = eventFileName(sequence, digest);
+      expect(parseEventFileName(name)).toEqual({ sequence, digest });
+    }
+    // Names no eventFileName call can have produced — each shape a private
+    // re-encoding (journal regex, event-log padding) used to admit or miss:
+    for (const foreign of [
+      "README.json",
+      "00001-abc.json",
+      "0000000-" + digest + ".json", // 7-digit prefix (past the ceiling)
+      "000001-" + "A".repeat(64) + ".json", // uppercase digest
+      "000001-" + "g".repeat(64) + ".json", // non-hex digest
+      "1-" + digest + ".json",
+      "000001-" + digest + ".tmp",
+      "",
+    ]) {
+      expect(parseEventFileName(foreign)).toBeNull();
+    }
   });
 
   it("pins the shared 6-digit lexicographic sequence domain", () => {

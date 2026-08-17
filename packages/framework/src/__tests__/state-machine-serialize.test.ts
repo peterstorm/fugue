@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { serializeValue, deserializeValue, toJson, fromJson } from "../state-machine/serialize.js";
+import { serializeValue, deserializeValue, toJson, fromJson, validateSerializedValueGrammar } from "../state-machine/serialize.js";
 
 describe("serializeValue / deserializeValue", () => {
   it("round-trips a plain object", () => {
@@ -63,6 +63,34 @@ describe("serializeValue / deserializeValue", () => {
     expect(deserializeValue(serializeValue(42))).toBe(42);
     expect(deserializeValue(serializeValue("hello"))).toBe("hello");
     expect(deserializeValue(serializeValue(true))).toBe(true);
+  });
+});
+
+describe("validateSerializedValueGrammar — options validation", () => {
+  // The defensive own-options guards (exported function, in-tree callers
+  // pass the shared constants) must stay fail-closed: non-safe-integer or
+  // negative depth options are caller bugs, not grammar input.
+  for (const badOptions of [
+    { maxDepth: Number.NaN, rootPath: "value" },
+    { maxDepth: -1, rootPath: "value" },
+    { maxDepth: 1.5, rootPath: "value" },
+    { maxDepth: Infinity, rootPath: "value" },
+    { maxDepth: 512, initialDepth: -1, rootPath: "value" },
+    { maxDepth: 512, initialDepth: Number.NaN, rootPath: "value" },
+  ]) {
+    it(`rejects ${JSON.stringify(Object.keys(badOptions).map((k) => `${k}=${String((badOptions as Record<string, unknown>)[k])}`).join(", "))}`, () => {
+      const result = validateSerializedValueGrammar({ a: 1 }, badOptions as never);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatch(/non-negative safe integer/);
+      }
+    });
+  }
+
+  it("accepts safe non-negative depth options and validates the value", () => {
+    expect(validateSerializedValueGrammar({ a: 1 }, { maxDepth: 512, rootPath: "value" })).toEqual({ ok: true, value: undefined });
+    const bad = validateSerializedValueGrammar(undefined, { maxDepth: 512, rootPath: "value" });
+    expect(bad.ok).toBe(false);
   });
 });
 

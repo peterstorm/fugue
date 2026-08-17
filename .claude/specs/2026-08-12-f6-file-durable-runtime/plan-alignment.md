@@ -41,7 +41,7 @@ None.
 | FR-006 | `updateData` atomic post-state snapshot | Covered — `atomicWriteFile` tmp+rename on `checkpoint.json` |
 | FR-007 | `updateProgress` durable with same atomicity | Covered — atomic `progress.json` |
 | FR-008 | Event-log reader exposes `RecordedEvent` envelopes (`recordedAtMs`, `event`) | Covered — `readFileEvents` envelope mapping |
-| FR-009 | Strict read-side validation (schema version, non-negative seq, finite timestamp, dedup charset); fail closed, never silent drop | Covered — `parseFileEventRecord` strict matrix; `readFileEventRecords` fails closed with `checkpoint-corrupt` |
+| FR-009 | Write-boundary losslessness (writer rejects anything the serializer cannot represent) + strict read-side validation (schema version, non-negative seq, finite timestamp, dedup charset); fail closed, never silent drop | Covered — `assertLosslessEvent` pre-scan + round-trip backstop at write time; `parseFileEventRecord` strict matrix; `readFileEventRecords` fails closed with `checkpoint-corrupt` |
 | FR-010 | Log authoritative, checkpoint may lag; disagreement with any strict-prefix replay fails closed (`checkpoint-corrupt`) | Covered — AD-3 algorithm (steps 2, 5, 6) |
 | FR-011 | Resume replays through pure machine, never re-invokes executor/side effects | Covered — AD-3; replay-only resume test |
 | FR-012 | Terminal-failed state never persisted as checkpoint; not resumable | Covered — AD-3 (failed-state key in no prefix replay) + terminal-failed test |

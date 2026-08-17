@@ -856,6 +856,53 @@ describe("createFileJournal.appendEvent — writer-side readdir failure (AD-6)",
   });
 });
 
+describe("createFileJournal.appendEvent — events-dir creation failure (AD-6)", () => {
+  it("a FILE squatting the events path (ENOTDIR) fails the first append typed with the run directory named", async () => {
+    const dir = tempDir();
+    // A regular file squatting the events path BEFORE the first append:
+    // mkdirSync({recursive: true}) on a file-backed path throws (EEXIST on
+    // the recursive leaf, ENOTDIR on some platforms) — the first I/O of the
+    // append transaction.
+    writeFileSync(join(dir, EVENTS_DIR), "squatter");
+    const journal = createFileJournal(dir);
+
+    let error: unknown;
+    try {
+      await journal.appendEvent({ type: "A" }, "k0");
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeDefined();
+    const typed = asCacheError(error as FrameworkError);
+    expect(typed.operation).toBe("appendEvent");
+    expect(typed.message).toContain(dir);
+    expect(typed.message).toMatch(/EEXIST|ENOTDIR|file already exists|not a directory/i);
+  });
+
+  it("an unwritable run directory (EACCES) fails the events-dir creation typed, never raw", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    // 0o500 = read+execute, no write: mkdirSync of the events child fails
+    // EACCES — the create path of the append transaction, before the lock.
+    chmodSync(dir, 0o500);
+    try {
+      let error: unknown;
+      try {
+        await journal.appendEvent({ type: "A" }, "k0");
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeDefined();
+      const typed = asCacheError(error as FrameworkError);
+      expect(typed.operation).toBe("appendEvent");
+      expect(typed.message).toContain(dir);
+      expect(typed.message).toMatch(/EACCES|permission denied/i);
+    } finally {
+      chmodSync(dir, 0o700); // restore so afterEach cleanup can rm
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // writeProgress caller-bug validation (0..100)
 // ---------------------------------------------------------------------------
@@ -1082,8 +1129,8 @@ describe("readFileEvents — genuine fs failures fail closed with typed cache-er
     const name = listEventFiles(dir)[0];
     rmSync(join(eventsDir, name));
     // A DIRECTORY wearing a *.json record name: readdir lists it, and the
-    // per-file read fails with EISDIR — a genuine fs failure branch, fail
-    // closed with the offending path named (FR-009).
+    // per-file read fails with EISDIR — a deterministic squat (only manual
+    // removal clears it), fail closed with the offending path named (FR-009).
     mkdirSync(join(eventsDir, name), { recursive: true });
     writeFileSync(join(eventsDir, name, "inner"), "x");
 
@@ -1094,12 +1141,11 @@ describe("readFileEvents — genuine fs failures fail closed with typed cache-er
       expect(failure.operation).toBe("readFileEvents");
       expect(failure.message).toContain(name);
       expect(failure.message).toMatch(/read failed/);
-      // A genuine fs I/O failure is the environment class: it stays
-      // UNCLASSIFIED (retriabilityOf retriable) — unlike deterministic
-      // on-disk corruption, which is classified permanent at its
-      // construction site (ADR-0080).
-      expect(failure.failureClass).toBeUndefined();
-      expect(retriabilityOf(failure)).toBe("retriable");
+      // A deterministic on-disk condition: re-running cannot clear it, only
+      // manual removal — pinned permanent at the construction site, parity
+      // with the append-time gate in journal.ts listEventFiles (ADR-0080).
+      expect(failure.failureClass).toBe("permanent");
+      expect(retriabilityOf(failure)).toBe("non-retriable");
     } else {
       throw new Error("expected the squatted record read to fail closed");
     }

@@ -72,15 +72,6 @@ export const APPEND_LOCK = "append.lock";
 /** Schema version stamped on every journal record file (`event-record.ts`). */
 export const JOURNAL_SCHEMA_VERSION = 1;
 
-/**
- * Lazy TTL for checkpointer meta and freshness entries, in seconds (24h) —
- * matches the Redis backend's expiry window. Lazy evaluation happens at read
- * time per Redis load-order parity (the validity check mirrors the Redis
- * checkpointer's load path; the freshness side applies the same lazy window
- * per AD-5). The file backend performs no background sweeps.
- */
-export const TTL_SECONDS = 86_400;
-
 // ---------------------------------------------------------------------------
 // Boundary validation (FR-016/FR-029) and digest/filename mapping (AD-2)
 // ---------------------------------------------------------------------------
@@ -97,6 +88,26 @@ export const TTL_SECONDS = 86_400;
  */
 export const isBoundaryId = (value: unknown): boolean =>
   typeof value === "string" && ID_PATTERN.test(value);
+
+/**
+ * `isBoundaryId` as a TYPE GUARD. `layout.ts` owns the rule and the boolean
+ * form serves path builders; the parsing modules (checkpointer-codec.ts,
+ * freshness-index.ts) consume untrusted on-disk and job-side values, so the
+ * same check has to NARROW — a validated id must come out of the guard as a
+ * `string`, never as an `unknown` a later line re-asserts. One rule, two
+ * views; the predicate delegates and never re-encodes the pattern.
+ */
+export const isBoundaryIdString = (value: unknown): value is string =>
+  isBoundaryId(value);
+
+/**
+ * Plain-record predicate shared by the file-backend parsing modules
+ * (checkpointer-codec.ts, freshness-index.ts): an object that is not an
+ * array. Null-prototype records remain plain. One encoding — the parsing
+ * modules import this instead of keeping private copies that can drift.
+ */
+export const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
  * sha256 hex digest (64 lowercase hex chars) of a key — the identifier form
@@ -217,6 +228,30 @@ export const eventFileName = (sequence: number, digest: string): string => {
     // every retry — never a transient environment condition.
     throw fileOperationError("eventFileName", "event filename", error, "permanent");
   }
+};
+
+/** The exact shape `eventFileName` emits — 6-digit zero-padded sequence,
+ * `-`, 64-lowercase-hex digest, `.json` — as a capturing pattern so the
+ * inverse parse below returns the components, not just a verdict. */
+const EVENT_FILE_NAME_PATTERN = /^(\d{6})-([0-9a-f]{64})\.json$/;
+
+/**
+ * Parse a name claiming to be an event-record filename back into its
+ * components — the single ENCODED INVERSE of the naming contract, shared by
+ * the writer's listing gate (`journal.ts`) and the strict reader's sequence
+ * check (`event-log.ts`): both consume this one parse instead of re-encoding
+ * the 6-digit/hex shape as a private regex or padding helper that could
+ * drift. `null` = a name no `eventFileName` call can have produced. The
+ * 6-digit form structurally bounds the sequence at
+ * `MAX_LEXICOGRAPHIC_SEQUENCE` (a 7-digit name fails the shape, so no
+ * separate ceiling check is possible or needed).
+ */
+export const parseEventFileName = (
+  name: string,
+): Readonly<{ readonly sequence: number; readonly digest: string }> | null => {
+  const match = EVENT_FILE_NAME_PATTERN.exec(name);
+  if (match === null) return null;
+  return { sequence: Number(match[1]), digest: match[2] };
 };
 
 /**

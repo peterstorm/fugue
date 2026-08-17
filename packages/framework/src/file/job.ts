@@ -151,11 +151,16 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
   let snapshot: { state: S; context: C } = initialSnapshot;
 
   return {
-    get data(): { state: S; context: C } {
-      // Deep-frozen clone per read: caller mutation can never diverge the
-      // snapshot (plain objects/arrays are frozen — mutation throws in strict
-      // mode and no-ops otherwise — and even unfreezable structures like
-      // Map/Set/Date are isolated by the fresh clone per call).
+    /**
+     * Deep-frozen CLONE of the snapshot per read: caller mutation can never
+     * diverge the snapshot (plain objects/arrays are frozen — mutation throws
+     * in strict mode and no-ops otherwise — and even unfreezable structures
+     * like Map/Set/Date are isolated by the fresh clone per call). The
+     * top-level `Readonly` wrapper makes the immutability invariant visible
+     * to callers at the type level; the per-property deep freeze is the
+     * runtime guarantee behind it.
+     */
+    get data(): Readonly<{ readonly state: S; readonly context: C }> {
       try {
         return deepFreeze(structuredClone(snapshot));
       } catch (error) {

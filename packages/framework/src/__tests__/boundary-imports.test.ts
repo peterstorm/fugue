@@ -358,6 +358,51 @@ describe("SC-006 extractImports — synthetic fixtures (FR-043)", () => {
     ]);
   });
 
+  it("catches destructured local bindings of the public factory, not just member calls", () => {
+    const dir = setup({
+      "file/destructured-cache-error.ts": [
+        `import { frameworkError } from "../types/error-factories.js";`,
+        `const { cacheError } = frameworkError;`,
+        `export const failure = cacheError("savNode", "bad");`,
+      ].join("\n") + "\n",
+      "file/member-ref-cache-error.ts": [
+        `import { frameworkError } from "../types/error-factories.js";`,
+        `const cacheError = frameworkError.cacheError;`,
+        `export const failure = cacheError("loadTypo", "bad");`,
+      ].join("\n") + "\n",
+      "file/namespace-destructured-cache-error.ts": [
+        `import * as errors from "../types/error-factories.js";`,
+        `const { cacheError } = errors;`,
+        `export const failure = cacheError("setMetat", "bad");`,
+      ].join("\n") + "\n",
+    });
+
+    const { violations } = checkImports(dir);
+    expect(violations).toHaveLength(3);
+    expect(violations.map((violation) => `${violation.file}:${violation.line}`).sort()).toEqual([
+      "file/destructured-cache-error.ts:3",
+      "file/member-ref-cache-error.ts:3",
+      "file/namespace-destructured-cache-error.ts:3",
+    ]);
+    for (const violation of violations) {
+      expect(violation.reason).toContain("FileOperation");
+      expect(violation.reason).toContain("file/boundary-error.ts");
+    }
+  });
+
+  it("does not flag a same-named local binding that is not derived from the imported factory", () => {
+    const dir = setup({
+      "file/local-not-bypass.ts": [
+        `import { frameworkError } from "../types/error-factories.js";`,
+        `const cacheError = (op: string) => ({ kind: "cache-error", operation: op, message: "local" });`,
+        `export const failure = cacheError("load");`,
+        `export const used = frameworkError;`,
+      ].join("\n") + "\n",
+    });
+
+    expect(checkImports(dir).violations).toHaveLength(0);
+  });
+
   it("permits the sole bridge definition and ignores comments, strings, unrelated objects, and tests", () => {
     const dir = setup({
       "file/boundary-error.ts": [

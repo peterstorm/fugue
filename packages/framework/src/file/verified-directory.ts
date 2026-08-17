@@ -1,6 +1,7 @@
 // Verified-directory containment policy for the file backend
-// (`@fuguejs/framework/file`), extracted from `checkpointer.ts` (advisory A8
-// of the 2026-08-14 PR remediation).
+// (`@fuguejs/framework/file`), extracted from `checkpointer.ts` during the
+// 2026-08-14 codec-separation remediation (review run
+// .claude/reviews/review-and-fix-runs/standalone-2026-08-14-f6-file-durable-runtime).
 //
 // The checkpointer addresses caller-supplied directories and backend-managed
 // run/nodes descendants before every I/O operation. Portable Node path APIs
