@@ -26,7 +26,7 @@ gates, freshness-aware state management, and production observability.
 | **Machine** | A generic state machine: `transition(state, event, context) → (state, context)`. |
 | **Executor** | An async function that observes the current phase and produces the next event. Lives in the imperative shell. |
 | **Transition** | A pure function that computes the next (phase, context) from (phase, event, context). No I/O. |
-| **JobLike** | Durable job handle: `updateData`, `updateProgress`, `appendEvent`. Backed by in-memory or BullMQ+Redis. |
+| **JobLike** | Durable job handle: `updateData`, `updateProgress`, `appendEvent`. Backed by in-memory, BullMQ+Redis, or the file backend (`file/` subpath). |
 | **Checkpoint** | A persisted snapshot of node outputs for crash-resume. |
 | **Fingerprint** | A content-hash of DAG topology + predicate versions. Detects shape drift between checkpoint write and resume. |
 | **FrameworkVersion** | Content-hash of the framework's runtime semantics (validation, retry, coercion). Resume rejects checkpoints from a different version to prevent silent behavioral drift. |
@@ -64,7 +64,7 @@ gates, freshness-aware state management, and production observability.
 | **Side-Effect Profile** | Declared on every node: `"none"`, `"reads"`, `"writes"`, `"external-call"`. Determines freshness tracking behavior. |
 | **Witness** | A token asserting the version of a resource at a point in time: `{ kind, resource, value }`. |
 | **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. |
-| **FreshnessIndex** | Port interface for witness tracking. Two adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed). |
+| **FreshnessIndex** | Port interface for witness tracking. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `file/` subpath). |
 
 ### Human-in-the-Loop (HITL)
 
@@ -93,6 +93,35 @@ gates, freshness-aware state management, and production observability.
 | **CronScheduler** | Drives periodic DAG runs via a registry of `TaskConfig` entries with cron expressions. |
 | **DeadLetterNotifier** | Called when a job exhausts all queue-level attempts. |
 
+### File-Backed Durable Runtime (`file/` subpath)
+
+The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backend behind the dedicated `@fuguejs/framework/file` subpath: node built-ins only, no optional peer deps (FR-041).
+
+| Term | Definition |
+|------|-----------|
+| **Event Log (file)** | The durable append-only journal: `events/NNNNNN-<digest>.json` records with contiguous 6-digit sequences and keyed/keyless digest addressing. The authoritative history (ADR-0076). |
+| **Checkpoint Projection (file)** | The lagging `checkpoint.json` + per-node files under `<runId>/nodes/`. May lag the log inside the benign lag window; the log always wins on resume (ADR-0077). |
+| **Append Lock** | The per-directory `events/append.lock` — a rename-born lock serializing the whole append transaction (list → dedup → sequence → commit) across processes (ADR-0078). |
+| **Benign Lag Window** | The window in which the log holds records not yet folded into the checkpoint. Proved harmless by the resume agreement proof — never a corruption (ADR-0077). |
+| **Resume Agreement Proof** | The pure `proveResumeAgreement`: full-replay vs checkpoint state-key comparison plus a single-pass strict-prefix scan (genesis included). Closed verdicts: agreement / benign lag / `checkpoint-missing` / `checkpoint-corrupt` (ADR-0077). |
+| **Digest Addressing** | Record and node filenames are sha256 hex digests: keyed `sha256(dedupKey)` vs keyless `sha256(sequence ‖ eventJson)` — structurally disjoint by the `|` exclusion; 6-digit lexicographic sequence ceiling (ADR-0076). |
+| **Composite Node Address** | `namespace@nodeId@index@attempt` checkpoint addressing with canonical folding; canonical IDs and composite keys are disjoint because `@` is outside the ID charset (ADR-0075). |
+| **Freshness Singleton (file)** | Exactly one latest-write file per resource, `<sha256(resource)>.json`: score-monotonic replacement (max `succeededAtMs`, Redis reverse-binary tie order), 24h lazy TTL, refresh-on-every-success — observable parity with the Redis adapter (ADR-0079). |
+| **FileOperation** | The closed `cache-error` operation vocabulary of the file backend; every file failure is a typed `FrameworkError` whose operation comes from this set (ADR-0080). |
+
+**Plan decision codes.** The F6 plan's `AD-1`…`AD-6` codes — cited in `file/*` and `checkpoint/*` comments — map to the ADRs one-to-one:
+
+| Plan code | ADR |
+|-----------|-----|
+| AD-1 | ADR-0075 — composite checkpoint node-key encoding |
+| AD-2 | ADR-0076 — on-disk layout, digest-filename adaptation |
+| AD-3 | ADR-0077 — resume agreement proof (carries the numbered proof steps) |
+| AD-4 | ADR-0078 — journal single-writer contract and append serialization |
+| AD-5 | ADR-0079 — file FreshnessIndex |
+| AD-6 | ADR-0080 — failure surface |
+
+(Other features' AD codes — e.g. the queue-bullmq/state-machine AD-3/AD-4 references — belong to their own spec's plan and are not part of this mapping.)
+
 ### Architecture Layers
 
 | Layer | Imports From | Responsibility |
@@ -105,6 +134,7 @@ gates, freshness-aware state management, and production observability.
 | `llm/` | `types/` | LLM client implementations |
 | `observer/` | `types/` | Observer implementations |
 | `checkpoint/` | `types/` | Checkpoint persistence — in-memory + Redis adapter |
+| `file/` | `types/`, `checkpoint/`, `state-machine/` | Durable file backend: event journal, checkpointer, freshness index, job, resume (subpath `@fuguejs/framework/file`) |
 | `cache/` | `types/` | Response caching — in-memory + Redis adapter |
 | `queue/` | `types/`, `state-machine/` | Queue abstractions |
 | `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
@@ -116,6 +146,7 @@ gates, freshness-aware state management, and production observability.
 |---------|---------|-------------------|
 | `@fuguejs/framework/redis` | `RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex` | `ioredis` |
 | `@fuguejs/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
+| `@fuguejs/framework/file` | File backend: journal, checkpointer, freshness index, job, resume | none (node built-ins only — FR-041) |
 
 `check-imports.ts` enforces that `ioredis` is reachable only from `cache/redis-cache.ts`, `checkpoint/redis-*.ts`, and `queue-bullmq/`.
 

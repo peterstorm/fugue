@@ -29,7 +29,7 @@
  * - `materializeCanonicalOutput`: -0 normalization, non-finite/accessor/
  *   sparse/reserved-tag/pollution-key/prototype/cycle/depth rejections,
  *   canonical Map/Set/Date/undefined tags, frozen output.
- * - `serializeNode` / `parseNodeFile`: the digest-filename contract (AD-2),
+ * - `serializeNode` / `parseNodeFile`: the digest-filename contract (ADR-0076),
  *   exact stored-envelope validation with recoverable corrupt addresses
  *   (FR-028), and Map/Set/Date/undefined restoration through
  *   `deserializeValue` — every expected malformed-byte shape returns a
@@ -87,7 +87,7 @@ const STATE = (overrides?: Record<string, unknown>) => ({
   ...overrides,
 });
 
-/** `<sha256hex(nodeKey)>.json` — the on-disk filename contract (AD-2). */
+/** `<sha256hex(nodeKey)>.json` — the on-disk filename contract (ADR-0076). */
 const fileNameOf = (nodeKey: string): string => `${keyDigest(nodeKey)}.json`;
 
 const envelopeJson = (nodeKey: string, overrides?: Record<string, unknown>): string =>
@@ -551,7 +551,7 @@ describe("serializeNode — canonical envelope bytes", () => {
     ).toThrow(/completedAt must be a valid Date/);
   });
 
-  it("addresses the filename by keyDigest(nodeKey) — the node-key ownership contract (AD-2)", () => {
+  it("addresses the filename by keyDigest(nodeKey) — the node-key ownership contract (ADR-0076)", () => {
     const nodeKey = "ns@n1@2@3";
     const json = serializeNode(nodeKey, snapshotNodeState(STATE()));
     const fileName = fileNameOf(nodeKey);

@@ -1,6 +1,6 @@
 /**
  * Integration tests for `src/file/resume.ts` — log-authoritative resume with
- * the AD-3 agreement proof (spec US1, FR-009/FR-010/FR-011/FR-012/FR-014).
+ * the ADR-0077 agreement proof (spec US1, FR-009/FR-010/FR-011/FR-012/FR-014).
  *
  * The event log is authoritative and the checkpoint is a projection that may
  * legitimately lag by the kernel's append-before-checkpoint window; anything
@@ -27,7 +27,7 @@
  *   manufactured failed-state checkpoint fails the agreement proof.
  * - US1: a completed journal resumes to the IDENTICAL final state; events,
  *   checkpoint and progress all round-trip.
- * - AD-3 prefix semantics: empty-prefix (genesis) lag, lag-by-many-prefix,
+ * - ADR-0077 prefix semantics: empty-prefix (genesis) lag, lag-by-many-prefix,
  *   and checkpoint-only directories (genesis-agreeing ⇒ genesis, disagreeing
  *   ⇒ corrupt).
  * - Checkpoint decode failures (bad JSON, bad schemaVersion, caller
@@ -49,7 +49,7 @@
  *   pollution keys, duplicate canonical Map/Set primitives, and excessive
  *   depth before `parseCheckpoint`; canonical nested Map/Set/Date/undefined
  *   tags round-trip in both cases.
- * - AD-6: a directory squatting on checkpoint.json (EISDIR) propagates the
+ * - ADR-0080: a directory squatting on checkpoint.json (EISDIR) propagates the
  *   journal's typed `cache-error` unchanged; a directory squatting on an
  *   event-file name is re-tagged `checkpoint-corrupt` with the reader's
  *   message preserved.
@@ -554,7 +554,7 @@ describe("resumeFileJob — corrupt event log variants fail closed (FR-009)", ()
     await journal.appendEvent({ type: "STEP" }, "k0");
     const [name] = readdirSync(join(dir, EVENTS_DIR)).filter((n) => n.endsWith(".json"));
     // Swap the digest suffix — the content no longer matches its filename
-    // (AD-2 tamper/tear check).
+    // (ADR-0076 tamper/tear check).
     renameSync(
       join(dir, EVENTS_DIR, name),
       join(dir, EVENTS_DIR, name.replace(/[0-9a-f]{64}/, "a".repeat(64))),
@@ -702,10 +702,10 @@ describe("resumeFileJob — completed journal round-trip (US1)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// AD-3 prefix semantics — the benign lag window
+// ADR-0077 prefix semantics — the benign lag window
 // ---------------------------------------------------------------------------
 
-describe("resumeFileJob — strict-prefix benign lag (AD-3 step 7)", () => {
+describe("resumeFileJob — strict-prefix benign lag (ADR-0077 step 7)", () => {
   it("a checkpoint of the genesis state with a non-empty log is the empty-prefix lag; resume returns the replay", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir, { now: () => 7 });
@@ -1495,16 +1495,16 @@ describe("resumeFileJob — hostile thrown-value callback matrix (FR-040)", () =
 });
 
 // ---------------------------------------------------------------------------
-// AD-6 — readCheckpoint's typed throw passthrough + reader I/O re-tag
+// ADR-0080 — readCheckpoint's typed throw passthrough + reader I/O re-tag
 // ---------------------------------------------------------------------------
 
-describe("resumeFileJob — checkpoint.json fs-failure passthrough (AD-6)", () => {
+describe("resumeFileJob — checkpoint.json fs-failure passthrough (ADR-0080)", () => {
   it("a directory squatting on checkpoint.json (EISDIR) ⇒ the journal's typed cache-error propagates unchanged", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir, { now: () => 7 });
     await journal.appendEvent({ type: "STEP" }, "k0");
     // A DIRECTORY wearing the checkpoint name: existsSync passes, the read
-    // throws EISDIR, readCheckpoint relabels it `cache-error` (AD-6) — an
+    // throws EISDIR, readCheckpoint relabels it `cache-error` (ADR-0080) — an
     // environment failure, not a content verdict.
     mkdirSync(join(dir, CHECKPOINT_FILE));
 
@@ -1526,7 +1526,7 @@ describe("resumeFileJob — checkpoint.json fs-failure passthrough (AD-6)", () =
     // A DIRECTORY wearing a valid event-file name: the reader's listing
     // filter is name-only, so it IS listed, and the read throws EISDIR —
     // the reader fails closed (never treating the log as empty), and resume
-    // re-tags the cache-error as checkpoint-corrupt per AD-6, preserving
+    // re-tags the cache-error as checkpoint-corrupt per ADR-0080, preserving
     // the reader's message (which names the file and reason).
     mkdirSync(join(eventsDir, `000000-${"a".repeat(64)}.json`));
 
@@ -1633,7 +1633,7 @@ describe("resumeFileJob — pollution-key checkpoint envelope fails closed", () 
 });
 
 // ---------------------------------------------------------------------------
-// AD-3 prefix-space property — every strict prefix (incl. genesis and the
+// ADR-0077 prefix-space property — every strict prefix (incl. genesis and the
 // full replay) is benign lag; any other checkpoint is corruption
 // ---------------------------------------------------------------------------
 

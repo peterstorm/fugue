@@ -2,7 +2,7 @@
 //
 // Covers the read-side fail-closed gate (FR-009), the write-boundary
 // losslessness pre-scan (`assertLosslessEvent`), and the FR-015 dedupKey
-// charset boundary that this module owns, including the AD-2 `|` exclusion:
+// charset boundary that this module owns, including the ADR-0076 `|` exclusion:
 //   - serializeFileEventRecord: byte-exact 5-field schema, toJson preservation
 //     of Map/Set/Date in `event`, invariant throws (the write side never emits
 //     a record the strict reader would reject), and the FR-009 pre-scan that
@@ -15,7 +15,7 @@
 //     (the deep-equal uses ===, not Object.is)
 //   - parseFileEventRecord strict matrix: non-object/array raw, wrong
 //     schemaVersion, non-integer/negative sequence, dedupKey charset errors
-//     (incl. the `|` AD-2 rejection and the 256-char bound), non-finite
+//     (incl. the `|` ADR-0076 rejection and the 256-char bound), non-finite
 //     recordedAtMs, missing event, malformed reserved tag encodings in the
 //     event at any depth — every failure names the source; well-formed
 //     tag-shaped record bytes are byte-identical to legitimate Map/Set/Date
@@ -91,7 +91,7 @@ const pipelineDir = (): string => {
 /** Write a hand-crafted raw record file (bypassing the write-side pre-scan,
  * which is exactly the point: these bytes could only come from a corrupt or
  * hostile writer) and run it through the REAL read pipeline. The reader
- * tags every failure `cache-error` (AD-6), whose frame carries the message. */
+ * tags every failure `cache-error` (ADR-0080), whose frame carries the message. */
 const readRawRecordFile = (
   contents: string,
   name = "000000-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
@@ -217,7 +217,7 @@ describe("serializeFileEventRecord — byte-exact schema via toJson", () => {
     expect(() => serializeFileEventRecord(0, "", -1, null)).not.toThrow();
     expect(JSON.parse(serializeFileEventRecord(0, "", -1, null)).recordedAtMs).toBe(-1);
 
-    // Shared sequence domain (AD-2, advisory): the codec and the naming
+    // Shared sequence domain (ADR-0076, advisory): the codec and the naming
     // layer enforce the same 6-digit lexicographic ceiling.
     expect(() => serializeFileEventRecord(1_000_000, "", 1, null)).toThrow(/lexicographic ceiling/);
     expect(() => serializeFileEventRecord(999_999, "", 1, null)).not.toThrow();
@@ -1050,7 +1050,7 @@ describe("parseFileEventRecord — strict rejection matrix (FR-009)", () => {
     ["dedupKey number", { ...validRecord(), dedupKey: 123 }, ["dedupKey"]],
     ["dedupKey null", { ...validRecord(), dedupKey: null }, ["dedupKey"]],
     ["dedupKey object", { ...validRecord(), dedupKey: {} }, ["dedupKey"]],
-    ["dedupKey '|' (AD-2)", { ...validRecord(), dedupKey: "a|b" }, ["dedupKey", "|"]],
+    ["dedupKey '|' (ADR-0076)", { ...validRecord(), dedupKey: "a|b" }, ["dedupKey", "|"]],
     ["dedupKey '@'", { ...validRecord(), dedupKey: "a@b" }, ["dedupKey"]],
     ["dedupKey space", { ...validRecord(), dedupKey: "a b" }, ["dedupKey"]],
     ["dedupKey dot", { ...validRecord(), dedupKey: "a.b" }, ["dedupKey"]],
@@ -1112,19 +1112,19 @@ describe("parseFileEventRecord — strict rejection matrix (FR-009)", () => {
   });
 });
 
-describe("parseFileEventRecord — AD-2 `|` rejection with rationale", () => {
+describe("parseFileEventRecord — ADR-0076 `|` rejection with rationale", () => {
   it("rejects every keyed dedupKey containing '|', however placed", () => {
     // A keyed dedupKey containing "|" is indistinguishable in form from the
     // keyless digest input `${sequence}|${toJson(event)}` (layout.ts
     // eventDigestOf) — e.g. keyed key `5|{"a":1}` would hash identically to
     // the keyless record (5, {a:1}), so the two records would fight for one
     // filename and silently dedup one of them. The charset exclusion makes
-    // the keyed and keyless digest domains disjoint by construction (AD-2).
+    // the keyed and keyless digest domains disjoint by construction (ADR-0076).
     for (const key of ["a|b", "|", "a|", "|a", "x|y|z", "5|{\"a\":1}", "|a|b|"]) {
       const r = parseFileEventRecord({ ...validRecord(), dedupKey: key }, SOURCE);
       expect(r.ok, `dedupKey ${JSON.stringify(key)} must be rejected`).toBe(false);
     }
-    expectRejected({ ...validRecord(), dedupKey: "a|b" }, ["|", "AD-2", "FR-015"]);
+    expectRejected({ ...validRecord(), dedupKey: "a|b" }, ["|", "ADR-0076", "FR-015"]);
   });
 
   it("documents the rule on the exported surface (pattern + guard + error)", () => {

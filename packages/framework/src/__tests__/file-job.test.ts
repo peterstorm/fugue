@@ -16,7 +16,7 @@
  * - the full kernel surface round-trips: checkpoint projection content,
  *   per-transition progress, `RecordedEvent` envelopes with the injected
  *   clock.
- * - typed failure surface (AD-6): fs failures throw `FrameworkError`
+ * - typed failure surface (ADR-0080): fs failures throw `FrameworkError`
  *   (`cache-error`, operation + directory in the message) instead of raw
  *   `Error`s — the shell-boundary conversion stays identity-safe — and a
  *   failed `updateData` never advances the in-memory snapshot.
@@ -90,7 +90,7 @@ const genesis = (): { state: S; context: C } => ({ state: { kind: "pending", cou
  * (`sha256DedupKey`): the same transition re-derives the same key across
  * worker invocations, which is exactly what makes the crash window safe
  * (FR-004). The runner's string-concat fallback is intentionally NOT used
- * here (kernel fallback, documented in AD-2): the default-keyer ×
+ * here (kernel fallback, documented in ADR-0076): the default-keyer ×
  * file-adapter path is pinned separately in the "kernel without
  * computeDedupKey" describe below, while real shells inject a digest keyer.
  */
@@ -247,10 +247,10 @@ describe("createFileJob — durability across fresh instances", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Typed failure surface (AD-6)
+// Typed failure surface (ADR-0080)
 // ---------------------------------------------------------------------------
 
-describe("createFileJob — typed FrameworkError on fs failure (AD-6)", () => {
+describe("createFileJob — typed FrameworkError on fs failure (ADR-0080)", () => {
   it("appendEvent/updateData/updateProgress throw cache-error with operation + directory; updateData never advances the snapshot", async () => {
     // A FILE squatting on the run-directory path makes every fs op below it
     // fail deterministically (ENOTDIR on all platforms, incl. as root).
@@ -275,7 +275,7 @@ describe("createFileJob — typed FrameworkError on fs failure (AD-6)", () => {
       operation: "updateProgress",
     });
 
-    // The message names the run directory (AD-6) and the typed value is the
+    // The message names the run directory (ADR-0080) and the typed value is the
     // FrameworkError itself — identity-safe for the shell's error mapping.
     await job.appendEvent({ type: "STEP" }, "k0").catch((error: unknown) => {
       expect(error).toMatchObject({ kind: "cache-error" });
@@ -567,7 +567,7 @@ describe("createFileJob — kernel without computeDedupKey (default fallback key
 
     // NO computeDedupKey: the runner's fallback emits
     // `${prevStateKey}|${attemptNumber}|${eventType}` — a "|"-bearing key
-    // that FR-015 excludes ("|" is the keyless digest field separator, AD-2).
+    // that FR-015 excludes ("|" is the keyless digest field separator, ADR-0076).
     const error = await runStateMachine(job, machine, executor, {
       errorEventOf: (): E => ({ type: "DONE" }),
     }).then(() => null, (e: unknown) => e);

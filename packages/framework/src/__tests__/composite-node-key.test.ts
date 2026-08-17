@@ -1,4 +1,4 @@
-// Tests for the composite checkpoint node-key codec (AD-1).
+// Tests for the composite checkpoint node-key codec (ADR-0075).
 //
 // Covers: canonical folding rules, parse round-trip (parse(encode(a)) = a)
 // over an address matrix, collision-freedom between canonical and composite
@@ -30,7 +30,7 @@ describe("DEFAULT_NODE_NAMESPACE", () => {
   });
 });
 
-describe("compositeNodeKey — canonical folding (AD-1)", () => {
+describe("compositeNodeKey — canonical folding (ADR-0075)", () => {
   it("returns the bare nodeId when no opts are given", () => {
     expect(compositeNodeKey(N("read-node"))).toBe("read-node");
   });
@@ -39,7 +39,7 @@ describe("compositeNodeKey — canonical folding (AD-1)", () => {
     expect(compositeNodeKey(N("read-node"), {})).toBe("read-node");
   });
 
-  it("rejects a namespace supplied without index/attempt as ambiguous (AD-1)", () => {
+  it("rejects a namespace supplied without index/attempt as ambiguous (ADR-0075)", () => {
     // A namespace alone can only mean the caller meant a composite address
     // but forgot its addressing component: silently folding would store the
     // entry under the bare canonical nodeId and discard the intent, so the
@@ -381,7 +381,7 @@ describe("fast-check properties", () => {
     a.index === undefined && a.attempt === undefined;
 
   /** Valid addresses only: a namespace WITHOUT index/attempt is ambiguous and
-   *  refused by the codec (AD-1 — the shape is unrepresentable). */
+   *  refused by the codec (ADR-0075 — the shape is unrepresentable). */
   const isValidAddress = (a: { readonly namespace?: string; readonly index?: number; readonly attempt?: number }): boolean =>
     !isCanonical(a) || a.namespace === undefined;
 

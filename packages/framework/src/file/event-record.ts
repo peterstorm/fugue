@@ -2,7 +2,7 @@
 // (`@fuguejs/framework/file`).
 //
 // `FileEventRecord` is the byte-level schema of every journal record file
-// (`events/<NNNNNN>-<digest>.json`, AD-2): `{ schemaVersion: 1, sequence,
+// (`events/<NNNNNN>-<digest>.json`, ADR-0076): `{ schemaVersion: 1, sequence,
 // dedupKey, recordedAtMs, event }` — byte-identical to Loom's proven
 // `ProgramEventRecord`. Records are serialized with `toJson` so Map/Set/Date
 // values inside `event` survive the JSON round-trip; the read pipeline is
@@ -58,7 +58,7 @@
 // `layout.ts` `isBoundaryId` is deliberately NOT reused — its `{1,128}`
 // quantifier would wrongly reject the spec-valid 129..256-char range; the
 // pattern below is the same ID charset with the FR-015 quantifier. The `|`
-// character additionally gets an explicit rejection (AD-2 disjointness): the
+// character additionally gets an explicit rejection (ADR-0076 disjointness): the
 // keyless digest form embeds `|` as a field separator
 // (`sha256hex(`${sequence}|${toJson(event)}`)`, `eventDigestOf` in layout.ts),
 // so a keyed dedupKey containing `|` would let a keyed record's digest input
@@ -93,7 +93,8 @@
 // Pure module — no I/O (INV-1; only framework-core imports — no Node
 // built-ins: `layout.js` constants, `state-machine/serialize.js`
 // (`toJson`/`serializeValue`/`deserializeValue`/`deepJsonEqual`/
-// `validateSerializedValueGrammar`), `types/result.js`, `types/safe-error.js`,
+// `validateSerializedValueGrammar`), `checkpoint/composite-node-key.js`
+// (`isNonNegativeSafeInteger`), `types/result.js`, `types/safe-error.js`,
 // `./boundary-error.js`).
 
 import {
@@ -156,7 +157,7 @@ export type DedupKey = string & {
   readonly [dedupKeyBrand]: "DedupKey";
 };
 
-/** One immutable event record as stored in the journal (AD-2 schema). */
+/** One immutable event record as stored in the journal (ADR-0076 schema). */
 export interface FileEventRecord {
   /** Journal schema version — pinned to `JOURNAL_SCHEMA_VERSION` (1). */
   readonly schemaVersion: typeof JOURNAL_SCHEMA_VERSION;
@@ -193,7 +194,7 @@ export interface FileEventRecord {
 /**
  * FR-015 keyed dedupKey charset — the framework ID charset with the FR-015
  * quantifier (1..256). `|` is excluded by the charset AND by the explicit
- * check in `dedupKeyError` (AD-2 keyed/keyless digest disjointness).
+ * check in `dedupKeyError` (ADR-0076 keyed/keyless digest disjointness).
  */
 export const DEDUP_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,256}$/;
 
@@ -217,7 +218,7 @@ const render = (value: unknown): string => {
 };
 
 /**
- * FR-015/AD-2 violation message for a dedupKey value, or null when valid.
+ * FR-015/ADR-0076 violation message for a dedupKey value, or null when valid.
  * THE single encoding of the FR-015 rule — `isDedupKey` is derived from
  * this function, and the read side derives its rejection message from it,
  * so there is exactly one implementation of the rule to drift.
@@ -233,7 +234,7 @@ const dedupKeyError = (value: unknown): string | null => {
     return `dedupKey must be a string, got runtime type ${runtimeType} (FR-015)`;
   }
   if (value.includes("|")) {
-    return `dedupKey ${render(value)} contains "|" — forbidden: "|" is the keyless digest field separator (AD-2), so keyed and keyless digest domains must stay disjoint (FR-015); runStateMachine's default fallback keyer emits "|", so file-backed callers must inject an FR-015-safe computeDedupKey`;
+    return `dedupKey ${render(value)} contains "|" — forbidden: "|" is the keyless digest field separator (ADR-0076), so keyed and keyless digest domains must stay disjoint (FR-015); runStateMachine's default fallback keyer emits "|", so file-backed callers must inject an FR-015-safe computeDedupKey`;
   }
   if (value !== "" && !DEDUP_KEY_PATTERN.test(value)) {
     return `dedupKey ${render(value)} does not match ${DEDUP_KEY_PATTERN.source} (FR-015)`;
@@ -242,7 +243,7 @@ const dedupKeyError = (value: unknown): string | null => {
 };
 
 /**
- * FR-015/AD-2 validator: `""` (keyless) or a charset-valid key. Type guard —
+ * FR-015/ADR-0076 validator: `""` (keyless) or a charset-valid key. Type guard —
  * also usable at the append boundary (journal.ts) so the write side and the
  * read side share one rule. DERIVED from `dedupKeyError` — one rule, two
  * views; there is no second encoding to drift.
@@ -815,7 +816,7 @@ const serializeFileEventRecordUnchecked = (
   }
   if (sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
     throw new Error(
-      `serializeFileEventRecord: sequence ${sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — a 7-digit prefix would sort before "999999-" and break sorted-listing = append order (AD-2, FR-009)`,
+      `serializeFileEventRecord: sequence ${sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — a 7-digit prefix would sort before "999999-" and break sorted-listing = append order (ADR-0076, FR-009)`,
     );
   }
   const keyError = dedupKeyError(dedupKey);
@@ -929,7 +930,7 @@ export const serializeFileEventRecord = (
  * Rejects: non-object/array raw, wrong schemaVersion, non-safe-integer/
  * negative sequence (including any sequence past the
  * `MAX_LEXICOGRAPHIC_SEQUENCE` 6-digit ceiling, shared with the naming
- * layer), invalid dedupKey charset ("" allowed; `|` rejected per AD-2),
+ * layer), invalid dedupKey charset ("" allowed; `|` rejected per ADR-0076),
  * non-finite recordedAtMs, missing/undefined event, an event that contains
  * a literal reserved serializer tag key (`__map__`/`__set__`/`__date__`/
  * `__undefined__`) as a plain-object key at any depth — `raw` is

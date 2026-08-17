@@ -7,7 +7,7 @@
 // the caller-supplied directory that is fully recoverable in a fresh process
 // from that directory alone (FR-003, US1).
 //
-// SINGLE-WRITER CONTRACT (AD-4) — documented on this public surface:
+// SINGLE-WRITER CONTRACT (ADR-0078) — documented on this public surface:
 //
 //   - ONE `JobLike` writer per run directory. Appends are serialized by the
 //     per-directory lock across processes too, but the checkpoint/progress
@@ -30,7 +30,7 @@
 // copy from the durable journal — a later `updateData` always commits what
 // the kernel actually produced, not what a caller scribbled on a stale copy.
 //
-// FAILURE SURFACE (AD-6): `JobLike` has no Result channel, so every rejected
+// FAILURE SURFACE (ADR-0080): `JobLike` has no Result channel, so every rejected
 // operation throws through its existing shell. That throwing channel is
 // CLOSED: factory validation, snapshot cloning, caller-value parsing,
 // serialization, clocks, locks, and filesystem failures all throw typed
@@ -124,7 +124,7 @@ export const __testDeepFreeze = deepFreeze;
  * This unchecked body throws raw diagnostics where the typed boundary is the
  * public `createFileJob` shell: factory-validation rejections are raw strings
  * and every other runtime/infrastructure rejection crosses to the shell, which
- * is the AD-6 boundary converting each to typed `FrameworkError`
+ * is the ADR-0080 boundary converting each to typed `FrameworkError`
  * (`cache-error`, operation + path in the message).
  */
 const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {
@@ -246,7 +246,7 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
         // the diagnostic ("appendEvent failed at run directory D: cache
         // appendEvent failed at run directory D: …"). Let the typed error
         // ride through unchanged; wrap only an unexpected raw throw so the
-        // JobLike port's never-raw contract (AD-6) stays total.
+        // JobLike port's never-raw contract (ADR-0080) stays total.
         if (isFrameworkError(error)) throw error;
         throw fileOperationError("appendEvent", `run directory ${directory}`, error);
       }
@@ -257,7 +257,7 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
 /**
  * Typed factory shell: converts the unchecked body's raw factory-validation
  * and runtime rejections into typed `FrameworkError` values
- * (`cache-error`, operation + path in the message, AD-6) before any rejection
+ * (`cache-error`, operation + path in the message, ADR-0080) before any rejection
  * leaks — constructing a file JobLike never permits a raw throw.
  */
 export const createFileJob = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {

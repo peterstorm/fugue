@@ -1,12 +1,14 @@
 /**
- * Integration and boundary tests for the AD-5 digest-addressed latest-write
+ * Integration and boundary tests for the ADR-0079 digest-addressed latest-write
  * singleton (FR-030..FR-032/FR-040, SC-007).
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
 import fc from "fast-check";
+import { spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -15,6 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import {
   __testCompareRedisMemberSerialization,
@@ -227,7 +230,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
     expect(existsSync(directory)).toBe(false);
   });
 
-  it("persists exactly one canonical AD-5 singleton and survives a fresh instance", async () => {
+  it("persists exactly one canonical ADR-0079 singleton and survives a fresh instance", async () => {
     const directory = tempDirectory();
     const resource = "postgres:orders:42";
     const event = writeEvent(resource, "v2", 1_900, {
@@ -757,6 +760,78 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       expect(retriabilityOf(found.error)).toBe("non-retriable");
     }
   });
+
+  it("a throwing injected clock is a permanent rejection on recordWrite and findConflict", async () => {
+    const directory = tempDirectory();
+    const resource = "clock:throwing";
+    // Seed a valid singleton with a healthy clock, then point a throwing
+    // clock at the same directory: the clock guard fires on both operations
+    // (before the non-finite return-value check), pinned "permanent" like the
+    // sibling clock sites (journal appendEvent, checkpointer setMeta/load).
+    await createFileFreshnessIndex(directory, { now: () => 1_000 })
+      .recordWrite(writeEvent(resource, "seed", 900));
+
+    const index = createFileFreshnessIndex(directory, {
+      now: () => {
+        throw new Error("clock exploded");
+      },
+    });
+
+    const write = await index.recordWrite(writeEvent(resource, "must-not-write", 1_100));
+    expect(write.ok).toBe(false);
+    if (write.ok) throw new Error("expected typed rejection");
+    expect(write.error.kind).toBe("cache-error");
+    if (write.error.kind === "cache-error") {
+      expect(write.error.operation).toBe("freshness:recordWrite");
+      expect(write.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(write.error)).toBe("non-retriable");
+      // The guard names its own rule; the hostile clock's text stays DATA
+      // inside the total diagnostic, never replacing the guard's message.
+      expect(write.error.message).toContain("clock failed while stamping the write");
+    }
+
+    const found = await index.findConflict(W(resource, "seed"), 0);
+    expect(found.ok).toBe(false);
+    if (found.ok) throw new Error("expected typed rejection");
+    expect(found.error.kind).toBe("cache-error");
+    if (found.error.kind === "cache-error") {
+      expect(found.error.operation).toBe("freshness:findConflict");
+      expect(found.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(found.error)).toBe("non-retriable");
+      expect(found.error.message).toContain("clock failed while evaluating the freshness TTL");
+    }
+
+    // The throw must not perturb the durable singleton: the seed survives on
+    // a healthy instance.
+    const healthy = createFileFreshnessIndex(directory, { now: () => 1_000 });
+    const survived = await healthy.findConflict(W(resource, "other"), 0);
+    expect(survived.ok).toBe(true);
+    if (survived.ok) {
+      expect(survived.value).not.toBeNull();
+    }
+  });
+
+  it("already-typed failures ride through recordWrite unwrapped (operation + location preserved)", async () => {
+    const directory = tempDirectory();
+    const resource = "ride:through";
+    // A FILE squatting on the lock path: the rename-born lock cannot be born
+    // (ENOTDIR), so withFileLock rejects with its OWN typed acquireFileLock
+    // failure. recordWrite's outer catch must let it ride through — no
+    // freshness:recordWrite re-wrap (which would double-nest the diagnostic
+    // and drop the inner failureClass), atomic.ts/journal.ts/job.ts parity.
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `${keyDigest(resource)}.lock`), "squatter");
+
+    const index = createFileFreshnessIndex(directory);
+    const write = await index.recordWrite(writeEvent(resource, "v", 1_000));
+    expect(write.ok).toBe(false);
+    if (write.ok) throw new Error("expected typed rejection");
+    expect(write.error.kind).toBe("cache-error");
+    if (write.error.kind === "cache-error") {
+      expect(write.error.operation).toBe("acquireFileLock");
+      expect(write.error.message).toContain(join(directory, `${keyDigest(resource)}.lock`));
+    }
+  });
   it("explicitly rejects append/member-set and extra-field persisted shapes", async () => {
     const directory = tempDirectory();
     const resource = "codec:singleton-only";
@@ -975,4 +1050,92 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       encodeRedisMember(entry.runId, entry.nodeId, "custom", "日本語"),
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-process singleton convergence (ADR-0079) — the in-process
+// serializes-concurrent-writers test cannot prove the invariant across
+// processes; the freshness index is the public API whose documented use is
+// multi-process sharing, so race three real bun children on one directory
+// and demand exactly one deterministic singleton (round-12 A3)
+// ---------------------------------------------------------------------------
+
+describe("createFileFreshnessIndex — cross-process singleton convergence (ADR-0079)", () => {
+  it("three racing processes converge on exactly one deterministic max-score singleton", async () => {
+    const dir = tempDirectory();
+    mkdirSync(dir, { recursive: true });
+    const resource = "cp:resource";
+    // Each child records 5 writes for the SAME resource with globally unique
+    // scores (id*100+i ⇒ 0..4, 100..104, 200..204): the winner is therefore
+    // unambiguous regardless of lock acquisition order — child "2", i=4
+    // (score 204). The 10 ms sleep widens the contention window so the
+    // children actually overlap.
+    const indexPath = pathToFileURL(join(__dirname, "..", "file", "freshness-index.js")).href;
+    const script = join(dir, "child-record.ts");
+    writeFileSync(
+      script,
+      [
+        `import { createFileFreshnessIndex } from ${JSON.stringify(indexPath)};`,
+        `const dir = process.env.F_DIR;`,
+        `const id = process.env.F_ID;`,
+        `if (!dir || !id) throw new Error("missing F_DIR/F_ID");`,
+        `const index = createFileFreshnessIndex(dir);`,
+        `for (let i = 0; i < 5; i++) {`,
+        `  const succeededAtMs = Number(id) * 100 + i;`,
+        `  const result = await index.recordWrite({`,
+        `    type: "write-attempted",`,
+        `    runId: \`run-\${id}\`,` ,
+        `    dagId: "dag-1",`,
+        `    nodeId: \`writer-\${id}\`,` ,
+        `    conditionedOn: { kind: "version", resource: "cp:resource", value: "none" },`,
+        `    newWitness: { kind: "version", resource: "cp:resource", value: \`\${id}:\${i}\` },`,
+        `    succeededAtMs,`,
+        `    timestamp: new Date(succeededAtMs),`,
+        `  });`,
+        `  if (!result.ok) {`,
+        `    console.error(\`child \${id} write \${i} failed: \${result.error}\`);`,
+        `    process.exit(1);`,
+        `  }`,
+        `  await new Promise((r) => setTimeout(r, 10));`,
+        `}`,
+      ].join("\n"),
+    );
+
+    const runChild = (id: string): Promise<number> =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script], {
+          env: { ...process.env, F_DIR: dir, F_ID: id },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stderr = "";
+        child.stderr.on("data", (d: Buffer) => {
+          stderr += d.toString();
+        });
+        child.on("error", reject);
+        child.on("exit", (code) => {
+          if (code !== 0) reject(new Error(`child ${id} exited ${code}: ${stderr.slice(0, 500)}`));
+          else resolve(code ?? 0);
+        });
+      });
+
+    const codes = await Promise.all([runChild("0"), runChild("1"), runChild("2")]);
+    expect(codes).toEqual([0, 0, 0]);
+
+    // Exactly ONE durable record file: no litter, no partials, no divergence.
+    const jsonFiles = readdirSync(dir).filter((name) => name.endsWith(".json"));
+    expect(jsonFiles).toEqual([`${keyDigest(resource)}.json`]);
+
+    // A fresh instance (real clock) sees the deterministic max-score winner —
+    // the singleton's identity is independent of which process won the lock
+    // in which order.
+    const reader = createFileFreshnessIndex(dir);
+    const found = await reader.findConflict(W(resource, "never-written"), 0);
+    expect(found.ok).toBe(true);
+    if (found.ok && found.value !== null) {
+      expect(found.value.succeededAtMs).toBe(204);
+      expect(found.value.newWitness.value).toBe("2:4");
+      expect(String(found.value.runId)).toBe("run-2");
+      expect(String(found.value.nodeId)).toBe("writer-2");
+    }
+  }, 30_000);
 });

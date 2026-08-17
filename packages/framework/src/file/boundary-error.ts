@@ -101,7 +101,7 @@ export const fileOperationError = (
 };
 
 /**
- * Path-string domain gate for the file backend's entry points (AD-6): a
+ * Path-string domain gate for the file backend's entry points (ADR-0080): a
  * brand-bypassed non-string, empty, or NUL-bearing path must fail closed at
  * the factory/operation boundary, before it can reach `join`/fs as a raw
  * TypeError. ONE encoding for every file-backend entry point (atomic.ts,

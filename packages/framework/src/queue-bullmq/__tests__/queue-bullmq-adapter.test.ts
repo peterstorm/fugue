@@ -6,6 +6,7 @@
 // Run with: REDIS_URL=redis://localhost:6379 bun test
 
 import { NoopObserver } from "../../observer/observer.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../../logger.js";
 import { N, R, D, nodeMap, nodeSet } from "../../__tests__/_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../../types/ids.js";
 import { DAG_INPUT } from "../../types/ids.js";
@@ -1035,6 +1036,40 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
       backend.createWorker("q", async () => {}, { concurrency: 1 }),
     ).not.toThrow();
   });
+
+  // Regression (round-12 A1): the Queue's INTERNAL connection (a separate
+  // ioredis instance behind the plain {host, port}) is re-emitted as an
+  // "error" event on the Queue by BullMQ (queue-base forwards its
+  // RedisConnection errors). The shared-connection and Worker listeners
+  // existed, but the Queue had none — an unhandled "error" event is a
+  // process-level hazard on the runtimes that enforce ERR_UNHANDLED_ERROR.
+  // Pin: a dead-port connection failure surfaces as a LOGGED queue error
+  // (named), never an unhandled throw.
+  it("createQueue routes internal-connection failures through the logger (named queue), never unhandled", async () => {
+    const lines: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (msg: string, ...args: unknown[]) => {
+        lines.push([msg, ...args.map((a) => String(a))].join(" "));
+      },
+    });
+    try {
+      const backend = createBullMQBackend(dummyConn);
+      backend.createQueue("a1-pin-queue");
+      // ECONNREFUSED on localhost arrives within milliseconds; poll generously
+      // so the pin is deterministic regardless of retry backoff timing.
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && !lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:"))) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:"))).toBe(true);
+      await backend.close();
+    } finally {
+      __resetFrameworkLogger();
+    }
+  }, 15_000);
 });
 
 // ---------------------------------------------------------------------------

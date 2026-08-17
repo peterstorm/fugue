@@ -1,12 +1,12 @@
 /**
  * Tests for `src/file/checkpointer.ts` — the filesystem `Checkpointer`
  * backend (spec FR-016/FR-020/FR-022/FR-024..FR-029/FR-040, SC-001, US2;
- * plan AD-1/AD-2/AD-6):
+ * plan ADR-0075/ADR-0076/ADR-0080):
  *
  * - the ENTIRE shared `checkpointerSuite` over fresh temp directories, with
  *   all byte-persistence capabilities enabled: corrupt meta and corrupt node,
  *   plus shared version/fingerprint/TTL semantics (SC-001)
- * - AD-1 composite addressing: canonical folding, and every permutation of
+ * - ADR-0075 composite addressing: canonical folding, and every permutation of
  *   namespace/index/attempt resolving to a DISTINCT durable entry, all
  *   returned by one `load` (FR-022)
  * - per-entry corruption dropped and surfaced in `corruptNodeIds`, keyed by
@@ -175,7 +175,7 @@ const writeRawMeta = (directory: string, runId: string, contents: string): void 
 };
 
 /** Write a raw node entry, addressed by an EXPLICIT filename so tests can
- * deliberately break the AD-2 filename↔content digest agreement. */
+ * deliberately break the ADR-0076 filename↔content digest agreement. */
 const writeRawNode = (directory: string, runId: string, fileName: string, contents: string): void => {
   const nodes = nodesDirOf(directory, runId);
   mkdirSync(nodes, { recursive: true });
@@ -819,10 +819,10 @@ describe("FileCheckpointer — load failure precedence", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FR-022 / AD-1 — composite addressing
+// FR-022 / ADR-0075 — composite addressing
 // ---------------------------------------------------------------------------
 
-describe("FileCheckpointer — composite addressing (FR-022, AD-1)", () => {
+describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
   it("stores every distinct address as a distinct entry and returns them all", async () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
@@ -853,7 +853,7 @@ describe("FileCheckpointer — composite addressing (FR-022, AD-1)", () => {
     );
     for (const [nodeId, , expectedKey] of addresses) {
       // The entry is keyed by the stored nodeKey; `nodeId` inside it still
-      // names the real node (AD-1).
+      // names the real node (ADR-0075).
       expect(result.value.nodes[expectedKey].output).toBe(expectedKey);
       expect(result.value.nodes[expectedKey].nodeId).toBe(nodeId);
     }
@@ -867,7 +867,7 @@ describe("FileCheckpointer — composite addressing (FR-022, AD-1)", () => {
     await cp.saveNode(R("run-fold"), "n1", node("n1", "canonical"));
 
     // A namespace without index/attempt is an ambiguous composite address
-    // (AD-1): the codec refuses to silently discard it and store under the
+    // (ADR-0075): the codec refuses to silently discard it and store under the
     // bare canonical nodeId — the file backend converts the refusal into a
     // typed error, never a raw throw.
     const result = await cp.saveNode(R("run-fold"), "n1", node("n1", "namespaced"), {
@@ -946,7 +946,7 @@ describe("FileCheckpointer — composite addressing (FR-022, AD-1)", () => {
     expect(result.value.nodes["__proto__@__proto__@1@0"].output).toBe("composite");
   });
 
-  it("addresses node files by the sha256 digest of the stored nodeKey (AD-2)", async () => {
+  it("addresses node files by the sha256 digest of the stored nodeKey (ADR-0076)", async () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-digest"), META());

@@ -40,7 +40,7 @@ export type {
 export { readFileEvents, readFileEventRecords } from "./file/event-log.js";
 export { createFileJob } from "./file/job.js";
 export type { CreateFileJobArgs } from "./file/job.js";
-// Log-authoritative resume with the checkpoint agreement proof (AD-3).
+// Log-authoritative resume with the checkpoint agreement proof (ADR-0077).
 export { resumeFileJob } from "./file/resume.js";
 export type { ResumeFileJobArgs } from "./file/resume.js";
 // Strict codec for journal event records. The module also provides shared
@@ -60,7 +60,7 @@ export type { FileCheckpointerOptions } from "./file/checkpointer.js";
 // write-failed values it addresses (2026-08-14 codec separation).
 export { META_RECORD_NODE_ID } from "./file/checkpointer-codec.js";
 // Durable FreshnessIndex with one digest-addressed atomic latest-write
-// singleton per resource and lazy TTL (AD-5).
+// singleton per resource and lazy TTL (ADR-0079).
 export { createFileFreshnessIndex } from "./file/freshness-index.js";
 export type { FileFreshnessIndexOptions } from "./file/freshness-index.js";
 // Kernel envelope type consumed by `readFileEvents` / `replayEvents`.

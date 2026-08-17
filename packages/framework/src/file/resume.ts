@@ -1,4 +1,4 @@
-// resumeFileJob — strict filesystem acquisition + delegation to the pure AD-3
+// resumeFileJob — strict filesystem acquisition + delegation to the pure ADR-0077
 // agreement proof (`@fuguejs/framework/file`).
 //
 // The event log is the single authoritative record of a run's history; the
@@ -11,7 +11,7 @@
 // caller's strict decoder and returns a `Result`. THIS module is the thin
 // filesystem shell: it acquires the two durable representations, applies the
 // FR-014 recoverable-state gate, and delegates. See `resume-proof.ts` for
-// the proof's algorithm (AD-3) and totality discipline; this header keeps
+// the proof's algorithm (ADR-0077) and totality discipline; this header keeps
 // the shell's own contract.
 //
 // The shell's job, exactly:
@@ -24,13 +24,13 @@
 //      shared strict reader (`readFileEvents`, FR-009). A missing events
 //      directory reads as an EMPTY log (`ok([])`); any corrupt record,
 //      sequence break, or filename mismatch fails closed here with the file
-//      named in the message (AD-3 step 1). Every reader failure is
-//      re-tagged `checkpoint-corrupt` per AD-6 (below): the log cannot be
+//      named in the message (ADR-0077 step 1). Every reader failure is
+//      re-tagged `checkpoint-corrupt` per ADR-0080 (below): the log cannot be
 //      proven ⇒ fail closed.
 //   2. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
 //      job; a missing file is `null`). `readCheckpoint` THROWS a typed
 //      `FrameworkError` (`cache-error`) on genuine fs failure (the `JobLike`
-//      port contract, AD-6); that typed value is propagated unchanged — an
+//      port contract, ADR-0080); that typed value is propagated unchanged — an
 //      unreadable checkpoint file is an environment failure, not a content
 //      verdict. The catch narrows before relabeling (FR-040): ONLY a value
 //      the runtime guard recognizes as a typed `FrameworkError` rides
@@ -60,17 +60,17 @@
 // rejects a manufactured failed-state checkpoint against the log, and a real
 // crash can never leave one behind (FR-012).
 //
-// Failure surface (AD-6): `resumeFileJob` returns `checkpoint-missing` (no
+// Failure surface (ADR-0080): `resumeFileJob` returns `checkpoint-missing` (no
 // recoverable state) and `checkpoint-corrupt` (strict-read failure, broken
 // sequence, checkpoint decode failure, machine/decoder throw, disagreement —
 // message names the file + reason), or propagates the journal's typed
 // `cache-error` unchanged when `checkpoint.json` itself is unreadable. Two
-// honest notes on the AD-6 mapping:
+// honest notes on the ADR-0080 mapping:
 //
 //   - The strict reader (`readFileEventRecords`/`readFileEvents`) reports its
 //     failures through one `Result` channel tagged `cache-error` — both
 //     record corruption AND genuine fs read failures (EACCES/ENOTDIR...).
-//     AD-6's surface for resume has no `cache-error` row, and a log that
+//     ADR-0080's surface for resume has no `cache-error` row, and a log that
 //     cannot be strictly read cannot prove anything: every reader failure is
 //     re-tagged `checkpoint-corrupt` with the reader's failure preserved as
 //     the `message` field inside the JSON-serialized `cache-error` value
@@ -87,9 +87,9 @@
 // resume is side-effect-free (a fresh-process resume cannot perturb the
 // journal it is proving).
 //
-// Import discipline (INV-1): `node:path` only among node built-ins.
+// Import discipline (INV-1): no node built-ins — every path join lives in
+// `resume-proof.ts` (which documents its own `node:path` dependency).
 
-import { join } from "node:path";
 import { readFileEvents } from "./event-log.js";
 import { createFileJournal } from "./journal.js";
 import { proveResumeAgreement } from "./resume-proof.js";
@@ -111,13 +111,13 @@ export interface ResumeFileJobArgs<S, E, C> {
    * names it too). */
   readonly runId: RunId;
   /** Run directory — the journal (`events/`, `checkpoint.json`) lives under
-   * it (see the AD-4 single-writer contract on `createFileJob`). */
+   * it (see the ADR-0078 single-writer contract on `createFileJob`). */
   readonly directory: string;
   /** The pure state machine the log is folded through — replay must
    * reconstruct the identical state the original run reached (FR-011). The
    * executor is NEVER consulted. */
   readonly machine: Machine<S, E, C>;
-  /** The run's genesis data — the empty-prefix state of the proof (AD-3
+  /** The run's genesis data — the empty-prefix state of the proof (ADR-0077
    * step 7 includes the empty prefix = genesis as benign lag). */
   readonly genesis: { state: S; context: C };
   /**
@@ -143,7 +143,7 @@ export interface ResumeFileJobArgs<S, E, C> {
 
 /**
  * Reconstruct the state a run must resume from, proving the durable
- * representations agree (AD-3) — see `resume-proof.ts` for the proof
+ * representations agree (ADR-0077) — see `resume-proof.ts` for the proof
  * algorithm and this module's header for the acquisition contract.
  *
  * The returned state is ALWAYS the pure replay of the authoritative event
@@ -156,7 +156,7 @@ export interface ResumeFileJobArgs<S, E, C> {
  * throw during replay, state-key comparison, or payload decode /
  * disagreement — the message names the file and reason, FR-009/FR-010). An
  * unreadable `checkpoint.json` (fs failure) is propagated unchanged as the
- * journal's typed `cache-error` (AD-6).
+ * journal's typed `cache-error` (ADR-0080).
  *
  * Never re-invokes the executor and performs no side effects (FR-011).
  */
@@ -185,9 +185,9 @@ const resumeFileJobUnchecked = async <S, E, C>(
   // 1. Read the AUTHORITATIVE representation — the event log — through the
   //    shared strict reader (FR-009). A missing events directory reads as an
   //    EMPTY log (`ok([])`); any corrupt record, sequence break, or filename
-  //    mismatch fails closed here with the file named in the message (AD-3
+  //    mismatch fails closed here with the file named in the message (ADR-0077
   //    step 1). Every reader failure is re-tagged `checkpoint-corrupt` per
-  //    AD-6 (see the module header): the log cannot be proven ⇒ fail closed.
+  //    ADR-0080 (see the module header): the log cannot be proven ⇒ fail closed.
   const events = readFileEvents(directory);
   if (!events.ok) {
     // `messageOf` narrows: some `FrameworkError` variants (e.g.
@@ -228,7 +228,7 @@ const resumeFileJobUnchecked = async <S, E, C>(
     return err(frameworkError.checkpointMissing(runId));
   }
 
-  // 4. Delegate the pure AD-3 agreement proof (`resume-proof.ts`): what
+  // 4. Delegate the pure ADR-0077 agreement proof (`resume-proof.ts`): what
   //    remains is decideable from the acquired representations alone — full
   //    replay through the pure machine, checkpoint envelope decode, the
   //    caller's strict `parseCheckpoint`, full-agreement / strict-prefix

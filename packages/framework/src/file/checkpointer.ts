@@ -1,4 +1,4 @@
-// `Checkpointer` backend over the filesystem (FR-020..FR-029, AD-1/AD-2/AD-6).
+// `Checkpointer` backend over the filesystem (FR-020..FR-029, ADR-0075/ADR-0076/ADR-0080).
 //
 // On-disk layout, per run, under the caller-supplied `directory`:
 //
@@ -10,7 +10,7 @@
 // partial write (FR-029). Crash litter is named `<path>.tmp.<unique-token>` and is
 // invisible to the reader, which only ever considers `*.json` entries.
 //
-// AD-2 digest filenames: a stored nodeKey may be a composite address
+// ADR-0076 digest filenames: a stored nodeKey may be a composite address
 // (`namespace@nodeId@index@attempt`, up to 291 bytes — see `layout.ts`), which
 // would exceed NAME_MAX in a literal `<key>.json` filename. Entries are
 // therefore addressed by `keyDigest(nodeKey)` and every read verifies the
@@ -18,7 +18,7 @@
 // means the file was moved, hand-written, or truncated, and the entry fails
 // closed as corrupt rather than being served under an address it does not own.
 //
-// AD-1 composite addressing: this is the ONE backend that implements it
+// ADR-0075 composite addressing: this is the ONE backend that implements it
 // (FR-022/FR-023). `saveNode`'s 4th argument goes through `compositeNodeKey`,
 // whose canonical folding makes a save with no `index`/`attempt` byte-identical
 // to a pre-extension save (stored key = the bare `nodeId`). Because `@` is
@@ -60,7 +60,7 @@
 // directory resolution, atomic writes, and typed error mapping only (2026-08-14
 // codec-separation remediation — see checkpointer-codec.ts header).
 //
-// Failure surface (AD-6/FR-040): NOTHING throws across the port boundary.
+// Failure surface (ADR-0080/FR-040): NOTHING throws across the port boundary.
 // Every failure returns `Result<_, FrameworkError>` using existing kinds —
 // invalid write values / serialization as `checkpoint-write-failed`, all
 // filesystem or clock failures as `cache-error` (`saveNode`/`setMeta`/`load`),
@@ -302,6 +302,41 @@ const createFileCheckpointerUnchecked = (
     return verifyDirectory(join(base.path, validRunId), base.path, create);
   }
 
+  /**
+   * Clock read + representability gate, shared by `setMeta` (write stamp) and
+   * `load` (FR-027 lazy expiry). Both rejections are code-constructed and
+   * deterministic — a throwing or non-representable injected clock fails
+   * identically on every retry — so both are pinned "permanent" exactly as the
+   * per-method blocks were, with the per-operation message prefixes
+   * byte-identical.
+   */
+  const readClock = (
+    operation: "setMeta" | "load",
+    runId: RunId,
+  ): Result<number, FrameworkError> => {
+    try {
+      const ms = now();
+      if (!Number.isFinite(ms) || !isValidDate(new Date(ms))) {
+        return err(
+          checkpointerCacheError(
+            operation,
+            `${operation} clock returned a non-representable timestamp for run ${render(runId)}: ${render(ms)}`,
+            "permanent",
+          ),
+        );
+      }
+      return ok(ms);
+    } catch (error) {
+      return err(
+        checkpointerCacheError(
+          operation,
+          `${operation} clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
+          "permanent",
+        ),
+      );
+    }
+  };
+
   return {
     async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
       let rawMeta: RawMetaSnapshot;
@@ -325,29 +360,9 @@ const createFileCheckpointerUnchecked = (
           ),
         );
       }
-      let createdAtMs: number;
-      try {
-        createdAtMs = now();
-      } catch (error) {
-        // Deterministic: a throwing injected clock fails identically on every
-        // retry — pin "permanent" like the other code-constructed rejections.
-        return err(
-          checkpointerCacheError(
-            "setMeta",
-            `setMeta clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
-            "permanent",
-          ),
-        );
-      }
-      if (!Number.isFinite(createdAtMs) || !isValidDate(new Date(createdAtMs))) {
-        return err(
-          checkpointerCacheError(
-            "setMeta",
-            `setMeta clock returned a non-representable timestamp for run ${render(runId)}: ${render(createdAtMs)}`,
-            "permanent",
-          ),
-        );
-      }
+      const createdAtClock = readClock("setMeta", runId);
+      if (!createdAtClock.ok) return err(createdAtClock.error);
+      const createdAtMs = createdAtClock.value;
 
       let json: string;
       try {
@@ -533,29 +548,9 @@ const createFileCheckpointerUnchecked = (
 
       // FR-027: lazy expiry — evaluated here, at read time, against the
       // injected clock. No sweeper, no physical GC in this pass.
-      let nowMs: number;
-      try {
-        nowMs = now();
-      } catch (error) {
-        // Deterministic: a throwing injected clock fails identically on every
-        // retry — pin "permanent" like the other code-constructed rejections.
-        return err(
-          checkpointerCacheError(
-            "load",
-            `load clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
-            "permanent",
-          ),
-        );
-      }
-      if (!Number.isFinite(nowMs) || !isValidDate(new Date(nowMs))) {
-        return err(
-          checkpointerCacheError(
-            "load",
-            `load clock returned a non-representable timestamp for run ${render(runId)}: ${render(nowMs)}`,
-            "permanent",
-          ),
-        );
-      }
+      const nowClock = readClock("load", runId);
+      if (!nowClock.ok) return err(nowClock.error);
+      const nowMs = nowClock.value;
       if (nowMs - createdAt.getTime() > TTL_SECONDS * 1000) {
         return err(frameworkError.checkpointExpired(run, createdAt));
       }

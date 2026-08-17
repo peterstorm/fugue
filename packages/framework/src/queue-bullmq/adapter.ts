@@ -98,6 +98,17 @@ export function createBullMQBackend(
           ? { attempts: opts.defaultAttempts }
           : undefined,
     });
+
+    // Attach the default queue error listener: BullMQ re-emits failures of the
+    // Queue's INTERNAL connection (a separate ioredis instance, since
+    // `bullConnection` is a plain {host, port}) as an "error" event on the
+    // Queue itself. An unhandled "error" event would crash the process with
+    // ERR_UNHANDLED_ERROR — the same hazard the shared-connection and Worker
+    // listeners above defend against; log it instead (with the queue name for
+    // correlation).
+    queue.on("error", (err) => {
+      fwLogger().error(`[BullMQ] Queue "${name}" error:`, err);
+    });
     queues.add(queue);
 
     return {

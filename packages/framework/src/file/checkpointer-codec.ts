@@ -1,5 +1,5 @@
 // Pure meta/node/options codecs for the file `Checkpointer` backend
-// (FR-016/FR-020..FR-029, AD-1/AD-2/AD-6), extracted from `checkpointer.ts`
+// (FR-016/FR-020..FR-029, ADR-0075/ADR-0076/ADR-0080), extracted from `checkpointer.ts`
 // during the 2026-08-14 codec-separation remediation (pure core split from
 // the I/O shell — review run
 // .claude/reviews/review-and-fix-runs/standalone-2026-08-14-f6-file-durable-runtime).
@@ -22,7 +22,7 @@
 // It performs NO I/O and NO clock reads: byte strings and frozen snapshots
 // go in, `Result`s and verdicts come out, and every expected rejection is a
 // typed `Result` or a documented throw the imperative shell converts at the
-// port boundary (AD-6/FR-040). The module has NO Node built-in imports at
+// port boundary (ADR-0080/FR-040). The module has NO Node built-in imports at
 // all (INV-1): the digest comes from `layout.ts`, which owns the
 // `node:crypto` import.
 //
@@ -60,7 +60,7 @@ import { err, ok } from "../types/result.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
-// Error construction (AD-6)
+// Error construction (ADR-0080)
 // ---------------------------------------------------------------------------
 
 /**
@@ -148,7 +148,7 @@ interface StoredMeta {
 
 /** On-disk shape of `<runId>/nodes/<digest>.json`. `nodeKey` is the stored
  * address (canonical nodeId or composite key) and MUST digest to the
- * filename; `nodeId` names the real node inside it (AD-1). */
+ * filename; `nodeId` names the real node inside it (ADR-0075). */
 interface StoredNode {
   readonly nodeKey: string;
   readonly nodeId: string;
@@ -599,7 +599,7 @@ export const serializeNode = (nodeKey: string, state: RawNodeSnapshot): string =
   return json;
 };
 
-/** The node-entry filename contract (AD-2): the 64-lowercase-hex digest of the
+/** The node-entry filename contract (ADR-0076): the 64-lowercase-hex digest of the
  * stored nodeKey, `.json`. A `*.json` file in `nodes/` that does not match was
  * never written by this backend. */
 const NODE_FILE_NAME_PATTERN = /^([0-9a-f]{64})\.json$/;
@@ -894,7 +894,9 @@ export const parseLoadOpts = (
   // The exact-key gate above already proved `ownKeys` is `[]` or exactly
   // `["expectedDagFingerprint"]`, so a single direct read IS the presence
   // check: it yields `undefined` exactly when the key is absent, with one
-  // property observation (round-8 A1 single-read parity).
+  // property observation (pinned in file-checkpointer-codec.test.ts,
+  // "returns fresh frozen option objects the caller cannot mutate or
+  // re-observe" — the counting-Proxy `reads === 1` assertion).
   const expectedDagFingerprint = loadOpts.expectedDagFingerprint;
   if (expectedDagFingerprint !== undefined && typeof expectedDagFingerprint !== "string") {
     return err(

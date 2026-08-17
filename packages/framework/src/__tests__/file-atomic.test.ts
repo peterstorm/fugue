@@ -1,6 +1,6 @@
 /**
  * Integration tests for `src/file/atomic.ts` — the file backend's two
- * durability primitives (AD-2 / AD-4, spec FR-006/FR-007/FR-013/FR-029/FR-031):
+ * durability primitives (ADR-0076 / ADR-0078, spec FR-006/FR-007/FR-013/FR-029/FR-031):
  *
  * - `atomicWriteFile`: tmp+rename atomic commit — a reader observes either the
  *   prior-complete or the new-complete snapshot, never a partial write;
@@ -222,7 +222,7 @@ describe("withFileLock — mutual exclusion", () => {
 
     // Each caller performs a read-modify-write with an await INSIDE the
     // critical section. Without serialization, two callers could observe the
-    // same listing and both write the same value — the exact hazard AD-4
+    // same listing and both write the same value — the exact hazard ADR-0078
     // documents for concurrent appends (sequence collision).
     const tasks = Array.from({ length: 8 }, () =>
       withFileLock(lockPath, async () => {
@@ -1213,7 +1213,7 @@ describe("stealStaleFileLock — post-rename liveness re-probe (never delete a l
   test("atomicWriteFile rejects non-string contents with a typed cache-error (last-line guard)", () => {
     // Every internal caller passes strings; this pins the guard itself so a
     // refactor cannot silently drop it, and the typed surface (FR-040): the
-    // raw string throw is converted to the AD-6 typed failure.
+    // raw string throw is converted to the ADR-0080 typed failure.
     const dir = tempDir();
     let failure: unknown = null;
     try {

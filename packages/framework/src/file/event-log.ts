@@ -1,4 +1,4 @@
-// Strict read side of the file event log (FR-008/FR-009, AD-2).
+// Strict read side of the file event log (FR-008/FR-009, ADR-0076).
 //
 // `readFileEventRecords` / `readFileEvents` reconstruct the journal's
 // records from the durable listing (`<directory>/events/*.json`, sorted —
@@ -25,14 +25,14 @@
 // event log is authoritative, so a corrupt entry is never silently dropped
 // mid-log (FR-009); the caller (e.g. `resumeFileJob`) decides how to fail
 // closed from there. Unlike the journal (whose `JobLike` surface must throw,
-// AD-6), the reader returns `Result<_, FrameworkError>` with kind
+// ADR-0080), the reader returns `Result<_, FrameworkError>` with kind
 // `cache-error` (operation `readFileEventRecords` / `readFileEvents`) — the
 // resume layer re-tags corruption as `checkpoint-corrupt` with the runId.
 //
 // Readers need NO lock: event files are immutable and written atomically
 // (rename is the commit point); `append.lock/` is a directory and `.tmp.<unique-token>`
 // litter never matches `*.json`, so they are invisible to this reader (any
-// number of concurrent readers is part of the AD-4 single-writer contract).
+// number of concurrent readers is part of the ADR-0078 single-writer contract).
 //
 // Import discipline (INV-1): `node:fs`, `node:path` only among node built-ins.
 
@@ -148,7 +148,7 @@ const readStrict = (directory: string): StrictResult => {
       });
     }
 
-    // 3. Filename digest ↔ content recompute (AD-2 tamper/tear check).
+    // 3. Filename digest ↔ content recompute (ADR-0076 tamper/tear check).
     // `eventFileName` re-validates both sides, so this equality is exact.
     const expected = eventFileName(record.sequence, eventDigestOf(record));
     if (name !== expected) {
@@ -167,7 +167,7 @@ const readStrict = (directory: string): StrictResult => {
 // Public readers
 // ---------------------------------------------------------------------------
 
-/** Tag a strict-read failure with the entry-point operation (AD-6).
+/** Tag a strict-read failure with the entry-point operation (ADR-0080).
  *
  * The class comes from the failure's own construction site, never from its
  * message text: strict reads fail either on deterministic on-disk conditions

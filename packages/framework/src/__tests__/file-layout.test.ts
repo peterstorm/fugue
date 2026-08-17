@@ -1,6 +1,6 @@
 // file-layout.test.ts — boundary validator matrix + digest/filename mapping
 //
-// Covers the single source of truth for the on-disk contract (AD-2):
+// Covers the single source of truth for the on-disk contract (ADR-0076):
 //   - constant surface (names, schema version, TTL)
 //   - isBoundaryId: charset/`{1,128}` boundary matrix incl. hostile strings
 //     (`../`, absolute paths, NUL, 129-char ids, `@`/`|` separators, `$input`,
@@ -191,7 +191,7 @@ describe("isBoundaryId — hostile identifier matrix (FR-016/FR-029, NFR-010)", 
     ["windows drive", "C:\\x"],
     ["NUL byte", "a\u0000b"],
     ["bare NUL", "\u0000"],
-    ["at separator (AD-1 composite)", "a@b"],
+    ["at separator (ADR-0075 composite)", "a@b"],
     ["leading at", "@a"],
     ["pipe separator", "a|b"],
     ["dollar (DAG_INPUT reserved)", "$input"],
@@ -260,7 +260,7 @@ describe("isBoundaryId — hostile identifier matrix (FR-016/FR-029, NFR-010)", 
   });
 });
 
-describe("keyDigest — sha256 hex mapping (AD-2)", () => {
+describe("keyDigest — sha256 hex mapping (ADR-0076)", () => {
   const sha256hex = (s: string): string => createHash("sha256").update(s).digest("hex");
 
   it("matches known sha256 vectors", () => {
@@ -362,7 +362,7 @@ describe("keyDigest — sha256 hex mapping (AD-2)", () => {
   });
 });
 
-describe("eventFileName — pad6 zero-padding and shape (AD-2)", () => {
+describe("eventFileName — pad6 zero-padding and shape (ADR-0076)", () => {
   const d = "ab".repeat(32); // 64 hex chars
 
   it("zero-pads sequences to 6 digits", () => {
@@ -428,7 +428,7 @@ describe("eventFileName — pad6 zero-padding and shape (AD-2)", () => {
   });
 });
 
-describe("eventDigestOf — keyed vs keyless (AD-2)", () => {
+describe("eventDigestOf — keyed vs keyless (ADR-0076)", () => {
   const event = { kind: "node-ran", nodeId: "n1" };
 
   it("keyed: digests the dedupKey and ignores sequence/event", () => {
@@ -528,7 +528,7 @@ describe("eventDigestOf — keyed vs keyless (AD-2)", () => {
   });
 });
 
-describe("keyed/keyless digest disjointness — enforcement point (AD-2/FR-015)", () => {
+describe("keyed/keyless digest disjointness — enforcement point (ADR-0076/FR-015)", () => {
   const event = { kind: "node-ran", nodeId: "n1" };
 
   it("pins the load-bearing argument: a `|`-bearing dedupKey would collide with a keyless seed, so the codec rejects it", () => {
@@ -581,7 +581,7 @@ describe("keyed/keyless digest disjointness — enforcement point (AD-2/FR-015)"
   });
 });
 
-describe("AD-2 NAME_MAX contract — full dedupKey range at the digest level (FR-015)", () => {
+describe("ADR-0076 NAME_MAX contract — full dedupKey range at the digest level (FR-015)", () => {
   it("accepts 256-char dedupKeys (spec maximum) and maps them to 76-byte names", () => {
     const dedupKey = "k".repeat(256);
     expect(dedupKey.length).toBe(256);

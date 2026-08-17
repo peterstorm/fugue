@@ -63,7 +63,7 @@ export interface RunState {
   /**
    * Stored node entries keyed by the STORED nodeKey — the canonical `nodeId`
    * for canonical saves, or the composite key
-   * `${namespace}@${nodeId}@${index}@${attempt}` for composite saves (AD-1;
+   * `${namespace}@${nodeId}@${index}@${attempt}` for composite saves (ADR-0075;
    * encode/decode via `compositeNodeKey`/`parseCompositeNodeKey`). `NodeState.nodeId`
    * inside each entry still names the real node, so mapped/fan-out instances
    * of the same node appear as separate entries under distinct composite keys
@@ -85,7 +85,7 @@ export interface RunState {
 
 /**
  * Per-call options for `Checkpointer.saveNode` — composite checkpoint
- * addressing (AD-1, see `composite-node-key.ts`).
+ * addressing (ADR-0075, see `composite-node-key.ts`).
  *
  * Canonical folding: when `index` AND `attempt` are BOTH absent, the entry is
  * stored under the bare `nodeId` — byte-identical to pre-extension behavior
@@ -123,7 +123,7 @@ export interface Checkpointer {
   /**
    * Persist a node's terminal state under `runId`.
    *
-   * The optional 4th argument enables composite addressing (AD-1): with
+   * The optional 4th argument enables composite addressing (ADR-0075): with
    * `index`/`attempt` both absent the entry is stored under the canonical
    * `nodeId` key (existing behavior, byte-identical); with either present the
    * entry is stored under the composite key (see `SaveNodeOpts`). The
@@ -137,7 +137,10 @@ export interface Checkpointer {
 
 /**
  * `setMeta` write-failure kind mapping — an explicit port decision, not an
- * accident of sequencing (round-8 remediation): for the SAME input class
+ * accident of sequencing (pinned per backend: in-memory in
+ * redis-checkpointer.test.ts, "setMeta with unreadable metadata is a typed
+ * cache-error(checkpoint:setMeta), never a raw rejection"; file in
+ * file-checkpointer.test.ts): for the SAME input class
  * (metadata that cannot be stored — a non-cloneable value, an unreadable
  * getter-bearing bag), each backend's failure kind is:
  *

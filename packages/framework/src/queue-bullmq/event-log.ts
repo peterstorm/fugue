@@ -68,9 +68,10 @@ export function createRedisStreamReader(
       // For the half-open semantic [fromMs, toMs):
       //   start = `${fromMs}-0`           (first entry at or after fromMs)
       //   end   = `${toMs - 1}-18446744073709551615`  (last entry strictly before toMs)
-      // Redis treats entry IDs lexicographically with ms.seq numeric ordering;
-      // using max u64 as the seq portion of the end bound captures every
-      // entry recorded at the (toMs - 1)-th millisecond.
+      // Redis compares entry IDs as numeric uint64 pairs (ms field, then seq
+      // field) — NOT lexicographically; using max u64 as the seq portion of
+      // the end bound captures every entry recorded at the (toMs - 1)-th
+      // millisecond precisely because that ordering is numeric.
       const start = `${fromMs}-0`;
       const end = `${toMs - 1}-18446744073709551615`;
       const entries = await redis.xrange(key, start, end);

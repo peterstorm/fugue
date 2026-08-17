@@ -397,7 +397,7 @@ const FRAMEWORK_ERROR_KINDS: ReadonlySet<string> = new Set<FrameworkError["kind"
  * Anything else — a plain `Error`, a hostile object carrying an off-union
  * `kind` string — is NOT a typed framework error and must not be relabeled
  * as one by a boundary that only ever throws typed values (e.g. the file
- * journal's `readCheckpoint`, AD-6).
+ * journal's `readCheckpoint`, ADR-0080).
  */
 export const isFrameworkError = (value: unknown): value is FrameworkError => {
   try {

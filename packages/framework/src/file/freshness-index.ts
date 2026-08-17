@@ -1,6 +1,6 @@
-// Durable filesystem FreshnessIndex (FR-030..FR-032, AD-5/AD-6).
+// Durable filesystem FreshnessIndex (FR-030..FR-032, ADR-0079/ADR-0080).
 //
-// AD-5 stores exactly one bounded latest-write singleton per resource:
+// ADR-0079 stores exactly one bounded latest-write singleton per resource:
 //
 //   <directory>/<sha256hex(resource)>.json
 //   { writtenAtMs, runId, nodeId, newWitness, succeededAtMs }
@@ -25,7 +25,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
-import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
+import { isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import { fwLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type {
@@ -36,7 +36,7 @@ import type {
 } from "../types/freshness.js";
 import { parseFileFactoryClock } from "./options.js";
 import { FRESHNESS_TTL_SECONDS, __brandWitness } from "../types/freshness.js";
-import type { FrameworkError } from "../types/errors.js";
+import { isFrameworkError, type FrameworkError } from "../types/errors.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
@@ -50,6 +50,7 @@ import {
 import {
   fileCacheError,
   fileOperationError,
+  fileThrownValueMessage,
   isFileBackendPathString,
   type FileOperation,
 } from "./boundary-error.js";
@@ -255,7 +256,7 @@ const serializeStoredFreshnessEntry = (entry: StoredFreshnessEntry): string =>
     succeededAtMs: entry.succeededAtMs,
   });
 
-/** Strict pure parser for the one AD-5 persisted singleton shape. */
+/** Strict pure parser for the one ADR-0079 persisted singleton shape. */
 const parseStoredFreshnessEntry = (
   text: string,
   expectedResource: string,
@@ -268,7 +269,7 @@ const parseStoredFreshnessEntry = (
   }
   if (!isPlainRecord(raw)) return err("entry must be a JSON object");
   if (!hasExactKeys(raw, ["writtenAtMs", "runId", "nodeId", "newWitness", "succeededAtMs"])) {
-    return err("entry must contain exactly the AD-5 singleton fields");
+    return err("entry must contain exactly the ADR-0079 singleton fields");
   }
 
   // `raw` is `JSON.parse` output — no getters, traps, or stateful accessors
@@ -433,7 +434,24 @@ const createFileFreshnessIndexUnchecked = (
         const lockPath = join(directory, `${resourceDigest}.lock`);
 
         return await withFileLock(lockPath, () => {
-          const nowMs = now();
+          let nowMs: number;
+          try {
+            nowMs = now();
+          } catch (error) {
+            // Deterministic: a throwing injected clock fails identically on
+            // every retry — pin "permanent" like the non-finite return below
+            // and the sibling clock sites (journal appendEvent, checkpointer
+            // setMeta/load).
+            return err(
+              cacheFailure(
+                "freshness:recordWrite",
+                resourceDigest,
+                `clock failed while stamping the write: ${fileThrownValueMessage(error)}`,
+                undefined,
+                "permanent",
+              ),
+            );
+          }
           if (!isFiniteNumber(nowMs)) {
             // Deterministic: a non-finite injected clock fails identically on
             // every retry — pin "permanent" like the other code-constructed
@@ -480,6 +498,13 @@ const createFileFreshnessIndexUnchecked = (
           return ok(undefined);
         });
       } catch (error) {
+        // An already-typed failure (the withFileLock acquisition/body wraps,
+        // atomicWriteFile, the deterministic codec/keyDigest rejections)
+        // carries its own precise operation, location, and inferred
+        // failureClass — re-wrapping it here only double-nests the diagnostic
+        // and drops the class. Let it ride through once (atomic.ts/journal.ts/
+        // job.ts parity); wrap only what is not yet typed.
+        if (isFrameworkError(error)) return err(error);
         return err(cacheFailure("freshness:recordWrite", digest, error));
       }
     },
@@ -521,7 +546,24 @@ const createFileFreshnessIndexUnchecked = (
           return ok(null);
         }
 
-        const nowMs = now();
+        let nowMs: number;
+        try {
+          nowMs = now();
+        } catch (error) {
+          // Deterministic: a throwing injected clock fails identically on
+          // every retry — pin "permanent" like the recordWrite twin and the
+          // sibling clock sites (journal appendEvent, checkpointer
+          // setMeta/load).
+          return err(
+            cacheFailure(
+              "freshness:findConflict",
+              digest,
+              `clock failed while evaluating the freshness TTL: ${fileThrownValueMessage(error)}`,
+              undefined,
+              "permanent",
+            ),
+          );
+        }
         if (!isFiniteNumber(nowMs)) {
           // Deterministic: a non-finite injected clock fails identically on
           // every retry — pin "permanent" like the other code-constructed
@@ -545,6 +587,10 @@ const createFileFreshnessIndexUnchecked = (
           ),
         );
       } catch (error) {
+        // Same ride-through as recordWrite: typed failures keep their own
+        // operation, location, and inferred failureClass instead of being
+        // double-nested and reclassified (atomic.ts/journal.ts/job.ts parity).
+        if (isFrameworkError(error)) return err(error);
         return err(cacheFailure("freshness:findConflict", digest, error));
       }
     },

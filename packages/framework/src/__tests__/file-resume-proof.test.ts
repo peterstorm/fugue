@@ -1,5 +1,5 @@
 /**
- * Direct PURE tests for `src/file/resume-proof.ts` — the AD-3 agreement
+ * Direct PURE tests for `src/file/resume-proof.ts` — the ADR-0077 agreement
  * proof (`proveResumeAgreement`), extracted from the `resumeFileJob`
  * filesystem shell.
  *
@@ -16,7 +16,7 @@
  *   state; the decoder is consulted exactly once; no checkpoint
  *   (`checkpointJson: null`) resumes from the pure replay without touching
  *   the decoder; proof inputs are never mutated.
- * - Strict-prefix lag (AD-3 step 7): empty-prefix (genesis) lag, lag by one,
+ * - Strict-prefix lag (ADR-0077 step 7): empty-prefix (genesis) lag, lag by one,
  *   lag by the last strict prefix, and checkpoint-only runs (empty log +
  *   genesis-agreeing checkpoint resume to genesis).
  * - Disagreement (FR-010): a checkpoint matching no prefix fails closed with
@@ -39,7 +39,7 @@
  *   objects) never escape and never make rendering throw; hostile non-string
  *   state keys fail closed.
  *
- * Filesystem integration (acquisition, re-tagging, AD-6 passthrough, the
+ * Filesystem integration (acquisition, re-tagging, ADR-0080 passthrough, the
  * FR-014 gate, and the outer typed boundary) stays covered by
  * `file-resume.test.ts`; the two suites share the same machine fixtures.
  */
@@ -140,10 +140,10 @@ const prove = (
   });
 
 // ---------------------------------------------------------------------------
-// Full agreement — the checkpoint equals the full replay (AD-3 step 6)
+// Full agreement — the checkpoint equals the full replay (ADR-0077 step 6)
 // ---------------------------------------------------------------------------
 
-describe("proveResumeAgreement — full agreement (AD-3 step 6)", () => {
+describe("proveResumeAgreement — full agreement (ADR-0077 step 6)", () => {
   it("resumes from the log replay when the checkpoint equals the full replay, consulting the decoder exactly once", () => {
     let parseCalls = 0;
     const result = prove({
@@ -196,10 +196,10 @@ describe("proveResumeAgreement — full agreement (AD-3 step 6)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Strict-prefix lag — the benign append-before-checkpoint window (AD-3 step 7)
+// Strict-prefix lag — the benign append-before-checkpoint window (ADR-0077 step 7)
 // ---------------------------------------------------------------------------
 
-describe("proveResumeAgreement — strict-prefix benign lag (AD-3 step 7)", () => {
+describe("proveResumeAgreement — strict-prefix benign lag (ADR-0077 step 7)", () => {
   const threeStepsThenDone = (): readonly RecordedEvent<unknown>[] =>
     stepLog(3).concat([recorded({ type: "DONE" }, 4_000)]);
 

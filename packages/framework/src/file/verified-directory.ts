@@ -29,7 +29,7 @@
 //
 // These helpers throw raw `Error` values with actionable messages; the checkpointer shell converts every throw into its typed
 // `cache-error(load|saveNode|setMeta)` boundary, so nothing untyped crosses
-// the port (AD-6). Missing entries are distinguished ONLY by the caller:
+// the port (ADR-0080). Missing entries are distinguished ONLY by the caller:
 // `verifyDirectory(…, create: false)` returns `null` for ENOENT, while
 // `verifyExistingFile` lets ENOENT propagate because a missing record file
 // mid-load is an environment failure the shell classifies explicitly.

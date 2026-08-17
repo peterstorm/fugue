@@ -1,4 +1,4 @@
-// Durable event journal + atomic projections for the file backend (AD-2/AD-4).
+// Durable event journal + atomic projections for the file backend (ADR-0076/ADR-0078).
 //
 // `createFileJournal(directory)` is the WRITE side of the on-disk layout:
 //
@@ -13,7 +13,7 @@
 // `withFileLock` from `atomic.ts`), so persisted
 // sequences are contiguous and replayable in lock-acquisition order. The
 // relative order of genuinely concurrent calls is scheduler-dependent
-// (FR-013, AD-4).
+// (FR-013, ADR-0078).
 //
 // The dedup decision is the durable file listing itself — no index. A keyed
 // append (`dedupKey !== ""`) whose `sha256hex(dedupKey)` digest suffix
@@ -33,11 +33,11 @@
 // `writeCheckpoint`/`writeProgress` commit atomically via `atomicWriteFile`
 // (tmp + rename — a reader observes prior-complete or new-complete, never a
 // partial file; FR-006/FR-007). They are deliberately LOCK-FREE: the
-// single-writer contract (AD-4, documented on `createFileJob`'s surface in
+// single-writer contract (ADR-0078, documented on `createFileJob`'s surface in
 // `job.ts`) guarantees exactly one writer per run directory, and the resume
 // proof backstops any violation.
 //
-// Failure surface (AD-6): `JobLike` methods are `Promise<void>` — the port
+// Failure surface (ADR-0080): `JobLike` methods are `Promise<void>` — the port
 // has no error channel — so fs I/O failures THROW a typed `FrameworkError`
 // of kind `cache-error` with the failing operation and the run directory
 // named in the message (operation field + message). A failed append is never
@@ -46,7 +46,7 @@
 // (e.g. a file squatting on `events/append.lock`), filename computation, the
 // 6-digit sequence capacity ceiling, and the atomic rename itself. Capacity
 // exhaustion is reported as the existing `cache-error` kind with operation
-// `appendEvent` and precise sequence/directory context, as required by AD-6.
+// `appendEvent` and precise sequence/directory context, as required by ADR-0080.
 // Invariant violations (a non-FR-015 dedupKey, a non-serializable event, a
 // non-finite clock value, or progress outside [0,100]) use the same closed
 // typed throwing channel: `cache-error` with the exact operation and durable
@@ -90,7 +90,7 @@ import {
 } from "./boundary-error.js";
 
 // ---------------------------------------------------------------------------
-// Errors (AD-6)
+// Errors (ADR-0080)
 // ---------------------------------------------------------------------------
 
 /**
@@ -108,7 +108,7 @@ const fsFailure = (
   fileOperationError(operation, `run directory ${directory}`, error, failureClass);
 
 /**
- * The event-file naming contract (AD-2) is parsed through
+ * The event-file naming contract (ADR-0076) is parsed through
  * `parseEventFileName` in `layout.ts` — the single encoded inverse of
  * `eventFileName`'s output shape (6-digit zero-padded sequence, `-`,
  * 64-lowercase-hex digest, `.json`). The writer's listing enforces the same
@@ -118,7 +118,7 @@ const fsFailure = (
  */
 
 /**
- * Build the AD-6 typed failure for the journal's permanent capacity ceiling.
+ * Build the ADR-0080 typed failure for the journal's permanent capacity ceiling.
  * The public error taxonomy stays closed: capacity exhaustion uses the
  * existing `cache-error` kind, with append operation and durable-layout
  * context sufficient to diagnose the non-transient condition.
@@ -152,7 +152,7 @@ export interface FileJournalOptions {
 
 /**
  * The durable store behind `createFileJob` (and `resumeFileJob`'s read side).
- * Methods throw only typed `FrameworkError` per AD-6 — kind `cache-error`
+ * Methods throw only typed `FrameworkError` per ADR-0080 — kind `cache-error`
  * with operation + directory/path named, for infrastructure, capacity, and
  * every runtime invariant rejection.
  */
@@ -166,7 +166,7 @@ export interface FileJournal {
   appendEvent(event: unknown, dedupKey?: string): Promise<void>;
   /**
    * Atomic projection of a losslessness-proved checkpoint (tmp + rename),
-   * lock-free by the single-writer contract (AD-4). The opaque commit can be
+   * lock-free by the single-writer contract (ADR-0078). The opaque commit can be
    * created only through `serializeFileCheckpoint`; arbitrary JSON is rejected
    * at both the TypeScript and runtime boundaries.
    */
@@ -218,7 +218,7 @@ export const createFileJournal = (
   const progressPath = join(directory, PROGRESS_FILE);
 
   /**
-   * List the durable event files (`*.json`) in append order (AD-2: the
+   * List the durable event files (`*.json`) in append order (ADR-0076: the
    * 6-digit sequence prefix makes lexicographic order == append order).
    *
    * Classification is by name SUFFIX only — `append.lock/` (a directory) and
@@ -314,7 +314,7 @@ export const createFileJournal = (
     // by the scheduler.
     //
     // Acquisition, lock-body, and owned-release failures are all normalized
-    // at the append boundary (AD-6). `withFileLock` arbitrates body vs cleanup:
+    // at the append boundary (ADR-0080). `withFileLock` arbitrates body vs cleanup:
     // release failure rejects an otherwise successful body, while a body
     // failure remains primary if cleanup also fails.
     const lockPath = join(eventsDir, APPEND_LOCK);

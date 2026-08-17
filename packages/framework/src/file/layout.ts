@@ -9,7 +9,7 @@
 // such as freshness resources, instead pass through `keyDigest`; only the digest
 // is joined, and the raw value never becomes a path component.
 //
-// AD-2 digest-filename adaptation: record filenames carry the sha256 hex digest
+// ADR-0076 digest-filename adaptation: record filenames carry the sha256 hex digest
 // of an identifier, never the identifier itself. A spec-valid 256-char
 // dedupKey (or a composite checkpoint nodeKey, `namespace@nodeId@index@attempt`
 // — up to 291 bytes in the true worst case: 128-char namespace AND 128-char
@@ -74,7 +74,7 @@ export const APPEND_LOCK = "append.lock";
 export const JOURNAL_SCHEMA_VERSION = 1;
 
 // ---------------------------------------------------------------------------
-// Boundary validation (FR-016/FR-029) and digest/filename mapping (AD-2)
+// Boundary validation (FR-016/FR-029) and digest/filename mapping (ADR-0076)
 // ---------------------------------------------------------------------------
 
 /**
@@ -85,7 +85,7 @@ export const JOURNAL_SCHEMA_VERSION = 1;
  * otherwise return `true`. `@`/`|`/`.`/`/`/`\`/NUL/etc. are all rejected, so a
  * validated id can never address anything outside the caller-supplied
  * directory, and composite checkpoint keys (`namespace@nodeId@index@attempt`,
- * AD-1) can never collide with a canonical id by construction.
+ * ADR-0075) can never collide with a canonical id by construction.
  */
 export const isBoundaryId = (value: unknown): boolean =>
   typeof value === "string" && ID_PATTERN.test(value);
@@ -174,7 +174,11 @@ export const keyDigest = (key: string): string => {
       .update(isWellFormedUtf16(key) ? key : encodeIllFormedUtf16(key))
       .digest("hex");
   } catch (error) {
-    // Deterministic: an unhashable/ill-formed key fails identically on retry.
+    // Deterministic fence: a failure here would be an engine-level hashing
+    // fault, not an input-domain rejection — ill-formed UTF-16 is routed to
+    // the injective encoding above BEFORE Hash.update, and update() on a
+    // string does not throw in Node. Re-running on the same key reproduces
+    // the fault identically, so it is pinned "permanent".
     throw fileOperationError("keyDigest", "digest input", error, "permanent");
   }
 };
@@ -191,7 +195,7 @@ const pad6 = (sequence: number): string => String(sequence).padStart(6, "0");
  * on any sequence past it, naming the rule). `"1000000-…"` would sort
  * before `"999999-…"` in a listing, silently breaking sorted-listing =
  * append order, so the ceiling is enforced everywhere a sequence becomes
- * durable — never truncated, never silently out-of-order (AD-2).
+ * durable — never truncated, never silently out-of-order (ADR-0076).
  */
 export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
 
@@ -201,7 +205,7 @@ export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
  * append order — but ONLY within the 6-digit ceiling: `"1000000-…"` would
  * sort before `"999999-…"`, silently breaking the invariant, so any sequence
  * past `MAX_LEXICOGRAPHIC_SEQUENCE` throws. The digest suffix carries the
- * AD-2 identity.
+ * ADR-0076 identity.
  *
  * Always 76 bytes for a 64-hex digest — within NAME_MAX (255) for every
  * spec-valid key — for every sequence under the 6-digit ceiling.

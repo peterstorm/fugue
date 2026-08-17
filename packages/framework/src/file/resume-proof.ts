@@ -1,4 +1,4 @@
-// proveResumeAgreement — the pure AD-3 agreement proof, extracted from the
+// proveResumeAgreement — the pure ADR-0077 agreement proof, extracted from the
 // `resumeFileJob` filesystem shell (`@fuguejs/framework/file`).
 //
 // The event log is the single authoritative record of a run's history; the
@@ -9,7 +9,7 @@
 // (the strictly-read event log and the raw checkpoint JSON) and hands them
 // in; every outcome here is decideable from those inputs alone (FR-011).
 //
-// The proof (AD-3). Step numbers cited as `AD-3 step N` in this module and
+// The proof (ADR-0077). Step numbers cited as `ADR-0077 step N` in this module and
 // its tests follow ADR-0077's shipped-implementation enumeration (1 read
 // events → 8 checkpoint-corrupt; agreement = 6, strict-prefix/genesis lag = 7):
 //
@@ -170,7 +170,7 @@ export interface ResumeProofArgs<S, E, C> {
    * reconstruct the identical state the original run reached (FR-011).
    * The executor is NEVER consulted. */
   readonly machine: Machine<S, E, C>;
-  /** The run's genesis data — the empty-prefix state of the proof (AD-3
+  /** The run's genesis data — the empty-prefix state of the proof (ADR-0077
    * step 7 includes the empty prefix = genesis as benign lag). */
   readonly genesis: { state: S; context: C };
   /**
@@ -195,7 +195,7 @@ export interface ResumeProofArgs<S, E, C> {
 }
 
 /**
- * The AD-3 agreement proof over already-acquired representations — see the
+ * The ADR-0077 agreement proof over already-acquired representations — see the
  * module header for the algorithm and the totality discipline. Always
  * returns a `Result`: `ok` with the PURE replay of the authoritative event
  * log whenever the run is resumable (the checkpoint is a projection that may
@@ -238,7 +238,7 @@ export const proveResumeAgreement = <S, E, C>(
   //    validation, object shape, closed top-level field set, schemaVersion —
   //    fail-closed parity with the strict record codec); the domain payload
   //    `data` is the caller's strict `parseCheckpoint`. ANY failure is
-  //    `checkpoint-corrupt` naming `checkpoint.json` (AD-6: "checkpoint
+  //    `checkpoint-corrupt` naming `checkpoint.json` (ADR-0080: "checkpoint
   //    decode failure").
   //
   //    GUARDED (FR-040): the caller's decoder is NOT trusted to be
@@ -368,7 +368,7 @@ export const proveResumeAgreement = <S, E, C>(
   }
   const checkpointData = decodedAttempt.value.value;
 
-  // 4. Agreement (AD-3 step 6): the checkpoint equals the FULL replay ⇒
+  // 4. Agreement (ADR-0077 step 6): the checkpoint equals the FULL replay ⇒
   //    resume from `replayed`. Context is deliberately not compared — the
   //    log alone determines the resumed state (FR-010).
   //
@@ -397,7 +397,7 @@ export const proveResumeAgreement = <S, E, C>(
   const checkpointKey = checkpointKeyResult.value;
   if (checkpointKey === replayedKey) return ok(replayed);
 
-  // 5. Single-pass strict-prefix scan (AD-3 step 7): fold the log while
+  // 5. Single-pass strict-prefix scan (ADR-0077 step 7): fold the log while
   //    comparing each intermediate state key to the checkpoint key. The
   //    empty prefix (genesis) is the state before any event; the FULL replay
   //    (the last transition's result) was already decided by step 4, so the

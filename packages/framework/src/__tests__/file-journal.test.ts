@@ -1,10 +1,10 @@
 /**
  * Integration tests for `src/file/journal.ts` (durable store) and
  * `src/file/event-log.ts` (strict reader) — the Phase-2 write/read sides
- * (AD-2, AD-4; spec FR-002/FR-006/FR-007/FR-008/FR-009/FR-013, SC-003):
+ * (ADR-0076, ADR-0078; spec FR-002/FR-006/FR-007/FR-008/FR-009/FR-013, SC-003):
  *
  * - append layout: `events/<NNNNNN>-<digest>.json`, sequence = count,
- *   keyed/keyless digests per AD-2; keyless appends never dedup
+ *   keyed/keyless digests per ADR-0076; keyless appends never dedup
  * - keyed dedup by the durable listing: same instance AND across a fresh
  *   instance over the same directory (simulated crash — SC-003), by key
  *   alone (in-memory/Redis parity)
@@ -18,7 +18,7 @@
  *   filename-prefix ↔ content-sequence mismatch, filename-digest ↔ content
  *   mismatch — all fail closed with the offending file named
  * - `readFileEvents` envelope mapping (FR-008) and FR-015 write-side
- *   rejection incl. the AD-2 NAME_MAX regression (256-char key still fits)
+ *   rejection incl. the ADR-0076 NAME_MAX regression (256-char key still fits)
  */
 
 import { describe, it, expect, afterEach } from "bun:test";
@@ -173,7 +173,7 @@ describe("createFileJournal — closed typed throwing shell", () => {
 // ---------------------------------------------------------------------------
 
 describe("createFileJournal.appendEvent — layout", () => {
-  it("writes the AD-2 layout: events/000000-<digest>.json, parseable record, recordedAtMs stamped", async () => {
+  it("writes the ADR-0076 layout: events/000000-<digest>.json, parseable record, recordedAtMs stamped", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir, { now: () => 1_700_000_000_123 });
     await journal.appendEvent({ type: "A", n: 1 });
@@ -669,10 +669,10 @@ describe("readFileEvents — RecordedEvent envelopes (FR-008)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Lock-acquire failure (AD-6) — typed, never a raw leak
+// Lock-acquire failure (ADR-0080) — typed, never a raw leak
 // ---------------------------------------------------------------------------
 
-describe("createFileJournal.appendEvent — lock-acquire failures are typed (AD-6)", () => {
+describe("createFileJournal.appendEvent — lock-acquire failures are typed (ADR-0080)", () => {
   it("a file squatting on events/append.lock fails with { kind: cache-error, operation: appendEvent }", async () => {
     const dir = tempDir();
     const eventsDir = join(dir, EVENTS_DIR);
@@ -802,10 +802,10 @@ describe("createFileJournal.appendEvent — a directory squatting on a record na
 });
 
 // ---------------------------------------------------------------------------
-// Capacity ceiling — existing AD-6 cache-error taxonomy
+// Capacity ceiling — existing ADR-0080 cache-error taxonomy
 // ---------------------------------------------------------------------------
 
-describe("createFileJournal.appendEvent — capacity ceiling classification (AD-6)", () => {
+describe("createFileJournal.appendEvent — capacity ceiling classification (ADR-0080)", () => {
   it("uses cache-error with append operation and precise capacity context", () => {
     const dir = tempDir();
     const full = journalCapacityError(
@@ -830,12 +830,12 @@ describe("createFileJournal.appendEvent — capacity ceiling classification (AD-
 });
 
 // ---------------------------------------------------------------------------
-// Writer-side genuine fs failures (AD-6) — the readdir branch of
+// Writer-side genuine fs failures (ADR-0080) — the readdir branch of
 // `listEventFiles` inside `appendEvent`, which the reader-only chmod tests
 // cannot cover
 // ---------------------------------------------------------------------------
 
-describe("createFileJournal.appendEvent — writer-side readdir failure (AD-6)", () => {
+describe("createFileJournal.appendEvent — writer-side readdir failure (ADR-0080)", () => {
   it("readdir EACCES on the events dir (0o300: writable, not readable) fails typed with the directory named", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);
@@ -864,7 +864,7 @@ describe("createFileJournal.appendEvent — writer-side readdir failure (AD-6)",
   });
 });
 
-describe("createFileJournal.appendEvent — events-dir creation failure (AD-6)", () => {
+describe("createFileJournal.appendEvent — events-dir creation failure (ADR-0080)", () => {
   it("a FILE squatting the events path (ENOTDIR) fails the first append typed with the run directory named", async () => {
     const dir = tempDir();
     // A regular file squatting the events path BEFORE the first append:
@@ -1216,7 +1216,7 @@ describe("strict reader — content-validation stays green after the ceiling gat
 });
 
 // ---------------------------------------------------------------------------
-// FR-015 write-side gate + AD-2 NAME_MAX regression
+// FR-015 write-side gate + ADR-0076 NAME_MAX regression
 // ---------------------------------------------------------------------------
 
 describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
@@ -1242,7 +1242,7 @@ describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
       "TWO-HUNDRED",
       "MAX",
     ]);
-    // Every filename stays within NAME_MAX (AD-2 — the digest adaptation).
+    // Every filename stays within NAME_MAX (ADR-0076 — the digest adaptation).
     for (const name of listEventFiles(dir)) {
       expect(name.length).toBeLessThanOrEqual(255);
     }
@@ -1410,7 +1410,7 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
     const dir = tempDir();
     const journal = createFileJournal(dir);
 
-    // FR-015: "a|b" violates AD-2 keyed/keyless digest disjointness.
+    // FR-015: "a|b" violates ADR-0076 keyed/keyless digest disjointness.
     const appendFailure = await journal.appendEvent({ type: "X" }, "a|b").then(
       () => null,
       (error: unknown) => error,
@@ -1454,12 +1454,12 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
 });
 
 // ---------------------------------------------------------------------------
-// Cross-process lock serialization (AD-4) — the in-process Promise.all tests
+// Cross-process lock serialization (ADR-0078) — the in-process Promise.all tests
 // cannot prove the lock spans processes; spawn three real bun children that
 // append to one directory concurrently and demand strict contiguity
 // ---------------------------------------------------------------------------
 
-describe("createFileJournal.appendEvent — cross-process lock serialization (AD-4)", () => {
+describe("createFileJournal.appendEvent — cross-process lock serialization (ADR-0078)", () => {
   it("three concurrent processes append a replayable contiguous sequence in scheduler-selected lock order", async () => {
     const dir = tempDir();
     // The child script imports the journal by absolute path and appends 10

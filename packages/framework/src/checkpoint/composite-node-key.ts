@@ -1,4 +1,4 @@
-// Composite checkpoint node-key codec (AD-1).
+// Composite checkpoint node-key codec (ADR-0075).
 //
 // Pure, backend-agnostic encoding of the composite node address space for the
 // `Checkpointer` port — no I/O, no imports from infra. The file backend keys
@@ -27,7 +27,7 @@ import { safeDiagnosticRender } from "../types/safe-error.js";
 export const DEFAULT_NODE_NAMESPACE = "dag";
 
 /**
- * Per-call options for composite checkpoint addressing on `saveNode` (AD-1).
+ * Per-call options for composite checkpoint addressing on `saveNode` (ADR-0075).
  *
  * Canonical folding: when `index` AND `attempt` are BOTH absent, the stored
  * key is exactly the bare `nodeId` and the options are ignored entirely —
@@ -97,13 +97,16 @@ const assertIndexOrAttempt = (kind: "index" | "attempt", value: number): void =>
   // `isNonNegativeSafeInteger` carries the `typeof value === "number"` guard
   // as its own first conjunct — no separate clause is needed, and the
   // predicate short-circuits on non-numbers before any `>= 0`/coercion, so a
-  // hostile `valueOf`/`toString` cannot trap here (round-9 A2 pin).
+  // hostile `valueOf`/`toString` cannot trap here (pinned in
+  // composite-node-key.test.ts, "rejects a throwing-hook … with the codec's
+  // own typed message (never a raw trap)").
   if (!isNonNegativeSafeInteger(value)) {
     // The codec's contract is TYPED throws: the diagnostic names the codec's
     // rule, never the hostile value's own error text. `safeDiagnosticRender`
     // is total — it renders objects via the object tag before any guarded
     // coercion, so a hostile `toString`/`valueOf` cannot trap inside this
-    // codec's own message construction (round-9 A2 pin).
+    // codec's own message construction (pinned in the same test: the
+    // rejection must not contain the hostile's "exploded" text).
     throw new Error(
       `Invalid composite node key ${kind}: expected a non-negative safe integer, got ${safeDiagnosticRender(value)}`,
     );
@@ -142,7 +145,7 @@ export const compositeNodeKey = (nodeId: NodeId, opts?: CompositeNodeKeyOpts): s
   if (opts !== undefined) assertNoNamespaceAlone(opts);
 
   // Canonical folding: index AND attempt both absent ⇒ bare nodeId. The opts
-  // are ignored entirely (AD-1), so a namespace alone never changes the key
+  // are ignored entirely (ADR-0075), so a namespace alone never changes the key
   // (and is rejected above as ambiguous caller error).
   if (opts?.index === undefined && opts?.attempt === undefined) {
     return nodeId;

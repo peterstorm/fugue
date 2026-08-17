@@ -187,6 +187,7 @@ src/checkpoint/index.ts                — export the new composite-node-key sur
 package.json                          — exports: add "./file": "./src/file.ts"
 src/scripts/check-imports.ts          — new rule: scope ["file", "file.ts"], forbiddenModules ["bullmq","ioredis","queue-bullmq"]
 docs/adr/0075-file-backend-durable-runtime.md   — ADR (composite address space + file backend design); registered in docs/adr/README.md index
+  							   └─ superseded: shipped split as ADR-0075 (composite node-key encoding) + ADR-0076…0080; see docs/adr/README.md
 ```
 
 ### Tests (`src/__tests__/`)
@@ -456,9 +457,9 @@ Executable-model policy note: no `## Lifecycles` (framework library code, not a 
 - Add `src/checkpoint/composite-node-key.ts` (AD-1 codec); export it from `src/checkpoint/index.ts`; extend the `Checkpointer` interface with the optional `SaveNodeOpts` param and document nodeKey semantics on `RunState`.
 - Add the `check-imports.ts` rule for scope `["file", "file.ts"]` (forbidden: `bullmq`, `ioredis`, `queue-bullmq`).
 - Add `"./file": "./src/file.ts"` to `package.json` exports; create the empty `src/file.ts` barrel (exports grow per phase).
-- Write ADR `docs/adr/0075-file-backend-durable-runtime.md` (composite address space + file backend design) per `docs/adr/adr-template.md` and register it in `docs/adr/README.md` (next index row).
+- Write ADR `docs/adr/0075-file-backend-durable-runtime.md` (composite address space + file backend design) per `docs/adr/adr-template.md` and register it in `docs/adr/README.md` (next index row). _(superseded: shipped split as ADR-0075 + ADR-0076…0080 — see `docs/adr/README.md`)_
 - Tests: `composite-node-key.test.ts` (folding, round-trip, collision-freedom, plus a fast-check property: distinct valid addresses ⇒ distinct keys, `parse(encode(a)) = a`), `file-atomic.test.ts` (atomic commit, interrupted-write litter ignored, lock mutual exclusion, stale-lock steal), `file-layout.test.ts` (boundary validator matrix incl. hostile strings, digest/filename mapping).
-- **Files:** `src/file/layout.ts`, `src/file/atomic.ts`, `src/file.ts`, `src/checkpoint/composite-node-key.ts`, `src/checkpoint/index.ts`, `src/checkpoint/checkpointer.ts`, `src/scripts/check-imports.ts`, `package.json`, `docs/adr/0075-file-backend-durable-runtime.md`, `docs/adr/README.md`, `src/__tests__/composite-node-key.test.ts`, `src/__tests__/file-atomic.test.ts`, `src/__tests__/file-layout.test.ts`.
+- **Files:** `src/file/layout.ts`, `src/file/atomic.ts`, `src/file.ts`, `src/checkpoint/composite-node-key.ts`, `src/checkpoint/index.ts`, `src/checkpoint/checkpointer.ts`, `src/scripts/check-imports.ts`, `package.json`, `docs/adr/0075-file-backend-durable-runtime.md` _(superseded: ADR-0075…0080)_, `docs/adr/README.md`, `src/__tests__/composite-node-key.test.ts`, `src/__tests__/file-atomic.test.ts`, `src/__tests__/file-layout.test.ts`.
 
 ### Phase 2: Journal, event log, and `createFileJob` (depends on Phase 1)
 
