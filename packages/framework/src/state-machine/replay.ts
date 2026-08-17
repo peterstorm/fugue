@@ -45,10 +45,10 @@ export const foldStep = <S, E, C>(
  * Rebuild state by replaying a sequence of events through the pure
  * transition function starting from an initial checkpoint.
  *
- * Accepts either raw events `E[]` (legacy form, used internally by tests
- * and code that already stripped envelopes) or `RecordedEvent<E>[]` (the
- * shape returned by `EventLogReader.readEvents`). Envelopes are unwrapped
- * automatically — the timestamp metadata is irrelevant to the fold.
+ * Accepts either raw events `E[]` (callers that already stripped envelopes)
+ * or `RecordedEvent<E>[]` (the shape returned by `EventLogReader.readEvents`).
+ * Envelopes are unwrapped automatically — the timestamp metadata is
+ * irrelevant to the fold.
  */
 export function replayEvents<S, E, C>(
   events: readonly RecordedEvent<unknown>[],

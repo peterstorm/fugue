@@ -22,8 +22,8 @@
  * Reaper tombs are reconciled before births; a live tomb that cannot be
  * restored blocks acquisition rather than permitting overlapping critical
  * sections. Release checks both pid and the acquisition's plain ownership
- * token. A branded lease type may be introduced in a future API revision; it
- * is deliberately not part of this internal primitive's current surface.
+ * token. The token is an internal ownership check, not a public lease
+ * (scope decision: ADR-0078).
  */
 
 import {

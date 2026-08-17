@@ -94,7 +94,11 @@ const assertIdComponent = (kind: string, value: string): void => {
 };
 
 const assertIndexOrAttempt = (kind: "index" | "attempt", value: number): void => {
-  if (typeof value !== "number" || !isNonNegativeSafeInteger(value)) {
+  // `isNonNegativeSafeInteger` carries the `typeof value === "number"` guard
+  // as its own first conjunct — no separate clause is needed, and the
+  // predicate short-circuits on non-numbers before any `>= 0`/coercion, so a
+  // hostile `valueOf`/`toString` cannot trap here (round-9 A2 pin).
+  if (!isNonNegativeSafeInteger(value)) {
     // The codec's contract is TYPED throws: the diagnostic names the codec's
     // rule, never the hostile value's own error text. `safeDiagnosticRender`
     // is total — it renders objects via the object tag before any guarded
@@ -186,6 +190,10 @@ const parseDecimalComponent = (raw: string): number | null => {
  *   - anything else ⇒ `null` (malformed — 1/2 separators, or a 4+ component
  *     "quad" that could never have been encoded).
  *
+ * The count is taken from ONE `key.split("@")` classified by part count
+ * (parts = separators + 1): no second pass over the string, and the
+ * classification is exactly the separator-count rule above.
+ *
  * Round-trip guarantee: for every valid address `a`,
  * `parseCompositeNodeKey(compositeNodeKey(a.nodeId, a.opts))` deep-equals the
  * NORMALIZED address — the discriminated form with defaults materialized
@@ -199,22 +207,21 @@ const parseDecimalComponent = (raw: string): number | null => {
 export const parseCompositeNodeKey = (key: string): ParsedCompositeNodeKey | null => {
   if (typeof key !== "string") return null;
 
-  let separators = 0;
-  for (let i = 0; i < key.length; i += 1) {
-    if (key[i] === "@") separators += 1;
-    if (separators > 3) return null; // more than 3 ⇒ cannot be composite; also cannot be canonical
-  }
-
-  if (separators === 0) {
+  // One split, one classification: part count is exactly separator count + 1,
+  // so 1 part ⇒ 0 separators (canonical), 4 parts ⇒ exactly 3 (composite),
+  // 2/3 parts ⇒ 1/2 separators (malformed), 5+ ⇒ more than 3 separators
+  // (cannot be composite and cannot be canonical).
+  const parts = key.split("@");
+  if (parts.length === 1) {
     // Canonical: the whole key is the nodeId. Re-validate so a key that the
     // encoder could never produce (empty, spaces, "..", …) is never reported
     // as a real canonical nodeId.
     return isIdComponent(key) ? { form: "canonical", nodeId: key } : null;
   }
 
-  if (separators !== 3) return null; // 1 or 2 separators ⇒ malformed
+  if (parts.length !== 4) return null; // 1 or 2 separators, or 4+ ⇒ malformed
 
-  const [namespace, nodeId, indexRaw, attemptRaw] = key.split("@");
+  const [namespace, nodeId, indexRaw, attemptRaw] = parts;
   if (!isIdComponent(namespace) || !isIdComponent(nodeId)) return null;
   const index = parseDecimalComponent(indexRaw);
   if (index === null) return null;

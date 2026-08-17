@@ -66,7 +66,8 @@ export function createBullMQBackend(
     lazyConnect: false,
   });
 
-  // FR-082: attach default error listener to prevent unhandled-rejection crashes
+  // default error listener: an unhandled ioredis "error" rejection would crash
+  // the process; log it instead
   redis.on("error", (err) => {
     fwLogger().error("[BullMQ] Shared Redis connection error:", err);
   });

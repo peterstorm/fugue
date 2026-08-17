@@ -25,7 +25,6 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
-import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import { fwLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
@@ -36,7 +35,7 @@ import type {
   WriteEntry,
 } from "../types/freshness.js";
 import { parseFileFactoryClock } from "./options.js";
-import { __brandWitness } from "../types/freshness.js";
+import { FRESHNESS_TTL_SECONDS, __brandWitness } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
@@ -55,7 +54,7 @@ import {
   type FileOperation,
 } from "./boundary-error.js";
 
-const TTL_MS = TTL_SECONDS * 1000;
+const TTL_MS = FRESHNESS_TTL_SECONDS * 1000;
 
 const WITNESS_KIND_ALLOW_LIST = {
   version: true,

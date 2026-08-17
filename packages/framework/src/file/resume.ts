@@ -16,6 +16,10 @@
 //
 // The shell's job, exactly:
 //
+//   0. Re-validate the caller's `runId` boundary (ID_PATTERN — the backend's
+//      re-validate-bypassed-brands discipline, `load` gates the same way):
+//      an out-of-domain id ⇒ typed `cache-error`, never a branded field that
+//      would fail the pattern, never a path addressed outside `directory`.
 //   1. Read the AUTHORITATIVE representation — the event log — through the
 //      shared strict reader (`readFileEvents`, FR-009). A missing events
 //      directory reads as an EMPTY log (`ok([])`); any corrupt record,
@@ -89,15 +93,17 @@ import { join } from "node:path";
 import { readFileEvents } from "./event-log.js";
 import { createFileJournal } from "./journal.js";
 import { proveResumeAgreement } from "./resume-proof.js";
+import { isBoundaryId } from "./layout.js";
 import type { Machine } from "../state-machine/types.js";
 import type { RunId } from "../types/ids.js";
+import { ID_PATTERN } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, messageOf } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";
-import { safeErrorMessage } from "../types/safe-error.js";
-import { fileOperationError } from "./boundary-error.js";
+import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
+import { fileCacheError, fileOperationError } from "./boundary-error.js";
 
 export interface ResumeFileJobArgs<S, E, C> {
   /** Run identity, carried on every typed error (`checkpoint-missing` /
@@ -158,6 +164,23 @@ const resumeFileJobUnchecked = async <S, E, C>(
   args: ResumeFileJobArgs<S, E, C>,
 ): Promise<Result<{ state: S; context: C }, FrameworkError>> => {
   const { runId, directory, machine, genesis, parseCheckpoint } = args;
+
+  // 0. Boundary re-validation of the caller's `runId` — bypassed brands are
+  //    re-checked (the backend's documented discipline; `Checkpointer.load`
+  //    gates the same way): an id outside `ID_PATTERN` would address a path
+  //    outside `directory`, and there is no run to call missing or corrupt,
+  //    so `cache-error` is the honest kind — the typed error must never
+  //    brand a value that would fail the pattern (truthful branding). The
+  //    value is constructed through `fileCacheError` so the operation name
+  //    stays inside the closed FileOperation vocabulary (SC-006).
+  if (!isBoundaryId(runId)) {
+    return err(
+      fileCacheError(
+        "resumeFileJob",
+        `resumeFileJob rejected: runId ${safeDiagnosticRender(runId)} does not match ${ID_PATTERN.source} — refusing to address a path outside ${safeDiagnosticRender(directory)}`,
+      ),
+    );
+  }
 
   // 1. Read the AUTHORITATIVE representation — the event log — through the
   //    shared strict reader (FR-009). A missing events directory reads as an

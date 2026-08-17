@@ -121,8 +121,11 @@ export const __testDeepFreeze = deepFreeze;
  * - `appendEvent(event, dedupKey?)` — durable append under the per-directory
  *   lock; keyed re-derivations land as no-ops (FR-004, SC-003).
  *
- * Throws only typed `FrameworkError` (`cache-error`, operation + path in the
- * message) for every runtime or infrastructure rejection (AD-6).
+ * This unchecked body throws raw diagnostics where the typed boundary is the
+ * public `createFileJob` shell: factory-validation rejections are raw strings
+ * and every other runtime/infrastructure rejection crosses to the shell, which
+ * is the AD-6 boundary converting each to typed `FrameworkError`
+ * (`cache-error`, operation + path in the message).
  */
 const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
@@ -251,7 +254,12 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
   };
 };
 
-/** Construct a file JobLike without permitting factory-time raw throws. */
+/**
+ * Typed factory shell: converts the unchecked body's raw factory-validation
+ * and runtime rejections into typed `FrameworkError` values
+ * (`cache-error`, operation + path in the message, AD-6) before any rejection
+ * leaks — constructing a file JobLike never permits a raw throw.
+ */
 export const createFileJob = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {
   try {
     return createFileJobUnchecked(args);

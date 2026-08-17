@@ -255,13 +255,16 @@ const parseFileCheckpointerClock = (opts: unknown): (() => number) => {
  *
  * Factory configuration is parsed eagerly: malformed options, unsupported own
  * keys (including symbols and non-enumerables), or a present non-function
- * `now` throw typed `cache-error(createFileCheckpointer)` before any backend
- * object is returned or filesystem I/O occurs. This closed grammar prevents a misspelled clock option from
- * silently falling back to `Date.now`. Operational port methods retain typed
- * `Result` boundaries.
+ * `now` throw raw `TypeError` diagnostics before any backend object is
+ * returned or filesystem I/O occurs — the public `createFileCheckpointer`
+ * shell is the typed boundary that converts them to
+ * `cache-error(createFileCheckpointer)`. This closed grammar prevents a
+ * misspelled clock option from silently falling back to `Date.now`.
+ * Operational port methods retain typed `Result` boundaries.
  *
- * @throws {FrameworkError} `cache-error(createFileCheckpointer)` when
- * `directory` or the complete own-property options grammar cannot be parsed.
+ * @throws {TypeError} raw configuration diagnostics (directory, options
+ * grammar, clock) — converted to typed `cache-error(createFileCheckpointer)`
+ * by the public shell; this unchecked body is not the typed boundary.
  *
  * The directory is created on demand, so a caller may point at a path that
  * does not exist yet. The supplied base entry and backend-managed run/nodes
@@ -672,7 +675,14 @@ const createFileCheckpointerUnchecked = (
   };
 };
 
-/** Typed factory shell: configuration/runtime inspection never leaks raw. */
+/**
+ * Typed factory shell: converts the unchecked body's raw configuration
+ * diagnostics into typed `FrameworkError` values before any rejection leaks —
+ * configuration/runtime inspection never leaks raw.
+ *
+ * @throws {FrameworkError} `cache-error(createFileCheckpointer)` when
+ * `directory` or the complete own-property options grammar cannot be parsed.
+ */
 export const createFileCheckpointer = (
   directory: string,
   opts?: FileCheckpointerOptions,

@@ -135,6 +135,7 @@ import {
 } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
 import { ok, err, tryCatch } from "../types/result.js";
+import { isNonNegativeSafeInteger } from "../checkpoint/composite-node-key.js";
 import { safeDiagnosticRender, safeDiagnosticString, safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
 
@@ -253,7 +254,7 @@ export const isDedupKey = (value: unknown): value is DedupKey =>
 export const parseJournalSequence = (
   value: unknown,
 ): Result<JournalSequence, string> => {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+  if (!isNonNegativeSafeInteger(value)) {
     return err(`sequence must be a non-negative safe integer, got ${render(value)} (FR-009)`);
   }
   if (value > MAX_LEXICOGRAPHIC_SEQUENCE) {
@@ -807,7 +808,7 @@ const serializeFileEventRecordUnchecked = (
   // comparison sides — so they must be refused before any JSON is produced.
   assertLosslessEventUnchecked(event);
 
-  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+  if (!isNonNegativeSafeInteger(sequence)) {
     throw new Error(
       `serializeFileEventRecord: sequence must be a non-negative safe integer, got ${render(sequence)}`,
     );

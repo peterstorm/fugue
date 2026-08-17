@@ -210,3 +210,14 @@ export interface FreshnessIndex {
 // Re-export the public event types used in this contract so consumers
 // importing `types/freshness.js` get the full surface without cross-import.
 export type { WitnessCapturedEvent, WriteAttemptedEvent };
+
+/**
+ * The FreshnessIndex port's 24-hour singleton-lifetime contract (FR-032) —
+ * ONE encoding, owned by the port file that specifies the expiry semantics,
+ * independent of the Checkpointer port's FR-027 TTL (`TTL_SECONDS` in
+ * `checkpoint/checkpointer.ts`). The value currently matches that TTL —
+ * ADR-0079's Redis `EXPIRE` parity target — and the parity pin in
+ * `file-freshness-index.test.ts` proves the agreement while it is meant to
+ * hold; a future FR-027 change must NOT silently redefine freshness expiry.
+ */
+export const FRESHNESS_TTL_SECONDS = 86_400;

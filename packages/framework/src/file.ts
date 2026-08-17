@@ -32,6 +32,7 @@
 export { createFileJournal } from "./file/journal.js";
 export type { FileJournal, FileJournalOptions } from "./file/journal.js";
 export { serializeFileCheckpoint } from "./file/checkpoint-record.js";
+export { isFileCheckpointCommit } from "./file/checkpoint-record.js";
 export type {
   FileCheckpointCommit,
   FileCheckpointData,

@@ -11,10 +11,14 @@ import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 /**
  * The checkpointer port's 24-hour TTL contract (FR-027) — ONE encoding,
  * owned by the port file that specifies the expiry semantics. The in-memory
- * adapter below evaluates it lazily on `load`; the file backend consumes the
- * same constant directly from this port file (`file/checkpointer.ts`,
- * `file/freshness-index.ts`), and the Redis backend mirrors the same
- * 24-hour contract. Production runs longer than
+ * adapter below evaluates it lazily on `load`; the file CHECKPOINTER backend
+ * consumes the same constant directly from this port file
+ * (`file/checkpointer.ts`), and the Redis backend mirrors the same
+ * 24-hour contract. The file FRESHNESS backend consumes the FreshnessIndex
+ * port's own 24-hour constant (`FRESHNESS_TTL_SECONDS`,
+ * `types/freshness.ts`) — value parity with this TTL is pinned in
+ * `file-freshness-index.test.ts` while ADR-0079's parity target holds — so
+ * a future FR-027 change cannot silently redefine freshness expiry. Production runs longer than
  * this should re-checkpoint anyway. TTL evaluation is lazy at read time
  * (load-order parity with the Redis backend) — not ADR-0017, which is the
  * framework-version-mismatch contract enforced in `load` below.

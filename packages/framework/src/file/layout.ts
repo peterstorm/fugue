@@ -49,6 +49,7 @@
 
 import { createHash } from "node:crypto";
 import { ID_PATTERN } from "../types/ids.js";
+import { isNonNegativeSafeInteger } from "../checkpoint/composite-node-key.js";
 import { toJson } from "../state-machine/serialize.js";
 import { fileOperationError } from "./boundary-error.js";
 
@@ -210,7 +211,7 @@ export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
  * silently corrupt the durable log's ordering/dedup keys.
  */
 const eventFileNameUnchecked = (sequence: number, digest: string): string => {
-  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+  if (!isNonNegativeSafeInteger(sequence)) {
     throw new Error(
       `eventFileName: sequence must be a non-negative safe integer, got ${sequence}`,
     );
@@ -288,7 +289,7 @@ const eventDigestOfUnchecked = (record: {
   readonly sequence: number;
   readonly event: unknown;
 }): string => {
-  if (!Number.isSafeInteger(record.sequence) || record.sequence < 0) {
+  if (!isNonNegativeSafeInteger(record.sequence)) {
     throw new Error(
       `eventDigestOf: sequence must be a non-negative safe integer — the same domain guard as eventFileName — got ${record.sequence}`,
     );
@@ -311,6 +312,12 @@ export const eventDigestOf = (record: {
   try {
     return eventDigestOfUnchecked(record);
   } catch (error) {
-    throw fileOperationError("eventDigestOf", "event digest", error);
+    // Deterministic: an out-of-domain sequence fails identically on every
+    // retry — never a transient environment condition. Same domain guard and
+    // same "permanent" class as the sibling `eventFileName` wrapper (the
+    // inner throw is a plain `Error`, so `fileOperationError` cannot infer
+    // the class — it must be pinned here, or the rejection would be
+    // unclassified and retry-classified by `retriabilityOf`).
+    throw fileOperationError("eventDigestOf", "event digest", error, "permanent");
   }
 };

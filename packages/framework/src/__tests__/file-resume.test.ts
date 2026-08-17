@@ -97,6 +97,7 @@ import { toJson } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import { runId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -378,6 +379,77 @@ describe("resumeFileJob — checkpoint-missing (FR-014)", () => {
     expect(resumed.error.kind).toBe("checkpoint-missing");
     if (resumed.error.kind !== "checkpoint-missing") return;
     // Resume is side-effect-free: the missing directory is still missing.
+    expect(existsSync(absent)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runId boundary re-validation — bypassed brands are re-checked at the shell
+// (the backend's documented discipline; `Checkpointer.load` gates the same
+// way): an out-of-domain id addresses a path outside `directory`, so the
+// rejection is an honest `cache-error` BEFORE any I/O, and the rejected value
+// never inhabits a branded `runId` field (truthful branding).
+// ---------------------------------------------------------------------------
+
+describe("resumeFileJob — runId boundary re-validation", () => {
+  const resumeWithRawRunId = (rawRunId: unknown, directory: string) =>
+    resumeFileJob<S, E, C>({
+      runId: rawRunId as RunId,
+      directory,
+      machine,
+      genesis: genesis(),
+      parseCheckpoint,
+    });
+
+  it("a brand-bypassed non-string runId ⇒ typed cache-error, no I/O", async () => {
+    const absent = join(tempDir(), "never-created");
+    const resumed = await resumeWithRawRunId(42, absent);
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    expect(resumed.error.message).toContain("resumeFileJob rejected: runId");
+    expect(resumed.error.message).toContain("does not match");
+    // The gate precedes any I/O: the missing directory is still missing, and
+    // the rejected value never inhabits a branded runId field.
+    expect(existsSync(absent)).toBe(false);
+  });
+
+  it("a boundary-invalid string runId (path-traversal shape) ⇒ the same typed cache-error", async () => {
+    const absent = join(tempDir(), "never-created");
+    const resumed = await resumeWithRawRunId("../escape", absent);
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    expect(resumed.error.message).toContain("refusing to address a path outside");
+    expect(existsSync(absent)).toBe(false);
+  });
+
+  it("a hostile runId whose toString/toString-primitives throw ⇒ still the typed cache-error, never a raw rejection", async () => {
+    const hostile = Object.defineProperties(
+      {},
+      {
+        toString: {
+          get: () => { throw new Error("toString trap must stay contained"); },
+        },
+        [Symbol.toPrimitive]: {
+          get: () => { throw new Error("Symbol.toPrimitive trap must stay contained"); },
+        },
+      },
+    );
+    const absent = join(tempDir(), "never-created");
+    const resumed = await resumeWithRawRunId(hostile, absent);
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    // The total renderer names the codec's rule, never the hostile's text.
+    expect(resumed.error.message).not.toContain("toString trap");
+    expect(resumed.error.message).not.toContain("Symbol.toPrimitive trap");
     expect(existsSync(absent)).toBe(false);
   });
 });

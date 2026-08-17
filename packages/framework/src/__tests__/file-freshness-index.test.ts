@@ -33,7 +33,7 @@ import type {
   WitnessKind,
   WriteEntry,
 } from "../types/freshness.js";
-import { resourceName, witness } from "../types/freshness.js";
+import { resourceName, witness, FRESHNESS_TTL_SECONDS } from "../types/freshness.js";
 import { D, N, R } from "./_id-helpers.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
@@ -348,6 +348,46 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
         succeededAtMs: 900,
       });
     }
+  });
+
+  it("retains the current singleton and refreshes writtenAtMs when an equal-score write carries a byte-identical member", async () => {
+    // The equal-score pins above use DISTINCT members (the property test
+    // pre-excludes equality); this closes the remaining cell: equal
+    // succeededAtMs AND byte-identical member serialization ⇒ the incoming
+    // write loses the tie — the current singleton is retained and only
+    // `writtenAtMs` is refreshed (Redis EXPIRE parity on a no-op write).
+    const directory = tempDirectory();
+    const resource = "postgres:orders:identical-member";
+    const path = join(directory, `${keyDigest(resource)}.json`);
+    const tie = { runId: "run-tie", nodeId: "writer-tie", kind: "version" as const, value: "v1" };
+    expect(
+      await createFileFreshnessIndex(directory, { now: () => 1_000 }).recordWrite(
+        tieEvent(resource, tie),
+      ),
+    ).toEqual({ ok: true, value: undefined });
+    // Same member bytes (same runId/nodeId/kind/value) + same succeededAtMs.
+    expect(
+      await createFileFreshnessIndex(directory, { now: () => 1_500 }).recordWrite(
+        tieEvent(resource, tie),
+      ),
+    ).toEqual({ ok: true, value: undefined });
+    expect(readSingleton(path)).toEqual({
+      writtenAtMs: 1_500,
+      runId: "run-tie",
+      nodeId: "writer-tie",
+      newWitness: { kind: "version", resource, value: "v1" },
+      succeededAtMs: 900,
+    });
+  });
+
+  it("FRESHNESS_TTL_SECONDS stays in lockstep with the Checkpointer port TTL while ADR-0079 parity holds", () => {
+    // The file freshness adapter consumes the FreshnessIndex port's own
+    // 24-hour constant (`types/freshness.ts`), not the Checkpointer port's
+    // `TTL_SECONDS` — so a future FR-027 change cannot silently redefine
+    // freshness expiry. While ADR-0079's parity target holds, the two ports
+    // MUST agree; this pin is the tripwire.
+    expect(FRESHNESS_TTL_SECONDS).toBe(86_400);
+    expect(FRESHNESS_TTL_SECONDS).toBe(TTL_SECONDS);
   });
 
   it("property: equal-score singleton selection is arrival-independent", async () => {
