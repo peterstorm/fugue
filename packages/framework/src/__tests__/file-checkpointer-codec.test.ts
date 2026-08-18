@@ -61,6 +61,7 @@ import {
   writeFailed,
 } from "../file/checkpointer-codec.js";
 import { MAX_SAFE_RECORD_DEPTH } from "../file/event-record.js";
+import { D, N } from "./_id-helpers.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { keyDigest } from "../file/layout.js";
 
@@ -329,7 +330,7 @@ describe("parseStoredMeta — strict parse of meta.json (parse, don't validate)"
     }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.meta.dagId).toBe("d");
+    expect(result.value.meta.dagId).toBe(D("d"));
   });
 
   it("treats an absent frameworkVersion as absent (ADR-0017 sees undefined, not corruption)", () => {
@@ -359,7 +360,7 @@ describe("parseStoredMeta — strict parse of meta.json (parse, don't validate)"
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.value.meta).toEqual({
-      dagId: "d",
+      dagId: D("d"),
       startedAt: new Date("2025-01-01T00:00:00Z"),
       nodeCount: 2,
       dagFingerprint: "fp",
@@ -583,7 +584,7 @@ describe("parseNodeFile — strict parse of one node file", () => {
     const verdict = parseNodeFile(fileNameOf("n1"), json);
     expect(verdict).toMatchObject({ kind: "entry", nodeKey: "n1" });
     if (verdict.kind !== "entry") return;
-    expect(verdict.state.nodeId).toBe("n1");
+    expect(verdict.state.nodeId).toBe(N("n1"));
     expect(verdict.state.completedAt).toEqual(new Date("2025-06-01T12:00:00Z"));
     const output = verdict.state.output as Record<string, unknown>;
     expect(output.when).toEqual(new Date("2025-06-01T12:00:00Z"));

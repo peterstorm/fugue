@@ -1,21 +1,30 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Redis from "ioredis";
 import { InMemoryCheckpointer, TTL_SECONDS } from "../checkpoint/checkpointer.js";
-import type { CheckpointerLoadOpts, RunMeta } from "../checkpoint/checkpointer.js";
-import type { RunId } from "../types/ids.js";
+import type { CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } from "../checkpoint/checkpointer.js";
+import type { DagId, NodeId, RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
-import { D, R } from "./_id-helpers.js";
+import { D, N, R } from "./_id-helpers.js";
 import { formatFrameworkError, retriabilityOf } from "../types/errors.js";
 
 // The backend-neutral contract lives in `_checkpointer-suite.ts`. This file
 // supplies each backend's raw-state bypass and retains only Redis-specific
 // behavior (the NOSCRIPT/EVAL recovery path).
 
+// Test-owned meta store adopted by the checkpointer (the deepening-round seam
+// that replaced `__testRawMetas`): the suite seeds stored records DIRECTLY —
+// the Redis-raw-set analog — so the in-memory leg mirrors the Redis leg's
+// bypass shape, and nothing on the adapter exposes its internals.
+const inMemoryStore = new Map<string, InMemoryStoredMeta>();
+
 checkpointerSuite(
   "InMemoryCheckpointer",
-  () => new InMemoryCheckpointer(),
+  () => {
+    inMemoryStore.clear();
+    return new InMemoryCheckpointer({ testStore: inMemoryStore });
+  },
   {
     setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
       await cp.setMeta(R(runId), {
@@ -25,26 +34,21 @@ checkpointerSuite(
         frameworkVersion: "1",
       });
     },
-    setMissingVersion: async (cp, runId, { startedAt, nodeCount }) => {
-      await cp.setMeta(R(runId), { dagId: D("d"), startedAt, nodeCount });
-      const rawMap = (cp as InMemoryCheckpointer).__testRawMetas();
-      const stored = rawMap.get(runId);
-      if (stored === undefined) throw new Error(`missing in-memory test meta for ${runId}`);
-      rawMap.set(runId, {
-        ...stored,
-        meta: {
-          dagId: stored.meta.dagId,
-          startedAt: stored.meta.startedAt,
-          nodeCount: stored.meta.nodeCount,
-        },
+    setMissingVersion: async (_cp, runId, { startedAt, nodeCount }) => {
+      // Stored record with NO frameworkVersion (the ADR-0017 missing-field
+      // case) — written directly, bypassing setMeta's version stamping.
+      inMemoryStore.set(R(runId), {
+        meta: { dagId: D("d"), startedAt, nodeCount },
+        createdAt: new Date(),
       });
     },
-    setExpired: async (cp, runId, { startedAt, nodeCount, expiredAt }) => {
-      await cp.setMeta(R(runId), { dagId: D("d"), startedAt, nodeCount });
-      const rawMap = (cp as InMemoryCheckpointer).__testRawMetas();
-      const stored = rawMap.get(runId);
-      if (stored === undefined) throw new Error(`missing in-memory test meta for ${runId}`);
-      rawMap.set(runId, { ...stored, createdAt: expiredAt });
+    setExpired: async (_cp, runId, { startedAt, nodeCount, expiredAt }) => {
+      // Current framework version (the version gate runs first) with a
+      // backdated `createdAt` so the lazy FR-027 TTL comparison expires it.
+      inMemoryStore.set(R(runId), {
+        meta: { dagId: D("d"), startedAt, nodeCount, frameworkVersion: FRAMEWORK_VERSION },
+        createdAt: expiredAt,
+      });
     },
     // Corrupt bytes are unrepresentable in the in-memory map.
   },
@@ -59,8 +63,8 @@ checkpointerSuite(
 describe("InMemoryCheckpointer — hostile-value totality", () => {
   test("saveNode refuses non-cloneable state with a typed checkpoint-write-failed, never a raw rejection", async () => {
     const cp = new InMemoryCheckpointer();
-    const result = await cp.saveNode(R("hostile-1"), "n1", {
-      nodeId: "n1",
+    const result = await cp.saveNode(R("hostile-1"), N("n1"), {
+      nodeId: N("n1"),
       output: { run: () => 42 }, // functions are not cloneable
       completedAt: new Date(),
     });
@@ -71,8 +75,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
 
   test("saveNode truthful branding: an invalid raw nodeId never inhabits the branded field and rendering stays bounded", async () => {
     const cp = new InMemoryCheckpointer();
-    const result = await cp.saveNode(R("hostile-2"), "not a valid id!", {
-      nodeId: "n1",
+    const result = await cp.saveNode(R("hostile-2"), "not a valid id!" as NodeId, {
+      nodeId: N("n1"),
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -100,18 +104,18 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
   });
 
   test("load refuses undetachable stored state (smuggled via the raw bypass) with typed checkpoint-corrupt", async () => {
-    const cp = new InMemoryCheckpointer();
+    const store = new Map<string, InMemoryStoredMeta>();
+    const cp = new InMemoryCheckpointer({ testStore: store });
     await cp.setMeta(R("hostile-4"), {
       dagId: D("d"),
       startedAt: new Date("2025-01-01T00:00:00Z"),
       nodeCount: 1,
     });
-    const rawMap = cp.__testRawMetas();
-    const stored = rawMap.get("hostile-4");
+    const stored = store.get("hostile-4");
     if (stored === undefined) throw new Error("missing in-memory test meta");
-    rawMap.set("hostile-4", {
+    store.set("hostile-4", {
       ...stored,
-      meta: { ...stored.meta, dagId: (() => "boom") as unknown as string },
+      meta: { ...stored.meta, dagId: (() => "boom") as unknown as DagId },
     });
     const result = await cp.load(R("hostile-4"));
     expect(result.ok).toBe(false);
@@ -127,8 +131,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     } as unknown as string;
     // Must RESOLVE with a typed err — a raw rejection (from the catch's own
     // message template) is the FR-040 escape this test pins closed.
-    const result = await cp.saveNode(R("hostile-5"), hostileNodeId, {
-      nodeId: "n1",
+    const result = await cp.saveNode(R("hostile-5"), hostileNodeId as NodeId, {
+      nodeId: N("n1"),
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -148,8 +152,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     // renderer (`stringOf`) so a hostile variant can only degrade, never
     // throw out of the async port.
     const coercibleNodeId = { toString: () => "coerced-key" } as unknown as string;
-    const result = await cp.saveNode(R("hostile-6"), coercibleNodeId, {
-      nodeId: "n1",
+    const result = await cp.saveNode(R("hostile-6"), coercibleNodeId as NodeId, {
+      nodeId: N("n1"),
       output: { value: 1 },
       completedAt: new Date(),
     });
@@ -190,11 +194,12 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
   });
 
   test("load with a plain non-string runId + undetachable state is typed checkpoint-corrupt (toRunId throw class)", async () => {
-    const cp = new InMemoryCheckpointer();
+    const store = new Map<string, InMemoryStoredMeta>();
+    const cp = new InMemoryCheckpointer({ testStore: store });
     const numericRunId = 42 as unknown as RunId;
-    cp.__testRawMetas().set(numericRunId, {
+    store.set(numericRunId, {
       meta: {
-        dagId: (() => "boom") as unknown as string,
+        dagId: (() => "boom") as unknown as DagId,
         startedAt: new Date("2025-01-01T00:00:00Z"),
         nodeCount: 1,
         frameworkVersion: FRAMEWORK_VERSION,
@@ -217,8 +222,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     // quoting, no truncation (formatFrameworkError is the single bounding
     // point and renders it once).
     const longRaw = "bad-node!".padEnd(80, "x");
-    const result = await cp.saveNode(R("hostile-7"), longRaw, {
-      nodeId: "n1",
+    const result = await cp.saveNode(R("hostile-7"), longRaw as NodeId, {
+      nodeId: N("n1"),
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -243,8 +248,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     // Hostile non-string runId: the invalidRunId facet the file backend's
     // writeFailed already emits — parity on both fields.
     const hostileRunId = { toString: () => "<unprintable>" } as unknown as RunId;
-    const result2 = await cp.saveNode(hostileRunId, "not a valid id!", {
-      nodeId: "n1",
+    const result2 = await cp.saveNode(hostileRunId, "not a valid id!" as NodeId, {
+      nodeId: N("n1"),
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -260,10 +265,12 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
   });
 
   test("a throwing injected clock fails closed with a typed cache-error on both setMeta and load", async () => {
+    const store = new Map<string, InMemoryStoredMeta>();
     const cp = new InMemoryCheckpointer({
       now: () => {
         throw new Error("clock broke");
       },
+      testStore: store,
     });
     const setResult = await cp.setMeta(R("clock-1"), {
       dagId: D("d"),
@@ -273,10 +280,10 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     expect(setResult.ok).toBe(false);
     if (!setResult.ok) expect(setResult.error.kind).toBe("cache-error");
 
-    // Seed the throwing-clock instance's store via the raw bypass (setMeta
-    // itself cannot succeed under the broken clock), then load: the TTL probe
-    // must fail closed rather than reject.
-    cp.__testRawMetas().set("clock-2", {
+    // Seed the throwing-clock instance's test-owned store (setMeta itself
+    // cannot succeed under the broken clock), then load: the TTL probe must
+    // fail closed rather than reject.
+    store.set("clock-2", {
       meta: {
         dagId: D("d"),
         startedAt: new Date("2025-01-01T00:00:00Z"),
@@ -299,7 +306,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
   // `file-checkpointer.test.ts`). Both rejections are deterministic — every
   // retry reproduces them — so both are pinned permanent.
   test("a non-finite injected clock fails closed with a permanent cache-error on both setMeta and load", async () => {
-    const cp = new InMemoryCheckpointer({ now: () => Number.NaN });
+    const store = new Map<string, InMemoryStoredMeta>();
+    const cp = new InMemoryCheckpointer({ now: () => Number.NaN, testStore: store });
     const meta: RunMeta = {
       dagId: D("d"),
       startedAt: new Date("2025-01-01T00:00:00Z"),
@@ -329,10 +337,10 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
       }
     }
 
-    // Seed the NaN-clock instance's store via the raw bypass (setMeta cannot
-    // succeed under the broken clock), then load: the TTL probe must fail
-    // closed rather than silently compare NaN.
-    cp.__testRawMetas().set("nan-clock-2", {
+    // Seed the NaN-clock instance's test-owned store (setMeta cannot succeed
+    // under the broken clock), then load: the TTL probe must fail closed
+    // rather than silently compare NaN.
+    store.set("nan-clock-2", {
       meta: {
         dagId: D("d"),
         startedAt: new Date("2025-01-01T00:00:00Z"),
@@ -369,8 +377,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
       subject: "s",
       frameworkVersion: FRAMEWORK_VERSION,
     });
-    const saved = await cp.saveNode(R("hostile-proto"), "__proto__", {
-      nodeId: "__proto__",
+    const saved = await cp.saveNode(R("hostile-proto"), N("__proto__"), {
+      nodeId: N("__proto__"),
       output: { value: 1 },
       completedAt: new Date(),
     });
@@ -379,7 +387,7 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
     expect(Object.hasOwn(loaded.value.nodes, "__proto__")).toBe(true);
     expect(loaded.value.nodes["__proto__"].output).toEqual({ value: 1 });
-    expect(loaded.value.nodes["__proto__"].nodeId).toBe("__proto__");
+    expect(loaded.value.nodes["__proto__"].nodeId).toBe(N("__proto__"));
     // The map itself was never re-parented by the `__proto__` entry.
     expect(Object.getPrototypeOf(loaded.value.nodes)).toBe(Object.prototype);
   });
@@ -444,16 +452,16 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
   test("the in-memory TTL boundary: exactly 24h accepted, one millisecond past rejected", async () => {
     const created = new Date("2025-01-01T00:00:00.000Z");
     let nowMs = created.getTime() + TTL_SECONDS * 1000;
-    const cp = new InMemoryCheckpointer({ now: () => nowMs });
+    const store = new Map<string, InMemoryStoredMeta>();
+    const cp = new InMemoryCheckpointer({ now: () => nowMs, testStore: store });
     await cp.setMeta(R("ttl-boundary"), {
       dagId: D("d"),
       startedAt: created,
       nodeCount: 1,
     });
-    const rawMap = cp.__testRawMetas();
-    const stored = rawMap.get("ttl-boundary");
+    const stored = store.get("ttl-boundary");
     if (stored === undefined) throw new Error("missing ttl-boundary meta");
-    rawMap.set("ttl-boundary", { ...stored, createdAt: created });
+    store.set("ttl-boundary", { ...stored, createdAt: created });
 
     const atBoundary = await cp.load(R("ttl-boundary"));
     expect(atBoundary.ok).toBe(true); // exactly at TTL: still live (strict >)
@@ -619,8 +627,8 @@ describeRedis("RedisCheckpointer", () => {
     const runId = makeRunId();
     await cp.setMeta(R(runId), { dagId: D("d"), startedAt: new Date(), nodeCount: 3 });
 
-    await cp.saveNode(R(runId), "n1", {
-      nodeId: "n1",
+    await cp.saveNode(R(runId), N("n1"), {
+      nodeId: N("n1"),
       output: { v: 1 },
       completedAt: new Date(),
     });
@@ -629,15 +637,15 @@ describeRedis("RedisCheckpointer", () => {
 
     await redisOrThrow().script("FLUSH");
 
-    const result = await cp.saveNode(R(runId), "n2", {
-      nodeId: "n2",
+    const result = await cp.saveNode(R(runId), N("n2"), {
+      nodeId: N("n2"),
       output: { v: 2 },
       completedAt: new Date(),
     });
     expect(result.ok).toBe(true);
 
-    await cp.saveNode(R(runId), "n3", {
-      nodeId: "n3",
+    await cp.saveNode(R(runId), N("n3"), {
+      nodeId: N("n3"),
       output: { v: 3 },
       completedAt: new Date(),
     });

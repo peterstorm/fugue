@@ -50,9 +50,9 @@ import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import type { Checkpointer, NodeState, RunMeta } from "../checkpoint/checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
-import { D, R } from "./_id-helpers.js";
-import type { RunId } from "../types/ids.js";
-import { __brandRunIdUnchecked } from "../types/ids.js";
+import { D, N, R } from "./_id-helpers.js";
+import type { RunId, NodeId } from "../types/ids.js";
+import { __brandNodeIdUnchecked, __brandRunIdUnchecked } from "../types/ids.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
@@ -111,7 +111,11 @@ const META = (overrides?: Partial<RunMeta>): RunMeta => ({
 });
 
 const node = (nodeId: string, output: unknown): NodeState => ({
-  nodeId,
+  // Brand UNCHECKED: the hostile-totality tests deliberately feed out-of-domain
+  // values (`"../escape"`, …) through the port — the port boundary is exactly
+  // where such values must be refused, and a validating brand here would throw
+  // in the fixture before the port ever saw the value.
+  nodeId: __brandNodeIdUnchecked(nodeId),
   output,
   completedAt: new Date("2025-06-01T12:00:00Z"),
 });
@@ -384,7 +388,7 @@ describe("FileCheckpointer — metadata", () => {
     const result = await createFileCheckpointer(directory).load(R("run-additive-meta"));
     if (!result.ok || result.value === null) throw new Error("expected additive metadata to load");
     expect(result.value.meta).toEqual({
-      dagId: "d",
+      dagId: D("d"),
       startedAt: new Date("2025-01-01T00:00:00.000Z"),
       nodeCount: 2,
       frameworkVersion: FRAMEWORK_VERSION,
@@ -647,7 +651,7 @@ describe("FileCheckpointer — lazy TTL (FR-027)", () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory, { now: () => nowMs });
     await cp.setMeta(R("run-l"), META());
-    await cp.saveNode(R("run-l"), "n1", node("n1", 1));
+    await cp.saveNode(R("run-l"), N("n1"), node("n1", 1));
 
     nowMs += TTL_SECONDS * 1000 + 1;
     const expired = await cp.load(R("run-l"));
@@ -786,7 +790,7 @@ describe("FileCheckpointer — load failure precedence", () => {
     const directory = freshDirectory();
     const checkpointer = createFileCheckpointer(directory, { now: () => nowMs });
     const meta: RunMeta = {
-      dagId: "dag-1",
+      dagId: D("dag-1"),
       startedAt: new Date(nowMs),
       nodeCount: 0,
     };
@@ -794,11 +798,11 @@ describe("FileCheckpointer — load failure precedence", () => {
     if (!setResult.ok) throw new Error("expected setMeta to succeed");
     // A saved node materializes `nodes/` (setMeta alone leaves it absent).
     const nodeState: NodeState = {
-      nodeId: "n1",
+      nodeId: N("n1"),
       output: { kept: true },
       completedAt: new Date(nowMs),
     };
-    const saveResult = await checkpointer.saveNode(R("run-order"), "n1", nodeState);
+    const saveResult = await checkpointer.saveNode(R("run-order"), N("n1"), nodeState);
     if (!saveResult.ok) throw new Error("expected saveNode to succeed");
     const nodesDir = join(directory, R("run-order"), NODES_DIR);
     chmodSync(nodesDir, 0o000); // rwx stripped — readdirSync fails EACCES even for the owner
@@ -839,7 +843,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     ];
 
     for (const [nodeId, opts, expectedKey] of addresses) {
-      const saved = await cp.saveNode(R("run-x"), nodeId, node(nodeId, expectedKey), opts);
+      const saved = await cp.saveNode(R("run-x"), N(nodeId), node(nodeId, expectedKey), opts);
       expect(saved.ok).toBe(true);
     }
 
@@ -855,7 +859,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
       // The entry is keyed by the stored nodeKey; `nodeId` inside it still
       // names the real node (ADR-0075).
       expect(result.value.nodes[expectedKey].output).toBe(expectedKey);
-      expect(result.value.nodes[expectedKey].nodeId).toBe(nodeId);
+      expect(result.value.nodes[expectedKey].nodeId).toBe(N(nodeId));
     }
     expect(result.value.corruptNodeIds).toBeUndefined();
   });
@@ -864,13 +868,13 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-fold"), META());
-    await cp.saveNode(R("run-fold"), "n1", node("n1", "canonical"));
+    await cp.saveNode(R("run-fold"), N("n1"), node("n1", "canonical"));
 
     // A namespace without index/attempt is an ambiguous composite address
     // (ADR-0075): the codec refuses to silently discard it and store under the
     // bare canonical nodeId — the file backend converts the refusal into a
     // typed error, never a raw throw.
-    const result = await cp.saveNode(R("run-fold"), "n1", node("n1", "namespaced"), {
+    const result = await cp.saveNode(R("run-fold"), N("n1"), node("n1", "namespaced"), {
       namespace: "other",
     });
     expect(result.ok).toBe(false);
@@ -896,8 +900,8 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     // The canonical id `dag` and the composite address `dag@dag@0@0` are two
     // genuinely different addresses; `@` is outside ID_PATTERN so they can
     // never be spelled the same way.
-    await cp.saveNode(R("run-collide"), "dag", node("dag", "canonical"));
-    await cp.saveNode(R("run-collide"), "dag", node("dag", "composite"), { index: 0 });
+    await cp.saveNode(R("run-collide"), N("dag"), node("dag", "canonical"));
+    await cp.saveNode(R("run-collide"), N("dag"), node("dag", "composite"), { index: 0 });
 
     const result = await cp.load(R("run-collide"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
@@ -915,7 +919,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     await cp.setMeta(R("run-proto"), META({ nodeCount: 3 }));
     const hostileIds = ["__proto__", "constructor", "prototype"] as const;
     for (const id of hostileIds) {
-      expect((await cp.saveNode(R("run-proto"), id, node(id, `out-${id}`))).ok).toBe(true);
+      expect((await cp.saveNode(R("run-proto"), N(id), node(id, `out-${id}`))).ok).toBe(true);
     }
 
     const result = await cp.load(R("run-proto"));
@@ -924,7 +928,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     for (const id of hostileIds) {
       expect(Object.hasOwn(result.value.nodes, id)).toBe(true);
       expect(result.value.nodes[id].output).toBe(`out-${id}`);
-      expect(result.value.nodes[id].nodeId).toBe(id);
+      expect(result.value.nodes[id].nodeId).toBe(N(id));
     }
     expect(result.value.corruptNodeIds).toBeUndefined();
     // The map itself was never re-parented by the `__proto__` entry.
@@ -934,7 +938,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
   it("round-trips a composite address whose nodeId and namespace are __proto__", async () => {
     const cp = createFileCheckpointer(freshDirectory());
     await cp.setMeta(R("run-proto2"), META());
-    const saved = await cp.saveNode(R("run-proto2"), "__proto__", node("__proto__", "composite"), {
+    const saved = await cp.saveNode(R("run-proto2"), N("__proto__"), node("__proto__", "composite"), {
       namespace: "__proto__",
       index: 1,
     });
@@ -950,7 +954,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-digest"), META());
-    await cp.saveNode(R("run-digest"), "n1", node("n1", 1), { namespace: "sub", index: 2, attempt: 3 });
+    await cp.saveNode(R("run-digest"), N("n1"), node("n1", 1), { namespace: "sub", index: 2, attempt: 3 });
     expect(readdirSync(nodesDirOf(directory, "run-digest"))).toEqual([
       `${keyDigest("sub@n1@2@3")}.json`,
     ]);
@@ -971,7 +975,7 @@ describe("FileCheckpointer — output fidelity", () => {
       when: new Date("2023-07-08T09:10:11.012Z"),
       nested: [{ deep: true }],
     };
-    await cp.saveNode(R("run-fid"), "n1", node("n1", output));
+    await cp.saveNode(R("run-fid"), N("n1"), node("n1", output));
 
     const result = await cp.load(R("run-fid"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
@@ -982,7 +986,7 @@ describe("FileCheckpointer — output fidelity", () => {
   it("round-trips an undefined output without treating the entry as corrupt", async () => {
     const cp = createFileCheckpointer(freshDirectory());
     await cp.setMeta(R("run-undef"), META());
-    await cp.saveNode(R("run-undef"), "n1", node("n1", undefined));
+    await cp.saveNode(R("run-undef"), N("n1"), node("n1", undefined));
 
     const result = await cp.load(R("run-undef"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
@@ -998,7 +1002,7 @@ describe("FileCheckpointer — output fidelity", () => {
     const second = { id: 1 };
     await cp.saveNode(
       R("run-object-keys"),
-      "n1",
+      N("n1"),
       node("n1", new Map<Readonly<{ id: number }>, string>([[first, "first"], [second, "second"]])),
     );
 
@@ -1019,7 +1023,7 @@ describe("FileCheckpointer — output fidelity", () => {
     const second = { id: 1 };
     await cp.saveNode(
       R("run-object-set"),
-      "n1",
+      N("n1"),
       node("n1", new Set<unknown>([first, second, "primitive", undefined])),
     );
 
@@ -1069,7 +1073,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-c"), META({ nodeCount: 5 }));
-    await cp.saveNode(R("run-c"), "good", node("good", "kept"));
+    await cp.saveNode(R("run-c"), N("good"), node("good", "kept"));
     return { directory, cp };
   };
 
@@ -1226,7 +1230,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
   it("surfaces every corrupt address at once while keeping all good entries", async () => {
     const { directory, cp } = await seed();
-    await cp.saveNode(R("run-c"), "good2", node("good2", "kept2"), { index: 3 });
+    await cp.saveNode(R("run-c"), N("good2"), node("good2", "kept2"), { index: 3 });
     writeRawNode(directory, "run-c", `${keyDigest("a")}.json`, "nope");
     writeRawNode(directory, "run-c", `${keyDigest("b")}.json`, "[]");
 
@@ -1422,7 +1426,7 @@ describe("FileCheckpointer — atomic writes (FR-029)", () => {
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-at"), META());
     for (const value of [1, 2, 3]) {
-      expect((await cp.saveNode(R("run-at"), "n1", node("n1", value))).ok).toBe(true);
+      expect((await cp.saveNode(R("run-at"), N("n1"), node("n1", value))).ok).toBe(true);
     }
 
     expect(readdirSync(nodesDirOf(directory, "run-at"))).toEqual([`${keyDigest("n1")}.json`]);
@@ -1435,7 +1439,7 @@ describe("FileCheckpointer — atomic writes (FR-029)", () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-crash"), META());
-    await cp.saveNode(R("run-crash"), "n1", node("n1", "committed"));
+    await cp.saveNode(R("run-crash"), N("n1"), node("n1", "committed"));
     // Exactly what a crash between write and rename leaves behind.
     writeRawNode(directory, "run-crash", `${keyDigest("n1")}.json.tmp.999999`, "half-written{");
 
@@ -1455,7 +1459,7 @@ describe("FileCheckpointer — atomic writes (FR-029)", () => {
     mkdirSync(squat, { recursive: true });
     writeFileSync(join(squat, "occupant"), "x");
 
-    const result = await cp.saveNode(R("run-fail"), "n1", node("n1", 1));
+    const result = await cp.saveNode(R("run-fail"), N("n1"), node("n1", 1));
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a rejection");
     expect(result.error.kind).toBe("cache-error");
@@ -1479,7 +1483,7 @@ describe("FileCheckpointer — canonical descendant containment", () => {
 
     const meta = await cp.setMeta(R("run-link"), META());
     expect(meta).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "setMeta" } });
-    const saved = await cp.saveNode(R("run-link"), "n1", node("n1", 1));
+    const saved = await cp.saveNode(R("run-link"), N("n1"), node("n1", 1));
     expect(saved).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "saveNode" } });
     const loaded = await cp.load(R("run-link"));
     expect(loaded).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "load" } });
@@ -1494,7 +1498,7 @@ describe("FileCheckpointer — canonical descendant containment", () => {
     expect((await cp.setMeta(R("run-nodes-link"), META())).ok).toBe(true);
     symlinkSync(outside, nodesDirOf(base, "run-nodes-link"), "dir");
 
-    const saved = await cp.saveNode(R("run-nodes-link"), "n1", node("n1", 1));
+    const saved = await cp.saveNode(R("run-nodes-link"), N("n1"), node("n1", 1));
     expect(saved).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "saveNode" } });
     const loaded = await cp.load(R("run-nodes-link"));
     expect(loaded).toMatchObject({ ok: false, error: { kind: "cache-error", operation: "load" } });
@@ -1533,7 +1537,7 @@ describe("FileCheckpointer — canonical descendant containment", () => {
     const runId = "run-node-file-link";
     const cp = createFileCheckpointer(base);
     expect((await cp.setMeta(R(runId), META())).ok).toBe(true);
-    expect((await cp.saveNode(R(runId), "n1", node("n1", 1))).ok).toBe(true);
+    expect((await cp.saveNode(R(runId), N("n1"), node("n1", 1))).ok).toBe(true);
 
     const nodesDir = nodesDirOf(base, runId);
     const entryName = `${keyDigest("n1")}.json`;
@@ -1599,7 +1603,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const directory = freshDirectory();
     const cp = createFileCheckpointer(directory);
     for (const hostile of HOSTILE_IDS) {
-      const result = await cp.saveNode(hostileRunId(hostile), "n1", node("n1", 1));
+      const result = await cp.saveNode(hostileRunId(hostile), N("n1"), node("n1", 1));
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error(`expected a rejection for ${JSON.stringify(hostile)}`);
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -1617,7 +1621,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-h"), META());
     for (const hostile of HOSTILE_IDS) {
-      const result = await cp.saveNode(R("run-h"), hostile, node("n1", 1));
+      const result = await cp.saveNode(R("run-h"), hostile as NodeId, node("n1", 1));
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error(`expected a rejection for ${JSON.stringify(hostile)}`);
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -1636,7 +1640,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-h2"), META());
     for (const stateNodeId of ["../escape", "n2"]) {
-      const result = await cp.saveNode(R("run-h2"), "n1", node(stateNodeId, 1));
+      const result = await cp.saveNode(R("run-h2"), N("n1"), node(stateNodeId, 1));
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected a rejection");
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -1649,7 +1653,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-h3"), META());
     for (const hostile of HOSTILE_IDS) {
-      const result = await cp.saveNode(R("run-h3"), "n1", node("n1", 1), { namespace: hostile, index: 0 });
+      const result = await cp.saveNode(R("run-h3"), N("n1"), node("n1", 1), { namespace: hostile, index: 0 });
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error(`expected a rejection for ${JSON.stringify(hostile)}`);
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -1662,9 +1666,9 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     await cp.setMeta(R("run-h4"), META());
     const badNumbers = [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, -0.5];
     for (const bad of badNumbers) {
-      const byIndex = await cp.saveNode(R("run-h4"), "n1", node("n1", 1), { index: bad });
+      const byIndex = await cp.saveNode(R("run-h4"), N("n1"), node("n1", 1), { index: bad });
       expect(byIndex.ok).toBe(false);
-      const byAttempt = await cp.saveNode(R("run-h4"), "n1", node("n1", 1), { attempt: bad });
+      const byAttempt = await cp.saveNode(R("run-h4"), N("n1"), node("n1", 1), { attempt: bad });
       expect(byAttempt.ok).toBe(false);
     }
   });
@@ -1684,7 +1688,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-h5"), META());
     for (const opts of [{ index: throwingValueOf }, { attempt: throwingValueOf }]) {
-      const result = await cp.saveNode(R("run-h5"), "n1", node("n1", 1), opts as never);
+      const result = await cp.saveNode(R("run-h5"), N("n1"), node("n1", 1), opts as never);
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected a rejection");
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -1755,7 +1759,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const cp = createFileCheckpointer(directory);
     await cp.setMeta(R("run-hostile-opts"), META());
     expect(
-      (await cp.saveNode(R("run-hostile-opts"), "n1", node("n1", "canonical"))).ok,
+      (await cp.saveNode(R("run-hostile-opts"), N("n1"), node("n1", "canonical"))).ok,
     ).toBe(true);
     const canonicalFile = `${keyDigest("n1")}.json`;
     const before = readFileSync(
@@ -1766,7 +1770,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     for (const hostile of hostileOptions) {
       const result = await cp.saveNode(
         R("run-hostile-opts"),
-        "n1",
+        N("n1"),
         node("n1", "must-not-overwrite"),
         hostile as Parameters<Checkpointer["saveNode"]>[3],
       );
@@ -1791,7 +1795,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     opts.namespace = "nested";
     opts.index = 2;
 
-    const saved = await cp.saveNode(R("run-null-proto"), "n1", node("n1", 1), opts);
+    const saved = await cp.saveNode(R("run-null-proto"), N("n1"), node("n1", 1), opts);
     expect(saved.ok).toBe(true);
     const loaded = await cp.load(R("run-null-proto"));
     if (!loaded.ok || loaded.value === null) throw new Error("expected loaded node");
@@ -1830,7 +1834,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
 
     const saved = await cp.saveNode(
       R("run-state-snapshot"),
-      "n1",
+      N("n1"),
       state,
       opts as Parameters<Checkpointer["saveNode"]>[3],
     );
@@ -1839,7 +1843,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     const loaded = await cp.load(R("run-state-snapshot"));
     if (!loaded.ok || loaded.value === null) throw new Error("expected snapshotted node");
     const stored = loaded.value.nodes["nested@n1@2@3"];
-    expect(stored.nodeId).toBe("n1");
+    expect(stored.nodeId).toBe(N("n1"));
     expect(stored.output).toEqual({ persisted: "first" });
     expect(stored.completedAt.toISOString()).toBe("2025-04-05T06:07:08.009Z");
   });
@@ -1916,7 +1920,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
         });
         const output = location === "top" ? proxy : { nested: proxy };
 
-        const saved = await cp.saveNode(R(runId), nodeId, node(nodeId, output));
+        const saved = await cp.saveNode(R(runId), N(nodeId), node(nodeId, output));
         expect(saved.ok, `${location}/${testCase.label}`).toBe(true);
         expect(getReads, `${location}/${testCase.label} must not invoke get`).toBe(0);
 
@@ -1969,7 +1973,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
 
     const saved = await cp.saveNode(
       R("run-array-descriptor"),
-      "n1",
+      N("n1"),
       node("n1", output),
     );
     expect(saved.ok).toBe(true);
@@ -2010,7 +2014,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
         },
       });
 
-      const saved = await cp.saveNode(R(runId), "n1", node("n1", output));
+      const saved = await cp.saveNode(R(runId), N("n1"), node("n1", output));
       expect(saved.ok).toBe(false);
       if (saved.ok) throw new Error("expected adversarial array rejection");
       expect(saved.error.kind).toBe("checkpoint-write-failed");
@@ -2049,7 +2053,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
         });
         const output = location === "top" ? proxy : { nested: proxy };
 
-        const saved = await cp.saveNode(R(runId), nodeId, node(nodeId, output));
+        const saved = await cp.saveNode(R(runId), N(nodeId), node(nodeId, output));
         expect(saved.ok, `${location}/${malformed}`).toBe(false);
         if (saved.ok) throw new Error("expected Proxy rejection");
         expect(saved.error.kind).toBe("checkpoint-write-failed");
@@ -2087,7 +2091,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
     ];
 
     for (const [label, makeState] of cases) {
-      const result = await cp.saveNode(R("run-state-invalid-first"), "n1", makeState());
+      const result = await cp.saveNode(R("run-state-invalid-first"), N("n1"), makeState());
       expect(result.ok, `${label} first snapshot must fail`).toBe(false);
       if (result.ok) throw new Error(`expected ${label} rejection`);
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -2105,7 +2109,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
         enumerable: true,
         get: () => { throw new Error(`${field} unavailable`); },
       });
-      const result = await cp.saveNode(R("run-state-throws"), "n1", state as unknown as NodeState);
+      const result = await cp.saveNode(R("run-state-throws"), N("n1"), state as unknown as NodeState);
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error(`expected ${field} getter rejection`);
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -2119,7 +2123,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
       });
       const result = await cp.saveNode(
         R("run-state-throws"),
-        "n1",
+        N("n1"),
         node("n1", 1),
         opts as Parameters<Checkpointer["saveNode"]>[3],
       );
@@ -2169,7 +2173,7 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
       });
       const nodeResult = await cp.saveNode(
         R(`run-hostile-node-${index}`),
-        "n1",
+        N("n1"),
         unreadableState,
       );
       expect(nodeResult.ok).toBe(false);
@@ -2487,10 +2491,10 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
     await cp.setMeta(R("run-e3"), META());
     // Same rationale as above: the port type forbids these, the boundary must
     // still refuse them rather than throw.
-    const notAnObject = await cp.saveNode(R("run-e3"), "n1", null as unknown as NodeState);
+    const notAnObject = await cp.saveNode(R("run-e3"), N("n1"), null as unknown as NodeState);
     expect(notAnObject.ok).toBe(false);
-    const badDate = await cp.saveNode(R("run-e3"), "n1", {
-      nodeId: "n1",
+    const badDate = await cp.saveNode(R("run-e3"), N("n1"), {
+      nodeId: N("n1"),
       output: 1,
       completedAt: new Date("nope"),
     });
@@ -2532,7 +2536,7 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
       ["excessive depth", tooDeep],
     ];
     for (const [label, output] of cases) {
-      const result = await cp.saveNode(R("run-e4"), "n1", node("n1", output));
+      const result = await cp.saveNode(R("run-e4"), N("n1"), node("n1", output));
       expect(result.ok, label).toBe(false);
       if (result.ok) throw new Error(`expected ${label} rejection`);
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -2547,7 +2551,7 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
 
     const nullSaveOpts = await cp.saveNode(
       R("run-opts"),
-      "n1",
+      N("n1"),
       node("n1", 1),
       null as unknown as Parameters<Checkpointer["saveNode"]>[3],
     );

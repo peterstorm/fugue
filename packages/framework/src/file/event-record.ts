@@ -133,6 +133,7 @@ import {
   validateSerializedValueGrammar,
   POLLUTION_KEYS,
   RESERVED_TAG_KEYS,
+  MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
 import { ok, err, tryCatch } from "../types/result.js";
@@ -297,33 +298,11 @@ const renderPathSegment = (key: PropertyKey): string => {
   return `[${JSON.stringify(key)}]`;
 };
 
-/**
- * Maximum nesting depth of a journal record's value tree — the shared depth
- * ceiling of every walk in the codec: the read-side pre-scan (the shared
- * raw-JSON serializer-grammar gate `validateSerializedValueGrammar` on the
- * record, `findReservedTagKey` on the deserialized event), the write-boundary
- * pre-scan (`assertLosslessEvent`) and — by construction — the
- * serializer/deserializer recursion those walks guard (`serializeValue`,
- * `deserializeValue`, `deepJsonEqual`, `toJson`).
- * Depth counts property hops from the scan root: the record fields and the
- * `event` value sit at depth 1, the event's children at depth 2, … A value
- * whose deepest chain exceeds the ceiling fails closed (FR-009): on the
- * READ side with a typed `err` naming the source and depth (the raw seam
- * rejects BEFORE `deserializeValue` could recurse past it), on the WRITE
- * side with the module's contextual typed boundary error. 512 is far below the
- * engine's call-stack overflow threshold (~20k-50k frames in V8/bun — the
- * exact depths at which the unchecked recursive walks overflowed), so every
- * walk (and every recursion they admit) completes on the stack, while
- * legitimately nested events (state snapshots, tool outputs — typically
- * well under 50 levels) clear it by an order of magnitude. The write and
- * read boundaries count identically — both start at the record level — so
- * the writer can never emit a record the strict reader rejects on depth.
- * The checkpoint codec observes the SAME domain: `serializeFileCheckpoint`
- * pre-scans the whole `{schemaVersion, data}` envelope (envelope at depth 1)
- * and the resume-proof read gate passes `initialDepth: 1`, so equivalent
- * checkpoint payloads are counted identically on both boundaries too.
- */
-export const MAX_SAFE_RECORD_DEPTH = 512;
+// The shared depth ceiling is a serializer-grammar knob — its canonical
+// definition lives with the grammar it bounds (`state-machine/serialize.ts`).
+// Re-exported so the event-record import path (the test suites and the
+// read-side docs that cite this module for the ceiling) stays unchanged.
+export { MAX_SAFE_RECORD_DEPTH } from "../state-machine/serialize.js";
 
 /** One link of a lazily-built path chain for the ITERATIVE walks: a
  * pre-rendered path segment plus its parent. Chains grow O(1) per level

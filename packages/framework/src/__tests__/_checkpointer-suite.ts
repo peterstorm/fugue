@@ -28,9 +28,10 @@ import { D, N, R } from "./_id-helpers.js";
  * Bypass-injection callbacks the shared ADR-0017/TTL/corruption tests need.
  * Backends reach their durable state by different means — Redis metadata
  * bypasses use `redis.set` while corrupt node entries use `redis.hset`,
- * in-memory mutates `__testRawMetas`, and the file backend writes checkpoint
- * files directly — so the suite is parametric over the bypass and the
- * CONTRACT assertions stay byte-identical for all of them.
+ * in-memory writes records into its test-owned store (the constructor-adopted
+ * seam that replaced `__testRawMetas`), and the file backend writes
+ * checkpoint files directly — so the suite is parametric over the bypass and
+ * the CONTRACT assertions stay byte-identical for all of them.
  *
  * Corrupt-meta/node callbacks are optional for exactly ONE reason: a backend
  * with no serialization step (in-memory, whose stores contain already-parsed
@@ -93,7 +94,7 @@ export function checkpointerSuite(
       const loadResult = await cp.load(R("run-1"));
       expect(loadResult.ok).toBe(true);
       if (loadResult.ok && loadResult.value) {
-        expect(loadResult.value.meta.dagId).toBe("dag-1");
+        expect(loadResult.value.meta.dagId).toBe(D("dag-1"));
         expect(loadResult.value.meta.nodeCount).toBe(3);
         expect(loadResult.value.meta.frameworkVersion).toBe(FRAMEWORK_VERSION);
         expect(loadResult.value.nodes).toEqual({});
@@ -105,13 +106,13 @@ export function checkpointerSuite(
       await cp.setMeta(R("run-2"), meta);
 
       const nodeState: NodeState = { nodeId: "n1" as NodeId, output: { text: "hello" }, completedAt: new Date("2025-06-01T12:00:00Z") };
-      const saveResult = await cp.saveNode(R("run-2"), "n1", nodeState);
+      const saveResult = await cp.saveNode(R("run-2"), N("n1"), nodeState);
       expect(saveResult.ok).toBe(true);
 
       const loadResult = await cp.load(R("run-2"));
       expect(loadResult.ok).toBe(true);
       if (loadResult.ok && loadResult.value) {
-        expect(loadResult.value.nodes["n1"].nodeId).toBe("n1");
+        expect(loadResult.value.nodes["n1"].nodeId).toBe(N("n1"));
         expect(loadResult.value.nodes["n1"].output).toEqual({ text: "hello" });
       }
     });
@@ -135,7 +136,7 @@ export function checkpointerSuite(
         output: { text: "hello" },
         completedAt: new Date("2025-06-01T12:00:00Z"),
       };
-      const saveResult = await cp.saveNode(R(runId), "n1", nodeState);
+      const saveResult = await cp.saveNode(R(runId), N("n1"), nodeState);
       expect(saveResult.ok).toBe(true);
 
       // Mutate the caller-owned inputs AFTER the successful writes...
@@ -164,7 +165,7 @@ export function checkpointerSuite(
       await cp.setMeta(R("run-3"), meta);
 
       for (const id of ["a", "b", "c"]) {
-        await cp.saveNode(R("run-3"), id, { nodeId: id, output: id, completedAt: new Date() });
+        await cp.saveNode(R("run-3"), N(id), { nodeId: N(id), output: id, completedAt: new Date() });
       }
 
       const loadResult = await cp.load(R("run-3"));
@@ -296,7 +297,7 @@ export function checkpointerSuite(
           startedAt: new Date(),
           nodeCount: 2,
         });
-        await cp.saveNode(R(runId), "good-node", {
+        await cp.saveNode(R(runId), N("good-node"), {
           nodeId: N("good-node"),
           output: { kept: true },
           completedAt: new Date(),

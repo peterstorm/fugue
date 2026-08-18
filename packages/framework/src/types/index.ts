@@ -135,7 +135,7 @@ export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, gitSha, tryGitSha,
 
 // ── Clock capability (C2) ─────────────────────────────────────────────────
 export type { ClockCapability } from "./clock.js";
-export { systemClock, fixedClock } from "./clock.js";
+export { systemClock, fixedClock, isRepresentableTimestampMs } from "./clock.js";
 
 export type { NonEmptyString } from "./non-empty-string.js";
 export { asNonEmptyString, nonEmptyString } from "./non-empty-string.js";

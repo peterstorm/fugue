@@ -55,3 +55,30 @@ export const fixedClock = (at: Date): ClockCapability => {
   const ms = at.getTime();
   return { now: () => new Date(ms) };
 };
+
+/**
+ * ONE encoding of the ms→Date clock domain's representability check
+ * (deepening round, simp-5): a raw millisecond timestamp is representable
+ * when it is a `number` that is finite AND `new Date` accepts — the
+ * ±100,000-year Time Value range. A finite number OUTSIDE that range
+ * (e.g. `1e300`) yields an invalid `Date`, so `toISOString()` throws and
+ * TTL comparisons silently compare `NaN` — both fail-closed only when the
+ * guard rejects the value BEFORE the conversion.
+ *
+ * This is the shared guard for the three ms→Date clock sites — the file
+ * checkpointer `readClock`, the in-memory checkpointer `readClock`, and the
+ * checkpoint codec serializers' timestamp checks (`serializeMeta`'s
+ * `createdAtMs`, `serializeNode`'s `completedAt` getTime). The raw-ms clock
+ * domain (journal `recordedAtMs`, freshness-index `writtenAtMs`) is
+ * deliberately NOT this check: those values are stored as raw `number`s
+ * and consumed by arithmetic — no `Date` conversion ever happens — so
+ * representability is out of domain and finiteness alone is the guard
+ * there. The two-domain split is pinned in `clock-parity.test.ts` (`±1e300`
+ * is the discriminator row: raw-ms sites accept, ms→Date sites reject).
+ *
+ * The `typeof` conjunct stays explicit so a hostile brand-bypassed
+ * non-number never reaches `new Date`'s string coercion — matching the
+ * per-site behavior exactly.
+ */
+export const isRepresentableTimestampMs = (ms: unknown): boolean =>
+  typeof ms === "number" && Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime());

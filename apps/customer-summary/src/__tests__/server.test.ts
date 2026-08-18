@@ -1,7 +1,7 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import { createApp } from "../server.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
-import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, runId as mkRunId, type Checkpointer } from "@fuguejs/framework";
+import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, runId as mkRunId, nodeId as N, dagId as D, type Checkpointer } from "@fuguejs/framework";
 import { createFileCheckpointer } from "@fuguejs/framework/file";
 import { SummaryResponseSchema } from "../schemas/response.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
@@ -158,8 +158,8 @@ describe("POST /summarize", () => {
             dagFingerprint: id.dagFingerprint,
             frameworkVersion: id.frameworkVersion,
           });
-          await cp.saveNode(victimRunId, "fetch-crm", {
-            nodeId: "fetch-crm",
+          await cp.saveNode(victimRunId, N("fetch-crm"), {
+            nodeId: N("fetch-crm"),
             output: { customer: { customerId: "cust-001", secret: "victim-data" } },
             completedAt: new Date(),
           });
@@ -257,7 +257,7 @@ describe("POST /summarize", () => {
           const cp = createCp();
           const runId = mkRunId("preFp-run");
           await cp.setMeta(runId, {
-            dagId: "customer-summary",
+            dagId: D("customer-summary"),
             startedAt: new Date(),
             nodeCount: 5,
             subject: "cust-001",

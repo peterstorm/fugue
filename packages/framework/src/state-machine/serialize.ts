@@ -37,6 +37,39 @@ export const POLLUTION_KEYS: ReadonlySet<string> = new Set([
   "prototype",
 ]);
 
+/**
+ * Maximum nesting depth of a value tree — the shared depth ceiling of
+ * every recursive walk in this grammar (`serializeValue`,
+ * `deserializeValue`, `deepJsonEqual`, `validateSerializedValueGrammar`)
+ * and of every file-layer write/read pre-scan that enforces it on
+ * caller-owned values BEFORE the grammar is allowed to recurse: the
+ * event write-boundary pre-scan (`assertLosslessEvent`,
+ * `file/event-record.ts`), the checkpoint codec materializer and envelope
+ * pre-scan (`materializeCanonicalOutput`, `serializeFileCheckpoint`,
+ * `file/checkpointer-codec.ts`), and the resume-proof read gate
+ * (`file/resume-proof.ts`). The ceiling is a grammar knob — the deepest
+ * nesting this grammar's recursion has been verified safe at — and it
+ * lives here, with the grammar it bounds, not in a consumer module.
+ *
+ * Depth counts property hops from the scan root: in a journal record the
+ * record fields and the `event` value sit at depth 1, the event's children
+ * at depth 2, …; in a checkpoint the `{schemaVersion, data}` envelope (or a
+ * node output) is the scan root and its children sit at depth 1. A value
+ * whose deepest chain exceeds the ceiling fails closed (FR-009): on the
+ * READ side with a typed `err` naming the source and depth (the raw seam
+ * rejects BEFORE `deserializeValue` could recurse past it), on the WRITE
+ * side with the module's contextual typed boundary error naming the path
+ * and depth. 512 is far below the engine's call-stack overflow threshold
+ * (~20k–50k frames in V8/bun — the exact depths at which the unchecked
+ * recursive walks previously overflowed), so every walk (and every
+ * recursion it admits) completes on the stack, while legitimately nested
+ * values (state snapshots, tool outputs — typically well under 50 levels)
+ * clear it by an order of magnitude. Write and read boundaries count
+ * identically within their domain, so a writer can never emit a record the
+ * strict reader rejects on depth.
+ */
+export const MAX_SAFE_RECORD_DEPTH = 512;
+
 const isReservedTag = (key: string): key is ReservedTag =>
   RESERVED_TAG_KEYS.has(key);
 

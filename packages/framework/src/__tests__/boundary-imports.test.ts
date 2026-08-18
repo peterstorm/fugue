@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { checkImports, type Violation } from "../scripts/check-imports.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
 import type { RunId } from "../types/ids.js";
+import { D, N } from "./_id-helpers.js";
 
 const SRC_DIR = join(__dirname, "../");
 
@@ -70,18 +71,18 @@ describe("SC-006 gate integrity pins", () => {
     const cp = new InMemoryCheckpointer();
     const rid = "opts-pin-run" as RunId;
     const metaRes = await cp.setMeta(rid, {
-      dagId: "opts-pin-dag",
+      dagId: D("opts-pin-dag"),
       startedAt: new Date(0),
       nodeCount: 1,
     });
     expect(metaRes.ok).toBe(true);
 
     const state = {
-      nodeId: "n1",
+      nodeId: N("n1"),
       output: { done: true },
       completedAt: new Date(0),
     };
-    const saveRes = await cp.saveNode(rid, "n1", state, { index: 1, attempt: 2 });
+    const saveRes = await cp.saveNode(rid, N("n1"), state, { index: 1, attempt: 2 });
     expect(saveRes.ok).toBe(true);
 
     const loadRes = await cp.load(rid);

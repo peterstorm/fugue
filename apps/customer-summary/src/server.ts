@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId } from "@fuguejs/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId, dagId as brandDagId } from "@fuguejs/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fuguejs/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -161,7 +161,7 @@ export const createApp = (deps: AppDeps): Hono => {
       }
       if (!resumeCheckpoint) {
         const metaResult = await checkpointer.setMeta(runId, {
-          dagId: dag.id,
+          dagId: brandDagId(dag.id),
           startedAt: new Date(),
           nodeCount: dag.nodes.length,
           subject: customer_id,

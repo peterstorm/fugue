@@ -21,8 +21,8 @@ import {
 } from "@fuguejs/framework";
 import { RedisCache, RedisCheckpointer } from "@fuguejs/framework/redis";
 import { DefaultAzureCredential } from "@azure/identity";
-import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink, FrameworkError } from "@fuguejs/framework";
-import { NoopObserver, runId as brandRunId } from "@fuguejs/framework";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink, FrameworkError, RunId, NodeId } from "@fuguejs/framework";
+import { NoopObserver } from "@fuguejs/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
 import { loadConfig, DEFAULT_MODELS, type Config } from "./config.js";
@@ -253,8 +253,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       },
     };
     checkpointWriter = {
-      write: async (runId: string, nodeId: string, value: unknown) => {
-        const r = await cp.saveNode(brandRunId(runId), nodeId, {
+      // Parameter types match the `CheckpointWriter` port it implements
+      // (branded ids — the checkpoint domain's one identifier ownership rule);
+      // the engine calls it with already-validated RunId/NodeId values.
+      write: async (runId: RunId, nodeId: NodeId, value: unknown) => {
+        const r = await cp.saveNode(runId, nodeId, {
           nodeId,
           output: value,
           completedAt: new Date(),

@@ -36,6 +36,7 @@ gates, freshness-aware state management, and production observability.
 | Term | Definition |
 |------|-----------|
 | **Branded ID** | `RunId`, `NodeId`, `DagId` — string newtypes with compile-time brands. Only smart constructors or `__brand` escapes produce them. |
+| **Checkpoint identifier ownership** | The `Checkpointer` port is typed with branded identifiers end-to-end (`saveNode(runId: RunId, nodeId: NodeId)`, `RunMeta.dagId: DagId`) — matching its sibling port `CheckpointWriter`, which was already branded. Adapters KEEP their runtime re-validation: a brand bypass is possible, and the file backend re-validates for path safety (NFR-010). `DagId` is the stricter domain (no `:` — Redis key-namespace escape). `DagDef.id` stays `string` at the authoring surface; consumers bridge with `dagId(dag.id)` (deepening round D1). |
 | **Result\<T, E\>** | Either-style type: `Ok<T>` or `Err<E>`. No exceptions cross module boundaries. |
 | **FrameworkError** | Discriminated union of 27 error kinds, exhaustively formatted via `formatFrameworkError`. |
 | **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`, `"clock"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
@@ -109,6 +110,15 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 | **Freshness Singleton (file)** | Exactly one latest-write file per resource, `<sha256(resource)>.json`: score-monotonic replacement (max `succeededAtMs`, Redis reverse-binary tie order), 24h lazy TTL, refresh-on-every-success — observable parity with the Redis adapter (ADR-0079). |
 | **FileOperation** | The closed `cache-error` operation vocabulary of the file backend; every file failure is a typed `FrameworkError` whose operation comes from this set (ADR-0080). |
 
+**Deepening-round decisions (2026-08-18).** The interface advisories deferred across review rounds 10–16 were adjudicated once, in a `file/` + `Checkpointer`-port deepening round (plan: `.claude/plans/2026-08-18-file-port-deepening-round.md`):
+
+- **Identifier ownership (D1)** — the port re-typed to branded `RunId`/`NodeId`/`DagId` (see *Checkpoint identifier ownership* under Type Safety).
+- **One truthful-branding path (D2)** — `checkpoint-write-failed` is constructed by ONE builder (`buildCheckpointWriteFailed`, `types/error-factories.ts`); the codec re-exports it. The per-backend error-KIND divergence documented in the port's mapping table is a deliberate ADR-0080 surface, not a mirror.
+- **Composite-key error channels (D3)** — `parseCompositeNodeKey → … | null` (read-side classifier over untrusted stored bytes), `compositeNodeKey` throwing (write-side constructor invariant, converted at its single production boundary), and the port-level `Result` are each the correct ADR-0080 channel; the contract is pinned in the module header so the shape is not re-flagged.
+- **Test-owned store (D4)** — `InMemoryCheckpointer` exposes no accessor to its internals; tests adopt a `Map` at construction (`testStore`) and seed stored records directly — the Redis-raw-set analog. Alias-ing the adapter's live internals is unrepresentable.
+- **Depth ceiling is a grammar knob (D5)** — `MAX_SAFE_RECORD_DEPTH` (512) lives in the serializer grammar module (`state-machine/serialize.ts`), with the grammar it bounds. The two write-side FR-009 losslessness pre-scans (journal events, node outputs) keep their per-module pinned message corpora, but their accept/reject VERDICTS are pinned to agree on a shared hostile + safe corpus (`losslessness-parity.test.ts`) — drift fails the build.
+- **Two clock domains (D6)** — the raw-ms guards (journal `recordedAtMs`, freshness `writtenAtMs`/`sinceMs`) are finiteness-only: the value is STORED as a raw number and consumed by arithmetic, so `Date` representability is out of domain. The ms→Date guards (both checkpointers' `readClock`, the codec serializers' timestamp checks) share ONE encoding, `isRepresentableTimestampMs` (`types/clock.ts`). `±1e300` is the discriminator row (raw-ms accepts, ms→Date rejects), pinned in `clock-parity.test.ts`.
+
 **Plan decision codes.** The F6 plan's `AD-1`…`AD-6` codes — cited in `file/*` and `checkpoint/*` comments — map to the ADRs one-to-one:
 
 | Plan code | ADR |
@@ -162,6 +172,7 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 6. **Capability validation happens once at run start** — before any `node.run` is called.
 7. **Freshness is fail-closed** — extractor failures abort the wave; proceeding without witness data would allow stale writes.
 8. **Pre-release: no backward-compat shims** — internal renames are first-class refactors, not aliased. No `@deprecated` re-exports for code that has not shipped.
+9. **Clock guards follow the storage domain** — raw-ms values are finiteness-guarded only; ms→Date values are guarded for finiteness AND representability (`isRepresentableTimestampMs`). The two-domain split is a pinned invariant (`clock-parity.test.ts`), not a convention.
 
 ### Host Layer (`@fuguejs/host`)
 

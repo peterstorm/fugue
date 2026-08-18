@@ -16,8 +16,9 @@
 //   - boundary snapshots and parsers for the `saveNode` options object
 //     (snapshot-once semantics, closed own-key grammar) and the `load`
 //     options object;
-//   - the `checkpoint-write-failed` construction policy (truthful brands,
-//     additive raw-value diagnostics, `META_RECORD_NODE_ID`).
+//   - the `checkpoint-write-failed` construction policy — delegated to the
+//     canonical builder in `types/error-factories.ts` (re-exported below as
+//     `writeFailed` for the shell and the tests).
 //
 // It performs NO I/O and NO clock reads: byte strings and frozen snapshots
 // go in, `Result`s and verdicts come out, and every expected rejection is a
@@ -32,7 +33,6 @@
 // policy). Moving the codecs here keeps every pure invariant directly
 // testable without a temp directory.
 
-import { MAX_SAFE_RECORD_DEPTH } from "./event-record.js";
 import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import type {
   CheckpointerLoadOpts,
@@ -51,15 +51,10 @@ import {
   POLLUTION_KEYS,
   RESERVED_TAG_KEYS,
   serializedPath as outputPath,
+  MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
-import type { FrameworkError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
-import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
-import {
-  CHECKPOINT_INVALID_NODE_ID,
-  CHECKPOINT_INVALID_RUN_ID,
-  stringOf,
-} from "../types/error-factories.js";
+import { ID_PATTERN, __brandDagIdUnchecked, __brandNodeId } from "../types/ids.js";
+import { isRepresentableTimestampMs } from "../types/clock.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
@@ -68,56 +63,24 @@ import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 // Error construction (ADR-0080)
 // ---------------------------------------------------------------------------
 
-/**
- * Grammar-valid diagnostic location used for metadata-scoped write failures.
- * `checkpoint-write-failed.nodeId` is a legacy required field, so metadata
- * failures need a truthful internal address even though no DAG node was being
- * written. Exported for source compatibility and for consumers that classify
- * metadata failures without parsing messages.
- */
-export const META_RECORD_NODE_ID: NodeId = __brandNodeId("checkpoint_meta");
-
-// Truthful-branding placeholders (the grammar-valid locations a rejected raw
-// id cannot truthfully inhabit) and the total raw-byte renderer are the
-// CANONICAL exports in `types/error-factories.ts` — imported above, so the
-// naming rule has one encoding across every `checkpoint-write-failed`
-// construction site (the public factory, the in-memory adapter, this codec).
-// The rejected bytes remain available in the additive `invalidRunId` /
-// `invalidNodeId` diagnostics; log-line bounding is `render`'s job.
+// The `checkpoint-write-failed` construction policy (truthful brands, additive
+// raw-value diagnostics, the meta-record case) has ONE encoding — the canonical
+// `buildCheckpointWriteFailed` builder in `types/error-factories.ts`, shared
+// with the public `frameworkError.checkpointWriteFailed` factory and the
+// in-memory adapter (deepening-round consolidation of the policy this module
+// used to mirror locally; output for every input is byte-identical to the
+// former local `writeFailed` — pinned by the per-backend hostile corpora).
+// Re-exported under the historical name: the file-checkpointer shell and the
+// tests import it from here. `META_RECORD_NODE_ID` is likewise re-exported
+// from its canonical definition so the `file.ts` barrel and test imports keep
+// their paths.
+export {
+  META_RECORD_NODE_ID,
+  buildCheckpointWriteFailed as writeFailed,
+} from "../types/error-factories.js";
 
 const render = safeDiagnosticRender;
 const messageOf = safeErrorMessage;
-
-/**
- * Construct a truthful, source-compatible `checkpoint-write-failed` value.
- * Valid raw identifiers retain their own brands. Invalid raw identifiers are
- * never branded as themselves: required legacy fields receive documented,
- * grammar-valid internal locations while additive diagnostics preserve the
- * rejected bytes. Metadata failures use `META_RECORD_NODE_ID`.
- */
-export const writeFailed = (
-  runIdRaw: unknown,
-  nodeIdRaw: unknown | undefined,
-  message: string,
-): FrameworkError => {
-  const runIdValid = typeof runIdRaw === "string" && isBoundaryId(runIdRaw);
-  const nodeIdValid = typeof nodeIdRaw === "string" && isBoundaryId(nodeIdRaw);
-  // Absent means "this is the meta record", which is distinct from "present but
-  // unparseable" — the three cases are a chain, so they read as one.
-  const nodeId = nodeIdRaw === undefined
-    ? META_RECORD_NODE_ID
-    : nodeIdValid ? __brandNodeId(nodeIdRaw) : CHECKPOINT_INVALID_NODE_ID;
-  return {
-    kind: "checkpoint-write-failed",
-    runId: runIdValid ? __brandRunId(runIdRaw) : CHECKPOINT_INVALID_RUN_ID,
-    nodeId,
-    ...(!runIdValid ? { invalidRunId: stringOf(runIdRaw) } : {}),
-    ...(nodeIdRaw !== undefined && !nodeIdValid
-      ? { invalidNodeId: stringOf(nodeIdRaw) }
-      : {}),
-    message,
-  };
-};
 
 // ---------------------------------------------------------------------------
 // Stored schemas (functional core: pure serialize / pure parse)
@@ -277,7 +240,7 @@ export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): strin
     );
   }
   const createdAt = new Date(createdAtMs);
-  if (!isValidDate(createdAt)) {
+  if (!isRepresentableTimestampMs(createdAtMs)) {
     throw new Error(`clock produced a non-representable timestamp: ${render(createdAtMs)}`);
   }
   const stored: StoredMeta = Object.freeze({
@@ -340,7 +303,13 @@ export const parseStoredMeta = (
   if (!parsedCreatedAt.ok) return err(parsedCreatedAt.error);
   return ok({
     meta: {
-      dagId,
+      // Read-side parse boundary: the meta bytes were written by a consumer
+      // of the (now branded) port. The file codec's frozen acceptance domain
+      // is a `typeof` shape check (it does NOT re-derive the `DagId` pattern
+      // domain at read time — that would newly reject stored values, a
+      // behavior change to a frozen surface), so the brand is applied
+      // unchecked: an honest re-typing of the deserialized value.
+      dagId: __brandDagIdUnchecked(dagId),
       startedAt: parsedStartedAt.value,
       nodeCount,
       ...(subject !== undefined ? { subject } : {}),
@@ -573,7 +542,7 @@ export const serializeNode = (nodeKey: string, state: RawNodeSnapshot): string =
     throw new Error(`state.completedAt must be a valid Date, got ${render(completedAt)}`);
   }
   const completedAtMs = Date.prototype.getTime.call(completedAt);
-  if (!Number.isFinite(completedAtMs)) {
+  if (!isRepresentableTimestampMs(completedAtMs)) {
     throw new Error(`state.completedAt must be a valid Date, got ${render(completedAt)}`);
   }
 
@@ -762,7 +731,10 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   return {
     kind: "entry",
     nodeKey,
-    state: { nodeId, output, completedAt: parsedCompletedAt.value },
+    // The `isBoundaryIdString(nodeId)` gate above already proved the
+    // `ID_PATTERN` domain — brand it with the VALIDATING constructor (no
+    // bypass; one cheap re-test on a value that was just tested).
+    state: { nodeId: __brandNodeId(nodeId), output, completedAt: parsedCompletedAt.value },
   };
 };
 

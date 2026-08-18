@@ -5,7 +5,7 @@
  */
 import { describe, test, expect } from "bun:test";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
-import { runId } from "../types/ids.js";
+import { dagId, nodeId, runId } from "../types/ids.js";
 
 /** Mock ioredis that throws on all operations. */
 const makeFailingRedis = (errorMsg: string) => ({
@@ -47,8 +47,8 @@ describe("RedisCheckpointer — connection failure paths", () => {
 
   test("saveNode() returns cache-error on connection failure", async () => {
     const cp = new RedisCheckpointer(makeFailingRedis("ECONNREFUSED") as any);
-    const result = await cp.saveNode(runId("run-test-789"), "node-1", {
-      nodeId: "node-1",
+    const result = await cp.saveNode(runId("run-test-789"), nodeId("node-1"), {
+      nodeId: nodeId("node-1"),
       output: { data: "test" },
       completedAt: new Date(),
     });
@@ -61,7 +61,7 @@ describe("RedisCheckpointer — connection failure paths", () => {
   test("setMeta() returns cache-error on connection failure", async () => {
     const cp = new RedisCheckpointer(makeFailingRedis("ECONNREFUSED") as any);
     const result = await cp.setMeta(runId("run-test-abc"), {
-      dagId: "test-dag",
+      dagId: dagId("test-dag"),
       startedAt: new Date(),
       nodeCount: 3,
       subject: "cust-001",

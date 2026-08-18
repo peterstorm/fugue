@@ -1,7 +1,8 @@
 import Redis from "ioredis";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { RunId } from "../types/ids.js";
+import type { RunId, NodeId } from "../types/ids.js";
+import { __brandDagIdUnchecked, __brandNodeIdUnchecked } from "../types/ids.js";
 import { ok, err } from "../types/result.js";
 import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
@@ -53,7 +54,12 @@ const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
   }
   return {
     meta: {
-      dagId: stored.dagId,
+      // Read-side parse boundary: the stored bytes were written by a consumer
+      // of the (now branded) port. The Redis backend's frozen domain is
+      // pass-through — it neither re-derives nor validates the id domain at
+      // read time, so the brand is applied unchecked (an honest re-typing of
+      // the deserialized value, not a new gate).
+      dagId: __brandDagIdUnchecked(stored.dagId),
       startedAt,
       nodeCount: stored.nodeCount,
       ...(stored.subject !== undefined ? { subject: stored.subject } : {}),
@@ -78,7 +84,7 @@ const deserializeNode = (raw: string): NodeState => {
     throw new Error(`Invalid date in checkpoint node: completedAt=${stored.completedAt}`);
   }
   return {
-    nodeId: stored.nodeId,
+    nodeId: __brandNodeIdUnchecked(stored.nodeId), // read-side pass-through (see the meta twin above)
     output: stored.output,
     completedAt,
   };
@@ -206,7 +212,7 @@ export class RedisCheckpointer implements Checkpointer {
     });
   }
 
-  async saveNode(runId: RunId, nodeId: string, state: NodeState): Promise<Result<void, FrameworkError>> {
+  async saveNode(runId: RunId, nodeId: NodeId, state: NodeState): Promise<Result<void, FrameworkError>> {
     const payload = serializeNode(state);
     try {
       if (!this.saveNodeSha) {

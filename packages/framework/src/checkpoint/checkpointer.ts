@@ -1,10 +1,11 @@
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { RunId } from "../types/ids.js";
+import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { err, ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
 import { ID_PATTERN } from "../types/ids.js";
+import { isRepresentableTimestampMs } from "../types/clock.js";
 import {
   CHECKPOINT_INVALID_RUN_ID,
   frameworkError,
@@ -32,7 +33,16 @@ export const TTL_SECONDS = 86_400;
 // --- Domain types ---
 
 export interface RunMeta {
-  readonly dagId: string;
+  /**
+   * The DAG this run belongs to. Branded `DagId` (the stricter domain —
+   * `DAG_ID_REGEX`, no `:` — which exists to keep dagIds out of Redis key
+   * namespaces; construct via `dagId()` from `types/ids.ts`). Every valid
+   * `DagDef.id` is already in this domain (validated at `validateDagShape`
+   * time), so honest consumers brand at zero runtime cost; the adapters
+   * still shape-re-validate at their hostile boundary (ADR-0080) — the brand
+   * declares the domain, it never relaxes a runtime gate.
+   */
+  readonly dagId: DagId;
   readonly startedAt: Date;
   readonly nodeCount: number;
   /**
@@ -57,7 +67,8 @@ export interface RunMeta {
 }
 
 export interface NodeState {
-  readonly nodeId: string;
+  /** The node this state belongs to (branded `NodeId` — see `RunMeta.dagId`). */
+  readonly nodeId: NodeId;
   readonly output: unknown;
   readonly completedAt: Date;
 }
@@ -120,6 +131,22 @@ export interface CheckpointerLoadOpts {
 }
 
 export interface Checkpointer {
+  /**
+   * Identifier ownership (deepening-round adjudication, one encoding for the
+   * whole checkpoint domain): the port parameters and the meta/node id fields
+   * carry the branded ids — `RunId`, `NodeId`, `DagId` — the same brands the
+   * engine's sibling `CheckpointWriter.write(runId: RunId, nodeId: NodeId, …)`
+   * port already declared. The brands are the DOMAIN declaration at the
+   * consumer level (argument-swap safety; `DagId`'s colon-free domain is
+   * enforced at the smart constructor, not re-derived per adapter). They do
+   * NOT relax any runtime gate: a brand-bypassed hostile value still reaches
+   * each adapter's boundary, which keeps its own shape/path re-validation
+   * (the file backend re-validates against `ID_PATTERN` for path safety,
+   * NFR-010/ADR-0080; the other backends keep their frozen acceptance
+   * domains). Backend-swap parity of RUNTIME behavior is unchanged by the
+   * re-typing — it is a compile-time contract move, byte-identical at every
+   * runtime input.
+   */
   load(
     runId: RunId,
     opts?: CheckpointerLoadOpts,
@@ -135,7 +162,7 @@ export interface Checkpointer {
    * composite addressing is a versioned opt-in implemented by the file
    * backend. `load` returns entries keyed by the stored nodeKey.
    */
-  saveNode(runId: RunId, nodeId: string, state: NodeState, opts?: SaveNodeOpts): Promise<Result<void, FrameworkError>>;
+  saveNode(runId: RunId, nodeId: NodeId, state: NodeState, opts?: SaveNodeOpts): Promise<Result<void, FrameworkError>>;
   setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>>;
 }
 
@@ -172,18 +199,35 @@ export interface Checkpointer {
  * Held in a separate field
  * rather than smuggled onto `RunMeta` so the public type stays clean.
  */
-interface StoredMeta {
+/**
+ * Internal storage shape — exported as the in-memory backend's TEST-SURFACE
+ * type (deepening-round seam redesign): the shared `checkpointerSuite` and the
+ * hostile-totality tests construct and seed these records directly through a
+ * constructor-adopted store (below) instead of mutating the adapter's live
+ * internals through a public accessor. The shape is exactly what `load`
+ * consumes: the caller's meta (possibly with `frameworkVersion` absent, for
+ * the ADR-0017 missing-field case) and the writer-stamped `createdAt` (used
+ * for the lazy FR-027 TTL evaluation).
+ */
+export interface InMemoryStoredMeta {
   readonly meta: RunMeta;
   readonly createdAt: Date;
 }
 
 export class InMemoryCheckpointer implements Checkpointer {
-  private readonly metas = new Map<string, StoredMeta>();
+  private readonly metas: Map<string, InMemoryStoredMeta>;
   private readonly nodes = new Map<string, Record<string, NodeState>>();
   private readonly now: () => number;
 
-  constructor(opts?: { readonly now?: () => number }) {
+  constructor(opts?: { readonly now?: () => number; readonly testStore?: Map<string, InMemoryStoredMeta> }) {
     this.now = opts?.now ?? Date.now;
+    // Test-store adoption: when a caller (the shared `checkpointerSuite` and
+    // the hostile-totality tests) supplies its own map, the adapter reads and
+    // writes through THAT map — the test owns the store from construction, so
+    // seeding hostile or version-less records is the test's own business, and
+    // no method on this class exposes the adapter's internals. Production
+    // construction (no `testStore`) is unchanged: a private map, no accessor.
+    this.metas = opts?.testStore ?? new Map();
   }
 
   /**
@@ -224,7 +268,7 @@ export class InMemoryCheckpointer implements Checkpointer {
   ): Result<number, FrameworkError> {
     try {
       const ms = this.now();
-      if (!Number.isFinite(ms) || Number.isNaN(new Date(ms).getTime())) {
+      if (!isRepresentableTimestampMs(ms)) {
         return err(
           frameworkError.cacheError(
             `checkpoint:${operation}`,
@@ -333,7 +377,7 @@ export class InMemoryCheckpointer implements Checkpointer {
 
   async saveNode(
     runId: RunId,
-    nodeId: string,
+    nodeId: NodeId,
     state: NodeState,
     _opts?: SaveNodeOpts,
   ): Promise<Result<void, FrameworkError>> {
@@ -401,16 +445,5 @@ export class InMemoryCheckpointer implements Checkpointer {
       createdAt,
     });
     return ok(undefined);
-  }
-
-  /**
-   * Test-only escape hatch — exposes raw meta storage so the shared
-   * `checkpointerSuite` can construct meta payloads that bypass `setMeta`'s
-   * framework-version stamping (missing-field case) or rewind `createdAt`
-   * (expired case). The Redis counterpart uses `redis.set` directly for the
-   * same purpose. Production code MUST go through `setMeta`.
-   */
-  __testRawMetas(): Map<string, StoredMeta> {
-    return this.metas;
   }
 }

@@ -76,11 +76,11 @@
 
 import { join } from "node:path";
 import { CHECKPOINT_FILE, EVENTS_DIR, JOURNAL_SCHEMA_VERSION } from "./layout.js";
-import { MAX_SAFE_RECORD_DEPTH } from "./event-record.js";
 import { replayEvents, foldStep } from "../state-machine/replay.js";
 import {
   deserializeValue,
   validateSerializedValueGrammar,
+  MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
 import type { Machine, RecordedEvent } from "../state-machine/types.js";
 import type { RunId } from "../types/ids.js";

@@ -18,6 +18,26 @@
 //   - Every composite component is re-validated against the same constraints
 //     the encoder enforces, so `parse(encode(a)) = a` for every valid address
 //     and out-of-contract keys are rejected outright (parse, don't validate).
+//
+// Error-channel contract (deepening-round adjudication — the three channels
+// are deliberate, not drift):
+//   - `parseCompositeNodeKey → … | null` is the read-side CLASSIFIER over
+//     untrusted stored bytes: it answers "is this a well-formed key?" and
+//     nothing more. Callers on the corrupt-entry path already compose their
+//     own per-site verdict message around the (recoverable) key, so a `Result`
+//     would force every read site to unwrap a message it does not use.
+//   - `compositeNodeKey` throws — a write-side CONSTRUCTOR INVARIANT over
+//     validated inputs, per ADR-0080 ("low-level pure implementation
+//     functions may use local exceptions as control flow, but every exported
+//     throwing boundary catches and converts them before they can escape").
+//     The single production call site (the file checkpointer's `saveNode`)
+//     re-validates the boundary first, so the only throw reachable there is
+//     this module's own `assertNoNamespaceAlone` rule (which the boundary
+//     parse intentionally does not pre-reject — the ambiguity rule belongs to
+//     this module as the single definition of the composite key), and it is
+//     converted to typed `checkpoint-write-failed` at that boundary.
+//   - The port-level `Result<_, FrameworkError>` channel is the Checkpointer's
+//     own — this module sits below it and never crosses it.
 
 import type { NodeId } from "../types/ids.js";
 import { ID_PATTERN } from "../types/ids.js";

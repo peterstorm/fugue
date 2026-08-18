@@ -81,7 +81,6 @@ import { META_FILE, NODES_DIR, isBoundaryId, keyDigest } from "./layout.js";
 import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import {
   isPlainObject,
-  isValidDate,
   parseLoadOpts,
   parseNodeFile,
   parseStoredMeta,
@@ -114,8 +113,9 @@ import type {
 import { compositeNodeKey } from "../checkpoint/composite-node-key.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { RunId } from "../types/ids.js";
+import type { RunId, NodeId } from "../types/ids.js";
 import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
+import { isRepresentableTimestampMs } from "../types/clock.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { frameworkError } from "../types/error-factories.js";
@@ -319,7 +319,7 @@ const createFileCheckpointerUnchecked = (
   ): Result<number, FrameworkError> => {
     try {
       const ms = now();
-      if (!Number.isFinite(ms) || !isValidDate(new Date(ms))) {
+      if (!isRepresentableTimestampMs(ms)) {
         return err(
           checkpointerCacheError(
             operation,
@@ -398,7 +398,7 @@ const createFileCheckpointerUnchecked = (
 
     async saveNode(
       runId: RunId,
-      nodeId: string,
+      nodeId: NodeId,
       state: NodeState,
       saveOpts?: SaveNodeOpts,
     ): Promise<Result<void, FrameworkError>> {
