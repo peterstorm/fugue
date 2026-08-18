@@ -214,14 +214,9 @@ export const mapKeycloakTokenResponse = (
   // A settled authorization "no" — bad credential / scope or audience not
   // permitted for this client. A denial is an answer, not an outage.
   if (res.status === 400 || res.status === 401 || res.status === 403) {
-    const description = res.json.error_description;
-    const error = res.json.error;
-    const reason =
-      typeof description === "string"
-        ? description
-        : typeof error === "string"
-          ? error
-          : `Keycloak token endpoint denied (HTTP ${res.status})`;
+    const described = [res.json.error_description, res.json.error]
+      .find((value): value is string => typeof value === "string");
+    const reason = described ?? `Keycloak token endpoint denied (HTTP ${res.status})`;
     return err({ kind: "downstream-denied", resource: audience, reason });
   }
 

@@ -80,10 +80,7 @@ export function seedInitialActiveSet(
     incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
   }
 
-  const seeds: NodeId[] = [];
-  for (const id of nodeIds) {
-    if ((incomingCount.get(id) ?? 0) === 0) seeds.push(id);
-  }
+  const seeds = nodeIds.filter((id) => (incomingCount.get(id) ?? 0) === 0);
 
   const active = new Set<NodeId>(seeds);
   const stack = [...seeds];

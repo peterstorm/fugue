@@ -42,7 +42,7 @@ import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import {
-  SHAPES,
+  DAG_SHAPES,
   buildScaffold,
   fugueYaml,
   parseShape,
@@ -83,7 +83,7 @@ export interface NewOptions {
 }
 
 // KEBAB (single-sourced in `identifiers.ts`) is a valid DAG id and directory
-// segment. (Runtime ids allow the wider /^[A-Za-z0-9_:-]{1,128}$/ — ID_REGEX
+// segment. (Runtime ids allow the wider /^[A-Za-z0-9_:-]{1,128}$/ — ID_PATTERN
 // in types/ids.ts; we hold authors to the kebab convention every existing
 // DAG follows.)
 
@@ -213,10 +213,10 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
   // membership check narrows, so the success arm never needs an `as Shape`.
   let parsedShape: Shape | null = null;
   if (shape === undefined) {
-    problems.push(`missing --shape (one of: ${SHAPES.join(", ")})`);
+    problems.push(`missing --shape (one of: ${DAG_SHAPES.join(", ")})`);
   } else {
     parsedShape = parseShape(shape);
-    if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${SHAPES.join(", ")})`);
+    if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${DAG_SHAPES.join(", ")})`);
   }
 
   // `--review` is a human-review gate (an aspect) — but the scaffold only knows

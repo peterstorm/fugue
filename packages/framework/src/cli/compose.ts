@@ -477,11 +477,9 @@ export type AnswerClass =
  */
 export const classifyAnswer = (text: string): AnswerClass => {
   const trimmed = text.trim();
-  return /^(yes|y|accept)$/i.test(trimmed)
-    ? { kind: "accept" }
-    : /^(abort|no|quit|exit)$/i.test(trimmed)
-      ? { kind: "abort" }
-      : { kind: "refine", text: trimmed };
+  if (/^(yes|y|accept)$/i.test(trimmed)) return { kind: "accept" };
+  if (/^(abort|no|quit|exit)$/i.test(trimmed)) return { kind: "abort" };
+  return { kind: "refine", text: trimmed };
 };
 
 /**

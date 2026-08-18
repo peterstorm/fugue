@@ -21,6 +21,7 @@
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
+import { match } from "ts-pattern";
 import { ok } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -258,18 +259,32 @@ export const startSyncLoop = (
       onStarted();
       const result = await executeSyncCycle(git, loader, config, lastSha, logger, clock);
 
-      if (result.kind === "updated") {
-        // Call onComplete BEFORE advancing SHA — if onComplete throws,
-        // SHA stays at lastSha so the next cycle will retry this commit.
-        onComplete(result.registry, result.newSha);
-        lastSha = result.newSha;
-      } else if (result.kind === "no-change") {
-        lastSha = result.currentSha;
-        // Transition syncing → ready (sync succeeded, nothing changed)
-        onNoChange(result.currentSha);
-      } else if (result.kind === "error") {
-        onError(result.syncError);
-      }
+      // Exhaustive: a new SyncCycleResult variant is a compile error here
+      // rather than a cycle that silently notifies no one.
+      match(result)
+        .with({ kind: "updated" }, (updated) => {
+          // Call onComplete BEFORE advancing SHA — if onComplete throws,
+          // SHA stays at lastSha so the next cycle will retry this commit.
+          onComplete(updated.registry, updated.newSha);
+          lastSha = updated.newSha;
+        })
+        .with({ kind: "no-change" }, (unchanged) => {
+          lastSha = unchanged.currentSha;
+          // Transition syncing → ready (sync succeeded, nothing changed)
+          onNoChange(unchanged.currentSha);
+        })
+        .with({ kind: "error" }, (failed) => {
+          onError(failed.syncError);
+        })
+        .with({ kind: "skipped" }, () => {
+          // Not reachable here: `skipped` is produced by doSync's re-entrancy
+          // guard ABOVE, before executeSyncCycle runs. It shares the SyncResult
+          // type but not this path — the in-progress cycle owns the callbacks,
+          // so firing any of them again would double-report one sync. The
+          // if-chain this replaced omitted the case silently; stating it is the
+          // whole point of `.exhaustive()`.
+        })
+        .exhaustive();
 
       return result;
     } catch (e) {

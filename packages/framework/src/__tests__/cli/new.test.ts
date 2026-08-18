@@ -15,7 +15,7 @@ import { runLint } from "../../cli/lint.js";
 import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
 import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "../../cli/identifiers.js";
-import { SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
+import { DAG_SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
 
 // `NewOptions.name` / `TemplateCtx.name` are branded (`KebabIdent`) — parse
 // test names through the single smart constructor, never cast.
@@ -66,7 +66,7 @@ const runBin = async (
 // --------------------------------------------------------------------------
 
 describe("generated scaffolds lint clean", () => {
-  for (const shape of SHAPES) {
+  for (const shape of DAG_SHAPES) {
     for (const llm of [false, true]) {
       const label = `${shape}${llm ? " --llm" : ""}`;
       it(`${label} → dag.ts lints, fugue.yaml parses${llm ? ", prompts check green" : ""}`, async () => {
@@ -155,7 +155,7 @@ describe("human-review scaffolds (--review)", () => {
 describe("generated content guarantees", () => {
   const ctx = (llm: boolean) => ({ name: mustName("x"), team: mustTeam("t"), llm });
 
-  for (const shape of SHAPES) {
+  for (const shape of DAG_SHAPES) {
     it(`${shape} --llm pins a current, non-dated model id`, () => {
       const { dagTs } = buildScaffold(shape, ctx(true));
       const m = dagTs.match(/DEFAULT_MODEL = "([^"]+)"/);

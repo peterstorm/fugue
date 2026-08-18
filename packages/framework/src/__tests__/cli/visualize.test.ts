@@ -72,7 +72,7 @@ describe("describedToMermaid", () => {
   });
 
   it("keeps distinct node ids distinct and clear of the reserved tokens", () => {
-    // ID_REGEX allows `_`, `:` and `-` — the Mermaid id encoding must be
+    // ID_PATTERN allows `_`, `:` and `-` — the Mermaid id encoding must be
     // INJECTIVE (distinct node ids map to distinct tokens; `a:b` and `a_b`
     // must never merge into one node) and NAMESPACED (a node literally named
     // `dag_input` must not merge with the virtual request node).

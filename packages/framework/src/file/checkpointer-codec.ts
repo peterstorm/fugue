@@ -108,15 +108,15 @@ export const writeFailed = (
 ): FrameworkError => {
   const runIdValid = typeof runIdRaw === "string" && isBoundaryId(runIdRaw);
   const nodeIdValid = typeof nodeIdRaw === "string" && isBoundaryId(nodeIdRaw);
+  // Absent means "this is the meta record", which is distinct from "present but
+  // unparseable" — the three cases are a chain, so they read as one.
+  const nodeId = nodeIdRaw === undefined
+    ? META_RECORD_NODE_ID
+    : nodeIdValid ? __brandNodeId(nodeIdRaw) : INVALID_NODE_ID;
   return {
     kind: "checkpoint-write-failed",
     runId: runIdValid ? __brandRunId(runIdRaw) : INVALID_RUN_ID,
-    nodeId:
-      nodeIdRaw === undefined
-        ? META_RECORD_NODE_ID
-        : nodeIdValid
-          ? __brandNodeId(nodeIdRaw)
-          : INVALID_NODE_ID,
+    nodeId,
     ...(!runIdValid ? { invalidRunId: stringOf(runIdRaw) } : {}),
     ...(nodeIdRaw !== undefined && !nodeIdValid
       ? { invalidNodeId: stringOf(nodeIdRaw) }

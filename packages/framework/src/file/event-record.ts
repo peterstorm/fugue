@@ -635,12 +635,13 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
           `serializeFileEventRecord: ${path} has a custom toJSON accessor — JSON.stringify would invoke it and persist its return value instead of the object itself; the losslessness pre-scan never invokes getters, so the object cannot be verified (FR-009)`,
         );
       }
-      const toJSONValue =
-        toJSONDescriptor !== undefined
-          ? toJSONDescriptor.value
-          : proto === Object.prototype
-            ? Object.getOwnPropertyDescriptor(Object.prototype, "toJSON")?.value
-            : undefined;
+      // Falls back to Object.prototype's own `toJSON` ONLY when the value has
+      // no own descriptor — an own descriptor whose `.value` is undefined still
+      // wins, so this is deliberately not `??`.
+      const inheritedToJSON = proto === Object.prototype
+        ? Object.getOwnPropertyDescriptor(Object.prototype, "toJSON")?.value
+        : undefined;
+      const toJSONValue = toJSONDescriptor !== undefined ? toJSONDescriptor.value : inheritedToJSON;
       if (typeof toJSONValue === "function") {
         throw new Error(
           `serializeFileEventRecord: ${path} has a custom toJSON method — JSON.stringify would persist the method's return value instead of the object itself (FR-009)`,

@@ -30,7 +30,7 @@ import { gitSha } from "@fuguejs/framework";
 import type { AuthDeps, AdmissionPort, SupervisorDeps } from "../../supervisor/supervisor.js";
 import type { WorkerLifecyclePort, EnsuredWorker } from "../../supervisor/lifecycle/spawn-port.js";
 import { createSupervisor, createTerminationHandler } from "../../supervisor/supervisor.js";
-import { TENANT_HEADER } from "../../supervisor/uds-proxy.js";
+import { TENANT_HEADER_NAME } from "../../domain/tenant-header.js";
 import type { UdsTransport } from "../../supervisor/uds-proxy.js";
 // Canonical verifier (the proxy no longer re-implements one — it imports the
 // shared signer; the worker side uses exactly this verifier).
@@ -486,7 +486,7 @@ describe("createSupervisor — routing + proxy with fakes", () => {
     let proxiedHeader: string | null = null;
     const transport: UdsTransport = async (sock, req) => {
       expect(sock).toBe("/run/fugue/acme.sock");
-      proxiedHeader = req.headers.get(TENANT_HEADER);
+      proxiedHeader = req.headers.get(TENANT_HEADER_NAME);
       return ok(new Response(JSON.stringify({ runId: "r1" }), { status: 200, headers: { "Content-Type": "application/json" } }));
     };
     const deps = buildDeps({

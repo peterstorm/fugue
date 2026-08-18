@@ -226,15 +226,12 @@ export const admitWithReservation = (
 ): AdmitDecision => {
   const decision = budgetDecision(meter, runId, budget);
   const projected = decision.cumulative + state.reservedInFlight;
-  // The exceeded budget, when over: a `refuse` decision carries it; the
-  // projection branch requires a defined `budget` to fire. Reading it off the
-  // branches keeps this cast-free — `undefined` means "admit".
-  const exceededBudget =
-    decision.kind === "refuse"
-      ? decision.budget
-      : budget !== undefined && projected >= budget
-        ? budget
-        : undefined;
+  // The exceeded budget, when over: a `refuse` decision carries it; otherwise
+  // the projection is over only when a budget was supplied. Reading it off the
+  // branches keeps this cast-free — `undefined` means "admit". Not `??`: a
+  // `refuse` decision's own budget stands even if it were undefined.
+  const projectedOverBudget = budget !== undefined && projected >= budget ? budget : undefined;
+  const exceededBudget = decision.kind === "refuse" ? decision.budget : projectedOverBudget;
   if (exceededBudget !== undefined) {
     return {
       kind: "refuse",

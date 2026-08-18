@@ -40,13 +40,14 @@ export const POLLUTION_KEYS: ReadonlySet<string> = new Set([
 const isReservedTag = (key: string): key is ReservedTag =>
   RESERVED_TAG_KEYS.has(key);
 
+/** A key that can be written as `.key` rather than `["key"]`. */
+const identifierLike = (key: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key);
+
 /** Diagnostic path renderer shared with `checkpointer-codec.ts` (ONE rule). */
-export const serializedPath = (parent: string, key: string | number): string =>
-  typeof key === "number"
-    ? `${parent}[${key}]`
-    : /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)
-      ? `${parent}.${key}`
-      : `${parent}[${JSON.stringify(key)}]`;
+export const serializedPath = (parent: string, key: string | number): string => {
+  if (typeof key === "number") return `${parent}[${key}]`;
+  return identifierLike(key) ? `${parent}.${key}` : `${parent}[${JSON.stringify(key)}]`;
+};
 
 /** SameValueZero identity for primitives after deserialization. Objects return
  * null because distinct object identities may have byte-identical serialized

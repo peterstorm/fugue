@@ -44,13 +44,6 @@ import { workerUnavailable } from "../domain/host-error.js";
 import { signTenantHeader, TENANT_HEADER_NAME } from "../domain/tenant-header.js";
 
 /**
- * The header carrying the supervisor-signed tenant principal. Re-exported from
- * the canonical contract module so existing `uds-proxy` importers keep working;
- * `TENANT_HEADER === TENANT_HEADER_NAME` by construction (no second definition).
- */
-export const TENANT_HEADER = TENANT_HEADER_NAME;
-
-/**
  * Attach the supervisor's signed tenant header to `headers` IFF an HMAC key is
  * configured, via the canonical `signTenantHeader`. The SINGLE decision point for
  * the "sign iff key present" branch shared by the data path (`buildForwardRequest`)
@@ -61,7 +54,7 @@ export const TENANT_HEADER = TENANT_HEADER_NAME;
  */
 const applySignedTenantHeader = (headers: Headers, hmacKey: string | undefined, tenant: TenantId): Headers => {
   if (hmacKey !== undefined) {
-    headers.set(TENANT_HEADER, signTenantHeader(hmacKey, tenant));
+    headers.set(TENANT_HEADER_NAME, signTenantHeader(hmacKey, tenant));
   }
   return headers;
 };
@@ -168,7 +161,7 @@ export const buildForwardRequest = (
   // Strip any client-supplied tenant header — the supervisor is the sole signer.
   // `Headers.delete` is case-insensitive, so a `x-fugue-tenant` / `X-FUGUE-TENANT`
   // smuggling attempt is removed too before the supervisor stamps its own value.
-  headers.delete(TENANT_HEADER);
+  headers.delete(TENANT_HEADER_NAME);
   // Stamp the supervisor's freshly-signed header (canonical synchronous signer,
   // node:crypto) — shared sign-iff-key-present branch with the liveness probe.
   applySignedTenantHeader(headers, hmacKey, tenant.id);

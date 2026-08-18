@@ -37,7 +37,7 @@ import type { Result } from "@fuguejs/framework";
 import { createSupervisor } from "../../supervisor/supervisor.js";
 import type { AuthDeps, AdmissionPort, SupervisorDeps } from "../../supervisor/supervisor.js";
 import type { UdsTransport } from "../../supervisor/uds-proxy.js";
-import { TENANT_HEADER } from "../../supervisor/uds-proxy.js";
+import { TENANT_HEADER_NAME } from "../../domain/tenant-header.js";
 import { verifyTenantHeader } from "../../domain/tenant-header.js";
 import { markTenant, tenantId, markSecretsRef } from "../../domain/tenant.js";
 import type { Tenant, TenantId, TenantRegistryView } from "../../domain/tenant.js";
@@ -167,7 +167,7 @@ describe("Integration — runtime onboarding e2e (SC-004, FR-036, US1)", () => {
     let stampedHeaderValid = false;
     const transport: UdsTransport = async (socketPath, req) => {
       const tenant = socketPath.slice(`${UDS_DIR}/`.length, -".sock".length);
-      const header = req.headers.get(TENANT_HEADER);
+      const header = req.headers.get(TENANT_HEADER_NAME);
       stampedTenant = tenant;
       stampedHeaderValid = !!header && verifyTenantHeader(KEY, tenant, header).kind === "ok";
       return ok(new Response(JSON.stringify({ runId: `run-${tenant}` }), {

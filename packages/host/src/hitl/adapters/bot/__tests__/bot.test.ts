@@ -389,7 +389,7 @@ describe("bot messages handler", () => {
     const hitl = fakeHitl();
     const res = await handleBotActivity(
       botDeps(hitl),
-      // "../secret" contains '/' and '.', neither permitted by ID_REGEX.
+      // "../secret" contains '/' and '.', neither permitted by ID_PATTERN.
       { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, runId: "../secret", nodeId: "review", decision: "approve" }) },
     );
     expect(res.status).toBe(200);

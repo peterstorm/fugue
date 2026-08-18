@@ -668,10 +668,9 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
    */
   const idleEvictSweep = async (): Promise<readonly TenantId[]> => {
     const now = clock();
-    const candidates: TenantId[] = [];
-    for (const [tenant, state] of workers) {
-      if (isIdleEvictable(state, config.idleEvictMs, now)) candidates.push(tenant);
-    }
+    const candidates = [...workers]
+      .filter(([, state]) => isIdleEvictable(state, config.idleEvictMs, now))
+      .map(([tenant]) => tenant);
     const evicted: TenantId[] = [];
     for (const tenant of candidates) {
       const state = workers.get(tenant);

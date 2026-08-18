@@ -204,12 +204,8 @@ export const buildSitesReadHandle = (token: string, http: GraphHttp): SitesReadH
     const url = `${GRAPH_BASE}/sites/${encodeURIComponent(siteId)}`;
     const ran = await runGraph(http, { method: "GET", url, bearer: token }, url);
     if (!ran.ok) return err(ran.error);
-    const title =
-      typeof ran.value.json.displayName === "string"
-        ? ran.value.json.displayName
-        : typeof ran.value.json.name === "string"
-          ? ran.value.json.name
-          : undefined;
+    const title = [ran.value.json.displayName, ran.value.json.name]
+      .find((value): value is string => typeof value === "string");
     // A 2xx whose body carries NO usable title is a malformed success — mirror
     // entra-wif's A4 mapping (200-without-usable-body → infra-unreachable) rather
     // than silently returning an empty title that reads as a real (blank) site.

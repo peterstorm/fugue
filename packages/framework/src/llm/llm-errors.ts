@@ -39,12 +39,13 @@ type HttpErrorClass =
   | { readonly kind: "transient" }
   | { readonly kind: "node-crash"; readonly retriability: Retriability };
 
-const classifyHttpStatus = (status: number): HttpErrorClass =>
-  TRANSIENT_HTTP_STATUSES.has(status)
-    ? { kind: "transient" }
-    : status >= 400 && status < 500
-      ? { kind: "node-crash", retriability: "non-retriable" }
-      : { kind: "node-crash", retriability: "retriable" };
+const classifyHttpStatus = (status: number): HttpErrorClass => {
+  if (TRANSIENT_HTTP_STATUSES.has(status)) return { kind: "transient" };
+  // Everything else is a node crash; only its retriability differs, so the
+  // 4xx/5xx split picks that field rather than a whole second result shape.
+  const retriability = status >= 400 && status < 500 ? "non-retriable" : "retriable";
+  return { kind: "node-crash", retriability };
+};
 
 /**
  * The ONE HTTP failure policy for non-OK responses on the raw-HTTP path
