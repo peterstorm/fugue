@@ -1183,6 +1183,39 @@ describe("readFileEvents — genuine fs failures fail closed with typed cache-er
     }
   });
 
+  it("an unreadable record file (EACCES) fails the per-file read as an ENVIRONMENT failure — retriable, unlike the EISDIR squat pin", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "A" }, "k0");
+
+    const eventsDir = join(dir, EVENTS_DIR);
+    const name = listEventFiles(dir)[0];
+    // Root cannot manufacture EACCES via chmod (DAC bypass) — the sibling
+    // readCheckpoint test carries the same guard.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    chmodSync(join(eventsDir, name), 0o000);
+    try {
+      const result = readFileEvents(dir);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        const failure = asCacheError(result.error);
+        expect(failure.operation).toBe("readFileEvents");
+        expect(failure.message).toContain(name);
+        expect(failure.message).toMatch(/read failed/);
+        // EACCES on an individual record is the environment class: a retry
+        // (or a restore) may clear it — the `permanent` flag is NOT pinned
+        // (contrast the deterministic EISDIR squat pin above, which is
+        // non-retriable). This is the errno branch the squat pin leaves open.
+        expect(failure.failureClass).toBeUndefined();
+        expect(retriabilityOf(failure)).toBe("retriable");
+      } else {
+        throw new Error("expected the unreadable record read to fail closed");
+      }
+    } finally {
+      chmodSync(join(eventsDir, name), 0o600); // restore so afterEach cleanup can rm
+    }
+  });
+
   it("a corrupt record file is classified permanent (deterministic — retriabilityOf fast-fails)", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);

@@ -17,9 +17,12 @@
 // The shell's job, exactly:
 //
 //   0. Re-validate the caller's `runId` boundary (ID_PATTERN — the backend's
-//      re-validate-bypassed-brands discipline, `load` gates the same way):
-//      an out-of-domain id ⇒ typed `cache-error`, never a branded field that
-//      would fail the pattern, never a path addressed outside `directory`.
+//      re-validate-bypassed-brands discipline, `load` gates the same way) AND
+//      `directory` (non-empty NUL-free string — `isFileBackendPathString`,
+//      the rule shared by the file-backend factories): an out-of-domain value
+//      ⇒ typed `cache-error` BEFORE any file-backend I/O — never a branded
+//      field that would fail the pattern, never a path addressed outside
+//      `directory`, never a CWD-relative read for `directory: ""`.
 //   1. Read the AUTHORITATIVE representation — the event log — through the
 //      shared strict reader (`readFileEvents`, FR-009). A missing events
 //      directory reads as an EMPTY log (`ok([])`); any corrupt record,
@@ -103,7 +106,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, messageOf } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
-import { fileCacheError, fileOperationError } from "./boundary-error.js";
+import { fileCacheError, fileOperationError, isFileBackendPathString } from "./boundary-error.js";
 
 export interface ResumeFileJobArgs<S, E, C> {
   /** Run identity, carried on every typed error (`checkpoint-missing` /
@@ -111,7 +114,13 @@ export interface ResumeFileJobArgs<S, E, C> {
    * names it too). */
   readonly runId: RunId;
   /** Run directory — the journal (`events/`, `checkpoint.json`) lives under
-   * it (see the ADR-0078 single-writer contract on `createFileJob`). */
+   * it (see the ADR-0078 single-writer contract on `createFileJob`).
+   *
+   * Domain (re-validated at the boundary, step 0, like `runId`): a non-empty
+   * NUL-free string — `isFileBackendPathString`, the one encoding shared by
+   * the file-backend factories (journal/checkpointer/freshness-index). An
+   * out-of-domain value is a typed `cache-error(resumeFileJob)` before any
+   * I/O, never a raw `join`/fs TypeError. */
   readonly directory: string;
   /** The pure state machine the log is folded through — replay must
    * reconstruct the identical state the original run reached (FR-011). The
@@ -178,6 +187,22 @@ const resumeFileJobUnchecked = async <S, E, C>(
       fileCacheError(
         "resumeFileJob",
         `resumeFileJob rejected: runId ${safeDiagnosticRender(runId)} does not match ${ID_PATTERN.source} — refusing to address a path outside ${safeDiagnosticRender(directory)}`,
+      ),
+    );
+  }
+
+  // The `directory` carries the factory siblings' domain rule (journal.ts /
+  //    checkpointer.ts / freshness-index.ts all gate on `isFileBackendPathString`
+  //    — non-empty, NUL-free string). Re-validate at THIS boundary, before
+  //    `readFileEvents` runs any I/O: a bypassed brand (or a raw `""` /
+  //    NUL-bearing string) would otherwise reach `join`/fs first — `""` reads
+  //    a CWD-relative `events/` directory as if it were the caller's run. Same
+  //    `cache-error` honesty as the `runId` gate above (SC-006 vocabulary).
+  if (!isFileBackendPathString(directory)) {
+    return err(
+      fileCacheError(
+        "resumeFileJob",
+        `resumeFileJob rejected: directory ${safeDiagnosticRender(directory)} must be a non-empty NUL-free string — refusing to address a run directory outside the file-backend domain`,
       ),
     );
   }

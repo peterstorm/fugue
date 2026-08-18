@@ -17,6 +17,7 @@ import {
   libcCandidates,
   resolveReaper,
   drainReap,
+  createReapFaultEscalation,
   broadcastSignalToWorkers,
   createBunInitProcessAdapter,
 } from "../../../supervisor/lifecycle/bun-init-process-adapter.js";
@@ -173,6 +174,67 @@ describe("drainReap (pure drain loop)", () => {
       }),
     ).not.toThrow();
     expect(calls).toBe(1); // faulted once, then ended the cycle (no infinite loop)
+  });
+
+  test("a fault signals onFault exactly once — the wiring can count and escalate (a broken seam is NOT invisible)", () => {
+    let signals = 0;
+    drainReap(
+      () => {
+        throw new Error("simulated ffi marshalling fault");
+      },
+      () => {
+        signals++;
+      },
+    );
+    expect(signals).toBe(1);
+  });
+
+  test("a clean drain signals onFault NOT at all", () => {
+    let signals = 0;
+    drainReap(() => 0, () => {
+      signals++;
+    });
+    expect(signals).toBe(0);
+  });
+});
+
+// ── createReapFaultEscalation: the broken-reaper observability policy ────────────
+
+describe("createReapFaultEscalation (broken-seam escalation policy)", () => {
+  test("the first fault logs at error level with faultCount=1", () => {
+    const { logger, logs } = capturingLogger();
+    const esc = createReapFaultEscalation(logger);
+    esc.runCycle(() => esc.onFault());
+    expect(logs).toHaveLength(1);
+    expect(logs[0].level).toBe("error");
+    expect(logs[0].msg).toContain("waitpid FFI fault");
+    expect(logs[0].data).toMatchObject({ faultCount: 1 });
+  });
+
+  test("faults 2..9 of a run are throttled; the 10th consecutive fault logs again with faultCount=10", () => {
+    const { logger, logs } = capturingLogger();
+    const esc = createReapFaultEscalation(logger);
+    for (let i = 0; i < 10; i++) esc.runCycle(() => esc.onFault());
+    expect(logs).toHaveLength(2);
+    expect(logs[0].data).toMatchObject({ faultCount: 1 });
+    expect(logs[1].data).toMatchObject({ faultCount: 10 });
+  });
+
+  test("a fault-free cycle resets the counter — a later fault is the 'first' again (transient faults don't stay elevated)", () => {
+    const { logger, logs } = capturingLogger();
+    const esc = createReapFaultEscalation(logger);
+    esc.runCycle(() => esc.onFault()); // fault 1 → logged
+    esc.runCycle(() => {}); // healthy cycle → reset
+    esc.runCycle(() => esc.onFault()); // fault 1 again → logged as faultCount=1
+    expect(logs).toHaveLength(2);
+    expect(logs[1].data).toMatchObject({ faultCount: 1 });
+  });
+
+  test("works without a logger (log port is optional at the PID-1 boundary)", () => {
+    const esc = createReapFaultEscalation();
+    expect(() => {
+      esc.runCycle(() => esc.onFault());
+    }).not.toThrow();
   });
 });
 

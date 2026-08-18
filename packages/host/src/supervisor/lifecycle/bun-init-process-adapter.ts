@@ -71,10 +71,12 @@ type ReapFn = () => void;
  * exist but none have exited; r < 0 ECHILD / no children. Stops on r <= 0.
  *
  * NEVER THROWS: a throw from the underlying FFI call is caught and ends THIS drain
- * cycle. The reaper runs inside a SIGCHLD handler AND an unref'd safety-net
- * interval — an uncaught throw there would escape into PID 1 (worst case: a bad
- * reap takes out PID 1 from a signal handler). On a fault we stop the cycle; the
- * next SIGCHLD / the interval retries.
+ * cycle, signaling the fault through `onFault` exactly once (the wiring counts
+ * consecutive faults and escalates a persistent broken seam to an error log —
+ * see `createBunInitProcessAdapter`). The reaper runs inside a SIGCHLD handler
+ * AND an unref'd safety-net interval — an uncaught throw there would escape into
+ * PID 1 (worst case: a bad reap takes out PID 1 from a signal handler). On a
+ * fault we stop the cycle; the next SIGCHLD / the interval retries.
  *
  * EINTR: a `waitpid(-1, WNOHANG)` that returns -1 on EINTR (extremely rare —
  * WNOHANG does not block, so the interrupt window is tiny) is indistinguishable
@@ -84,13 +86,21 @@ type ReapFn = () => void;
  * Exported so the multi-reap drain + the throw-safety are unit-testable without a
  * real PID namespace.
  */
-export const drainReap = (reapOne: () => number): void => {
+export const drainReap = (reapOne: () => number, onFault?: () => void): void => {
   for (;;) {
     let r: number;
     try {
       r = reapOne();
     } catch {
-      break; // FFI call-time fault — stop this cycle; SIGCHLD / the interval retries.
+      // FFI call-time fault — stop this cycle; SIGCHLD / the interval retries.
+      // A transient fault is still invisible at the caller unless signaled:
+      // `onFault` fires exactly once per broken cycle so the wiring can count
+      // and escalate a PERSISTENTLY broken waitpid seam (a broken native seam
+      // fails identically every cycle — without a signal, PID 1 leaks zombies
+      // indefinitely with zero log line, defeating the "dead-worker-reads-as-alive"
+      // invariant this module's header warns about).
+      onFault?.();
+      break;
     }
     if (r <= 0) break;
   }
@@ -102,7 +112,7 @@ export const drainReap = (reapOne: () => number): void => {
  * (wrong libc for the image / dlopen failure). Injectable into `resolveReaper` so
  * the candidate-resolution loop and its fail-fast are unit-testable.
  */
-const loadWaitpidReaper = (candidate: string): ReapFn | null => {
+const loadWaitpidReaper = (candidate: string, onFault?: () => void): ReapFn | null => {
   try {
     const lib = dlopen(candidate, {
       waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
@@ -115,7 +125,8 @@ const loadWaitpidReaper = (candidate: string): ReapFn | null => {
     const status = new Int32Array(1);
     // -1 = wait for ANY child (incl. re-parented orphans). Drained (and made
     // throw-safe) by `drainReap`.
-    return () => drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number);
+    return () =>
+      drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number, onFault);
   } catch {
     return null;
   }
@@ -263,11 +274,51 @@ interface BunInitProcessAdapter extends InitProcessPort {
  * libc-resolution failure surfaces at startup (fail-fast), not on the first
  * orphaned worker.
  */
+/**
+ * Escalation policy for FFI reap faults, separated from the adapter so it is
+ * unit-testable without a real FFI fault. A broken `waitpid` seam fails
+ * identically on every cycle, so the first fault logs at error level, then every
+ * 10th consecutive fault (SIGCHLD bursts can fire the reaper many times per
+ * second — unthrottled per-fault logging would be spam). A fault-free cycle
+ * resets the counter, so a transient fault followed by healthy reaping never
+ * leaves the counter elevated. A persistently broken reaper must not leak
+ * zombies with ZERO signal (a dead worker reads as alive — the invariant this
+ * module's header warns about).
+ */
+export const createReapFaultEscalation = (
+  logger?: LogPort,
+): {
+  readonly onFault: () => void;
+  readonly runCycle: (cycle: () => void) => void;
+} => {
+  let consecutiveFaults = 0;
+  return {
+    onFault: (): void => {
+      consecutiveFaults += 1;
+      if (consecutiveFaults === 1 || consecutiveFaults % 10 === 0) {
+        logger?.error?.(
+          "[thin-init] waitpid FFI fault — reap cycle stopped; zombies will accumulate until the next SIGCHLD/interval",
+          { faultCount: consecutiveFaults },
+        );
+      }
+    },
+    runCycle: (cycle: () => void): void => {
+      const before = consecutiveFaults;
+      cycle();
+      if (consecutiveFaults === before) consecutiveFaults = 0;
+    },
+  };
+};
+
 export const createBunInitProcessAdapter = (
   cfg: BunInitAdapterConfig,
   logger?: LogPort,
 ): BunInitProcessAdapter => {
-  const reap = resolveReaper(libcCandidates(process.platform, process.arch));
+  const reapFaults = createReapFaultEscalation(logger);
+  const rawReap = resolveReaper(libcCandidates(process.platform, process.arch), (candidate) =>
+    loadWaitpidReaper(candidate, reapFaults.onFault),
+  );
+  const reapZombies: ReapFn = () => reapFaults.runCycle(rawReap);
   const spawn: SpawnSupervisorFn = cfg.spawn ?? ((command, options) => Bun.spawn([...command], options));
   let terminating = false;
   let currentPid: number | undefined;
@@ -321,7 +372,7 @@ export const createBunInitProcessAdapter = (
       }
     },
 
-    reapZombies: reap,
+    reapZombies,
 
     onSigchld: (handler) => {
       const onChld = (): void => handler();

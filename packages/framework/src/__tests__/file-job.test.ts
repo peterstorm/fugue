@@ -492,6 +492,46 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     });
   });
 
+  it("Map/Set/Date members are isolated by the fresh clone per read (the guarantee Object.freeze alone cannot provide)", async () => {
+    // Object.freeze is shallow over Map/Set/Date contents — a frozen Map is
+    // still settable. The `data` getter's documented isolation for these
+    // structures is the FRESH structuredClone per call; this pins it (every
+    // other snapshot-contract test uses plain objects only).
+    type MapState = { tags: Map<string, number> };
+    type RichContext = { ids: Set<string>; at: Date };
+    const dir = tempDir();
+    const seed: { state: MapState; context: RichContext } = {
+      state: { tags: new Map<string, number>([["a", 1]]) },
+      context: { ids: new Set<string>(["x"]), at: new Date(Date.UTC(2026, 0, 2, 3, 4, 5)) },
+    };
+    const job = createFileJob<MapState, RichContext>({ directory: dir, initial: seed });
+
+    const first = job.data;
+    const second = job.data;
+    // Fresh clones — distinct Map/Set/Date objects per read:
+    expect(first.state.tags).not.toBe(second.state.tags);
+    expect(first.context.ids).not.toBe(second.context.ids);
+
+    // The clone's Map/Set are NOT frozen (freeze cannot reach their contents) —
+    // mutation is legal and MUST stay contained in the throwaway clone:
+    first.state.tags.set("a", 999);
+    first.state.tags.set("evil", 1);
+    first.context.ids.add("evil");
+    first.context.at.setUTCFullYear(1999);
+
+    // Subsequent reads are untouched:
+    expect(job.data.state.tags.get("a")).toBe(1);
+    expect(job.data.state.tags.has("evil")).toBe(false);
+    expect(job.data.context.ids.has("evil")).toBe(false);
+    expect(job.data.context.at.getTime()).toBe(seed.context.at.getTime());
+
+    // And the durable checkpoint is untouched: committing the CURRENT (unmutated)
+    // snapshot reproduces the seed commit bytes exactly.
+    const expectedJson = serializeFileCheckpoint({ state: seed.state, context: seed.context }).json;
+    await job.updateData(job.data);
+    expect(createFileJournal(dir).readCheckpoint()).toBe(expectedJson);
+  });
+
   it("rejects an unclonable initial snapshot at the typed factory boundary", () => {
     const dir = tempDir();
     let failure: unknown;

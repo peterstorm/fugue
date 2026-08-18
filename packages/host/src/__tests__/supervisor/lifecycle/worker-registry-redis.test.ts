@@ -11,9 +11,12 @@
  * flag (AD-9), env precedence (tenant binding wins over inherited/extra env).
  */
 
+import { ok, err } from "@fuguejs/framework";
 import { describe, test, expect } from "bun:test";
 import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
+import { redisUnavailable } from "../../../domain/host-error.js";
+import type { LogPort, RedisPort } from "../../../ports.js";
 import {
   createWorkerRegistry,
   createInMemoryWorkerRedisFake,
@@ -46,6 +49,24 @@ const rec = (
 
 const alwaysLive: UdsLivenessProbe = async () => true;
 const alwaysDead: UdsLivenessProbe = async () => false;
+
+/** A LogPort that records every call so tests can assert observability. */
+interface CapturedLog {
+  readonly level: "info" | "warn" | "error";
+  readonly msg: string;
+  readonly data?: Record<string, unknown>;
+}
+const capturingLogPort = (): { logger: LogPort; logs: CapturedLog[] } => {
+  const logs: CapturedLog[] = [];
+  return {
+    logs,
+    logger: {
+      info: (msg, data) => logs.push({ level: "info", msg, data }),
+      warn: (msg, data) => logs.push({ level: "warn", msg, data }),
+      error: (msg, data) => logs.push({ level: "error", msg, data }),
+    },
+  };
+};
 
 // ── Round-trip ─────────────────────────────────────────────────────────────
 
@@ -129,6 +150,50 @@ describe("worker-registry: put / get / remove", () => {
     const reg = createWorkerRegistry(fake.redis, alwaysLive);
     const got = await reg.get(tid("neg"));
     if (got.ok) expect(got.value).toBeNull();
+  });
+});
+
+// ── Corrupt-record observability (contract parity with reconcileReadopt) ─────────
+
+describe("worker-registry: corrupt-record observability", () => {
+  test("a corrupt record reads as null AND is pruned + WARN-logged (distinguishable from never-registered)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    fake.store.set(`${WORKER_KEY_PREFIX}acme`, "{ not json");
+    const { logger, logs } = capturingLogPort();
+    const reg = createWorkerRegistry(fake.redis, alwaysLive, {}, logger);
+    const got = await reg.get(tid("acme"));
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.value).toBeNull();
+    // The corrupt entry is pruned (the same self-healing as reconcileReadopt).
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
+    // The operator signal that distinguishes corrupt from absent — without it,
+    // a truncation/allocator fault reading as "absent" is a silent failure.
+    const warn = logs.find((l) => l.level === "warn");
+    expect(warn).toBeDefined();
+    expect(warn?.msg).toContain("corrupt worker record");
+    expect(warn?.data).toMatchObject({ tenant: tid("acme") });
+  });
+
+  test("a prune failure does NOT fail the read — get still returns null and the record is left for reconcile", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    fake.store.set(`${WORKER_KEY_PREFIX}acme`, "{ not json");
+    const { logger, logs } = capturingLogPort();
+    // A RedisPort over the same store whose del FAILS (result-level failure, no throw).
+    const delFailing: RedisPort = {
+      ...fake.redis,
+      del: async () => err(redisUnavailable("del")),
+    };
+    const reg = createWorkerRegistry(delFailing, alwaysLive, {}, logger);
+    const got = await reg.get(tid("acme"));
+    // Fail-closed read: null (lazy-spawn path), NOT an error.
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.value).toBeNull();
+    // The corrupt record SURVIVES the failed prune — reconcile prunes it later.
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(true);
+    // Both facts are surfaced: the corrupt read AND the prune that could not run.
+    const warns = logs.filter((l) => l.level === "warn");
+    expect(warns.some((l) => l.msg.includes("corrupt worker record"))).toBe(true);
+    expect(warns.some((l) => l.msg.includes("prune reported unavailable"))).toBe(true);
   });
 });
 

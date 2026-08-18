@@ -239,7 +239,7 @@ export const isIdleEvictable = (state: WorkerState, idleTtlMs: number, now: numb
 export const beginDrain = (
   state: WorkerState,
   now: number,
-): Result<WorkerState, WorkerTransitionError> => {
+): Result<Extract<WorkerState, { readonly phase: "draining" }>, WorkerTransitionError> => {
   if (state.phase !== "live") {
     return err(invalidWorkerTransition(state.tenant, state.phase, "draining"));
   }

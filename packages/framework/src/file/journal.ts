@@ -368,25 +368,23 @@ export const createFileJournal = (
           event,
         };
 
-        let json: string;
-        try {
-          json = serializeFileEventRecord(
-            record.sequence,
-            record.dedupKey,
-            record.recordedAtMs,
-            record.event,
-          );
-        } catch (error) {
-          throw fsFailure("appendEvent", directory, error);
-        }
-        try {
-          atomicWriteFile(
-            join(eventsDir, eventFileName(record.sequence, eventDigestOf(record))),
-            json,
-          );
-        } catch (error) {
-          throw fsFailure("appendEvent", directory, error);
-        }
+        // Both callees throw ALREADY-TYPED failures (`serializeFileEventRecord`
+        // and `atomicWriteFile` name their own operation, location, and
+        // inferred failureClass) — there are no inner catches here. The single
+        // outer catch below re-tags every `withFileLock`-boundary failure once,
+        // at the public journal surface (as its comment states), so the
+        // diagnostic carries exactly one `appendEvent failed at run directory
+        // D:` layer instead of a redundant nested pair.
+        const json = serializeFileEventRecord(
+          record.sequence,
+          record.dedupKey,
+          record.recordedAtMs,
+          record.event,
+        );
+        atomicWriteFile(
+          join(eventsDir, eventFileName(record.sequence, eventDigestOf(record))),
+          json,
+        );
       });
     } catch (error) {
       // withFileLock preserves a primary append-body failure when release also

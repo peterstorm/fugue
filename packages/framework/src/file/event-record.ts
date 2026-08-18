@@ -462,10 +462,9 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
         );
       case "object":
         break;
-      default:
-        throw new Error(
-          `serializeFileEventRecord: ${path} is a ${typeof value} — not representable losslessly (FR-009)`,
-        );
+      // The seven `typeof` results are a closed set: after the null/undefined
+      // early return above, every reachable value is cased — there is no
+      // `default` arm left to hide a kind this walk does not admit.
     }
 
     // Circular-reference guard: a node revisited through its own descendants

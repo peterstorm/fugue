@@ -457,6 +457,83 @@ describe("resumeFileJob — runId boundary re-validation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// directory boundary re-validation — the factory siblings' domain rule
+// (non-empty NUL-free string, `isFileBackendPathString`) is re-checked at the
+// shell BEFORE any file-backend I/O: `directory: ""` would otherwise read a
+// CWD-relative `events/` as the caller's run, and a NUL-bearing or bypassed
+// string would reach `join`/fs as a raw TypeError.
+// ---------------------------------------------------------------------------
+
+describe("resumeFileJob — directory boundary re-validation", () => {
+  const resumeWithRawDirectory = (rawDirectory: unknown) =>
+    resumeFileJob<S, E, C>({
+      runId: runId("run-resume"),
+      directory: rawDirectory as string,
+      machine,
+      genesis: genesis(),
+      parseCheckpoint,
+    });
+
+  it("directory: '' ⇒ typed cache-error(resumeFileJob) before any I/O — never a CWD-relative read", async () => {
+    const resumed = await resumeWithRawDirectory("");
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    // A gate regression would instead surface as `checkpoint-corrupt` (the
+    // journal factory's raw TypeError re-tagged at step 2) or, when a
+    // CWD-relative `events/` happens to exist, a resume of the WRONG run —
+    // the identity pin below discriminates both.
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    expect(resumed.error.message).toContain("resumeFileJob rejected: directory");
+    expect(resumed.error.message).toContain("non-empty NUL-free string");
+  });
+
+  it("a NUL-bearing directory ⇒ the same typed cache-error", async () => {
+    const resumed = await resumeWithRawDirectory("bad\u0000path");
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    expect(resumed.error.message).toContain("non-empty NUL-free string");
+  });
+
+  it("a brand-bypassed non-string directory ⇒ the typed cache-error, never a raw TypeError", async () => {
+    const resumed = await resumeWithRawDirectory(42);
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    expect(resumed.error.message).toContain("non-empty NUL-free string");
+  });
+
+  it("a hostile directory whose toString/toString-primitives throw ⇒ still the typed cache-error, never a raw rejection", async () => {
+    const hostile = Object.defineProperties(
+      {},
+      {
+        toString: {
+          get: () => { throw new Error("toString trap must stay contained"); },
+        },
+        [Symbol.toPrimitive]: {
+          get: () => { throw new Error("Symbol.toPrimitive trap must stay contained"); },
+        },
+      },
+    );
+    const resumed = await resumeWithRawDirectory(hostile);
+    expect(resumed.ok).toBe(false);
+    if (resumed.ok) return;
+    expect(resumed.error.kind).toBe("cache-error");
+    if (resumed.error.kind !== "cache-error") return;
+    expect(resumed.error.operation).toBe("resumeFileJob");
+    // The total renderer names the codec's rule, never the hostile's text.
+    expect(resumed.error.message).not.toContain("toString trap");
+    expect(resumed.error.message).not.toContain("Symbol.toPrimitive trap");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FR-009 — strict per-record fail-closed variants (each names the file)
 // ---------------------------------------------------------------------------
 

@@ -21,6 +21,19 @@
 // Malformed records are warned and treated as absent by findConflict; logger,
 // filesystem, clock, and hostile runtime-accessor failures become typed
 // freshness cache-errors. No raw exception crosses either port method.
+//
+// Symlink policy — a DELIBERATE divergence from the file checkpointer: the
+// digest-addressed singletons are read with plain `readFileSync`, which
+// FOLLOWS symlinks, while the checkpointer's `verifyExistingFile`/
+// `verifyDirectory` lstat-verify every path component as a non-symlink under a
+// canonical base anchor. The asymmetry is sound because the filename here is
+// not caller-controlled path material — only the sha256 digest is — so the
+// caller's `directory` is the sole trust boundary and a symlink inside that
+// operator-owned directory is operator-controlled material. The checkpointer,
+// by contrast, addresses files with arbitrary caller-supplied composite node
+// keys, where a symlink is an in-band attack vector. The write side matches
+// the read side: `atomicWriteFile`'s rename REPLACES a symlink at the digest
+// path rather than writing through it (pinned in the symlink tests).
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -489,6 +502,7 @@ const createFileFreshnessIndexUnchecked = (
 
           let current: StoredFreshnessEntry | null = null;
           try {
+            // Follows symlinks deliberately — module header, "Symlink policy".
             const text = readFileSync(recordPath, "utf-8");
             const parsed = parseStoredFreshnessEntry(text, prepared.value.resource);
             if (!parsed.ok) {
@@ -522,8 +536,8 @@ const createFileFreshnessIndexUnchecked = (
         // atomicWriteFile, the deterministic codec/keyDigest rejections)
         // carries its own precise operation, location, and inferred
         // failureClass — re-wrapping it here only double-nests the diagnostic
-        // and drops the class. Let it ride through once (atomic.ts/journal.ts/
-        // job.ts parity); wrap only what is not yet typed.
+        // and drops the class. Let it ride through once (atomic.ts/job.ts
+        // parity); wrap only what is not yet typed.
         if (isFrameworkError(error)) return err(error);
         return err(cacheFailure("freshness:recordWrite", digest, error));
       }
@@ -552,6 +566,7 @@ const createFileFreshnessIndexUnchecked = (
         const recordPath = join(directory, `${digest}.json`);
         let text: string;
         try {
+          // Follows symlinks deliberately — module header, "Symlink policy".
           text = readFileSync(recordPath, "utf-8");
         } catch (error) {
           const codeProbe = probeErrorCode(error);
@@ -580,7 +595,7 @@ const createFileFreshnessIndexUnchecked = (
       } catch (error) {
         // Same ride-through as recordWrite: typed failures keep their own
         // operation, location, and inferred failureClass instead of being
-        // double-nested and reclassified (atomic.ts/journal.ts/job.ts parity).
+        // double-nested and reclassified (atomic.ts/job.ts parity).
         if (isFrameworkError(error)) return err(error);
         return err(cacheFailure("freshness:findConflict", digest, error));
       }

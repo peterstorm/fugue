@@ -585,19 +585,21 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok(undefined);
     }
     // `current` was just confirmed `phase === "live"`, so `beginDrain` MUST yield a
-    // `draining` state. A rejection (or unexpected phase) here is a real ADT
-    // INVARIANT VIOLATION — NOT the legitimate "nothing live to drain" no-op above
-    // — so it must surface loudly rather than masquerade as success (mirrors the
-    // `workerLive` "transition rejected (invariant)" logging).
+    // `draining` state — its ok value hardcodes `phase: "draining"` (worker-lifecycle.ts),
+    // so a non-`draining` ok is unrepresentable and the guard collapses to the
+    // `!draining.ok` arm. A rejection here is a real ADT INVARIANT VIOLATION — NOT
+    // the legitimate "nothing live to drain" no-op above — so it must surface loudly
+    // rather than masquerade as success (mirrors the `workerLive` "transition
+    // rejected (invariant)" logging).
     const draining = beginDrain(current, clock());
-    if (!draining.ok || draining.value.phase !== "draining") {
+    if (!draining.ok) {
       logger.error("[worker-lifecycle] beginDrain rejected for a confirmed-live worker (invariant)", {
         tenant,
-        ...(draining.ok ? { phase: draining.value.phase } : { error: draining.error.message }),
+        error: draining.error.message,
       });
       // A confirmed-live worker that cannot begin draining is a real invariant
       // violation — surface it as a worker-unavailable rather than silent success.
-      return draining.ok ? ok(undefined) : err(workerUnavailable(tenant));
+      return err(workerUnavailable(tenant));
     }
     const next = draining.value;
     workers.set(tenant, next);

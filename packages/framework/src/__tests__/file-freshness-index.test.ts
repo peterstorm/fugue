@@ -8,11 +8,13 @@ import fc from "fast-check";
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -726,6 +728,70 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
     if (found.error.kind === "cache-error") {
       expect(found.error.operation).toBe("freshness:findConflict");
     }
+  });
+});
+
+describe("createFileFreshnessIndex — symlinks (deliberate checkpointer divergence)", () => {
+  // The module header's "Symlink policy" pins WHY the file checkpointer
+  // lstat-rejects symlink path components while this index does not: the
+  // digest filename is not caller-controlled path material, so the caller's
+  // directory is the sole trust boundary. These tests pin the behavior the
+  // policy describes — read side follows, write side replaces — so a future
+  // "hardening" that starts rejecting (or writing through) symlinks must
+  // deliberately change the documented contract.
+
+  it("findConflict FOLLOWS a symlink at the digest path — the decision comes from the target", async () => {
+    const directory = tempDirectory();
+    const resource = "postgres:orders:42";
+    const event = writeEvent(resource, "v1", 9, { runId: "run-old" });
+    const index = createFileFreshnessIndex(directory, { now: () => 10 });
+    expect(await index.recordWrite(event)).toEqual({ ok: true, value: undefined });
+
+    const recordPath = join(directory, `${keyDigest(resource)}.json`);
+    // Relocate the real singleton OUTSIDE the index directory and re-expose
+    // the digest path as a symlink back to it.
+    const outside = join(resolve(directory, ".."), "outside-singleton.json");
+    writeFileSync(outside, readFileSync(recordPath, "utf-8"));
+    rmSync(recordPath);
+    symlinkSync(outside, recordPath);
+
+    // The conflict decision is derived through the symlink — the stored v1
+    // singleton still conflicts a v2 attempt, indistinguishable from a direct
+    // file read.
+    expect(comparable(unwrap(await index.findConflict(W(resource, "v2"), 0)))).toMatchObject({
+      runId: "run-old",
+      newWitness: { value: "v1" },
+    });
+  });
+
+  it("recordWrite's rename REPLACES a symlink at the digest path — it never writes through it", async () => {
+    const directory = tempDirectory();
+    const resource = "postgres:orders:42";
+    let nowMs = 10;
+    const index = createFileFreshnessIndex(directory, { now: () => nowMs });
+    const first = writeEvent(resource, "v1", 9, { runId: "run-first" });
+    expect(await index.recordWrite(first)).toEqual({ ok: true, value: undefined });
+
+    const recordPath = join(directory, `${keyDigest(resource)}.json`);
+    // A symlink wearing the digest name whose target is a valid sibling
+    // singleton OUTSIDE the directory.
+    const outside = join(resolve(directory, ".."), "outside-singleton.json");
+    const outsideBytes = readFileSync(recordPath, "utf-8");
+    writeFileSync(outside, outsideBytes);
+    rmSync(recordPath);
+    symlinkSync(outside, recordPath);
+
+    const second = writeEvent(resource, "v2", 19, { runId: "run-second" });
+    nowMs = 20;
+    expect(await index.recordWrite(second)).toEqual({ ok: true, value: undefined });
+
+    // The symlink is GONE — the atomic rename replaced the path itself:
+    expect(lstatSync(recordPath).isSymbolicLink()).toBe(false);
+    // …with the NEW singleton's bytes:
+    expect(readSingleton(recordPath)).toEqual(expectedSingleton(20, second));
+    // …and the link's target was NOT written through — it still holds the
+    // pre-write bytes.
+    expect(readFileSync(outside, "utf-8")).toBe(outsideBytes);
   });
 });
 

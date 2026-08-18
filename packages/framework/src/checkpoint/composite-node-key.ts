@@ -31,7 +31,11 @@ export const DEFAULT_NODE_NAMESPACE = "dag";
  *
  * Canonical folding: when `index` AND `attempt` are BOTH absent, the stored
  * key is exactly the bare `nodeId` and the options are ignored entirely —
- * byte-identical behavior with every existing consumer. When either is
+ * byte-identical behavior with every existing consumer — EXCEPT a `namespace`
+ * alone, which is rejected as an ambiguous caller error (a namespace-only
+ * address would be silently folded into the canonical nodeId): supply `index`
+ * and/or `attempt` to address a composite entry (ADR-0075 amendment,
+ * `assertNoNamespaceAlone`). When `index` and/or `attempt` are
  * present, the stored key is `${namespace ?? "dag"}@${nodeId}@${index ?? 0}@${attempt ?? 0}`,
  * so mapped/fan-out instances (index) and retry attempts address distinct
  * durable entries without overwriting each other.

@@ -200,9 +200,43 @@ export const createWorkerRegistry = (
       alive();
       if (r.value === null || r.value === "") return ok(null);
       const record = deserialize(tenant, r.value);
-      // A corrupt record is treated as "no live worker" — fail-closed, the
-      // supervisor will lazy-spawn a fresh one.
-      return ok(record ?? null);
+      if (record === undefined) {
+        // Contract parity with `reconcileReadopt`: a corrupt persisted record is
+        // surfaced (warn) and pruned best-effort — never silently indistinguishable
+        // from a tenant that was never registered. The supervisor will lazy-spawn
+        // a fresh worker for the tenant either way; the log line is what lets an
+        // operator grep for WHY (truncated/half-written value, allocator fault).
+        const key = workerKey(tenant);
+        logger?.warn("[worker-registry] corrupt worker record — treating as absent, pruning", {
+          tenant,
+          key,
+        });
+        let pruned = true;
+        try {
+          const prune = await redis.del(key);
+          if (!prune.ok) pruned = false;
+        } catch (e) {
+          // Best-effort per the deserialize contract: a prune failure must not
+          // fail the read — the record stays corrupt-and-untreated until the
+          // next reconcile (which prunes on its own path).
+          pruned = false;
+          logger?.warn("[worker-registry] corrupt-record prune threw — leaving to reconcile", {
+            tenant,
+            key,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+        if (!pruned) {
+          logger?.warn("[worker-registry] corrupt-record prune reported unavailable — leaving to reconcile", {
+            tenant,
+            key,
+          });
+        }
+        return ok(null);
+      }
+      // A non-corrupt record is served as-is — the supervisor's lazy-spawn
+      // path is only for genuinely absent tenants.
+      return ok(record);
     },
 
     remove: async (tenant) => {

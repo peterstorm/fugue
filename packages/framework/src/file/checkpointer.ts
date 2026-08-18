@@ -20,8 +20,11 @@
 //
 // ADR-0075 composite addressing: this is the ONE backend that implements it
 // (FR-022/FR-023). `saveNode`'s 4th argument goes through `compositeNodeKey`,
-// whose canonical folding makes a save with no `index`/`attempt` byte-identical
-// to a pre-extension save (stored key = the bare `nodeId`). Because `@` is
+// whose canonical folding makes a save with no `index`, `attempt`, OR
+// `namespace` byte-identical to a pre-extension save (stored key = the bare
+// `nodeId`); a `namespace` alone is rejected as ambiguous (ADR-0075
+// amendment), so the byte-identity clause covers exactly the no-options and
+// index/attempt forms. Because `@` is
 // outside `ID_PATTERN`, a composite key can never collide with a canonical one,
 // and distinct addresses digest to distinct filenames — so any two distinct
 // addresses resolve to distinct durable entries and `load` returns them all,
