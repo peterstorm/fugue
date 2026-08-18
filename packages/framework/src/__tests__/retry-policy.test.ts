@@ -3,7 +3,7 @@ import { handleNodeFailed, handleHookCrash, computeBackoffMs, getRetryLimit, typ
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { DagDef } from "../types/dag.js";
-import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, D, nodeMap } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Minimal context factory

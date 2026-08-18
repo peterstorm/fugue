@@ -20,7 +20,7 @@
 
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { FreshnessIndex, WriteEntry, WitnessKind, ResourceName } from "../types/freshness.js";
+import type { FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
 import { __brandWitness } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";

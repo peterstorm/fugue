@@ -6,7 +6,7 @@ import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { type Result, ok, err } from "../types/result.js";
+import { type Result, ok } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";

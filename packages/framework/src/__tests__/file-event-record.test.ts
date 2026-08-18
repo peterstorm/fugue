@@ -57,7 +57,6 @@ import { readFileEventRecords, readFileEvents } from "../file/event-log.js";
 import { asCacheError } from "./_cache-error-helpers.js";
 import { EVENTS_DIR, JOURNAL_SCHEMA_VERSION } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError } from "../types/errors.js";
 
 /** Realistic source naming (FR-009: failures name the file they came from). */
 const SOURCE = "events/000042-1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890.json";

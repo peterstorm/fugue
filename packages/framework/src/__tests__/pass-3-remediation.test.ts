@@ -23,11 +23,11 @@ import { judgePassed, judgeCrashed } from "../nodes/eval-judge.js";
 import type { DagDef, EdgeDefRawInput } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
-import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
+import type { DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers

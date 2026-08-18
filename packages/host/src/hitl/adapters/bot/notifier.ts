@@ -19,7 +19,7 @@
  * control is the authz gate on the inbound button click (`canAccessDag`).
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { err } from "@fuguejs/framework";
 import type { Result, DagId } from "@fuguejs/framework";
 import type { Team } from "../../../domain/auth.js";
 import type { HostError } from "../../../domain/host-error.js";

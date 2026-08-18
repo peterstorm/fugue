@@ -31,15 +31,6 @@ const buildOutgoing = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
   return out;
 };
 
-const buildIncoming = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
-  const inc = new Map<NodeId, EdgeDef[]>();
-  for (const n of dag.nodes) inc.set(n.id, []);
-  for (const e of dag.edges) {
-    const list = inc.get(e.to);
-    if (list) list.push(e);
-  }
-  return inc;
-};
 
 /**
  * Seed the initial active set: every node reachable from a wave-0 entry point

@@ -1,7 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { defineLinearDag, createFetchNode, createTransformNode, ok, nodeId, dagId, DagDefinitionError } from "../index.js";
-import type { Result, FrameworkError } from "../index.js";
 
 describe("defineLinearDag", () => {
   const nodeA = createFetchNode({

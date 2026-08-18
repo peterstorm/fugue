@@ -18,7 +18,6 @@ import { trace, SpanStatusCode } from "@opentelemetry/api";
 import type { Tracer as OtelTracer } from "@opentelemetry/api";
 import type { CapabilityHandle } from "../types/capability-handle.js";
 import type { Capability } from "../types/node.js";
-import type { Result } from "../types/result.js";
 
 // ---------------------------------------------------------------------------
 // Semantic conventions for capability spans

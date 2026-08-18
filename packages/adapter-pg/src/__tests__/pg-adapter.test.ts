@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { ok, isOk, isErr } from "@fuguejs/framework";
+import { isOk, isErr } from "@fuguejs/framework";
 import {
   createFakePgCapability,
   createPgClient,

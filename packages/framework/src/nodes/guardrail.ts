@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";

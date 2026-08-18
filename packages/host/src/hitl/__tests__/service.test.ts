@@ -295,7 +295,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     let draftRuns = 0;
     let reviewRuns = 0;
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
-    const { service, store, queue, dec, notif } = setup(dag);
+    const { service, store, queue, notif } = setup(dag);
 
     // 1. start → queued
     const started = await service.startRun("test-dag" as DagId, { x: 1 }, ADMIN);

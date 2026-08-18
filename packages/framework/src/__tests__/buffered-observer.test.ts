@@ -1,5 +1,4 @@
 import { describe, it, expect } from "bun:test";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { BufferedObserver, computeRunSummary } from "../observer/buffered.js";
 import { RecordingObserver } from "../observer/observer.js";
@@ -28,7 +27,7 @@ function nodeStart(nodeId: string, runId = "r1"): NodeStartEvent {
   };
 }
 
-function nodeEnd(nodeId: string, attrs: Record<string, unknown> = {}, runId = "r1"): NodeEndEvent {
+function nodeEnd(nodeId: string, _attrs: Record<string, unknown> = {}, runId = "r1"): NodeEndEvent {
   return {
     type: "node-end",
     runId: runId as RunId,

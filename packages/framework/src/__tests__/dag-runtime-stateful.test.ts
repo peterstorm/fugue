@@ -17,7 +17,7 @@ import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -216,7 +216,7 @@ describe("runDagStateful — diamond DAG", () => {
         makeNode("b", { run: async () => { order.push("b"); return ok("b"); } }),
         makeNode("c", { run: async () => { order.push("c"); return ok("c"); } }),
         makeNode("d", {
-          run: async (input) => { order.push("d"); return ok("d-out"); },
+          run: async (_input) => { order.push("d"); return ok("d-out"); },
         }),
       ],
       edges: [

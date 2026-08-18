@@ -1,10 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
-import { createGuardrailNode, ok } from "../../src/index.js";
+import type { RunId, DagId } from "../types/ids.js";
+import { createGuardrailNode } from "../../src/index.js";
 import type { GuardrailResult } from "../../src/index.js";
 import { z } from "zod";
 import { NoopObserver, RecordingObserver } from "../../src/observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 const InputSchema = z.object({ value: z.number() });
 const OutputSchema: z.ZodType<GuardrailResult<number>> = z.any();

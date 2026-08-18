@@ -39,7 +39,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
   const calls = { setNx: [] as { key: string; opts?: { expiresInSec?: number } }[], set: [] as string[], del: [] as string[] };
   const redis: RedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
-    async set(k, v, opts) { calls.set.push(k); m.set(k, v); return ok("OK"); },
+    async set(k, v, _opts) { calls.set.push(k); m.set(k, v); return ok("OK"); },
     async del(k) { calls.del.push(k); const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts) { calls.setNx.push({ key: k, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
@@ -56,7 +56,7 @@ const fakeBackend = () => {
   const enqueued: { id: string; delayMs?: number }[] = [];
   let queueOpts: QueueOpts | undefined;
   const backend: QueueBackend = {
-    createQueue(name, opts) {
+    createQueue(_name, opts) {
       queueOpts = opts;
       return {
         async enqueue(id: string, _data: { state: RunId; context: null }, eo?: EnqueueOpts) { enqueued.push({ id, delayMs: eo?.delayMs }); },

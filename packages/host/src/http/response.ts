@@ -6,7 +6,7 @@
  */
 
 import type { Context } from "hono";
-import type { DescribedDag, DescribedEdge, DescribedNode } from "@fuguejs/framework";
+import type { DescribedDag } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Response Types

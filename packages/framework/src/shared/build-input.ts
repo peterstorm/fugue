@@ -7,7 +7,6 @@ import type { IncomingSources } from "./incoming.js";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
 
 /**

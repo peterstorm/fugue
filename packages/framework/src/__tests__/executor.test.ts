@@ -8,11 +8,10 @@ import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { runDag } from "../executor/run-dag.js";
 import { topoSort } from "../shared/topo.js";
-import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { RecordingObserver, NoopObserver } from "../observer/observer.js";
-import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { defineDagFromArray } from "../executor/define-dag.js";
+import { N } from "./_id-helpers.js";
 
 const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,

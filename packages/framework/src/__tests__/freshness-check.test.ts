@@ -10,7 +10,7 @@
 import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
-import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
+import type { WriteAttemptedEvent } from "../types/events.js";
 import { witness, resourceName } from "../types/freshness.js";
 import type { Witness } from "../types/freshness.js";
 import { unwrap } from "../types/result.js";

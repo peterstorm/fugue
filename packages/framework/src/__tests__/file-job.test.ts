@@ -39,8 +39,7 @@ import {
 } from "../file.js"; // the @fuguejs/framework/file barrel under test
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "../file/layout.js";
 import { __testDeepFreeze } from "../file/job.js";
-import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError, retriabilityOf } from "../types/errors.js";
+import { retriabilityOf } from "../types/errors.js";
 import { asCacheError } from "./_cache-error-helpers.js";
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { computeCostUsd, PRICE_TABLE } from "../llm/cost.js";
 
 describe("computeCostUsd", () => {

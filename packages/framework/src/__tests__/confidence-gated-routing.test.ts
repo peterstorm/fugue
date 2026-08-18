@@ -12,7 +12,6 @@ import { runDag } from "../executor/run-dag.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { confidence } from "../types/confidence.js";
-import { resourceName } from "../types/freshness.js";
 import type { NodeDef } from "../types/node.js";
 import type { Confidence } from "../types/confidence.js";
 import { runId, dagId, nodeId, DAG_INPUT } from "../types/ids.js";

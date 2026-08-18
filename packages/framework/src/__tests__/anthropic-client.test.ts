@@ -6,7 +6,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { AnthropicLlmClient } from "../llm/anthropic-client.js";
 import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Anthropic SDK stub

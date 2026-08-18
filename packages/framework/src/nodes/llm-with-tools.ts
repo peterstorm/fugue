@@ -3,7 +3,7 @@ import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
-import { type Result, ok, err } from "../types/result.js";
+import { type Result, ok } from "../types/result.js";
 import { resourceName } from "../types/freshness.js";
 import { stableHash } from "../shared/hash.js";
 import { nodeId } from "../types/ids.js";

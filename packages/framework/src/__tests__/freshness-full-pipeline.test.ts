@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 /**
  * Wave 6 — Test gap coverage for review remediation.
  *
@@ -17,7 +17,7 @@ import { defineDag } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { ok } from "../types/result.js";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent, HumanInterventionEvent } from "../types/events.js";
 

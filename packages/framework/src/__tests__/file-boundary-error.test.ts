@@ -49,10 +49,10 @@ const FILE_CHECKPOINTER_OPERATION_TYPECHECK_COVERAGE = [
 ] as const satisfies readonly FileOperation[];
 
 type AssertNever<T extends never> = T;
-type _EveryFileOperationIsCovered = AssertNever<
+export type _EveryFileOperationIsCovered = AssertNever<
   Exclude<FileOperation, (typeof FILE_OPERATION_TYPECHECK_COVERAGE)[number]>
 >;
-type _EveryCheckpointerOperationBelongsToFileOperation = AssertNever<
+export type _EveryCheckpointerOperationBelongsToFileOperation = AssertNever<
   Exclude<(typeof FILE_CHECKPOINTER_OPERATION_TYPECHECK_COVERAGE)[number], FileOperation>
 >;
 

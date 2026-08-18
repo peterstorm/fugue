@@ -27,7 +27,6 @@
  */
 
 import { ok, err } from "@fuguejs/framework";
-import type { Result } from "@fuguejs/framework";
 import { redisUnavailable, teamAlreadyExists } from "../domain/host-error.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
 import type { TenantId } from "../domain/cache-keys.js";

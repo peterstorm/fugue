@@ -1,4 +1,4 @@
-import { resourceName, witness, RN } from "./_freshness-helpers.js";
+import { resourceName, witness } from "./_freshness-helpers.js";
 /**
  * Tests for the FreshnessIndex Result-typed interface.
  *

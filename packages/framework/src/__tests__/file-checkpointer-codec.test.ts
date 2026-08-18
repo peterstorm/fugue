@@ -455,7 +455,7 @@ describe("materializeCanonicalOutput — canonical serializer-ready grammar", ()
     // a Proxy reporting a phantom index with a materialized descriptor. The
     // canonicalizer must reject it against the captured length.
     const phantomIndex = new Proxy([1], {
-      ownKeys(target) {
+      ownKeys(_target) {
         return ["0", "1", "length"];
       },
       getOwnPropertyDescriptor(target, key) {

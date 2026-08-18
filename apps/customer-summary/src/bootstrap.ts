@@ -10,7 +10,6 @@ import {
   initTracing,
   createMlflowExporter,
   createAzureMonitorExporter,
-  alwaysOn,
   errorOnly,
   anyOf,
   hadRetry,

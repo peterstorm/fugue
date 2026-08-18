@@ -98,7 +98,7 @@ import type { Machine } from "../state-machine/types.js";
 import type { RunId } from "../types/ids.js";
 import { ID_PATTERN } from "../types/ids.js";
 import type { Result } from "../types/result.js";
-import { ok, err } from "../types/result.js";
+import { err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, messageOf } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";

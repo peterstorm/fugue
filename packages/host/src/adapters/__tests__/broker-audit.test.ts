@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { runId as makeRunId, nodeId as makeNodeId } from "@fuguejs/framework";
-import type { Tracer, RunId, NodeId } from "@fuguejs/framework";
+import type { Tracer } from "@fuguejs/framework";
 import type { LogPort } from "../../ports.js";
 import { createBrokerAudit, brokerAuditPayload, type BrokerAuditFields } from "../broker-audit.js";
 

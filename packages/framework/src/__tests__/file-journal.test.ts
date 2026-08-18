@@ -55,7 +55,7 @@ import {
   keyDigest,
 } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError, retriabilityOf } from "../types/errors.js";
+import { retriabilityOf } from "../types/errors.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------

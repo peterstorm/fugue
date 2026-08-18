@@ -15,7 +15,7 @@ import { createInMemoryBackend } from "../queue/in-memory.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { handleNodeFailed } from "../dag-runtime/retry-policy.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
-import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
+import type { DagMachineContext } from "../dag-runtime/types.js";
 
 import { defineDag } from "../executor/define-dag.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -39,7 +39,7 @@ import type { NodeContext } from "../types/node.js";
 import { DAG_INPUT } from "../types/ids.js";
 
 import fc from "fast-check";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, R } from "./_id-helpers.js";
 
 const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,

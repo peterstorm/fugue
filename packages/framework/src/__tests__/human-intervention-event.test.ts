@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 // Phase 4 — HumanInterventionEvent tests
 // Verifies that `HumanInterventionEvent` is emitted via the observer for each
 // human-action variant, with correct fields (actor, action, context, elapsedMs).

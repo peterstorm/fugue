@@ -123,7 +123,7 @@ describe("withTracedCapability", () => {
       const handle: AnyHandle = {
         name: "db" as any,
         client: {
-          query: async (sql: string, params: unknown[]) => ok([]),
+          query: async (_sql: string, _params: unknown[]) => ok([]),
         },
       };
 

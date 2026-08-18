@@ -148,7 +148,7 @@ describe("createCachedDocumentParser", () => {
     const { source, state } = countingSource({ content: new Uint8Array(7), metadata: meta("2026-06-01T00:00:00Z", 7) });
 
     const a = await read(source, ref);
-    const b = await read(source, ref);
+    await read(source, ref);
     const c = await read(source, ref);
 
     expect(isOk(a) && a.value).toBe(7);

@@ -10,7 +10,7 @@
  */
 
 import type { Context } from "hono";
-import type { DagId, Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
+import type { Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
 import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../router.js";

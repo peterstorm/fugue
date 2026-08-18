@@ -45,7 +45,7 @@ import { createRequire } from "node:module";
 import type { z } from "zod";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
-import type { Pool as PgPool, PoolConfig } from "pg";
+import type { PoolConfig } from "pg";
 
 // ---------------------------------------------------------------------------
 // Capability Interface

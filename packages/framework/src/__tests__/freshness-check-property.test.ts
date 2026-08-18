@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, stampWitness, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, stampWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 property test — freshness conflict detection.
  *
@@ -7,7 +7,7 @@ import { resourceName, witness, witnessValue, stampWitness, mkWitness, RN } from
  * implementation. This pins the contract with fast-check.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it } from "bun:test";
 import fc from "fast-check";
 import { N, R, D } from "./_id-helpers.js";
 import {
@@ -16,10 +16,9 @@ import {
 } from "../dag-runtime/freshness-check.js";
 import { unwrap } from "../types/result.js";
 import type {
-  WitnessCapturedEvent,
   WriteAttemptedEvent,
 } from "../types/events.js";
-import type { Witness, WitnessKind } from "../types/freshness.js";
+import type { WitnessKind } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 
 const arbWitnessKind = fc.constantFrom<WitnessKind>(

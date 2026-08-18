@@ -3,9 +3,9 @@
 //        approve / approve-with-edit / reject / reroute-back / reroute-forward-invalid / abort
 
 import { describe, it, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { N, R, D, nodeMap, nodeSet, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
 import {
@@ -764,7 +764,7 @@ describe("advanceToNextWave", () => {
     // waves has an empty last entry
     // @ts-expect-error — branded ID test fixture
     const ctx = makeCtx({ waves: [[] as any] as unknown as readonly (readonly string[])[], outputs: new Map() });
-    const result = advanceToNextWave(-1, ctx); // nextWave = 0 >= waves.length=1? No. Need to reach terminal.
+    advanceToNextWave(-1, ctx); // nextWave = 0 >= waves.length=1? No. Need to reach terminal.
     // Actually use makeCtx with waves so that nextWave >= waves.length
     const ctx2 = makeCtx({ waves: [[]], outputs: new Map() });
     const result2 = advanceToNextWave(0, ctx2);

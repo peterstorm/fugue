@@ -37,7 +37,6 @@ import {
 } from "../tracing/semantic-conventions.js";
 import { fwLogger } from "../logger.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
-import type { NodeId } from "../types/ids.js";
 import { nodeId as brandNodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
 

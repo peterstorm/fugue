@@ -7,7 +7,6 @@ import {
   waveIndexOf,
 } from "../dag-runtime/wave-resolution.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
-import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
 import type { Decision } from "../dag-runtime/routing.js";
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
@@ -213,25 +212,6 @@ describe("handleWaveDone — human review queue", () => {
     }
   });
 
-  it("fails when humanReview node has no nodeDef", () => {
-    // nodeById is empty — nodeDef lookup will fail
-    const ctx = mkCtx({
-      waves: [[N("a")]],
-      activeNodeIds: nodeSet(["a"]),
-      nodeById: new Map(), // intentionally empty
-      dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
-    });
-    // Manually construct a scenario: nodeById empty but the node has humanReview
-    // The collectHumanReviewQueue won't find the node (nodeDef is undefined),
-    // so the queue will be empty and we advance. Test the path where nodeDef IS
-    // found by collectHumanReviewQueue but then the handleWaveDone lookup fails.
-    // This requires nodeById to have a partial entry. Let's use a different approach:
-    // Insert a node with humanReview into nodeById, then remove it after collection.
-    // Actually, the simpler test: wave with review node where nodeById returns undefined
-    // inside handleWaveDone after collection. Since collectHumanReviewQueue checks
-    // nodeById too, we need a mock that returns different values on different calls.
-    // Skip this edge case — it's defensive code that can't be reached in normal operation.
-  });
 });
 
 // ---------------------------------------------------------------------------

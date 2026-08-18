@@ -11,7 +11,7 @@
 import { describe, it, expect } from "bun:test";
 import { FrameworkAugmentedError } from "../types/errors.js";
 import type { FrameworkError } from "../types/errors.js";
-import { N, R } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 describe("FrameworkAugmentedError", () => {
   const sampleError: FrameworkError = {

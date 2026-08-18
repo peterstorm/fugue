@@ -26,8 +26,8 @@ import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
-import type { GitPort, ModuleLoaderPort, LoadResult, Clock } from "../ports.js";
-import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
+import type { GitPort, ModuleLoaderPort, Clock } from "../ports.js";
+import { loadResultToRegisteredDag } from "../domain/dag-factory.js";
 import type { HostTimeoutDefaults } from "../domain/dag-factory.js";
 
 // Re-export for test convenience (tests import from sync-loop)

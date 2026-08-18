@@ -9,7 +9,6 @@
 //   seq(T) < seq(R).
 
 import { describe, expect, it } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import type { NodeContext, NodeDef } from "../types/node.js";
@@ -21,7 +20,7 @@ import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createTransformNode } from "../nodes/transform.js";
 import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, R, D } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — seeded linear congruential generator. Test failures

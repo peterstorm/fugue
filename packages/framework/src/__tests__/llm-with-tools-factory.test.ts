@@ -1,5 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { createLlmWithToolsNode } from "../nodes/llm-with-tools.js";
@@ -8,7 +8,7 @@ import type { NodeContext } from "../types/node.js";
 import type { LlmClient, ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 const InputSchema = z.object({ customerId: z.string() });
 const OutputSchema = z.object({ greeting: z.string() });

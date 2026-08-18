@@ -11,8 +11,8 @@ import type { DagDef } from "../../src/types/dag.js";
 import type { LlmClient } from "../../src/types/llm.js";
 import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
-import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { defineDagFromArray } from "../executor/define-dag.js";
+import { N } from "./_id-helpers.js";
 import { DAG_INPUT } from "../types/ids.js";
 
 // --- Helpers ---
@@ -100,22 +100,6 @@ describe("executor + eval-judge integration", () => {
   });
 
   test("multiple judges run in parallel", async () => {
-    const callOrder: string[] = [];
-
-    const llm1: LlmClient = {
-      sendWithTools: stubSendWithTools,
-      sendStructured: async () => {
-        callOrder.push("judge-1");
-        return ok({ output: { score: 0.9, criteria_scores: [{ name: "a", score: 0.9 }], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
-      },
-    };
-    const llm2: LlmClient = {
-      sendWithTools: stubSendWithTools,
-      sendStructured: async () => {
-        callOrder.push("judge-2");
-        return ok({ output: { score: 0.5, criteria_scores: [{ name: "b", score: 0.5 }], failed_criteria: ["b"], reason: "bad" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
-      },
-    };
 
     // Both judges share the same judgeLlm — we just need to check both run
     // Use a single LLM that tracks calls

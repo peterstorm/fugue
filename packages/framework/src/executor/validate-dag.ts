@@ -11,7 +11,7 @@ import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";
-import type { NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { nodeId, tryNodeId, dagId, DAG_INPUT, isDagInput } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";

@@ -1,7 +1,7 @@
 // CronScheduler integration tests — FR-064, SC-007
 // Uses injected `now` clock + real short-delay timers for timer-based tests.
 
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { createCronScheduler } from "../scheduler/scheduler.js";
 import { markerFiredKey } from "../scheduler/scheduler.js";
 import type { TaskConfig, TaskRegistry } from "../scheduler/types.js";

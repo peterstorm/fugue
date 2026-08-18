@@ -10,7 +10,6 @@
 // silently would allow undetectable stale writes.
 
 import { match } from "ts-pattern";
-import type { NodeDef } from "../types/node.js";
 import type { NodeId } from "../types/ids.js";
 import type { Witness } from "../types/freshness.js";
 import { stampWitness } from "../types/freshness.js";

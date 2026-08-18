@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 import { describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
 import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";

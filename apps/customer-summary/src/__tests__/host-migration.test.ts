@@ -7,7 +7,6 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { z } from "zod";
 import registration, { SummarizeInputSchema } from "../dag-registration.js";
 import {
   DagRegistrationSchema,

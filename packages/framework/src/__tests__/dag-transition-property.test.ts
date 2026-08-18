@@ -8,14 +8,14 @@
  * without throwing.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it } from "bun:test";
 import fc from "fast-check";
 import { dagTransition } from "../dag-runtime/transition.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import type { DagDef } from "../types/dag.js";
-import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, D } from "./_id-helpers.js";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------

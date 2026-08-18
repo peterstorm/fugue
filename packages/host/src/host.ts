@@ -14,7 +14,7 @@
  */
 
 import { ok, err, runId as makeRunId } from "@fuguejs/framework";
-import type { Result, DagId, GitSha, NodeContext, DagDef, FrameworkError, RunId } from "@fuguejs/framework";
+import type { Result, DagId, NodeContext, DagDef, FrameworkError } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
@@ -73,10 +73,9 @@ import type { ConversationStorePort } from "./hitl/adapters/bot/ports.js";
 import { handleBotActivity } from "./hitl/adapters/bot/messages-handler.js";
 import type { BotResponse } from "./hitl/adapters/bot/messages-handler.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
-import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
+import type { SyncLoopHandle, SyncLogger } from "./sync/sync-loop.js";
 import { createSyncCallbacks } from "./sync/sync-callbacks.js";
 import { executeStartup } from "./lifecycle/startup.js";
-import type { StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
 import type { SignalHandlerHandle } from "./lifecycle/signals.js";
 import { startRedisProbe } from "./lifecycle/redis-probe.js";

@@ -6,9 +6,8 @@
 // random outputs.
 
 import { NoopObserver } from "../observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import { DAG_INPUT } from "../types/ids.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { compileDagToMachine } from "../dag-runtime/machine.js";

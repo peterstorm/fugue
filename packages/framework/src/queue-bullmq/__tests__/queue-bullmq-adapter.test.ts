@@ -7,8 +7,7 @@
 
 import { NoopObserver } from "../../observer/observer.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../../logger.js";
-import { N, R, D, nodeMap, nodeSet } from "../../__tests__/_id-helpers.js";
-import type { RunId, NodeId, DagId } from "../../types/ids.js";
+import type { RunId } from "../../types/ids.js";
 import { DAG_INPUT } from "../../types/ids.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
@@ -84,28 +83,6 @@ afterEach(async () => {
 type S = { kind: "pending" } | { kind: "running" } | { kind: "succeeded" } | { kind: "failed"; reason: string };
 type E = { type: "START" } | { type: "DONE" } | { type: "FAIL"; reason: string } | { type: "ERROR"; retriable: boolean; message: string };
 type C = { value: number };
-
-const testMachine: Machine<S, E, C> = {
-  transition(state, event, context) {
-    if (state.kind === "pending" && event.type === "START") {
-      return { state: { kind: "running" }, context };
-    }
-    if (state.kind === "running" && event.type === "DONE") {
-      return { state: { kind: "succeeded" }, context: { value: context.value + 1 } };
-    }
-    if (state.kind === "running" && event.type === "FAIL") {
-      return { state: { kind: "failed", reason: event.reason }, context };
-    }
-    if (event.type === "ERROR") {
-      return { state: { kind: "failed", reason: event.message }, context };
-    }
-    return { state, context };
-  },
-  isTerminal: (s) => s.kind === "succeeded" || s.kind === "failed",
-  isFailed: (s) => s.kind === "failed",
-  stateProgress: (s) => (s.kind === "pending" ? 0 : s.kind === "running" ? 50 : 100),
-  stateKey: (s) => JSON.stringify(s),
-};
 
 // ---------------------------------------------------------------------------
 // createRedisMarkerStore — FR-043
@@ -1085,7 +1062,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
     const { runDagAsWorkerJob } = await import("../../executor/run-dag.js");
     const { defineDagFromArray } = await import("../../executor/define-dag.js");
     const { z } = await import("zod");
-    const { ok, err } = await import("../../types/result.js");
+    const { ok } = await import("../../types/result.js");
     type NodeContext = import("../../types/node.js").NodeContext;
     type NodeDef = import("../../types/node.js").NodeDef<unknown, unknown>;
 

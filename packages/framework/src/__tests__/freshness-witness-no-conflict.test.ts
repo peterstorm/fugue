@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness witness: no-conflict case.
  *
@@ -11,21 +11,18 @@ import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { N, R, D, NO_CONFIDENCE } from "./_id-helpers.js";
+import { N, R, D } from "./_id-helpers.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
   FreshnessViolationEvent,
-  ObserverEvent,
 } from "../types/events.js";
-import type { Witness } from "../types/freshness.js";
 import { ok } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
-import type { RunId, DagId } from "../types/ids.js";
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
   runId: R("fresh-r1"),

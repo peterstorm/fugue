@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { RN } from "./_freshness-helpers.js";
 /**
  * Phase 1 test — node side-effects propagation.
  *
@@ -12,16 +12,16 @@ import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { N, R, D, NO_SIDE_EFFECTS } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 import type { NodeDef } from "../types/node.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
-import type { NodeStartEvent, NodeEndEvent, NodeErrorEvent, ObserverEvent } from "../types/events.js";
+import type { NodeStartEvent, NodeEndEvent, NodeErrorEvent } from "../types/events.js";
 import { ok, err } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import type { NodeContext } from "../types/node.js";
-import type { RunId, DagId, NodeId } from "../types/ids.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({

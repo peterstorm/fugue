@@ -257,7 +257,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
     });
     const ctx = makeCtx({
       tracer: {
-        withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>): Promise<T> => {
+        withSpan: <T,>(_n: string, _t: string, _fn: () => Promise<T>): Promise<T> => {
           throw new Error("tracer exploded");
         },
       },

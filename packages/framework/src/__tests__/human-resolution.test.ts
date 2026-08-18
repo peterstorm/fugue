@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
 import type { DagMachineContext, DagPhase, HumanAction } from "../dag-runtime/types.js";
-import type { DagDef, EdgeDef } from "../types/dag.js";
+import type { DagDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";

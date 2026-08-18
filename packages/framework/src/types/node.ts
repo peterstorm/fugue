@@ -303,7 +303,7 @@ type _Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B 
   ? true
   : false;
 type _StaticAssert<T extends true> = T;
-type _BuiltinKeysComplete = _StaticAssert<
+export type _BuiltinKeysComplete = _StaticAssert<
   _Equal<BuiltinCapabilityKey, Extract<keyof BaseNodeContext, Capability>>
 >;
 

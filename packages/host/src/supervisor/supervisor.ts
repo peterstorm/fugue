@@ -48,7 +48,6 @@ import { authenticateIdentity } from "../http/authenticate-identity.js";
 import type { AuthDeps } from "../http/authenticate-identity.js";
 import type { Tenant, TenantRegistryView } from "../domain/tenant.js";
 import { resolveTenant } from "../domain/tenant.js";
-import type { TenantId } from "../domain/tenant.js";
 import type { RedisConnectivityPort, LogPort } from "../ports.js";
 import { startRedisProbe } from "../lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "../lifecycle/redis-probe.js";

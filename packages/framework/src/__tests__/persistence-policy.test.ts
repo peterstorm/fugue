@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
 import {
   alwaysOn,
   errorOnly,

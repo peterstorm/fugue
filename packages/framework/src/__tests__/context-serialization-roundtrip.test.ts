@@ -11,8 +11,7 @@
 import { describe, it, expect } from "bun:test";
 import fc from "fast-check";
 import { toJson, fromJson } from "../state-machine/serialize.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
-import type { DagMachineContextPersisted } from "../dag-runtime/types.js";
+import { N } from "./_id-helpers.js";
 import type { NodeId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import { z } from "zod";
-import { N, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { makeNodeContext, mergeScopedCapabilities } from "../shared/make-node-context.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
@@ -20,7 +20,6 @@ import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
 import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import type { LlmClient } from "../types/llm.js";
-import type { FrameworkError } from "../types/errors.js";
 import type { CapabilityBroker, ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { isOk, isErr, ok } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";

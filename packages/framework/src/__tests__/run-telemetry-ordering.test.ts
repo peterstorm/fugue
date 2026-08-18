@@ -1,12 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
-import { NoopObserver } from "../observer/observer.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { beginRunTelemetry } from "../dag-runtime/run-telemetry.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Observer } from "../observer/observer.js";
-import type { RunStartEvent, RunEndEvent, ObserverEvent } from "../types/events.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import type { ObserverEvent } from "../types/events.js";
 
 /**
  * Wave 1.3 regression — `beginRunTelemetry` previously dispatched `run-start`

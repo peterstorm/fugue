@@ -19,7 +19,6 @@ import type { NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
-import { resourceName } from "../types/freshness.js";
 
 const makeNode = (id: string): NodeDef<unknown, unknown> => ({
   id: N(id),

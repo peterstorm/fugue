@@ -6,7 +6,7 @@
 // in `decideRoute` also catches smuggled-through malformed predicates.
 
 import { describe, it, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
@@ -15,7 +15,6 @@ import { defineDag } from "../executor/define-dag.js";
 import { DagDefinitionError } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { RecordingObserver } from "../observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 const makeNode = (
   id: string,

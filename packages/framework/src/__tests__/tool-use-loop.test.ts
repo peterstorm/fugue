@@ -5,13 +5,11 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { toolUseLoop, type ToolLoopProvider, type TurnResult } from "../llm/tool-use-loop.js";
+import { toolUseLoop, type ToolLoopProvider } from "../llm/tool-use-loop.js";
 import { toolName } from "../llm/tools.js";
 import { z } from "zod";
-import { ok, err, isOk, isErr } from "../types/result.js";
-import type { Result } from "../types/result.js";
-import type { FrameworkError } from "../types/errors.js";
-import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { ok, err } from "../types/result.js";
+import { N } from "./_id-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { stubLlmClient } from "./_llm-mocks.js";
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";

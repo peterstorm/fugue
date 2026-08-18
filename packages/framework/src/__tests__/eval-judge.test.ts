@@ -1,5 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import { judgePassed } from "../types/eval-judge.js";
@@ -240,7 +240,7 @@ describe("createEvalJudgeNode", () => {
       let calledWith = "";
       const judgeLlm: LlmClient = {
         sendWithTools: stubSendWithTools,
-        sendStructured: async (req) => {
+        sendStructured: async (_req) => {
           calledWith = "judgeLlm";
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },

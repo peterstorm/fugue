@@ -105,6 +105,8 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
       return errorResponse(c, 403, "forbidden", "Admin access required");
     }
     await next();
+    // Admin identity verified; the downstream handler owns the response.
+    return undefined;
   });
 
   // ── Admin routes ─────────────────────────────────────────────────────────

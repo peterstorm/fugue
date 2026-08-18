@@ -18,12 +18,9 @@
  */
 
 import type {
-  NodeContext,
   ContextCacheAdapter,
   CheckpointWriter,
   CacheLookup,
-  LlmClient,
-  Tracer,
   DagId,
   RunId,
   NodeId,

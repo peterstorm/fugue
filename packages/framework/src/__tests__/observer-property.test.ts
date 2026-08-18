@@ -1,11 +1,10 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
-import { describe, it, expect } from "bun:test";
+import { witness, RN } from "./_freshness-helpers.js";
+import { describe, it } from "bun:test";
 import fc from "fast-check";
 import { RecordingObserver, createObserver } from "../observer/observer.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
-import type { FrameworkError } from "../types/errors.js";
 
 // ---------------------------------------------------------------------------
 // Arbitrary ObserverEvent generator — covers all 13 discriminants

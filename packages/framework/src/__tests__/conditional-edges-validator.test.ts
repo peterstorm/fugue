@@ -10,7 +10,7 @@ import type { DagDefInput } from "../types/dag.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { ok } from "../types/result.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 const mkNode = (id: string) =>
   createTransformNode({

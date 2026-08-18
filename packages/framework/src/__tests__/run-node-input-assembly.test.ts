@@ -5,7 +5,7 @@
 // via runNodeShared with a trivial echo node that returns its input.
 
 import { describe, it, expect } from "bun:test";
-import { N, R, D, nodeMap } from "./_id-helpers.js";
+import { N, D } from "./_id-helpers.js";
 import { z } from "zod";
 import { runNodeShared } from "../dag-runtime/run-node.js";
 import { ok } from "../types/result.js";

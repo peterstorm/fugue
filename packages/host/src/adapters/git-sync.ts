@@ -14,7 +14,7 @@
 
 import { join } from "node:path";
 import { ok, err, gitSha as brandGitSha } from "@fuguejs/framework";
-import type { Result, GitSha } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
 

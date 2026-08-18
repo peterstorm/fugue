@@ -1,5 +1,5 @@
 import type { SynthesisOutput } from "../schemas/summary.js";
-import type { CrmRecord, Message } from "../schemas/crm.js";
+import type { CrmRecord } from "../schemas/crm.js";
 
 /**
  * Grounding check result for a single dimension.

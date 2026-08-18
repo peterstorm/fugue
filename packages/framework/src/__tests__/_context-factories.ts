@@ -11,8 +11,6 @@
 //   const retry = testRetryState({ retries: new Map([[nodeId("a"), 2]]) });
 
 import type { NodeId } from "../types/ids.js";
-import type { EdgeDef } from "../types/dag.js";
-import type { Confidence } from "../types/confidence.js";
 import type {
   DagTopology,
   DagRetryState,

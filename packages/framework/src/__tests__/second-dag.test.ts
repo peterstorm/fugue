@@ -1,16 +1,15 @@
 import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import type { NodeContext } from "../types/node.js";
-import type { DagDef } from "../types/dag.js";
 import { runDag } from "../executor/run-dag.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
-import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
+import { defineDagFromArray } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 /**
  * SC-007: A simple "hello world" DAG using only public framework primitives.
