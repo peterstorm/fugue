@@ -56,9 +56,9 @@ podman push your-registry.example.com/fugue/host:0.2.0
 **What's in the image:**
 - Bun 1.2 runtime (Alpine-based, ~50MB)
 - `git` + `openssh-client` (for DAG repo sync over https/ssh)
-- `packages/framework/`, `packages/host/`, `packages/adapter-fs/`, and
-  `packages/document-source/` source (the last two back `DOCUMENTS_ADAPTER=fs`,
-  which `main.ts` imports dynamically)
+- `packages/framework/`, `packages/host/`, `packages/adapter-fs/`, `packages/adapter-ms-graph/`, and
+  `packages/document-source/` source (the adapter packages back
+  `DOCUMENTS_ADAPTER=fs` / `ms-graph`, which the entries import dynamically)
 - Dependencies via `bun install --frozen-lockfile --production`
 - Non-root user `fugue`, port 3000, health check at `GET /health`
 
@@ -211,12 +211,20 @@ the realm-JWT inbound mode. See [`auth.md`](./auth.md).
 
 **Documents capability.** Required for DAGs declaring `requires: ["documents"]`
 (the `fs` adapter is backed by `packages/adapter-fs` + `packages/document-source`,
-both in the image).
+both in the image; `ms-graph` by `packages/adapter-ms-graph`).
 
 | Env var | Required | Purpose |
 |---------|----------|---------|
-| `DOCUMENTS_ADAPTER` | for `documents` DAGs | Adapter to wire (`fs`) |
+| `DOCUMENTS_ADAPTER` | for `documents` DAGs | Adapter to wire (`fs` \| `ms-graph`) |
 | `DOCUMENTS_FS_ROOT` | when `DOCUMENTS_ADAPTER=fs` | Root directory for the fs adapter (mounted volume / staged files) |
+| `MSGRAPH_TENANT_ID` | when `DOCUMENTS_ADAPTER=ms-graph` | Azure app-registration tenant (directory) id |
+| `MSGRAPH_CLIENT_ID` | when `DOCUMENTS_ADAPTER=ms-graph` | Azure app (client) id — app-only client credentials |
+| `MSGRAPH_CLIENT_SECRET` | when `DOCUMENTS_ADAPTER=ms-graph` | Azure app client secret (never logged) |
+| `MSGRAPH_BASE_URL` | optional | Graph base incl. `/v1.0` (sovereign clouds); the token scope derives from its origin unless `MSGRAPH_SCOPE` is set |
+| `MSGRAPH_TOKEN_URL` | optional | OIDC v2.0 token-endpoint override (sovereign clouds) |
+| `MSGRAPH_SCOPE` | optional | Graph resource scope override (default `<Graph origin>/.default`) |
+| `MSGRAPH_REQUEST_TIMEOUT_MS` | optional | Per-request timeout for Graph + token calls (defaults 30 s / 15 s) |
+| `MSGRAPH_RESOLVE_PATHS` | optional | `true` = resolve `sharePointPath` refs to driveItem ids by folder-walk (for tenants whose Graph backend rejects item-path URLs — peterstorm/fugue#36). Default `false` |
 
 ---
 

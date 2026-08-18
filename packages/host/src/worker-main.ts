@@ -47,6 +47,7 @@ import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 import { createModuleLoader } from "./adapters/module-loader.js";
 import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
 import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
+import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/documents-capability.js";
 import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
@@ -250,10 +251,16 @@ const main = async () => {
       { name: "clock", client: systemClock },
     ];
 
-    if (config.DOCUMENTS_ADAPTER === "fs") {
-      const { createFsAdapter } = await import("@fuguejs/fs");
-      capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
-      logger.info(`documents capability: @fuguejs/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
+    // ADR-0052: optional `documents` capability, selected by environment
+    // (fs / ms-graph) — the SAME shared builder as the single-tenant entry
+    // (main.ts), so the adapter selection can never drift between topologies.
+    // Undefined when unconfigured → a `requires: ["documents"]` DAG fails the
+    // boot-time capability check (zero-regression baseline, same gating as the
+    // oracle / authedHttp capabilities).
+    const documents = await buildDocumentsCapability(config);
+    if (documents !== undefined) {
+      capabilities.push(documents);
+      logger.info(`documents capability: ${describeDocumentsAdapter(config)}`, { tenant });
     }
 
     // Optional `authedHttp` capability (FR-060): the generic @fuguejs/http-auth

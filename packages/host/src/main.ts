@@ -18,6 +18,7 @@ import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.
 import { createModuleLoader } from "./adapters/module-loader.js";
 import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
 import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
+import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/documents-capability.js";
 import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
@@ -118,15 +119,16 @@ const main = async () => {
       { name: "clock", client: systemClock },
     ];
 
-    // ADR-0052: optional `documents` capability, selected by environment.
-    // Dynamic import mirrors the ioredis/Anthropic pattern — the adapter
-    // package loads only when configured. createHost calls connect() on the
-    // handle at boot (validates the mount) and close() at shutdown.
-    if (config.DOCUMENTS_ADAPTER === "fs") {
-      const { createFsAdapter } = await import("@fuguejs/fs");
-      // Config validation (superRefine) guarantees DOCUMENTS_FS_ROOT is set.
-      capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
-      logger.info(`documents capability: @fuguejs/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
+    // ADR-0052: optional `documents` capability, selected by environment
+    // (fs / ms-graph). buildDocumentsCapability is the SINGLE wiring shared
+    // with the multi-tenant worker entry, so the adapter selection can never
+    // drift between the topologies; the adapter package loads only when
+    // configured. createHost calls connect() on the handle at boot (validates
+    // the mount / auth wiring) and close() at shutdown.
+    const documents = await buildDocumentsCapability(config);
+    if (documents !== undefined) {
+      capabilities.push(documents);
+      logger.info(`documents capability: ${describeDocumentsAdapter(config)}`);
     }
 
     // Optional `authedHttp` capability (FR-060): the generic @fuguejs/http-auth

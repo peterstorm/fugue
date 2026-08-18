@@ -39,13 +39,16 @@ RUN bun install --frozen-lockfile --production
 # Copy source for the host's runtime closure only. main.ts dynamically imports
 # @fuguejs/fs when DOCUMENTS_ADAPTER=fs (which the lead DAGs require); @fuguejs/fs
 # pulls in @fuguejs/document-source, and everything depends on @fuguejs/framework.
-# @fuguejs/oracle + @fuguejs/http-auth are host runtime deps (workspace:*) wired in
-# main.ts/worker-main.ts (the `oracle` / `authedHttp` capabilities) — their source
-# MUST be present or the worker import fails when those capabilities are configured.
+# @fuguejs/ms-graph is the DOCUMENTS_ADAPTER=ms-graph adapter (dynamically imported
+# when configured); @fuguejs/oracle + @fuguejs/http-auth are host runtime deps
+# (workspace:*) wired in main.ts/worker-main.ts (the `oracle` / `authedHttp`
+# capabilities) — their source MUST be present or the worker import fails when
+# those capabilities are configured.
 COPY packages/framework/ packages/framework/
 COPY packages/host/ packages/host/
 COPY packages/adapter-fs/ packages/adapter-fs/
 COPY packages/document-source/ packages/document-source/
+COPY packages/adapter-ms-graph/ packages/adapter-ms-graph/
 COPY packages/adapter-oracle/ packages/adapter-oracle/
 COPY packages/http-auth/ packages/http-auth/
 

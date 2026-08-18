@@ -12,7 +12,15 @@ import { fwLogger } from "../logger.js";
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const zodToJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
-  const { $schema: _, ...json } = z.toJSONSchema(schema) as Record<string, unknown>;
+  // `unrepresentable: "any"` — zod 4's default ("throw") makes `z.toJSONSchema`
+  // throw on `z.date()` (and z.map / z.set / z.void / an undefined literal) at
+  // ANY nesting depth ("Date cannot be represented in JSON Schema"). That turns
+  // a renderable object schema into "unverifiable" in `renderObjectSchema`
+  // (a real fan-in-key mismatch would then defer to the runtime Zod parse)
+  // and hard-fails the LLM structured-output path below. Mapping unrepresentable
+  // types to `{}` (any) keeps the render total: a `z.date()` column renders as
+  // an open schema instead of throwing (peterstorm/fugue#36, related item).
+  const { $schema: _, ...json } = z.toJSONSchema(schema, { unrepresentable: "any" }) as Record<string, unknown>;
   return json;
 };
 

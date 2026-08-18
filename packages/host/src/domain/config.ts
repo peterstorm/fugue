@@ -426,12 +426,50 @@ export const HostConfigSchema = z.object({
    * Optional `documents` capability adapter (ADR-0052). When unset, DAGs
    * declaring `requires: ["documents"]` fail the boot-time capability check.
    * `fs` wires @fuguejs/fs rooted at DOCUMENTS_FS_ROOT (mounted volume /
-   * initContainer-staged files). Other adapters (ms-graph, …) are wired by
-   * extending this enum alongside their credential config.
+   * initContainer-staged files). `ms-graph` wires @fuguejs/ms-graph with
+   * app-only client credentials from the MSGRAPH_* fields below
+   * (wiring: adapters/documents-capability.ts).
    */
-  DOCUMENTS_ADAPTER: z.enum(["fs"]).optional(),
+  DOCUMENTS_ADAPTER: z.enum(["fs", "ms-graph"]).optional(),
   /** Root directory for the fs documents adapter — required when DOCUMENTS_ADAPTER=fs */
   DOCUMENTS_FS_ROOT: z.string().optional(),
+  // ── ms-graph documents adapter (DOCUMENTS_ADAPTER=ms-graph) ──
+  /** Azure app-registration tenant (directory) id — required when DOCUMENTS_ADAPTER=ms-graph */
+  MSGRAPH_TENANT_ID: z.string().min(1).optional(),
+  /** Azure app (client) id for the app-only client-credentials flow — required when DOCUMENTS_ADAPTER=ms-graph */
+  MSGRAPH_CLIENT_ID: z.string().min(1).optional(),
+  /**
+   * Azure app client secret — required when DOCUMENTS_ADAPTER=ms-graph.
+   * SENSITIVE: never logged — the token provider's errors carry the endpoint
+   * host + HTTP status only (NFR-014, mirroring the Keycloak credentials).
+   */
+  MSGRAPH_CLIENT_SECRET: z.string().min(1).optional(),
+  /**
+   * Graph API base URL including `/v1.0` (default
+   * `https://graph.microsoft.com/v1.0`). Override for sovereign clouds
+   * (e.g. `https://graph.microsoft.us/v1.0`); the token scope derives from
+   * this URL's origin when MSGRAPH_SCOPE is unset.
+   */
+  MSGRAPH_BASE_URL: z.string().url().optional(),
+  /**
+   * OIDC v2.0 token endpoint override (sovereign clouds / tests). Default:
+   * `https://login.microsoftonline.com/{MSGRAPH_TENANT_ID}/oauth2/v2.0/token`.
+   */
+  MSGRAPH_TOKEN_URL: z.string().url().optional(),
+  /** Graph resource scope override. Default: `<Graph origin>/.default`. */
+  MSGRAPH_SCOPE: z.string().min(1).optional(),
+  /** Per-request timeout (ms) for Graph + token calls. Defaults: adapter 30 s, token 15 s. */
+  MSGRAPH_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  /**
+   * Resolve `sharePointPath` refs to driveItem ids by id-based folder-walk
+   * BEFORE delegating to the stock adapter (peterstorm/fugue#36): required for
+   * tenants whose Graph backend rejects the documented item-path URL forms
+   * tenant-wide. Default `false` — standard tenants keep the stock URL shape.
+   */
+  MSGRAPH_RESOLVE_PATHS: z
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+    .transform((v) => v === true || v === "true" || v === "1")
+    .default(false),
   // ── CDRator / Oister authenticated-REST capability (`authedHttp`, FR-060/NFR-010) ──
   /**
    * Base URL of the CDRator/Oister core REST API the `authedHttp` capability
@@ -723,6 +761,13 @@ export const HostConfigSchema = z.object({
   }
   if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
     ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });
+  }
+  if (c.DOCUMENTS_ADAPTER === "ms-graph" && (!c.MSGRAPH_TENANT_ID || !c.MSGRAPH_CLIENT_ID || !c.MSGRAPH_CLIENT_SECRET)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["MSGRAPH_TENANT_ID"],
+      message: "MSGRAPH_TENANT_ID, MSGRAPH_CLIENT_ID, and MSGRAPH_CLIENT_SECRET required when DOCUMENTS_ADAPTER is 'ms-graph'",
+    });
   }
   // ── CDRator `authedHttp` capability (FR-060/NFR-010) ───────────────────────
   // The capability is gated on CDRATOR_URL: once it is set the operator credentials,

@@ -120,8 +120,8 @@ export interface MsGraphAdapterConfig {
 /** Sentinel node ID for ms-graph capability errors. */
 const MS_GRAPH_NODE_ID = nodeId("ms-graph-capability");
 
-const DEFAULT_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
-const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFAULT_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+export const DEFAULT_TIMEOUT_MS = 30_000;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -377,3 +377,20 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
     },
   };
 };
+
+// ---------------------------------------------------------------------------
+// Path-resolving wrapper (opt-in, peterstorm/fugue#36)
+// ---------------------------------------------------------------------------
+
+/**
+ * The path-resolving wrapper for tenants whose Graph backend rejects the
+ * documented item-path URL forms tenant-wide (probed live — see
+ * `path-resolving.ts` header). Opt-in: standard tenants keep
+ * `createMsGraphAdapter`; the host selects this one via
+ * `MSGRAPH_RESOLVE_PATHS` (see `@fuguejs/host` config).
+ */
+export {
+  createPathResolvingMsGraphAdapter,
+  type PathResolvingMsGraphHandle,
+  type SharePointListItem,
+} from "./path-resolving.js";

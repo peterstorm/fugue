@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { zodToJsonSchema } from "../llm/zod-schema.js";
+import { zodToJsonSchema, objectSchemaKeys, objectSchemaRequiredKeys } from "../llm/zod-schema.js";
 
 describe("zodToJsonSchema", () => {
   it("strips $schema key from output", () => {
@@ -50,5 +50,30 @@ describe("zodToJsonSchema", () => {
     const result = zodToJsonSchema(schema);
     const tags = (result.properties as any).tags;
     expect(tags.type).toBe("array");
+  });
+});
+
+describe("zodToJsonSchema — unrepresentable types (peterstorm/fugue#36, related)", () => {
+  it("z.date() renders as an open schema instead of throwing — at ANY nesting depth", () => {
+    const schema = z.object({ d: z.date(), rows: z.array(z.object({ at: z.date() })) });
+    const result = zodToJsonSchema(schema); // used to throw "Date cannot be represented in JSON Schema"
+    expect((result.properties as any).d).toEqual({});
+    const items = (result.properties as any).rows.items as { properties: Record<string, unknown> };
+    expect(items.properties.at).toEqual({});
+  });
+
+  it("objectSchemaKeys still introspects schemas with z.date() columns (no more 'unverifiable')", () => {
+    const schema = z.object({ a: z.string(), d: z.date() });
+    expect(objectSchemaKeys(schema)).toEqual(["a", "d"]);
+    expect(objectSchemaRequiredKeys(schema)).toEqual(["a", "d"]);
+  });
+
+  it("schemas without unrepresentable types are rendered exactly as before", () => {
+    const schema = z.object({ name: z.string(), n: z.number(), b: z.boolean() });
+    const result = zodToJsonSchema(schema);
+    expect(result.type).toBe("object");
+    expect((result.properties as any).name).toEqual({ type: "string" });
+    expect((result.properties as any).n).toEqual({ type: "number" });
+    expect((result.properties as any).b).toEqual({ type: "boolean" });
   });
 });

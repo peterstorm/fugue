@@ -196,9 +196,10 @@ describe("runVisualize", () => {
   });
 
   it("threads describe's schema-serialization warnings through the ok arm (never dropped)", async () => {
-    // The schema-warning fixture's registration inputSchema is z.void() —
-    // describe stays ok with a warning; runVisualize must carry it on
-    // `warnings` (the always-an-array contract), not lose it in the wrap.
+    // The schema-warning fixture's registration inputSchema is HOSTILE (a
+    // non-schema value in the shape) — describe stays ok with a warning;
+    // runVisualize must carry it on `warnings` (the always-an-array
+    // contract), not lose it in the wrap.
     const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await runVisualize(resolve(__dirname, "fixtures", "schema-warning.ts"));

@@ -94,6 +94,68 @@ describe("HostConfigSchema", () => {
     expect(result.value.DOCUMENTS_ADAPTER).toBeUndefined();
   });
 
+  it("accepts DOCUMENTS_ADAPTER=ms-graph with the three credentials (resolve paths default off)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "tenant-1",
+      MSGRAPH_CLIENT_ID: "client-1",
+      MSGRAPH_CLIENT_SECRET: "secret-1",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.DOCUMENTS_ADAPTER).toBe("ms-graph");
+    expect(result.value.MSGRAPH_TENANT_ID).toBe("tenant-1");
+    expect(result.value.MSGRAPH_RESOLVE_PATHS).toBe(false);
+  });
+
+  it("rejects DOCUMENTS_ADAPTER=ms-graph missing any credential (fail-closed at boot)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "tenant-1",
+      MSGRAPH_CLIENT_ID: "client-1",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("MSGRAPH_CLIENT_SECRET");
+  });
+
+  it("coerces MSGRAPH_RESOLVE_PATHS string tokens and rejects typos (fail-closed-loud)", () => {
+    const base = {
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "t",
+      MSGRAPH_CLIENT_ID: "c",
+      MSGRAPH_CLIENT_SECRET: "s",
+    };
+    for (const v of ["true", "1"]) {
+      const r = parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: v });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value.MSGRAPH_RESOLVE_PATHS).toBe(true);
+    }
+    const off = parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: "false" });
+    expect(off.ok).toBe(true);
+    if (off.ok) expect(off.value.MSGRAPH_RESOLVE_PATHS).toBe(false);
+    // A typo'd `yes`/`on` is REJECTED at boot rather than silently off — same
+    // fail direction as SUPERVISOR_REDIS_ACL_ENABLED.
+    expect(parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: "yes" }).ok).toBe(false);
+  });
+
+  it("rejects a non-URL MSGRAPH_BASE_URL", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "t",
+      MSGRAPH_CLIENT_ID: "c",
+      MSGRAPH_CLIENT_SECRET: "s",
+      MSGRAPH_BASE_URL: "not a url",
+    });
+    expect(result.ok).toBe(false);
+  });
+
   it("rejects BOT_APP_ID without BOT_APP_PASSWORD (ADR-0060)", () => {
     const result = parseHostConfig({ ...validEnv, BOT_APP_ID: "00000000-0000-0000-0000-000000000000" });
     expect(result.ok).toBe(false);
