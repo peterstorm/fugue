@@ -3,7 +3,7 @@
  * pure lifecycle ADT (`worker-lifecycle.ts`), the `SpawnPort` / `ProcManagePort`
  * (`bun-spawn-adapter.ts`), the Redis `WorkerRegistry` (`worker-registry-redis.ts`),
  * a UDS liveness probe, and the tenant registry into a single
- * `WorkerLifecyclePort` the supervisor injects (FR-014/015/019/020, SC-006).
+ * `WorkerLifecyclePort` the supervisor injects (multi-tenant spec FR-014/015/019/020, SC-006).
  *
  * DESIGN (functional core / imperative shell):
  *   - ALL state-transition DECISIONS live in the pure ADT (`requestWorker`,
@@ -18,7 +18,7 @@
  *     injected `clock()`.
  *   - It is FAIL-CLOSED + per-tenant CONTAINED: any spawn/probe/registry failure
  *     for one tenant surfaces as that tenant's `worker-unavailable` (503) and
- *     never touches another tenant's entry (FR-015, AD-8).
+ *     never touches another tenant's entry (multi-tenant spec FR-015, AD-8).
  *
  * SECURITY (FR-004 one-tenant-one-socket): the udsPath a worker binds is a PURE
  * function of its `TenantId` (`workerSocketPath(udsDir, tenant)`), derived HERE —
@@ -432,12 +432,12 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     workers.set(tenant, liveResult.value);
     await persistRecord(liveResult.value);
 
-    // EXIT WATCHER (FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
+    // EXIT WATCHER (multi-tenant spec FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
     // signal for a worker THIS process spawned. When it resolves, react ONLY if the
     // map entry is still THIS incarnation (same pid), then branch on phase:
     //   - `live`     → an UNEXPECTED exit is a crash; drive `onCrash` (respawn, AD-8).
     //   - `draining` → the worker was SIGTERM'd by `drain` and has now stopped; that
-    //     is the EXPECTED end of a graceful drain (FR-017), NOT a crash — drive the
+    //     is the EXPECTED end of a graceful drain (multi-tenant spec FR-017), NOT a crash — drive the
     //     pure `drainComplete` transition (→ terminal `evicted`), free the slot and
     //     remove the record. It must NOT be misread as a crash and respawned.
     // The pid+phase guard is REQUIRED so a deliberate evict/idle-evict (which DELETES
@@ -450,7 +450,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       const cur = workers.get(tenant);
       if (cur === undefined) return;
       if (cur.phase === "draining" && cur.pid === handle.pid) {
-        // Graceful drain completed (FR-017): land the pure draining → evicted
+        // Graceful drain completed (multi-tenant spec FR-017): land the pure draining → evicted
         // transition, then drop the entry + record to release the slot. No respawn.
         const done = drainComplete(cur, clock());
         if (!done.ok) {
@@ -532,7 +532,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     workers.set(tenant, crashed.value);
     await removeRecord(tenant);
 
-    // Restart ONLY this tenant's worker (AD-8/FR-015): re-run the spawn path.
+    // Restart ONLY this tenant's worker (AD-8/multi-tenant spec FR-015): re-run the spawn path.
     // Sync runs fail-fast (the crash already surfaced as 503 to in-flight
     // callers); HITL durability is handled by existing checkpoint machinery
     // (AD-8 — no new resume engine here).
@@ -558,7 +558,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok(undefined);
     }
 
-    // RESTART-AT-CAP (FR-015): we DELETE the crashed entry before respawning
+    // RESTART-AT-CAP (multi-tenant spec FR-015): we DELETE the crashed entry before respawning
     // rather than pre-setting `spawning` via `restart(...)`. lazySpawn's admission
     // check counts `spawning` (occupiesSlot) against SUPERVISOR_MAX_LIVE_WORKERS,
     // so a pre-set `spawning` would make the crashing tenant count its OWN
@@ -624,7 +624,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     workers.delete(tenant);
     await removeRecord(tenant);
     if (pid !== undefined) {
-      // Immediate revoke (FR-029 / NFR-012), NOT a graceful drain: SIGTERM and
+      // Immediate revoke (multi-tenant spec FR-029 / NFR-012), NOT a graceful drain: SIGTERM and
       // SIGKILL fire back-to-back with NO intervening wait — `signalWorker` returns
       // once the signal is delivered, it does not await `exited` — so this is a HARD
       // kill. (Graceful "let in-flight work finish" is `drain()`'s job: SIGTERM only,
@@ -649,7 +649,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // default to false.
       const spawnCfg = tenants.spawnConfigFor(record.tenant);
       const eagerPin = spawnCfg !== undefined ? spawnCfg.eagerPin : record.eagerPin;
-      // FR-017 fidelity: a record persisted as `draining` (it had been SIGTERM'd to
+      // multi-tenant spec FR-017 fidelity: a record persisted as `draining` (it had been SIGTERM'd to
       // drain) that still answers its UDS MUST be re-adopted as `draining`, NOT
       // forced to `live`. `adoptLive` would set `canServe` true and `ensureWorker`
       // would route NEW traffic to a worker we deliberately drained. `adoptDraining`
@@ -709,7 +709,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   };
 
   /**
-   * Liveness sweep (FR-014/FR-015, SC-006): the crash-detection SAFETY NET for
+   * Liveness sweep (multi-tenant spec FR-014/FR-015, SC-006): the crash-detection SAFETY NET for
    * RE-ADOPTED workers. A worker spawned by THIS process carries a `handle.exited`
    * crash watcher (`watchedTenants`); a worker re-adopted across a supervisor
    * restart (`adoptLive`) does NOT — its process was re-parented, so we never own
@@ -760,7 +760,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
         if (cur === undefined || (cur.phase !== "live" && cur.phase !== "draining") || cur.pid !== pid) continue;
         if (cur.phase === "draining") {
           // A RE-ADOPTED draining worker (no exited watcher) has now exited — that
-          // is the EXPECTED end of a graceful drain (FR-017), NOT a crash. Mirror
+          // is the EXPECTED end of a graceful drain (multi-tenant spec FR-017), NOT a crash. Mirror
           // the spawned-worker exit watcher: land the pure `drainComplete` (→
           // terminal `evicted`), free the slot + record, and DO NOT restart it
           // (a worker SIGTERM'd to drain must not be resurrected).

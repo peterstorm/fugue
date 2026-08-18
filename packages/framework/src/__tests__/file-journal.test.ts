@@ -26,11 +26,14 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -52,6 +55,7 @@ import {
   PROGRESS_FILE,
   APPEND_LOCK,
   MAX_LEXICOGRAPHIC_SEQUENCE,
+  eventFileName,
   keyDigest,
 } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -1640,4 +1644,66 @@ describe("createFileJournal.appendEvent — crashed-writer stale lock (ADR-0078,
     expect(records.value.map((r) => (r.event as { type: string }).type)).toEqual(["BEFORE", "AFTER"]);
     expect(existsSync(lockPath)).toBe(false);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// Symlink policy (journal.ts module header) — the pinned deliberate
+// divergence from the file checkpointer's non-symlink trust anchor:
+// a writer inside the caller's run directory can already forge record bytes
+// directly, so the journal follows symlinks instead of rejecting them.
+// (The rename-replaces-symlink mechanism these writes rely on is pinned at the
+// `atomicWriteFile` level in file-atomic.test.ts.) If the checkpointer's
+// symlink rejection is ever extended to the journal, these are the behavior
+// pins to update — the divergence is test-visible.
+// ---------------------------------------------------------------------------
+
+describe("symlink policy (pinned divergence from the file checkpointer)", () => {
+  it("a symlink at a record name is read THROUGH on resume — the strict reader follows it", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "read-through" }, "symlink-read-key");
+
+    const events = join(dir, EVENTS_DIR);
+    const names = listEventFiles(dir);
+    expect(names).toHaveLength(1);
+    const recordPath = join(events, names[0]!);
+
+    // Move the real record out of the listing, then re-create its name as a
+    // symlink to the moved file — what a writer inside the run directory can
+    // already do. The journal's documented policy: follow it.
+    const parked = join(dir, "parked.json");
+    renameSync(recordPath, parked);
+    symlinkSync(parked, recordPath);
+    expect(lstatSync(recordPath).isSymbolicLink()).toBe(true);
+
+    const result = readFileEvents(dir);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toHaveLength(1);
+      expect(result.value[0]!.event).toEqual({ type: "read-through" });
+    }
+  });
+
+  it("a keyed append against a symlink squatting at its keyed name is a dedup NO-OP — the writer reads the symlink through the listing and writes nothing", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+
+    // A writer inside the run directory squats a symlink at the exact name a
+    // keyed append of key "k" would use. `listEventFiles` `statSync`s (follows)
+    // it — a symlink to a regular file passes the regular-file gate — and the
+    // keyed dedup no-ops against it: no write happens; the symlink and its
+    // target stay untouched.
+    const target = join(dir, "squat-target.json");
+    writeFileSync(target, "squatting bytes");
+    const events = join(dir, EVENTS_DIR);
+    mkdirSync(events, { recursive: true });
+    const name = eventFileName(0, keyDigest("k"));
+    symlinkSync(target, join(events, name));
+
+    await journal.appendEvent({ type: "never-written" }, "k");
+
+    expect(listEventFiles(dir)).toEqual([name]);
+    expect(lstatSync(join(events, name)).isSymbolicLink()).toBe(true); // untouched
+    expect(readFileSync(target, "utf8")).toBe("squatting bytes"); // untouched
+  });
 });

@@ -80,8 +80,9 @@ type ReapFn = () => void;
  *
  * EINTR: a `waitpid(-1, WNOHANG)` that returns -1 on EINTR (extremely rare —
  * WNOHANG does not block, so the interrupt window is tiny) is indistinguishable
- * from ECHILD here and breaks early. That merely defers one orphan's reap to the
- * next cycle, bounded by the safety-net interval — never a persistent zombie leak.
+ * from ECHILD here and breaks early. That defers the rest of that burst's reaps
+ * to the next cycle, bounded by the safety-net interval — never a persistent
+ * zombie leak.
  *
  * Exported so the multi-reap drain + the throw-safety are unit-testable without a
  * real PID namespace.
@@ -167,7 +168,7 @@ interface WorkerBroadcastSeams {
 
 /**
  * POD SHUTDOWN: broadcast `sig` to every per-tenant WORKER in the pod's PID
- * namespace so they drain gracefully (FR-017) — the supervisor deliberately does
+ * namespace so they drain gracefully (multi-tenant spec FR-017) — the supervisor deliberately does
  * NOT propagate shutdown to workers (AD-2), so PID 1 must, else they are
  * hard-SIGKILLed by namespace teardown. GUARDED on `selfPid === 1`: only as the
  * pod's genuine PID 1 (its own PID namespace) is enumerating + signalling every
@@ -261,7 +262,7 @@ interface BunInitProcessAdapter extends InitProcessPort {
   /**
    * Pod shutdown: forward `sig` to the CURRENT supervisor child AND (when we are
    * actually PID 1) to every per-tenant WORKER in the pod so they drain gracefully
-   * (FR-017) — the supervisor deliberately does NOT propagate shutdown to
+   * (multi-tenant spec FR-017) — the supervisor deliberately does NOT propagate shutdown to
    * workers (AD-2), so without this they would be hard-SIGKILLed by namespace
    * teardown. Latches a flag so the supervise loop PARKS instead of respawning;
    * the binary then `process.exit`s after a bounded grace.
@@ -357,7 +358,7 @@ export const createBunInitProcessAdapter = (
         // crash-loop budget + the pod's give-up/grace-drain path — exactly as it does
         // for a supervisor that starts then crashes. Letting it THROW would escape the
         // loop to `main().catch` → `process.exit(1)`, tearing down the PID namespace and
-        // SIGKILLing every live worker mid-flight with NO drain (AD-2/FR-019/FR-021
+        // SIGKILLing every live worker mid-flight with NO drain (AD-2/multi-tenant spec FR-019/FR-021
         // violated) — the worst outcome at precisely the moment (memory pressure) a
         // fork failure is most likely AND most likely to be transient/self-healing.
         // Clear `currentPid` so a subsequent `beginTermination` never signals a stale

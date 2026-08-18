@@ -53,8 +53,13 @@ import {
   serializedPath as outputPath,
 } from "../state-machine/serialize.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId, RunId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
+import {
+  CHECKPOINT_INVALID_NODE_ID,
+  CHECKPOINT_INVALID_RUN_ID,
+  stringOf,
+} from "../types/error-factories.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
@@ -72,24 +77,13 @@ import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
  */
 export const META_RECORD_NODE_ID: NodeId = __brandNodeId("checkpoint_meta");
 
-/** Grammar-valid locations used only when rejected raw values cannot inhabit
- * the required branded fields. The raw values remain available in the
- * additive `invalidRunId` / `invalidNodeId` diagnostics. */
-const INVALID_RUN_ID: RunId = __brandRunId("checkpoint_invalid_run");
-const INVALID_NODE_ID: NodeId = __brandNodeId("checkpoint_invalid_node");
-
-/** Compact rendering of an identifier for error messages. Note: string
- * inputs are preserved UNMODIFIED — the rejected bytes must survive into the
- * additive `invalidRunId` / `invalidNodeId` diagnostics. Log-line bounding is
- * `safeDiagnosticRender`'s job (`render` below); never log the raw field. */
-const stringOf = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  try {
-    return String(value);
-  } catch {
-    return "<unprintable>";
-  }
-};
+// Truthful-branding placeholders (the grammar-valid locations a rejected raw
+// id cannot truthfully inhabit) and the total raw-byte renderer are the
+// CANONICAL exports in `types/error-factories.ts` — imported above, so the
+// naming rule has one encoding across every `checkpoint-write-failed`
+// construction site (the public factory, the in-memory adapter, this codec).
+// The rejected bytes remain available in the additive `invalidRunId` /
+// `invalidNodeId` diagnostics; log-line bounding is `render`'s job.
 
 const render = safeDiagnosticRender;
 const messageOf = safeErrorMessage;
@@ -112,10 +106,10 @@ export const writeFailed = (
   // unparseable" — the three cases are a chain, so they read as one.
   const nodeId = nodeIdRaw === undefined
     ? META_RECORD_NODE_ID
-    : nodeIdValid ? __brandNodeId(nodeIdRaw) : INVALID_NODE_ID;
+    : nodeIdValid ? __brandNodeId(nodeIdRaw) : CHECKPOINT_INVALID_NODE_ID;
   return {
     kind: "checkpoint-write-failed",
-    runId: runIdValid ? __brandRunId(runIdRaw) : INVALID_RUN_ID,
+    runId: runIdValid ? __brandRunId(runIdRaw) : CHECKPOINT_INVALID_RUN_ID,
     nodeId,
     ...(!runIdValid ? { invalidRunId: stringOf(runIdRaw) } : {}),
     ...(nodeIdRaw !== undefined && !nodeIdValid

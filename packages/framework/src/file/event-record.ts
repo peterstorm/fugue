@@ -90,15 +90,16 @@
 // on-disk data may be corrupt through no fault of the caller.
 //
 // Pure module — no I/O (INV-1; only framework-core imports — no Node
-// built-ins: `layout.js` constants, `state-machine/serialize.js`
+// built-ins: `layout.js` (constants + the `sequenceDomainError` rule),
+// `state-machine/serialize.js`
 // (`toJson`/`serializeValue`/`deserializeValue`/`deepJsonEqual`/
-// `validateSerializedValueGrammar`), `checkpoint/composite-node-key.js`
-// (`isNonNegativeSafeInteger`), `types/result.js`, `types/safe-error.js`,
+// `validateSerializedValueGrammar`), `types/result.js`, `types/safe-error.js`,
 // `./boundary-error.js`).
 
 import {
   JOURNAL_SCHEMA_VERSION,
   MAX_LEXICOGRAPHIC_SEQUENCE,
+  sequenceDomainError,
 } from "./layout.js";
 // The reserved-tag and pollution-key sets are the serializer's own (ONE
 // encoding in state-machine/serialize.ts, shared with the checkpointer
@@ -135,7 +136,6 @@ import {
 } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
 import { ok, err, tryCatch } from "../types/result.js";
-import { isNonNegativeSafeInteger } from "../checkpoint/composite-node-key.js";
 import { safeDiagnosticRender, safeDiagnosticString, safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
 
@@ -242,13 +242,13 @@ export const isDedupKey = (value: unknown): value is DedupKey =>
 export const parseJournalSequence = (
   value: unknown,
 ): Result<JournalSequence, string> => {
-  if (!isNonNegativeSafeInteger(value)) {
-    return err(`sequence must be a non-negative safe integer, got ${render(value)} (FR-009)`);
-  }
-  if (value > MAX_LEXICOGRAPHIC_SEQUENCE) {
-    return err(
-      `sequence ${render(value)} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the codec and naming layer share one sequence domain (FR-009)`,
-    );
+  const violation = sequenceDomainError(value);
+  if (violation !== null) {
+    return violation.clause === "not-a-safe-integer"
+      ? err(`sequence must be a non-negative safe integer, got ${violation.rendered} (FR-009)`)
+      : err(
+          `sequence ${violation.rendered} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the codec and naming layer share one sequence domain (FR-009)`,
+        );
   }
   return ok(value as JournalSequence);
 };
@@ -767,10 +767,9 @@ export const tryParseEventRecordJson = (
  * losslessly — the canonical rejection inventory is `assertLosslessEvent`'s
  * contract; see that function's doc for the full list (per the module
  * header's pointer policy, copies drift) — each rejection names the
- * offending kind and path.
- * These losses are invisible to a round-trip comparison (`serializeValue`
- * drops the same things on both sides), so they are refused BEFORE any
- * JSON is produced: silent loss is unrepresentable at the write boundary.
+ * offending kind and path. Why the pre-scan runs BEFORE any JSON is produced
+ * (the round-trip check cannot see these losses): the module header states
+ * the canonical argument — per its pointer policy, copies drift.
  *
  * After the pre-scan, the JSON is ROUND-TRIP-VERIFIED (FR-009): `toJson`
  * runs inside `tryCatch` (an unexpected engine error still yields THIS
@@ -790,19 +789,17 @@ const serializeFileEventRecordUnchecked = (
   event: unknown,
 ): string => {
   // FR-009 write-boundary pre-scan FIRST: reject any event value the
-  // serializer cannot represent losslessly. The round-trip check cannot see
-  // these losses — serializeValue strips/drops identically on both
-  // comparison sides — so they must be refused before any JSON is produced.
+  // serializer cannot represent losslessly — the round-trip check cannot see
+  // these losses (canonical argument: module header) — so they must be
+  // refused before any JSON is produced.
   assertLosslessEventUnchecked(event);
 
-  if (!isNonNegativeSafeInteger(sequence)) {
+  const violation = sequenceDomainError(sequence);
+  if (violation !== null) {
     throw new Error(
-      `serializeFileEventRecord: sequence must be a non-negative safe integer, got ${render(sequence)}`,
-    );
-  }
-  if (sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
-    throw new Error(
-      `serializeFileEventRecord: sequence ${sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — a 7-digit prefix would sort before "999999-" and break sorted-listing = append order (ADR-0076, FR-009)`,
+      violation.clause === "not-a-safe-integer"
+        ? `serializeFileEventRecord: sequence must be a non-negative safe integer, got ${violation.rendered}`
+        : `serializeFileEventRecord: sequence ${violation.rendered} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — a 7-digit prefix would sort before "999999-" and break sorted-listing = append order (ADR-0076, FR-009)`,
     );
   }
   const keyError = dedupKeyError(dedupKey);

@@ -166,16 +166,26 @@ export const createPathResolvingMsGraphAdapter = (
     if (opts?.signal?.aborted) {
       return err(frameworkError.aborted(`SharePoint path resolution aborted: ${url.split("?")[0]}`));
     }
+    let tokenError: string | null = null;
     const token = await (async () => {
       try {
         return await config.getAccessToken();
-      } catch {
+      } catch (e) {
+        // Preserve the provider's cause: the standard token provider throws
+        // precise, actionable messages (endpoint host, HTTP status, missing
+        // access_token) — collapsing them into a constant would force the
+        // operator to re-derive the cause by hand. The stock adapter's twin
+        // preserves the cause the same way.
+        tokenError = e instanceof Error ? e.message : String(e);
         return "";
       }
     })();
     if (token.length === 0) {
       return err(
-        frameworkError.transient(SP_RESOLVE_NODE_ID, "token acquisition failed for SharePoint path resolution"),
+        frameworkError.transient(
+          SP_RESOLVE_NODE_ID,
+          `token acquisition failed for SharePoint path resolution${tokenError !== null ? `: ${tokenError}` : ""}`,
+        ),
       );
     }
     let res: Response;

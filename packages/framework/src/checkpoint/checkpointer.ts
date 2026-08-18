@@ -1,11 +1,15 @@
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId, RunId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
 import { err, ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
-import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
-import { frameworkError } from "../types/error-factories.js";
+import { ID_PATTERN } from "../types/ids.js";
+import {
+  CHECKPOINT_INVALID_RUN_ID,
+  frameworkError,
+  stringOf,
+} from "../types/error-factories.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 
 /**
@@ -162,73 +166,6 @@ export interface Checkpointer {
 // --- InMemoryCheckpointer ---
 
 /**
- * Total renderer for a rejected raw boundary value: strings are carried
- * UNMODIFIED — the additive `invalidRunId`/`invalidNodeId` fields preserve
- * the rejected RAW bytes, and log-line bounding is `formatFrameworkError`'s
- * single job; non-strings stringify safely, degrading to the unprintable
- * placeholder when `toString` itself throws (FR-040). One encoding with the
- * file backend's `writeFailed` (checkpointer-codec.ts).
- */
-const stringOf = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  try {
-    return String(value);
-  } catch {
-    return "<unprintable>";
-  }
-};
-
-/**
- * Grammar-valid placeholder for a rejected raw `nodeId` — truthful branding
- * (parity with the file backend's `checkpoint-write-failed` construction): a
- * raw id that fails `ID_PATTERN` never inhabits the branded `nodeId` field;
- * the rejected bytes are preserved additively in `invalidNodeId`.
- */
-const INVALID_NODE_ID: NodeId = __brandNodeId("checkpoint_invalid_node");
-
-/** Grammar-valid placeholder for a rejected raw `runId` — identical
- * placeholder to the file backend's `writeFailed` (one naming rule). */
-const INVALID_RUN_ID: RunId = __brandRunId("checkpoint_invalid_run");
-
-/**
- * Typed `checkpoint-write-failed` for the in-memory adapter that never throws
- * on a hostile raw `runId`/`nodeId` — the port parameters are unvalidated
- * strings, so branding them unconditionally would turn a cloneable-state
- * refusal into a second raw rejection (FR-040).
- *
- * Truthful branding, in PARITY with the file backend's `writeFailed`
- * (checkpointer-codec.ts) — the policy is manually mirrored in each layer, so
- * any change to it must land on BOTH sides (the hostile-value corpus pins it
- * per backend): a raw id that fails `ID_PATTERN` never inhabits the branded
- * field; the rejected RAW bytes are preserved additively in
- * `invalidRunId`/`invalidNodeId` through the total `stringOf` renderer (no
- * pre-quoting or truncation — `formatFrameworkError` is the single bounding
- * point).
- *
- * `typeof` guard before the pattern test (parity with the file backend's
- * `writeFailed` and with `isIdComponent`/`isBoundaryId`): `RegExp.test`
- * coerces non-strings, so a bypassed numeric brand would otherwise match
- * `ID_PATTERN` and inhabit the branded field instead of routing
- * through the placeholder + `invalid*` diagnostic.
- */
-const checkpointWriteFailed = (
-  runIdRaw: string,
-  nodeIdRaw: string,
-  message: string,
-): FrameworkError => {
-  const runIdValid = typeof runIdRaw === "string" && ID_PATTERN.test(runIdRaw);
-  const nodeIdValid = typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw);
-  return {
-    kind: "checkpoint-write-failed",
-    runId: runIdValid ? __brandRunId(runIdRaw) : INVALID_RUN_ID,
-    nodeId: nodeIdValid ? __brandNodeId(nodeIdRaw) : INVALID_NODE_ID,
-    ...(runIdValid ? {} : { invalidRunId: stringOf(runIdRaw) }),
-    ...(nodeIdValid ? {} : { invalidNodeId: stringOf(nodeIdRaw) }),
-    message,
-  };
-};
-
-/**
  * Internal storage shape. `createdAt` is split out so the checkpointer owns
  * the timestamp the same way the Redis variant does (stamped at write time by
  * the writer process in `setMeta`, evaluated against `TTL_SECONDS` on load).
@@ -279,8 +216,7 @@ export class InMemoryCheckpointer implements Checkpointer {
    * expiry (a finite timestamp outside the ±100,000-year Time Value range
    * yields an Invalid `Date`; the file backend's twin rejects the identical
    * inputs; pinned in `redis-checkpointer.test.ts`). ONE encoding for
-   * `load` and `setMeta` — the pair used to be inlined twice here, and the
-   * file backend's twin consolidated the same pair in round 12.
+   * `load` and `setMeta` (the file backend's twin is the same guard).
    */
   private readClock(
     operation: "setMeta" | "load",
@@ -389,7 +325,7 @@ export class InMemoryCheckpointer implements Checkpointer {
           )
         : err({
             kind: "checkpoint-corrupt",
-            runId: INVALID_RUN_ID,
+            runId: CHECKPOINT_INVALID_RUN_ID,
             message: `stored checkpoint state could not be detached for run ${safeDiagnosticRender(runId)}: ${safeErrorMessage(error)}`,
           });
     }
@@ -415,8 +351,12 @@ export class InMemoryCheckpointer implements Checkpointer {
       // The message must render the id through the total diagnostic renderer
       // (FR-040): a hostile raw `nodeId` whose `toString` throws is caught
       // above and must not throw AGAIN inside this catch's own template.
+      // Construction goes through the public `checkpointWriteFailed` factory
+      // — the ONE truthful-branding construction path shared with the file
+      // backend (the documented exception to that module's brand-throwing
+      // default).
       return err(
-        checkpointWriteFailed(
+        frameworkError.checkpointWriteFailed(
           runId,
           nodeId,
           `state for node ${safeDiagnosticRender(nodeId)} is not cloneable (stored checkpoint state is never aliased by reference): ${safeErrorMessage(error)}`,

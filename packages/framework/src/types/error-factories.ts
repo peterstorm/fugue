@@ -2,15 +2,51 @@
 //
 // These accept plain strings for nodeId/runId and brand internally,
 // providing the parse-don't-validate boundary for consumer code that
-// constructs errors outside the framework's node factories.
+// constructs errors outside the framework's node factories. Grammar-invalid
+// ids reach the brand smart constructors, which throw (the
+// brand-constructor invariant). `checkpointWriteFailed` is the documented
+// exception: per the `checkpoint-write-failed` consumer contract
+// (types/errors.ts), a rejected raw id never inhabits the branded field — it
+// takes the truthful placeholder and the rejected bytes are preserved
+// additively in `invalidRunId`/`invalidNodeId`, never a raw throw.
 
-import { nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
+import { ID_PATTERN, nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
 import type { NodeId, RunId } from "./ids.js";
 import type { FrameworkError, MissingCapability, Retriability } from "./errors.js";
 import type { Capability } from "./node.js";
 
 const toNodeId = (nid: string | NodeId): NodeId => brandNodeId(nid as string);
 const toRunId = (rid: string | RunId): RunId => brandRunId(rid as string);
+
+/**
+ * Grammar-valid diagnostic locations used ONLY when a rejected raw id cannot
+ * inhabit the required branded field of a `checkpoint-write-failed` value
+ * (truthful branding — the ADR-0080 surface documented on the variant in
+ * `errors.ts`). THE canonical placeholders: every `checkpoint-write-failed`
+ * construction site (the public factory, the in-memory adapter, the file
+ * backend's `writeFailed`) imports these, so the naming rule has one
+ * encoding. The rejected bytes remain available in the additive
+ * `invalidRunId` / `invalidNodeId` diagnostics.
+ */
+export const CHECKPOINT_INVALID_RUN_ID: RunId = brandRunId("checkpoint_invalid_run");
+export const CHECKPOINT_INVALID_NODE_ID: NodeId = brandNodeId("checkpoint_invalid_node");
+
+/**
+ * Total renderer for a rejected raw boundary value: strings are carried
+ * UNMODIFIED — the additive `invalidRunId`/`invalidNodeId` fields preserve the
+ * rejected RAW bytes, and log-line bounding is `formatFrameworkError`'s single
+ * job; non-strings stringify safely, degrading to the unprintable placeholder
+ * when `toString` itself throws (FR-040). The ONE encoding shared by every
+ * `checkpoint-write-failed` construction site.
+ */
+export const stringOf = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  try {
+    return String(value);
+  } catch {
+    return "<unprintable>";
+  }
+};
 
 /** Ergonomic factories for constructing FrameworkError values with string node/run IDs. */
 export const frameworkError = {
@@ -103,8 +139,27 @@ export const frameworkError = {
   checkpointVersionMismatch: (rid: string | RunId, expected: string, actual: string | undefined): FrameworkError =>
     ({ kind: "checkpoint-version-mismatch", runId: toRunId(rid), expected, actual }),
 
-  checkpointWriteFailed: (rid: string | RunId, nid: string | NodeId, message: string): FrameworkError =>
-    ({ kind: "checkpoint-write-failed", runId: toRunId(rid), nodeId: toNodeId(nid), message }),
+  // Truthful branding (the documented exception to this module's
+  // brand-throwing default): a raw id that fails `ID_PATTERN` never inhabits
+  // the branded field — the canonical placeholders do, and the rejected RAW
+  // bytes are preserved additively in `invalidRunId`/`invalidNodeId` through
+  // `stringOf` (the `checkpoint-write-failed` consumer contract in `errors.ts`,
+  // parity with the file backend's `writeFailed`). `typeof` guard before the
+  // pattern test: `RegExp.test` coerces non-strings, so a bypassed numeric
+  // brand would otherwise match `ID_PATTERN` and inhabit the branded field
+  // instead of routing through the placeholder + `invalid*` diagnostic.
+  checkpointWriteFailed: (rid: string | RunId, nid: string | NodeId, message: string): FrameworkError => {
+    const runIdValid = typeof rid === "string" && ID_PATTERN.test(rid);
+    const nodeIdValid = typeof nid === "string" && ID_PATTERN.test(nid);
+    return {
+      kind: "checkpoint-write-failed",
+      runId: runIdValid ? brandRunId(rid) : CHECKPOINT_INVALID_RUN_ID,
+      nodeId: nodeIdValid ? brandNodeId(nid) : CHECKPOINT_INVALID_NODE_ID,
+      ...(!runIdValid ? { invalidRunId: stringOf(rid) } : {}),
+      ...(!nodeIdValid ? { invalidNodeId: stringOf(nid) } : {}),
+      message,
+    };
+  },
 
   // --- Structural errors ---
 

@@ -449,7 +449,7 @@ describe("createPathResolvingMsGraphAdapter — failures", () => {
     expect(countCalls(state, "/children")).toBe(0);
   });
 
-  test("token acquisition failure → transient (retriable)", async () => {
+  test("token acquisition failure → transient (retriable), preserving the provider's cause (parity with the stock adapter's token-failure surface)", async () => {
     const state = freshState();
     const handle = createPathResolvingMsGraphAdapter({
       getAccessToken: async () => {
@@ -462,8 +462,28 @@ describe("createPathResolvingMsGraphAdapter — failures", () => {
     if (!r.ok) {
       expect(r.error.kind).toBe("transient");
       if (r.error.kind === "transient") {
-        expect(r.error.message).not.toContain("client secret");
-        expect(r.error.message).not.toContain("AADSTS7000215");
+        // The cause is preserved: the standard token provider's messages are
+        // secret-free by design (endpoint host / HTTP status / AADSTS code —
+        // the client secret rides in the request body, never in a message),
+        // and the stock adapter's twin surfaces the same cause.
+        expect(r.error.message).toContain("token acquisition failed for SharePoint path resolution");
+        expect(r.error.message).toContain("AADSTS7000215");
+      }
+    }
+  });
+
+  test("an empty token (no provider throw) → transient WITHOUT a spurious cause suffix", async () => {
+    const state = freshState();
+    const handle = createPathResolvingMsGraphAdapter({
+      getAccessToken: async () => "",
+      fetchImpl: makeFakeGraph(state),
+    });
+    const r = await handle.client.getMetadata(ref("/workbooks/Brancheliste.xlsx"));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.kind).toBe("transient");
+      if (r.error.kind === "transient") {
+        expect(r.error.message).toBe("token acquisition failed for SharePoint path resolution");
       }
     }
   });

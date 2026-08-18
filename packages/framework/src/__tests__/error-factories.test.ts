@@ -135,6 +135,56 @@ describe("frameworkError factories", () => {
         expect(error.invalidNodeId).toBeUndefined();
       }
     });
+
+    it("truthful branding: an invalid raw id never inhabits the branded field — the documented placeholder takes it and the rejected RAW bytes are preserved additively", () => {
+      const error = frameworkError.checkpointWriteFailed("../escape", "not a valid id!", "disk full");
+      expect(error.kind).toBe("checkpoint-write-failed");
+      if (error.kind === "checkpoint-write-failed") {
+        expect(String(error.runId)).toBe("checkpoint_invalid_run");
+        expect(String(error.nodeId)).toBe("checkpoint_invalid_node");
+        expect(error.invalidRunId).toBe("../escape");
+        expect(error.invalidNodeId).toBe("not a valid id!");
+        expect(error.message).toBe("disk full");
+      }
+    });
+
+    it("never throws for hostile raw ids — a raw throw from an error constructor would violate the FR-040 surface (the documented invalid* case is constructable through the public factory)", () => {
+      const hostileRunId = {
+        toString: () => {
+          throw new Error("boom");
+        },
+      } as unknown as string;
+      expect(() =>
+        frameworkError.checkpointWriteFailed(hostileRunId, "ok-node", "disk full"),
+      ).not.toThrow();
+      const error = frameworkError.checkpointWriteFailed(hostileRunId, "ok-node", "disk full");
+      expect(error.kind).toBe("checkpoint-write-failed");
+      if (error.kind === "checkpoint-write-failed") {
+        expect(String(error.runId)).toBe("checkpoint_invalid_run");
+        expect(error.invalidRunId).toBe("<unprintable>");
+        expect(String(error.nodeId)).toBe("ok-node");
+        expect(error.invalidNodeId).toBeUndefined();
+      }
+    });
+
+    it("a numeric brand bypass (non-string at runtime) routes through the placeholder, not a raw throw", () => {
+      const numericRunId = 42 as unknown as string;
+      expect(() => frameworkError.checkpointWriteFailed(numericRunId, "ok-node", "disk full")).not.toThrow();
+      const error = frameworkError.checkpointWriteFailed(numericRunId, "ok-node", "disk full");
+      if (error.kind === "checkpoint-write-failed") {
+        expect(String(error.runId)).toBe("checkpoint_invalid_run");
+        expect(error.invalidRunId).toBe("42");
+        expect(String(error.nodeId)).toBe("ok-node");
+      }
+    });
+  });
+
+  describe("other factories keep the brand-constructor invariant (invalid plain strings throw)", () => {
+    it("transient still throws for a grammar-invalid nodeId — only checkpointWriteFailed is the documented exception", () => {
+      expect(() => frameworkError.transient("bad id with spaces", "nope")).toThrow();
+      const branded = frameworkError.transient(nodeId("ok-node"), "nope");
+      expect(branded.kind).toBe("transient");
+    });
   });
 
   describe("rejected", () => {

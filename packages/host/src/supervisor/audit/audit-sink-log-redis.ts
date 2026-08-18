@@ -82,8 +82,10 @@ const summarize = (rec: AuditRecord): string =>
 /**
  * Structured-log audit sink. Emits one `info` line per record with the full
  * record as structured data (so log aggregators capture actor/timestamp/tenant/
- * action). Never throws — a logger that threw is caught and dropped (a sink must
- * not crash the request path).
+ * action). Never throws — a logger that threw is caught and reported to stderr
+ * as a LAST RESORT (a sink must not crash the request path, but the floor must
+ * not be silent either: when the structured log is down AND the Redis stream is
+ * down, that breadcrumb is the only trace the record existed).
  */
 export const createLogAuditSink = (logger: LogPort): AuditPort => ({
   record: async (rec) => {
@@ -97,8 +99,18 @@ export const createLogAuditSink = (logger: LogPort): AuditPort => ({
         outcome: rec.outcome,
         ...(rec.detail !== undefined ? { detail: rec.detail } : {}),
       });
-    } catch {
-      // A logger that throws must not break the request path. Nothing else to do.
+    } catch (e) {
+      // A logger that threw must not break the request path — but the floor
+      // must not be SILENT: emit a last-resort breadcrumb that bypasses the
+      // host logger entirely. The write itself is guarded — stderr can be
+      // unavailable, and nothing further is possible in that case.
+      try {
+        process.stderr.write(
+          `[audit] LOG SINK FAILURE — record not logged: ${rec.action} tenant='${rec.tenant}': ${e instanceof Error ? e.message : String(e)}\n`,
+        );
+      } catch {
+        // stderr itself is unavailable — nothing further is possible.
+      }
     }
   },
 });

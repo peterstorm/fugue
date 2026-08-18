@@ -29,12 +29,14 @@ import { describe, test, expect, afterEach, mock } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   chmodSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -91,6 +93,23 @@ const deadPid = (): number =>
 // ---------------------------------------------------------------------------
 
 describe("atomicWriteFile", () => {
+  test("rename replaces a symlink squatting at the target path — the symlink's target is untouched (POSIX rename semantics the journal's append/checkpoint commits rely on)", () => {
+    const dir = tempDir();
+    const targetPath = join(dir, "checkpoint.json");
+    const external = join(dir, "external.json");
+    writeFileSync(external, "external bytes");
+    symlinkSync(external, targetPath);
+    expect(lstatSync(targetPath).isSymbolicLink()).toBe(true);
+
+    atomicWriteFile(targetPath, '{"v":1}');
+
+    // rename(2) replaces the directory entry itself — the symlink, not its
+    // target: the target path is now a regular file with the new snapshot.
+    expect(lstatSync(targetPath).isSymbolicLink()).toBe(false);
+    expect(readFileSync(targetPath, "utf-8")).toBe('{"v":1}');
+    expect(readFileSync(external, "utf-8")).toBe("external bytes"); // untouched
+  });
+
   test("commits new content via tmp+rename, leaving no litter", () => {
     const dir = tempDir();
     const target = join(dir, "checkpoint.json");

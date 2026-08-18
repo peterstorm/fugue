@@ -21,7 +21,7 @@
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type { FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
-import { __brandWitness } from "../types/freshness.js";
+import { FRESHNESS_TTL_SECONDS, __brandWitness } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -29,7 +29,6 @@ import { ok, err } from "../types/result.js";
 import { __brandRunId, __brandNodeId } from "../types/ids.js";
 import { fwLogger } from "../logger.js";
 
-const TTL_SECONDS = 86_400; // 24h — matches checkpoint TTL
 const KEY_PREFIX = "fugue:freshness:";
 
 /**
@@ -139,7 +138,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
           key,
           score,
           member,
-          String(TTL_SECONDS),
+          String(FRESHNESS_TTL_SECONDS),
         );
       } catch (e) {
         // NOSCRIPT — fall back to inline EVAL and re-prime the SHA.
@@ -151,7 +150,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
             key,
             score,
             member,
-            String(TTL_SECONDS),
+            String(FRESHNESS_TTL_SECONDS),
           );
         } else {
           throw e;

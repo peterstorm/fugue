@@ -52,6 +52,26 @@
 // typed throwing channel: `cache-error` with the exact operation and durable
 // path. No plain runtime exception crosses this exported shell (FR-040).
 //
+// Symlink policy (deliberate divergence from the file checkpointer, pinned in
+// `file-journal.test.ts` — the read/write read-through — and `file-atomic.
+// test.ts` — the rename-replaces-symlink mechanism): the journal FOLLOWS
+// symlinks. `listEventFiles`
+// `statSync`s each record name (following), a symlinked `events/` directory
+// is listed and written through, and `atomicWriteFile`'s rename replaces
+// whatever entry — symlink included — sits at the target path. The
+// checkpointer instead establishes a NON-SYMLINK TRUST ANCHOR per
+// `verified-directory.ts` (rejecting symlinked or swapped entries and
+// re-proving directory identity around its address-then-use I/O); the journal
+// does not need that mechanism because its trust boundary is the caller's run
+// directory — a writer inside it can already forge record bytes directly, so
+// symlink rejection would buy no security, only divergence — and its record
+// names are digest-addressed by the layout contract, not caller-controlled
+// path material (the same trust argument the freshness index documents).
+// If the checkpointer's symlink rejection is ever extended to the journal, the
+// pins in `file-journal.test.ts` / `file-atomic.test.ts` are the behavior to
+// update — they make this divergence test-visible instead of a silent
+// resume-behavior change.
+//
 // Import discipline (INV-1): `node:fs`, `node:path` only among node built-ins.
 
 import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";

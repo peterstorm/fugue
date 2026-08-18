@@ -1,9 +1,12 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import { createApp } from "../server.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
-import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, runId as mkRunId } from "@fuguejs/framework";
+import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, runId as mkRunId, type Checkpointer } from "@fuguejs/framework";
+import { createFileCheckpointer } from "@fuguejs/framework/file";
 import { SummaryResponseSchema } from "../schemas/response.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const fixturesDir = join(import.meta.dir, "../../fixtures/customers");
@@ -18,7 +21,7 @@ const makeSynthesisOutput = () => ({
   customerSatisfaction: "satisfied" as const,
 });
 
-const createTestApp = (cp: InMemoryCheckpointer = new InMemoryCheckpointer()) => {
+const createTestApp = (cp: Checkpointer = new InMemoryCheckpointer()) => {
   const source = new JsonFixtureSource(fixturesDir);
   // FakeLlmClient keyed by model name used in synthesize node
   const llm = new FakeLlmClient(
@@ -104,145 +107,193 @@ describe("POST /summarize", () => {
   });
 
   describe("resume_run_id principal binding", () => {
-    const createAppWithCheckpointer = (cp: InMemoryCheckpointer) => createTestApp(cp);
+    // NFR-020 backend-swap pin (pr-test-analyzer): the consumer's resume flow
+    // (load + error-kind → HTTP mapping + subject binding + fingerprint/version
+    // gates) must hold for ANY Checkpointer backend — the file backend is the F6
+    // production one, and this handler is the only production resume consumer.
+    // The Redis leg is pinned at the port level by the shared `checkpointerSuite`
+    // (SC-001); the app-level test does not bring up Redis.
+    const fileDirs: string[] = [];
+    const backends: ReadonlyArray<readonly [name: string, create: () => Checkpointer]> = [
+      ["in-memory", () => new InMemoryCheckpointer()],
+      [
+        "file",
+        () => {
+          const dir = mkdtempSync(join(tmpdir(), "server-resume-file-"));
+          fileDirs.push(dir);
+          return createFileCheckpointer(dir);
+        },
+      ],
+    ];
 
-    test("fresh run writes meta with subject = customer_id", async () => {
-      const cp = new InMemoryCheckpointer();
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", { customer_id: "cust-001" });
-      expect(res.status).toBe(200);
-      // After the run completes the only way to inspect meta is via load against
-      // any runId — but we don't know the generated runId here. Smoke-check the
-      // happy path; the IDOR test below directly exercises the principal check.
+    afterEach(() => {
+      for (const dir of fileDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
     });
 
-    test("resume with mismatched customer_id returns 404 and does NOT replay outputs", async () => {
-      const cp = new InMemoryCheckpointer();
-      const id = currentDagIdentity();
+    for (const [backendName, createCp] of backends) {
+      describe(backendName, () => {
+        const createAppWithCheckpointer = (cp: Checkpointer) => createTestApp(cp);
 
-      // Pre-seed a checkpoint owned by victim "cust-001"
-      const victimRunId = mkRunId("victim-run-id-123");
-      await cp.setMeta(victimRunId, {
-        dagId: id.dagId,
-        startedAt: new Date(),
-        nodeCount: id.nodeCount,
-        subject: "cust-001",
-        dagFingerprint: id.dagFingerprint,
-        frameworkVersion: id.frameworkVersion,
-      });
-      await cp.saveNode(victimRunId, "fetch-crm", {
-        nodeId: "fetch-crm",
-        output: { customer: { customerId: "cust-001", secret: "victim-data" } },
-        completedAt: new Date(),
-      });
+        test("fresh run writes meta with subject = customer_id", async () => {
+          const cp = createCp();
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", { customer_id: "cust-001" });
+          expect(res.status).toBe(200);
+          // After the run completes the only way to inspect meta is via load against
+          // any runId — but we don't know the generated runId here. Smoke-check the
+          // happy path; the IDOR test below directly exercises the principal check.
+        });
 
-      const app = createAppWithCheckpointer(cp);
-      // Attacker uses a different customer_id but the victim's runId
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-attacker",
-        resume_run_id: victimRunId,
-      });
+        test("resume with mismatched customer_id returns 404 and does NOT replay outputs", async () => {
+          const cp = createCp();
+          const id = currentDagIdentity();
 
-      expect(res.status).toBe(404);
-      const json = await res.json();
-      expect(json.error).toBe("Run not found");
-    });
+          // Pre-seed a checkpoint owned by victim "cust-001"
+          const victimRunId = mkRunId("victim-run-id-123");
+          await cp.setMeta(victimRunId, {
+            dagId: id.dagId,
+            startedAt: new Date(),
+            nodeCount: id.nodeCount,
+            subject: "cust-001",
+            dagFingerprint: id.dagFingerprint,
+            frameworkVersion: id.frameworkVersion,
+          });
+          await cp.saveNode(victimRunId, "fetch-crm", {
+            nodeId: "fetch-crm",
+            output: { customer: { customerId: "cust-001", secret: "victim-data" } },
+            completedAt: new Date(),
+          });
 
-    test("resume with unknown runId returns 404", async () => {
-      const cp = new InMemoryCheckpointer();
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-001",
-        resume_run_id: "does-not-exist",
-      });
-      expect(res.status).toBe(404);
-    });
+          const app = createAppWithCheckpointer(cp);
+          // Attacker uses a different customer_id but the victim's runId
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-attacker",
+            resume_run_id: victimRunId,
+          });
 
-    test("resume with matching subject succeeds", async () => {
-      const cp = new InMemoryCheckpointer();
-      const runId = mkRunId("owner-run-id");
-      const id = currentDagIdentity();
-      await cp.setMeta(runId, {
-        dagId: id.dagId,
-        startedAt: new Date(),
-        nodeCount: id.nodeCount,
-        subject: "cust-001",
-        dagFingerprint: id.dagFingerprint,
-        frameworkVersion: id.frameworkVersion,
-      });
+          expect(res.status).toBe(404);
+          const json = await res.json();
+          expect(json.error).toBe("Run not found");
+        });
 
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-001",
-        resume_run_id: runId,
-      });
-      expect(res.status).toBe(200);
-    });
+        test("resume with unknown runId returns 404", async () => {
+          const cp = createCp();
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-001",
+            resume_run_id: "does-not-exist",
+          });
+          expect(res.status).toBe(404);
+        });
 
-    test("resume rejects with 409 on dagFingerprint mismatch (codex finding #2)", async () => {
-      const cp = new InMemoryCheckpointer();
-      const runId = mkRunId("fp-mismatch-run");
-      const id = currentDagIdentity();
-      await cp.setMeta(runId, {
-        dagId: id.dagId,
-        startedAt: new Date(),
-        nodeCount: id.nodeCount,
-        subject: "cust-001",
-        dagFingerprint: "deadbeef-stale-fingerprint",
-        frameworkVersion: id.frameworkVersion,
-      });
+        test("resume with matching subject succeeds", async () => {
+          const cp = createCp();
+          const runId = mkRunId("owner-run-id");
+          const id = currentDagIdentity();
+          await cp.setMeta(runId, {
+            dagId: id.dagId,
+            startedAt: new Date(),
+            nodeCount: id.nodeCount,
+            subject: "cust-001",
+            dagFingerprint: id.dagFingerprint,
+            frameworkVersion: id.frameworkVersion,
+          });
 
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-001",
-        resume_run_id: runId,
-      });
-      expect(res.status).toBe(409);
-      const json = await res.json();
-      expect(json.error).toBe("Checkpoint incompatible with current DAG");
-    });
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-001",
+            resume_run_id: runId,
+          });
+          expect(res.status).toBe(200);
+        });
 
-    test("resume rejects with 409 on frameworkVersion mismatch", async () => {
-      const cp = new InMemoryCheckpointer();
-      const runId = mkRunId("fwver-mismatch-run");
-      const id = currentDagIdentity();
-      await cp.setMeta(runId, {
-        dagId: id.dagId,
-        startedAt: new Date(),
-        nodeCount: id.nodeCount,
-        subject: "cust-001",
-        dagFingerprint: id.dagFingerprint,
-        frameworkVersion: "0", // older framework version
-      });
+        test("resume rejects with 409 on dagFingerprint mismatch (codex finding #2)", async () => {
+          const cp = createCp();
+          const runId = mkRunId("fp-mismatch-run");
+          const id = currentDagIdentity();
+          await cp.setMeta(runId, {
+            dagId: id.dagId,
+            startedAt: new Date(),
+            nodeCount: id.nodeCount,
+            subject: "cust-001",
+            dagFingerprint: "deadbeef-stale-fingerprint",
+            frameworkVersion: id.frameworkVersion,
+          });
 
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-001",
-        resume_run_id: runId,
-      });
-      expect(res.status).toBe(409);
-    });
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-001",
+            resume_run_id: runId,
+          });
+          expect(res.status).toBe(409);
+          const json = await res.json();
+          expect(json.error).toBe("Checkpoint incompatible with current DAG");
+        });
 
-    test("resume rejects with 409 when meta predates fingerprint binding", async () => {
-      // Pre-fingerprint checkpoints have subject set but no dagFingerprint or
-      // frameworkVersion. They must not be replayed against the current DAG.
-      const cp = new InMemoryCheckpointer();
-      const runId = mkRunId("preFp-run");
-      await cp.setMeta(runId, {
-        dagId: "customer-summary",
-        startedAt: new Date(),
-        nodeCount: 5,
-        subject: "cust-001",
-        // no dagFingerprint, no frameworkVersion
-      });
+        test("resume rejects with 409 on frameworkVersion mismatch", async () => {
+          const cp = createCp();
+          const runId = mkRunId("fwver-mismatch-run");
+          const id = currentDagIdentity();
+          await cp.setMeta(runId, {
+            dagId: id.dagId,
+            startedAt: new Date(),
+            nodeCount: id.nodeCount,
+            subject: "cust-001",
+            dagFingerprint: id.dagFingerprint,
+            frameworkVersion: "0", // older framework version
+          });
 
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-001",
-        resume_run_id: runId,
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-001",
+            resume_run_id: runId,
+          });
+          expect(res.status).toBe(409);
+        });
+
+        test("resume rejects with 409 when meta predates fingerprint binding", async () => {
+          // Pre-fingerprint checkpoints have subject set but no dagFingerprint or
+          // frameworkVersion. They must not be replayed against the current DAG.
+          const cp = createCp();
+          const runId = mkRunId("preFp-run");
+          await cp.setMeta(runId, {
+            dagId: "customer-summary",
+            startedAt: new Date(),
+            nodeCount: 5,
+            subject: "cust-001",
+            // no dagFingerprint, no frameworkVersion
+          });
+
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-001",
+            resume_run_id: runId,
+          });
+          expect(res.status).toBe(409);
+        });
+
+        test("resume against legacy meta (no subject) returns 404", async () => {
+          const cp = createCp();
+          const id = currentDagIdentity();
+          const runId = mkRunId("legacy-run-id");
+          await cp.setMeta(runId, {
+            dagId: id.dagId,
+            startedAt: new Date(),
+            nodeCount: id.nodeCount,
+            dagFingerprint: id.dagFingerprint,
+            frameworkVersion: id.frameworkVersion,
+            // no subject — pre-fix data
+          });
+
+          const app = createAppWithCheckpointer(cp);
+          const res = await post(app, "/summarize", {
+            customer_id: "cust-001",
+            resume_run_id: runId,
+          });
+          expect(res.status).toBe(404);
+        });
       });
-      expect(res.status).toBe(409);
-    });
+    }
 
     test("/summarize returns 503 when checkpointer is null (codex finding #1)", async () => {
       const source = new JsonFixtureSource(fixturesDir);
@@ -272,26 +323,6 @@ describe("POST /summarize", () => {
       expect(res.status).toBe(503);
     });
 
-    test("resume against legacy meta (no subject) returns 404", async () => {
-      const cp = new InMemoryCheckpointer();
-      const id = currentDagIdentity();
-      const runId = mkRunId("legacy-run-id");
-      await cp.setMeta(runId, {
-        dagId: id.dagId,
-        startedAt: new Date(),
-        nodeCount: id.nodeCount,
-        dagFingerprint: id.dagFingerprint,
-        frameworkVersion: id.frameworkVersion,
-        // no subject — pre-fix data
-      });
-
-      const app = createAppWithCheckpointer(cp);
-      const res = await post(app, "/summarize", {
-        customer_id: "cust-001",
-        resume_run_id: runId,
-      });
-      expect(res.status).toBe(404);
-    });
   });
 
   test("all response variants match SummaryResponseSchema", async () => {

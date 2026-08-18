@@ -532,6 +532,38 @@ describe("@fuguejs/oracle — healthCheckWithTimeout", () => {
     }
   });
 
+  it("a late rejection after the timeout is LOGGED (credential-stripped) for diagnostics — the verdict is unchanged", async () => {
+    const warns: string[] = [];
+    const original = console.warn;
+    console.warn = (msg?: unknown): void => {
+      warns.push(String(msg));
+    };
+    try {
+      const lateRejector: OracleQueryable = {
+        execute: () =>
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error("ORA-03113: end-of-file on communication channel for scott/tiger@db:1521/ORCL")),
+              30,
+            ),
+          ),
+      };
+      const result = await healthCheckWithTimeout(lateRejector, 10);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) expect(result.error).toContain("timed out after 10ms");
+
+      // Give the in-flight execute time to reject so the late-cause handler runs.
+      await new Promise((r) => setTimeout(r, 80));
+      expect(warns.some((w) => w.includes("late probe failure after timeout"))).toBe(true);
+      const warn = warns.find((w) => w.includes("late probe failure after timeout"))!;
+      expect(warn).toContain("ORA-03113"); // the root cause is diagnosable
+      expect(warn).not.toContain("scott/tiger@"); // credential-stripped, like the rest of this file
+      expect(warn).toContain("***@db:1521/ORCL");
+    } finally {
+      console.warn = original;
+    }
+  });
+
   it("strips credentials from a health-check error", async () => {
     const result = await healthCheckWithTimeout(
       queryableThatThrows(oraError("login failed scott/tiger@db:1521/ORCL")),

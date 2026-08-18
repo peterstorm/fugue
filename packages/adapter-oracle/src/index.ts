@@ -531,9 +531,20 @@ export const healthCheckWithTimeout = async (
   // later rejection — a hung connection eventually erroring, or the production
   // seam's `conn.close()` throwing in `finally` — becomes a process-level
   // unhandledRejection AFTER we already returned Err(timeout). Swallow it with
-  // intent: the timeout result has already been decided.
+  // intent: the timeout result has already been decided — but do not let the
+  // late cause VANISH: log it (credential-stripped, like the rest of this
+  // file) so the operator can see WHY the probe exceeded the budget (ORA-03113
+  // / ORA-03135, pool exhaustion, …) instead of guessing. Diagnostics must
+  // never throw: a failing log must not replace the decided verdict.
   const executePromise = queryable.execute("SELECT 1 FROM DUAL", {});
-  executePromise.catch(() => {});
+  executePromise.catch((lateError: unknown) => {
+    try {
+      const msg = lateError instanceof Error ? lateError.message : String(lateError);
+      console.warn(`[oracle] health check: late probe failure after timeout: ${stripCredentials(msg)}`);
+    } catch {
+      // ignore: a failing diagnostic must not mask anything — the verdict is final.
+    }
+  });
   try {
     await Promise.race([
       executePromise,

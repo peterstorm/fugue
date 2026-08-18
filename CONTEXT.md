@@ -122,6 +122,8 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 
 (Other features' AD codes — e.g. the queue-bullmq/state-machine AD-3/AD-4 references — belong to their own spec's plan and are not part of this mapping.)
 
+(FR/SC/NFR numbers in host-pod comments — `packages/host/src/supervisor/` — cite the 2026-06-18 multi-tenant-single-host spec and are qualified in the code as `multi-tenant spec FR-xxx`. The F6 spec assigns the same numbers to different requirements (e.g. F6 FR-021 = composite node-key extension, F6 SC-006 = boundary imports), so an unqualified number grep returns two meanings — the qualification in the comment is the disambiguation.)
+
 ### Architecture Layers
 
 | Layer | Imports From | Responsibility |

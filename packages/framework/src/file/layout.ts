@@ -51,6 +51,7 @@ import { createHash } from "node:crypto";
 import { ID_PATTERN } from "../types/ids.js";
 import { isNonNegativeSafeInteger } from "../checkpoint/composite-node-key.js";
 import { toJson } from "../state-machine/serialize.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
 
 // ---------------------------------------------------------------------------
@@ -200,6 +201,33 @@ const pad6 = (sequence: number): string => String(sequence).padStart(6, "0");
 export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
 
 /**
+ * THE single encoding of the journal's durable sequence-domain rule
+ * (FR-009/ADR-0076): a non-negative safe integer at most
+ * `MAX_LEXICOGRAPHIC_SEQUENCE` — the one rule shared by the codec
+ * (`serializeFileEventRecord`, `parseJournalSequence`) and the naming/digest
+ * layers (`eventFileName`, `eventDigestOf`), mirroring the sibling dedupKey
+ * rule's one-encoding discipline (`dedupKeyError`). Returns `null` when valid,
+ * otherwise WHICH clause fires plus the hostile-safe rendering of the value
+ * (`safeDiagnosticRender` — a hostile non-integer must never be raw
+ * interpolated: rendering can execute traps; a safe integer renders
+ * identically to raw interpolation). Each consuming site composes its own
+ * pinned message around this shared verdict — the tails intentionally name
+ * the consuming layer.
+ */
+export const sequenceDomainError = (value: unknown):
+  | { readonly clause: "not-a-safe-integer"; readonly rendered: string }
+  | { readonly clause: "exceeds-ceiling"; readonly rendered: string }
+  | null => {
+  if (!isNonNegativeSafeInteger(value)) {
+    return { clause: "not-a-safe-integer", rendered: safeDiagnosticRender(value) };
+  }
+  if (value > MAX_LEXICOGRAPHIC_SEQUENCE) {
+    return { clause: "exceeds-ceiling", rendered: safeDiagnosticRender(value) };
+  }
+  return null;
+};
+
+/**
  * Event-record filename for the journal: `${pad6(sequence)}-${digest}.json`.
  * The zero-padded sequence prefix makes lexicographic (sorted) listing equal
  * append order — but ONLY within the 6-digit ceiling: `"1000000-…"` would
@@ -215,14 +243,12 @@ export const MAX_LEXICOGRAPHIC_SEQUENCE = 999_999;
  * silently corrupt the durable log's ordering/dedup keys.
  */
 const eventFileNameUnchecked = (sequence: number, digest: string): string => {
-  if (!isNonNegativeSafeInteger(sequence)) {
+  const violation = sequenceDomainError(sequence);
+  if (violation !== null) {
     throw new Error(
-      `eventFileName: sequence must be a non-negative safe integer, got ${sequence}`,
-    );
-  }
-  if (sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
-    throw new Error(
-      `eventFileName: sequence ${sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — a 7-digit prefix would sort before "999999-" and break sorted-listing = append order`,
+      violation.clause === "not-a-safe-integer"
+        ? `eventFileName: sequence must be a non-negative safe integer, got ${violation.rendered}`
+        : `eventFileName: sequence ${violation.rendered} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — a 7-digit prefix would sort before "999999-" and break sorted-listing = append order`,
     );
   }
   if (!/^[0-9a-f]{64}$/.test(digest)) {
@@ -293,14 +319,12 @@ const eventDigestOfUnchecked = (record: {
   readonly sequence: number;
   readonly event: unknown;
 }): string => {
-  if (!isNonNegativeSafeInteger(record.sequence)) {
+  const violation = sequenceDomainError(record.sequence);
+  if (violation !== null) {
     throw new Error(
-      `eventDigestOf: sequence must be a non-negative safe integer — the same domain guard as eventFileName — got ${record.sequence}`,
-    );
-  }
-  if (record.sequence > MAX_LEXICOGRAPHIC_SEQUENCE) {
-    throw new Error(
-      `eventDigestOf: sequence ${record.sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the digest and filename layers share one durable sequence domain`,
+      violation.clause === "not-a-safe-integer"
+        ? `eventDigestOf: sequence must be a non-negative safe integer — the same domain guard as eventFileName — got ${violation.rendered}`
+        : `eventDigestOf: sequence ${violation.rendered} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} — the digest and filename layers share one durable sequence domain`,
     );
   }
   return record.dedupKey !== ""

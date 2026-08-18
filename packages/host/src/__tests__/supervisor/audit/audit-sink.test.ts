@@ -173,6 +173,26 @@ describe("log sink", () => {
     const sink = createLogAuditSink({ info: () => { throw new Error("boom"); }, warn: () => {}, error: () => {} });
     await expect(sink.record(rec())).resolves.toBeUndefined();
   });
+
+  it("a throwing logger is reported to stderr as a LAST RESORT — the floor is never silent (action/tenant + cause captured, bypassing the host logger)", async () => {
+    const written: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const sink = createLogAuditSink({ info: () => { throw new Error("logger broke"); }, warn: () => {}, error: () => {} });
+      await expect(sink.record(rec())).resolves.toBeUndefined();
+      expect(written).toHaveLength(1);
+      expect(written[0]!).toContain("LOG SINK FAILURE");
+      expect(written[0]!).toContain("register"); // the record's action
+      expect(written[0]!).toContain("acme"); // the record's tenant
+      expect(written[0]!).toContain("logger broke"); // the cause, not a silent drop
+    } finally {
+      process.stderr.write = original;
+    }
+  });
 });
 
 describe("redis-stream sink (never-throw contract)", () => {
