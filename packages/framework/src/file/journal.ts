@@ -92,9 +92,10 @@ import {
 import {
   parseJournalSequence,
   parseOptionalDedupKey,
+  parseRecordedAtMs,
   serializeFileEventRecord,
 } from "./event-record.js";
-import type { FileEventRecord } from "./event-record.js";
+import type { FileEventRecord, RecordedAtMs } from "./event-record.js";
 import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
@@ -360,15 +361,15 @@ export const createFileJournal = (
         // filesystem — name it explicitly so a throwing or non-finite clock
         // is diagnosed as a clock failure, not misattributed to the lock
         // machinery or the record codec (parity with the checkpointer and
-        // freshness-index clock guards).
-        let recordedAtMs: number;
+        // freshness-index clock guards). The stamp is minted through
+        // `parseRecordedAtMs` — the record codec's single finiteness clause
+        // — so the journal can never hand the serializer a value the strict
+        // reader would reject.
+        let recordedAtMs: RecordedAtMs;
         try {
-          recordedAtMs = now();
-          if (!Number.isFinite(recordedAtMs)) {
-            throw new Error(
-              `clock returned a non-finite timestamp ${safeDiagnosticRender(recordedAtMs)}`,
-            );
-          }
+          const parsedStamp = parseRecordedAtMs(now());
+          if (!parsedStamp.ok) throw new Error(parsedStamp.error);
+          recordedAtMs = parsedStamp.value;
         } catch (error) {
           // Deterministic: a clock that throws or stamps non-finite fails
           // identically on every retry of the same append — the same class

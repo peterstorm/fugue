@@ -134,7 +134,7 @@ const runEnd = (runId: string, dagId: string, status: "ok" | "error", duration: 
   ({ type: "run-end", runId, dagId, status, duration, timestamp: new Date() } as unknown as ObserverEvent);
 
 // ---------------------------------------------------------------------------
-// Default path (no Foundry) — byte-for-byte unchanged (SC-006 / FR-003 / FR-027)
+// Default path (no Foundry) — byte-for-byte unchanged (observability spec SC-006 / FR-003 / FR-027)
 // ---------------------------------------------------------------------------
 describe("composeObservability — default (MLflow-only) path", () => {
   const resolved: ResolvedObservability = { kind: "mlflow-only", traceBackends: ["mlflow"] };
@@ -179,7 +179,7 @@ describe("composeObservability — Foundry-only path", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Dual-export path — order + both backends (FR-002 / FR-011)
+// Dual-export path — order + both backends (observability spec FR-002 / FR-011)
 // ---------------------------------------------------------------------------
 describe("composeObservability — dual-export path", () => {
   const resolved: ResolvedObservability = {
@@ -209,9 +209,9 @@ describe("composeObservability — dual-export path", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Policy sharing — discarded trace produces NO domain events (FR-021 / SC-010)
+// Policy sharing — discarded trace produces NO domain events (observability spec FR-021 / SC-010)
 // ---------------------------------------------------------------------------
-describe("composeObservability — shared policy gating (FR-021 / SC-010)", () => {
+describe("composeObservability — shared policy gating (observability spec FR-021 / SC-010)", () => {
   const resolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
@@ -253,9 +253,9 @@ describe("composeObservability — shared policy gating (FR-021 / SC-010)", () =
 });
 
 // ---------------------------------------------------------------------------
-// SC-008 — full run summary (nodeCount / retryCount / cacheHitCount)
+// observability spec SC-008 — full run summary (nodeCount / retryCount / cacheHitCount)
 // ---------------------------------------------------------------------------
-describe("FoundryRunSummaryObserver — full FR-019 summary (SC-008)", () => {
+describe("FoundryRunSummaryObserver — full observability spec FR-019 summary (observability spec SC-008)", () => {
   test("run-end emits ONE summary carrying nodeCount/retryCount/cacheHitCount", () => {
     const { sink, events, metrics } = recordingSink();
     const obs = new FoundryRunSummaryObserver(sink);
@@ -343,7 +343,7 @@ describe("foundrySinkOver — Application Insights adapter", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createAppInsightsClient — auth translation (FR-022 / FR-023)
+// createAppInsightsClient — auth translation (observability spec FR-022 / FR-023)
 // BOTH modes build an ISOLATED client (useGlobalProviders:false); entra-id adds
 // a credential via config.aadTokenCredential — NO global useAzureMonitor distro,
 // so the sink never collides with the framework's global TracerProvider.
@@ -394,7 +394,7 @@ describe("createAppInsightsClient — auth translation", () => {
       { mode: "entra-id", connectionString: nes("InstrumentationKey=entra") },
       r.seams,
     );
-    // The credential factory IS invoked (FR-023).
+    // The credential factory IS invoked (observability spec FR-023).
     expect(r.credentialInvocations).toBe(1);
     // The credential is applied to the SAME isolated client (config.aadTokenCredential),
     // not configured through a global pipeline.
@@ -526,7 +526,7 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
 
 // ---------------------------------------------------------------------------
 // Fix 4 — Foundry construction failure must NOT disable MLflow tracing
-// (FR-026 / SC-006 / SC-009)
+// (observability spec FR-026 / SC-006 / SC-009)
 // ---------------------------------------------------------------------------
 describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", () => {
   const dualResolved: ResolvedObservability = {
@@ -655,7 +655,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
 
 // ---------------------------------------------------------------------------
 // Bootstrap wiring — ONE shared persistence-policy instance reaches BOTH the
-// trace pipeline (initTracing) and the domain-event observer (FR-021 / SC-010).
+// trace pipeline (initTracing) and the domain-event observer (observability spec FR-021 / SC-010).
 //
 // The composition layer above proves the observer gates on its given policy, and
 // init.test.ts proves initTracing exposes the policy it was handed. The gap this
@@ -665,7 +665,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
 // wiring (resolveFoundryLeg → composeObservability → initTracing) with a SINGLE
 // policy const and assert the instance is shared end-to-end.
 // ---------------------------------------------------------------------------
-describe("bootstrap wiring — single shared policy instance (FR-021 / SC-010)", () => {
+describe("bootstrap wiring — single shared policy instance (observability spec FR-021 / SC-010)", () => {
   const dualResolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],

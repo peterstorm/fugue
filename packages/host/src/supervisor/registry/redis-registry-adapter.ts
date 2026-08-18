@@ -1,10 +1,10 @@
 /**
  * Redis-backed tenant registry adapter — the IMPERATIVE SHELL around the pure
- * `tenant-registry.ts` core (FR-022, FR-023, FR-024, AD-5).
+ * `tenant-registry.ts` core (multi-tenant spec FR-022, FR-023, FR-024, AD-5).
  *
  * RESPONSIBILITIES (I/O only; all decision logic stays in the pure core):
  *   - Persist each tenant's config under `fugue:tenants:<id>` as JSON (a secrets
- *     REFERENCE only — NEVER a secret value, AD-6 / FR-005).
+ *     REFERENCE only — NEVER a secret value, AD-6 / multi-tenant spec FR-005).
  *   - On register / deregister / reconfigure, write Redis AND publish a
  *     lifecycle event on the `fugue:tenants:events` pub/sub channel so the
  *     supervisor (and, on its NEXT spawn, each worker) observes the change
@@ -12,7 +12,7 @@
  *     records state + announces it; it does NOT hot-swap a running worker.
  *   - Hydrate the in-memory registry from Redis on startup.
  *
- * FAIL-CLOSED WIRING (FR-022 / FR-023 — reuse the existing degraded machine):
+ * FAIL-CLOSED WIRING (multi-tenant spec FR-022 / FR-023 — reuse the existing degraded machine):
  *   On ANY Redis failure (read, write, OR publish returning `!ok`, or a thrown
  *   error) the adapter:
  *     1. surfaces `redisUnavailable(...)` — the SAME `redis-unavailable`
@@ -23,14 +23,14 @@
  *        does NOT build a parallel degraded state.
  *   A successful operation invokes `onRedisAlive` (wired to `redisRecovered`),
  *   mirroring the liveness probe's edge-agnostic callbacks. The supervisor then
- *   refuses to start NEW runs while degraded (FR-022) but does NOT tear down
- *   live workers — already-running workers keep serving in-flight work (FR-023),
+ *   refuses to start NEW runs while degraded (multi-tenant spec FR-022) but does NOT tear down
+ *   live workers — already-running workers keep serving in-flight work (multi-tenant spec FR-023),
  *   because this adapter NEVER kills a worker; it only writes/reads/publishes.
  *   It NEVER throws: a thrown Redis client error is caught and converted to the
  *   same fail-closed `redis-unavailable` Result.
  *
- * The pure core is the source of truth for idempotency (SC-009) and the
- * fail-closed unknown-tenant lookup (FR-022); this shell delegates every state
+ * The pure core is the source of truth for idempotency (multi-tenant spec SC-009) and the
+ * fail-closed unknown-tenant lookup (multi-tenant spec FR-022); this shell delegates every state
  * transition to it and only persists/announces the RESULT.
  */
 
@@ -273,33 +273,33 @@ export interface RedisTenantRegistry {
    * SNAPSHOT read of an ACTIVE tenant's config; fail-closed for
    * unknown/deregistered. This is the IN-FLIGHT / read-only / status path: it
    * reads the in-memory snapshot and is NOT blocked while Redis is degraded, so
-   * already-admitted work keeps resolving its tenant (FR-023). NEW-run admission
-   * must NOT use this — it must use `resolveForNewRun` (see below, FR-022).
+   * already-admitted work keeps resolving its tenant (multi-tenant spec FR-023). NEW-run admission
+   * must NOT use this — it must use `resolveForNewRun` (see below, multi-tenant spec FR-022).
    */
   readonly lookup: (id: TenantId) => Result<ActiveTenantConfig, HostError>;
   /**
-   * FAIL-CLOSED NEW-RUN resolution seam (FR-022). While Redis is degraded this
+   * FAIL-CLOSED NEW-RUN resolution seam (multi-tenant spec FR-022). While Redis is degraded this
    * returns `redis-unavailable` so the supervisor refuses to start a NEW run on
    * possibly-stale config; otherwise it delegates to the fail-closed core lookup.
    *
    * The supervisor's NEW-run admission gate (the routing seam that builds the
    * `AdmissionDecision` fed to `routeRequest`) MUST call this — NOT `lookup` — so
    * a new run is never routed on last-known config after Redis
-   * dies. In-flight / status paths keep using `lookup` (FR-023). Note that
+   * dies. In-flight / status paths keep using `lookup` (multi-tenant spec FR-023). Note that
    * `canServeRequests` (host-state.ts) must NOT be widened to block on this: it
    * intentionally returns true while degraded so cached/in-flight work keeps
-   * being served (FR-023); only NEW-run admission fails closed here.
+   * being served (multi-tenant spec FR-023); only NEW-run admission fails closed here.
    */
   readonly resolveForNewRun: (id: TenantId) => Result<ActiveTenantConfig, HostError>;
   /**
-   * INBOUND degraded signal (FR-022). The registry's own write/hydrate ops flip
+   * INBOUND degraded signal (multi-tenant spec FR-022). The registry's own write/hydrate ops flip
    * `degraded` on Redis failure, but the SUPERVISOR's data path is read-only and
    * its Redis liveness PROBE (`redis-probe.ts`) is what first observes Redis
    * death/recovery. Wiring that probe to this method makes `resolveForNewRun`
    * fail closed (→ 503) the moment the probe sees Redis DOWN — so NEW runs are
    * refused while degraded even though no registry WRITE has occurred — and
    * recover when the probe sees Redis back. In-flight/status (`lookup`) and
-   * `canServeRequests` are intentionally NOT affected (FR-023).
+   * `canServeRequests` are intentionally NOT affected (multi-tenant spec FR-023).
    */
   readonly markRedisDegraded: (dead: boolean) => void;
   readonly register: (cfg: ActiveTenantConfig, now: number) => Promise<Result<void, HostError>>;
@@ -307,7 +307,7 @@ export interface RedisTenantRegistry {
   readonly reconfigure: (cfg: ActiveTenantConfig, now: number) => Promise<Result<void, HostError>>;
   /**
    * HARD-DELETE a tenant's retained (tombstoned) record — the FINAL step of the
-   * grace-window purge (T10, FR-030). Distinct from `deregister`, which only
+   * grace-window purge (T10, multi-tenant spec FR-030). Distinct from `deregister`, which only
    * tombstones-and-retains: this REMOVES the `fugue:tenants:<id>` key entirely and
    * advances the in-memory view, so the tenant no longer appears in the registry
    * at all. Idempotent (deleting an absent record is a no-op success) and
@@ -328,7 +328,7 @@ export const createRedisTenantRegistry = (
 ): RedisTenantRegistry => {
   let registry = seed;
   // The host's degraded edge, mirrored here so `resolveForNewRun` can fail closed
-  // (FR-022) WITHOUT reaching back into host-state.ts. It is split by SIGNAL SOURCE:
+  // (multi-tenant spec FR-022) WITHOUT reaching back into host-state.ts. It is split by SIGNAL SOURCE:
   //   - `writeDegraded` is SET by the write/hydrate path (`dead()`) on a Redis write
   //     failure and cleared by `alive()` on the next SUCCESSFUL write/hydrate.
   //   - `probeDegraded` is owned by the liveness-probe edge (`markRedisDegraded`),
@@ -422,7 +422,7 @@ export const createRedisTenantRegistry = (
     lookup: (id) => coreLookup(registry, id),
 
     resolveForNewRun: (id) =>
-      // FR-022 fail-closed: refuse to resolve a NEW run on possibly-stale config
+      // multi-tenant spec FR-022 fail-closed: refuse to resolve a NEW run on possibly-stale config
       // while Redis is down (per EITHER signal); else delegate to the core lookup.
       writeDegraded || probeDegraded
         ? err(redisUnavailable("tenant-resolve"))
@@ -430,7 +430,7 @@ export const createRedisTenantRegistry = (
 
     markRedisDegraded: (isDead) => {
       // Drive the probe-owned `probeDegraded` flag `resolveForNewRun` also consults,
-      // so the supervisor's liveness probe gates NEW-run admission (FR-022) without a
+      // so the supervisor's liveness probe gates NEW-run admission (multi-tenant spec FR-022) without a
       // registry write. We do NOT fire the onRedisDead/onRedisAlive hooks here:
       // those drive the host-state degraded MACHINE, which the supervisor's probe
       // already drives directly (avoiding a double-transition).

@@ -1,6 +1,6 @@
 /**
  * Supervisor routing — the PURE core that decides where an inbound, already-
- * authenticated + already-tenant-resolved request goes (FR-004, US3).
+ * authenticated + already-tenant-resolved request goes (multi-tenant spec FR-004, US3).
  *
  * STRICTLY NO I/O. No Redis, no clock, no fs, no socket. Every input — the
  * resolved `Tenant`, the worker-presence view, the new-run admission decision —
@@ -9,13 +9,13 @@
  * property-testable, and keeps the imperative shell (`supervisor.ts`) free of
  * any branching logic that could drift between the tested core and the wire.
  *
- * SECURITY (FR-004, FR-008, FR-040/041 — no cross-tenant leakage):
+ * SECURITY (multi-tenant spec FR-004, FR-008, FR-040/041 — no cross-tenant leakage):
  *   - A `route` decision ALWAYS targets the socket of the resolved tenant's OWN
  *     worker (`workerSocketPath(udsDir, tenant.id)`), computed from the branded,
  *     `:`/glob-free `TenantId` so the path can never escape `udsDir` into another
- *     tenant's socket (FR-004 — never route to a worker that does not own the
+ *     tenant's socket (multi-tenant spec FR-004 — never route to a worker that does not own the
  *     tenant). There is NO code path that targets a different tenant's socket.
- *   - This core holds NO shared cross-tenant state (FR-008): it is a pure
+ *   - This core holds NO shared cross-tenant state (multi-tenant spec FR-008): it is a pure
  *     function of its arguments. The only tenant data it touches is the SINGLE
  *     resolved `Tenant` handed to it for THIS request.
  *   - Every refusal is one of the established host errors (`tenant-unknown` 404,
@@ -39,7 +39,7 @@ import { workerSocketPath } from "../domain/config.js";
  *
  *   - `live`     — a worker for this tenant is up; route to its socket.
  *   - `unavailable` — the worker is crashed / draining / could-not-be-ensured.
- *     Fail closed to 503 for THIS tenant only (FR-041, AD-8).
+ *     Fail closed to 503 for THIS tenant only (multi-tenant spec FR-041, AD-8).
  */
 export type WorkerPresence =
   | { readonly kind: "live"; readonly socketPath: string }
@@ -54,14 +54,14 @@ export type WorkerPresence =
  *
  *   - `admitted`  — the tenant is active and under its admission ceiling.
  *   - `unknown`   — `resolveForNewRun` failed closed (unknown/deregistered
- *     tenant, OR Redis degraded — FR-022). Rendered as `tenant-unknown` (404)
+ *     tenant, OR Redis degraded — multi-tenant spec FR-022). Rendered as `tenant-unknown` (404)
  *     so a degraded-registry refusal is indistinguishable from an unknown
- *     tenant and leaks nothing about other tenants (FR-040).
- *   - `over-quota` — the tenant exceeded its OWN ceiling (SC-012). Carries the
+ *     tenant and leaks nothing about other tenants (multi-tenant spec FR-040).
+ *   - `over-quota` — the tenant exceeded its OWN ceiling (multi-tenant spec SC-012). Carries the
  *     per-tenant backoff for the 429 Retry-After.
  *   - `unavailable` — admission could not be decided because the registry is
  *     fail-closed in a way that maps to a tenant-scoped 503. RESERVED, and it
- *     must STAY reserved for the degraded-registry case: INVARIANT (FR-040) — a
+ *     must STAY reserved for the degraded-registry case: INVARIANT (multi-tenant spec FR-040) — a
  *     DEGRADED registry (`resolveForNewRun` failing closed on a Redis outage)
  *     MUST map to `unknown` (404, non-leaking), NEVER `unavailable` (503). A 503
  *     would confirm the tenant EXISTS (only its worker is down), letting a caller
@@ -91,7 +91,7 @@ export type RouteDecision =
 // ── Pure routing ─────────────────────────────────────────────────────────────
 
 /**
- * Decide where a request for the resolved `tenant` goes (FR-004, FR-008).
+ * Decide where a request for the resolved `tenant` goes (multi-tenant spec FR-004, FR-008).
  *
  * PURE + TOTAL + FAIL-CLOSED. The order is admission FIRST, then worker
  * presence:
@@ -125,7 +125,7 @@ export const routeRequest = (
       kind: "refuse",
       // RESERVED arm (see `AdmissionDecision.unavailable`): only ever a
       // worker-scoped 503 for a tenant that PASSED admission — never a degraded-
-      // registry refusal, which must stay `unknown`/404 per FR-040.
+      // registry refusal, which must stay `unknown`/404 per multi-tenant spec FR-040.
       error: workerUnavailable(tenant.id),
     }))
     .with({ kind: "admitted" }, (): RouteDecision =>
@@ -144,7 +144,7 @@ export const routeRequest = (
     .exhaustive();
 
 /**
- * The canonical owning-worker socket for a resolved tenant (FR-004). A thin,
+ * The canonical owning-worker socket for a resolved tenant (multi-tenant spec FR-004). A thin,
  * pure wrapper over `workerSocketPath` that takes the BRANDED `Tenant` (so the
  * id is guaranteed `:`/glob-free and the path cannot escape `udsDir`). The
  * supervisor uses this to build the `live` `WorkerPresence` it feeds back into

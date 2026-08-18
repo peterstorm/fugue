@@ -132,7 +132,7 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 
 (Other features' AD codes — e.g. the queue-bullmq/state-machine AD-3/AD-4 references — belong to their own spec's plan and are not part of this mapping.)
 
-(FR/SC/NFR numbers in host-pod comments — `packages/host/src/supervisor/` — cite the 2026-06-18 multi-tenant-single-host spec and are qualified in the code as `multi-tenant spec FR-xxx`. The F6 spec assigns the same numbers to different requirements (e.g. F6 FR-021 = composite node-key extension, F6 SC-006 = boundary imports), so an unqualified number grep returns two meanings — the qualification in the comment is the disambiguation.)
+(FR/SC/NFR numbers in host-pod comments (`packages/host/src/supervisor/`) and app comments (`apps/customer-summary/src/`) cite their owning spec and are qualified in the code as `<spec> FR-xxx` — `multi-tenant spec FR-xxx` (2026-06-18 single-host), `observability spec FR-xxx` (2026-05-30 Foundry), `F6 spec FR-xxx`, `host spec FR-xxx` (2026-05-20), `ai-summary spec FR-xxx` (2026-04-28), `keycloak-entra spec NFR-xxx` (2026-06-16). The specs assign the same numbers to different requirements (e.g. multi-tenant FR-028 = audit records, F6 FR-028 = corrupt-node drop, observability FR-028 = off-critical-path export), so an unqualified number grep returns several meanings — the qualification in the comment is the disambiguation. A grouped citation takes one qualifier for the group: `(multi-tenant spec FR-032, SC-011)`.)
 
 ### Architecture Layers
 

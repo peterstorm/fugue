@@ -117,6 +117,40 @@ export function checkpointerSuite(
       }
     });
 
+    // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a LEGAL
+    // nodeId, and the Checkpointer seam's shared save→load contract is that
+    // every saved node round-trips as an OWN entry with the returned map
+    // un-reparented. A plain bracket assignment in any adapter's `load` would
+    // hit `Object.prototype`'s `__proto__` SETTER: no own entry, no
+    // `corruptNodeIds` trace, no error — a silent re-execution on resume.
+    // Lifted into the shared suite in round-17 (previously pinned per-adapter
+    // in file-checkpointer.test.ts and the in-memory block of
+    // redis-checkpointer.test.ts, which the Redis leg itself never ran) so
+    // every leg — including the opt-in Redis leg — is held to the same
+    // contract by the suite that defines it.
+    test("saveNode round-trips a prototype-named nodeId (__proto__) as an OWN entry, un-reparented", async () => {
+      await cp.setMeta(R("hostile-proto"), {
+        dagId: D("d"),
+        startedAt: new Date("2025-01-01T00:00:00Z"),
+        nodeCount: 1,
+        subject: "s",
+        frameworkVersion: FRAMEWORK_VERSION,
+      });
+      const saved = await cp.saveNode(R("hostile-proto"), N("__proto__"), {
+        nodeId: N("__proto__"),
+        output: { value: 1 },
+        completedAt: new Date(),
+      });
+      expect(saved.ok).toBe(true);
+      const loaded = await cp.load(R("hostile-proto"));
+      if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
+      expect(Object.hasOwn(loaded.value.nodes, "__proto__")).toBe(true);
+      expect(loaded.value.nodes["__proto__"].output).toEqual({ value: 1 });
+      expect(loaded.value.nodes["__proto__"].nodeId).toBe(N("__proto__"));
+      // The map itself was never re-parented by the `__proto__` entry.
+      expect(Object.getPrototypeOf(loaded.value.nodes)).toBe(Object.prototype);
+    });
+
     test("saveNode/setMeta snapshot at write time: post-call caller mutation cannot rewrite stored state", async () => {
       // Write-time snapshot parity across every backend: file/Redis serialize
       // at write time; in-memory detaches on both write paths (saveNode and

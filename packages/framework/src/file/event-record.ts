@@ -146,6 +146,7 @@ import { fileOperationError } from "./boundary-error.js";
 
 declare const journalSequenceBrand: unique symbol;
 declare const dedupKeyBrand: unique symbol;
+declare const recordedAtMsBrand: unique symbol;
 
 /** Validated position in the durable journal's six-digit sequence domain. */
 export type JournalSequence = number & {
@@ -155,6 +156,19 @@ export type JournalSequence = number & {
 /** Validated keyed dedup identity, or the explicit keyless empty sentinel. */
 export type DedupKey = string & {
   readonly [dedupKeyBrand]: "DedupKey";
+};
+
+/**
+ * Wall-clock milliseconds of a journal append, validated at the boundary.
+ * The clause is FINITE-NESS (not sign): negative finite values are accepted
+ * — pre-epoch timestamps are representable (pinned contract). Distinct from
+ * the checkpointer's `isRepresentableTimestampMs` domain (the D6 two-domain
+ * split): a record's stamp is whatever a finite clock produced; the
+ * checkpointer's timestamp domain additionally bounds representability for
+ * the TTL/expiry math it performs on loaded state.
+ */
+export type RecordedAtMs = number & {
+  readonly [recordedAtMsBrand]: "RecordedAtMs";
 };
 
 /** One immutable event record as stored in the journal (ADR-0076 schema). */
@@ -170,10 +184,12 @@ export interface FileEventRecord {
   readonly sequence: JournalSequence;
   /** "" (keyless) or an FR-015 key: `^[A-Za-z0-9:_-]{1,256}$`, no "|". */
   readonly dedupKey: DedupKey;
-  /** Wall-clock milliseconds of the append; must be finite. Negative finite
-   * values ARE accepted — pre-epoch timestamps are representable (pinned
-   * contract: the check is finite-ness, not sign). */
-  readonly recordedAtMs: number;
+  /** Wall-clock milliseconds of the append — a `RecordedAtMs` (finite;
+   * negative finite values ARE accepted — pre-epoch timestamps are
+   * representable, the clause is finite-ness not sign). Minted by
+   * `parseRecordedAtMs`, the single finiteness clause shared by the write
+   * and read sides. */
+  readonly recordedAtMs: RecordedAtMs;
   /**
    * Any losslessly-serializable value EXCEPT top-level `undefined` (the
    * read path treats an undefined event as missing, and the write side
@@ -258,6 +274,19 @@ export const parseJournalSequence = (
 export const parseDedupKey = (value: unknown): Result<DedupKey, string> => {
   const failure = dedupKeyError(value);
   return failure === null ? ok(value as DedupKey) : err(failure);
+};
+
+/** Parse a hostile runtime value into the journal's recordedAtMs type.
+ * THE single finiteness clause for the record's timestamp domain — the write
+ * boundary (`serializeFileEventRecord`) and the read boundary
+ * (`parseFileEventRecord`) derive their rejections from this one encoding,
+ * and the journal mints its stamp through it at the clock seam. Negative
+ * finite values are valid (pre-epoch); the clause is finite-ness, not sign. */
+export const parseRecordedAtMs = (value: unknown): Result<RecordedAtMs, string> => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return err(`recordedAtMs must be a finite number, got ${render(value)} (FR-009)`);
+  }
+  return ok(value as RecordedAtMs);
 };
 
 /**
@@ -785,10 +814,9 @@ const serializeFileEventRecordUnchecked = (
   if (keyError !== null) {
     throw new Error(`serializeFileEventRecord: ${keyError}`);
   }
-  if (typeof recordedAtMs !== "number" || !Number.isFinite(recordedAtMs)) {
-    throw new Error(
-      `serializeFileEventRecord: recordedAtMs must be a finite number, got ${render(recordedAtMs)} (FR-009)`,
-    );
+  const parsedRecordedAtMs = parseRecordedAtMs(recordedAtMs);
+  if (!parsedRecordedAtMs.ok) {
+    throw new Error(`serializeFileEventRecord: ${parsedRecordedAtMs.error}`);
   }
   if (event === undefined) {
     throw new Error(
@@ -943,11 +971,8 @@ const parseFileEventRecordUnchecked = (
   const parsedDedupKey = parseDedupKey(dedupKey);
   if (!parsedDedupKey.ok) return err(`${source}: ${parsedDedupKey.error}`);
 
-  if (typeof recordedAtMs !== "number" || !Number.isFinite(recordedAtMs)) {
-    return err(
-      `${source}: recordedAtMs must be a finite number, got ${render(recordedAtMs)} (FR-009)`,
-    );
-  }
+  const parsedRecordedAtMs = parseRecordedAtMs(recordedAtMs);
+  if (!parsedRecordedAtMs.ok) return err(`${source}: ${parsedRecordedAtMs.error}`);
 
   if (event === undefined) {
     return err(`${source}: missing event field (FR-009)`);
@@ -972,7 +997,7 @@ const parseFileEventRecordUnchecked = (
     schemaVersion: JOURNAL_SCHEMA_VERSION,
     sequence: parsedSequence.value,
     dedupKey: parsedDedupKey.value,
-    recordedAtMs,
+    recordedAtMs: parsedRecordedAtMs.value,
     event,
   });
 };

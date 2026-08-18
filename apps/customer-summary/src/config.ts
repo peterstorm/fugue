@@ -27,13 +27,13 @@ const ConfigSchema = z.object({
   // persists everything (dev only); 0.1 = 10% sampling for production.
   TRACE_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(0.1),
 
-  // ── Observability backend selection (FR-001 … FR-006, FR-022, FR-023) ──────
+  // ── Observability backend selection (observability spec FR-001 … FR-006, FR-022, FR-023) ──────
   //
   // Trace backend(s), comma-separated. One = exclusive, two = dual export
-  // (FR-002). MLflow is the DEFAULT so behavior is identical to the current
-  // setup when nothing is configured (FR-003). Validated against the known
+  // (observability spec FR-002). MLflow is the DEFAULT so behavior is identical to the current
+  // setup when nothing is configured (observability spec FR-003). Validated against the known
   // set {mlflow, foundry}; unknown tokens, blank entries, and duplicates are
-  // rejected at startup (fail-closed, FR-006) rather than silently ignored.
+  // rejected at startup (fail-closed, observability spec FR-006) rather than silently ignored.
   // Parsed into a frozen, deduped, order-preserving tuple of TraceBackend.
   OBSERVABILITY_TRACE_BACKENDS: z
     .string()
@@ -80,7 +80,7 @@ const ConfigSchema = z.object({
       return Object.freeze(backends) as TraceBackends;
     }),
 
-  // Application Insights connection string (FR-022). Optional at the schema
+  // Application Insights connection string (observability spec FR-022). Optional at the schema
   // level because it is only REQUIRED when foundry is selected; the cross-field
   // refinement below enforces that. `asNonEmptyString` normalizes blank →
   // undefined so `APPLICATIONINSIGHTS_CONNECTION_STRING=` (set-but-empty) is
@@ -93,16 +93,16 @@ const ConfigSchema = z.object({
     .transform((v) => (v === undefined ? undefined : asNonEmptyString(v))),
 
   // Auth mode for the Foundry (Application Insights) exporter.
-  // Default = connection-string (FR-022); entra-id is opt-in (FR-023) and uses
+  // Default = connection-string (observability spec FR-022); entra-id is opt-in (observability spec FR-023) and uses
   // the default Azure credential mechanism downstream.
   AZURE_AUTH_MODE: z.enum(["connection-string", "entra-id"]).default("connection-string"),
 
-  // Eval backend selector (FR-004/FR-005). MLflow is the default eval backend.
+  // Eval backend selector (observability spec FR-004/FR-005). MLflow is the default eval backend.
   // "both" runs evals against MLflow and Foundry. The eval CLI selector consumes
   // this key; here we only add the key + validation.
   EVAL_BACKEND: z.enum(["mlflow", "foundry", "both"]).default("mlflow"),
 })
-  // ── Cross-field, fail-closed validation at STARTUP (FR-006) ────────────────
+  // ── Cross-field, fail-closed validation at STARTUP (observability spec FR-006) ────────────────
   //
   // When foundry is selected as a trace backend it MUST have usable auth.
   // The Azure Monitor SDK needs the Application Insights connection string to
@@ -124,7 +124,7 @@ const ConfigSchema = z.object({
     }
   });
 
-/** A selectable trace backend. One = exclusive export, two = dual export (FR-002). */
+/** A selectable trace backend. One = exclusive export, two = dual export (observability spec FR-002). */
 export type TraceBackend = "mlflow" | "foundry";
 
 /**

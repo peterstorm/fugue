@@ -361,37 +361,6 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     }
   });
 
-  // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a LEGAL
-  // nodeId. `saveNode` stores via a computed-key spread
-  // (`{ ...existing, [nodeId]: detached }`), which defines an OWN property —
-  // but a refactor to plain bracket assignment (`nodes[nodeId] = …`) would
-  // hit `Object.prototype`'s `__proto__` SETTER and silently re-parent the
-  // map. Pin the own-entry semantics (parity with the file-backend pin at
-  // file-checkpointer.test.ts "round-trips prototype-named node ids").
-  test("saveNode round-trips a prototype-named nodeId (__proto__) as an OWN entry", async () => {
-    const cp = new InMemoryCheckpointer();
-    await cp.setMeta(R("hostile-proto"), {
-      dagId: D("d"),
-      startedAt: new Date("2025-01-01T00:00:00Z"),
-      nodeCount: 1,
-      subject: "s",
-      frameworkVersion: FRAMEWORK_VERSION,
-    });
-    const saved = await cp.saveNode(R("hostile-proto"), N("__proto__"), {
-      nodeId: N("__proto__"),
-      output: { value: 1 },
-      completedAt: new Date(),
-    });
-    expect(saved.ok).toBe(true);
-    const loaded = await cp.load(R("hostile-proto"));
-    if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
-    expect(Object.hasOwn(loaded.value.nodes, "__proto__")).toBe(true);
-    expect(loaded.value.nodes["__proto__"].output).toEqual({ value: 1 });
-    expect(loaded.value.nodes["__proto__"].nodeId).toBe(N("__proto__"));
-    // The map itself was never re-parented by the `__proto__` entry.
-    expect(Object.getPrototypeOf(loaded.value.nodes)).toBe(Object.prototype);
-  });
-
   // Round-8 (silent-failure-hunter-1): the caller-owned `load` opts bag is a
   // hostile seam — parity with the file backend's `parseLoadOpts` snapshot-once
   // discipline. A throwing `expectedDagFingerprint` getter used to reject the

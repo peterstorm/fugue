@@ -1,8 +1,7 @@
 // Pure meta/node/options codecs for the file `Checkpointer` backend
-// (FR-016/FR-020..FR-029, ADR-0075/ADR-0076/ADR-0080), extracted from `checkpointer.ts`
-// during the 2026-08-14 codec-separation remediation (pure core split from
-// the I/O shell — review run
-// .claude/reviews/review-and-fix-runs/standalone-2026-08-14-f6-file-durable-runtime).
+// (FR-016/FR-020..FR-029, ADR-0075/ADR-0076/ADR-0080), extracted from
+// `checkpointer.ts` during the 2026-08-14 codec-separation remediation
+// (pure core split from the I/O shell).
 //
 // This module is the PURE half of the adapter — the functional core:
 //

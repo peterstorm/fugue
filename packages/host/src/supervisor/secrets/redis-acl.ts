@@ -1,7 +1,7 @@
 /**
  * Redis ACL spec — PURE construction of a per-tenant Redis ACL user (AD-4).
  *
- * THE HEART OF CROSS-TENANT ISOLATION (FR-009, FR-010, SC-001, US2):
+ * THE HEART OF CROSS-TENANT ISOLATION (multi-tenant spec FR-009, FR-010, SC-001, US2):
  *   ONE Redis server backs every tenant. Each worker receives a Redis ACL
  *   credential scoped to ONLY its own tenant's key prefix `~fugue:<tenant>:*`.
  *   A compromised worker running `GET fugue:<other>:…` is refused with NOPERM —

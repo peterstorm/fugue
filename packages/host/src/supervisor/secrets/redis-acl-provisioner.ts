@@ -17,7 +17,7 @@
  *     `apply` call and the caller's immediate handoff. (See `AppliedAclCredential`
  *     and `CREDENTIAL HANDOFF CONTRACT` below.)
  *
- * FAIL-CLOSED (FR-009, FR-010, SC-001): every admin command returns
+ * FAIL-CLOSED (multi-tenant spec FR-009, FR-010, SC-001): every admin command returns
  * `Result<_, HostError>`. On any `!ok` admin response the provisioner returns
  * `err(redis-unavailable)` — it never proceeds, never returns a credential for a
  * user that may not have been created, and never half-provisions silently.
@@ -69,7 +69,7 @@ export type RedisAclAdminPort = {
 /**
  * The SECRET credential `apply` returns for handoff to the worker spawn-env channel.
  *
- * CREDENTIAL HANDOFF CONTRACT (AD-6, FR-005/FR-006, SC-002):
+ * CREDENTIAL HANDOFF CONTRACT (AD-6, multi-tenant spec FR-005/FR-006, SC-002):
  *   - This value is the ONLY place the minted password ever materializes.
  *   - The caller MUST hand it to the owning worker's spawn-env channel (SEPARATE
  *     from the `SecretsSource` env-file port) and then drop the reference. The

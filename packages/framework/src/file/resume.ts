@@ -23,14 +23,7 @@
 //      ⇒ typed `cache-error` BEFORE any file-backend I/O — never a branded
 //      field that would fail the pattern, never a path addressed outside
 //      `directory`, never a CWD-relative read for `directory: ""`.
-//   1. Read the AUTHORITATIVE representation — the event log — through the
-//      shared strict reader (`readFileEvents`, FR-009). A missing events
-//      directory reads as an EMPTY log (`ok([])`); any corrupt record,
-//      sequence break, or filename mismatch fails closed here with the file
-//      named in the message (ADR-0077 step 1). Every reader failure is
-//      re-tagged `checkpoint-corrupt` per ADR-0080 (below): the log cannot be
-//      proven ⇒ fail closed.
-//   2. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
+//   1. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
 //      job; a missing file is `null`). `readCheckpoint` THROWS a typed
 //      `FrameworkError` (`cache-error`) on genuine fs failure (the `JobLike`
 //      port contract, ADR-0080); that typed value is propagated unchanged — an
@@ -41,6 +34,29 @@
 //      journal implementation is NOT assumed to keep the typed contract) is
 //      re-tagged `checkpoint-corrupt` — never smuggled across the boundary
 //      as typed.
+//   2. Read the AUTHORITATIVE representation — the event log — through the
+//      shared strict reader (`readFileEvents`, FR-009). A missing events
+//      directory reads as an EMPTY log (`ok([])`); any corrupt record,
+//      sequence break, or filename mismatch fails closed here with the file
+//      named in the message (ADR-0077 step 2). Every reader failure is
+//      re-tagged `checkpoint-corrupt` per ADR-0080 (below): the log cannot be
+//      proven ⇒ fail closed.
+//
+// The acquisition ORDER is part of the contract (ADR-0077, amended 2026-08-18):
+// the projection is read BEFORE the log. The kernel commits each append as two
+// separate atomic renames — the log record FIRST, then the checkpoint
+// projection (FR-005). A log-first reader of a LIVE writer can list the log
+// before the Nth record rename and read the checkpoint after it: a checkpoint
+// STRICTLY AHEAD of its own log snapshot — the mirror of the benign lag
+// window, which the proof's strict-prefix scan does not accept and would
+// verdict `checkpoint-corrupt` on a healthy run. Checkpoint-first makes the
+// pair monotone for every append-first writer — checkpoint(t₁) ≤ log(t₁) ≤
+// log(t₂) — so a concurrent reader can only ever observe an agreeing or
+// LAGGING checkpoint: exactly the space the proof accepts. The returned state
+// is unchanged (always the full log replay); what the order changes is which
+// failure a resumer sees when BOTH seams are broken at once — an unreadable
+// `checkpoint.json` now surfaces its typed `cache-error` ahead of a
+// simultaneously corrupt log (pinned in `file-resume.test.ts`).
 //   3. No recoverable state (FR-014): no event files AND no checkpoint.json
 //      — a missing or empty run directory. `checkpoint-missing`, never a
 //      silent fresh start. (A checkpoint alone, or events alone, IS
@@ -207,30 +223,19 @@ const resumeFileJobUnchecked = async <S, E, C>(
     );
   }
 
-  // 1. Read the AUTHORITATIVE representation — the event log — through the
-  //    shared strict reader (FR-009). A missing events directory reads as an
-  //    EMPTY log (`ok([])`); any corrupt record, sequence break, or filename
-  //    mismatch fails closed here with the file named in the message (ADR-0077
-  //    step 1). Every reader failure is re-tagged `checkpoint-corrupt` per
-  //    ADR-0080 (see the module header): the log cannot be proven ⇒ fail closed.
-  const events = readFileEvents(directory);
-  if (!events.ok) {
-    // `messageOf` narrows: some `FrameworkError` variants (e.g.
-    // `checkpoint-missing`) carry no `message` field. The reader's message —
-    // which names the offending file and reason — must ride inside
-    // `checkpoint-corrupt`.
-    return err(frameworkError.checkpointCorrupt(runId, messageOf(events.error)));
-  }
-
-  // 2. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
-  //    job; a missing file is `null`). `readCheckpoint` throws a typed
-  //    `FrameworkError` (`cache-error`) on genuine fs failure — that typed
-  //    value is propagated unchanged: an unreadable checkpoint file is an
-  //    environment failure, not a corruption verdict. The catch narrows
-  //    before relabeling (FR-040): ONLY a value the runtime guard
-  //    recognizes as a typed `FrameworkError` rides through unchanged; any
-  //    other throw (a hostile or version-drifted journal implementation is
-  //    NOT assumed to keep the typed contract) is re-tagged
+  // 1. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
+  //    job; a missing file is `null`) — BEFORE the authoritative log, the
+  //    ADR-0077 acquisition contract (amended 2026-08-18; the interleaving
+  //    argument is in the module header): a log-first acquisition could
+  //    observe a live writer's projection ahead of its own log snapshot, the
+  //    one direction the proof's strict-prefix scan does not accept.
+  //    `readCheckpoint` throws a typed `FrameworkError` (`cache-error`) on
+  //    genuine fs failure — that typed value is propagated unchanged: an
+  //    unreadable checkpoint file is an environment failure, not a corruption
+  //    verdict. The catch narrows before relabeling (FR-040): ONLY a value
+  //    the runtime guard recognizes as a typed `FrameworkError` rides through
+  //    unchanged; any other throw (a hostile or version-drifted journal
+  //    implementation is NOT assumed to keep the typed contract) is re-tagged
   //    `checkpoint-corrupt` — never smuggled across the boundary as typed.
   let checkpointJson: string | null;
   try {
@@ -243,6 +248,24 @@ const resumeFileJobUnchecked = async <S, E, C>(
         `readCheckpoint threw a non-FrameworkError: ${safeErrorMessage(error)}`,
       ),
     );
+  }
+
+  // 2. Read the AUTHORITATIVE representation — the event log — through the
+  //    shared strict reader (FR-009). A missing events directory reads as an
+  //    EMPTY log (`ok([])`); any corrupt record, sequence break, or filename
+  //    mismatch fails closed here with the file named in the message (ADR-0077
+  //    step 2). Every reader failure is re-tagged `checkpoint-corrupt` per
+  //    ADR-0080 (see the module header): the log cannot be proven ⇒ fail
+  //    closed. Acquired AFTER the projection so a concurrent reader of a live
+  //    append-first writer can only ever observe an agreeing or lagging
+  //    checkpoint — never one ahead of the log snapshot (module header).
+  const events = readFileEvents(directory);
+  if (!events.ok) {
+    // `messageOf` narrows: some `FrameworkError` variants (e.g.
+    // `checkpoint-missing`) carry no `message` field. The reader's message —
+    // which names the offending file and reason — must ride inside
+    // `checkpoint-corrupt`.
+    return err(frameworkError.checkpointCorrupt(runId, messageOf(events.error)));
   }
 
   // 3. No recoverable state (FR-014): no event files AND no checkpoint.json

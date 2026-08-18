@@ -12,7 +12,7 @@
  * Both feed the SAME `tenantConfig` smart constructor (`tenant-registry.ts`), so
  * a config that registers over HTTP and the identical config seeded from the
  * bootstrap file produce a byte-identical `ActiveTenantConfig` — and the registry
- * `register`'s structural-equality idempotency (SC-009) then treats a
+ * `register`'s structural-equality idempotency (multi-tenant spec SC-009) then treats a
  * bootstrap-then-HTTP (or re-boot) of the same config as a no-op.
  *
  * PURE: no I/O. Takes an already-branded `TenantId` plus the untrusted body and
@@ -81,7 +81,7 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // enumerable properties only (no prototype keys).
   const agentMapResult = parseAgentClientIdsByDag(id, km.agentClientIdsByDag);
   if (!agentMapResult.ok) return agentMapResult;
-  // Every tenant worker requires a secrets reference (FR-005; `worker-main`
+  // Every tenant worker requires a secrets reference (multi-tenant spec FR-005; `worker-main`
   // hard-requires `FUGUE_SECRETS_REF`). Reject a blank/absent one HERE at the
   // trust boundary rather than letting it reach the registry and surface later as
   // a worker-spawn failure. Parse-don't-validate: a registered tenant always

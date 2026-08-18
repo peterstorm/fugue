@@ -58,7 +58,7 @@ const uniqueToken = (): string =>
   `${process.pid}-${Date.now()}-${tokenCounter++}-${Math.random().toString(36).slice(2)}`;
 
 /** Test-only deterministic temp-path hook; production calls always mint a unique path. */
-interface AtomicWriteFileTestHooks {
+export interface AtomicWriteFileTestHooks {
   readonly temporaryPath?: (targetPath: string) => string;
 }
 
@@ -112,13 +112,11 @@ const fencePathOf = (lockPath: string): string => `${lockPath}.fence`;
 /** Test-only scheduling and deterministic diagnostics hooks. */
 interface FileLockTestHooks {
   readonly afterUnfencedStaleProbe?: () => void | Promise<void>;
-  readonly afterFenceEstablished?: () => void | Promise<void>;
   readonly afterStableOwnerProbe?: (stale: boolean) => void | Promise<void>;
   readonly afterVictimRename?: () => void | Promise<void>;
   readonly readOwnerPid?: (ownerPath: string) => string;
   readonly probeOwnerProcess?: (pid: number) => void;
   readonly readOwnershipToken?: (ownerPath: string) => string;
-  readonly inspectReleasePath?: (lockPath: string) => void;
 }
 
 type OwnerProbeResult =
@@ -331,7 +329,6 @@ const fencedReap = async (
   const intent = createIntent(lockPath, "reap");
   try {
     if (!(await waitForBirthBarrier(lockPath, hooks))) return false;
-    await hooks.afterFenceEstablished?.();
 
     if (!reconcileTombs(lockPath, hooks)) return false;
     if (!existsSync(lockPath)) return true;
@@ -484,11 +481,9 @@ const releaseFailure = (
  */
 const releaseLockIsAbsent = (
   lockPath: string,
-  hooks: FileLockTestHooks,
 ): boolean => {
   try {
-    if (hooks.inspectReleasePath !== undefined) hooks.inspectReleasePath(lockPath);
-    else lstatSync(lockPath);
+    lstatSync(lockPath);
     return false;
   } catch (error) {
     const probe = probeErrorCode(error);
@@ -508,7 +503,6 @@ const readReleaseMetadata = (
   lockPath: string,
   field: "pid" | "ownership token",
   read: () => string,
-  hooks: FileLockTestHooks,
 ): ReleaseMetadataRead => {
   try {
     return { kind: "value", value: read().trim() };
@@ -517,7 +511,7 @@ const readReleaseMetadata = (
     if (
       probe.kind === "code"
       && probe.code === "ENOENT"
-      && releaseLockIsAbsent(lockPath, hooks)
+      && releaseLockIsAbsent(lockPath)
     ) {
       return { kind: "absent" };
     }
@@ -546,7 +540,6 @@ export const releaseFileLock = (
     "pid",
     () => hooks.readOwnerPid?.(lockPath)
       ?? readFileSync(join(lockPath, PID_FILE), "utf-8"),
-    hooks,
   );
   if (pid.kind === "absent" || pid.value !== `${process.pid}`) return;
 
@@ -555,7 +548,6 @@ export const releaseFileLock = (
     "ownership token",
     () => hooks.readOwnershipToken?.(lockPath)
       ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8"),
-    hooks,
   );
   if (token.kind === "absent" || token.value !== ownershipToken) return;
 

@@ -1,7 +1,7 @@
 /**
  * Redis worker registry — the durable record of which tenant's worker is live,
  * its pid, UDS path, and health (AD-2). This is the source of truth a RESTARTED
- * supervisor reads to re-adopt still-live workers (SC-006, FR-019/FR-020): the
+ * supervisor reads to re-adopt still-live workers (multi-tenant spec SC-006, FR-019/FR-020): the
  * supervisor's in-memory lifecycle map does NOT survive its own restart, but the
  * workers (children of thin-init, not the supervisor — AD-2) keep running, so the
  * registry + a per-worker UDS liveness probe lets the new supervisor find them.
@@ -9,7 +9,7 @@
  * KEY LAYOUT (AD-2): `fugue:supervisor:workers:<tenant>` → JSON
  *   `{ pid, udsPath, startedAt, health, eagerPin }`.
  *
- * `reconcileReadopt()` is the deterministic SC-006 reconcile:
+ * `reconcileReadopt()` is the deterministic multi-tenant spec SC-006 reconcile:
  *   1. enumerate every registered worker entry,
  *   2. UDS-liveness-probe each one (injected `probe`),
  *   3. ADOPT the ones that answer (return their `AdoptableWorker` records), and
@@ -57,7 +57,7 @@ type WorkerHealth = Extract<WorkerPhase, "live" | "draining">;
 
 /**
  * The persisted worker record. Carries ONLY routing/liveness metadata — never a
- * secret (the supervisor holds none; FR-005). `startedAt` lets the new supervisor
+ * secret (the supervisor holds none; multi-tenant spec FR-005). `startedAt` lets the new supervisor
  * preserve the original worker uptime when it re-adopts (so idle-evict math stays
  * honest across a supervisor restart).
  *
@@ -148,7 +148,7 @@ export interface WorkerRegistry {
   /** Delete a tenant's worker record (on crash/evict/prune). Idempotent. */
   readonly remove: (tenant: TenantId) => Promise<Result<void, HostError>>;
   /**
-   * SC-006 reconcile on supervisor restart: enumerate all registered workers,
+   * multi-tenant spec SC-006 reconcile on supervisor restart: enumerate all registered workers,
    * UDS-probe each, adopt the live ones, prune the dead ones. Deterministic.
    * Returns the adoptable (still-live) workers + the pruned (dead) tenants.
    */
@@ -329,7 +329,7 @@ export const createWorkerRegistry = (
 
       // 4. Prune dead + corrupt entries so the registry self-heals (best-effort:
       // a prune failure does NOT abort the reconcile — adopted workers must still
-      // be returned so live routing resumes, FR-020). A genuine Redis OUTAGE
+      // be returned so live routing resumes, multi-tenant spec FR-020). A genuine Redis OUTAGE
       // would already have failed above on scan/get.
       const deleteKeys = [
         ...pruned.map((t) => workerKey(t)),

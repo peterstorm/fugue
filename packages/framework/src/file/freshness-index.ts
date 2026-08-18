@@ -65,6 +65,7 @@ import {
   fileOperationError,
   fileThrownValueMessage,
   isFileBackendPathString,
+  LOCK_PROTOCOL_OPERATIONS,
   type FileOperation,
 } from "./boundary-error.js";
 
@@ -151,6 +152,48 @@ const cacheFailure = (
     }`,
     failureClass,
   );
+
+/**
+ * The public freshness surface for a thrown/returned failure (ADR-0080,
+ * mirroring the journal's `appendEvent` re-tag at its public boundary):
+ *
+ * - a typed failure whose operation is in the CLOSED lock-protocol set
+ *   (`acquireFileLock` / `withFileLock` / `releaseFileLock` /
+ *   `stealStaleFileLock` — atomic.ts internals) is RE-TAGGED to this
+ *   operation: the lock's internal mechanics must not name the caller's
+ *   port call. The re-tag preserves the inner `failureClass` (inferred from
+ *   the wrapped cache-error) and the full diagnostic chain — the
+ *   `withFileLock` diagnostic names the lock path and carries the primary
+ *   body failure (e.g. the `atomicWriteFile` commit error) nested inside;
+ * - any OTHER typed failure already carries its own operation (this port's
+ *   operation, or a body-internal one such as `keyDigest`) and rides through
+ *   unchanged — re-wrapping it would double-nest the diagnostic and drop
+ *   the class;
+ * - anything not yet typed is wrapped as this operation's failure.
+ */
+const surfaceFailure = (
+  operation: FreshnessOperation,
+  digest: string | null,
+  error: unknown,
+): FrameworkError => {
+  if (
+    isFrameworkError(error) &&
+    error.kind === "cache-error" &&
+    // The public `cache-error.operation` is deliberately `string`-typed for
+    // adapter compatibility; narrowing to the closed `FileOperation`
+    // vocabulary at this file-backend boundary (boundary-error.ts contract)
+    // makes the set-membership test unrepresentable-misspelling safe.
+    LOCK_PROTOCOL_OPERATIONS.has(error.operation as FileOperation)
+  ) {
+    return fileOperationError(
+      operation,
+      digest === null ? "resource digest unavailable" : `resource digest ${digest}`,
+      error,
+    );
+  }
+  if (isFrameworkError(error)) return error;
+  return cacheFailure(operation, digest, error);
+};
 
 /** Snapshot each accessor-backed event field once before validating any value. */
 const snapshotWriteEvent = (event: Record<string, unknown>): RawWriteSnapshot => ({
@@ -419,6 +462,11 @@ const warnCorrupt = (
 export interface FileFreshnessIndexOptions {
   /** Clock stamping writes and evaluating the lazy 24h TTL. */
   readonly now?: () => number;
+  /** TEST-ONLY seam: threads deterministic hooks (e.g. a squatted temp
+   * path) into `recordWrite`'s commit (`atomicWriteFile`) so a body-internal
+   * commit failure is reproducible without FS races. Production callers
+   * omit it (atomic.ts mints a unique temp path). */
+  readonly atomicWriteFileHooks?: import("./atomic.js").AtomicWriteFileTestHooks;
 }
 
 const createFileFreshnessIndexUnchecked = (
@@ -428,17 +476,20 @@ const createFileFreshnessIndexUnchecked = (
   if (!isFileBackendPathString(directory)) {
     throw `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`;
   }
-  const now = parseFileFactoryClock(opts);
+  // This factory's options grammar = the shared closed clock shape (options.ts
+  // — the journal twin's exact encoding) PLUS the test-only
+  // `atomicWriteFileHooks` seam (recordWrite's commit), declared to the shared
+  // parser below. The seam is test-only, typed at the interface, and consumed
+  // by atomicWriteFile's own typed catch boundary.
+  const now = parseFileFactoryClock(opts, ["atomicWriteFileHooks"]);
 
   /**
    * Clock read + representability gate, shared by `recordWrite` (write
    * stamp) and `findConflict` (lazy TTL evaluation). Both rejections are
    * code-constructed and deterministic — a throwing or non-finite injected
    * clock fails identically on every retry — so both are pinned
-   * "permanent" exactly as the inline per-method blocks were, with the
-   * per-operation message prefixes byte-identical to those blocks. The two
-   * checkpointer backends consolidated the same pair the same way
-   * (file/checkpointer.ts `readClock`, checkpoint/checkpointer.ts
+   * "permanent". The two checkpointer backends consolidated the same pair the
+   * same way (file/checkpointer.ts `readClock`, checkpoint/checkpointer.ts
    * `readClock`); this is the third of the five file-backend clock sites.
    */
   const readClock = (
@@ -528,18 +579,15 @@ const createFileFreshnessIndexUnchecked = (
           }
 
           const next = selectLatestWrite(current, prepared.value, nowMs);
-          atomicWriteFile(recordPath, serializeStoredFreshnessEntry(next));
+          atomicWriteFile(recordPath, serializeStoredFreshnessEntry(next), opts.atomicWriteFileHooks);
           return ok(undefined);
         });
       } catch (error) {
-        // An already-typed failure (the withFileLock acquisition/body wraps,
-        // atomicWriteFile, the deterministic codec/keyDigest rejections)
-        // carries its own precise operation, location, and inferred
-        // failureClass — re-wrapping it here only double-nests the diagnostic
-        // and drops the class. Let it ride through once (atomic.ts/job.ts
-        // parity); wrap only what is not yet typed.
-        if (isFrameworkError(error)) return err(error);
-        return err(cacheFailure("freshness:recordWrite", digest, error));
+        // Public-surface ride-through + lock-protocol re-tag (ADR-0080 —
+        // `surfaceFailure`, mirroring the journal's `appendEvent` re-tag):
+        // lock-protocol operations name THIS port call, other typed
+        // failures keep their own operation, untyped throws are wrapped.
+        return err(surfaceFailure("freshness:recordWrite", digest, error));
       }
     },
 
@@ -593,11 +641,9 @@ const createFileFreshnessIndexUnchecked = (
           ),
         );
       } catch (error) {
-        // Same ride-through as recordWrite: typed failures keep their own
-        // operation, location, and inferred failureClass instead of being
-        // double-nested and reclassified (atomic.ts/job.ts parity).
-        if (isFrameworkError(error)) return err(error);
-        return err(cacheFailure("freshness:findConflict", digest, error));
+        // Public-surface ride-through + lock-protocol re-tag — the
+        // recordWrite twin (ADR-0080, `surfaceFailure`).
+        return err(surfaceFailure("freshness:findConflict", digest, error));
       }
     },
   };

@@ -12,9 +12,10 @@ import type { ResourceName, Witness } from "./witness.js";
 // FreshnessIndex port + supporting types
 //
 // Defines the contract for freshness-write tracking. Pure type-layer
-// definitions; both the in-memory adapter (dag-runtime/freshness-check.ts) and
-// the Redis adapter (checkpoint/redis-freshness-index.ts) implement this
-// interface against the same shape.
+// definitions; the in-memory adapter (dag-runtime/freshness-check.ts), the
+// Redis adapter (checkpoint/redis-freshness-index.ts), and the file adapter
+// (file/freshness-index.ts) all implement this interface against the same
+// shape.
 // ---------------------------------------------------------------------------
 
 import type { RunId, NodeId } from "./ids.js";

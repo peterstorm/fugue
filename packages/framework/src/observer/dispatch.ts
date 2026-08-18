@@ -6,8 +6,11 @@ import { fwLogger } from "../logger.js";
  * When `OBSERVER_STRICT=1` is set, dispatchEvent rethrows any observer failure
  * instead of catching. Useful in tests to surface programming bugs in observer
  * implementations that would otherwise be silently absorbed in production.
+ * Read per call (not frozen at module load) so a test can toggle it around a
+ * single pin and restore it — production processes never mutate the variable
+ * mid-run, so per-call reads observe the same value as a load-time const.
  */
-const OBSERVER_STRICT =
+const isStrictMode = (): boolean =>
   typeof process !== "undefined" && process.env?.OBSERVER_STRICT === "1";
 
 /**
@@ -44,7 +47,7 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
           `[observer] async observe() rejected for ${event.type} — Observer.observe must be synchronous:`,
           e instanceof Error ? e.message : e,
         );
-        if (OBSERVER_STRICT) {
+        if (isStrictMode()) {
           const error = e instanceof Error ? e : new Error(String(e));
           error.message = `[OBSERVER_STRICT] Observer.observe() returned a rejected Promise for event '${event.type}'. ` +
             `Observer.observe MUST be synchronous. Original: ${error.message}`;
@@ -59,6 +62,6 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
       `[observer] dispatchEvent failed for ${event.type}:`,
       e instanceof Error && e.stack ? e.stack : e,
     );
-    if (OBSERVER_STRICT) throw e;
+    if (isStrictMode()) throw e;
   }
 }

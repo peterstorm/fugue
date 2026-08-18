@@ -56,8 +56,9 @@ export type { FileEventRecord } from "./file/event-record.js";
 // Durable Checkpointer over per-run meta.json + nodes/<digest>.json.
 export { createFileCheckpointer } from "./file/checkpointer.js";
 export type { FileCheckpointerOptions } from "./file/checkpointer.js";
-// The metadata diagnostic constant lives with the codec that constructs the
-// write-failed values it addresses (2026-08-14 codec separation).
+// `META_RECORD_NODE_ID` and the `checkpoint-write-failed` builder are
+// canonical in `types/error-factories.ts` (deepening-round D2); the codec
+// re-exports them so this barrel and the test imports keep their paths.
 export { META_RECORD_NODE_ID } from "./file/checkpointer-codec.js";
 // Durable FreshnessIndex with one digest-addressed atomic latest-write
 // singleton per resource and lazy TTL (ADR-0079).

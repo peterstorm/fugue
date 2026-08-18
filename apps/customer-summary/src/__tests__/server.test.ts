@@ -107,12 +107,12 @@ describe("POST /summarize", () => {
   });
 
   describe("resume_run_id principal binding", () => {
-    // NFR-020 backend-swap pin (pr-test-analyzer): the consumer's resume flow
+    // F6 spec NFR-020 backend-swap pin (pr-test-analyzer): the consumer's resume flow
     // (load + error-kind → HTTP mapping + subject binding + fingerprint/version
     // gates) must hold for ANY Checkpointer backend — the file backend is the F6
     // production one, and this handler is the only production resume consumer.
     // The Redis leg is pinned at the port level by the shared `checkpointerSuite`
-    // (SC-001); the app-level test does not bring up Redis.
+    // (F6 spec SC-001); the app-level test does not bring up Redis.
     const fileDirs: string[] = [];
     const backends: ReadonlyArray<readonly [name: string, create: () => Checkpointer]> = [
       ["in-memory", () => new InMemoryCheckpointer()],
@@ -426,7 +426,7 @@ describe("GET /readyz", () => {
     expect((await res.json()).status).toBe("not-ready");
   });
 
-  test("a failing secondary trace backend degrades the signal but does NOT gate readiness (FR-026)", async () => {
+  test("a failing secondary trace backend degrades the signal but does NOT gate readiness (observability spec FR-026)", async () => {
     // Multi-backend deployment where one exporter (e.g. Foundry) keeps failing
     // while MLflow succeeds. This must surface as ready-degraded@200 with the
     // per-child counts visible — never 503 (a Foundry fault must not remove the pod).

@@ -4,7 +4,7 @@
  * header, and streams the worker's `Response` back verbatim (the existing HTTP
  * 200 contract — status, headers, body — is preserved).
  *
- * SECURITY MODEL (FR-005, FR-007, AD-8):
+ * SECURITY MODEL (multi-tenant spec FR-005, FR-007, AD-8):
  *   - The supervisor holds ZERO tenant secrets. The ONLY credential this module
  *     uses is the platform-internal `FUGUE_SUPERVISOR_HMAC_KEY` — an integrity
  *     key shared between the supervisor and every worker, NOT a tenant secret
@@ -28,7 +28,7 @@
  *     bearer is what the worker re-validates). No NEW secret is added beyond the
  *     internal HMAC stamp.
  *
- * FAIL-CLOSED (FR-041, AD-8): a socket connect/transport failure maps to
+ * FAIL-CLOSED (multi-tenant spec FR-041, AD-8): a socket connect/transport failure maps to
  * `worker-unavailable` (503) for THIS tenant only — a worker fault is contained
  * to its tenant and never surfaces as another tenant's error or a generic 500.
  */
@@ -190,7 +190,7 @@ export const proxyToWorker = async (
   const res = await deps.transport(socketPath, forward);
   if (!res.ok) {
     deps.logger?.warn("[supervisor] UDS proxy transport failed — worker unavailable", {
-      // Names only the caller's OWN tenant — never another tenant (FR-041).
+      // Names only the caller's OWN tenant — never another tenant (multi-tenant spec FR-041).
       tenant: tenant.id,
       reason: res.error.reason,
     });

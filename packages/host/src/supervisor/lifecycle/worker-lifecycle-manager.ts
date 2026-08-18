@@ -20,11 +20,11 @@
  *     for one tenant surfaces as that tenant's `worker-unavailable` (503) and
  *     never touches another tenant's entry (multi-tenant spec FR-015, AD-8).
  *
- * SECURITY (FR-004 one-tenant-one-socket): the udsPath a worker binds is a PURE
+ * SECURITY (multi-tenant spec FR-004 one-tenant-one-socket): the udsPath a worker binds is a PURE
  * function of its `TenantId` (`workerSocketPath(udsDir, tenant)`), derived HERE —
  * never taken from arbitrary input — so a worker can only ever own its own socket.
  *
- * SECURITY (FR-005 reference-only): the spawn forwards the tenant's `secretsRef`
+ * SECURITY (multi-tenant spec FR-005 reference-only): the spawn forwards the tenant's `secretsRef`
  * REFERENCE only; this module never dereferences a secret.
  */
 
@@ -233,7 +233,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
    * control flow), but a failure MUST be observable:
    *  - `orphanRisk: true` → the caller has already removed the map entry + registry
    *    record, so a failed SIGKILL leaves an orphaned worker still bound to its UDS
-   *    while the supervisor believes the slot is reclaimed (corrupts the FR-033
+   *    while the supervisor believes the slot is reclaimed (corrupts the multi-tenant spec FR-033
    *    live-worker count). Logged at `error`.
    *  - `orphanRisk: false` → the slot is not yet considered reclaimed (e.g. SIGTERM
    *    during drain); logged at `warn`.
@@ -318,17 +318,17 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return err(workerUnavailable(tenant));
     }
 
-    // FR-004: the socket is a PURE function of the TenantId, derived here.
+    // multi-tenant spec FR-004: the socket is a PURE function of the TenantId, derived here.
     const udsPath = workerSocketPath(config.udsDir, tenant);
 
-    // CLAIM THE `spawning` SLOT NOW (FR-033) — synchronously, AFTER the admission
+    // CLAIM THE `spawning` SLOT NOW (multi-tenant spec FR-033) — synchronously, AFTER the admission
     // check above and BEFORE any `await`. `requestWorker` yields a `spawning` state
     // that `occupiesSlot` counts, so the check-then-reserve pair is atomic on Bun's
     // single thread. The single-flight only dedupes the SAME tenant; concurrent
     // FIRST requests for DISTINCT cold tenants each run their own `lazySpawn`, so if
     // the slot were claimed only AFTER the awaited ACL provisioning below, all of
     // them would read the same pre-commit `liveWorkerCount()`, all pass the cap and
-    // all overshoot it (`liveWorkerCount()` is the SOLE FR-033 enforcer). Reserving
+    // all overshoot it (`liveWorkerCount()` is the SOLE multi-tenant spec FR-033 enforcer). Reserving
     // here closes that TOCTOU; every failure path below unwinds this entry
     // (`workers.delete`) so the slot is released fail-closed.
     workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
@@ -375,7 +375,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
 
     const spawnResult = await spawn.spawn({
       tenant,
-      secretsRef: spawnCfg.secretsRef, // REFERENCE only (FR-005).
+      secretsRef: spawnCfg.secretsRef, // REFERENCE only (multi-tenant spec FR-005).
       workerEntry: config.workerEntry,
       udsPath,
       ...(config.heapCapMb !== undefined ? { heapCapMb: config.heapCapMb } : {}),
@@ -699,7 +699,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       await removeRecord(tenant);
       // Drain then force-stop (mirrors `evict`): SIGTERM lets an idle worker exit
       // cleanly, SIGKILL GUARANTEES the slot is reclaimed so the live-worker count
-      // (FR-033) cannot under-count a worker that ignores SIGTERM. Entry + record
+      // (multi-tenant spec FR-033) cannot under-count a worker that ignores SIGTERM. Entry + record
       // are already removed, so a failed SIGKILL leaves an orphan — orphan-risk.
       await signalWorker(tenant, pid, "SIGTERM", false);
       await signalWorker(tenant, pid, "SIGKILL", true);

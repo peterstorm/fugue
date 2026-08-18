@@ -309,9 +309,7 @@ const createFileCheckpointerUnchecked = (
    * Clock read + representability gate, shared by `setMeta` (write stamp) and
    * `load` (FR-027 lazy expiry). Both rejections are code-constructed and
    * deterministic — a throwing or non-representable injected clock fails
-   * identically on every retry — so both are pinned "permanent" exactly as the
-   * per-method blocks were, with the per-operation message prefixes
-   * byte-identical.
+   * identically on every retry — so both are pinned "permanent".
    */
   const readClock = (
     operation: "setMeta" | "load",

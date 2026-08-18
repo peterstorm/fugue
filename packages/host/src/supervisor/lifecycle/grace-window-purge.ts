@@ -1,9 +1,9 @@
 /**
  * Grace-window retention + auto-purge of a deregistered tenant's footprint
- * (FR-030, SC-010).
+ * (multi-tenant spec FR-030, SC-010).
  *
  * Deregistration (the admin handler, T10) is an IMMEDIATE revoke — kill the
- * worker + invalidate the token (FR-029) — but it RETAINS the tenant's footprint
+ * worker + invalidate the token (multi-tenant spec FR-029) — but it RETAINS the tenant's footprint
  * (filesystem mount, secrets, cache/checkpoint keys) for a configurable grace
  * window (default 7 days). This module owns the second half: deciding WHEN the
  * window has elapsed (a PURE predicate) and PURGING the footprint once it has (an
@@ -33,13 +33,13 @@ import type { LogPort } from "../../ports.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { DeregisteredTenantConfig, TenantRegistry } from "../registry/tenant-registry.js";
 
-// ── Grace window default (FR-030) ─────────────────────────────────────────────
+// ── Grace window default (multi-tenant spec FR-030) ─────────────────────────────────────────────
 
 /** One day in milliseconds. */
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The DEFAULT grace window: 7 days (FR-030). Exported so the supervisor binary
+ * The DEFAULT grace window: 7 days (multi-tenant spec FR-030). Exported so the supervisor binary
  * can override it from config (`SUPERVISOR_GRACE_WINDOW_MS`) while the default is
  * a single named constant — never a magic number sprinkled across call sites.
  */
@@ -57,7 +57,7 @@ export const gracePurgeDueAt = (deregisteredAt: number, graceWindowMs: number): 
 
 /**
  * Whether the grace window for a deregistered tenant has ELAPSED at `now`
- * (FR-030). PURE: `now >= deregisteredAt + graceWindowMs`. A non-positive window
+ * (multi-tenant spec FR-030). PURE: `now >= deregisteredAt + graceWindowMs`. A non-positive window
  * makes purge due immediately (degenerate but well-defined). This is the single
  * decision point the sweep consults — the time comparison lives here, not inside
  * an I/O method, so it is trivially unit-testable with a simulated `now`.
@@ -70,7 +70,7 @@ export const isGraceWindowElapsed = (
 
 /**
  * From a registry snapshot, select every DEREGISTERED tenant whose grace window
- * has elapsed at `now` (FR-030, SC-010). PURE — drives the auto-purge sweep: the
+ * has elapsed at `now` (multi-tenant spec FR-030, SC-010). PURE — drives the auto-purge sweep: the
  * sweep asks this which tenants are due, then purges each. Active tenants and
  * still-in-window deregistered tenants are never returned.
  */
@@ -169,7 +169,7 @@ type PurgeStep =
  * ALL steps succeeded. A non-empty `failedSteps` means the sweep should retry on
  * the next tick — the steps are idempotent, so re-running is safe. `failedSteps`
  * is a closed `PurgeStep` union (never a free-form string), so the real failed
- * steps survive into the sweep's outcomes losslessly (SC-010 observability).
+ * steps survive into the sweep's outcomes losslessly (multi-tenant spec SC-010 observability).
  */
 interface PurgeOutcome {
   readonly tenant: TenantId;
@@ -180,7 +180,7 @@ interface PurgeOutcome {
 // ── Imperative shell: purge one tenant's footprint ────────────────────────────
 
 /**
- * PURGE one deregistered tenant's footprint (FR-030, SC-010).
+ * PURGE one deregistered tenant's footprint (multi-tenant spec FR-030, SC-010).
  *
  * Order: revoke the ACL user FIRST (so even a still-running rogue worker loses
  * data-plane access before its keys are deleted), then remove the worker-registry
@@ -228,7 +228,7 @@ export const purgeTenantFootprint = async (
   // failure. A non-empty `failedSteps` IS the fail-closed signal (the sweep
   // retries on the next tick; every step is idempotent), and the genuine typed
   // steps + `keysDeleted` are preserved losslessly for the caller's trail
-  // (SC-010 observability) — never collapsed into a stringly error.
+  // (multi-tenant spec SC-010 observability) — never collapsed into a stringly error.
   return { tenant, keysDeleted, failedSteps };
 };
 
@@ -238,7 +238,7 @@ export const purgeSucceeded = (outcome: PurgeOutcome): boolean => outcome.failed
 // ── Imperative shell: the sweep ───────────────────────────────────────────────
 
 /**
- * Run one auto-purge sweep over a registry snapshot (FR-030, SC-010): select
+ * Run one auto-purge sweep over a registry snapshot (multi-tenant spec FR-030, SC-010): select
  * every deregistered tenant whose grace window elapsed at `now`, purge each, and
  * return the outcomes. Driven by the supervisor binary on a timer (the binary
  * owns the interval; the policy — which tenants are due — lives in the pure
@@ -259,7 +259,7 @@ export const runGracePurgeSweep = async (
     // `purgeTenantFootprint` ALWAYS returns the structured outcome — success and
     // partial-failure alike. We push the GENUINE outcome (real typed
     // `failedSteps` + `keysDeleted`) in every case, so the sweep's report is
-    // lossless: a persistently-stuck step is visible per tenant (SC-010). A
+    // lossless: a persistently-stuck step is visible per tenant (multi-tenant spec SC-010). A
     // per-tenant failure is captured in that tenant's outcome and never aborts
     // the sweep, so one stuck tenant cannot block purging the rest.
     const outcome = await purgeTenantFootprint(deps, cfg);

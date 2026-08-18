@@ -58,7 +58,7 @@ describe("summary-dag", () => {
       }
     }
 
-    // FR-103: one synthesis LLM call + one eval-judge LLM call on happy path
+    // ai-summary spec FR-103: one synthesis LLM call + one eval-judge LLM call on happy path
     expect(callCount).toBe(2);
   });
 

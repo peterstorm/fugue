@@ -80,9 +80,9 @@ describe("loadConfig", () => {
     expect(() => loadConfig()).toThrow();
   });
 
-  // ── Observability backend selection (FR-001 … FR-006, FR-022, FR-023) ──────
+  // ── Observability backend selection (observability spec FR-001 … FR-006, FR-022, FR-023) ──────
 
-  test("OBSERVABILITY_TRACE_BACKENDS defaults to [mlflow] (FR-003)", () => {
+  test("OBSERVABILITY_TRACE_BACKENDS defaults to [mlflow] (observability spec FR-003)", () => {
     const config = loadConfig();
     expect(config.OBSERVABILITY_TRACE_BACKENDS).toEqual(["mlflow"]);
     expect(config.AZURE_AUTH_MODE).toBe("connection-string");
@@ -90,7 +90,7 @@ describe("loadConfig", () => {
     expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBeUndefined();
   });
 
-  test("parses comma-separated dual selection mlflow,foundry (FR-002)", () => {
+  test("parses comma-separated dual selection mlflow,foundry (observability spec FR-002)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,foundry";
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc;IngestionEndpoint=https://x/";
     expect(loadConfig().OBSERVABILITY_TRACE_BACKENDS).toEqual(["mlflow", "foundry"]);
@@ -102,39 +102,39 @@ describe("loadConfig", () => {
     expect(loadConfig().OBSERVABILITY_TRACE_BACKENDS).toEqual(["mlflow", "foundry"]);
   });
 
-  test("rejects unknown trace backend token (fail-closed, FR-006)", () => {
+  test("rejects unknown trace backend token (fail-closed, observability spec FR-006)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,datadog";
     expect(() => loadConfig()).toThrow();
   });
 
-  test("rejects duplicate trace backend token (fail-closed, FR-006)", () => {
+  test("rejects duplicate trace backend token (fail-closed, observability spec FR-006)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,mlflow";
     expect(() => loadConfig()).toThrow();
   });
 
-  test("rejects blank entry in trace backend list (fail-closed, FR-006)", () => {
+  test("rejects blank entry in trace backend list (fail-closed, observability spec FR-006)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "mlflow,";
     expect(() => loadConfig()).toThrow();
   });
 
-  test("rejects empty trace backend string (fail-closed, FR-006)", () => {
+  test("rejects empty trace backend string (fail-closed, observability spec FR-006)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "";
     expect(() => loadConfig()).toThrow();
   });
 
-  test("rejects foundry selected without connection string (contradictory config, FR-006)", () => {
+  test("rejects foundry selected without connection string (contradictory config, observability spec FR-006)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
     // no APPLICATIONINSIGHTS_CONNECTION_STRING
     expect(() => loadConfig()).toThrow();
   });
 
-  test("rejects foundry selected with blank connection string (FR-006)", () => {
+  test("rejects foundry selected with blank connection string (observability spec FR-006)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "   ";
     expect(() => loadConfig()).toThrow();
   });
 
-  test("accepts foundry with connection string (FR-022)", () => {
+  test("accepts foundry with connection string (observability spec FR-022)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc;IngestionEndpoint=https://x/";
     const config = loadConfig();
@@ -142,7 +142,7 @@ describe("loadConfig", () => {
     expect(config.APPLICATIONINSIGHTS_CONNECTION_STRING).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
   });
 
-  test("entra-id auth mode still requires a connection string (FR-023)", () => {
+  test("entra-id auth mode still requires a connection string (observability spec FR-023)", () => {
     process.env.OBSERVABILITY_TRACE_BACKENDS = "foundry";
     process.env.AZURE_AUTH_MODE = "entra-id";
     // no connection string → contradictory
@@ -159,7 +159,7 @@ describe("loadConfig", () => {
     expect(() => loadConfig()).toThrow();
   });
 
-  test("accepts EVAL_BACKEND = both (FR-004)", () => {
+  test("accepts EVAL_BACKEND = both (observability spec FR-004)", () => {
     process.env.EVAL_BACKEND = "both";
     expect(loadConfig().EVAL_BACKEND).toBe("both");
   });

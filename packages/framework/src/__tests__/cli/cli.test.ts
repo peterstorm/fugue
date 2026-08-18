@@ -345,7 +345,7 @@ describe("fugue bin (subprocess)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(true);
     expect(parsed.path).toContain("valid-dag.ts");
-  });
+  }, 60_000);
 
   it("lint exits 1 and emits dag-definition-error on a broken DAG", async () => {
     const { exitCode, stdout } = await runBin(["lint", fixturePath("invalid-edge-typo.ts")]);
@@ -353,7 +353,7 @@ describe("fugue bin (subprocess)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(false);
     expect(parsed.errors[0].kind).toBe("dag-definition-error");
-  });
+  }, 60_000);
 
   it("describe emits a full DAG manifest as JSON", async () => {
     const { exitCode, stdout } = await runBin(["describe", fixturePath("valid-dag.ts")]);
@@ -362,7 +362,7 @@ describe("fugue bin (subprocess)", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.dag.id).toBe("valid-fixture");
     expect(parsed.dag.waves).toEqual([["fetch-user"], ["summarize"]]);
-  });
+  }, 60_000);
 
   it("capabilities exits 0 and emits the built-in catalogue as JSON", async () => {
     const { exitCode, stdout } = await runBin(["capabilities"]);

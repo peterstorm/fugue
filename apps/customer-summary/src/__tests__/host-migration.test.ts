@@ -2,8 +2,8 @@
  * Host Migration Tests — validates the DagRegistration export shape
  * is correct and compatible with the Fugue host contract.
  *
- * @satisfies SC-004 — DagRegistration validates correctly
- * @satisfies FR-011 — Custom route override (/summarize)
+ * @satisfies host spec SC-004 — DagRegistration validates correctly
+ * @satisfies host spec FR-011 — Custom route override (/summarize)
  */
 
 import { describe, test, expect } from "bun:test";

@@ -5,8 +5,8 @@
  * The standalone server.ts remains for backward compatibility during migration;
  * this module is the NEW contract consumed by the Fugue host.
  *
- * @satisfies SC-004 — Existing integration tests pass unchanged
- * @satisfies FR-011 — Custom route override (/summarize) for backward compatibility
+ * @satisfies host spec SC-004 — Existing integration tests pass unchanged
+ * @satisfies host spec FR-011 — Custom route override (/summarize) for backward compatibility
  */
 
 import { z } from "zod";

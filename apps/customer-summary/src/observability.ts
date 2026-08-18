@@ -9,11 +9,11 @@
  * build the actual `SpanExporter` instances.
  *
  * Requirements satisfied:
- * - FR-002: one trace backend = exclusive, two = dual export.
- * - FR-003: MLflow is the default trace backend (no foundry selected).
- * - FR-006: contradictory/invalid selection fails CLOSED with a typed error.
- * - FR-022: default auth = Application Insights connection string.
- * - FR-023: opt-in Entra ID via the default Azure credential mechanism.
+ * - observability spec FR-002: one trace backend = exclusive, two = dual export.
+ * - observability spec FR-003: MLflow is the default trace backend (no foundry selected).
+ * - observability spec FR-006: contradictory/invalid selection fails CLOSED with a typed error.
+ * - observability spec FR-022: default auth = Application Insights connection string.
+ * - observability spec FR-023: opt-in Entra ID via the default Azure credential mechanism.
  *
  * Note on shapes vs. the plan: the plan sketched a FLAT `ResolvedObservability`
  * with an always-present `auth`. Per CLAUDE.md ("make illegal states
@@ -79,7 +79,7 @@ export const isFoundryEnabled = (
  * `reason`, not on parsed message strings.
  *
  * - `missing-connection-string`: foundry is selected but no Application Insights
- *   connection string is available for the resolved auth mode (FR-006/FR-022).
+ *   connection string is available for the resolved auth mode (observability spec FR-006/FR-022).
  *   In well-formed config this is caught earlier by the zod `superRefine`, but
  *   the resolver re-checks defense-in-depth (a `Config` built by hand in a test,
  *   or any future bypass of `loadConfig`, still fails closed here).
@@ -98,11 +98,11 @@ export class ObservabilityConfigError extends Error {
 /**
  * Pure resolver. `Config -> Result<ResolvedObservability, ObservabilityConfigError>`.
  *
- * - No foundry selected → `{ kind: 'mlflow-only', traceBackends }` (FR-003).
+ * - No foundry selected → `{ kind: 'mlflow-only', traceBackends }` (observability spec FR-003).
  *   The `mlflow-only` arm has no `auth`, so {@link isFoundryEnabled} is `false`.
  * - Foundry selected → requires a connection string for BOTH auth modes
- *   (FR-022/FR-023; the connection string carries the ingestion endpoint).
- *   Missing → fail-closed `ObservabilityConfigError` (FR-006).
+ *   (observability spec FR-022/FR-023; the connection string carries the ingestion endpoint).
+ *   Missing → fail-closed `ObservabilityConfigError` (observability spec FR-006).
  */
 export const resolveObservabilityBackends = (
   config: Config,

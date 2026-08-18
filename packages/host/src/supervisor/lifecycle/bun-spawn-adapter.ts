@@ -47,7 +47,7 @@ interface WorkerSpawnPlan {
  *
  *   - argv: `["bun", "run", <workerEntry>]`.
  *   - env: the inherited env MERGED with the per-worker overrides:
- *       TENANT_ID, FUGUE_SECRETS_REF (the REFERENCE only — FR-005/FR-006),
+ *       TENANT_ID, FUGUE_SECRETS_REF (the REFERENCE only — multi-tenant spec FR-005/FR-006),
  *       WORKER_UDS_DIR = `dirname(spec.udsPath)` so the worker binds EXACTLY the
  *       socket the supervisor targets (C7), any `spec.extraEnv`, and — when
  *       `heapCapMb` is set — `NODE_OPTIONS` with

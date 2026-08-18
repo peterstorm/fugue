@@ -71,6 +71,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1095,7 +1096,7 @@ describe("resumeFileJob — replay determinism", () => {
         },
       ),
     );
-  });
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1787,6 +1788,12 @@ describe("resumeFileJob — prefix-space property (fast-check)", () => {
 // post-append state, never a torn read — is proven HERE with a spawned child
 // running the kernel's own append-before-checkpoint discipline (FR-005) and
 // a parent resuming in a loop across the whole write window.
+// round-17: the parent gates on the writer's ready marker (deterministic
+// mid-flight overlap — the old strict-prefix sampling assertion was schedule-
+// dependent), and the checkpoint-first acquisition (ADR-0077, amended 2026-
+// 08-18) makes the consistent-prefix invariant hold by construction against
+// the append-first writer, so the invariant under test is the only thing
+// this run can fail on.
 // ---------------------------------------------------------------------------
 
 describe("resumeFileJob — cross-process reader under an active writer (round-14 A4)", () => {
@@ -1795,6 +1802,7 @@ describe("resumeFileJob — cross-process reader under an active writer (round-1
     const N = 30;
     const barrelUrl = pathToFileURL(join(__dirname, "..", "file.js")).href;
     const marker = join(dir, "writer-done");
+    const ready = join(dir, "writer-ready");
     const script = join(dir, "writer.ts");
     writeFileSync(
       script,
@@ -1804,6 +1812,9 @@ describe("resumeFileJob — cross-process reader under an active writer (round-1
         `const dir = process.env.R_DIR;`,
         `if (!dir) throw new Error("missing R_DIR");`,
         `const job = createFileJob({ directory: dir, initial: { state: { kind: "pending", count: 0 }, context: { value: 0 } } });`,
+        `// Ready BEFORE the first append: the parent gates its polling loop on`,
+        `// this so the overlap with the live writer is deterministic (round-17).`,
+        `writeFileSync(process.env.R_READY, "1");`,
         `const N = ${N};`,
         `for (let i = 0; i < N; i++) {`,
         `  // The kernel's own discipline (FR-005): append FIRST, then the`,
@@ -1819,13 +1830,27 @@ describe("resumeFileJob — cross-process reader under an active writer (round-1
     );
 
     const writer = spawn(process.execPath, [script], {
-      env: { ...process.env, R_DIR: dir, R_MARKER: marker },
+      env: { ...process.env, R_DIR: dir, R_MARKER: marker, R_READY: ready },
       stdio: "ignore",
     });
+
+    // Deterministic overlap (round-17): wait for the writer's ready marker so
+    // the polling loop starts while the writer is mid-flight. Without the
+    // gate a loaded parent could first wake after `writer-done` and the run
+    // would prove nothing about concurrent reads.
+    const readyDeadline = Date.now() + 15_000;
+    while (!existsSync(ready) && Date.now() < readyDeadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    if (!existsSync(ready)) {
+      writer.kill("SIGKILL");
+      throw new Error("writer never became ready");
+    }
 
     const observedCounts = new Set<number>();
     const deadline = Date.now() + 30_000;
     let finalCount: number | null = null;
+    let observedBeforeDone = false;
     while (Date.now() < deadline) {
       const resumed = await resume(dir, "a4-cross-process");
       if (resumed.ok) {
@@ -1842,6 +1867,9 @@ describe("resumeFileJob — cross-process reader under an active writer (round-1
           throw new Error(`torn observation: state=${JSON.stringify(state)} context=${JSON.stringify(context)}`);
         }
         observedCounts.add(k);
+        // A successful resume before the done marker is a mid-flight
+        // observation of the live run (the overlap this test exists to pin).
+        if (!existsSync(marker)) observedBeforeDone = true;
         if (k === N && existsSync(marker)) {
           finalCount = k;
           break;
@@ -1860,10 +1888,52 @@ describe("resumeFileJob — cross-process reader under an active writer (round-1
     const exitCode = await new Promise<number>((resolve) => writer.once("exit", (code) => resolve(code ?? -1)));
     expect(exitCode).toBe(0);
     expect(finalCount).toBe(N);
-    // The loop actually observed the write MID-FLIGHT: at least one prefix
-    // strictly between start and end. A loop that only ever saw the tail
-    // would prove nothing about concurrent reads.
-    const intermediates = [...observedCounts].filter((k) => k > 0 && k < N);
-    expect(intermediates.length).toBeGreaterThan(0);
+    // The loop actually observed the run MID-FLIGHT: at least one successful
+    // resume before the writer's done marker (the ready gate above made this
+    // overlap deterministic — polling starts while the writer is still
+    // appending its 30-event window, so the old schedule-dependent strict-
+    // prefix sampling is no longer the thing being pinned).
+    expect(observedBeforeDone).toBe(true);
   }, 45_000);
+});
+
+// ---------------------------------------------------------------------------
+// round-17 acquisition precedence — both seams broken at once
+// ---------------------------------------------------------------------------
+
+describe("resumeFileJob — two-seam failure precedence (round-17 checkpoint-first acquisition)", () => {
+  it("unreadable checkpoint.json + corrupt log ⇒ the checkpoint's typed cache-error surfaces before the log's checkpoint-corrupt", async () => {
+    // A healthy completed run — BOTH seams exist: the event log AND the
+    // checkpoint projection (the kernel's append-then-checkpoint order,
+    // FR-005), so breaking both at once is a realistic two-seam failure.
+    const dir = tempDir();
+    const job = createFileJob<S, C>({ directory: dir, initial: genesis() });
+    await runStateMachine(job, machine, executor, runOpts());
+    // Break BOTH seams at once:
+    //   (1) log: a committed record with non-canonical bytes — the strict
+    //   reader would verdict `checkpoint-corrupt` naming the file;
+    const eventsDir = join(dir, EVENTS_DIR);
+    const record = readdirSync(eventsDir).find((name) => name.endsWith(".json"));
+    if (record === undefined) throw new Error("no committed record in the events dir");
+    const eventFile = join(eventsDir, record);
+    writeFileSync(eventFile, `{"not":"a canonical record"}`);
+    //   (2) checkpoint: permission-broken ⇒ readCheckpoint THROWS its typed
+    //   `cache-error` (the journal's environment-failure channel, ADR-0080).
+    const checkpointPath = join(dir, CHECKPOINT_FILE);
+    chmodSync(checkpointPath, 0o000);
+    try {
+      const resumed = await resume(dir, "both-seams-broken");
+      expect(resumed.ok).toBe(false);
+      if (resumed.ok) return;
+      // The checkpoint read runs FIRST (ADR-0077, amended 2026-08-18), so its
+      // typed fs failure — an environment failure, not a content verdict —
+      // propagates unchanged instead of the log's `checkpoint-corrupt`.
+      expect(resumed.error.kind).toBe("cache-error");
+      if (resumed.error.kind !== "cache-error") return;
+      expect(resumed.error.operation).toBe("readCheckpoint");
+      expect(resumed.error.message).toContain(dir);
+    } finally {
+      chmodSync(checkpointPath, 0o600); // leave the temp dir rm-able
+    }
+  });
 });

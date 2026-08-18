@@ -58,6 +58,23 @@ export type FileOperation =
   | "writeCheckpoint"
   | "writeProgress";
 
+/**
+ * The closed set of `FileOperation` values the file-lock protocol (atomic.ts)
+ * produces — acquire / with / release / steal. These are the lock's INTERNAL
+ * mechanics, not the caller-facing port operation: when one surfaces through
+ * a public boundary (the journal's `appendEvent`, the freshness index's
+ * `recordWrite` / `findConflict`), the boundary re-tags it to its own
+ * operation — the lock detail (lock path, the primary body failure nested
+ * inside the `withFileLock` diagnostic) stays in the diagnostic chain,
+ * ADR-0080.
+ */
+export const LOCK_PROTOCOL_OPERATIONS: ReadonlySet<FileOperation> = new Set<FileOperation>([
+  "acquireFileLock",
+  "withFileLock",
+  "releaseFileLock",
+  "stealStaleFileLock",
+]);
+
 /** Preserve the public string field while constraining file-backend callers.
  * The public factory already branches on `failureClass === undefined` and
  * produces the identical object in both arms — delegate in one call; this
@@ -105,8 +122,9 @@ export const fileOperationError = (
  * brand-bypassed non-string, empty, or NUL-bearing path must fail closed at
  * the factory/operation boundary, before it can reach `join`/fs as a raw
  * TypeError. ONE encoding for every file-backend entry point (atomic.ts,
- * journal.ts, checkpointer.ts, freshness-index.ts); the per-site DIAGNOSTIC
- * stays at each call site (the message names the site-specific field).
+ * journal.ts, checkpointer.ts, freshness-index.ts, resume.ts); the per-site
+ * DIAGNOSTIC stays at each call site (the message names the site-specific
+ * field).
  */
 export const isFileBackendPathString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && !value.includes("\u0000");

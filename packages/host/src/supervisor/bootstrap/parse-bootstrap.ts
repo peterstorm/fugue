@@ -19,7 +19,7 @@
  * tenant config is validated through the SAME `parseTenantConfigBody` the admin
  * HTTP path uses, so the bootstrap and HTTP paths can never drift.
  *
- * NEVER LOG SECRETS (NFR-014): the team-token parser treats the token VALUE as a
+ * NEVER LOG SECRETS (keycloak-entra spec NFR-014): the team-token parser treats the token VALUE as a
  * secret — every error names only the team (safe) and a structural reason, never
  * the token. (Mirrors `env-file-secrets-source.ts`.)
  */
@@ -48,7 +48,7 @@ const TEAM_NAME_REGEX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
  * register body PLUS a top-level `id` string; it is branded via `tenantId` and
  * validated through the shared `parseTenantConfigBody`, so a bootstrapped tenant
  * is byte-identical to one registered over HTTP (and the registry's structural
- * idempotency then makes a re-seed a no-op, SC-009).
+ * idempotency then makes a re-seed a no-op, multi-tenant spec SC-009).
  *
  * Fail-closed: a non-array, a non-object/idless element, an invalid id, an
  * invalid config, OR a DUPLICATE id all abort with a Left — never a partial seed.
@@ -111,7 +111,7 @@ export interface TeamTokenSeed {
  * a list of `TeamTokenSeed`.
  *
  * The token VALUE is a SECRET: it is validated for shape but NEVER appears in an
- * error message (NFR-014). Each token MUST carry the `fug_` team-token shape
+ * error message (keycloak-entra spec NFR-014). Each token MUST carry the `fug_` team-token shape
  * (`isTeamTokenShape`) — that is the exact pre-filter the inbound auth path uses
  * to route a bearer token to the hashed team-token lookup, so a token without it
  * would be seeded yet never resolve. Rejecting the shape HERE makes that a loud
@@ -136,7 +136,7 @@ export const parseTeamTokensBootstrap = (
     // offending input, which here could echo part of a secret token into the
     // log. We surface ONLY the char length — a content-free signal that lets an
     // operator distinguish an empty/unmounted file from a populated-but-malformed
-    // one without quoting any input (NFR-014 — a token value never appears in an error).
+    // one without quoting any input (keycloak-entra spec NFR-014 — a token value never appears in an error).
     return fileError(source, `not valid JSON (${raw.length} chars)`);
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

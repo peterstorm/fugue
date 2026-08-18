@@ -1,5 +1,5 @@
 /**
- * Audit sinks — the IMPERATIVE SHELL behind `AuditPort` (FR-028, SC-008).
+ * Audit sinks — the IMPERATIVE SHELL behind `AuditPort` (multi-tenant spec FR-028, SC-008).
  *
  * Two concrete sinks plus a compound sink that fans out to both:
  *   - `createLogAuditSink(logger)`        — structured-log sink. Emits one
@@ -15,7 +15,7 @@
  * propagated a Redis-stream outage — would turn a successful tenant op into a
  * failed request, which would be WORSE than a best-effort trail. So every sink
  * catches its own failure, logs it, and resolves. The audit trail is best-effort
- * AT THE INFRA LAYER; SC-008's "100% emit a record" is satisfied by the handler
+ * AT THE INFRA LAYER; multi-tenant spec SC-008's "100% emit a record" is satisfied by the handler
  * ALWAYS CALLING `record` for every op — the sink layer just must not crash.
  *
  * The Redis stream is a SUPERVISOR/admin keyspace (`fugue:supervisor:audit`),
@@ -179,7 +179,7 @@ export const createCompoundAuditSink = (
 
 /**
  * In-memory audit sink for tests — captures every record in order so a test can
- * assert SC-008 (every op emitted a record with the required fields). Mirrors the
+ * assert multi-tenant spec SC-008 (every op emitted a record with the required fields). Mirrors the
  * recorded-call fake style used across the supervisor adapters.
  */
 export interface FakeAuditSink extends AuditPort {

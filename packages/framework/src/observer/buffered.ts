@@ -216,11 +216,19 @@ export class BufferedObserver implements Observer, Disposable {
         }
         // Guard the final run-end dispatch the same way as the replay loop —
         // an unguarded throw here used to escape, skip buffer cleanup, and
-        // leak the run-id's events for the lifetime of the observer.
+        // leak the run-id's events for the lifetime of the observer. The
+        // failure is accounted exactly like the replay loop's: counted in
+        // `dispatchErrors` and routed through `onReplayFailure` (the dead-letter
+        // seam), not logged-and-forgotten.
         try {
           dispatchEvent(this.inner, e);
         } catch (err) {
-          fwLogger().error(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
+          this.dispatchErrors++;
+          if (this.onReplayFailure) {
+            this.onReplayFailure(e, err);
+          } else {
+            fwLogger().error(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
+          }
         }
       } else {
         fwLogger().warn(`[BufferedObserver] Dropping ${events.length} events for run ${e.runId} (filtered by persistence policy)`);

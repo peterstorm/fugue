@@ -13,7 +13,7 @@
  * is IDEMPOTENT end-to-end so re-running it on every boot (and on a re-seed of an
  * unchanged file) converges without error:
  *   - tenants → `registry.register`, whose structural-equality check makes an
- *     unchanged config a no-op (SC-009);
+ *     unchanged config a no-op (multi-tenant spec SC-009);
  *   - team tokens → reconcile against the store: an identical team+token is a
  *     no-op, a rotated token (same team, new value) UPSERTS, and the same token
  *     reused across two teams fails closed.
@@ -24,7 +24,7 @@
  * every token's team is then cross-checked against an active tenant — a token for
  * an unknown team is a misconfiguration caught at boot, not a silent runtime 403.
  *
- * NEVER LOG SECRETS (NFR-014): a team token's value never reaches a log line or
+ * NEVER LOG SECRETS (keycloak-entra spec NFR-014): a team token's value never reaches a log line or
  * an error message here; only the team name and structural reasons do.
  */
 

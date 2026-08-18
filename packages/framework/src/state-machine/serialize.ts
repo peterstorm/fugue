@@ -54,7 +54,8 @@ export const POLLUTION_KEYS: ReadonlySet<string> = new Set([
  * Depth counts property hops from the scan root: in a journal record the
  * record fields and the `event` value sit at depth 1, the event's children
  * at depth 2, …; in a checkpoint the `{schemaVersion, data}` envelope (or a
- * node output) is the scan root and its children sit at depth 1. A value
+ * node output) is scanned at depth 1 (`initialDepth: 1`) and its children
+ * sit at depth 2. A value
  * whose deepest chain exceeds the ceiling fails closed (FR-009): on the
  * READ side with a typed `err` naming the source and depth (the raw seam
  * rejects BEFORE `deserializeValue` could recurse past it), on the WRITE

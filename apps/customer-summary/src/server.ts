@@ -26,7 +26,7 @@ interface HealthDeps {
    * fan out, else `null` (single backend — nothing to fan out). Surfaced in
    * `/readyz` so a constructed-but-failing secondary backend (e.g. Foundry
    * export erroring while MLflow succeeds) is observable beyond the exporter's
-   * rate-limited logs. INFORMATIONAL ONLY — it never gates readiness (FR-026: a
+   * rate-limited logs. INFORMATIONAL ONLY — it never gates readiness (observability spec FR-026: a
    * failing secondary trace backend must not remove the pod), so it can only
    * flip `ready` → `ready-degraded`, never → `not-ready`. A plain synchronous
    * getter (no I/O — it reads in-memory counters).
@@ -252,7 +252,7 @@ export const createApp = (deps: AppDeps): Hono => {
       : true;
     // Cumulative per-backend export failures (multi-backend fan-out only).
     // Informational: a failing SECONDARY trace backend degrades the signal but
-    // never gates readiness (FR-026) — exactly like MLflow above.
+    // never gates readiness (observability spec FR-026) — exactly like MLflow above.
     const exporterFailures = deps.health?.tracingExporterFailures
       ? (deps.health.tracingExporterFailures() ?? null)
       : null;
@@ -261,7 +261,7 @@ export const createApp = (deps: AppDeps): Hono => {
     const httpStatus = redisOk ? 200 : 503;
     // Three outcomes, one level: redis down gates readiness entirely; with
     // redis up, any degraded trace backend (MLflow or a secondary exporter)
-    // downgrades to `ready-degraded` (FR-026: degrades the signal, never
+    // downgrades to `ready-degraded` (observability spec FR-026: degrades the signal, never
     // gates readiness).
     const degraded = !mlflowOk || tracingDegraded;
     let status: string;

@@ -877,14 +877,15 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     }
   });
 
-  it("already-typed failures ride through recordWrite unwrapped (operation + location preserved)", async () => {
+  it("lock-protocol failures are re-tagged at the recordWrite public surface (ADR-0080, journal appendEvent parity)", async () => {
     const directory = tempDirectory();
     const resource = "ride:through";
     // A FILE squatting on the lock path: the rename-born lock cannot be born
-    // (ENOTDIR), so withFileLock rejects with its OWN typed acquireFileLock
-    // failure. recordWrite's outer catch must let it ride through — no
-    // freshness:recordWrite re-wrap (which would double-nest the diagnostic
-    // and drop the inner failureClass), atomic.ts/journal.ts/job.ts parity.
+    // (ENOTDIR), so acquireFileLock rejects with its OWN typed lock-protocol
+    // failure. recordWrite's public surface must re-tag it to the CALLER'S
+    // port operation (freshness:recordWrite) — the lock's internal mechanics
+    // must not name the port call — while the lock detail (the lock path,
+    // the inner acquireFileLock diagnostic) survives in the message chain.
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, `${keyDigest(resource)}.lock`), "squatter");
 
@@ -894,8 +895,43 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     if (write.ok) throw new Error("expected typed rejection");
     expect(write.error.kind).toBe("cache-error");
     if (write.error.kind === "cache-error") {
-      expect(write.error.operation).toBe("acquireFileLock");
+      expect(write.error.operation).toBe("freshness:recordWrite");
+      // The lock path + the inner lock-protocol diagnostic ride through
+      // inside the re-tagged message (the diagnostic chain is preserved).
       expect(write.error.message).toContain(join(directory, `${keyDigest(resource)}.lock`));
+      expect(write.error.message).toContain("acquireFileLock");
+    }
+  });
+
+  it("a body-internal commit failure (atomicWriteFile) is re-tagged to freshness:recordWrite, not withFileLock", async () => {
+    const directory = tempDirectory();
+    const resource = "commit:fail";
+    mkdirSync(directory, { recursive: true });
+    // Deterministic commit failure via the test-only seam: the temp path
+    // squats under a FILE, so the tmp write cannot land (ENOTDIR) — the
+    // body's atomicWriteFile throws inside the locked critical section.
+    const squatterFile = join(directory, "tmp-squatter");
+    writeFileSync(squatterFile, "squatter");
+
+    const index = createFileFreshnessIndex(directory, {
+      now: () => 1_000,
+      atomicWriteFileHooks: {
+        temporaryPath: () => join(squatterFile, "tmp.json"),
+      },
+    });
+    const write = await index.recordWrite(writeEvent(resource, "v", 1_000));
+    expect(write.ok).toBe(false);
+    if (write.ok) throw new Error("expected typed rejection");
+    expect(write.error.kind).toBe("cache-error");
+    if (write.error.kind === "cache-error") {
+      // The operation names the CALLER'S port call — not withFileLock
+      // (the wrapper) and not atomicWriteFile (the body helper).
+      expect(write.error.operation).toBe("freshness:recordWrite");
+      // The full chain survives: the withFileLock diagnostic (lock path) +
+      // the primary atomicWriteFile commit failure nested inside it.
+      expect(write.error.message).toContain("withFileLock");
+      expect(write.error.message).toContain("atomicWriteFile");
+      expect(write.error.message).toContain(`${keyDigest(resource)}.json`);
     }
   });
   it("explicitly rejects append/member-set and extra-field persisted shapes", async () => {

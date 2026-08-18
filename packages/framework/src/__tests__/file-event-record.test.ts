@@ -39,7 +39,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tryFromJson, deepJsonEqual } from "../state-machine/serialize.js";
-import type { DedupKey, FileEventRecord, JournalSequence } from "../file/event-record.js";
+import type { DedupKey, FileEventRecord, JournalSequence, RecordedAtMs } from "../file/event-record.js";
 import {
   DEDUP_KEY_PATTERN,
   isDedupKey,
@@ -956,7 +956,9 @@ describe("parseFileEventRecord — valid records", () => {
       schemaVersion: 1 as const,
       sequence: 7,
       dedupKey: "agent:run-1",
-      recordedAtMs: 1_700_000_000_000,
+      // Structurally a plain number at runtime — the parsed record carries
+      // the `RecordedAtMs` brand; `toEqual` compares by structure.
+      recordedAtMs: 1_700_000_000_000 as unknown as RecordedAtMs,
       event: { kind: "step", n: 2 },
     };
     expect({
@@ -1833,7 +1835,7 @@ describe("fast-check properties", () => {
         expect(parsed.value.schemaVersion).toBe(JOURNAL_SCHEMA_VERSION);
         expect(Number(parsed.value.sequence)).toBe(rec.sequence);
         expect(String(parsed.value.dedupKey)).toBe(rec.dedupKey);
-        expect(parsed.value.recordedAtMs).toBe(rec.recordedAtMs);
+        expect(Number(parsed.value.recordedAtMs)).toBe(rec.recordedAtMs);
         expect(parsed.value.event).toEqual(rec.event);
 
         // read → write: re-serialization is byte-stable even with Map/Set/Date

@@ -8,14 +8,14 @@
  *   2. the domain-event `Observer` placed into `deps.observer`.
  *
  * Default (no Foundry) path: a SINGLE MLflow exporter + a `NoopObserver` —
- * byte-for-byte the pre-Foundry behaviour (SC-006 / FR-003 / FR-027). The
+ * byte-for-byte the pre-Foundry behaviour (observability spec SC-006 / FR-003 / FR-027). The
  * 1-element exporter tuple unwraps in `normalizeExporter`, so no Composite
  * wrapper is introduced.
  *
- * Foundry path: the MLflow and/or Azure Monitor exporters (FR-002 dual export,
+ * Foundry path: the MLflow and/or Azure Monitor exporters (observability spec FR-002 dual export,
  * order preserved), and an `AiFoundryObserver`-over-sink wrapped in a
  * `BufferedObserver` that SHARES the SAME persistence-policy instance used for
- * trace tail-sampling (FR-021 / SC-010 — a discarded trace produces no orphaned
+ * trace tail-sampling (observability spec FR-021 / SC-010 — a discarded trace produces no orphaned
  * domain events).
  *
  * Why a helper (functional core / imperative shell): the factories are
@@ -76,12 +76,12 @@ interface ComposedObservability {
 }
 
 /**
- * Inner observer that emits the FULL FR-019 run summary (SC-008).
+ * Inner observer that emits the FULL observability spec FR-019 run summary (observability spec SC-008).
  *
  * `BufferedObserver` replays a run's buffered events one-by-one to its inner
  * observer and then the `run-end`. The framework's `AiFoundryObserver` maps each
  * event via `mapEventToFoundry`, which for `run-end` emits only the BARE summary
- * (duration + status — the fields the bare event guarantees). To satisfy SC-008
+ * (duration + status — the fields the bare event guarantees). To satisfy observability spec SC-008
  * (every completed run produces a summary carrying nodeCount / retryCount /
  * cacheHitCount / totalCost) we bridge here:
  *
@@ -100,7 +100,7 @@ interface ComposedObservability {
  * `gen_ai.usage.*`), NOT on observer events — and are simply NOT re-emitted on
  * this domain-event channel here: `mapRunSummaryToFoundry` drops them when
  * undefined (which they always are on this observer-derived path).
- * `cacheHitCount` IS knowable here and is always supplied so the SC-008 guarantee
+ * `cacheHitCount` IS knowable here and is always supplied so the observability spec SC-008 guarantee
  * holds.
  *
  * This observer is fail-tolerant in the same spirit as `AiFoundryObserver`: it
@@ -184,7 +184,7 @@ export { dispatchEvent };
  * @param policy        the SHARED persistence policy. The SAME instance is the
  *                      one `bootstrap.ts` passes to `initTracing`, so trace
  *                      tail-sampling and domain-event gating make ONE coherent
- *                      decision per run (FR-021 / SC-010).
+ *                      decision per run (observability spec FR-021 / SC-010).
  * @param factories     injectable exporter/sink builders (fakes in tests).
  */
 export const composeObservability = (
@@ -192,7 +192,7 @@ export const composeObservability = (
   policy: PersistencePolicy,
   factories: ObservabilityFactories,
 ): ComposedObservability => {
-  // Build exporters in the resolved `traceBackends` ORDER (FR-002). The selection
+  // Build exporters in the resolved `traceBackends` ORDER (observability spec FR-002). The selection
   // is a NON-EMPTY tuple (config invariant, carried in `TraceBackends`), so the
   // head backend is proven present at the type level — destructuring yields a
   // non-optional head and the result is a non-empty `ExporterList` with no
@@ -210,7 +210,7 @@ export const composeObservability = (
 
   // Foundry path: domain events go to the Application Insights sink via the
   // run-summary-bridging observer, wrapped in a BufferedObserver that SHARES
-  // the trace policy instance (FR-021 / SC-010).
+  // the trace policy instance (observability spec FR-021 / SC-010).
   const sink = factories.createFoundrySink();
   const foundryObserver = new FoundryRunSummaryObserver(sink);
   const observer = new BufferedObserver(foundryObserver, policy);
@@ -237,8 +237,8 @@ interface FoundryLegLogger {
  * - `inactive` — Foundry was never enabled, OR its construction FAILED and the
  *   leg degraded to an MLflow-only `effective` selection. Either way there are
  *   no prebuilt instances. A runtime Foundry construction fault therefore
- *   degrades ONLY the Foundry leg (FR-026 / SC-009) and never disables MLflow
- *   tracing (SC-006).
+ *   degrades ONLY the Foundry leg (observability spec FR-026 / SC-009) and never disables MLflow
+ *   tracing (observability spec SC-006).
  *
  * `{ exporter present, sink null }` (and vice versa) is now unrepresentable.
  */
@@ -261,7 +261,7 @@ type ResolvedFoundryLeg =
 /**
  * Attempt the Foundry exporter + sink construction in ISOLATION from MLflow.
  *
- * This is the fault-isolation boundary (FR-026 / SC-009): the effectful Foundry
+ * This is the fault-isolation boundary (observability spec FR-026 / SC-009): the effectful Foundry
  * construction runs here, OUTSIDE the lazy composition factories, so a failure
  * degrades only the Foundry leg. MLflow's exporter is built unconditionally by
  * the caller and is unaffected by this function's outcome.
@@ -291,7 +291,7 @@ export const resolveFoundryLeg = (
     return { outcome: "active", effective: resolved, foundryExporter, foundrySink };
   } catch (foundryErr) {
     // Foundry export disabled — MLflow tracing CONTINUES unaffected
-    // (FR-026 / SC-009). Degrade the selection to MLflow-only so the
+    // (observability spec FR-026 / SC-009). Degrade the selection to MLflow-only so the
     // composition emits no Foundry exporter/observer for this run.
     log.error(
       "Azure AI Foundry export construction failed — disabling Foundry export; " +

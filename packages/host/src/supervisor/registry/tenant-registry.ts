@@ -1,12 +1,12 @@
 /**
- * Tenant registry — PURE functional core (FR-024, FR-027, SC-009).
+ * Tenant registry — PURE functional core (multi-tenant spec FR-024, FR-027, SC-009).
  *
  * This module is the runtime tenant registry's algebraic data model and its
  * total, pure, IDEMPOTENT transformations. It holds per-tenant CONFIG only — a
- * secrets *reference* (never a secret value, AD-6 / FR-005), the tenant's fs
+ * secrets *reference* (never a secret value, AD-6 / multi-tenant spec FR-005), the tenant's fs
  * root, its Keycloak client mapping, admission limits, and lifecycle metadata —
  * and it is mutated at runtime by `register` / `deregister` / `reconfigure`
- * (FR-024).
+ * (multi-tenant spec FR-024).
  *
  * STRICTLY NO I/O. No Redis, no clock, no `Date.now()`: every function receives
  * the data it needs (including `now`) as a parameter and returns a NEW immutable
@@ -24,7 +24,7 @@
  * uses `ts-pattern`'s exhaustive `match` on `status` instead of probing an
  * optional field.
  *
- * FAIL-CLOSED LOOKUP (FR-022): `lookup` returns first-class ABSENCE for an
+ * FAIL-CLOSED LOOKUP (multi-tenant spec FR-022): `lookup` returns first-class ABSENCE for an
  * unknown — or already-deregistered — tenant (`Result.err(tenantUnknown())`),
  * never a guessed or fabricated config. The supervisor turns that into a refusal
  * to start a NEW run; the Redis adapter additionally fails closed on infra loss
@@ -32,7 +32,7 @@
  * cannot positively confirm a tenant therefore NEVER routes on stale/guessed
  * config.
  *
- * IDEMPOTENCY (FR-027, SC-009): repeating an identical `register` or
+ * IDEMPOTENCY (multi-tenant spec FR-027, SC-009): repeating an identical `register` or
  * `deregister` yields a STRUCTURALLY identical registry — same entries, same
  * `deregisteredAt` timestamps. `register` of an unchanged config is a no-op that
  * returns the SAME registry reference; `deregister` of an absent or
@@ -68,7 +68,7 @@ interface KeycloakClientMapping {
 }
 
 /**
- * This tenant's OWN admission ceilings (FR-041 / SC-012 are enforced elsewhere;
+ * This tenant's OWN admission ceilings (multi-tenant spec FR-041 / SC-012 are enforced elsewhere;
  * the registry only carries the numbers). All counts are non-negative integers;
  * the smart constructor (`tenantConfig`) is the parse boundary that guarantees
  * that, so downstream code can treat these as already-valid.
@@ -81,11 +81,11 @@ interface TenantLimits {
 }
 
 /**
- * The lifecycle-independent fields of a tenant's configuration record (FR-024).
+ * The lifecycle-independent fields of a tenant's configuration record (multi-tenant spec FR-024).
  *
  * `secretsRef` is the branded `SecretsRef` — a REFERENCE only. The registry (and
  * the supervisor that holds it) never carries a secret VALUE; dereferencing is
- * the worker's job via its `SecretsSource` (AD-6, FR-005). The type system keeps
+ * the worker's job via its `SecretsSource` (AD-6, multi-tenant spec FR-005). The type system keeps
  * "reference" and "secret" disjoint, so a registry entry can never be a secret.
  */
 export interface TenantConfigBase {
@@ -94,7 +94,7 @@ export interface TenantConfigBase {
   readonly keycloakClientMapping: KeycloakClientMapping;
   readonly fsRoot: string;
   /**
-   * The per-tenant DAG root the worker discovers graphs under (FR-002). Injected
+   * The per-tenant DAG root the worker discovers graphs under (multi-tenant spec FR-002). Injected
    * into the worker's spawn env as `DAGS_LOCAL_PATH`, so the worker runs the
    * LocalGitAdapter rooted HERE and globs `dags/**​/dag.ts` under it alone.
    *
@@ -275,7 +275,7 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
  * Deep structural equality for the config fields that define a tenant's
  * identity-config, INCLUDING the lifecycle discriminant + tombstone. This is what
  * makes `register`/`reconfigure` idempotent: a re-apply of a structurally
- * identical config is a no-op (same-reference return, FR-027 / SC-009).
+ * identical config is a no-op (same-reference return, multi-tenant spec FR-027 / SC-009).
  */
 const configEquals = (a: TenantConfig, b: TenantConfig): boolean =>
   a.status === b.status &&
@@ -340,7 +340,7 @@ const teamOwnedByOther = (
 // ── Transitions (pure, total, idempotent) ────────────────────────────────────
 
 /**
- * Register (or re-register) a tenant (FR-024, FR-027, SC-009).
+ * Register (or re-register) a tenant (multi-tenant spec FR-024, FR-027, SC-009).
  *
  * Always lands the config in its ACTIVE shape — the `cfg` argument is an
  * `ActiveTenantConfig` by construction (the union forbids passing a tombstone
@@ -348,7 +348,7 @@ const teamOwnedByOther = (
  *
  * IDEMPOTENT: if an entry with the same id and a STRUCTURALLY identical config
  * already exists, this is a no-op and returns the SAME registry reference — so
- * repeating an identical register produces an identical end state (SC-009). A
+ * repeating an identical register produces an identical end state (multi-tenant spec SC-009). A
  * register of a previously-deregistered tenant REVIVES it: registration is the
  * canonical way to bring a tenant back.
  *
@@ -362,7 +362,7 @@ export const register = (
 ): Result<TenantRegistry, HostError> => {
   const existing = registry.entries.get(cfg.id);
   if (existing !== undefined && configEquals(existing, cfg)) {
-    // No-op: identical end state. Return the same reference (SC-009).
+    // No-op: identical end state. Return the same reference (multi-tenant spec SC-009).
     return ok(registry);
   }
   // Enforce team↔tenant 1:1 (fail-closed) so the supervisor's team→tenant routing
@@ -378,7 +378,7 @@ export const register = (
 };
 
 /**
- * Deregister a tenant (FR-024, FR-027, SC-009).
+ * Deregister a tenant (multi-tenant spec FR-024, FR-027, SC-009).
  *
  * Transitions the entry to the `DeregisteredTenantConfig` variant
  * (`status:"deregistered"`, `deregisteredAt = now`) and RETAINS it
@@ -390,7 +390,7 @@ export const register = (
  * the same registry, NOT an error). Deregistering an ALREADY-deregistered tenant
  * preserves the ORIGINAL `deregisteredAt` and returns the same registry — a
  * retried deregister never bumps the grace-window clock, so repeating it yields
- * an identical end state (SC-009).
+ * an identical end state (multi-tenant spec SC-009).
  */
 export const deregister = (
   registry: TenantRegistry,
@@ -420,7 +420,7 @@ export const deregister = (
 };
 
 /**
- * Reconfigure a registered, ACTIVE tenant (FR-024).
+ * Reconfigure a registered, ACTIVE tenant (multi-tenant spec FR-024).
  *
  * Replaces the config in place (immutably). Per AD-5 the new config takes effect
  * on the tenant's NEXT worker spawn — this function ONLY updates registry state;
@@ -468,7 +468,7 @@ export const reconfigure = (
 // ── Queries (fail-closed) ────────────────────────────────────────────────────
 
 /**
- * Resolve a tenant's ACTIVE config (FR-022 fail-closed).
+ * Resolve a tenant's ACTIVE config (multi-tenant spec FR-022 fail-closed).
  *
  * Returns `Result.err(tenantUnknown())` for an unknown OR a
  * deregistered-but-retained tenant — never a guessed config, never the retained

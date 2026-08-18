@@ -97,9 +97,9 @@ describe("E2E observability flow", () => {
   });
 });
 
-// --- Resume integration (SC-008) ---
+// --- Resume integration (ai-summary spec SC-008) ---
 
-describe("E2E resume integration (SC-008)", () => {
+describe("E2E resume integration (ai-summary spec SC-008)", () => {
   test("resume skips checkpointed nodes, only re-runs uncompleted ones", async () => {
     const { observer, events } = collectingObserver();
     const source = new JsonFixtureSource(FIXTURES_DIR);

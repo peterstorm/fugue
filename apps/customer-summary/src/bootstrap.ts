@@ -65,13 +65,13 @@ type TracingConfig = Pick<Config, "TRACE_SAMPLE_RATIO" | "MLFLOW_TRACKING_URI" |
  * fault-tolerant "continue without tracing" path is unit-testable WITHOUT the
  * full bootstrap (Redis/LLM/server).
  *
- * MLflow is the always-available trace backend (FR-003): its exporter is built
+ * MLflow is the always-available trace backend (observability spec FR-003): its exporter is built
  * unconditionally. The Foundry leg is attempted in its OWN isolation guard
  * ({@link resolveFoundryLeg}); a Foundry CONSTRUCTION fault degrades only the
- * Foundry leg and leaves MLflow tracing live (FR-026 / SC-006 / SC-009). The
+ * Foundry leg and leaves MLflow tracing live (observability spec FR-026 / SC-006 / SC-009). The
  * persistence policy is the SINGLE source of truth gating BOTH trace
  * tail-sampling AND the BufferedObserver's domain-event emission, so a discarded
- * trace produces no orphaned domain events (FR-021 / SC-010).
+ * trace produces no orphaned domain events (observability spec FR-021 / SC-010).
  *
  * On ANY failure the catch returns a COHERENT un-traced state — `null` tracing,
  * a fresh `NoopObserver`, and `null` sink — so the "continuing without tracing"
@@ -172,9 +172,9 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   const fixturesDir = resolve(config.FIXTURES_DIR);
   const promptsDir = resolve(config.PROMPTS_DIR);
 
-  // --- Observability backend selection (FR-002/003/006/022/023) ---
+  // --- Observability backend selection (observability spec FR-002/003/006/022/023) ---
   // Resolve the trace backend(s) + auth from config. A config error MUST fail
-  // bootstrap loudly — never silently fall back (FR-006). In well-formed config
+  // bootstrap loudly — never silently fall back (observability spec FR-006). In well-formed config
   // this is already caught by the zod superRefine in loadConfig(); the resolver
   // re-checks defense-in-depth, so a thrown error here means contradictory
   // config slipped past the schema and must stop startup.
@@ -188,7 +188,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   // Delegated to the seam-injectable `setUpTracing` shell. It builds the
   // always-on MLflow backend, attempts the Foundry leg in isolation, composes
   // exporters + observer, and starts the pipeline — returning a coherent
-  // un-traced state on any failure so the app still boots (SC-006 / FR-026).
+  // un-traced state on any failure so the app still boots (observability spec SC-006 / FR-026).
   const { tracing, observer, foundrySinkForFlush } = await setUpTracing(resolved, config, log);
 
   // --- Redis (cache + checkpointer) ---
@@ -364,7 +364,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     cache: contextCache,
     checkpointWriter,
     checkpointer,
-    // Default path: NoopObserver (byte-for-byte unchanged, SC-006/FR-027).
+    // Default path: NoopObserver (byte-for-byte unchanged, observability spec SC-006/FR-027).
     // Foundry path: BufferedObserver(AiFoundryObserver) sharing the trace
     // policy instance — set by composeObservability above.
     observer,
@@ -403,7 +403,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       // constructed-but-persistently-failing secondary backend (e.g. Foundry
       // export erroring while MLflow succeeds) is observable beyond the
       // exporter's rate-limited logs. Null unless multiple backends fan out.
-      // Informational only — never gates readiness (FR-026). Reads `tracing`
+      // Informational only — never gates readiness (observability spec FR-026). Reads `tracing`
       // lazily: by request time the bootstrap tracing block has settled.
       tracingExporterFailures: () => tracing?.exporterFailures() ?? null,
     },

@@ -193,13 +193,6 @@ export interface Checkpointer {
 // --- InMemoryCheckpointer ---
 
 /**
- * Internal storage shape. `createdAt` is split out so the checkpointer owns
- * the timestamp the same way the Redis variant does (stamped at write time by
- * the writer process in `setMeta`, evaluated against `TTL_SECONDS` on load).
- * Held in a separate field
- * rather than smuggled onto `RunMeta` so the public type stays clean.
- */
-/**
  * Internal storage shape — exported as the in-memory backend's TEST-SURFACE
  * type (deepening-round seam redesign): the shared `checkpointerSuite` and the
  * hostile-totality tests construct and seed these records directly through a
@@ -207,7 +200,11 @@ export interface Checkpointer {
  * internals through a public accessor. The shape is exactly what `load`
  * consumes: the caller's meta (possibly with `frameworkVersion` absent, for
  * the ADR-0017 missing-field case) and the writer-stamped `createdAt` (used
- * for the lazy FR-027 TTL evaluation).
+ * for the lazy FR-027 TTL evaluation). `createdAt` is split out so the
+ * checkpointer owns the timestamp the same way the Redis variant does
+ * (stamped at write time in `setMeta`, evaluated against `TTL_SECONDS` on
+ * load) — a separate field rather than smuggled onto `RunMeta`, so the
+ * public type stays clean.
  */
 export interface InMemoryStoredMeta {
   readonly meta: RunMeta;
