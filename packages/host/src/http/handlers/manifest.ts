@@ -92,7 +92,7 @@ export const buildManifest = (
 // Handler
 // ---------------------------------------------------------------------------
 
-export interface ManifestHandlerDeps {
+interface ManifestHandlerDeps {
   /** Optional logger — records non-fatal schema-serialization degradations server-side. */
   readonly logger?: LogPort;
 }

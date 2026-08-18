@@ -399,7 +399,7 @@ export const TOKEN_PREFIX = "fug_";
 export const TOKEN_MIN_LENGTH = TOKEN_PREFIX.length + 43;
 
 /** Required entropy for a team token — 32 bytes → 43 base64url chars. */
-export const TOKEN_RANDOM_BYTES = 32;
+const TOKEN_RANDOM_BYTES = 32;
 
 /**
  * Construct a TeamToken from a prefix + random bytes (base64url encoded).

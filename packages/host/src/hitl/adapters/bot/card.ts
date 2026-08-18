@@ -18,7 +18,7 @@ import type { ReviewNotification } from "../../types.js";
 export const REVIEW_VERB = "fugue.review" as const;
 
 /** The decision payload an `Action.Execute` button submits back to the bot. */
-export interface ReviewActionData {
+interface ReviewActionData {
   readonly verb: typeof REVIEW_VERB;
   readonly runId: string;
   readonly nodeId: string;

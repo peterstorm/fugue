@@ -113,7 +113,7 @@ export const isRateLimit = (e: unknown): boolean =>
 export const isTimeoutError = (e: unknown): boolean =>
   e instanceof Error && (e as { cause?: unknown }).cause === "timeout";
 
-export interface ClassifyOpts {
+interface ClassifyOpts {
   /** True when the request-level timeout fired. */
   readonly timedOut?: boolean;
   /** True when the caller's own signal was aborted (not our timeout). */

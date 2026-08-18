@@ -47,7 +47,7 @@ export type { HostTimeoutDefaults } from "../domain/dag-factory.js";
  *   before any successful sync
  * - skipped: `previousSha` — the last known SHA (or `null` if never synced)
  */
-export type SyncResult =
+type SyncResult =
   | { readonly kind: "no-change"; readonly currentSha: GitSha }
   | { readonly kind: "updated"; readonly newSha: GitSha; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
   | { readonly kind: "error"; readonly previousSha: GitSha | null; readonly syncError: HostError }
@@ -75,22 +75,22 @@ export type SyncLogger = import("../ports.js").LogPort;
 /**
  * Callback invoked when a sync cycle begins (before pulling).
  */
-export type OnSyncStarted = () => void;
+type OnSyncStarted = () => void;
 
 /**
  * Callback invoked when sync completes with a new registry.
  */
-export type OnSyncComplete = (registry: Registry, sha: GitSha) => void;
+type OnSyncComplete = (registry: Registry, sha: GitSha) => void;
 
 /**
  * Callback invoked when sync completes with no changes (SHA unchanged).
  */
-export type OnSyncNoChange = (sha: GitSha) => void;
+type OnSyncNoChange = (sha: GitSha) => void;
 
 /**
  * Callback invoked when sync fails.
  */
-export type OnSyncError = (error: HostError) => void;
+type OnSyncError = (error: HostError) => void;
 
 /**
  * Clock function — re-exported from ports for backward compatibility.

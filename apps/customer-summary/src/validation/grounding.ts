@@ -4,7 +4,7 @@ import type { CrmRecord } from "../schemas/crm.js";
 /**
  * Grounding check result for a single dimension.
  */
-export type GroundingCheck = {
+type GroundingCheck = {
   readonly dimension: string;
   readonly passed: boolean;
   readonly detail: string;
@@ -13,7 +13,7 @@ export type GroundingCheck = {
 /**
  * Aggregate grounding validation result.
  */
-export type GroundingResult = {
+type GroundingResult = {
   readonly checks: readonly GroundingCheck[];
   readonly allPassed: boolean;
   readonly warnings: readonly string[];

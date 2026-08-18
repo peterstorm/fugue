@@ -28,7 +28,7 @@ import type { RunId } from "@fuguejs/framework";
  * `total !== tokensIn + tokensOut` value representable — an illegal state that
  * feeds the budget check directly. Dropping the field makes it unrepresentable.
  */
-export interface RunUsage {
+interface RunUsage {
   readonly tokensIn: number;
   readonly tokensOut: number;
 }
@@ -49,7 +49,7 @@ export interface LlmMeter {
 }
 
 /** A single LLM call's token delta. */
-export interface TokenDelta {
+interface TokenDelta {
   readonly tokensIn: number;
   readonly tokensOut: number;
 }
@@ -61,7 +61,7 @@ export interface TokenDelta {
  * `cumulative` on both branches is the run's total-so-far at decision time
  * (before the in-flight call). `budget` is only meaningful on `refuse`.
  */
-export type BudgetDecision =
+type BudgetDecision =
   | { readonly kind: "allow"; readonly cumulative: number }
   | { readonly kind: "refuse"; readonly cumulative: number; readonly budget: number };
 
@@ -200,7 +200,7 @@ export const emptyReservation: ReservationState = { reservedInFlight: 0, maxObse
  * frees precisely that, even if the estimate has since grown); a `refuse`
  * carries the figures the shell logs. Illegal blends unrepresentable.
  */
-export type AdmitDecision =
+type AdmitDecision =
   | { readonly kind: "admit"; readonly state: ReservationState; readonly reserved: number }
   | {
       readonly kind: "refuse";

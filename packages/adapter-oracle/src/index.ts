@@ -122,7 +122,7 @@ declare module "@fuguejs/framework" {
  * Configuration for the Oracle adapter. Credentials come from env config
  * only — never hardcoded (FR-040) and never logged (FR-041).
  */
-export interface OracleAdapterConfig {
+interface OracleAdapterConfig {
   /** Easy-connect string: `HOST:PORT/SERVICE`. */
   readonly connectString: string;
   /** Oracle schema/user. */
@@ -583,7 +583,7 @@ export const healthCheckWithTimeout = async (
  * });
  * ```
  */
-export interface FakeOracleRoute {
+interface FakeOracleRoute {
   readonly rows?: unknown[];
   /**
    * When `true`, this route matches any SQL that `startsWith` its key (longest

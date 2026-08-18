@@ -213,7 +213,7 @@ export const fanInConstName = (id: KebabIdent): string => `${pascalCase(id)}FanI
 export const llmFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}`;
 
 /** Module-level node const for non-llm nodes: `fetch-record` → `fetchRecord`. */
-export const nodeConstName = (id: KebabIdent): string => camelCase(id);
+const nodeConstName = (id: KebabIdent): string => camelCase(id);
 
 /**
  * The `<camel>Node` identifier claimed for llm nodes: `summarize` →
@@ -347,7 +347,7 @@ export const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
  * (not `AuthoredNode`) so this module stays import-free — `authored.ts`
  * imports us, not the other way around.
  */
-export interface IdentifierSource {
+interface IdentifierSource {
   readonly id: KebabIdent;
   readonly kind: AuthoredNodeKind;
 }

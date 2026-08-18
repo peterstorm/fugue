@@ -33,7 +33,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Result of one LLM turn, normalized across providers. */
-export interface TurnResult {
+interface TurnResult {
   /** Tool calls requested by the model. Empty array = final answer turn. */
   readonly toolCalls: readonly ToolCall[];
   /** Text content from the model (present on final-answer turns). */
@@ -64,7 +64,7 @@ export interface ToolLoopProvider {
 }
 
 /** Configuration for the tool-use loop. */
-export interface ToolUseLoopConfig<O> {
+interface ToolUseLoopConfig<O> {
   readonly nodeId: NodeId;
   readonly model: string;
   readonly schema: z.ZodType<O>;

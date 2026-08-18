@@ -27,13 +27,13 @@ import type { Redis as IoRedis, RedisOptions } from "ioredis";
  * (e.g. the worker's `AclCredential`, minted from the supervisor's spawn-env
  * handoff) satisfies it, so this adapter need not depend on the worker bootstrap.
  */
-export interface RedisAclCredential {
+interface RedisAclCredential {
   readonly username: string;
   readonly password: string;
 }
 
 /** The wired connectivity bundle: a startup probe port, the data port, and teardown. */
-export interface RedisConnectivityBundle {
+interface RedisConnectivityBundle {
   readonly port: RedisConnectivityPort;
   readonly redis: RedisPort;
   /** Teardown — resolves once the client has quit; the result is not meant to be consumed. */

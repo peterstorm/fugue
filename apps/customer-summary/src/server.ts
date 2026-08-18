@@ -18,7 +18,7 @@ const SummarizeRequestSchema = z.object({
 
 // --- Health check deps ---
 
-export interface HealthDeps {
+interface HealthDeps {
   readonly checkRedis?: () => Promise<boolean>;
   readonly checkMlflow?: () => Promise<boolean>;
   /**

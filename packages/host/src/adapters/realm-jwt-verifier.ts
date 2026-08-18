@@ -52,7 +52,7 @@ const REALM_TOKEN_ALGS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", 
 /** Tolerate normal clock skew between this host and the realm (matches the Bot verifier). */
 const CLOCK_TOLERANCE = "60s";
 
-export interface RealmJwtVerifierConfig {
+interface RealmJwtVerifierConfig {
   /**
    * The realm issuer URL. Its `<issuer>/protocol/openid-connect/certs` JWKS
    * endpoint is where the realm publishes its signing keys (Keycloak convention)

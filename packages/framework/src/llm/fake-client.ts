@@ -73,7 +73,7 @@ export type FakeFinalTurn = {
 
 export type FakeTurn = FakeToolUseTurn | FakeFinalTurn;
 
-export interface FakeWithToolsTurnContext {
+interface FakeWithToolsTurnContext {
   readonly turn: number;
   readonly toolResults: readonly ToolDispatchResult[];
 }
@@ -162,7 +162,7 @@ const signalAborted = (host: object): boolean => {
   }
 };
 
-export interface FakeLlmClientOpts {
+interface FakeLlmClientOpts {
   /**
    * Per-call script for `sendWithTools`. If an array, plays back in order;
    * if a function, called once per turn with the prior tool results.

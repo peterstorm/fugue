@@ -87,14 +87,14 @@ export interface NewOptions {
 // in types/ids.ts; we hold authors to the kebab convention every existing
 // DAG follows.)
 
-export interface ParsedNewArgs {
+interface ParsedNewArgs {
   readonly ok: true;
   /** Discriminant: shape mode vs `--from` mode — narrow on this, not key probing. */
   readonly mode: "shape";
   readonly options: NewOptions;
 }
 /** `fugue new --from <authored.json>` — everything else comes from the file. */
-export interface ParsedNewFromArgs {
+interface ParsedNewFromArgs {
   readonly ok: true;
   /** Discriminant: shape mode vs `--from` mode — narrow on this, not key probing. */
   readonly mode: "from";
@@ -103,7 +103,7 @@ export interface ParsedNewFromArgs {
   readonly root?: string;
   readonly force: boolean;
 }
-export interface ParseNewError {
+interface ParseNewError {
   readonly ok: false;
   readonly problems: readonly string[];
 }
@@ -429,7 +429,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
 // `fugue new --from <authored.json>` — deterministic codegen (Phase B2)
 // ---------------------------------------------------------------------------
 
-export interface NewFromOptions {
+interface NewFromOptions {
   /** Path to the dag.authored.json file. */
   readonly from: string;
   readonly owner?: string;

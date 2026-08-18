@@ -16,7 +16,7 @@ import { LINE_TERMINATORS } from "./identifiers.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { assertNever, type LintError } from "./types.js";
 
-export type VisualizeResult =
+type VisualizeResult =
   | {
       readonly ok: true;
       readonly path: string;

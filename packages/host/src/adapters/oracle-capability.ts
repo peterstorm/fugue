@@ -109,7 +109,7 @@ export const connectStringHost = (connectString: string): string =>
  * surfacing path deterministically (without depending on whether `oracledb`
  * happens to load). Production never passes it.
  */
-export type OracleAdapterFactory = typeof createOracleAdapter;
+type OracleAdapterFactory = typeof createOracleAdapter;
 
 export const buildOracleCapability = (
   config: HostConfig,

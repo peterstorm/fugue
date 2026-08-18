@@ -46,7 +46,7 @@ export interface BrokerAuditFields {
  * a `refusal` carries the typed reason it was denied. Illegal blends (a refusal
  * with a "minted via" tag) are unrepresentable.
  */
-export type BrokerAuditOutcome =
+type BrokerAuditOutcome =
   | {
       readonly result: "mint";
       readonly via: "client_credentials" | "token-exchange-v2";

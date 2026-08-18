@@ -60,7 +60,7 @@ export const classifyJoseError = (e: unknown): BotAuthError["kind"] => {
   return isJwksTimeout || isFetchFailure ? "unavailable" : "invalid";
 };
 
-export interface BotVerifyConfig {
+interface BotVerifyConfig {
   /** The bot's Microsoft app id — the audience the inbound token must carry. */
   readonly appId: string;
 }

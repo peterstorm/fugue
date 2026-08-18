@@ -34,7 +34,7 @@ import type {
 import type { DecisionStorePort, HumanReviewNotifierPort } from "./ports.js";
 import type { LogPort } from "../ports.js";
 
-export interface OnHumanReviewDeps {
+interface OnHumanReviewDeps {
   readonly decisions: DecisionStorePort;
   readonly notifier: HumanReviewNotifierPort;
   readonly runId: RunId;
@@ -104,7 +104,7 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
     return { kind: "pending" };
   };
 
-export interface OnDecisionConsumedDeps {
+interface OnDecisionConsumedDeps {
   readonly decisions: DecisionStorePort;
   readonly runId: RunId;
   readonly logger?: LogPort;

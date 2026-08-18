@@ -77,7 +77,7 @@ const createLogger = (): SyncLogger => ({
  * NOTE: `config` carries the resolved secrets merged in — it is SENSITIVE; the
  * caller MUST NOT log it.
  */
-export interface WorkerBootstrap {
+interface WorkerBootstrap {
   readonly tenant: TenantId;
   readonly secretsRef: SecretsRef;
   readonly config: HostConfig;

@@ -370,7 +370,7 @@ const mintToken = async (
 // Provider factory — the one justified piece of encapsulated mutable state
 // ---------------------------------------------------------------------------
 
-export interface TokenProviderDeps {
+interface TokenProviderDeps {
   readonly auth: AuthConfig;
   readonly fetch: FetchLike;
   /** Epoch-ms clock seam; defaults to `Date.now`. Injected by tests. */

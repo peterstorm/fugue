@@ -20,7 +20,7 @@ import type { RedisConnectivityPort, LogPort } from "../ports.js";
  * expected to be idempotent — `onAlive`/`onDead` fire on every tick, not just on
  * edges, so the host applies the matching state transition only when valid.
  */
-export interface RedisProbeCallbacks {
+interface RedisProbeCallbacks {
   /** A PING succeeded. */
   readonly onAlive: () => void;
   /** A PING failed (Result.err or thrown). */

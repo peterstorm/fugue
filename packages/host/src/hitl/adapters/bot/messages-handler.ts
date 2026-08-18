@@ -53,7 +53,7 @@ import type { ConversationStorePort, VerifyBotToken, ConversationReference } fro
 import { REVIEW_VERB, buildResolvedCard } from "./card.js";
 import { isTrustedBotServiceUrl } from "./trusted-host.js";
 
-export interface BotMessagesDeps {
+interface BotMessagesDeps {
   readonly verify: VerifyBotToken;
   readonly hitl: Pick<HitlRunService, "getRun" | "recordDecision">;
   readonly conversations: ConversationStorePort;

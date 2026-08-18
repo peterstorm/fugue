@@ -18,7 +18,7 @@
 import type { AppLogger } from "./logger.js";
 
 /** Trace-pipeline teardown surface (subset of `TracingHandle`). */
-export interface TraceShutdownHandle {
+interface TraceShutdownHandle {
   readonly flush: () => Promise<void>;
   readonly shutdown: () => Promise<void>;
 }
@@ -28,15 +28,15 @@ export interface TraceShutdownHandle {
  * or `Symbol.dispose`. The default `NoopObserver` has neither, so the dispose
  * step is a no-op on the byte-for-byte-unchanged path.
  */
-export type DisposableObserver = Partial<Disposable> & { close?: () => void };
+type DisposableObserver = Partial<Disposable> & { close?: () => void };
 
 /** Foundry domain-event sink drain surface. */
-export interface SinkFlushHandle {
+interface SinkFlushHandle {
   readonly flush: () => Promise<void>;
 }
 
 /** Redis teardown surface. `ioredis.disconnect()` returns `void`; awaiting it is harmless. */
-export interface RedisShutdownHandle {
+interface RedisShutdownHandle {
   readonly disconnect: () => void | Promise<void>;
 }
 

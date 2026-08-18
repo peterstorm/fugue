@@ -67,7 +67,7 @@ import {
  * `domain/concurrency.ts`, a constructor rejecting `current > max` would
  * contradict the intentional, documented drain-down behaviour.
  */
-export interface TenantConcurrency {
+interface TenantConcurrency {
   readonly current: number;
   readonly max: number;
 }
@@ -123,7 +123,7 @@ export interface AdmitToken {
 // Builders
 // ---------------------------------------------------------------------------
 
-export interface AdmissionConfig {
+interface AdmissionConfig {
   /** Default per-tenant concurrency ceiling (FR-032). */
   readonly defaultTenantMax?: number;
   /** Retry-After (seconds) advertised on `tenant-over-quota` (FR-038). */

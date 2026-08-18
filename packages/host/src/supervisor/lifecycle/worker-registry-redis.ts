@@ -53,7 +53,7 @@ const workerKey = (tenant: TenantId): string => `${WORKER_KEY_PREFIX}${tenant}`;
  * `draining`) are persistable here. Adding/removing a lifecycle phase that should
  * be persisted is a single-edit change at the source of truth.
  */
-export type WorkerHealth = Extract<WorkerPhase, "live" | "draining">;
+type WorkerHealth = Extract<WorkerPhase, "live" | "draining">;
 
 /**
  * The persisted worker record. Carries ONLY routing/liveness metadata — never a
@@ -78,7 +78,7 @@ export interface WorkerRecord {
 }
 
 /** A registered worker the reconcile confirmed is still alive (probe ok). */
-export interface AdoptableWorker {
+interface AdoptableWorker {
   readonly record: WorkerRecord;
 }
 
@@ -126,7 +126,7 @@ const tenantFromKey = (key: string): TenantId | undefined => {
 
 // ── Degraded hook (reuse, don't reinvent) ──────────────────────────────────────
 
-export interface WorkerRegistryHooks {
+interface WorkerRegistryHooks {
   readonly onRedisDead?: () => void;
   readonly onRedisAlive?: () => void;
 }
@@ -328,7 +328,7 @@ export const createWorkerRegistry = (
  * tenant-registry fake). Exposes the backing store and a `setFail` switch to
  * drive the fail-closed path without a real Redis.
  */
-export interface InMemoryWorkerRedisFake {
+interface InMemoryWorkerRedisFake {
   readonly redis: RedisPort;
   readonly store: Map<string, string>;
   setFail: (fail: boolean) => void;

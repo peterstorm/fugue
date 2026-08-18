@@ -34,7 +34,7 @@ import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
 import { toPersistedIdentity } from "./identity.js";
 
-export interface HitlRunServiceDeps {
+interface HitlRunServiceDeps {
   readonly runStore: RunStorePort;
   readonly runQueue: RunQueuePort;
   readonly decisions: DecisionStorePort;

@@ -21,7 +21,7 @@ import type { RunQueuePort } from "../ports.js";
 /** Trigger envelope: the queue only needs the run id. */
 type RunTrigger = { state: RunId; context: null };
 
-export interface RunQueueDeps {
+interface RunQueueDeps {
   readonly backend: QueueBackend;
   readonly redis: RedisPort;
   /**
@@ -57,7 +57,7 @@ export interface RunQueueDeps {
   readonly logger?: LogPort;
 }
 
-export interface RunQueueHandle {
+interface RunQueueHandle {
   readonly queue: RunQueuePort;
   /**
    * Start the worker. The processor is `HitlRunService.processRun`. Returns the

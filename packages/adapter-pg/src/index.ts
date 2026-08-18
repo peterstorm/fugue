@@ -348,7 +348,7 @@ export const healthCheckWithTimeout = async (
  * });
  * ```
  */
-export interface FakePgRoute {
+interface FakePgRoute {
   readonly rows?: unknown[];
   readonly rowCount?: number;
 }

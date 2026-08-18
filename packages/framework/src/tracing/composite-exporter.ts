@@ -51,7 +51,7 @@ export interface ChildFailureCount {
  * cannot hang indefinitely. A total hang therefore surfaces as FAILED (an
  * actionable outage) rather than an invisible wedge.
  */
-export const EXPORT_SETTLE_TIMEOUT_MS = 30_000;
+const EXPORT_SETTLE_TIMEOUT_MS = 30_000;
 
 /**
  * Rate-limited per-child failure logging. Logs at true powers of ten —

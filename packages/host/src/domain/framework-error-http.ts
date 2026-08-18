@@ -46,7 +46,7 @@ import type { FrameworkError, FrameworkErrorKind } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import { httpStatusFor, retryAfterSecondsFor } from "./host-error.js";
 
-export interface FrameworkErrorHttp {
+interface FrameworkErrorHttp {
   /** HTTP status to return to the client. */
   readonly status: number;
   /**
@@ -118,7 +118,7 @@ const classifyRootKind = (
  * doing its job correctly, so it must NEVER count toward a circuit breaker, and
  * a transient worker outage is an infra-flavoured 503.
  */
-export type SupervisorHostErrorKind =
+type SupervisorHostErrorKind =
   | "tenant-unknown"
   | "tenant-over-quota"
   | "worker-unavailable";

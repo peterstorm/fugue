@@ -73,7 +73,7 @@ export const initialRestartBudget = (
   windowMs,
 });
 
-export type SupervisorRestartDecision =
+type SupervisorRestartDecision =
   | { readonly action: "restart"; readonly budget: RestartBudget }
   | { readonly action: "give-up"; readonly reason: "crash-loop"; readonly budget: RestartBudget };
 

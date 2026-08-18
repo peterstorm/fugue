@@ -68,7 +68,7 @@ const primitiveSameValueZeroIdentity = (value: unknown): string | null => {
   return null;
 };
 
-export interface SerializedGrammarOptions {
+interface SerializedGrammarOptions {
   /** Diagnostic root, for example `record` or `output`. */
   readonly rootPath: string;
   /** Maximum property/tag hops admitted before recursive deserialization. */

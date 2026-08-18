@@ -58,7 +58,7 @@ const uniqueToken = (): string =>
   `${process.pid}-${Date.now()}-${tokenCounter++}-${Math.random().toString(36).slice(2)}`;
 
 /** Test-only deterministic temp-path hook; production calls always mint a unique path. */
-export interface AtomicWriteFileTestHooks {
+interface AtomicWriteFileTestHooks {
   readonly temporaryPath?: (targetPath: string) => string;
 }
 
@@ -110,7 +110,7 @@ const errnoOf = (error: unknown): string | undefined => {
 const fencePathOf = (lockPath: string): string => `${lockPath}.fence`;
 
 /** Test-only scheduling and deterministic diagnostics hooks. */
-export interface FileLockTestHooks {
+interface FileLockTestHooks {
   readonly afterUnfencedStaleProbe?: () => void | Promise<void>;
   readonly afterFenceEstablished?: () => void | Promise<void>;
   readonly afterStableOwnerProbe?: (stale: boolean) => void | Promise<void>;

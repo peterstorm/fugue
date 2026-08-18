@@ -65,7 +65,7 @@ export interface Violation {
   readonly reason: string;
 }
 
-export interface CheckResult {
+interface CheckResult {
   violations: Violation[];
 }
 

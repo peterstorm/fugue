@@ -59,7 +59,7 @@ import type { Team } from "../../domain/auth.js";
  * `AGENT_CLIENT_IDS_BY_DAG` config shape, scoped per tenant). Held as plain,
  * already-validated data — this is config the registry carries, not a secret.
  */
-export interface KeycloakClientMapping {
+interface KeycloakClientMapping {
   readonly realm: string;
   /** The supervisor-facing OIDC client id for resolving this tenant's identities. */
   readonly clientId: string;
@@ -73,7 +73,7 @@ export interface KeycloakClientMapping {
  * the smart constructor (`tenantConfig`) is the parse boundary that guarantees
  * that, so downstream code can treat these as already-valid.
  */
-export interface TenantLimits {
+interface TenantLimits {
   /** Max concurrently-running runs admitted for this tenant. */
   readonly maxConcurrentRuns: number;
   /** Max queued (pending-admission) runs for this tenant. */

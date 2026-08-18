@@ -94,7 +94,7 @@ export const selectPurgeable = (
  * an already-empty keyspace is a no-op success. Returns the count deleted (for
  * the audit/log trail).
  */
-export interface TenantKeyspacePurgePort {
+interface TenantKeyspacePurgePort {
   readonly purgeKeyspace: (tenant: TenantId) => Promise<Result<number, HostError>>;
 }
 
@@ -103,7 +103,7 @@ export interface TenantKeyspacePurgePort {
  * absent path is a no-op success. Kept behind a port so the purge stays pure-
  * shell-over-port and the fs op can be faked deterministically.
  */
-export interface TenantFsPurgePort {
+interface TenantFsPurgePort {
   readonly removeMount: (fsRoot: string) => Promise<Result<void, HostError>>;
 }
 
@@ -112,7 +112,7 @@ export interface TenantFsPurgePort {
  * provisioner exposes (`redis-acl-provisioner.revoke`), narrowed to one method so
  * the purge depends only on what it needs. Idempotent at the Redis level.
  */
-export interface TenantAclRevokePort {
+interface TenantAclRevokePort {
   readonly revokeAcl: (tenant: TenantId) => Promise<Result<void, HostError>>;
 }
 
@@ -120,7 +120,7 @@ export interface TenantAclRevokePort {
  * Remove the tenant's worker-registry record (`fugue:supervisor:workers:<tenant>`).
  * The SAME seam `WorkerRegistry.remove` exposes, narrowed. Idempotent.
  */
-export interface WorkerRegistryRemovePort {
+interface WorkerRegistryRemovePort {
   readonly remove: (tenant: TenantId) => Promise<Result<void, HostError>>;
 }
 
@@ -130,7 +130,7 @@ export interface WorkerRegistryRemovePort {
  * longer carries the tenant at all. Distinct from `deregister` (which only
  * tombstones): this REMOVES the record. Idempotent.
  */
-export interface RegistryHardDeletePort {
+interface RegistryHardDeletePort {
   readonly hardDelete: (tenant: TenantId) => Promise<Result<void, HostError>>;
 }
 
@@ -155,7 +155,7 @@ export interface GracePurgeDeps {
  * Adding/removing a step is a single edit here + a compile error at the push
  * sites — the failed-step surface can never silently drift from the purge body.
  */
-export type PurgeStep =
+type PurgeStep =
   | "acl-revoke"
   | "worker-registry-remove"
   | "keyspace-purge"
@@ -171,7 +171,7 @@ export type PurgeStep =
  * is a closed `PurgeStep` union (never a free-form string), so the real failed
  * steps survive into the sweep's outcomes losslessly (SC-010 observability).
  */
-export interface PurgeOutcome {
+interface PurgeOutcome {
   readonly tenant: TenantId;
   readonly keysDeleted: number;
   readonly failedSteps: readonly PurgeStep[];

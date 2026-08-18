@@ -17,7 +17,7 @@ import type { LogPort } from "../../../ports.js";
 import type { BotConnectorPort, ConversationReference } from "./ports.js";
 import { isTrustedBotServiceUrl } from "./trusted-host.js";
 
-export interface BotConnectorConfig {
+interface BotConnectorConfig {
   readonly appId: string;
   readonly appPassword: string;
   /**

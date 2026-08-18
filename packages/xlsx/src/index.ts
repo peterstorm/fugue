@@ -63,7 +63,7 @@ const validationErr = (message: string, path?: string): FrameworkError => ({
 });
 
 /** Options for `parseWorkbook`. */
-export interface ParseWorkbookOpts {
+interface ParseWorkbookOpts {
   /** Worksheet to read: name (string) or 1-based index (number). Default: first sheet. */
   readonly sheet?: string | number;
   /** 1-based row holding the column headers. Default: 1. */

@@ -7,7 +7,7 @@ import { createSynthesizeNode } from "./nodes/synthesize.js";
 import { createGroundingGuardrailNode } from "./nodes/grounding-guardrail.js";
 import { createAssembleResponseNode } from "./nodes/assemble-response.js";
 
-export interface SummaryDagOpts {
+interface SummaryDagOpts {
   readonly model?: string;
   readonly judgeModel?: string;
   readonly thinking?: { type: "enabled"; budgetTokens: number };

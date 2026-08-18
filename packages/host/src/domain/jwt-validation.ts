@@ -31,7 +31,7 @@ import { markAuthenticatedUser, canonicalTeam } from "./auth.js";
  * client-facing 401-worthy (bad/expired/mis-targeted token); infra/verifier
  * failures are a SEPARATE concern handled in the shell (503), not modelled here.
  */
-export type AuthError =
+type AuthError =
   /** Claims object is missing required fields or has the wrong shape/types. */
   | { readonly kind: "malformed"; readonly reason: string }
   /** `iss` did not equal the expected fugue-platform realm issuer. */
@@ -59,7 +59,7 @@ export const describeAuthError = (e: AuthError): string =>
 
 // ── Validation options ─────────────────────────────────────────────────────
 
-export interface ValidateRealmJwtOptions {
+interface ValidateRealmJwtOptions {
   /** The fugue-platform realm issuer URL the token must declare in `iss`. */
   readonly expectedIss: string;
   /** The audience this host must appear in (`fugue-host`). */

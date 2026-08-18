@@ -60,7 +60,7 @@ import {
  * budget (`llmBudgetTokens`) — when `undefined`, metering still happens but no
  * call is ever refused (FR-W1-006).
  */
-export interface MeteredLlmDeps {
+interface MeteredLlmDeps {
   readonly dagId: DagId;
   readonly runId: RunId;
   readonly budget?: number;

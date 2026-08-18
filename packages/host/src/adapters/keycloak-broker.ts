@@ -194,7 +194,7 @@ export const audienceForScope = (
  */
 export type AssignedScopes = (agentClientId: AgentClientId) => ReadonlySet<string>;
 
-export interface KeycloakBrokerDeps {
+interface KeycloakBrokerDeps {
   /** The injected Keycloak token endpoint — the FIRST egress (records calls in tests). */
   readonly endpoint: KeycloakTokenEndpoint;
   /**

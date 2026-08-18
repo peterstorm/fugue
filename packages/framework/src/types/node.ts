@@ -337,7 +337,7 @@ export const RESERVED_NON_CAPABILITY_KEYS = [
   "contentFilter",
 ] as const satisfies readonly (keyof BaseNodeContext)[];
 
-export type ReservedNonCapabilityKey = (typeof RESERVED_NON_CAPABILITY_KEYS)[number];
+type ReservedNonCapabilityKey = (typeof RESERVED_NON_CAPABILITY_KEYS)[number];
 
 /**
  * The runtime-facing NodeContext shape (capability fields nullable). The

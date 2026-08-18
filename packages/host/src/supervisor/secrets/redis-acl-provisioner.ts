@@ -216,7 +216,7 @@ export const revoke = async (
  * test can assert the password was carried to the server — but a PRODUCTION
  * adapter modelled on this MUST NOT log those rules. The fake never logs.
  */
-export type FakeAclAdmin = RedisAclAdminPort & {
+type FakeAclAdmin = RedisAclAdminPort & {
   /** Every `setUser` invocation, in order. */
   readonly setUserCalls: ReadonlyArray<{ username: string; rules: readonly AclRuleToken[] }>;
   /** Every `delUser` invocation, in order. */

@@ -18,7 +18,7 @@ import { match } from "ts-pattern";
 /**
  * Reason the circuit entered the open state — discriminated union for machine-parseability.
  */
-export type OpenReason =
+type OpenReason =
   | { readonly kind: "threshold-exceeded"; readonly threshold: number; readonly windowMs: number }
   | { readonly kind: "half-open-test-failed" };
 

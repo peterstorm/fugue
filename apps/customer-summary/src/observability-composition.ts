@@ -52,7 +52,7 @@ import { isFoundryEnabled } from "./observability.js";
 export type { SpanExporter };
 
 /** A non-empty tuple of exporters, the exact shape `initTracing` accepts. */
-export type ExporterList = readonly [SpanExporter, ...SpanExporter[]];
+type ExporterList = readonly [SpanExporter, ...SpanExporter[]];
 
 /**
  * Factories the composition depends on. All injectable so tests can supply
@@ -68,7 +68,7 @@ export interface ObservabilityFactories {
   readonly createFoundrySink: () => FoundryTelemetrySink;
 }
 
-export interface ComposedObservability {
+interface ComposedObservability {
   /** Ordered, non-empty exporter tuple for the widened `initTracing`. */
   readonly exporters: ExporterList;
   /** The domain-event observer for `deps.observer`. */
@@ -221,7 +221,7 @@ export const composeObservability = (
 /**
  * Minimal logging seam for {@link resolveFoundryLeg} — only `error` is used.
  */
-export interface FoundryLegLogger {
+interface FoundryLegLogger {
   error(msg: string, ...args: unknown[]): void;
 }
 
@@ -242,7 +242,7 @@ export interface FoundryLegLogger {
  *
  * `{ exporter present, sink null }` (and vice versa) is now unrepresentable.
  */
-export type ResolvedFoundryLeg =
+type ResolvedFoundryLeg =
   | {
       readonly outcome: "active";
       // An active leg means Foundry construction SUCCEEDED, which is only

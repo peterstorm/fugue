@@ -50,9 +50,9 @@ export const serializeRegistry = (entries: Record<string, RegistryEntry>): strin
   return `${JSON.stringify(sorted, null, 2)}\n`;
 };
 
-export type PromptStatus = "unchanged" | "added" | "bumped" | "removed";
+type PromptStatus = "unchanged" | "added" | "bumped" | "removed";
 
-export interface PromptsResult {
+interface PromptsResult {
   readonly ok: boolean;
   readonly registryPath: string;
   readonly prompts: Record<string, { version: string; hash: string; status: PromptStatus }>;

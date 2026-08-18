@@ -77,7 +77,7 @@ export const TENANT_EVENTS_CHANNEL = "fugue:tenants:events";
  * channel only needs to say "this tenant changed, go re-read it" (smaller, and
  * keeps the secrets-reference invariant trivially: nothing sensitive on the bus).
  */
-export interface TenantEvent {
+interface TenantEvent {
   readonly kind: "registered" | "deregistered" | "reconfigured";
   readonly tenant: TenantId;
 }
@@ -109,7 +109,7 @@ const parseEvent = (raw: string): TenantEvent | undefined => {
  * operation, edge or not — exactly like `redis-probe.ts`. Defaulted to no-ops so
  * the adapter is usable in isolation.
  */
-export interface RegistryDegradedHooks {
+interface RegistryDegradedHooks {
   readonly onRedisDead?: () => void;
   readonly onRedisAlive?: () => void;
 }
@@ -642,7 +642,7 @@ export const subscribeTenantEvents = async (
  * log for assertions, plus a `fail` switch that flips every Redis op to `!ok` so
  * tests can drive the fail-closed path WITHOUT a real Redis.
  */
-export interface InMemoryRedisFake {
+interface InMemoryRedisFake {
   readonly redis: RedisPort;
   readonly pubsub: RedisPubSubPort;
   /** Backing key→value store (for round-trip assertions). */

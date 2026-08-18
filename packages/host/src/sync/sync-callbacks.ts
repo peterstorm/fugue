@@ -24,7 +24,7 @@ import type { LogPort } from "../ports.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export interface SyncCallbackDeps {
+interface SyncCallbackDeps {
   readonly getState: () => HostState;
   readonly setState: (s: HostState) => void;
   readonly getCircuitBreakers: () => Map<DagId, CircuitState>;
@@ -34,7 +34,7 @@ export interface SyncCallbackDeps {
   readonly clock: () => number;
 }
 
-export interface SyncCallbacks {
+interface SyncCallbacks {
   readonly onStarted: () => void;
   readonly onComplete: (registry: Registry, sha: GitSha) => void;
   readonly onNoChange: (sha: GitSha) => void;

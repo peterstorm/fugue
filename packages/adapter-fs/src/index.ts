@@ -67,7 +67,7 @@ export interface FsLike {
 }
 
 /** Configuration for the filesystem adapter. */
-export interface FsAdapterConfig {
+interface FsAdapterConfig {
   /**
    * Root directory all `localPath` references resolve against. Reads are
    * confined to this tree; references that escape it are rejected. Point this

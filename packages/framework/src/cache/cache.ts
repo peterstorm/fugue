@@ -22,7 +22,7 @@ export interface Cache {
   set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>>;
 }
 
-export interface InMemoryCacheOpts {
+interface InMemoryCacheOpts {
   /** Injectable clock; defaults to `Date.now`. Tests can supply a stub for deterministic TTL assertions. */
   readonly now?: () => number;
 }

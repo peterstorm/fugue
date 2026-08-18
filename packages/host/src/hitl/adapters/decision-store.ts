@@ -95,7 +95,7 @@ export const createInMemoryDecisionStore = (): DecisionStorePort => {
 const pendingKey = (tenant: TenantId, runId: RunId, nodeId: NodeId): string => `fugue:${tenant}:hitl:pending:${runId}${KEY_SEP}${nodeId}`;
 const decisionKey = (tenant: TenantId, runId: RunId, nodeId: NodeId): string => `fugue:${tenant}:hitl:decision:${runId}${KEY_SEP}${nodeId}`;
 
-export interface RedisDecisionStoreConfig {
+interface RedisDecisionStoreConfig {
   /** TTL applied to pending/decision keys, in seconds. Should exceed the run TTL. */
   readonly ttlSec: number;
 }

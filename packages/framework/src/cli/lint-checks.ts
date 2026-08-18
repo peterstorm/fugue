@@ -20,7 +20,7 @@ import { computeIncomingByNode } from "../dag-runtime/topology.js";
 import { fanInKeyCheck, describeFanInKeyMismatch } from "../executor/fan-in-keys.js";
 import { isDagInput } from "../types/ids.js";
 
-export interface DagAnalysis {
+interface DagAnalysis {
   readonly errors: readonly LintError[];
   readonly advisories: readonly LintAdvisory[];
 }

@@ -53,7 +53,7 @@ export type GraphFetchLike = (
  * resulting `AbortError` rejection is mapped by `runGraph`'s `try/catch` to the
  * retriable `infra-unreachable` (NFR-020) — same channel as a DNS/socket fault.
  */
-export const DEFAULT_GRAPH_HTTP_TIMEOUT_MS = 30_000;
+const DEFAULT_GRAPH_HTTP_TIMEOUT_MS = 30_000;
 
 /**
  * Build the live `GraphHttp` transport over an injected `fetch` (default: global

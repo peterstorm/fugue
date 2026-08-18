@@ -29,7 +29,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Returned by `beginRunTelemetry`; closes the run-end loop with `emitRunEnd`. */
-export interface RunTelemetry {
+interface RunTelemetry {
   /** Emit `run-end` with elapsed `duration` and the supplied status. Idempotent at the observer level. */
   readonly emitRunEnd: (status: "ok" | "error") => void;
   /** Time-source seam (defaults to `Date.now`); shared with retry/backoff jitter. */
@@ -114,7 +114,7 @@ export const startRunSpan = <T>(
 // ---------------------------------------------------------------------------
 
 /** Discriminated union describing how to close the root span. */
-export type RootSpanOutcome =
+type RootSpanOutcome =
   | { readonly kind: "ok" }
   | {
       readonly kind: "ok-eval-failed";

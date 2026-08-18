@@ -396,7 +396,7 @@ Set confidence by how much signal the input carries — never use a number.
 // The scaffold builder
 // ---------------------------------------------------------------------------
 
-export interface AuthoredScaffold {
+interface AuthoredScaffold {
   readonly dagTs: string;
   readonly prompts: readonly PromptFile[];
 }

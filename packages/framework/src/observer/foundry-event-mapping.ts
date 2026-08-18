@@ -47,13 +47,13 @@ export const FOUNDRY_METRIC_NODE_LATENCY = "fugue.node.latency_ms" as const;
 export const FOUNDRY_METRIC_NODE_CACHE_HIT = "fugue.node.cache_hit" as const;
 
 /** The three stable Foundry event names. */
-export type FoundryEventName =
+type FoundryEventName =
   | typeof FOUNDRY_EVENT_RUN_SUMMARY
   | typeof FOUNDRY_EVENT_ROUTE_DECISION
   | typeof FOUNDRY_EVENT_NODE_PRUNED;
 
 /** The five stable Foundry metric names. */
-export type FoundryMetricName =
+type FoundryMetricName =
   | typeof FOUNDRY_METRIC_RUN_LATENCY
   | typeof FOUNDRY_METRIC_RUN_COST
   | typeof FOUNDRY_METRIC_RUN_TOKENS

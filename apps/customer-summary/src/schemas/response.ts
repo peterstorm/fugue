@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { SynthesisOutputSchema } from "./summary.js";
 
-export const GroundingWarningSchema = z.object({
+const GroundingWarningSchema = z.object({
   dimension: z.string(),
   detail: z.string(),
 });

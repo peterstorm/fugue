@@ -27,7 +27,7 @@ import { lookupDag } from "../../domain/registry.js";
 import type { HitlRunService } from "../../hitl/service.js";
 import type { RunRecord, RunStatus } from "../../hitl/types.js";
 
-export interface RunsHandlerDeps {
+interface RunsHandlerDeps {
   readonly hitl?: HitlRunService;
 }
 

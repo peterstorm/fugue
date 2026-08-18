@@ -36,7 +36,7 @@ import type { SpawnPort, ProcManagePort, WorkerSpawnSpec, WorkerHandle } from ".
  * a value so tests can assert the heap-cap flag and the forwarded env WITHOUT a
  * real process.
  */
-export interface WorkerSpawnPlan {
+interface WorkerSpawnPlan {
   readonly cmd: readonly string[];
   readonly env: Readonly<Record<string, string>>;
 }

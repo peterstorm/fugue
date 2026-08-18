@@ -27,7 +27,7 @@ import type { TenantId } from "../../domain/tenant.js";
 import type { RunExecutorPort, RunExecOutcome, RunExecutionRequest } from "../ports.js";
 import { toExecIdentity } from "../identity.js";
 
-export interface RunExecutorDeps {
+interface RunExecutorDeps {
   readonly sharedInfra: SharedInfra;
   /** Look up the currently-registered DAG (registry changes on git sync). */
   readonly getRegisteredDag: (dagId: string) => RegisteredDag | undefined;

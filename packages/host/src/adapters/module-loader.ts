@@ -33,7 +33,7 @@ const BunYAML = (Bun as unknown as { YAML?: { parse: (s: string) => unknown } })
  *   isolated load failure (the DAG is skipped, others are unaffected; NFR-010),
  *   because silently ignoring deployment config would mask operator mistakes.
  */
-export const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | null, HostError>> => {
+const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | null, HostError>> => {
   const yamlPath = join(dirname(modulePath), "fugue.yaml");
   let text: string;
   try {
@@ -173,7 +173,7 @@ export const loadDagModule = async (
  * - a registry entry whose prompt file is missing,
  * - a hash mismatch (prompt edited without a version bump).
  */
-export const validatePromptRegistry = async (
+const validatePromptRegistry = async (
   modulePath: string,
   prompts: ReadonlyMap<string, string>,
   forDagId: DagId,

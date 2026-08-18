@@ -80,8 +80,8 @@ export const EVENT_GEN_AI_ASSISTANT_MESSAGE = "gen_ai.assistant.message";
 // --- Span Type Values ---
 
 export const SPAN_TYPE_CHAIN = "chain";
-export const SPAN_TYPE_LLM = "llm";
-export const SPAN_TYPE_RETRIEVER = "retriever";
+const SPAN_TYPE_LLM = "llm";
+const SPAN_TYPE_RETRIEVER = "retriever";
 export const SPAN_TYPE_TOOL = "tool";
 
 /** Map node kind → span type */

@@ -119,7 +119,7 @@ export interface AuthedClientConfig {
   readonly timeoutMs?: number;
 }
 
-export interface AuthedClientDeps {
+interface AuthedClientDeps {
   readonly config: AuthedClientConfig;
   readonly tokens: TokenProvider;
   readonly fetch: FetchLike;

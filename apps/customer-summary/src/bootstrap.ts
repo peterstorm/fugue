@@ -36,7 +36,7 @@ import { runGracefulShutdown } from "./shutdown.js";
 const LLM_CACHE_TTL = 3600; // 1 hour
 
 /** The resolved tracing state handed back to the bootstrap shell. */
-export interface TracingSetup {
+interface TracingSetup {
   /** The started tracing pipeline, or `null` when tracing setup failed/degraded. */
   readonly tracing: TracingHandle | null;
   /** Domain-event observer — `NoopObserver` on the default/no-Foundry path or on failure. */

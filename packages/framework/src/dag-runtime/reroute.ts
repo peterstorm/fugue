@@ -14,7 +14,7 @@ import { isConditionalEdge } from "../types/dag.js";
 import { decideRoute } from "./routing.js";
 import { expandActive, seedInitialActiveSet } from "./topology.js";
 
-export type RerouteResult =
+type RerouteResult =
   | { readonly kind: "ok"; readonly activeSet: ReadonlySet<NodeId> }
   | { readonly kind: "invalid-target"; readonly targetNodeId: NodeId }
   | {
@@ -23,7 +23,7 @@ export type RerouteResult =
       readonly message: string;
     };
 
-export const computeRerouteActiveSet = (
+const computeRerouteActiveSet = (
   targetNodeId: NodeId,
   machineCtx: DagMachineContext,
 ): RerouteResult => {

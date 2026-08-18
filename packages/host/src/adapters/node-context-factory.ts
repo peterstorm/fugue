@@ -45,7 +45,7 @@ import { createMeteredLlm } from "./metered-llm.js";
  * TTL configuration resolved for a specific DAG — combines host defaults
  * with per-DAG overrides from fugue.yaml.
  */
-export interface ResolvedTtl {
+interface ResolvedTtl {
   readonly cacheTtlSec: number | undefined;
   readonly checkpointTtlSec: number | undefined;
 }

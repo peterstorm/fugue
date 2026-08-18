@@ -40,7 +40,7 @@ const createLogger = (): LogPort => ({
 
 // ── Pure: env → config (testable without a process) ─────────────────────────────
 
-export interface ThinInitEnvConfig extends ThinInitConfig {
+interface ThinInitEnvConfig extends ThinInitConfig {
   /** Bounded grace (ms) after forwarding SIGTERM before PID 1 exits the pod. */
   readonly shutdownGraceMs: number;
 }
@@ -91,7 +91,7 @@ export const decidePostLoopExit = (terminated: boolean): "defer-to-grace-timer" 
 
 // ── Shutdown handler (testable: injected exit + grace-timer seams) ───────────────
 
-export interface ShutdownDeps {
+interface ShutdownDeps {
   /** Forward shutdown to the supervisor + workers and park the supervise loop. */
   readonly beginTermination: (sig: "SIGTERM" | "SIGINT") => void;
   readonly graceMs: number;
@@ -102,7 +102,7 @@ export interface ShutdownDeps {
   readonly setGraceTimer: (fn: () => void, ms: number) => void;
 }
 
-export interface ShutdownHandler {
+interface ShutdownHandler {
   readonly onSignal: (sig: "SIGTERM" | "SIGINT") => void;
   readonly isTerminated: () => boolean;
 }
@@ -138,7 +138,7 @@ export const createShutdownHandler = (deps: ShutdownDeps): ShutdownHandler => {
 
 // ── Last-resort PID-1 error nets (testable: no exit seam ⇒ cannot exit) ───────────
 
-export interface GlobalErrorHandlers {
+interface GlobalErrorHandlers {
   readonly onUncaughtException: (e: unknown) => void;
   readonly onUnhandledRejection: (reason: unknown) => void;
 }

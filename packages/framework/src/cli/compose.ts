@@ -111,13 +111,13 @@ export interface ComposeOptions {
  * Carried on EVERY outcome arm — `repair-exhausted` is precisely where
  * `repairs` is diagnostic, so failure never discards it.
  */
-export interface ComposeRounds {
+interface ComposeRounds {
   readonly questions: number;
   readonly repairs: number;
   readonly refinements: number;
 }
 
-export type ComposeOutcome =
+type ComposeOutcome =
   | {
       readonly ok: true;
       readonly result: Extract<NewResult, { ok: true }>;
@@ -212,11 +212,11 @@ export type ComposeOutcome =
 // KEBAB (single-sourced in `identifiers.ts`) — the same convention the
 // AuthoredDag schema enforces on `team` and `fugue new` enforces on its path.
 
-export interface ParsedComposeArgs {
+interface ParsedComposeArgs {
   readonly ok: true;
   readonly options: ComposeOptions;
 }
-export interface ParseComposeError {
+interface ParseComposeError {
   readonly ok: false;
   readonly problems: readonly string[];
 }
@@ -326,7 +326,7 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
  * `parseAuthoredDag`'s problems can feed the repair loop rather than fail the
  * transport (see the module header). `parseAuthoredDag` is the ONLY consumer.
  */
-export const ComposeTurnSchema = z.discriminatedUnion("action", [
+const ComposeTurnSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("questions"),
     questions: z.array(z.string().min(1)).min(1).max(5),
@@ -436,7 +436,7 @@ const COMPOSE_NODE_ID = nodeId("fugue-compose");
  * The LintError kinds fixable by editing the AuthoredDag JSON — the element
  * type of the allowlist, so the set can never admit an unrepairable kind.
  */
-export type RepairableKind = "dag-definition-error" | "fan-in-key-mismatch";
+type RepairableKind = "dag-definition-error" | "fan-in-key-mismatch";
 // Compile-time proof every RepairableKind IS a LintError kind (mirrors the
 // `_NoExtraShapes` backstop in types.ts): a renamed/removed kind fails at
 // this annotation instead of silently draining the allowlist.

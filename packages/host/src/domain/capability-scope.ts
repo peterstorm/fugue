@@ -52,10 +52,10 @@ const KNOWN_SCOPES = {
 } as const;
 
 /** Microsoft Graph operations this layer recognises — derived from `KNOWN_SCOPES`. */
-export type MsGraphOperation = (typeof KNOWN_SCOPES)["msgraph"][number];
+type MsGraphOperation = (typeof KNOWN_SCOPES)["msgraph"][number];
 
 /** Dynamics operations this layer recognises — derived from `KNOWN_SCOPES`. */
-export type DynamicsOperation = (typeof KNOWN_SCOPES)["dynamics"][number];
+type DynamicsOperation = (typeof KNOWN_SCOPES)["dynamics"][number];
 
 /**
  * A parsed, typed downstream scope. Discriminated by `provider`; the

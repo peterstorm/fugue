@@ -64,7 +64,7 @@ interface RunBuffer {
   createdAt: number;
 }
 
-export interface BufferedObserverOpts {
+interface BufferedObserverOpts {
   /** Drop a run buffer if `run-end` never arrived within this many ms. Default 1h. */
   readonly ttlMs?: number;
   /** Sweep interval for dropping stale buffers. Default 5min. */

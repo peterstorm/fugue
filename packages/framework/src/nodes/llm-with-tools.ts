@@ -23,7 +23,7 @@ import { runLlmCallPipeline } from "./llm-pipeline.js";
  * Discriminated pairing for `skipWhen` + `skipDefault` — supplying one without
  * the other is a compile error, not a runtime failure at first call.
  */
-export type LlmWithToolsSkipConfig<I, O> =
+type LlmWithToolsSkipConfig<I, O> =
   | { readonly skipWhen?: undefined; readonly skipDefault?: undefined }
   | { readonly skipWhen: (input: I) => boolean; readonly skipDefault: O };
 

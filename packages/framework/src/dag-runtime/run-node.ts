@@ -32,7 +32,7 @@ import { withTracedNodeSpan, EMPTY_OUTCOME, type NodeSpanOutcome } from "./node-
 import { resolveContentFilter } from "../tracing/content-filter.js";
 import type { IncomingSources } from "../shared/incoming.js";
 
-export interface RunNodeOpts {
+interface RunNodeOpts {
   /**
    * When provided and contains the node's id, the node skips execution.
    * The cached value is validated against `outputSchema` before being

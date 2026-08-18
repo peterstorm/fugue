@@ -76,7 +76,7 @@ const _noExtraShapes: _NoExtraShapes = true;
 void _noExtraShapes;
 
 /** A DAG shape-helper constructor name (`defineLinearDag` … `defineSources`). */
-export type ShapeHelper = (typeof SHAPE_HELPER)[Shape];
+type ShapeHelper = (typeof SHAPE_HELPER)[Shape];
 
 /**
  * Non-fatal lint hint. Advisories never set `ok: false` — they nudge the author

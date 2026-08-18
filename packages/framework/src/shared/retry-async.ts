@@ -9,7 +9,7 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 
-export interface RetryOpts {
+interface RetryOpts {
   /** Maximum number of attempts (including the first). */
   readonly maxAttempts: number;
   /** Base delay in ms — multiplied by (attempt index) for linear backoff. */

@@ -27,7 +27,7 @@ import type { LintAdvisory, LintError, LintResult } from "./types.js";
  * gauntlet path imports the same staged file twice) — the seam exists so a
  * failed evaluation is only ever imported once and its real error captured.
  */
-export type ImportedDagFile =
+type ImportedDagFile =
   | {
       readonly ok: true;
       readonly path: string;

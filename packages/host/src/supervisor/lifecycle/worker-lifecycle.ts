@@ -44,7 +44,7 @@ import type { TenantId } from "../../domain/tenant.js";
  * local to this module (mirrors `host-state.ts`'s `TransitionError`); callers
  * widen to `HostError` at the boundary if they need to.
  */
-export interface WorkerTransitionError {
+interface WorkerTransitionError {
   readonly kind: "invalid-worker-transition";
   readonly tenant: TenantId;
   readonly from: WorkerPhase | "none";

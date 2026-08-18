@@ -142,7 +142,7 @@ export interface WorkerLifecycleConfig {
   readonly restartWindowMs: number;
 }
 
-export interface WorkerLifecycleDeps {
+interface WorkerLifecycleDeps {
   readonly spawn: SpawnPort;
   readonly proc: ProcManagePort;
   readonly registry: WorkerRegistry;

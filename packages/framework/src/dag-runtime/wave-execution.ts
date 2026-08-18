@@ -60,7 +60,7 @@ export interface WaveConfig {
 export type { PostWaveContext } from "./post-wave-context.js";
 import type { PostWaveContext } from "./post-wave-context.js";
 
-export interface WaveResult {
+interface WaveResult {
   readonly event: DagEvent;
   readonly outcomes: readonly NodeSpanOutcome[];
 }

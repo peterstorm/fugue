@@ -82,7 +82,7 @@ export interface BootstrapDeps {
 }
 
 /** What bootstrap applied — counts only (never a token value), for the boot log. */
-export interface BootstrapSummary {
+interface BootstrapSummary {
   readonly tenantsApplied: number;
   readonly teamTokensApplied: number;
 }

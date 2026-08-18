@@ -193,7 +193,7 @@ export interface SupervisorDeps {
   readonly onShutdown?: () => Promise<void>;
 }
 
-export interface SupervisorInstance {
+interface SupervisorInstance {
   readonly getState: () => HostState;
   /** Handle a single inbound request (exposed for tests; also the serve fetch). */
   readonly handle: (request: Request) => Promise<Response>;

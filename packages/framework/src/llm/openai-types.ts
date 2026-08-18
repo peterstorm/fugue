@@ -14,7 +14,7 @@ import { fwLogger } from "../logger.js";
 // Type definitions
 // ---------------------------------------------------------------------------
 
-export interface FunctionCallBlock {
+interface FunctionCallBlock {
   readonly type: "function_call";
   readonly id?: string;
   readonly call_id: string;
@@ -22,26 +22,26 @@ export interface FunctionCallBlock {
   readonly arguments: string;
 }
 
-export interface OutputTextPart {
+interface OutputTextPart {
   readonly type: "output_text";
   readonly text: string;
 }
 
-export interface MessageContentPart {
+interface MessageContentPart {
   readonly type: string;
   readonly text?: string;
 }
 
-export interface MessageBlock {
+interface MessageBlock {
   readonly type: "message";
   readonly content: readonly MessageContentPart[];
 }
 
-export interface ReasoningSummaryItem {
+interface ReasoningSummaryItem {
   readonly text?: string;
 }
 
-export interface ReasoningBlock {
+interface ReasoningBlock {
   readonly type: "reasoning";
   readonly summary: readonly ReasoningSummaryItem[];
 }
@@ -52,7 +52,7 @@ export type ResponsesOutputItem =
   | ReasoningBlock
   | { readonly type: string };
 
-export interface FunctionCallOutputItem {
+interface FunctionCallOutputItem {
   readonly type: "function_call_output";
   readonly call_id: string;
   readonly output: string;
@@ -70,13 +70,13 @@ export type ConversationItem =
   | ResponsesOutputItem
   | FunctionCallOutputItem;
 
-export interface ResponsesUsage {
+interface ResponsesUsage {
   readonly input_tokens?: number;
   readonly output_tokens?: number;
 }
 
 /** The `error` object a `status: "failed"` Responses body carries. */
-export interface ResponsesApiError {
+interface ResponsesApiError {
   readonly code?: string;
   readonly message?: string;
 }
@@ -100,7 +100,7 @@ export interface ResponsesApiResponse {
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object";
 
-export const isFunctionCallBlock = (b: unknown): b is FunctionCallBlock =>
+const isFunctionCallBlock = (b: unknown): b is FunctionCallBlock =>
   isObject(b) &&
   b.type === "function_call" &&
   typeof b.call_id === "string" &&
@@ -113,7 +113,7 @@ export const isMessageBlock = (b: unknown): b is MessageBlock =>
 export const isOutputTextPart = (c: unknown): c is OutputTextPart =>
   isObject(c) && c.type === "output_text" && typeof c.text === "string";
 
-export const isReasoningBlock = (b: unknown): b is ReasoningBlock =>
+const isReasoningBlock = (b: unknown): b is ReasoningBlock =>
   isObject(b) && b.type === "reasoning" && Array.isArray(b.summary);
 
 // ---------------------------------------------------------------------------

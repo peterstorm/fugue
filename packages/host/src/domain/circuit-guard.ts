@@ -75,7 +75,7 @@ export interface CircuitPermit {
 
 // ── Guard Results ──────────────────────────────────────────────────────────
 
-export type CircuitCheckResult =
+type CircuitCheckResult =
   | { readonly allowed: true; readonly permit: CircuitPermit }
   | { readonly allowed: false; readonly reason: "circuit-open" };
 

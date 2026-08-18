@@ -1,6 +1,6 @@
 import type { Message } from "../schemas/crm.js";
 
-export type SentimentMarker = {
+type SentimentMarker = {
   readonly messageIndex: number;
   readonly sentiment: "positive" | "negative" | "neutral";
   readonly keywords: readonly string[];

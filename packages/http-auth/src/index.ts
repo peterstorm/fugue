@@ -273,7 +273,7 @@ export const healthCheckWithTimeout = async (
  * shaped route apart from a raw payload, so a raw payload that happens to carry
  * a `body`/`status` field is never misread as control metadata.
  */
-export interface FakeAuthedHttpRoute {
+interface FakeAuthedHttpRoute {
   readonly status?: number;
   readonly body: unknown;
   readonly matchBody?: (body: unknown) => boolean;

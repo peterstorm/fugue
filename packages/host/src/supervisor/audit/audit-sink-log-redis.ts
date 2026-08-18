@@ -190,7 +190,7 @@ export const createFakeAuditSink = (): FakeAuditSink => {
  * In-memory `AuditStreamPort` fake — records every `xAdd` (key + fields) and can
  * be flipped to throw, exercising the redis-stream sink's never-throw path.
  */
-export interface FakeAuditStream extends AuditStreamPort {
+interface FakeAuditStream extends AuditStreamPort {
   readonly entries: readonly { streamKey: string; fields: Record<string, string> }[];
   setFail: (fail: boolean) => void;
 }

@@ -170,7 +170,7 @@ const activeKey = (tenant: TenantId): string => `fugue:${tenant}:hitl:active`;
 /** The metadata half of a `RunRecord` (everything except the checkpoint string). */
 type RunMeta = Omit<RunRecord, "checkpoint">;
 
-export interface RedisRunStoreConfig {
+interface RedisRunStoreConfig {
   /** TTL applied to run keys on every write, in seconds. Bounds storage growth. */
   readonly ttlSec: number;
   /** Wall-clock source (injected for tests). Defaults to `Date.now`. */

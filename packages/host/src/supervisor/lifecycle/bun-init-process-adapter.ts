@@ -62,7 +62,7 @@ export const libcCandidates = (platform: string, arch: string): readonly string[
 const WNOHANG = 1;
 
 /** A non-blocking zombie reaper: drains every currently-reapable child. */
-export type ReapFn = () => void;
+type ReapFn = () => void;
 
 /**
  * PURE drain loop for the reaper: invoke `reapOne` (one non-blocking `waitpid`)
@@ -102,7 +102,7 @@ export const drainReap = (reapOne: () => number): void => {
  * (wrong libc for the image / dlopen failure). Injectable into `resolveReaper` so
  * the candidate-resolution loop and its fail-fast are unit-testable.
  */
-export const loadWaitpidReaper = (candidate: string): ReapFn | null => {
+const loadWaitpidReaper = (candidate: string): ReapFn | null => {
   try {
     const lib = dlopen(candidate, {
       waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
@@ -144,7 +144,7 @@ export const resolveReaper = (
 // ── Pod-shutdown worker broadcast (PID-1 only; injected OS seams) ────────────────
 
 /** OS seams for the worker-drain broadcast — injected so the PID-1-only path is testable. */
-export interface WorkerBroadcastSeams {
+interface WorkerBroadcastSeams {
   /** This process's PID. The broadcast is a NO-OP unless this is 1 (genuine pod PID 1). */
   readonly selfPid: number;
   /** Enumerate `/proc` entries (pid dir names). MAY throw (no `/proc` / EACCES). */
@@ -211,7 +211,7 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
 // ── Adapter ─────────────────────────────────────────────────────────────────────
 
 /** What the adapter needs from a spawned supervisor: its pid + a promise of its exit code. */
-export interface SpawnedSupervisorProcess {
+interface SpawnedSupervisorProcess {
   readonly pid?: number;
   readonly exited: Promise<number | null>;
 }
@@ -221,12 +221,12 @@ export interface SpawnedSupervisorProcess {
  * path (`Bun.spawn` throwing on EAGAIN/ENOMEM/EMFILE/ENOENT) is unit-testable without
  * a real resource-exhaustion fork. Production defaults to `Bun.spawn`.
  */
-export type SpawnSupervisorFn = (
+type SpawnSupervisorFn = (
   command: readonly string[],
   options: { readonly env: Record<string, string>; readonly stdout: "inherit"; readonly stderr: "inherit" },
 ) => SpawnedSupervisorProcess;
 
-export interface BunInitAdapterConfig {
+interface BunInitAdapterConfig {
   /** Absolute path to the supervisor binary (`main-supervisor.ts`) to spawn. */
   readonly supervisorEntry: string;
   /** Env handed to the spawned supervisor. Defaults to `process.env`. */
@@ -246,7 +246,7 @@ export interface BunInitAdapterConfig {
  * binary's SIGTERM handler uses to forward shutdown to the current supervisor and
  * stop respawning (the loop is otherwise infinite).
  */
-export interface BunInitProcessAdapter extends InitProcessPort {
+interface BunInitProcessAdapter extends InitProcessPort {
   /**
    * Pod shutdown: forward `sig` to the CURRENT supervisor child AND (when we are
    * actually PID 1) to every per-tenant WORKER in the pod so they drain gracefully

@@ -133,7 +133,7 @@ export const buildProbeRequest = (hmacKey: string | undefined, tenant: TenantId)
 
 // ── Proxy ────────────────────────────────────────────────────────────────────
 
-export interface UdsProxyDeps {
+interface UdsProxyDeps {
   /**
    * The platform-internal HMAC key. SECURITY: this is asserted (by the wiring
    * site, supervisor.ts) to be `FUGUE_SUPERVISOR_HMAC_KEY` — NOT a tenant secret.

@@ -78,7 +78,7 @@ export const SUBJECT_TOKEN_TYPE_ACCESS =
   "urn:ietf:params:oauth:token-type:access_token" as const;
 
 /** Static config for the live Keycloak token endpoint — just the token URL. */
-export interface KeycloakTokenEndpointConfig {
+interface KeycloakTokenEndpointConfig {
   /**
    * The Keycloak realm token endpoint the agent-client legs POST to
    * (`.../protocol/openid-connect/token`). Already validated https at boot
@@ -250,7 +250,7 @@ export const mapKeycloakTokenResponse = (
 // ───────────────────────────────────────────────────────────────────────────
 
 /** Dependencies for the live Keycloak token endpoint — all I/O injected. */
-export interface KeycloakTokenEndpointDeps {
+interface KeycloakTokenEndpointDeps {
   /** Static config: the realm token URL (https-validated at boot). */
   readonly config: KeycloakTokenEndpointConfig;
   /** The injected HTTP POST transport (the shared `createFetchHttpPost`, AD-2). */

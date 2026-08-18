@@ -24,7 +24,7 @@ import type { HostError } from "./host-error.js";
 /**
  * Health status of a single capability.
  */
-export type CapabilityHealth =
+type CapabilityHealth =
   | { readonly status: "healthy"; readonly name: string }
   | { readonly status: "unhealthy"; readonly name: string; readonly reason: string }
   | { readonly status: "no-check"; readonly name: string };
@@ -32,7 +32,7 @@ export type CapabilityHealth =
 /**
  * Aggregated health of all capabilities.
  */
-export interface CapabilityHealthReport {
+interface CapabilityHealthReport {
   readonly overall: "healthy" | "degraded";
   readonly capabilities: readonly CapabilityHealth[];
 }
@@ -133,7 +133,7 @@ export const topoSortHandles = (
  * before it — the caller MUST close that prefix to avoid leaking pools and
  * sockets on an aborted boot.
  */
-export interface ConnectFailure {
+interface ConnectFailure {
   readonly error: HostError;
   /** Handles whose `connect()` completed before the failure, in connect order. */
   readonly connected: readonly CapabilityHandle[];
@@ -188,7 +188,7 @@ export const connectAll = async (
 };
 
 /** A single capability that failed to close during shutdown. */
-export interface CloseFailure {
+interface CloseFailure {
   readonly name: string;
   readonly error: string;
 }

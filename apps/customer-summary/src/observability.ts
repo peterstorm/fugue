@@ -84,7 +84,7 @@ export const isFoundryEnabled = (
  *   the resolver re-checks defense-in-depth (a `Config` built by hand in a test,
  *   or any future bypass of `loadConfig`, still fails closed here).
  */
-export type ObservabilityConfigErrorCause = "missing-connection-string";
+type ObservabilityConfigErrorCause = "missing-connection-string";
 
 export class ObservabilityConfigError extends Error {
   readonly reason: ObservabilityConfigErrorCause;

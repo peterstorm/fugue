@@ -12,7 +12,7 @@ import type { DescribedDag } from "@fuguejs/framework";
 // Response Types
 // ---------------------------------------------------------------------------
 
-export interface ErrorResponse {
+interface ErrorResponse {
   readonly ok: false;
   readonly error: string;
   readonly message: string;
@@ -21,7 +21,7 @@ export interface ErrorResponse {
   readonly runId?: string;
 }
 
-export interface SuccessResponse<T = unknown> {
+interface SuccessResponse<T = unknown> {
   readonly ok: true;
   readonly data: T;
   readonly runId?: string;
@@ -39,7 +39,7 @@ export interface DagListItem {
   readonly owner?: string;
 }
 
-export interface DagListResponse {
+interface DagListResponse {
   readonly dags: readonly DagListItem[];
   readonly count: number;
 }
@@ -61,12 +61,12 @@ export interface DagManifestResponse extends DescribedDag {
   readonly loadedAt: number;
 }
 
-export interface HealthResponse {
+interface HealthResponse {
   readonly status: "ok" | "degraded" | "unavailable";
   readonly timestamp: string;
 }
 
-export interface ReadinessResponse {
+interface ReadinessResponse {
   readonly ready: boolean;
   readonly dagCount: number;
   readonly phase: string;

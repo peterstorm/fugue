@@ -29,7 +29,7 @@ export interface WebhookHttp {
   readonly post: (url: string, jsonBody: string) => Promise<{ readonly status: number }>;
 }
 
-export interface WebhookNotifierConfig {
+interface WebhookNotifierConfig {
   /** Teams Incoming Webhook (Workflows) URL the card is POSTed to. */
   readonly webhookUrl: string;
   /**

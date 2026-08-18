@@ -20,7 +20,7 @@ import type { PostWaveContext } from "./post-wave-context.js";
  * decisions for the wave-done event, and an optional early-failure event
  * when a predicate is malformed (short-circuits the wave).
  */
-export interface RoutingPhaseResult {
+interface RoutingPhaseResult {
   /** Per-source-node routing decisions. Empty map when no conditional edges fired. */
   readonly decisions: ReadonlyMap<NodeId, Decision>;
   /** Per-node extracted confidence values for persisting into the transition context. */
