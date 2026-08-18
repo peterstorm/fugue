@@ -27,16 +27,8 @@ import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
 import type { LogPort } from "../ports.js";
 import { errorResponse } from "./response.js";
 
-// ---------------------------------------------------------------------------
-// Shared environment type for Hono context variables
-// ---------------------------------------------------------------------------
-
-export type HostEnv = {
-  Variables: {
-    hostState: HostState;
-    authIdentity: import("../domain/auth.js").AuthIdentity;
-  };
-};
+export type { HostEnv } from "./env.js";
+import type { HostEnv } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // Router factory

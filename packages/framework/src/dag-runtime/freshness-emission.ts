@@ -19,7 +19,7 @@ import { fwLogger } from "../logger.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
-import type { PostWaveContext } from "./wave-execution.js";
+import type { PostWaveContext } from "./post-wave-context.js";
 
 /**
  * Emit freshness witness events for all reads/writes nodes in a wave.

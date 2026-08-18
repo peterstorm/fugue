@@ -13,7 +13,7 @@
 
 import type { Context } from "hono";
 import { tryDagId, buildDescribedDag, formatFrameworkError } from "@fuguejs/framework";
-import type { HostEnv } from "../router.js";
+import type { HostEnv } from "../env.js";
 import type { LogPort } from "../../ports.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";

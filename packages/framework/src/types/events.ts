@@ -3,7 +3,7 @@ import type { FrameworkError } from "./errors.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
-import type { Witness, ResourceName } from "./freshness.js";
+import type { Witness, ResourceName } from "./witness.js";
 import type { SideEffectKind } from "./side-effects.js";
 import type { JsonPatch } from "./json-patch.js";
 

@@ -17,7 +17,7 @@ import { match } from "ts-pattern";
 import type { Context } from "hono";
 import type { HumanAction } from "@fuguejs/framework";
 import { formatFrameworkError, tryRunId, tryNodeId } from "@fuguejs/framework";
-import type { HostEnv } from "../router.js";
+import type { HostEnv } from "../env.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";

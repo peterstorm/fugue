@@ -13,7 +13,7 @@ import type { Decision } from "./routing.js";
 import { decideRoute } from "./routing.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { emit } from "./emit.js";
-import type { PostWaveContext } from "./wave-execution.js";
+import type { PostWaveContext } from "./post-wave-context.js";
 
 /**
  * Result of the routing-decision phase. Contains the per-source-node

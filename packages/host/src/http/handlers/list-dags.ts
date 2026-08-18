@@ -11,7 +11,7 @@
  */
 
 import type { Context } from "hono";
-import type { HostEnv } from "../router.js";
+import type { HostEnv } from "../env.js";
 import { dagListResponse } from "../response.js";
 import type { DagListItem } from "../response.js";
 import { canServeRequests, getRegistry } from "../../domain/host-state.js";

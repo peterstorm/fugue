@@ -6,23 +6,8 @@ import { dispatchEvent } from "./dispatch.js";
 import { match } from "ts-pattern";
 export { dispatchEvent } from "./dispatch.js";
 
-export interface RunSummary {
-  readonly runId: string;
-  readonly status: "ok" | "error";
-  readonly totalDuration: number;
-  readonly nodeCount: number;
-  readonly retryCount: number;
-  /**
-   * Sum of LLM cost from OTel spans. Present only when computed by
-   * `TailSamplingProcessor` (which reads `ai.llm.cost_usd` from span
-   * attributes). `undefined` in the `BufferedObserver` path because
-   * observer events don't carry cost data.
-   */
-  readonly totalCostUsd?: number;
-  readonly freshnessViolationCount: number;
-  readonly humanInterventionCount: number;
-  readonly routeDecisionCount: number;
-}
+export type { RunSummary } from "./run-summary.js";
+import type { RunSummary } from "./run-summary.js";
 
 export interface AggregateCounters {
   runCount: number;

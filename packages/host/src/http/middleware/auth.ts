@@ -161,12 +161,9 @@ export const isJwtShape = (token: string): boolean => {
 // Middleware factory
 // ---------------------------------------------------------------------------
 
-/** @deprecated Use HostEnv from router.ts — kept for test backward compatibility */
-export type AuthEnv = {
-  Variables: {
-    authIdentity: AuthIdentity;
-  };
-};
+// Both Hono context shapes live in `env.js`; re-exported here for the
+// middleware's own test call sites.
+export type { AuthEnv } from "../env.js";
 
 /**
  * Creates a Hono middleware that resolves bearer tokens to AuthIdentity.

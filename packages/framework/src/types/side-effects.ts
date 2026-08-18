@@ -16,7 +16,7 @@
  * `DagMachineContextPersisted` shape excludes `NodeDef` entirely.
  */
 
-import type { Witness, WitnessValue, ResourceName } from "./freshness.js";
+import type { Witness, WitnessValue, ResourceName } from "./witness.js";
 
 export type SideEffectKind = "none" | "reads" | "writes" | "external-call";
 

@@ -1,4 +1,4 @@
-import type { RunSummary } from "./buffered.js";
+import type { RunSummary } from "./run-summary.js";
 
 export interface PersistencePolicy {
   shouldFlush(summary: RunSummary): boolean;

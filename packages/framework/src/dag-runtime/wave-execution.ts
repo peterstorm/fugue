@@ -19,7 +19,7 @@ import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import type { DagMachineContext, DagEvent } from "./types.js";
@@ -57,18 +57,8 @@ export interface WaveConfig {
  * Concentrates everything the post-dispatch pipeline (freshness + routing)
  * needs into one object, eliminating 10-param / 7-param positional calls.
  */
-export interface PostWaveContext {
-  readonly waveNodeIds: readonly NodeId[];
-  readonly nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>;
-  readonly nodeCtx: ValidatedNodeContext;
-  readonly machineCtx: DagMachineContext;
-  readonly dagId: DagId;
-  readonly nowFn: () => number;
-  readonly freshnessIndex: FreshnessIndex;
-  readonly witnessAccumulator?: Map<string, Witness>;
-  readonly resumeCheckpoint?: Map<string, unknown>;
-  readonly priorOutputs: ReadonlyMap<NodeId, unknown>;
-}
+export type { PostWaveContext } from "./post-wave-context.js";
+import type { PostWaveContext } from "./post-wave-context.js";
 
 export interface WaveResult {
   readonly event: DagEvent;
