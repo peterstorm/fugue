@@ -198,11 +198,3 @@ export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error
   });
   return errorResponse(c, 500, "internal-error", "An unexpected error occurred");
 };
-
-/**
- * Convenience error handler using console.error — intended for dev/test only.
- * Production code should use createErrorHandler(logger) with a structured logger.
- */
-export const errorHandler = createErrorHandler({
-  error: (msg, data) => console.error(JSON.stringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});

@@ -342,10 +342,6 @@ export const releaseTenant = (
 export const tenantCurrent = (state: TenantConcurrencyState, tenant: TenantId): number =>
   state.perTenant.get(tenant)?.current ?? 0;
 
-/** Effective ceiling for a tenant (its explicit limit, else the default). */
-export const tenantMax = (state: TenantConcurrencyState, tenant: TenantId): number =>
-  state.perTenant.get(tenant)?.max ?? state.defaultTenantMax;
-
 /**
  * Whether `admitTenant` would succeed RIGHT NOW for this tenant, without
  * mutating state. Consistent with `admitTenant`: false iff the tenant is at its

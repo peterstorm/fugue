@@ -53,8 +53,6 @@ export interface DagListResponse {
 // sha, loadedAt) is appended on top of that shape.
 // ---------------------------------------------------------------------------
 
-export type DagManifestNode = DescribedNode;
-export type DagManifestEdge = DescribedEdge;
 
 export interface DagManifestResponse extends DescribedDag {
   readonly team: string;

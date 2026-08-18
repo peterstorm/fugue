@@ -22,14 +22,6 @@ export type OpenReason =
   | { readonly kind: "threshold-exceeded"; readonly threshold: number; readonly windowMs: number }
   | { readonly kind: "half-open-test-failed" };
 
-/**
- * Format an OpenReason for human-readable logging.
- */
-export const formatOpenReason = (reason: OpenReason): string =>
-  match(reason)
-    .with({ kind: "threshold-exceeded" }, (r) => `Exceeded ${r.threshold} failures within ${r.windowMs}ms window`)
-    .with({ kind: "half-open-test-failed" }, () => "Half-open test request failed")
-    .exhaustive();
 
 export type CircuitState =
   | { readonly state: "closed"; readonly failureCount: number; readonly windowStart: number }

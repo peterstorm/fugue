@@ -76,7 +76,6 @@ export const EVENT_LLM_COST = "ai.llm.cost";
 export const EVENT_GEN_AI_SYSTEM_MESSAGE = "gen_ai.system.message";
 export const EVENT_GEN_AI_USER_MESSAGE = "gen_ai.user.message";
 export const EVENT_GEN_AI_ASSISTANT_MESSAGE = "gen_ai.assistant.message";
-export const EVENT_GEN_AI_CHOICE = "gen_ai.choice";
 
 // --- Span Type Values ---
 

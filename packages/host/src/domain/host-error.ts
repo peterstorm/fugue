@@ -186,10 +186,6 @@ export const redisUnavailable = (operation: string): HostError => ({ kind: "redi
 /** Producer of `fs-purge-failed` — a local filesystem fault during grace-window mount reclamation (NOT a Redis outage). */
 export const fsPurgeFailed = (message: string): HostError => ({ kind: "fs-purge-failed", message });
 export const teamAlreadyExists = (team: string): HostError => ({ kind: "team-already-exists", team });
-export const teamNotFound = (team: string): HostError => ({ kind: "team-not-found", team });
-export const importFailed = (path: string, message: string, stack?: string): HostError => ({ kind: "import-failed", path, message, stack });
-export const noDefaultExport = (path: string): HostError => ({ kind: "no-default-export", path });
-export const discoveryFailed = (dagsRoot: string, message: string): HostError => ({ kind: "discovery-failed", dagsRoot, message });
 export const internalInvariantViolated = (message: string, context: Record<string, unknown>): HostError => ({ kind: "internal-invariant-violated", message, context });
 
 /**
