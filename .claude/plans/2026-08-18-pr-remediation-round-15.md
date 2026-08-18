@@ -86,18 +86,19 @@ cd packages/framework && bun run lint:boundaries                # SC-006 boundar
 
 (Exact workspace script names confirmed at implementation time; the four compiler strictness checks from round-12 remain on.)
 
-## Status (2026-08-18, post-implementation)
+## Status (2026-08-18, COMPLETE)
 
-**All 12 accepted fixes are implemented and validated.** Validation evidence:
+**All 12 accepted fixes implemented, validated, installed, committed, and pushed.**
+
+- **Commit:** `5b387a5` on `feat/f6-file-durable-runtime` (pushed to origin; 17 files, +632/−55, incl. this plan)
+- **Phase 4 runs:** `remediation-2026-08-18-160257-f6-file-durable-runtime` (blocked — the two host test files were not in the frozen scope; retained as evidence) → `remediation-2026-08-18-163159-f6-file-durable-runtime` (**done** — verified index `e3703a7f2f9431a2a88db0a24208ae917f30ebebb68d33996a18f878d9d5695f` installed atomically, effect `effect:remediation-install:0e8ebfe07d801ea7e05e08e4ce0db34c70d66bc9577d3616399191190358552a`, witness `a8eaf7d363d78529a66b407ab91d615b1b16dd2fb37273a0e413ce95b09e9af0`)
+- (An earlier skew-guard refusal, `remediation-2026-08-18-155943-…`, was refused before any mutation — the loom checkout had moved under the session; no run directory exists for it.)
+- The two host test files were registered as support paths (regression pins not in the reviewed scope), per Phase 3's "register every necessary support path".
+
+Validation evidence (all green, before installation):
 
 - `packages/framework`: `bun run typecheck` clean; `bun test` → **2881 pass / 0 fail** (2919 run, 38 skipped), incl. the new pins (Map/Set/Date clone isolation, per-file EACCES retriable class, symlink follow/replace, resume directory boundary ×4, drainReap onFault, reap-fault escalation ×4, corrupt-record observability ×2, beginDrain narrowed-type suite).
 - `packages/host`: `bun run typecheck` clean; `bun test` → **757 pass / 0 fail**.
 - Workspace: `bun run typecheck` → **12/12 projects exit 0**.
 - Loom linter (`.claude/linter/rules` incl. the SC-006 boundary config, `--include-tests`): **183 violations before == 183 after — parity, zero deltas** (the one transient `max-function-lines` trip from the symlink comment was resolved by trimming the comment to one line).
-
-**Phase 4 (registered remediation) is BLOCKED on an operator action** — not a validation failure:
-
-- The remediation start (`remediation-2026-08-18-155943-f6-file-durable-runtime`, source run `standalone-2026-08-18-121200-f6-file-durable-runtime`, supportPaths = this plan) was **refused before any mutation** by the Loom runtime-skew guard: this Pi session loaded runtime revision `sha256:044b4ac0…`, but the loom checkout on disk is now `sha256:ce8f8a…` (new commit `8faa352` + in-flight uncommitted engine edits).
-- No run directory was created; the refusal is the designed handshake, not a failure to diagnose around.
-- **Operator action required: run `/reload` in this Pi session (or restart Pi), then the parent retries the exact remediation start + resume commands** (Phase 4), after which the engine stages/verifies/installs the index and the parent commits + pushes (no force-push) and files the Phase 5 report.
 
