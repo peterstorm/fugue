@@ -278,4 +278,4 @@ customer-summary) ran after all six moves; per-package results recorded below.
 - [x] root `bun test scripts/` — 7/0
 - [x] `check:docs` — 19 shipped doc files, all links resolve
 - [x] customer-summary — 203/0
-- [ ] commit + push
+- [x] commit `02f4ac4` + push `53300fb..02f4ac4` (no force)
