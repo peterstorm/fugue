@@ -1541,3 +1541,70 @@ describe("createFileJournal.appendEvent — cross-process lock serialization (AD
     );
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// round-14 A2 — stale-lock reaping at the JOURNAL level (ADR-0078 closes its
+// own loop): the primitive test (file-atomic.test.ts) proves a fresh process
+// reaps a crashed holder's lock through `withFileLock` directly; this test
+// proves the recovery through the journal's OWN append path — a crashed
+// writer's `events/append.lock` must not wedge a fresh instance's
+// `appendEvent`.
+// ---------------------------------------------------------------------------
+
+describe("createFileJournal.appendEvent — crashed-writer stale lock (ADR-0078, round-14 A2)", () => {
+  it("a fresh process appends successfully when the previous writer died holding events/append.lock", async () => {
+    const dir = tempDir();
+    const journalPath = pathToFileURL(join(__dirname, "..", "file", "journal.js")).href;
+    const atomicPath = pathToFileURL(join(__dirname, "..", "file", "atomic.js")).href;
+    const marker = join(dir, "writer-ready");
+    const script = join(dir, "crashed-writer.ts");
+    writeFileSync(
+      script,
+      [
+        `import { writeFileSync } from "node:fs";`,
+        `import { createFileJournal } from ${JSON.stringify(journalPath)};`,
+        `import { withFileLock } from ${JSON.stringify(atomicPath)};`,
+        `const dir = process.env.J_DIR;`,
+        `if (!dir) throw new Error("missing J_DIR");`,
+        `const journal = createFileJournal(dir);`,
+        `await journal.appendEvent({ type: "BEFORE" });`,
+        `writeFileSync(process.env.J_MARKER, "1");`,
+        `// Hold the journal's append lock the way an in-flight append does,`,
+        `// then die while holding it (SIGKILL from the parent).`,
+        `await withFileLock(dir + "/events/append.lock", () => new Promise(() => {}));`,
+      ].join("\n"),
+    );
+
+    const writer = spawn(process.execPath, [script], {
+      env: { ...process.env, J_DIR: dir, J_MARKER: marker },
+      stdio: "ignore",
+    });
+    const deadline = Date.now() + 15_000;
+    while (!existsSync(marker) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(existsSync(marker)).toBe(true);
+
+    writer.kill("SIGKILL");
+    await new Promise<void>((resolve) => writer.once("exit", () => resolve()));
+
+    // The crash left the lock file behind (a stale owner: dead pid + token).
+    const lockPath = join(dir, "events", "append.lock");
+    expect(existsSync(lockPath)).toBe(true);
+
+    // A FRESH journal instance over the same directory appends through its
+    // own append path — the reaping happens inside `appendEvent`, not by
+    // calling the primitive from user code.
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "AFTER" });
+
+    // The log is contiguous across the crash: BEFORE (0) + AFTER (1), and
+    // the release cleaned up the reaped lock.
+    const records = readFileEventRecords(dir);
+    expect(records.ok).toBe(true);
+    if (!records.ok) return;
+    expect(records.value.map((r) => Number(r.sequence))).toEqual([0, 1]);
+    expect(records.value.map((r) => (r.event as { type: string }).type)).toEqual(["BEFORE", "AFTER"]);
+    expect(existsSync(lockPath)).toBe(false);
+  }, 30_000);
+});

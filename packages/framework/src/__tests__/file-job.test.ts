@@ -24,7 +24,7 @@
 
 import { describe, it, expect, afterEach } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runStateMachine } from "../state-machine/runner.js";
@@ -35,11 +35,14 @@ import {
   createFileJournal,
   readFileEvents,
   readFileEventRecords,
+  serializeFileCheckpoint,
   type CreateFileJobArgs,
+  type FileCheckpointData,
 } from "../file.js"; // the @fuguejs/framework/file barrel under test
-import { CHECKPOINT_FILE, PROGRESS_FILE } from "../file/layout.js";
+import { CHECKPOINT_FILE, EVENTS_DIR, PROGRESS_FILE } from "../file/layout.js";
 import { __testDeepFreeze } from "../file/job.js";
 import { retriabilityOf } from "../types/errors.js";
+import type { FrameworkError } from "../types/errors.js";
 import { asCacheError } from "./_cache-error-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -632,5 +635,120 @@ describe("createFileJob — appendEvent ride-through (round-8 A13 nesting)", () 
     expect(events.ok).toBe(true);
     if (!events.ok) return;
     expect(events.value).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// round-14 A6 — hostile getters on the job surface (seed + updateData).
+// The checkpointer pins the same throwing-getter class on its metadata
+// surface (file-checkpointer.test.ts); the job surface shares the guard
+// through `serializeFileCheckpoint` → `assertLosslessEvent` (own accessors
+// are rejected by descriptor, never invoked), so both entry points fail
+// closed with typed errors instead of raw rejections.
+// ---------------------------------------------------------------------------
+
+describe("createFileJob — hostile getters on state/context (round-14 A6)", () => {
+  const withThrowingGetter = (base: Record<string, unknown>): Record<string, unknown> => {
+    Object.defineProperty(base, "trap", {
+      enumerable: true,
+      get: () => {
+        throw new Error("hostile getter must stay contained");
+      },
+    });
+    return base;
+  };
+
+  it("a throwing getter on a seed state or context field fails createFileJob typed, before any durable layout", () => {
+    const dir = tempDir();
+    const cases: ReadonlyArray<readonly [string, CreateFileJobArgs<S, C>]> = [
+      ["state", { directory: dir, initial: { state: withThrowingGetter({ kind: "pending", count: 0 }) as unknown as S, context: { value: 1 } } }],
+      ["context", { directory: dir, initial: { state: { kind: "pending", count: 0 } as S, context: withThrowingGetter({ value: 1 }) as unknown as C } }],
+    ];
+    for (const [label, args] of cases) {
+      const error = (() => {
+        try {
+          createFileJob<S, C>(args);
+          return null;
+        } catch (e) {
+          return e;
+        }
+      })();
+      const typed = asCacheError(error, "createFileJob");
+      expect(typed.message).toContain("FR-009");
+      expect(typed.message).toMatch(/accessor/);
+      expect(typed.failureClass).toBe("permanent");
+      // The seed is rejected BEFORE the journal is created — no events dir,
+      // no checkpoint, no lock: the hostile value never reached durable I/O.
+      expect(existsSync(join(dir, EVENTS_DIR))).toBe(false);
+      expect(existsSync(join(dir, CHECKPOINT_FILE))).toBe(false);
+      void label;
+    }
+  });
+
+  it("a throwing getter on an updateData state or context field fails typed cache-error(updateData) without advancing the snapshot", async () => {
+    const dir = tempDir();
+    const job = createFileJob<S, C>({ directory: dir, initial: genesis() });
+    const cases: ReadonlyArray<readonly [string, { state: S; context: C }]> = [
+      ["state", { state: withThrowingGetter({ kind: "pending", count: 1 }) as unknown as S, context: { value: 2 } }],
+      ["context", { state: { kind: "pending", count: 1 } as S, context: withThrowingGetter({ value: 2 }) as unknown as C }],
+    ];
+    for (const [label, d] of cases) {
+      const error = await job.updateData(d).then(() => null, (e: unknown) => e);
+      const typed = asCacheError(error, "updateData");
+      expect(typed.message).toContain("FR-009");
+      expect(typed.message).toMatch(/accessor/);
+      expect(typed.message).toContain(join(dir, CHECKPOINT_FILE));
+      expect(typed.failureClass).toBe("permanent");
+      // No checkpoint written, and the snapshot never advanced.
+      expect(createFileJournal(dir).readCheckpoint()).toBeNull();
+      expect(job.data).toEqual(genesis());
+      void label;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// round-14 A8 — serializeFileCheckpoint write-boundary shape gate.
+// A non-object `data` (undefined, null, array, primitive) previously slipped
+// through the envelope own-key check (`{"data":{"__undefined__":true}}`
+// keeps the own key; the deep-equal verdict catches loss, never shape) and
+// would fail closed only late, at the caller's `parseCheckpoint` on resume.
+// The gate refuses it at the write boundary with a named FR-009 reason —
+// the event-side sibling codec's established shape for the same class.
+// ---------------------------------------------------------------------------
+
+describe("serializeFileCheckpoint — non-object data gate (round-14 A8)", () => {
+  const rejectShape = (value: unknown): Extract<FrameworkError, { readonly kind: "cache-error" }> | null => {
+    let error: unknown = null;
+    try {
+      serializeFileCheckpoint(value as unknown as FileCheckpointData<unknown, unknown>);
+    } catch (e) {
+      error = e;
+    }
+    return error === null ? null : asCacheError(error, "serializeFileCheckpoint");
+  };
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["number", 42],
+    ["string", "checkpoint"],
+    ["boolean", true],
+    ["array", [1, 2, 3]],
+  ] as const)("rejects %s data with a typed FR-009 rejection", (label, value) => {
+    const typed = rejectShape(value);
+    expect(typed).not.toBeNull();
+    if (typed === null) return;
+    expect(typed.message).toContain("FR-009");
+    expect(typed.message).toContain("plain object");
+    expect(typed.message).toContain(label === "array" ? "Array" : label);
+    expect(typed.failureClass).toBe("permanent");
+  });
+  it("still round-trips a plain-object data envelope (the gate is shape-only)", () => {
+    const commit = serializeFileCheckpoint({ state: { kind: "pending", count: 1 }, context: { value: 1 } });
+    expect(commit.data).toEqual({ state: { kind: "pending", count: 1 }, context: { value: 1 } });
+    const parsed = JSON.parse(commit.json) as { schemaVersion: number; data: { state: unknown; context: unknown } };
+    expect(parsed.schemaVersion).toBe(1);
+    expect(parsed.data).toEqual({ state: { kind: "pending", count: 1 }, context: { value: 1 } });
   });
 });

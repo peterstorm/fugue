@@ -465,6 +465,16 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
           logger.error("[worker-lifecycle] onCrash threw", { tenant, error: e instanceof Error ? e.message : String(e) }),
         );
       }
+    }).catch((e) => {
+      // The drain branch (drainComplete, the injected clock, and the logger
+      // itself) can throw where the crash branch already catches onCrash —
+      // an unguarded throw here would surface only as a process-level
+      // unhandled rejection, dropping the tenant attribution. Mirror the
+      // sibling catch so a fault is logged at its site.
+      logger.error("[worker-lifecycle] exit watcher threw", {
+        tenant,
+        error: e instanceof Error ? e.message : String(e),
+      });
     });
 
     return ok({ udsPath });

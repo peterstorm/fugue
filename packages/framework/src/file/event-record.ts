@@ -82,10 +82,9 @@
 // pre-scan defers — `JSON.stringify` silently converts NaN/±Infinity to
 // `null` — and any other divergence; a divergence throws the module's
 // contextual FR-009 error instead of silently mutating the authoritative
-// journal. The ONE accepted divergence is the `-0` → `0` normalization:
-// the deep-equal uses `===`, not `Object.is` (JSON normalizes the sign of
-// zero; nobody's event semantics depend on it), so `-0` persists as `0`
-// without throwing.
+// journal. The one ACCEPTED divergence (`-0` → `0`) is stated once in the
+// module header — one canonical site, pointers everywhere else, because
+// copies drift.
 //
 // `parseFileEventRecord` returns `Result<FileEventRecord, string>` because
 // on-disk data may be corrupt through no fault of the caller.
@@ -433,8 +432,8 @@ const ownValue = (obj: object, key: string): unknown =>
  * accessors anywhere), nested no deeper than `MAX_SAFE_RECORD_DEPTH`.
  * Non-finite numbers are deliberately deferred to the
  * round-trip check (JSON coerces NaN/±Infinity to `null`, which the
- * deep-equal rejects); `-0` → `0` is the one ACCEPTED coercion (`===`,
- * not `Object.is`).
+ * deep-equal rejects); the one ACCEPTED coercion (`-0` → `0`) is stated
+ * in the module header.
  */
 const assertLosslessEventUnchecked = (event: unknown): void => {
   const walk = (
@@ -782,9 +781,8 @@ export const tryParseEventRecordJson = (
  * backstops the coercion class the pre-scan defers — `JSON.stringify`
  * silently converts NaN/±Infinity to `null` — and any divergence throws
  * the contextual FR-009 error instead of silently mutating the
- * authoritative journal. The one ACCEPTED coercion is the `-0` → `0`
- * normalization: the deep-equal compares with `===`, not `Object.is`
- * (JSON normalizes the sign of zero).
+ * authoritative journal. The one ACCEPTED coercion (`-0` → `0`) is stated
+ * in the module header.
  */
 const serializeFileEventRecordUnchecked = (
   sequence: number,

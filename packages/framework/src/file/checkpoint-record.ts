@@ -13,6 +13,7 @@
 
 import { deepJsonEqual, serializeValue, toJson, tryFromJson } from "../state-machine/serialize.js";
 import { tryCatch } from "../types/result.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
 import { fileOperationError, fileThrownValueMessage } from "./boundary-error.js";
 import { assertLosslessEvent } from "./event-record.js";
 import { JOURNAL_SCHEMA_VERSION } from "./layout.js";
@@ -51,6 +52,20 @@ export const isFileCheckpointCommit = (
 const serializeFileCheckpointUnchecked = <S, C>(
   data: FileCheckpointData<S, C>,
 ): FileCheckpointCommit<S, C> => {
+  // Write-boundary shape gate, mirroring the strict reader's contract: `data`
+  // is the `{ state, context }` envelope the caller's `parseCheckpoint`
+  // decodes at resume. A non-object `data` (undefined, null, array, primitive)
+  // slips through the envelope own-key check below — `{"data":{"__undefined__":true}}`
+  // keeps the own key, and the deep-equal verdict can only catch loss, never
+  // shape — so it would fail closed only at the caller's decode, late. Refuse
+  // it here, the way the event-side sibling codec refuses a top-level
+  // `undefined` event with a named FR-009 reason.
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error(
+      `serializeFileCheckpoint: data must be a plain object (the { state, context } envelope), got ${data === null ? "null" : Array.isArray(data) ? "Array" : typeof data}: ${safeDiagnosticRender(data)} (FR-009)`,
+    );
+  }
+
   const payload = { schemaVersion: JOURNAL_SCHEMA_VERSION, data };
   try {
     assertLosslessEvent(payload);
@@ -105,8 +120,9 @@ export const serializeFileCheckpoint = <S, C>(
   try {
     return serializeFileCheckpointUnchecked(data);
   } catch (error) {
-    // Deterministic: every rejection in the unchecked codec (losslessness
-    // pre-scan, toJson, round-trip parse, envelope shape, deep-equal verdict)
+    // Deterministic: every rejection in the unchecked codec (top-level shape
+    // gate, losslessness pre-scan, toJson, round-trip parse, envelope shape,
+    // deep-equal verdict)
     // reproduces identically for the same payload — re-running the transition
     // cannot clear it. Marked permanent so `retriabilityOf` fast-fails instead
     // of burning the retry budget (the event-side twin

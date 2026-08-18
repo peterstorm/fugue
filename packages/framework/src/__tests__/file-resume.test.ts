@@ -68,6 +68,7 @@
  */
 
 import { describe, it, expect, afterEach } from "bun:test";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -81,6 +82,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import * as fc from "fast-check";
 import { runStateMachine } from "../state-machine/runner.js";
 import type { JobLike, Machine, KernelRunOpts } from "../state-machine/types.js";
@@ -1698,4 +1700,93 @@ describe("resumeFileJob — prefix-space property (fast-check)", () => {
       ),
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// round-14 A4 — cross-process reader vs active writer (NFR-001 at the resume
+// seam): atomicity of the durable bytes is pinned at the `atomicWriteFile`
+// primitive, but the end-to-end claim — a resumer reading a directory while
+// a real writer process is appending observes only complete pre- or
+// post-append state, never a torn read — is proven HERE with a spawned child
+// running the kernel's own append-before-checkpoint discipline (FR-005) and
+// a parent resuming in a loop across the whole write window.
+// ---------------------------------------------------------------------------
+
+describe("resumeFileJob — cross-process reader under an active writer (round-14 A4)", () => {
+  it("concurrent resumers observe only consistent prefixes — all-or-nothing per append — and end at the full log", async () => {
+    const dir = tempDir();
+    const N = 30;
+    const barrelUrl = pathToFileURL(join(__dirname, "..", "file.js")).href;
+    const marker = join(dir, "writer-done");
+    const script = join(dir, "writer.ts");
+    writeFileSync(
+      script,
+      [
+        `import { writeFileSync } from "node:fs";`,
+        `import { createFileJob } from ${JSON.stringify(barrelUrl)};`,
+        `const dir = process.env.R_DIR;`,
+        `if (!dir) throw new Error("missing R_DIR");`,
+        `const job = createFileJob({ directory: dir, initial: { state: { kind: "pending", count: 0 }, context: { value: 0 } } });`,
+        `const N = ${N};`,
+        `for (let i = 0; i < N; i++) {`,
+        `  // The kernel's own discipline (FR-005): append FIRST, then the`,
+        `  // projection (updateData mints the commit + writes checkpoint.json)`,
+        `  // — the lag window is exactly the hazard under test.`,
+        `  await job.appendEvent({ type: "STEP" });`,
+        `  await new Promise((r) => setTimeout(r, 2));`,
+        `  await job.updateData({ state: { kind: "pending", count: i + 1 }, context: { value: i + 1 } });`,
+        `  await new Promise((r) => setTimeout(r, 10));`,
+        `}`,
+        `writeFileSync(process.env.R_MARKER, "1");`,
+      ].join("\n"),
+    );
+
+    const writer = spawn(process.execPath, [script], {
+      env: { ...process.env, R_DIR: dir, R_MARKER: marker },
+      stdio: "ignore",
+    });
+
+    const observedCounts = new Set<number>();
+    const deadline = Date.now() + 30_000;
+    let finalCount: number | null = null;
+    while (Date.now() < deadline) {
+      const resumed = await resume(dir, "a4-cross-process");
+      if (resumed.ok) {
+        const { state, context } = resumed.value;
+        const k = (state as { count: number }).count;
+        // Consistency of the observation: the replayed log prefix — `pending`
+        // at an integer count 0..N with the context that prefix implies. Any
+        // other shape is a torn read (partial append, partial checkpoint,
+        // mixed sources). A LAGGING checkpoint is benign (FR-005 window): the
+        // replay decides the state, so k is the LOG's count, not the
+        // projection's.
+        if (state.kind !== "pending" || !Number.isInteger(k) || k < 0 || k > N || context.value !== k) {
+          writer.kill("SIGKILL");
+          throw new Error(`torn observation: state=${JSON.stringify(state)} context=${JSON.stringify(context)}`);
+        }
+        observedCounts.add(k);
+        if (k === N && existsSync(marker)) {
+          finalCount = k;
+          break;
+        }
+      } else if (resumed.error.kind !== "checkpoint-missing") {
+        writer.kill("SIGKILL");
+        const detail = (resumed.error as { message?: string }).message;
+        throw new Error(
+          `unexpected typed failure during active writes: ${resumed.error.kind}${detail !== undefined ? `: ${detail}` : ""}`,
+        );
+      }
+      // checkpoint-missing = before the first append landed — not a torn
+      // read, just an empty run: keep polling.
+    }
+
+    const exitCode = await new Promise<number>((resolve) => writer.once("exit", (code) => resolve(code ?? -1)));
+    expect(exitCode).toBe(0);
+    expect(finalCount).toBe(N);
+    // The loop actually observed the write MID-FLIGHT: at least one prefix
+    // strictly between start and end. A loop that only ever saw the tail
+    // would prove nothing about concurrent reads.
+    const intermediates = [...observedCounts].filter((k) => k > 0 && k < N);
+    expect(intermediates.length).toBeGreaterThan(0);
+  }, 45_000);
 });

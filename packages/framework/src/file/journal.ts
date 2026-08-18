@@ -108,16 +108,6 @@ const fsFailure = (
   fileOperationError(operation, `run directory ${directory}`, error, failureClass);
 
 /**
- * The event-file naming contract (ADR-0076) is parsed through
- * `parseEventFileName` in `layout.ts` — the single encoded inverse of
- * `eventFileName`'s output shape (6-digit zero-padded sequence, `-`,
- * 64-lowercase-hex digest, `.json`). The writer's listing enforces the same
- * contract the strict reader consumes (parity in both directions): an entry
- * that could never have been written by this journal fails the append fast
- * instead of silently inflating the sequence.
- */
-
-/**
  * Build the ADR-0080 typed failure for the journal's permanent capacity ceiling.
  * The public error taxonomy stays closed: capacity exhaustion uses the
  * existing `cache-error` kind, with append operation and durable-layout
@@ -237,8 +227,11 @@ export const createFileJournal = (
    * deferred from append-time to read-time. (A DELETED record, by contrast,
    * cannot appear in the durable listing at all: it produces a contiguity
    * gap that the strict reader catches, not a count inflation.) Fail fast
-   * instead, with a typed `cache-error` naming the offending entry
-   * (fail-fast parity with the strict reader in `event-log.ts`).
+   * instead, with a typed `cache-error` naming the offending entry — the
+   * writer's listing enforces the same contract the strict reader consumes
+   * (parity in both directions): an entry that could never have been written
+   * by this journal fails the append fast instead of silently inflating the
+   * sequence (fail-fast parity with the strict reader in `event-log.ts`).
    */
   const listEventFiles = (): readonly string[] => {
     let names: string[];

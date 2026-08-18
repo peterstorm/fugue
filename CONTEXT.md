@@ -17,7 +17,7 @@ gates, freshness-aware state management, and production observability.
 | **Edge** | A connection between nodes. Three kinds: `unconditional`, `conditional` (with a predicate), `default` (fallback when no conditional matches). |
 | **Wave** | A set of nodes at the same topological depth that can execute concurrently. The DAG is compiled into an ordered sequence of waves. |
 | **Run** | A single execution of a DAG with a specific input. Identified by a `RunId`. |
-| **Phase** | The current state of a run: `pending`, `running`, `retrying`, `awaiting-human`, `retrying-hook`, `succeeded`, `failed`. |
+| **Phase** | The current state of a run: `pending`, `running`, `retrying`, `awaiting-human`, `suspended`, `retrying-hook`, `succeeded`, `failed`. |
 
 ### State Machine Kernel
 
@@ -173,7 +173,7 @@ The host is the **imperative shell** that wires the framework into a production 
 | `domain/circuit-breaker.ts` | Pure closed/open/half-open state machine |
 | `domain/circuit-guard.ts` | Protocol-enforcing permit token (check→execute→mark) |
 | `domain/config.ts` | Zod-validated environment config with sensible defaults |
-| `domain/host-error.ts` | 28-variant discriminated union, exhaustive HTTP mapping |
+| `domain/host-error.ts` | Discriminated union of host errors, exhaustively mapped to HTTP status via `httpStatusFor` |
 | `adapters/git-sync.ts` | Bun.spawn → git clone/pull/rev-parse with timeout |
 | `adapters/module-loader.ts` | Dynamic import + validation + prompt loading |
 | `adapters/node-context-factory.ts` | Constructs per-request NodeContext with DAG-namespaced keys |

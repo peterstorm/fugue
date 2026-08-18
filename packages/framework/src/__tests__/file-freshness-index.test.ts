@@ -1038,6 +1038,39 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     }
   });
 
+  it("a directory squatting on the <digest>.json singleton fails recordWrite and findConflict closed with typed EISDIR-class errors (round-14 A5)", async () => {
+    // round-14 A5: the sibling modules pin the errno-class matrix (EACCES/
+    // EIO/ENOTDIR/EISDIR) at their read surfaces; the freshness singleton's
+    // per-resource record had no EISDIR pin — a DIRECTORY wearing the
+    // `<digest>.json` name makes readFileSync throw EISDIR, and both
+    // operations must fail closed with the code in the typed diagnostic
+    // instead of a raw escape or a misclassified verdict.
+    const directory = tempDirectory();
+    const resource = "squat:eisdir";
+    mkdirSync(directory, { recursive: true });
+    mkdirSync(join(directory, `${keyDigest(resource)}.json`));
+
+    const index = createFileFreshnessIndex(directory);
+
+    const write = await index.recordWrite(writeEvent(resource, "squat-write", 100));
+    expect(write.ok).toBe(false);
+    if (!write.ok && write.error.kind === "cache-error") {
+      expect(write.error.operation).toBe("freshness:recordWrite");
+      expect(write.error.message).toContain("EISDIR");
+    } else {
+      throw new Error("expected a typed cache-error(recordWrite)");
+    }
+
+    const read = await index.findConflict(W(resource, "squat-read"), 0);
+    expect(read.ok).toBe(false);
+    if (!read.ok && read.error.kind === "cache-error") {
+      expect(read.error.operation).toBe("freshness:findConflict");
+      expect(read.error.message).toContain("EISDIR");
+    } else {
+      throw new Error("expected a typed cache-error(findConflict)");
+    }
+  });
+
   it("uses the exact Redis member serialization only for deterministic tie comparison", () => {
     const entry = {
       resource: "tie:serialization",

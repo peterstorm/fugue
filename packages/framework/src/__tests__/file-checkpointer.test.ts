@@ -2580,6 +2580,23 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
     expect(result.error.operation).toBe("setMeta");
   });
 
+  it("maps a run path squatting with a regular file to typed cache-error(load) — never clean ok(null)", async () => {
+    // round-14 A3: the US2 contract says UNKNOWN runs (absent path) read as a
+    // clean `null`; a run path OCCUPIED by a regular file is a filesystem
+    // conflict, not an unknown run — `verifyDirectory` throws its
+    // non-directory verdict and the load boundary must carry it as a typed
+    // `cache-error(load)`, never masquerade it as "no checkpoint".
+    const directory = freshDirectory();
+    writeFileSync(join(directory, "run-squat"), "not a directory");
+    const result = await createFileCheckpointer(directory).load(R("run-squat"));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a rejection");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind !== "cache-error") throw new Error("unreachable");
+    expect(result.error.operation).toBe("load");
+    expect(result.error.message).toContain("run-squat");
+  });
+
   it("reports an unreadable meta.json as a typed cache-error(load)", async () => {
     const directory = freshDirectory();
     // A directory where meta.json belongs: readable path, unreadable file.

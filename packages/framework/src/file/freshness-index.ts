@@ -417,6 +417,55 @@ const createFileFreshnessIndexUnchecked = (
   }
   const now = parseFileFactoryClock(opts);
 
+  /**
+   * Clock read + representability gate, shared by `recordWrite` (write
+   * stamp) and `findConflict` (lazy TTL evaluation). Both rejections are
+   * code-constructed and deterministic — a throwing or non-finite injected
+   * clock fails identically on every retry — so both are pinned
+   * "permanent" exactly as the inline per-method blocks were, with the
+   * per-operation message prefixes byte-identical to those blocks. The two
+   * checkpointer backends consolidated the same pair the same way
+   * (file/checkpointer.ts `readClock`, checkpoint/checkpointer.ts
+   * `readClock`); this is the third of the five file-backend clock sites.
+   */
+  const readClock = (
+    operation: "freshness:recordWrite" | "freshness:findConflict",
+    digest: string,
+    clockFailedContext: "stamping the write" | "evaluating the freshness TTL",
+  ): Result<number, FrameworkError> => {
+    try {
+      const nowMs = now();
+      if (!isFiniteNumber(nowMs)) {
+        // Deterministic: a non-finite injected clock fails identically on
+        // every retry — pin "permanent" like the other code-constructed
+        // invariant rejections.
+        return err(
+          cacheFailure(
+            operation,
+            digest,
+            "clock must return a finite timestamp",
+            undefined,
+            "permanent",
+          ),
+        );
+      }
+      return ok(nowMs);
+    } catch (error) {
+      // Deterministic: a throwing injected clock fails identically on
+      // every retry — pin "permanent" like the sibling clock sites
+      // (journal appendEvent, checkpointer setMeta/load).
+      return err(
+        cacheFailure(
+          operation,
+          digest,
+          `clock failed while ${clockFailedContext}: ${fileThrownValueMessage(error)}`,
+          undefined,
+          "permanent",
+        ),
+      );
+    }
+  };
+
   return {
     async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
       let digest: string | null = null;
@@ -434,38 +483,9 @@ const createFileFreshnessIndexUnchecked = (
         const lockPath = join(directory, `${resourceDigest}.lock`);
 
         return await withFileLock(lockPath, () => {
-          let nowMs: number;
-          try {
-            nowMs = now();
-          } catch (error) {
-            // Deterministic: a throwing injected clock fails identically on
-            // every retry — pin "permanent" like the non-finite return below
-            // and the sibling clock sites (journal appendEvent, checkpointer
-            // setMeta/load).
-            return err(
-              cacheFailure(
-                "freshness:recordWrite",
-                resourceDigest,
-                `clock failed while stamping the write: ${fileThrownValueMessage(error)}`,
-                undefined,
-                "permanent",
-              ),
-            );
-          }
-          if (!isFiniteNumber(nowMs)) {
-            // Deterministic: a non-finite injected clock fails identically on
-            // every retry — pin "permanent" like the other code-constructed
-            // invariant rejections.
-            return err(
-              cacheFailure(
-                "freshness:recordWrite",
-                resourceDigest,
-                "clock must return a finite timestamp",
-                undefined,
-                "permanent",
-              ),
-            );
-          }
+          const clocked = readClock("freshness:recordWrite", resourceDigest, "stamping the write");
+          if (!clocked.ok) return clocked;
+          const nowMs = clocked.value;
 
           let current: StoredFreshnessEntry | null = null;
           try {
@@ -546,38 +566,9 @@ const createFileFreshnessIndexUnchecked = (
           return ok(null);
         }
 
-        let nowMs: number;
-        try {
-          nowMs = now();
-        } catch (error) {
-          // Deterministic: a throwing injected clock fails identically on
-          // every retry — pin "permanent" like the recordWrite twin and the
-          // sibling clock sites (journal appendEvent, checkpointer
-          // setMeta/load).
-          return err(
-            cacheFailure(
-              "freshness:findConflict",
-              digest,
-              `clock failed while evaluating the freshness TTL: ${fileThrownValueMessage(error)}`,
-              undefined,
-              "permanent",
-            ),
-          );
-        }
-        if (!isFiniteNumber(nowMs)) {
-          // Deterministic: a non-finite injected clock fails identically on
-          // every retry — pin "permanent" like the other code-constructed
-          // invariant rejections.
-          return err(
-            cacheFailure(
-              "freshness:findConflict",
-              digest,
-              "clock must return a finite timestamp",
-              undefined,
-              "permanent",
-            ),
-          );
-        }
+        const clocked = readClock("freshness:findConflict", digest, "evaluating the freshness TTL");
+        if (!clocked.ok) return clocked;
+        const nowMs = clocked.value;
         return ok(
           decideConflict(
             parsed.value,
