@@ -6,7 +6,7 @@ import { RecordingObserver } from "../observer/observer.js";
 import { nodeId, runId, dagId } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
-import type { PostWaveContext } from "../dag-runtime/wave-execution.js";
+import type { PostWaveContext } from "../dag-runtime/post-wave-context.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent } from "../types/events.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";

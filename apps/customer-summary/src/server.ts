@@ -259,11 +259,19 @@ export const createApp = (deps: AppDeps): Hono => {
     const tracingDegraded =
       exporterFailures !== null && exporterFailures.some((f) => f.failures > 0);
     const httpStatus = redisOk ? 200 : 503;
-    const status: string = redisOk
-      ? mlflowOk && !tracingDegraded
-        ? "ready"
-        : "ready-degraded"
-      : "not-ready";
+    // Three outcomes, one level: redis down gates readiness entirely; with
+    // redis up, any degraded trace backend (MLflow or a secondary exporter)
+    // downgrades to `ready-degraded` (FR-026: degrades the signal, never
+    // gates readiness).
+    const degraded = !mlflowOk || tracingDegraded;
+    let status: string;
+    if (!redisOk) {
+      status = "not-ready";
+    } else if (degraded) {
+      status = "ready-degraded";
+    } else {
+      status = "ready";
+    }
     return { status, redis: redisOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
   };
 

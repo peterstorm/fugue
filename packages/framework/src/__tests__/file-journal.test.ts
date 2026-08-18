@@ -759,6 +759,30 @@ describe("createFileJournal.appendEvent — writer-side listing contract", () =>
     // No new record was committed (the malformed name is still the only addition).
     expect(listEventFiles(dir)).toEqual([...before, "000000-deadbeef.json"].sort());
   });
+
+  it("a validly-named record with corrupt content does NOT block a different-key append (writer never parses content, ADR-0078)", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "A" }, "k0");
+    // A VALID name (correct 6-digit sequence + a real key digest) wearing
+    // corrupt CONTENT: the append hot path verifies names only — keyed dedup
+    // is by digest suffix and never parses existing record bytes (ADR-0078
+    // writer/reader split). This is the SUCCESS-direction pin the negative-
+    // direction suite above lacks: a future refactor that starts parsing
+    // content on the append hot path fails HERE, not only at resume time.
+    const corruptName = `000001-${keyDigest("k-corrupt")}.json`;
+    writeFileSync(join(dir, EVENTS_DIR, corruptName), "not json at all");
+
+    await journal.appendEvent({ type: "B" }, "k1"); // must NOT throw
+
+    // The corrupt record was COUNTED (sequence = count) but never read: the
+    // new record landed at sequence 2 beside it.
+    expect(listEventFiles(dir)).toEqual([
+      `000000-${keyDigest("k0")}.json`,
+      corruptName,
+      `000002-${keyDigest("k1")}.json`,
+    ].sort());
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ export function createBullMQBackend(
   function createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C> {
     if (
       opts?.defaultAttempts !== undefined &&
-      (!Number.isFinite(opts.defaultAttempts) || opts.defaultAttempts < 1)
+      (!Number.isInteger(opts.defaultAttempts) || opts.defaultAttempts < 1)
     ) {
       throw new RangeError(
         `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
@@ -151,7 +151,7 @@ export function createBullMQBackend(
   ): WorkerHandle {
     if (
       opts?.concurrency !== undefined &&
-      (!Number.isFinite(opts.concurrency) || opts.concurrency < 1)
+      (!Number.isInteger(opts.concurrency) || opts.concurrency < 1)
     ) {
       throw new RangeError(
         `concurrency must be a finite integer >= 1, got ${opts.concurrency}`,

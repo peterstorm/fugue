@@ -235,6 +235,32 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       if (e.kind === "node-crash") expect(e.nodeId).toBe(EXECUTOR_NODE_ID);
     }
   });
+
+  it("a context-build throw settles as `failed` carrying the wiring fault's message (the durable diagnostic)", async () => {
+    // The setup phase is host wiring (context build), not an in-DAG node crash.
+    // Whatever channel settles it, the recorded FrameworkError must carry the
+    // factory's actual message — the operator's only durable diagnostic (the
+    // service's err-channel mapping would drop it), and the log line must be
+    // findable at error level with the message attached.
+    const dag = singleNodeDag((async () => ok("x")) as never);
+    const reg = registered(dag);
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw new Error("infra exploded"); },
+    };
+    const exec = createRunExecutor({ sharedInfra: throwingInfra, getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+    expect(res.ok && res.value.kind).toBe("failed");
+    if (res.ok && res.value.kind === "failed") {
+      const e = res.value.error;
+      if (e.kind !== "node-crash") {
+        throw new Error(`expected the node-crash fallback, got ${e.kind}`);
+      }
+      // The factory's actual message survives into the recorded error.
+      expect(e.message).toContain("infra exploded");
+    }
+  });
 });
 
 describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040)", () => {

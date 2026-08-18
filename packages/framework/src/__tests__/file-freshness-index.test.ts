@@ -1127,15 +1127,21 @@ describe("createFileFreshnessIndex — cross-process singleton convergence (ADR-
 
     // A fresh instance (real clock) sees the deterministic max-score winner —
     // the singleton's identity is independent of which process won the lock
-    // in which order.
+    // in which order. The winner must be ASSERTED, not conditionally checked:
+    // ADR-0079's drop-with-warning path treats a corrupt singleton as absent
+    // (`ok(null)`), and an `if (found.value !== null)` guard would silently
+    // skip every assertion below in exactly the failure case this pin guards.
     const reader = createFileFreshnessIndex(dir);
     const found = await reader.findConflict(W(resource, "never-written"), 0);
-    expect(found.ok).toBe(true);
-    if (found.ok && found.value !== null) {
-      expect(found.value.succeededAtMs).toBe(204);
-      expect(found.value.newWitness.value).toBe("2:4");
-      expect(String(found.value.runId)).toBe("run-2");
-      expect(String(found.value.nodeId)).toBe("writer-2");
+    const winner = unwrap(found);
+    if (winner === null) {
+      throw new Error(
+        "the committed singleton was dropped-with-warning (ok(null)) — exactly the corrupt-singleton case this pin must not skip",
+      );
     }
+    expect(winner.succeededAtMs).toBe(204);
+    expect(winner.newWitness.value).toBe("2:4");
+    expect(String(winner.runId)).toBe("run-2");
+    expect(String(winner.nodeId)).toBe("writer-2");
   }, 30_000);
 });

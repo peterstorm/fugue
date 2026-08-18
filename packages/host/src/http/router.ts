@@ -27,7 +27,6 @@ import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
 import type { LogPort } from "../ports.js";
 import { errorResponse } from "./response.js";
 
-export type { HostEnv } from "./env.js";
 import type { HostEnv } from "./env.js";
 
 // ---------------------------------------------------------------------------

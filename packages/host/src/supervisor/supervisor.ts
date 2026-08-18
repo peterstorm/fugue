@@ -69,7 +69,6 @@ import type { AdminTenantsDeps } from "../http/handlers/admin/tenants.js";
  * maps the result into the pure router's `WorkerPresence` so routing never
  * branches on lifecycle internals — see `presenceFromEnsure`.
  */
-export type { WorkerLifecyclePort } from "./lifecycle/spawn-port.js";
 import type { WorkerLifecyclePort, EnsuredWorker } from "./lifecycle/spawn-port.js";
 
 /**
@@ -529,8 +528,3 @@ export const createSupervisor = async (
     get server() { return server; },
   });
 };
-
-// Re-export so the binary's wiring can reference the canServeRequests contract
-// without reaching back into host-state.ts (and to document that NEW-run
-// admission fail-closure lives in the registry seam, NOT in canServeRequests).
-export { canServeRequests };

@@ -972,6 +972,13 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
     ).toThrow(RangeError);
   });
 
+  it("createQueue throws RangeError for defaultAttempts = 1.5 (the gate is integer, not just finite)", () => {
+    const backend = createBullMQBackend(dummyConn);
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: 1.5 }),
+    ).toThrow(RangeError);
+  });
+
   it("createWorker throws RangeError for concurrency = 0", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
@@ -997,6 +1004,13 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: Infinity }),
+    ).toThrow(RangeError);
+  });
+
+  it("createWorker throws RangeError for concurrency = 1.5 (the gate is integer, not just finite)", () => {
+    const backend = createBullMQBackend(dummyConn);
+    expect(() =>
+      backend.createWorker("q", async () => {}, { concurrency: 1.5 }),
     ).toThrow(RangeError);
   });
 

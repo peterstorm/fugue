@@ -6,8 +6,13 @@
  * run-store-backed `jobLike` so a run can park and resume.
  *
  * `run` never throws: a framework run-failure (including an abort/timeout of an
- * execution slice) is mapped onto the `failed` outcome; only an unknown DAG uses
- * the `err` channel.
+ * execution slice) is mapped onto the `failed` outcome. The `err` channel is
+ * reserved for faults BEFORE the slice can start (unknown DAG). A
+ * CONTEXT-BUILD fault (host wiring: invalid tenant team, FR-040 unmapped agent
+ * client) is logged at `error` with the actual message and settles as the
+ * `failed` outcome — NOT `err` — so the recorded `FrameworkError` keeps the
+ * factory's descriptive message (the service's `err`→run-failure mapping would
+ * drop it).
  */
 
 import { runResumableDagJob, ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
@@ -89,6 +94,14 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
       const SLICE_TIMEOUT = Symbol("hitl-slice-timeout");
       const timeoutId = setTimeout(() => controller.abort(SLICE_TIMEOUT), registered.config.timeout);
 
+      // `setup` = context build (host wiring), `execution` = the kernel slice.
+      // Both settle as the `failed` outcome below, but a setup fault is a
+      // PERMANENT host-wiring condition (invalid tenant team, FR-040 unmapped
+      // agent client) — not an in-DAG node crash — so the two phases log as
+      // different events, at ERROR with the actual message: neither may be a
+      // silent, detail-less warn.
+      let phase: "setup" | "execution" = "setup";
+
       try {
         const { ctx, origin } = await createNodeContextForDag(
           sharedInfra,
@@ -106,6 +119,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           undefined,
           tenant,
         );
+        phase = "execution";
 
         const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
           jobLike: req.jobLike,
@@ -119,10 +133,21 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         }
         return ok({ kind: "completed", output: outcome.output });
       } catch (e) {
-        // runResumableDagJob throws on a genuine run failure (incl. abort). Map
-        // to the `failed` outcome so the service settles the run, not the err
-        // channel (which is reserved for host infra faults like unknown DAG).
-        logger?.warn?.("hitl: run slice failed", { runId: req.runId, dagId: req.dagId });
+        // Setup phase: a host wiring fault (the factory's fail-closed throws).
+        // Execution phase: runResumableDagJob threw on a genuine run failure
+        // (incl. abort). Map both to the `failed` outcome so the service
+        // settles the run — the `err` channel is reserved for host infra
+        // faults BEFORE the slice can start (unknown DAG) — and log at error
+        // with the message: the recorded FrameworkError below carries that
+        // message as the operator's durable diagnostic.
+        logger?.error?.(
+          phase === "setup" ? "hitl: context build failed" : "hitl: run slice failed",
+          {
+            runId: req.runId,
+            dagId: req.dagId,
+            error: e instanceof Error ? e.message : String(e),
+          },
+        );
         return ok({ kind: "failed", error: toFrameworkError(e) });
       } finally {
         clearTimeout(timeoutId);

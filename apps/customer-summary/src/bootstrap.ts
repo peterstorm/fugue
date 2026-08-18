@@ -21,7 +21,7 @@ import {
 } from "@fuguejs/framework";
 import { RedisCache, RedisCheckpointer } from "@fuguejs/framework/redis";
 import { DefaultAzureCredential } from "@azure/identity";
-import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink } from "@fuguejs/framework";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink, FrameworkError } from "@fuguejs/framework";
 import { NoopObserver, runId as brandRunId } from "@fuguejs/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
@@ -282,24 +282,23 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     registryPath: join(promptsDir, "registry.json"),
   });
   const prompts = new Map<string, string>();
-  const synthesisPrompt = await promptRegistry.load("synthesis");
-  if (synthesisPrompt.ok) {
-    prompts.set("synthesis", synthesisPrompt.value.text);
-  } else {
-    log.error("Failed to load synthesis prompt:", synthesisPrompt.error);
-  }
-  const evalRubricPrompt = await promptRegistry.load("summary-eval-rubric");
-  if (evalRubricPrompt.ok) {
-    prompts.set("summary-eval-rubric", evalRubricPrompt.value.text);
-  } else {
-    log.warn("Failed to load summary-eval-rubric prompt:", evalRubricPrompt.error);
-  }
-  const synthesisSystemPrompt = await promptRegistry.load("synthesis-system");
-  if (synthesisSystemPrompt.ok) {
-    prompts.set("synthesis-system", synthesisSystemPrompt.value.text);
-  } else {
-    log.error("Failed to load synthesis-system prompt:", synthesisSystemPrompt.error);
-  }
+  // One load path for all prompt files: load-or-log, name threaded through so
+  // each prompt keeps its own severity (synthesis/synthesis-system are fatal
+  // to the pipeline, the eval rubric only feeds post-hoc tooling).
+  const loadPrompt = async (
+    name: string,
+    onFail: (error: FrameworkError) => void,
+  ): Promise<void> => {
+    const loaded = await promptRegistry.load(name);
+    if (loaded.ok) {
+      prompts.set(name, loaded.value.text);
+    } else {
+      onFail(loaded.error);
+    }
+  };
+  await loadPrompt("synthesis", (error) => log.error("Failed to load synthesis prompt:", error));
+  await loadPrompt("summary-eval-rubric", (error) => log.warn("Failed to load summary-eval-rubric prompt:", error));
+  await loadPrompt("synthesis-system", (error) => log.error("Failed to load synthesis-system prompt:", error));
   // Note: the summary-eval-rubric prompt is loaded for external eval tooling only;
   // it is intentionally not consumed in the in-pipeline run (post-hoc evaluation
   // is handled by the eval sidecar).
@@ -313,15 +312,16 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     : (config.LLM_MODEL ?? DEFAULT_MODELS[provider]);
 
   if (provider === "azure" && config.AZURE_OPENAI_ENDPOINT && config.AZURE_OPENAI_API_KEY) {
-    // Azure base URL: <endpoint>/openai/deployments/<deployment>
-    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? model;
-    const azureBaseUrl = `${config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${deployment}`;
+    // Azure base URL: <endpoint>/openai/deployments/<model> — in the azure
+    // branch `model` is already `AZURE_OPENAI_DEPLOYMENT ?? LLM_MODEL ??
+    // DEFAULT_MODELS[azure]`, so no separate `deployment` name exists.
+    const azureBaseUrl = `${config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${model}`;
     llm = new OpenAILlmClient({
       apiKey: config.AZURE_OPENAI_API_KEY,
       baseUrl: azureBaseUrl,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
     });
-    log.info(`Using Azure OpenAI LLM client (deployment: ${deployment}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
+    log.info(`Using Azure OpenAI LLM client (deployment: ${model}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
   } else if (provider === "openai" && config.OPENAI_API_KEY) {
     llm = new OpenAILlmClient({
       apiKey: config.OPENAI_API_KEY,

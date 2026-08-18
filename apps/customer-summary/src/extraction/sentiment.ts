@@ -6,13 +6,14 @@ type SentimentMarker = {
   readonly keywords: readonly string[];
 };
 
-const POSITIVE_KEYWORDS = [
+/** Shared with the grounding guardrail (`validation/grounding.ts`) — one encoding, no private mirrors. */
+export const POSITIVE_KEYWORDS = [
   "thank", "thanks", "great", "excellent", "awesome", "good", "love",
   "happy", "pleased", "wonderful", "fantastic", "perfect", "appreciate",
   "helpful", "satisfied", "amazing",
 ] as const;
 
-const NEGATIVE_KEYWORDS = [
+export const NEGATIVE_KEYWORDS = [
   "terrible", "awful", "bad", "worst", "hate", "angry", "frustrated",
   "disappointed", "unacceptable", "horrible", "poor", "annoying",
   "broken", "failure", "useless", "complaint",

@@ -57,7 +57,6 @@ export interface WaveConfig {
  * Concentrates everything the post-dispatch pipeline (freshness + routing)
  * needs into one object, eliminating 10-param / 7-param positional calls.
  */
-export type { PostWaveContext } from "./post-wave-context.js";
 import type { PostWaveContext } from "./post-wave-context.js";
 
 interface WaveResult {

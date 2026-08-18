@@ -1,6 +1,13 @@
 import type { Message } from "../schemas/crm.js";
 
-const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
+/**
+ * THE canonical topic keyword table — one encoding, two consumers: the
+ * extractor below and the grounding guardrail (`validation/grounding.ts`).
+ * The guardrail once kept a private "mirror" copy; that copy drifted (an
+ * undocumented wider `general` net) and scored grounding against a vocabulary
+ * the extractor no longer shared. Copies drift — this is why it is shared.
+ */
+export const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
   billing: ["invoice", "payment", "charge", "refund", "bill", "price", "cost", "subscription", "fee"],
   technical: ["error", "bug", "crash", "slow", "install", "update", "login", "password", "api", "integration"],
   account: ["account", "profile", "settings", "cancel", "upgrade", "downgrade", "plan"],

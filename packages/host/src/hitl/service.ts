@@ -208,12 +208,15 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     });
 
     if (!result.ok) {
-      // Host infra failure (unknown DAG, context build) — settle the run failed
-      // so a status poll surfaces it rather than leaving it stuck "running".
-      // The run has reached a durable terminal state, so the worker job is DONE:
-      // return `ok` (no queue retry — a retry would only no-op on the terminal
-      // guard above). Pre-settle transient failures (e.g. the `runStore.get`
-      // above) return `err` and ARE retried by the worker.
+      // Pre-slice host failure (unknown DAG, run-store fault) — settle the run
+      // failed so a status poll surfaces it rather than leaving it stuck
+      // "running". (A mid-slice CONTEXT-BUILD fault never reaches this branch:
+      // the executor settles it as the `failed` outcome so the recorded
+      // FrameworkError keeps the factory's message — the mapping below would
+      // drop it.) The run has reached a durable terminal state, so the worker
+      // job is DONE: return `ok` (no queue retry — a retry would only no-op on
+      // the terminal guard above). Pre-settle transient failures (e.g. the
+      // `runStore.get` above) return `err` and ARE retried by the worker.
       const settled = await runStore.setStatus(runId, { kind: "failed", error: asRunFailure(result.error) });
       if (!settled.ok) {
         // Could not even record the failure — leave it to the queue to retry.

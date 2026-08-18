@@ -5,7 +5,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { NodeId } from "../types/ids.js";
 import type { EdgeDef } from "../types/dag.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
-import type { PostWaveContext } from "../dag-runtime/wave-execution.js";
+import type { PostWaveContext } from "../dag-runtime/post-wave-context.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
 

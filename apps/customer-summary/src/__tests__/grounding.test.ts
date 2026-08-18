@@ -7,6 +7,7 @@ import {
 } from "../validation/grounding.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { CrmRecord } from "../schemas/crm.js";
+import { TOPIC_KEYWORDS } from "../extraction/topics.js";
 
 const makeRecord = (overrides: Partial<CrmRecord> = {}): CrmRecord => ({
   customerId: "test-001",
@@ -48,6 +49,48 @@ describe("checkTopicGrounding", () => {
     const result = checkTopicGrounding(makeSynthesis({ keyTopics: ["shipping"] }), makeRecord());
     expect(result.passed).toBe(false);
     expect(result.detail).toContain("shipping");
+  });
+
+  // Round-13 C1: the guardrail's topic table is the SHARED extractor table
+  // (`extraction/topics.ts`). This module once kept a private "mirror" copy
+  // whose `general` net had drifted — an undocumented inquiry/request/
+  // assistance widening and a MISSING `contact` — so a `general` topic
+  // grounded only by "contact" in the source produced a spurious ungrounded-
+  // topic warning plus a false ERROR span in a shipped ok response.
+  it("a `general` topic grounded only by 'contact' passes (the drifted-mirror case)", () => {
+    const record = makeRecord({
+      conversations: [
+        {
+          id: "conv-1",
+          date: "2024-06-01",
+          channel: "chat",
+          messages: [
+            { role: "customer", content: "Please contact us.", timestamp: "2024-06-01T10:00:00Z" },
+          ],
+        },
+      ],
+    });
+    const result = checkTopicGrounding(makeSynthesis({ keyTopics: ["general"] }), record);
+    expect(result.passed).toBe(true);
+  });
+
+  it("every EXTRACTOR `general` keyword grounds the `general` topic (one shared table, no private mirror)", () => {
+    for (const keyword of TOPIC_KEYWORDS["general"]) {
+      const record = makeRecord({
+        conversations: [
+          {
+            id: "conv-1",
+            date: "2024-06-01",
+            channel: "chat",
+            messages: [
+              { role: "customer", content: `hello ${keyword} hello`, timestamp: "2024-06-01T10:00:00Z" },
+            ],
+          },
+        ],
+      });
+      const result = checkTopicGrounding(makeSynthesis({ keyTopics: ["general"] }), record);
+      expect(result.passed).toBe(true);
+    }
   });
 });
 

@@ -198,24 +198,12 @@ export interface FileEventRecord {
  */
 export const DEDUP_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,256}$/;
 
-/** Compact rendering of a raw field value for error messages — long strings
- * are truncated so a hostile 256+ char key cannot flood the log. Non-
- * primitive values go straight to the total `safeDiagnosticRender`: the
- * hostile-boundary discipline `dedupKeyError` below enforces applies here
- * too — `JSON.stringify` on an untrusted value executes `toJSON`/getter
- * traps, and diagnostics are part of the hostile runtime boundary. */
-const render = (value: unknown): string => {
-  if (typeof value === "string") {
-    const shown =
-      value.length > 40 ? `${value.slice(0, 40)}…(${value.length} chars)` : value;
-    return JSON.stringify(shown);
-  }
-  if (value === undefined) return "undefined";
-  if (value === null || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return safeDiagnosticRender(value);
-};
+/** Diagnostic rendering of raw field values — the shared total renderer
+ * every file-backend module aliases: a hostile 256+ char key cannot flood
+ * the log (the renderer's 60-char cap) and `toJSON`/getter traps cannot
+ * execute. This module once re-encoded the same rule with its own 40-char
+ * cap and an unguarded `String()` arm; one renderer is one rule. */
+const render = safeDiagnosticRender;
 
 /**
  * FR-015/ADR-0076 violation message for a dedupKey value, or null when valid.

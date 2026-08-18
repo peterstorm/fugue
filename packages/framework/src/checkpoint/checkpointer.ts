@@ -271,6 +271,38 @@ export class InMemoryCheckpointer implements Checkpointer {
     }
   }
 
+  /**
+   * The injected clock is an untrusted seam (hostile tests/proxies): a
+   * throwing clock must become a typed error, never a raw rejection, and a
+   * non-representable clock output must fail closed too — a NaN TTL
+   * comparison is always `false`, which would silently void the FR-027
+   * expiry (a finite timestamp outside the ±100,000-year Time Value range
+   * yields an Invalid `Date`; the file backend's twin rejects the identical
+   * inputs; pinned in `redis-checkpointer.test.ts`). ONE encoding for
+   * `load` and `setMeta` — the pair used to be inlined twice here, and the
+   * file backend's twin consolidated the same pair in round 12.
+   */
+  private readClock(
+    operation: "setMeta" | "load",
+    runId: RunId,
+  ): Result<number, FrameworkError> {
+    try {
+      const ms = this.now();
+      if (!Number.isFinite(ms) || Number.isNaN(new Date(ms).getTime())) {
+        return err(
+          frameworkError.cacheError(
+            `checkpoint:${operation}`,
+            `${operation} clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(ms)}`,
+            "permanent",
+          ),
+        );
+      }
+      return ok(ms);
+    } catch (error) {
+      return err(frameworkError.cacheError(`checkpoint:${operation}`, safeErrorMessage(error)));
+    }
+  }
+
   async load(
     runId: RunId,
     opts?: CheckpointerLoadOpts,
@@ -318,27 +350,12 @@ export class InMemoryCheckpointer implements Checkpointer {
 
     // Mirror the Redis TTL semantics — past-TTL meta is reported as
     // `checkpoint-expired` so callers see the same surface across backends.
-    // The injected clock is an untrusted seam (hostile tests/proxies): a
-    // throwing clock must become a typed error, never a raw rejection, and a
-    // non-finite clock output must fail closed too — a NaN TTL comparison is
-    // always `false`, which would silently void the FR-027 expiry (the file
-    // backend's twin rejects the identical input as a permanent `cache-error`;
-    // pinned in `redis-checkpointer.test.ts`).
-    let nowMs: number;
-    try {
-      nowMs = this.now();
-    } catch (error) {
-      return err(frameworkError.cacheError("checkpoint:load", safeErrorMessage(error)));
-    }
-    if (!Number.isFinite(nowMs) || Number.isNaN(new Date(nowMs).getTime())) {
-      return err(
-        frameworkError.cacheError(
-          "checkpoint:load",
-          `load clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(nowMs)}`,
-          "permanent",
-        ),
-      );
-    }
+    // The clock read is the shared hostile-seam guard above: a throwing or
+    // non-representable clock settles as a typed `cache-error` before any
+    // comparison runs.
+    const nowClock = this.readClock("load", runId);
+    if (!nowClock.ok) return nowClock;
+    const nowMs = nowClock.value;
     const expired = nowMs - createdAt.getTime() > TTL_SECONDS * 1000;
     if (expired) {
       return err({
@@ -423,33 +440,16 @@ export class InMemoryCheckpointer implements Checkpointer {
     let createdAt: Date;
     try {
       detached = this.detachStored(meta, "checkpoint meta");
-      const createdAtMs = this.now();
-      // The injected clock is an untrusted seam: a throwing clock must become
-      // a typed error, never a raw rejection, and a non-representable clock
-      // output must fail closed too. The `isFinite` disjunct catches
-      // NaN/infinity; the `new Date` disjunct catches the other class — a
-      // FINITE timestamp outside the ±8.64e15 (±100,000-year) Time Value range
-      // yields an Invalid `Date` that would be stored silently and make every
-      // `load` TTL comparison a NaN comparison that is always `false`,
-      // silently voiding the FR-027 expiry (the file backend's twin rejects
-      // the identical input as a permanent `cache-error`; pinned in
-      // `redis-checkpointer.test.ts`).
-      if (
-        !Number.isFinite(createdAtMs) ||
-        Number.isNaN(new Date(createdAtMs).getTime())
-      ) {
-        return err(
-          frameworkError.cacheError(
-            "checkpoint:setMeta",
-            `setMeta clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(createdAtMs)}`,
-            "permanent",
-          ),
-        );
-      }
-      createdAt = new Date(createdAtMs);
     } catch (error) {
       return err(frameworkError.cacheError("checkpoint:setMeta", safeErrorMessage(error)));
     }
+    // Timestamp gate: the shared hostile-seam clock guard (throwing or
+    // non-representable output settles as a typed `cache-error`; a NaN
+    // timestamp would be stored silently and void every `load` TTL
+    // comparison — see `readClock`).
+    const createdAtClock = this.readClock("setMeta", runId);
+    if (!createdAtClock.ok) return createdAtClock;
+    createdAt = new Date(createdAtClock.value);
     // Always stamp the writer's framework version unless the caller supplied
     // their own (lets tests construct stale-version payloads). Matches
     // `RedisCheckpointer.setMeta` exactly so backend swap is transparent.

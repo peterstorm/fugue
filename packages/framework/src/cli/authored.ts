@@ -608,7 +608,7 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
     // mistake, not a fallback.
     const predicates = new Set<string>();
     for (const [i, c] of s.cases.entries()) {
-      const p = `${c.when.field} ${c.when.equals}`;
+      const p = `${c.when.field}\u0000${c.when.equals}`;
       if (predicates.has(p)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

@@ -1,5 +1,7 @@
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { CrmRecord } from "../schemas/crm.js";
+import { TOPIC_KEYWORDS } from "../extraction/topics.js";
+import { POSITIVE_KEYWORDS, NEGATIVE_KEYWORDS } from "../extraction/sentiment.js";
 
 /**
  * Grounding check result for a single dimension.
@@ -19,34 +21,19 @@ type GroundingResult = {
   readonly warnings: readonly string[];
 };
 
-// --- Topic keywords (mirrors extraction/topics.ts) ---
-
-const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
-  billing: ["invoice", "payment", "charge", "refund", "bill", "price", "cost", "subscription", "fee"],
-  technical: ["error", "bug", "crash", "slow", "install", "update", "login", "password", "api", "integration"],
-  account: ["account", "profile", "settings", "cancel", "upgrade", "downgrade", "plan"],
-  shipping: ["shipping", "delivery", "tracking", "package", "order", "return", "address"],
-  product: ["feature", "product", "release", "version", "documentation", "tutorial", "guide"],
-  general: ["help", "question", "support", "information", "inquiry", "request", "assistance"],
-};
+// --- Grounding vocabulary: the SHARED tables (one encoding, no mirrors) ---
+// `TOPIC_KEYWORDS` is owned by `extraction/topics.ts` (the extractor is the
+// vocabulary's source of truth); `POSITIVE_KEYWORDS`/`NEGATIVE_KEYWORDS` by
+// `extraction/sentiment.ts`. The private copies this module once kept here
+// drifted from their sources — the `general` topic net in particular — and
+// the guardrail scored grounding against a vocabulary the extractor no longer
+// shared. Import instead of mirror: copies drift.
 
 /** Words that are inherent to the customer support domain and always considered grounded. */
 const DOMAIN_STOP_WORDS = new Set([
   "customer", "support", "service", "satisfaction", "feedback", "experience",
   "resolution", "response", "interaction", "communication", "team",
 ]);
-
-const POSITIVE_KEYWORDS = [
-  "thank", "thanks", "great", "excellent", "awesome", "good", "love",
-  "happy", "pleased", "wonderful", "fantastic", "perfect", "appreciate",
-  "helpful", "satisfied", "amazing",
-] as const;
-
-const NEGATIVE_KEYWORDS = [
-  "terrible", "awful", "bad", "worst", "hate", "angry", "frustrated",
-  "disappointed", "unacceptable", "horrible", "poor", "annoying",
-  "broken", "failure", "useless", "complaint",
-] as const;
 
 // --- Pure validation functions ---
 
