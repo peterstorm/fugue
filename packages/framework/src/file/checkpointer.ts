@@ -120,6 +120,7 @@ import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { frameworkError } from "../types/error-factories.js";
 import {
+  isMissingPathError,
   probeErrorCode,
   safeDiagnosticRender,
   safeErrorMessage,
@@ -505,7 +506,7 @@ const createFileCheckpointerUnchecked = (
         // inspection is itself untrusted; a trapped getter becomes part of the
         // typed diagnostic instead of being erased or escaping raw.
         const codeProbe = probeErrorCode(error);
-        if (codeProbe.kind === "code" && codeProbe.code === "ENOENT") return ok(null);
+        if (isMissingPathError(error)) return ok(null);
         return err(
           checkpointerCacheError(
             "load",

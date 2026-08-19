@@ -48,12 +48,13 @@ import type {
   WriteEntry,
 } from "../types/freshness.js";
 import { parseFileFactoryClock } from "./options.js";
-import { FRESHNESS_TTL_SECONDS, __brandWitness } from "../types/freshness.js";
+import { FRESHNESS_TTL_SECONDS, __brandWitness, isWitnessKind } from "../types/freshness.js";
 import { isFrameworkError, type FrameworkError } from "../types/errors.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import {
+  isMissingPathError,
   probeErrorCode,
   safeDiagnosticRender,
   safeErrorMessage,
@@ -70,15 +71,6 @@ import {
 } from "./boundary-error.js";
 
 const TTL_MS = FRESHNESS_TTL_SECONDS * 1000;
-
-const WITNESS_KIND_ALLOW_LIST = {
-  version: true,
-  etag: true,
-  timestamp: true,
-  lsn: true,
-  "idempotency-key": true,
-  custom: true,
-} as const satisfies Readonly<Record<WitnessKind, true>>;
 
 interface PreparedFreshnessWrite {
   readonly resource: string;
@@ -115,11 +107,36 @@ type RawWitnessSnapshot = Readonly<{
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
-const isWitnessKind = (value: unknown): value is WitnessKind =>
-  typeof value === "string" && Object.hasOwn(WITNESS_KIND_ALLOW_LIST, value);
-
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
+
+/**
+ * ONE encoding of the witness-field acceptance domain (kind ∈ closed
+ * WitnessKind union, non-empty resource, non-empty value) shared by the
+ * three boundary parsers. `afterResource` lets the strict stored-entry
+ * reader interpose its digest/content resource agreement between the
+ * resource and value gates, preserving its pre-helper gate order exactly.
+ */
+const parseWitnessFields = (
+  raw: Readonly<{ kind: unknown; resource: unknown; value: unknown }>,
+  label: string,
+  afterResource?: (resource: string) => string | null,
+): Result<{ kind: WitnessKind; resource: string; value: string }, string> => {
+  if (!isWitnessKind(raw.kind)) {
+    return err(`${label}.kind is not a WitnessKind`);
+  }
+  if (!isNonEmptyString(raw.resource)) {
+    return err(`${label}.resource must be non-empty`);
+  }
+  if (afterResource !== undefined) {
+    const disagreement = afterResource(raw.resource);
+    if (disagreement !== null) return err(disagreement);
+  }
+  if (!isNonEmptyString(raw.value)) {
+    return err(`${label}.value must be non-empty`);
+  }
+  return ok({ kind: raw.kind, resource: raw.resource, value: raw.value });
+};
 
 const hasExactKeys = (
   value: Record<string, unknown>,
@@ -232,27 +249,20 @@ const prepareFreshnessWrite = (
   }
 
   const rawWitness = snapshotWitness(rawEvent.newWitness);
-  if (!isWitnessKind(rawWitness.kind)) {
-    return err("newWitness.kind is not a WitnessKind");
-  }
-  if (!isNonEmptyString(rawWitness.resource)) {
-    return err("newWitness.resource must be non-empty");
-  }
-  if (!isNonEmptyString(rawWitness.value)) {
-    return err("newWitness.value must be non-empty");
-  }
+  const parsedWitness = parseWitnessFields(rawWitness, "newWitness");
+  if (!parsedWitness.ok) return parsedWitness;
   if (!isFiniteNumber(rawEvent.succeededAtMs)) {
     return err("succeededAtMs must be finite");
   }
 
   return ok({
-    resource: rawWitness.resource,
+    resource: parsedWitness.value.resource,
     runId: __brandRunId(rawEvent.runId),
     nodeId: __brandNodeId(rawEvent.nodeId),
     newWitness: __brandWitness({
-      kind: rawWitness.kind,
-      resource: rawWitness.resource,
-      value: rawWitness.value,
+      kind: parsedWitness.value.kind,
+      resource: parsedWitness.value.resource,
+      value: parsedWitness.value.value,
     }),
     succeededAtMs: rawEvent.succeededAtMs,
   });
@@ -262,19 +272,12 @@ const prepareFreshnessWrite = (
 const parseConditionedOn = (value: unknown): Result<ConditionedOnSnapshot, string> => {
   if (!isPlainRecord(value)) return err("conditionedOn must be an object");
   const rawWitness = snapshotWitness(value);
-  if (!isWitnessKind(rawWitness.kind)) {
-    return err("conditionedOn.kind is not a WitnessKind");
-  }
-  if (!isNonEmptyString(rawWitness.resource)) {
-    return err("conditionedOn.resource must be non-empty");
-  }
-  if (!isNonEmptyString(rawWitness.value)) {
-    return err("conditionedOn.value must be non-empty");
-  }
+  const parsedWitness = parseWitnessFields(rawWitness, "conditionedOn");
+  if (!parsedWitness.ok) return parsedWitness;
   return ok({
-    kind: rawWitness.kind,
-    resource: rawWitness.resource,
-    value: rawWitness.value,
+    kind: parsedWitness.value.kind,
+    resource: parsedWitness.value.resource,
+    value: parsedWitness.value.value,
   });
 };
 
@@ -342,23 +345,26 @@ const parseStoredFreshnessEntry = (
   }
 
   const { kind, resource, value } = newWitness;
-  if (!isWitnessKind(kind)) return err("newWitness.kind is not a WitnessKind");
-  if (!isNonEmptyString(resource)) return err("newWitness.resource must be non-empty");
-  if (resource !== expectedResource) {
-    return err("digest/content resource disagreement");
-  }
-  if (!isNonEmptyString(value)) return err("newWitness.value must be non-empty");
+  const parsedWitness = parseWitnessFields(
+    { kind, resource, value },
+    "newWitness",
+    (parsedResource) =>
+      parsedResource === expectedResource
+        ? null
+        : "digest/content resource disagreement",
+  );
+  if (!parsedWitness.ok) return parsedWitness;
   if (!isFiniteNumber(succeededAtMs)) return err("succeededAtMs must be finite");
 
   return ok({
     writtenAtMs: writtenAtMs,
-    resource: resource,
+    resource: parsedWitness.value.resource,
     runId: __brandRunId(runId),
     nodeId: __brandNodeId(nodeId),
     newWitness: __brandWitness({
-      kind: kind,
-      resource: resource,
-      value: value,
+      kind: parsedWitness.value.kind,
+      resource: parsedWitness.value.resource,
+      value: parsedWitness.value.value,
     }),
     succeededAtMs: succeededAtMs,
   });
@@ -474,7 +480,7 @@ const createFileFreshnessIndexUnchecked = (
   opts: FileFreshnessIndexOptions = {},
 ): FreshnessIndex => {
   if (!isFileBackendPathString(directory)) {
-    throw `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`;
+    throw new TypeError(`directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`);
   }
   // This factory's options grammar = the shared closed clock shape (options.ts
   // — the journal twin's exact encoding) PLUS the test-only
@@ -617,8 +623,11 @@ const createFileFreshnessIndexUnchecked = (
           // Follows symlinks deliberately — module header, "Symlink policy".
           text = readFileSync(recordPath, "utf-8");
         } catch (error) {
+          // Absence is ENOENT ONLY — a missing singleton means "no recent
+          // write", every other read failure fails closed (parity with
+          // recordWrite's non-ENOENT handling).
+          if (isMissingPathError(error)) return ok(null);
           const codeProbe = probeErrorCode(error);
-          if (codeProbe.kind === "code" && codeProbe.code === "ENOENT") return ok(null);
           return err(cacheFailure("freshness:findConflict", digest, error, codeProbe));
         }
 

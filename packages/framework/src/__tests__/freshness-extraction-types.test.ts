@@ -188,6 +188,19 @@ describe("freshness extraction types (Phase 3)", () => {
     expect(() => resourceName("")).toThrow();
   });
 
+  // Round-18 tda-1: the smart constructors now enforce the CLOSED WitnessKind
+  // union at mint time (the file adapter's boundary gate is no longer the
+  // only line of defense — a cast or plain-JS caller cannot mint an
+  // off-contract witness). `__brandWitness` remains the trusted
+  // deserialization bypass.
+  test("witness()/witnessValue() reject an off-contract kind (closed-union invariant)", () => {
+    const bogus = "bogus-kind" as unknown as ReturnType<typeof witnessValue>["kind"];
+    expect(() => witnessValue(bogus, "v")).toThrow(TypeError);
+    expect(() => witness(bogus, RN("postgres:orders"), "v")).toThrow(TypeError);
+    // stampWitness routes through witness(), so a smuggled kind is caught there.
+    expect(() => stampWitness(RN("postgres:orders"), witnessValue(bogus, "v"))).toThrow(TypeError);
+  });
+
   test("node without extractors compiles (freshness tracking silently skipped)", () => {
     const node: NodeDef<unknown, unknown> = {
       id: "pure" as unknown as NodeId,

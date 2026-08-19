@@ -100,7 +100,7 @@ import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
 import type { FrameworkError } from "../types/errors.js";
-import { probeErrorCode, safeDiagnosticRender } from "../types/safe-error.js";
+import { isMissingPathError, safeDiagnosticRender } from "../types/safe-error.js";
 import { parseFileFactoryClock } from "./options.js";
 import {
   fileCacheError,
@@ -479,8 +479,7 @@ export const createFileJournal = (
       // would misreport a permission-broken directory as "no checkpoint".
       // The sibling strict readers (event-log.ts, file/checkpointer.ts)
       // probe the same way.
-      const probe = probeErrorCode(error);
-      if (probe.kind === "code" && probe.code === "ENOENT") return null;
+      if (isMissingPathError(error)) return null;
       throw fsFailure("readCheckpoint", directory, error);
     }
   };

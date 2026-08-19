@@ -48,8 +48,18 @@ const countKeywords = (text: string, keywords: readonly string[]): number =>
 
 /**
  * Check that every keyTopic in the synthesis output is grounded in the source conversations.
- * Uses word-overlap matching: a topic is grounded if the majority of its meaningful words
- * appear in the source text.
+ *
+ * A topic is grounded when ANY of these hold:
+ * - the topic text appears verbatim in the source text;
+ * - a TOPIC_KEYWORDS entry for the topic has a keyword appearing in the source;
+ * - some keyword from ANY topic group appears inside the topic string AND in the source;
+ * - word-overlap: at least ONE meaningful word of the topic (length > 3, not a domain
+ *   stop word) — or a stem prefix of it (>= 4 chars) — appears in the source text.
+ *   There is NO majority rule: one matching word suffices regardless of how many
+ *   meaningful words the topic has (pinned in grounding.test.ts).
+ * - the topic's meaningful-word set is empty (every word is a DOMAIN_STOP_WORD): it
+ *   always passes with zero source overlap — editing DOMAIN_STOP_WORDS changes which
+ *   topics get this unconditional pass.
  */
 export const checkTopicGrounding = (
   synthesis: SynthesisOutput,
@@ -98,6 +108,14 @@ export const checkTopicGrounding = (
 
 /**
  * Check that the sentiment direction is consistent with source message tone.
+ *
+ * Numeric contract (asymmetric per direction, pinned in grounding.test.ts):
+ * - claiming "positive" fails when the source has MORE THAN 2x negative keywords
+ *   AND at least 3 negative indicators;
+ * - claiming "negative" fails when the source has MORE THAN 2x positive keywords
+ *   AND at least 3 positive indicators;
+ * - a neutral claim always passes; a 2x imbalance with fewer than 3 opposing
+ *   indicators passes (the thresholds exist to reject noise, not single words).
  */
 export const checkSentimentConsistency = (
   synthesis: SynthesisOutput,

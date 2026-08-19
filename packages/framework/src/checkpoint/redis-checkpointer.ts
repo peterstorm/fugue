@@ -7,6 +7,9 @@ import { ok, err } from "../types/result.js";
 import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
 import { TTL_SECONDS } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
+import { frameworkError } from "../types/error-factories.js";
+import { isRepresentableTimestampMs } from "../types/clock.js";
+import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 import { fwLogger } from "../logger.js";
 
 interface StoredMeta {
@@ -28,12 +31,12 @@ interface StoredNodeState {
 const nodesKey = (runId: RunId) => `chkpt:${runId}`;
 const metaKey = (runId: RunId) => `chkpt:${runId}:meta`;
 
-const serializeMeta = (meta: RunMeta): string =>
+const serializeMeta = (meta: RunMeta, createdAtMs: number): string =>
   JSON.stringify({
     dagId: meta.dagId,
     startedAt: meta.startedAt.toISOString(),
     nodeCount: meta.nodeCount,
-    createdAt: new Date().toISOString(),
+    createdAt: new Date(createdAtMs).toISOString(),
     ...(meta.subject !== undefined ? { subject: meta.subject } : {}),
     ...(meta.dagFingerprint !== undefined ? { dagFingerprint: meta.dagFingerprint } : {}),
     // ADR-0017: always stamp the writing framework's version so load() can
@@ -110,6 +113,37 @@ export class RedisCheckpointer implements Checkpointer {
     this.now = opts?.now ?? Date.now;
   }
 
+  /**
+   * The injected clock is an untrusted seam (hostile tests/proxies): a
+   * throwing clock must become a typed error, never a raw rejection, and a
+   * non-representable clock output must fail closed too — a NaN TTL
+   * comparison is always `false`, which would silently void the FR-027
+   * expiry (a finite timestamp outside the ±100,000-year Time Value range
+   * yields an Invalid `Date`; the in-memory and file twins reject the
+   * identical inputs; pinned in `clock-parity.test.ts`). ONE encoding for
+   * `load` and `setMeta` (the in-memory adapter's twin is the same guard).
+   */
+  private readClock(
+    operation: "setMeta" | "load",
+    runId: RunId,
+  ): Result<number, FrameworkError> {
+    try {
+      const ms = this.now();
+      if (!isRepresentableTimestampMs(ms)) {
+        return err(
+          frameworkError.cacheError(
+            `checkpoint:${operation}`,
+            `${operation} clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(ms)}`,
+            "permanent",
+          ),
+        );
+      }
+      return ok(ms);
+    } catch (error) {
+      return err(frameworkError.cacheError(`checkpoint:${operation}`, safeErrorMessage(error)));
+    }
+  }
+
   async load(
     runId: RunId,
     opts?: CheckpointerLoadOpts,
@@ -156,18 +190,39 @@ export class RedisCheckpointer implements Checkpointer {
     // replay cached outputs into the new graph and skip the validations they
     // depend on. Opt-in: callers who omit `expectedDagFingerprint` keep the
     // legacy no-check behaviour.
-    if (opts?.expectedDagFingerprint !== undefined) {
-      if (meta.dagFingerprint !== opts.expectedDagFingerprint) {
+    //
+    // The caller-owned `opts` bag is a hostile seam (parity with the
+    // in-memory adapter and the file backend's `parseLoadOpts` snapshot-once
+    // discipline): read `expectedDagFingerprint` EXACTLY ONCE under a guard —
+    // a throwing accessor getter becomes a typed `cache-error`, never a raw
+    // rejection, and a stateful getter (different value per read) cannot make
+    // the gate and the comparison disagree.
+    let expectedDagFingerprint: string | undefined;
+    try {
+      expectedDagFingerprint = opts?.expectedDagFingerprint;
+    } catch (error) {
+      return err(
+        frameworkError.cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
+      );
+    }
+    if (expectedDagFingerprint !== undefined) {
+      if (meta.dagFingerprint !== expectedDagFingerprint) {
         return err({
           kind: "checkpoint-version-mismatch" as const,
           runId,
-          expected: opts.expectedDagFingerprint,
+          expected: expectedDagFingerprint,
           actual: meta.dagFingerprint,
         });
       }
     }
 
-    const nowMs = this.now();
+    // The clock read is the shared hostile-seam guard above: a throwing or
+    // non-representable clock settles as a typed `cache-error` before any
+    // comparison runs (a NaN timestamp would otherwise void the FR-027 TTL
+    // check — `NaN > TTL` is always false).
+    const nowClock = this.readClock("load", runId);
+    if (!nowClock.ok) return nowClock;
+    const nowMs = nowClock.value;
     if (nowMs - createdAt.getTime() > TTL_SECONDS * 1000) {
       return err({
         kind: "checkpoint-expired" as const,
@@ -266,8 +321,16 @@ export class RedisCheckpointer implements Checkpointer {
   }
 
   async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
+    // Timestamp gate: the shared hostile-seam clock guard (throwing or
+    // non-representable output settles as a typed `cache-error`; a NaN
+    // timestamp would be stored silently and void every `load` TTL
+    // comparison — see `readClock`). `createdAt` is stamped from the
+    // injected clock like the in-memory adapter, so a fixed-clock test
+    // suite drives the write side deterministically.
+    const createdAtClock = this.readClock("setMeta", runId);
+    if (!createdAtClock.ok) return createdAtClock;
     try {
-      await this.redis.set(metaKey(runId), serializeMeta(meta), "EX", TTL_SECONDS);
+      await this.redis.set(metaKey(runId), serializeMeta(meta, createdAtClock.value), "EX", TTL_SECONDS);
       return ok(undefined);
     } catch (e) {
       return err({

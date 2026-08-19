@@ -158,6 +158,22 @@ export class BufferedObserver implements Observer, Disposable {
     buf.events.push(event);
   }
 
+  /**
+   * ONE accounting contract for a dispatch failure: count it in
+   * `dispatchErrors` AND route it through the dead-letter seam, or log it —
+   * never both, never neither. The replay loop and the run-end dispatch
+   * share this so a future divergence between the two catch sites cannot
+   * silently re-open the leak class those pins guard.
+   */
+  private accountDispatchFailure(event: ObserverEvent, error: unknown, label: string): void {
+    this.dispatchErrors++;
+    if (this.onReplayFailure) {
+      this.onReplayFailure(event, error);
+    } else {
+      fwLogger().error(`[BufferedObserver] Replay failed for ${label}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
   observe(event: ObserverEvent): void {
     if (event.type === "run-end") {
       this.handleRunEnd(event);
@@ -201,12 +217,7 @@ export class BufferedObserver implements Observer, Disposable {
             dispatchEvent(this.inner, buffered);
           } catch (err) {
             replayFailures++;
-            this.dispatchErrors++;
-            if (this.onReplayFailure) {
-              this.onReplayFailure(buffered, err);
-            } else {
-              fwLogger().error(`[BufferedObserver] Replay failed for ${buffered.type}: ${err instanceof Error ? err.message : err}`);
-            }
+            this.accountDispatchFailure(buffered, err, `${buffered.type}`);
           }
         }
         if (replayFailures > 0) {
@@ -223,12 +234,7 @@ export class BufferedObserver implements Observer, Disposable {
         try {
           dispatchEvent(this.inner, e);
         } catch (err) {
-          this.dispatchErrors++;
-          if (this.onReplayFailure) {
-            this.onReplayFailure(e, err);
-          } else {
-            fwLogger().error(`[BufferedObserver] Replay failed for run-end: ${err instanceof Error ? err.message : err}`);
-          }
+          this.accountDispatchFailure(e, err, "run-end");
         }
       } else {
         fwLogger().warn(`[BufferedObserver] Dropping ${events.length} events for run ${e.runId} (filtered by persistence policy)`);

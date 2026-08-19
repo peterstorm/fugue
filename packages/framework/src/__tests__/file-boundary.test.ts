@@ -24,7 +24,7 @@ import { createFileJob } from "../file/job.js";
 import { EVENTS_DIR, isBoundaryId, keyDigest } from "../file/layout.js";
 import type { RunMeta } from "../checkpoint/checkpointer.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import { witness, resourceName } from "../types/freshness.js";
+import { witness, resourceName, type Witness } from "../types/freshness.js";
 import { __brandNodeIdUnchecked, __brandRunIdUnchecked } from "../types/ids.js";
 import { isFrameworkError } from "../types/errors.js";
 import { D, N, R } from "./_id-helpers.js";
@@ -101,6 +101,64 @@ describe("file backend hostile identifier/resource boundary", () => {
     }
 
     expect(readdirSync(root)).toEqual([]);
+  });
+
+  // Round-18 pta-1: every recordWrite/findConflict boundary-validation gate
+  // must be pinned — a regression that weakens ANY single gate (the event-
+  // type gate, the witness-kind allow-list, non-empty resource/value,
+  // finiteness of succeededAtMs/sinceMs) would otherwise pass the whole
+  // suite. The journal and checkpointer have exhaustive hostile matrices;
+  // the third durable surface gets the same here.
+  it("freshness recordWrite/findConflict boundary rejections are pinned (event type, witness fields, finiteness)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fugue-freshness-boundary-matrix-"));
+    roots.push(root);
+    const freshnessRoot = join(root, "freshness-matrix-root");
+    const freshness = createFileFreshnessIndex(freshnessRoot, { now: () => 400 });
+
+    const base = freshnessEvent("postgres:orders", "v1");
+    const cases: ReadonlyArray<{ readonly label: string; readonly event: unknown; readonly expectMessage: string }> = [
+      { label: "wrong event type", event: { ...base, type: "write-completed" }, expectMessage: 'write event type must be exactly "write-attempted"' },
+      { label: "non-object event", event: 42, expectMessage: "write event must be an object" },
+      { label: "non-object newWitness", event: { ...base, newWitness: "oops" }, expectMessage: "newWitness must be an object" },
+      { label: "off-contract witness kind", event: { ...base, newWitness: { kind: "bogus", resource: "r", value: "v" } }, expectMessage: "newWitness.kind is not a WitnessKind" },
+      { label: "empty witness resource", event: { ...base, newWitness: { kind: "version", resource: "", value: "v" } }, expectMessage: "newWitness.resource must be non-empty" },
+      { label: "empty witness value", event: { ...base, newWitness: { kind: "version", resource: "r", value: "" } }, expectMessage: "newWitness.value must be non-empty" },
+      { label: "non-finite succeededAtMs", event: { ...base, succeededAtMs: Number.NaN }, expectMessage: "succeededAtMs must be finite" },
+    ];
+
+    for (const { label, event, expectMessage } of cases) {
+      const result = await freshness.recordWrite(event as WriteAttemptedEvent);
+      expect(result.ok, `${label}: expected rejection`).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind, label).toBe("cache-error");
+        if (result.error.kind === "cache-error") {
+          expect(result.error.operation, label).toBe("freshness:recordWrite");
+          expect(result.error.message, label).toContain(expectMessage);
+        }
+      }
+    }
+    expect(existsSync(freshnessRoot)).toBe(false); // rejections happen before any artifact
+
+    // findConflict gates: conditionedOn witness fields + sinceMs finiteness.
+    const conflictCases: ReadonlyArray<{ readonly label: string; readonly conditionedOn: unknown; readonly sinceMs: number; readonly expectMessage: string }> = [
+      { label: "non-object conditionedOn", conditionedOn: null, sinceMs: 1, expectMessage: "conditionedOn must be an object" },
+      { label: "off-contract conditionedOn kind", conditionedOn: { kind: "bogus", resource: "postgres:orders", value: "old" }, sinceMs: 1, expectMessage: "conditionedOn.kind is not a WitnessKind" },
+      { label: "empty conditionedOn resource", conditionedOn: { kind: "version", resource: "", value: "old" }, sinceMs: 1, expectMessage: "conditionedOn.resource must be non-empty" },
+      { label: "empty conditionedOn value", conditionedOn: { kind: "version", resource: "postgres:orders", value: "" }, sinceMs: 1, expectMessage: "conditionedOn.value must be non-empty" },
+      { label: "non-finite sinceMs", conditionedOn: witness("version", resourceName("postgres:orders"), "old"), sinceMs: Number.NaN, expectMessage: "sinceMs must be finite" },
+      { label: "non-finite sinceMs (Infinity)", conditionedOn: witness("version", resourceName("postgres:orders"), "old"), sinceMs: Number.POSITIVE_INFINITY, expectMessage: "sinceMs must be finite" },
+    ];
+    for (const { label, conditionedOn, sinceMs, expectMessage } of conflictCases) {
+      const result = await freshness.findConflict(conditionedOn as Witness, sinceMs);
+      expect(result.ok, `${label}: expected rejection`).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind, label).toBe("cache-error");
+        if (result.error.kind === "cache-error") {
+          expect(result.error.operation, label).toBe("freshness:findConflict");
+          expect(result.error.message, label).toContain(expectMessage);
+        }
+      }
+    }
   });
 
   it("fails closed where constrained, digests unbounded resources, and never path-escapes", async () => {

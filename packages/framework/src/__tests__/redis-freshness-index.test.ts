@@ -98,4 +98,13 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
   it("returns null for JSON number", () => {
     expect(decode("42")).toBeNull();
   });
+
+  // Round-18 tda-2: persisted bytes are untrusted — an off-contract kind
+  // must not flow into conflict decisions. Unknown kinds are corrupt entries
+  // (null), exactly like shape failures.
+  it("returns null for an off-contract witnessKind (closed-union gate)", () => {
+    expect(decode(JSON.stringify(["r", "n", "bogus-kind", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", "", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 42, "v"]))).toBeNull();
+  });
 });

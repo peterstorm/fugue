@@ -41,6 +41,7 @@ import {
 import { basename, join } from "node:path";
 import {
   type ErrorCodeProbe,
+  isMissingPathError,
   probeErrorCode,
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
@@ -70,10 +71,10 @@ export const atomicWriteFile = (
   let temporary: string | null = null;
   try {
     if (!isFileBackendPathString(path)) {
-      throw "path must be a non-empty NUL-free string";
+      throw new TypeError("path must be a non-empty NUL-free string");
     }
     if (typeof contents !== "string") {
-      throw "contents must be a string";
+      throw new TypeError("contents must be a string");
     }
     temporary = hooks.temporaryPath?.(path) ?? `${path}.tmp.${uniqueToken()}`;
     writeFileSync(temporary, contents);
@@ -146,7 +147,7 @@ const ownerStaleness = (
     const probe = probeErrorCode(error);
     // A missing pid is a legacy/torn owner. Every other metadata failure is
     // insufficient evidence of death: warn with the cause and fail closed.
-    if (probe.kind === "code" && probe.code === "ENOENT") return { stale: true };
+    if (isMissingPathError(error)) return { stale: true };
     return {
       stale: false,
       diagnostic: warnUnexpectedOwnerFailure(ownerPath, "read pid metadata", error, probe),

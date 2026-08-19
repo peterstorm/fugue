@@ -10,7 +10,7 @@ import {
   createModuleLoader,
 } from "../adapters/module-loader.js";
 import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../ports.js";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from "fs";
 import { join } from "path";
 
 // ── Test Fixtures ──────────────────────────────────────────────────────────
@@ -470,6 +470,42 @@ describe("Module Loader", () => {
 
       // Cleanup
       rmSync(dagDir, { recursive: true });
+    });
+
+    it("calls onFileError for a non-ENOENT prompts-directory listing failure (unreadable dir, EACCES class)", async () => {
+      // Round-18 sfh-1: the catch around readdir(promptsDir) once swallowed
+      // EVERY listing failure as "no prompts directory". Only ENOENT may mean
+      // absence; an existing-but-unreadable prompts dir (EACCES) must surface
+      // through onFileError instead of being silently treated as absent.
+      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
+
+      const dagDir = join(TEST_DIR, "dags", "team-a", "unlistable-prompts");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      writeFileSync(join(promptsDir, "hidden.txt"), "secret");
+      // 0o000: readdir on the directory now fails with EACCES (POSIX). Skipped
+      // on root-owned CI where the permission bit is not honored.
+      chmodSync(promptsDir, 0o000);
+
+      try {
+        const errors: string[] = [];
+        const result = await loadPromptsForModule(
+          join(dagDir, "dag.ts"),
+          (path) => errors.push(path),
+        );
+        if (process.getuid?.() === 0) {
+          // Root bypasses the permission gate; absence-vs-failure cannot be
+          // exercised this way — accept either outcome, but never a throw.
+          expect(result.size).toBeGreaterThanOrEqual(0);
+        } else {
+          expect(result.size).toBe(0);
+          expect(errors.length).toBe(1);
+          expect(errors[0]).toContain("prompts");
+        }
+      } finally {
+        chmodSync(promptsDir, 0o755);
+        rmSync(dagDir, { recursive: true, force: true });
+      }
     });
 
     it("prompts flow through loadAll into BulkLoadResult", async () => {

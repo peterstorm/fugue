@@ -6,7 +6,7 @@
  * existing `from "./freshness.js"` import site is unchanged.
  */
 export type { WitnessKind, ResourceName, Witness, WitnessValue } from "./witness.js";
-export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness } from "./witness.js";
+export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness, isWitnessKind } from "./witness.js";
 import type { ResourceName, Witness } from "./witness.js";
 // ---------------------------------------------------------------------------
 // FreshnessIndex port + supporting types

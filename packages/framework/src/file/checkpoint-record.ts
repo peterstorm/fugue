@@ -23,7 +23,12 @@ export interface FileCheckpointData<S, C> {
   readonly context: C;
 }
 
-declare const FILE_CHECKPOINT_COMMIT: unique symbol;
+/**
+ * Runtime brand carried by every issued commit — the type says `true` and
+ * the runtime object really carries it (see the mint site below); the
+ * module-private WeakSet remains the unforgeability gate.
+ */
+const FILE_CHECKPOINT_COMMIT: unique symbol = Symbol("FILE_CHECKPOINT_COMMIT");
 
 /** Opaque, losslessness-proved checkpoint bytes plus their detached data. */
 export interface FileCheckpointCommit<S, C> {
@@ -105,6 +110,11 @@ const serializeFileCheckpointUnchecked = <S, C>(
   const commit = Object.freeze({
     json: serialized.value,
     data: detached,
+    // The nominal brand is carried by the runtime object itself (the
+    // interface says `[FILE_CHECKPOINT_COMMIT]: true`), so the type does not
+    // lie about what exists; the module-private WeakSet remains the real
+    // unforgeability gate.
+    [FILE_CHECKPOINT_COMMIT]: true as const,
   }) as FileCheckpointCommit<S, C>;
   issuedCommits.add(commit);
   return commit;

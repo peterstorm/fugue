@@ -21,7 +21,7 @@
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type { FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
-import { FRESHNESS_TTL_SECONDS, __brandWitness } from "../types/freshness.js";
+import { FRESHNESS_TTL_SECONDS, __brandWitness, isWitnessKind } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -49,12 +49,22 @@ const encodeMember = (
  */
 const decodeMember = (
   member: string,
-): { runId: RunId; nodeId: NodeId; witnessKind: string; witnessValue: string } | null => {
+): { runId: RunId; nodeId: NodeId; witnessKind: WitnessKind; witnessValue: string } | null => {
   try {
     const parsed = JSON.parse(member);
     if (!Array.isArray(parsed) || parsed.length !== 4) {
       fwLogger().warn(
         `[RedisFreshnessIndex] decodeMember: unexpected shape (length=${Array.isArray(parsed) ? parsed.length : "not-array"}): ${member.slice(0, 100)}`,
+      );
+      return null;
+    }
+    // Persisted bytes are untrusted: an off-contract kind must not flow into
+    // conflict decisions (the file adapter enforces the same gate; the
+    // in-memory adapter mints through the kind-checked constructors). An
+    // off-contract kind is a corrupt entry, exactly like a shape failure.
+    if (!isWitnessKind(parsed[2])) {
+      fwLogger().warn(
+        `[RedisFreshnessIndex] decodeMember: unknown witnessKind ${String(parsed[2]).slice(0, 100)}: ${member.slice(0, 100)}`,
       );
       return null;
     }

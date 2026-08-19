@@ -98,7 +98,7 @@ const deepFreeze = <T>(value: T): T => {
  * exists only so a future snapshot source cannot silently weaken the
  * "fully immutable" contract without a test failing.
  */
-export const __testDeepFreeze = deepFreeze;
+export { deepFreeze as __testDeepFreeze };
 
 /**
  * Construct the durable `JobLike<S, unknown, C>` over a file journal.
@@ -129,13 +129,13 @@ export const __testDeepFreeze = deepFreeze;
  */
 const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
-    throw "createFileJob arguments must be an object";
+    throw new TypeError("createFileJob arguments must be an object");
   }
   const directory = args.directory;
   const initial = args.initial;
   const configuredNow = args.now;
   if (typeof initial !== "object" || initial === null || Array.isArray(initial)) {
-    throw "createFileJob initial must be an object with state and context";
+    throw new TypeError("createFileJob initial must be an object with state and context");
   }
   // Parse the seed through the same lossless codec used by updateData. The
   // returned snapshot is reconstructed from the exact canonical bytes and is
@@ -197,7 +197,7 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
     async updateData(d: { state: S; context: C }): Promise<void> {
       try {
         if (typeof d !== "object" || d === null || Array.isArray(d)) {
-          throw "checkpoint data must be an object with state and context";
+          throw new TypeError("checkpoint data must be an object with state and context");
         }
         const captured = {
           state: (d as { state: S }).state,

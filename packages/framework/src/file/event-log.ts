@@ -39,7 +39,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { EVENTS_DIR, eventDigestOf, eventFileName, parseEventFileName } from "./layout.js";
-import { parseFileEventRecord, tryParseEventRecordJson } from "./event-record.js";
+import { parseStoredEventRecord } from "./event-record.js";
 import type { FileEventRecord } from "./event-record.js";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
@@ -116,12 +116,12 @@ const readStrict = (directory: string): StrictResult => {
         ...(squattingEntry ? { permanent: true } : {}),
       });
     }
-    // Raw-JSON seam: `tryParseEventRecordJson` validates the complete exact
-    // serializer grammar BEFORE `deserializeValue` may reinterpret tags or
-    // erase sibling/pollution fields, then restores Map/Set/Date/undefined.
-    const raw = tryParseEventRecordJson(contents, source);
-    if (!raw.ok) return err({ message: raw.error, permanent: true });
-    const parsed = parseFileEventRecord(raw.value, source);
+    // Raw-JSON seam: `parseStoredEventRecord` is the barrel's text entry
+    // point — the full two-stage composition (raw grammar validation, then
+    // strict record parsing) in one call, so the reader cannot drift from
+    // the public codec; both stages fail closed as permanent (deterministic
+    // corrupt bytes never clear on retry).
+    const parsed = parseStoredEventRecord(contents, source);
     if (!parsed.ok) return err({ message: parsed.error, permanent: true });
     const record = parsed.value;
 

@@ -11,7 +11,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { ok, err, computePromptHash } from "@fuguejs/framework";
+import { ok, err, computePromptHash, probeErrorCode } from "@fuguejs/framework";
 import type { Result, DagId, GitSha } from "@fuguejs/framework";
 import { tryDagId, dagId } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -269,8 +269,16 @@ export const loadPromptsForModule = async (
         onFileError?.(filePath, e);
       }
     }
-  } catch {
-    // No prompts/ directory — expected for DAGs that don't use prompts
+  } catch (e) {
+    // Absence is ENOENT ONLY — a bare catch would swallow EACCES/ENOTDIR/
+    // ELOOP/EMFILE and misreport a permission-broken prompts dir as "no
+    // prompts", deferring the failure to a misattributed runtime
+    // prompt-not-found (parity with validatePromptRegistry's non-ENOENT
+    // hard-error handling and the per-file onFileError logging above).
+    const probe = probeErrorCode(e);
+    if (probe.kind !== "code" || probe.code !== "ENOENT") {
+      onFileError?.(promptsDir, e);
+    }
   }
 
   return map;

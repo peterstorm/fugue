@@ -138,6 +138,19 @@ export const probeErrorCode = (error: unknown): ErrorCodeProbe => {
 };
 
 /**
+ * ONE encoding of the absence question: is this caught value a Node-style
+ * ENOENT? Every file-backend site that treats ENOENT as "the path does not
+ * exist" (rather than as a failure) routes through this predicate; a bare
+ * `code === "ENOENT"` check or an `existsSync` pre-probe elsewhere is a
+ * parallel copy that can drift (an EACCES/ENOTDIR swallowed as absence is
+ * the drift this prevents). Total: a hostile caught value can never throw.
+ */
+export const isMissingPathError = (error: unknown): boolean => {
+  const probe = probeErrorCode(error);
+  return probe.kind === "code" && probe.code === "ENOENT";
+};
+
+/**
  * Render a primary failure while preserving a secondary errno-inspection
  * failure as actionable diagnostics. The supplied probe avoids invoking a
  * hostile getter twice.

@@ -22,6 +22,31 @@ export type WitnessKind =
   | "idempotency-key"  // request-scoped (Stripe, Plaid)
   | "custom";
 
+/** ONE encoding of the closed WitnessKind membership question. The smart
+ *  constructors below enforce it at mint time, so a cast or plain-JS caller
+ *  cannot mint an off-contract witness; the Redis adapter gates persisted
+ *  bytes with the same predicate before they re-enter conflict decisions. */
+const WITNESS_KIND_ALLOW_LIST = {
+  version: true,
+  etag: true,
+  timestamp: true,
+  lsn: true,
+  "idempotency-key": true,
+  custom: true,
+} as const satisfies Readonly<Record<WitnessKind, true>>;
+
+export const isWitnessKind = (value: unknown): value is WitnessKind =>
+  typeof value === "string" && Object.hasOwn(WITNESS_KIND_ALLOW_LIST, value);
+
+const assertWitnessKind = (kind: WitnessKind): void => {
+  if (!isWitnessKind(kind)) {
+    // Deterministic: an off-contract kind fails identically on every retry.
+    throw new TypeError(
+      `Witness kind must be one of ${Object.keys(WITNESS_KIND_ALLOW_LIST).join(", ")}; got ${typeof kind === "string" ? `"${kind}"` : typeof kind}`,
+    );
+  }
+};
+
 // ---------------------------------------------------------------------------
 // ResourceName — branded type shared by Witness and SideEffectProfile
 // ---------------------------------------------------------------------------
@@ -92,8 +117,9 @@ export type WitnessValue = {
   readonly resource?: never;
 };
 
-/** Smart constructor for a resource-free witness value. Validates non-empty value. */
+/** Smart constructor for a resource-free witness value. Validates non-empty value and closed kind. */
 export const witnessValue = (kind: WitnessKind, value: string): WitnessValue => {
+  assertWitnessKind(kind);
   if (!value) {
     throw new Error("Witness value must be non-empty");
   }
@@ -112,6 +138,7 @@ export const witness = (
   resource: ResourceName,
   value: string,
 ): Witness => {
+  assertWitnessKind(kind);
   if (!value) {
     throw new Error("Witness value must be non-empty");
   }

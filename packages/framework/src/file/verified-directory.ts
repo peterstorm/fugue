@@ -38,7 +38,7 @@
 
 import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { probeErrorCode, safeDiagnosticRender } from "../types/safe-error.js";
+import { isMissingPathError, probeErrorCode, safeDiagnosticRender } from "../types/safe-error.js";
 
 /** Compact, total rendering for diagnostics that include arbitrary values. */
 const render = safeDiagnosticRender;
@@ -48,11 +48,6 @@ export interface VerifiedDirectory {
   readonly device: number;
   readonly inode: number;
 }
-
-const isMissingPathError = (error: unknown): boolean => {
-  const probe = probeErrorCode(error);
-  return probe.kind === "code" && probe.code === "ENOENT";
-};
 
 /**
  * Establish a directory as a non-symlink trust anchor. The returned canonical

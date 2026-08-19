@@ -35,6 +35,7 @@
 
 import { describe, it, expect, afterEach } from "bun:test";
 import * as fc from "fast-check";
+import vm from "node:vm";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,6 +55,8 @@ import {
 } from "../file/event-record.js";
 import { parseStoredEventRecord as barrelParseStoredEventRecord } from "../file.js";
 import { readFileEventRecords, readFileEvents } from "../file/event-log.js";
+import { createFileJob } from "../file/job.js";
+import { isFrameworkError, formatFrameworkError } from "../types/errors.js";
 import { asCacheError } from "./_cache-error-helpers.js";
 import { EVENTS_DIR, JOURNAL_SCHEMA_VERSION } from "../file/layout.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -601,6 +604,89 @@ describe("assertLosslessEvent — write-boundary pre-scan rejection classes (a�
       );
       expect(sub.message).toContain("FR-009");
       expect(sub.message).toContain("FutureDate");
+    });
+
+    // Round-18 pta-2: the subclassed Map/Set/array rejections (the one FR-009
+    // class the round-trip backstop cannot self-detect — a subclassed Map
+    // persists as a plain Map and the canonicalizing round-trip comparison
+    // sees no difference). A regression that deletes any of these three
+    // prototype checks would silently class-degrade stored events.
+    it("rejects subclassed Map, Set, and array, and foreign-realm arrays, before any round-trip can canonicalize them", () => {
+      class SubMap extends Map<string, string> {
+        constructor(entries?: readonly (readonly [string, string])[]) {
+          super(entries);
+        }
+      }
+      class SubSet extends Set<string> {
+        constructor(items?: readonly string[]) {
+          super(items);
+        }
+      }
+      class SubArray extends Array<number> {
+        constructor(...items: number[]) {
+          super(...items);
+        }
+      }
+
+      const mapError = contextualError(() =>
+        serializeFileEventRecord(0, "", 1, new SubMap([["k", "v"]])),
+      );
+      expect(mapError.message).toContain("FR-009");
+      expect(mapError.message).toContain("SubMap");
+      expect(mapError.message).toContain("subclassed Map");
+
+      const setError = contextualError(() =>
+        serializeFileEventRecord(0, "", 1, new SubSet(["v"])),
+      );
+      expect(setError.message).toContain("FR-009");
+      expect(setError.message).toContain("SubSet");
+      expect(setError.message).toContain("subclassed Set");
+
+      const arrayError = contextualError(() =>
+        serializeFileEventRecord(0, "", 1, new SubArray(1, 2)),
+      );
+      expect(arrayError.message).toContain("FR-009");
+      expect(arrayError.message).toContain("subclassed or foreign-realm array");
+
+      // Foreign-realm array: same prototype-mismatch family — a REAL array
+      // whose prototype comes from another realm (Array.isArray is true for
+      // cross-realm arrays, so the array branch's proto check is reachable).
+      const foreignRealmArray = vm.runInNewContext("Array(1, 2)") as unknown[];
+      expect(Array.isArray(foreignRealmArray)).toBe(true);
+      expect(Object.getPrototypeOf(foreignRealmArray)).not.toBe(Array.prototype);
+      const foreignError = contextualError(() =>
+        serializeFileEventRecord(0, "", 1, foreignRealmArray),
+      );
+      expect(foreignError.message).toContain("FR-009");
+      expect(foreignError.message).toContain("subclassed or foreign-realm array");
+    });
+
+    it("rejects subclassed Map/Set through the PUBLIC appendEvent boundary too (the silent-degradation vector)", async () => {
+      // appendEvent is where a DAG author's event actually crosses: the
+      // subclass rejections must surface as typed, permanent cache-errors
+      // there, not only from the direct codec call.
+      const dir = mkdtempSync(join(tmpdir(), "fugue-subclass-append-"));
+      try {
+        const job = createFileJob({ directory: dir, initial: { state: "ready", context: {} } });
+        class SubMap extends Map<string, string> {
+          constructor(entries?: readonly (readonly [string, string])[]) {
+            super(entries);
+          }
+        }
+        let failure: unknown;
+        try {
+          await job.appendEvent(new SubMap([["k", "v"]]));
+        } catch (error) {
+          failure = error;
+        }
+        expect(isFrameworkError(failure)).toBe(true);
+        if (isFrameworkError(failure)) {
+          expect(failure.kind).toBe("cache-error");
+          expect(formatFrameworkError(failure)).toContain("subclassed Map");
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("accepts every allowed leaf kind (primitives, plain objects, arrays, Date, Map, Set) at depth", () => {

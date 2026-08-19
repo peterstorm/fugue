@@ -31,6 +31,18 @@ export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialToke
 export { formatFrameworkError, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
+// ── Total error diagnostics ───────────────────────────────────────────────
+// Total (never-throwing) inspection helpers for values caught at an `unknown`
+// boundary — safe to run while handling an earlier failure. Exported for
+// first-party consumers (host adapters) that implement fail-closed errno
+// logic at I/O boundaries; `probeErrorCode` + `isMissingPathError` keep the
+// absence-vs-failure question one encoding.
+export {
+  safeErrorMessage,
+  probeErrorCode,
+  isMissingPathError,
+} from "./safe-error.js";
+
 // ── Span kinds ────────────────────────────────────────────────────────────
 export type { SpanKind } from "./span.js";
 

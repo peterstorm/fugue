@@ -627,4 +627,95 @@ describeRedis("RedisCheckpointer", () => {
       expect(Object.keys(loaded.value.nodes).sort()).toEqual(["n1", "n2", "n3"]);
     }
   });
+
+  // Round-18 arch-1/arch-2: the Redis leg of the Checkpointer port now shares
+  // the in-memory/file hostile-seam contracts — the injected clock and the
+  // caller-owned opts bag. These pin that a throwing/non-representable clock
+  // settles as a typed `cache-error` (never a raw rejection, never a silently
+  // voided FR-027 TTL) and that a stateful `expectedDagFingerprint` getter
+  // cannot make the load gate and comparison disagree.
+  test("a throwing injected clock settles as a typed cache-error from load and setMeta", async () => {
+    const hostile = new RedisCheckpointer(redisOrThrow(), {
+      now: () => { throw new Error("hostile clock"); },
+    });
+    await hostile.setMeta(R("clock-throw"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
+
+    const loaded = await hostile.load(R("clock-throw"));
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) {
+      expect(loaded.error.kind).toBe("cache-error");
+      if (loaded.error.kind === "cache-error") {
+        expect(loaded.error.operation).toContain("load");
+        expect(loaded.error.message).toContain("hostile clock");
+        // Deterministic rejection — retry cannot clear a throwing clock.
+        expect(retriabilityOf(loaded.error)).toBe("non-retriable");
+      }
+    }
+
+    const written = await hostile.setMeta(R("clock-throw-2"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
+    expect(written.ok).toBe(false);
+    if (!written.ok) {
+      expect(written.error.kind).toBe("cache-error");
+      if (written.error.kind === "cache-error") {
+        expect(written.error.operation).toContain("setMeta");
+      }
+    }
+  });
+
+  test("a NaN injected clock fails closed — the FR-027 TTL check cannot be silently voided", async () => {
+    const cp = new RedisCheckpointer(redisOrThrow(), { now: () => Number.NaN });
+    await cp.setMeta(R("clock-nan"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
+    const result = await cp.load(R("clock-nan"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind === "cache-error") {
+        expect(result.error.message).toContain("non-representable timestamp");
+        expect(retriabilityOf(result.error)).toBe("non-retriable");
+      }
+    }
+  });
+
+  test("a throwing expectedDagFingerprint getter settles as a typed cache-error, never a raw rejection", async () => {
+    const cp = new RedisCheckpointer(redisOrThrow());
+    const opts = {
+      get expectedDagFingerprint(): string {
+        throw new Error("hostile opts getter");
+      },
+    } as CheckpointerLoadOpts;
+    const result = await cp.load(R("opts-throw"), opts);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind === "cache-error") {
+        expect(result.error.message).toContain("could not inspect options");
+      }
+    }
+  });
+
+  test("a stateful expectedDagFingerprint getter cannot make the gate and the comparison disagree", async () => {
+    const cp = new RedisCheckpointer(redisOrThrow());
+    const runId = makeRunId();
+    await cp.setMeta(R(runId), {
+      dagId: D("d"),
+      startedAt: new Date(),
+      nodeCount: 1,
+      dagFingerprint: "stored-fp",
+    });
+
+    // First read returns undefined (gate skipped), later reads return the
+    // stored value — a per-read getter would make a fresh gate pass but a
+    // fresh comparison pass too; the snapshot-once discipline means the
+    // comparison sees exactly what the gate saw.
+    const calls = [undefined, "stored-fp", "stored-fp"];
+    const opts = {
+      get expectedDagFingerprint(): string | undefined {
+        return calls.shift();
+      },
+    } as CheckpointerLoadOpts;
+    const result = await cp.load(R(runId), opts);
+    // Gate saw undefined → legacy no-check behaviour, exactly one read.
+    expect(result.ok).toBe(true);
+    expect(calls).toHaveLength(2); // the getter was read ONCE, not three times
+  });
 });
