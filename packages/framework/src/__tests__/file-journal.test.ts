@@ -485,6 +485,34 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     expect(JSON.parse(readFileSync(join(dir, PROGRESS_FILE), "utf-8"))).toEqual({ percent: 25 });
   });
 
+  it("writeCheckpoint maps a POST-mkdir atomic-write failure to typed cache-error(writeCheckpoint) — the branch the EACCES suite misses by failing at mkdir first", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    // Establish the run directory FIRST so mkdirSync({recursive:true}) is a
+    // no-op afterwards: the existing EACCES tests chmod before the directory
+    // exists and fail at mkdirSync, never reaching atomicWriteFile. This
+    // pins the real write-failure branch of writeCheckpoint (round-24
+    // pta-1).
+    await journal.writeCheckpoint(serializeFileCheckpoint({ state: "s", context: null }));
+    chmodSync(dir, 0o500); // read+execute, no write — mkdir no-ops, the tmp write fails
+
+    try {
+      let error: unknown;
+      try {
+        await journal.writeCheckpoint(serializeFileCheckpoint({ state: "s2", context: null }));
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeDefined();
+      const typed = asCacheError(error as FrameworkError);
+      expect(typed.operation).toBe("writeCheckpoint");
+      expect(typed.message).toContain(dir);
+      expect(typed.message).toMatch(/EACCES|permission denied/i);
+    } finally {
+      chmodSync(dir, 0o700); // restore so afterEach cleanup can rm
+    }
+  });
+
   it("writeProgress persists { percent } and overwrites atomically", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);
@@ -714,6 +742,28 @@ describe("readFileEvents — RecordedEvent envelopes (FR-008)", () => {
     if (result.ok) return;
     expect(asCacheError(result.error).operation).toBe("readFileEvents");
     expect(asCacheError(result.error).message).toMatch(/not valid JSON/);
+  });
+
+  it("records and envelopes are DEEP-FROZEN — the readonly promise is runtime-true (round-24 tda-4)", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "A", nested: { deep: [1, 2] } }, "k0");
+    await journal.appendEvent({ type: "B" }, "k1");
+
+    const records = readFileEventRecords(dir);
+    expect(records.ok).toBe(true);
+    if (!records.ok) return;
+    expect(Object.isFrozen(records.value)).toBe(true); // the array itself
+    expect(Object.isFrozen(records.value[0])).toBe(true); // each record
+    const firstEvent = records.value[0]!.event as { nested: { deep: unknown[] } };
+    expect(Object.isFrozen(firstEvent.nested)).toBe(true);
+    expect(Object.isFrozen(firstEvent.nested.deep)).toBe(true);
+
+    const envelopes = readFileEvents(dir);
+    expect(envelopes.ok).toBe(true);
+    if (!envelopes.ok) return;
+    expect(Object.isFrozen(envelopes.value)).toBe(true);
+    expect(Object.isFrozen(envelopes.value[0])).toBe(true);
   });
 });
 

@@ -46,6 +46,7 @@ import type { JobLike } from "../state-machine/types.js";
 import { createFileJournal } from "./journal.js";
 import type { FileJournalOptions } from "./journal.js";
 import { serializeFileCheckpoint } from "./checkpoint-record.js";
+import { deepFreeze } from "./deep-freeze.js";
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "./layout.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
@@ -64,31 +65,11 @@ export interface CreateFileJobArgs<S, C> extends FileJournalOptions {
 // Snapshot immutability (see the snapshot contract in the module header)
 // ---------------------------------------------------------------------------
 
-/**
- * Recursively `Object.freeze` a structured value, in place — safe here
- * because it is always applied to a `structuredClone` output, a fresh tree a
- * caller never shares with the snapshot. Plain objects and arrays become
- * fully immutable (mutation throws in strict mode); Map/Set/Date instances
- * are frozen shallowly — their mutation APIs operate on internal slots, so
- * their content is guarded by the CLONE ISOLATION (each `data` read returns
- * an independent clone), not by the freeze.
- */
-const deepFreeze = <T>(value: T): T => {
-  if (value !== null && typeof value === "object") {
-    // `Reflect.ownKeys` — not `Object.getOwnPropertyNames` — so objects
-    // nested under symbol keys are frozen too. The `data` getter's clone
-    // can never carry symbol-keyed properties in the current data flow —
-    // `structuredClone` omits symbol keys, and the FR-009 boundary rejects
-    // symbol-keyed state at seed/`updateData` — but the totality keeps the
-    // primitive correct for any future snapshot source that does carry
-    // them, pinned by `__testDeepFreeze`.
-    for (const key of Reflect.ownKeys(value)) {
-      deepFreeze((value as Record<PropertyKey, unknown>)[key]);
-    }
-    Object.freeze(value);
-  }
-  return value;
-};
+// The recursive freeze primitive lives in `deep-freeze.ts` (round-24 tda-4) —
+// ONE implementation shared with the strict event-log reader, so the two
+// runtime-immutability promises cannot drift apart. Here it is always applied
+// to a `structuredClone` output, a fresh tree a caller never shares with the
+// snapshot; the shared module documents the reader-side source.
 
 /**
  * Test-only: exposes the snapshot freeze primitive so the symbol-keyed

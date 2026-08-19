@@ -129,11 +129,11 @@ import {
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
 } from "../types/safe-error.js";
-import { fwLogger } from "../logger.js";
 import {
   fileCacheError,
   fileOperationError,
   isFileBackendPathString,
+  warnWithoutThrowing,
   type FileOperation,
 } from "./boundary-error.js";
 
@@ -607,18 +607,15 @@ const createFileCheckpointerUnchecked = (
           }
 
           if (verdict.kind === "corrupt") {
-            const warning =
-              `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeKey=${verdict.address}: ${verdict.message}`;
-            try {
-              fwLogger().warn(warning);
-            } catch (error) {
-              return err(
-                checkpointerCacheError(
-                  "load",
-                  `load failed to emit the required corrupt-node warning for run ${render(runId)} nodeKey=${render(verdict.address)}: ${messageOf(error)}`,
-                ),
-              );
-            }
+            // Diagnostic alongside the `corruptNodeIds` surface (round-23
+            // tda-3), never part of the load verdict: a throwing host logger
+            // must not turn a healthy durable read into a typed failure
+            // (boundary-error.ts doctrine — the Redis twin logs the same
+            // event unguarded). `warnWithoutThrowing` keeps the emission
+            // total.
+            warnWithoutThrowing(
+              `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeKey=${verdict.address}: ${verdict.message}`,
+            );
             corruptNodeIds.push(verdict.address);
             continue;
           }

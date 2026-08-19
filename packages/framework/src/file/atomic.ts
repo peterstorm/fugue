@@ -83,11 +83,18 @@ export const atomicWriteFile = (
   } catch (error) {
     if (temporary !== null) {
       try {
-        if (existsSync(temporary)) unlinkSync(temporary);
+        // No existsSync pre-probe: existsSync swallows EACCES/EPERM/ELOOP as
+        // "missing", silently skipping the unlink and littering the tmp on
+        // the very failure paths this module fails loudly about elsewhere.
+        // A genuinely absent tmp unlinks as a benign ENOENT no-op; every real
+        // unlink failure lands in the warn arm below.
+        unlinkSync(temporary);
       } catch (cleanupError) {
-        warnWithoutThrowing(
-          `[AtomicWrite] failed to unlink tmp ${temporary} after a failed write: ${safeErrorMessage(cleanupError)}`,
-        );
+        if (!isMissingPathError(cleanupError)) {
+          warnWithoutThrowing(
+            `[AtomicWrite] failed to unlink tmp ${temporary} after a failed write: ${safeErrorMessage(cleanupError)}`,
+          );
+        }
       }
     }
     throw fileOperationError("atomicWriteFile", path, error);
@@ -542,7 +549,44 @@ export const releaseFileLock = (
     () => hooks.readOwnerPid?.(lockPath)
       ?? readFileSync(join(lockPath, PID_FILE), "utf-8"),
   );
-  if (pid.kind === "absent" || pid.value !== `${process.pid}`) return;
+  if (pid.kind === "absent") return;
+
+  if (pid.value !== `${process.pid}`) {
+    // Not provably ours by pid. A raw pid-string mismatch is NOT proof of
+    // non-ownership: the pid bytes may be corrupt (partial write, disk
+    // corruption, foreign tooling inside the caller-owned run directory) —
+    // and `ownerStaleness` treats exactly such an unparsable/foreign pid as
+    // STALE, so this path must consult the authoritative ownership proof
+    // (the acquisition token) before deciding. A MATCHING token means the
+    // lock is provably ours despite the corrupt pid: warn and remove it.
+    // Every other outcome (token missing, unreadable, or foreign — e.g. the
+    // lock was stale-reaped and re-acquired by another owner, whose token
+    // now lives here) stays a SILENT no-op: silence is contractually
+    // reserved for "absent or proven not ours", and this branch cannot
+    // prove ownership. Unlike the owning-pid path below, an unreadable
+    // token here is inconclusive, not a release failure — the pid already
+    // said "not ours", so there is no owned lock to leak.
+    let recordedToken: string;
+    try {
+      recordedToken = (hooks.readOwnershipToken?.(lockPath)
+        ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8")).trim();
+    } catch {
+      return;
+    }
+    if (recordedToken !== ownershipToken) return;
+    warnWithoutThrowing(
+      `[FileLock] owner pid metadata corrupt (recorded "${pid.value}", expected "${process.pid}") but ownership token matches — removing the owned lock`,
+    );
+    try {
+      rmSync(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      throw releaseFailure(
+        lockPath,
+        `failed to remove the owned lock directory whose pid metadata was corrupt; lock left in place: ${safeErrorMessage(error)}`,
+      );
+    }
+    return;
+  }
 
   const token = readReleaseMetadata(
     lockPath,

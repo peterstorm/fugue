@@ -1461,7 +1461,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("maps a throwing required corrupt-node warning to cache-error(load)", async () => {
+  it("a throwing corrupt-node warning logger does NOT fail the load — the drop is surfaced via corruptNodeIds and the emission is best-effort", async () => {
     const { directory, cp } = await seed();
     const fileName = `${keyDigest("logger-failure")}.json`;
     writeRawNode(directory, "run-c", fileName, "truncated{");
@@ -1476,16 +1476,19 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
       error: () => {},
     });
 
+    // The load verdict is a function of the durable bytes, not of the
+    // telemetry singleton (round-24 atl-2): a throwing host logger must not
+    // turn a healthy durable read into a typed failure. The emission runs
+    // through warnWithoutThrowing (boundary-error.ts doctrine) and the drop
+    // is surfaced through corruptNodeIds (round-23 tda-3).
     const result = await cp.load(R("run-c"));
     expect(warningAttempted).toBe(true);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected a rejection");
-    expect(result.error.kind).toBe("cache-error");
-    if (result.error.kind !== "cache-error") throw new Error("unreachable");
-    expect(result.error.operation).toBe("load");
-    expect(result.error.message).toContain("required corrupt-node warning");
-    expect(result.error.message).toContain("logger unavailable");
-    expect(result.error.message).toContain(fileName.slice(0, 60));
+    if (!result.ok) throw new Error("expected a successful load despite the throwing logger");
+    expect(result.value).not.toBeNull();
+    if (result.value === null) return;
+    expect(result.value.corruptNodeIds).toEqual([fileName]);
+    expect(Object.keys(result.value.nodes)).toEqual(["good"]);
+    expect(result.value.nodes["good"].output).toBe("kept");
   });
 
   it("reports a corrupt meta as checkpoint-corrupt, not as a per-entry drop", async () => {

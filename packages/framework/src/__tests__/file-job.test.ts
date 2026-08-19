@@ -581,6 +581,8 @@ describe("createFileJob — typed factory validation", () => {
       null,
       { directory: "", initial: genesis() },
       { directory: tempDir(), initial: genesis(), now: 7 },
+      { directory: tempDir(), initial: null },
+      { directory: tempDir(), initial: [] },
     ] as const) {
       let failure: unknown;
       try {
@@ -750,12 +752,15 @@ describe("createFileJob — hostile getters on state/context (round-14 A6)", () 
 
 // ---------------------------------------------------------------------------
 // round-14 A8 — serializeFileCheckpoint write-boundary shape gate.
-// A non-object `data` (undefined, null, array, primitive) previously slipped
-// through the envelope own-key check (`{"data":{"__undefined__":true}}`
-// keeps the own key; the deep-equal verdict catches loss, never shape) and
-// would fail closed only late, at the caller's `parseCheckpoint` on resume.
-// The gate refuses it at the write boundary with a named FR-009 reason —
-// the event-side sibling codec's established shape for the same class.
+// A non-object `data` (undefined, null, array, primitive — e.g. `[1, 2]`)
+// previously slipped through the envelope own-key check (such a data keeps
+// the own key; the deep-equal verdict catches loss, never shape) and would
+// fail closed only late, at the caller's `parseCheckpoint` on resume. (A
+// PLAIN-OBJECT data wearing a reserved tag key like `{"__undefined__":true}`
+// is NOT such a shape — the FR-009 pre-scan rejects it at write time.) The
+// gate refuses the gate-only shapes at the write boundary with a named
+// FR-009 reason — the event-side sibling codec's established shape for the
+// same class.
 // ---------------------------------------------------------------------------
 
 describe("serializeFileCheckpoint — non-object data gate (round-14 A8)", () => {

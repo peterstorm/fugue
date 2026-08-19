@@ -13,7 +13,7 @@
 //   FR-027  → ADR-0005 (retry backoff with jitter)
 //   FR-029a → ADR-0013 (onHumanReview hook crash retry)
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import type { DagDef } from "../types/dag.js";
@@ -344,22 +344,17 @@ export const buildDagExecutor = (
       .with({ kind: "pending" }, () => ({ type: "start" } as DagEvent))
 
       // -----------------------------------------------------------------------
-      // retrying: sleep with jitter then re-run the failing node in its wave
-      // FR-027: delay = nextDelayMs * (1 ± jitterRatio) — symmetric jitter via applyJitter
+      // retrying / running: execute the wave and record its outcomes. Both
+      // payloads carry `wave` and the bodies are byte-identical — they diverge
+      // only in the pre-sleep the retrying path takes (FR-027 jittered delay
+      // before re-running the failed node's wave).
       // -----------------------------------------------------------------------
-      .with({ kind: "retrying" }, async (p) => {
-        const abortEvent = await sleepWithAbortCheck(p.nextDelayMs, p.nodeId);
-        if (abortEvent) return abortEvent;
+      .with({ kind: P.union("retrying", "running") }, async (p) => {
+        if (p.kind === "retrying") {
+          const abortEvent = await sleepWithAbortCheck(p.nextDelayMs, p.nodeId);
+          if (abortEvent) return abortEvent;
+        }
 
-        const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
-        recordOutcomes?.(outcomes);
-        return event;
-      })
-
-      // -----------------------------------------------------------------------
-      // running: run the current wave
-      // -----------------------------------------------------------------------
-      .with({ kind: "running" }, async (p) => {
         const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
         recordOutcomes?.(outcomes);
         return event;

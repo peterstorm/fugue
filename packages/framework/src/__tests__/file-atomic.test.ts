@@ -226,6 +226,42 @@ describe("atomicWriteFile", () => {
     expect(existsSync(tmp)).toBe(true); // a dir cannot be unlinked — expected
     expect(existsSync(target)).toBe(false);
   });
+
+  test("cleanup failure of the swallowed-as-absence class is WARNED, not skipped by an existsSync probe (ENOTDIR representative)", () => {
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (msg: string) => {
+        warnings.push(msg);
+      },
+      error: () => {},
+    });
+    try {
+      const dir = tempDir();
+      const target = join(dir, "checkpoint.json");
+      // A regular FILE squatting the tmp's parent: the tmp write fails
+      // ENOTDIR and the cleanup unlink fails ENOTDIR. `existsSync` swallows
+      // this class (EACCES/EPERM/ELOOP/ENOTDIR all report "false" for a
+      // path that is genuinely broken), so the OLD pre-probe skipped the
+      // unlink and emitted NOTHING — silent litter risk with zero evidence.
+      // (EACCES-on-unlink specifically is unreachable through the public
+      // surface: a failed write never leaves a tmp behind in a no-write
+      // directory, so its unlink is a benign ENOENT. ENOTDIR is the
+      // deterministic, portable representative of the same swallowed class.)
+      const parent = join(dir, "file-parent");
+      writeFileSync(parent, "not a directory");
+      const tmp = join(parent, "x.tmp");
+
+      expect(() => atomicWriteFile(target, "new", { temporaryPath: () => tmp })).toThrow();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("failed to unlink tmp");
+      expect(warnings[0]).toContain("ENOTDIR");
+      expect(existsSync(tmp)).toBe(false);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -375,13 +411,49 @@ describe("withFileLock — stale steal and ownership", () => {
     const ownershipToken = await acquireFileLock(lockPath);
 
     // Simulate the lock being stale-reaped and re-born by another process
-    // while we held it: the pid file now names a foreign process.
+    // while we held it: pid AND ownership token now name the foreign
+    // process (a real re-birth writes both).
     const foreignPid = String(deadPid());
     writeFileSync(join(lockPath, "pid"), foreignPid);
+    writeFileSync(join(lockPath, "owner"), "foreign-token");
 
     releaseFileLock(lockPath, ownershipToken); // must be a no-op — we are not the owner
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(join(lockPath, "pid"), "utf-8")).toBe(foreignPid);
+  });
+
+  test("releaseFileLock warns and removes an OWNED lock whose pid metadata is corrupt (foreign pid bytes + matching token)", async () => {
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (msg: string) => {
+        warnings.push(msg);
+      },
+      error: () => {},
+    });
+    try {
+      const dir = tempDir();
+      const lockPath = join(dir, "append.lock");
+      // We hold this lock; its pid metadata has been clobbered (partial
+      // write, disk corruption, or foreign tooling inside the caller-owned
+      // run directory) to name someone else. The ownership TOKEN — the
+      // authoritative ownership proof — still matches, so the pid mismatch
+      // must NOT silently strand our lock: warn and remove it (round-24
+      // sfh-1).
+      const ownershipToken = await acquireFileLock(lockPath);
+      const foreignPid = String(deadPid());
+      writeFileSync(join(lockPath, "pid"), foreignPid);
+
+      releaseFileLock(lockPath, ownershipToken);
+
+      expect(existsSync(lockPath)).toBe(false); // provably ours — removed
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("owner pid metadata corrupt");
+      expect(warnings[0]).toContain(foreignPid);
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 
   test("release requires the acquisition token even for the same live pid", async () => {

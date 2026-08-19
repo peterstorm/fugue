@@ -38,6 +38,13 @@ export interface FileCheckpointCommit<S, C> {
 
 const issuedCommits = new WeakSet<object>();
 
+// Module-instance-scoped by design: a commit minted under a DUPLICATED module
+// instance (duplicate bundle, pnpm aliasing, two copies of this package)
+// fails `isFileCheckpointCommit` as an apparent forgery. That is the safe
+// direction — fail closed, never a forged accept — but if a legitimate
+// commit starts being rejected after a packaging change, look for two live
+// copies of this module before suspecting corruption (round-24 tda-5).
+
 /** Runtime capability check used by the throwing journal boundary. */
 export const isFileCheckpointCommit = (
   value: unknown,
@@ -58,11 +65,15 @@ const serializeFileCheckpointUnchecked = <S, C>(
 ): FileCheckpointCommit<S, C> => {
   // Write-boundary shape gate, mirroring the strict reader's contract: `data`
   // is the `{ state, context }` envelope the caller's `parseCheckpoint`
-  // decodes at resume. A non-object `data` (undefined, null, array, primitive)
-  // slips through the envelope own-key check below — `{"data":{"__undefined__":true}}`
-  // keeps the own key, and the deep-equal verdict can only catch loss, never
-  // shape — so it would fail closed only at the caller's decode, late. Refuse
-  // it here, the way the event-side sibling codec refuses a top-level
+  // decodes at resume. This gate EXCLUSIVELY catches shapes the rest of the
+  // pipeline admits: a non-object `data` (undefined, null, array, primitive —
+  // e.g. `data: [1, 2]`) keeps the envelope own-key check below, passes the
+  // FR-009 losslessness pre-scan, and the deep-equal verdict can only catch
+  // loss, never shape — so it would fail closed only at the caller's decode,
+  // late. (A PLAIN-OBJECT data wearing a reserved tag key like
+  // `{"__undefined__":true}` is NOT such a shape: `assertLosslessEvent`
+  // below already rejects it at write time.) Refuse the gate-only shapes
+  // here, the way the event-side sibling codec refuses a top-level
   // `undefined` event with a named FR-009 reason.
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new Error(

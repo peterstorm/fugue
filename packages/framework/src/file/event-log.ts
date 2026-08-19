@@ -41,6 +41,7 @@ import { join } from "node:path";
 import { EVENTS_DIR, CHECKPOINT_FILE, eventDigestOf, eventFileName, parseEventFileName } from "./layout.js";
 import { parseStoredEventRecord } from "./event-record.js";
 import type { FileEventRecord } from "./event-record.js";
+import { deepFreeze } from "./deep-freeze.js";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -173,9 +174,14 @@ const readStrict = (directory: string): StrictResult => {
       });
     }
 
-    records.push(record);
+    // Freeze at the read boundary (round-24 tda-4): the public type promises
+    // `readonly` and the runtime now delivers it — each record is a freshly
+    // parsed JSON tree, so freezing is free of aliasing risk, and a consumer
+    // that mutates a record or reorders the array fails fast (strict mode)
+    // instead of silently corrupting the load-bearing append order.
+    records.push(deepFreeze(record));
   }
-  return ok(records);
+  return ok(deepFreeze(records));
 };
 
 // ---------------------------------------------------------------------------
@@ -219,6 +225,8 @@ export const readCheckpointFile = (directory: string): string | null => {
 export const readFileEventRecords = (directory: string): Result<readonly FileEventRecord[], FrameworkError> => {
   try {
     const result = readStrict(directory);
+    // `readStrict` already froze the records and the array — the promise of
+    // the `readonly` return type is runtime-true.
     return result.ok ? ok(result.value) : err(failure("readFileEventRecords", result.error));
   } catch (error) {
     return err(fileOperationError("readFileEventRecords", "event-log directory", error));
@@ -235,7 +243,12 @@ export const readFileEvents = (directory: string): Result<readonly RecordedEvent
   try {
     const result = readStrict(directory);
     if (!result.ok) return err(failure("readFileEvents", result.error));
-    return ok(result.value.map((r) => ({ recordedAtMs: r.recordedAtMs, event: r.event })));
+    // Freeze the fresh envelope array too (round-24 tda-4): order is this
+    // module's core invariant; the `readonly` type promise matches the
+    // runtime. The `event` references inside are already frozen by
+    // `readStrict`.
+    const envelopes = result.value.map((r) => ({ recordedAtMs: r.recordedAtMs, event: r.event }));
+    return ok(deepFreeze(envelopes));
   } catch (error) {
     return err(fileOperationError("readFileEvents", "event-log directory", error));
   }

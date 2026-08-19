@@ -1,5 +1,5 @@
 /**
- * DecisionStore adapters (ADR-0060) — in-memory (tests/dev) and Redis (prod).
+ * DecisionStore adapter (ADR-0060) — Redis (prod).
  *
  * Tracks, per `(runId, nodeId)` human gate: whether it is pending (so a
  * resume-then-re-park loop notifies only once) and the human's decision (so a
@@ -54,38 +54,6 @@ const HumanActionSchema = z.discriminatedUnion("kind", [
  * as binary.
  */
 const KEY_SEP = "\x1f";
-
-// ── In-Memory Adapter (tests/dev) ───────────────────────────────────────────
-
-export const createInMemoryDecisionStore = (): DecisionStorePort => {
-  const pending = new Set<string>();
-  const decisions = new Map<string, HumanAction>();
-  const key = (runId: RunId, nodeId: NodeId) => `${runId}${KEY_SEP}${nodeId}`;
-  return {
-    async markPending(runId, nodeId) {
-      const k = key(runId, nodeId);
-      if (pending.has(k)) return ok(false);
-      pending.add(k);
-      return ok(true);
-    },
-    async isPending(runId, nodeId) {
-      return ok(pending.has(key(runId, nodeId)));
-    },
-    async putDecision(runId, nodeId, action) {
-      decisions.set(key(runId, nodeId), action);
-      return ok(undefined);
-    },
-    async getDecision(runId, nodeId) {
-      return ok(decisions.get(key(runId, nodeId)) ?? null);
-    },
-    async clear(runId, nodeId) {
-      const k = key(runId, nodeId);
-      pending.delete(k);
-      decisions.delete(k);
-      return ok(undefined);
-    },
-  };
-};
 
 // ── Redis Adapter (production) ───────────────────────────────────────────────
 

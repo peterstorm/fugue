@@ -7,11 +7,13 @@
 //
 // History belongs to the event log; this index deliberately persists neither
 // an append log nor a Redis member set. Writes for one digest are serialized,
-// compared, and atomically replaced. A lower succeededAtMs cannot overwrite a
-// newer singleton. Equal scores use Redis's reverse unsigned-binary member
-// ordering, making the winner deterministic regardless of arrival order.
-// Every successful recordWrite refreshes writtenAtMs (Redis EXPIRE parity),
-// including a stale write that loses the comparison. Readers therefore see
+// compared, and atomically replaced. While the current singleton is within
+// TTL, a lower succeededAtMs cannot overwrite a newer singleton; an expired
+// singleton is replaced by any incoming write (lazy supersede,
+// `selectLatestWrite`). Equal scores use Redis's reverse unsigned-binary
+// member ordering, making the winner deterministic regardless of arrival
+// order. Every successful recordWrite refreshes writtenAtMs (Redis EXPIRE
+// parity), including a stale write that loses the comparison. Readers therefore see
 // either the complete previous singleton or the complete replacement, never a
 // partial record. Expiry is evaluated lazily; there is no sweep or physical GC.
 //
