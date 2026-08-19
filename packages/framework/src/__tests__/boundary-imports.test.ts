@@ -22,7 +22,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { checkImports, type Violation } from "../scripts/check-imports.js";
+import { checkImports, findUncheckedBrandImports, type Violation } from "../scripts/check-imports.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
 import type { RunId } from "../types/ids.js";
 import { D, N } from "./_id-helpers.js";
@@ -54,6 +54,49 @@ describe("SC-006 boundary imports", () => {
 // ---------------------------------------------------------------------------
 
 describe("SC-006 gate integrity pins", () => {
+  it("the __brand*Unchecked trusted-caller gate flags non-whitelisted importers and spares the whitelist", () => {
+    // Positive: a non-whitelisted module importing an unchecked cast from
+    // types/ids.js is a violation, whatever the relative spelling depth.
+    const positives = findUncheckedBrandImports(
+      `import { __brandRunIdUnchecked, __brandDagIdUnchecked } from "../types/ids.js";\nconst x = __brandRunIdUnchecked("raw");\n`,
+      "file/event-log.ts",
+    );
+    expect(positives).toHaveLength(1);
+    expect(positives[0].importSpecifier).toContain("__brandRunIdUnchecked");
+    expect(positives[0].importSpecifier).toContain("__brandDagIdUnchecked");
+
+    const deepSpelling = findUncheckedBrandImports(
+      `import { __brandNodeIdUnchecked } from "../../types/ids.js";\n`,
+      "file/sub/x.ts",
+    );
+    expect(deepSpelling).toHaveLength(1);
+
+    // Negative: whitelisted profiled deserialization / pinning test modules
+    // are the exact sanctioned importers.
+    for (const whitelisted of [
+      "checkpoint/redis-checkpointer.ts",
+      "file/checkpointer-codec.ts",
+      "__tests__/file-boundary.test.ts",
+      "__tests__/file-checkpointer.test.ts",
+    ]) {
+      expect(
+        findUncheckedBrandImports(
+          `import { __brandRunIdUnchecked } from "../types/ids.js";\n`,
+          whitelisted,
+        ),
+      ).toHaveLength(0);
+    }
+
+    // Negative: the validating `__brandRunId` / `__brandNodeId` twins and
+    // non-ids imports are not the gate's subject.
+    expect(
+      findUncheckedBrandImports(
+        `import { __brandRunId } from "../types/ids.js";\nimport { ok } from "../types/result.js";\n`,
+        "file/event-log.ts",
+      ),
+    ).toHaveLength(0);
+  });
+
   it("@fuguejs/framework/file exports entry resolves to the barrel module", async () => {
     // A broken `./file` exports line (typo, dropped map entry, wrong target)
     // must not pass CI silently — the gate's own boundary has to be

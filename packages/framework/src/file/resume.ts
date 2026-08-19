@@ -30,10 +30,11 @@
 //      unreadable checkpoint file is an environment failure, not a content
 //      verdict. The catch narrows before relabeling (FR-040): ONLY a value
 //      the runtime guard recognizes as a typed `FrameworkError` rides
-//      through unchanged; any other throw (a hostile or version-drifted
-//      journal implementation is NOT assumed to keep the typed contract) is
-//      re-tagged `checkpoint-corrupt` — never smuggled across the boundary
-//      as typed.
+//      through unchanged; any other throw is re-tagged `checkpoint-corrupt` —
+//      never smuggled across the boundary as typed. The re-tag arm is a
+//      boundary-TOTALITY fence (ADR-0080), not an expected path: the
+//      statically-imported journal throws only typed `FrameworkError` today,
+//      but this shell must stay total even if the journal contract drifts.
 //   2. Read the AUTHORITATIVE representation — the event log — through the
 //      shared strict reader (`readFileEvents`, FR-009). A missing events
 //      directory reads as an EMPTY log (`ok([])`); any corrupt record,
@@ -234,9 +235,9 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    unreadable checkpoint file is an environment failure, not a corruption
   //    verdict. The catch narrows before relabeling (FR-040): ONLY a value
   //    the runtime guard recognizes as a typed `FrameworkError` rides through
-  //    unchanged; any other throw (a hostile or version-drifted journal
-  //    implementation is NOT assumed to keep the typed contract) is re-tagged
-  //    `checkpoint-corrupt` — never smuggled across the boundary as typed.
+  //    unchanged; any other throw is re-tagged `checkpoint-corrupt` — a
+  //    boundary-totality fence (ADR-0080) keeping this shell total even if a
+  //    future change makes the journal throw something untyped.
   let checkpointJson: string | null;
   try {
     checkpointJson = createFileJournal(directory).readCheckpoint();

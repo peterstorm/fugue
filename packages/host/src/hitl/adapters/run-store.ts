@@ -81,20 +81,33 @@ const isTerminalStatus = (status: RunStatus): boolean =>
   status.kind === "completed" || status.kind === "failed";
 
 /**
- * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive and
- * TOTAL: returns false on any parse/shape failure, so a corrupt member is never
- * pruned (it stays counted, exactly as before) — fixing the terminal-index leak must
- * NOT introduce a new "one corrupt record blocks the whole gate" failure mode. Used
- * only by the active-index self-heal to spot a terminal run whose settle-time `sRem`
+ * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive
+ * and TOTAL: a parse failure yields `{ kind: "corrupt" }` with the parse error
+ * so the caller can log a trail while STILL treating the corrupt member as
+ * live (it stays counted, exactly as before) — fixing the terminal-index leak
+ * must NOT introduce a new "one corrupt record blocks the whole gate" failure
+ * mode, and the corruption must not vanish without a trace (house style:
+ * `readMeta` and the prune failures below both log). Used only by the
+ * active-index self-heal to spot a terminal run whose settle-time `sRem`
  * never landed.
  */
-const persistedStatusIsTerminal = (raw: string): boolean => {
+type PersistedStatusVerdict =
+  | { readonly kind: "terminal" }
+  | { readonly kind: "live" }
+  | { readonly kind: "corrupt"; readonly parseError: string };
+
+const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
   try {
     const obj = JSON.parse(raw) as { status?: { kind?: unknown } };
     const kind = obj?.status?.kind;
-    return kind === "completed" || kind === "failed";
-  } catch {
-    return false;
+    return kind === "completed" || kind === "failed"
+      ? { kind: "terminal" }
+      : { kind: "live" };
+  } catch (e) {
+    return {
+      kind: "corrupt",
+      parseError: e instanceof Error ? e.message : String(e),
+    };
   }
 };
 
@@ -293,7 +306,18 @@ export const createRedisRunStore = (
           }
           continue;
         }
-        if (persistedStatusIsTerminal(raw.value)) {
+        const verdict = parsePersistedStatus(raw.value);
+        if (verdict.kind === "corrupt") {
+          // Unparseable meta: treat as live (conservative over-count, matching
+          // the missing-meta prune below) but LOG it — a silent swallow would
+          // otherwise inflate the count toward `maxQueuedRuns` and 429
+          // legitimate startRun calls with no trail pointing at the corrupt key.
+          logger?.warn?.("hitl: active-run index scan: unparseable run meta treated as live (count may over-report)", {
+            runId: id,
+            error: verdict.parseError,
+          });
+        }
+        if (verdict.kind === "terminal") {
           // TERMINAL but still indexed: the settle-time `sRem` did not land (a
           // transient Redis blip AFTER the terminal meta write). The meta key still
           // EXISTS, so the missing-meta prune above cannot catch it — `processRun`'s

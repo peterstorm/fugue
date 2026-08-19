@@ -97,14 +97,15 @@ const isIdComponent = (value: unknown): boolean =>
  * Non-negative safe integer — ONE encoding of the domain, exported so every
  * boundary that validates a counted component (composite index/attempt,
  * stored `nodeCount`) shares the same rule. `typeof` first: `Number.isSafeInteger`
- * performs NO type coercion (it returns `false` for any non-`number` input —
- * the non-coercing ES6 twin of the legacy global), so the coercion hazard in
- * this conjunction is the TAIL — `value >= 0` applies ToNumber, and a
- * bypassed brand smuggling a `valueOf`-bearing object would throw a raw trap
- * there instead of failing closed. `typeof` keeps that comparison off hostile
- * values (and supplies the type-predicate narrowing) — the same discipline as
- * `isIdComponent` above and `ids.ts`'s `validate()`, where the coercion is
- * real: `RegExp.prototype.test` coerces via ToString.
+ * performs NO type coercion — per spec it returns `false` for any non-`number`
+ * input before any conversion (it is an ES6 `Number.*` method in the
+ * non-coercing family: `Number.isFinite`/`Number.isNaN` are the twins of the
+ * coercing legacy globals `isFinite`/`isNaN`; `Number.isSafeInteger` has no
+ * global counterpart), so this conjunction can never apply the `>=` tail to a
+ * hostile value — `>=` only ever sees the numbers `isSafeInteger` accepted.
+ * The `typeof` first conjunct supplies the type-predicate narrowing (the same
+ * discipline as `isIdComponent` above, where the coercion is real:
+ * `RegExp.prototype.test` coerces via ToString).
  */
 export const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;

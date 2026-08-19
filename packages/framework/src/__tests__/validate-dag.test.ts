@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok } from "../types/result.js";
 import type { DagDefInput } from "../types/dag.js";
-import { DAG_INPUT } from "../types/ids.js";
+import { DAG_INPUT, nodeId } from "../types/ids.js";
 import { validateDagShape } from "../executor/validate-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 
@@ -149,6 +149,54 @@ describe("validateDagShape", () => {
         { from: "B", to: "D" },
         { from: "C", to: "D" },
       ],
+    };
+    expect(validateDagShape(dag).ok).toBe(true);
+  });
+
+  it("rejects a retry.backoffMs entry that is NaN or negative", () => {
+    for (const bad of [NaN, -1, Number.NEGATIVE_INFINITY]) {
+      const node = { ...mkNode("A"), retry: { backoffMs: [1000, bad] } };
+      const r = validateDagShape({
+        id: "bad-backoff",
+        nodes: { A: node },
+        edges: [{ from: DAG_INPUT, to: "A" }],
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok && r.error.kind === "validation") {
+        expect(r.error.message).toContain("retry.backoffMs entries must all be finite non-negative numbers");
+        expect(r.error.nodeId).toBe(nodeId("A"));
+      } else {
+        throw new Error(`expected a validation error for backoffMs=${String(bad)}, got ${r.ok ? "ok" : r.error.kind}`);
+      }
+    }
+  });
+
+  it("rejects a retry.jitterRatio outside [0, 1] or non-finite", () => {
+    for (const bad of [-0.1, 1.1, NaN, Number.POSITIVE_INFINITY]) {
+      const node = { ...mkNode("A"), retry: { jitterRatio: bad } };
+      const r = validateDagShape({
+        id: "bad-jitter",
+        nodes: { A: node },
+        edges: [{ from: DAG_INPUT, to: "A" }],
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok && r.error.kind === "validation") {
+        expect(r.error.message).toContain("retry.jitterRatio must be a finite number in [0, 1]");
+      } else {
+        throw new Error(`expected a validation error for jitterRatio=${String(bad)}, got ${r.ok ? "ok" : r.error.kind}`);
+      }
+    }
+  });
+
+  it("accepts boundary-legal retry configs and bare defaults", () => {
+    const node = {
+      ...mkNode("A"),
+      retry: { backoffMs: [0, 1000], jitterRatio: 0 },
+    };
+    const dag: DagDefInput = {
+      id: "ok-retry",
+      nodes: { A: node, B: { ...mkNode("B"), retry: { backoffMs: [500], jitterRatio: 1 } } },
+      edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
     };
     expect(validateDagShape(dag).ok).toBe(true);
   });

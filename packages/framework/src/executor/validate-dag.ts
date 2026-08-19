@@ -103,6 +103,39 @@ export const validateDagShape = (
         ),
       );
     }
+
+    // Retry-config numeric domains (NodeRetryConfig): backoff delays must be
+    // finite non-negative milliseconds and the jitter ratio a finite value in
+    // [0, 1]. A NaN/negative delay or out-of-range jitter would otherwise flow
+    // unvalidated into `applyJitter` retry scheduling (a NaN/negative delay
+    // collapses `setTimeout` to an immediate retry spin; jitter > 1 can invert
+    // the delay sign). Validation lives at the single mandatory soundness gate
+    // with the same `validation`-kind error naming the offending node.
+    if (node.retry !== undefined) {
+      const { backoffMs, jitterRatio } = node.retry;
+      if (
+        backoffMs !== undefined &&
+        !backoffMs.every((ms) => Number.isFinite(ms) && ms >= 0)
+      ) {
+        return err(
+          validationErr(
+            node.id,
+            `node '${node.id}' retry.backoffMs entries must all be finite non-negative numbers`,
+          ),
+        );
+      }
+      if (
+        jitterRatio !== undefined &&
+        !(Number.isFinite(jitterRatio) && jitterRatio >= 0 && jitterRatio <= 1)
+      ) {
+        return err(
+          validationErr(
+            node.id,
+            `node '${node.id}' retry.jitterRatio must be a finite number in [0, 1]`,
+          ),
+        );
+      }
+    }
   }
 
   const nodeIds = new Set(entries.map(([id]) => nodeId(id)));

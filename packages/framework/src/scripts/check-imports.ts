@@ -37,6 +37,11 @@
  *   - file/** implementation modules MUST NOT call the public string-typed
  *     frameworkError.cacheError factory directly; boundary-error.ts is the
  *     sole bridge into the backend-local FileOperation vocabulary
+ *   - the zero-validation `__brandRunIdUnchecked` / `__brandNodeIdUnchecked` /
+ *     `__brandDagIdUnchecked` casts (types/ids.js) may be imported ONLY by the
+ *     whitelisted profiled deserialization modules and the two pinning test
+ *     files — the trusted-caller restriction is boundary-enforced, never a
+ *     naming convention
  *
  * Scans all .ts files (excluding .d.ts) under packages/framework/src/.
  * Import restrictions recognize static ESM/CommonJS forms. The file-error
@@ -471,6 +476,10 @@ const isImportedFrameworkError = (
     imports.namespaceBindings.has(member.owner.text);
 };
 
+// ---------------------------------------------------------------------------
+// Unchecked-brand import audit — the `__brand*Unchecked` trusted-caller gate
+// ---------------------------------------------------------------------------
+
 /**
  * Find direct calls to the public, string-typed cache-error constructor in a
  * file-backend implementation. `file/boundary-error.ts` is intentionally the
@@ -484,6 +493,95 @@ const isImportedFrameworkError = (
  * `const cacheError = frameworkError.cacheError;` — which would otherwise be
  * bare-identifier calls the member audit cannot attribute.
  */
+
+/**
+ * The three zero-validation widening casts exported from `types/ids.js`.
+ * They bypass `ID_PATTERN`, so the codebase's own hostile-caller doctrine
+ * (ADR-0080) requires their import surface to be boundary-enforced rather
+ * than convention-gated by the `__` naming prefix: only modules whose id
+ * provenance is already guaranteed (profiled hot deserialization paths) and
+ * the tests that pin hostile bypass behavior may import them.
+ */
+const UNCHECKED_BRAND_NAMES: ReadonlySet<string> = new Set([
+  "__brandRunIdUnchecked",
+  "__brandNodeIdUnchecked",
+  "__brandDagIdUnchecked",
+]);
+
+/**
+ * The exact importers that hold the trusted-caller privilege today. Any other
+ * module importing an unchecked cast is a violation, so a new importer must
+ * justify itself here (with the provenance argument) before the gate passes.
+ */
+const UNCHECKED_BRAND_WHITELIST: ReadonlySet<string> = new Set([
+  "checkpoint/redis-checkpointer.ts",
+  "file/checkpointer-codec.ts",
+  "__tests__/file-boundary.test.ts",
+  "__tests__/file-checkpointer.test.ts",
+]);
+
+/**
+ * Flag named imports of the unchecked id casts from `types/ids.js` (any
+ * relative spelling, resolved against the importing file). Exported so the
+ * gate's own behavior is unit-pinned: rule presence and positive/negative
+ * classification are asserted directly in `boundary-imports.test.ts`, not
+ * only through the real-tree hard-fail.
+ */
+export const findUncheckedBrandImports = (
+  source: string,
+  relPath: string,
+): readonly Violation[] => {
+  if (UNCHECKED_BRAND_WHITELIST.has(relPath)) return [];
+
+  const sourceFile = ts.createSourceFile(
+    relPath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const violations: Violation[] = [];
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const moduleSpecifier = statement.moduleSpecifier;
+    if (
+      !ts.isStringLiteral(moduleSpecifier) &&
+      !ts.isNoSubstitutionTemplateLiteral(moduleSpecifier)
+    ) {
+      continue;
+    }
+    const specifier = moduleSpecifier.text;
+    if (!specifier.startsWith("./") && !specifier.startsWith("../")) continue;
+    const resolved = normalize(join(dirname(relPath), specifier))
+      .replaceAll("\\", "/")
+      .replace(/\.(js|ts)$/, "");
+    if (resolved !== "types/ids") continue;
+
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings === undefined || !ts.isNamedImports(bindings)) continue;
+    const offending = bindings.elements.filter((element) =>
+      UNCHECKED_BRAND_NAMES.has(element.propertyName?.text ?? element.name.text),
+    );
+    if (offending.length === 0) continue;
+
+    const { line } = sourceFile.getLineAndCharacterOfPosition(
+      statement.getStart(sourceFile),
+    );
+    violations.push({
+      file: relPath,
+      line: line + 1,
+      importSpecifier: offending
+        .map((element) => element.propertyName?.text ?? element.name.text)
+        .join(", "),
+      reason:
+        "the __brand*Unchecked casts bypass all ID_PATTERN validation; only the whitelisted profiled deserialization modules (checkpoint/redis-checkpointer.ts, file/checkpointer-codec.ts) and the pinning test files may import them — trusted provenance must be boundary-enforced, never a naming convention",
+    });
+  }
+
+  return violations;
+};
+
 const findFileCacheErrorBypasses = (
   source: string,
   relPath: string,
@@ -644,13 +742,18 @@ export function checkImports(srcDir: string): CheckResult {
       (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
     );
 
-    if (applicableRules.length === 0) continue;
-
     const source = readFileSync(file, "utf-8");
+
+    if (applicableRules.length === 0) {
+      violations.push(...findUncheckedBrandImports(source, relPath));
+      continue;
+    }
+
     const imports = extractImports(source);
     const isFileBackendSource = inScope(relPath, FILE_BACKEND_SCOPE);
 
     violations.push(...findFileCacheErrorBypasses(source, relPath));
+    violations.push(...findUncheckedBrandImports(source, relPath));
 
     for (const { specifier, line } of imports) {
       const nodeBuiltin = isFileBackendSource

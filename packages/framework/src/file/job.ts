@@ -200,8 +200,8 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
           throw new TypeError("checkpoint data must be an object with state and context");
         }
         const captured = {
-          state: (d as { state: S }).state,
-          context: (d as { context: C }).context,
+          state: d.state,
+          context: d.context,
         };
         // Mint both the opaque bytes and detached snapshot synchronously,
         // before the first await. Later caller mutation cannot affect either

@@ -236,7 +236,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       get: async (key: string) => {
         const r = await cache.get(key, z.unknown());
         if (!r.ok) {
-          log.warn(`[cache] get failed for key=${key}: ${r.error.kind}`);
+          log.warn(
+            `[cache] get failed for key=${key}: ${r.error.kind}${
+              r.error.kind === "cache-error" ? ` — ${r.error.message}` : ""
+            }`,
+          );
           return { hit: false } as const;
         }
         // RedisCache.get returns ok(null) on miss, ok(value) on hit.
@@ -247,7 +251,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       set: async (key: string, value: unknown) => {
         const r = await cache.set(key, value, LLM_CACHE_TTL);
         if (!r.ok) {
-          log.warn(`[cache] set failed for key=${key}: ${r.error.kind}`);
+          log.warn(
+            `[cache] set failed for key=${key}: ${r.error.kind}${
+              r.error.kind === "cache-error" ? ` — ${r.error.message}` : ""
+            }`,
+          );
         }
         return r;
       },
