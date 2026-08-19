@@ -276,7 +276,16 @@ export class InMemoryCheckpointer implements Checkpointer {
       }
       return ok(ms);
     } catch (error) {
-      return err(frameworkError.cacheError(`checkpoint:${operation}`, safeErrorMessage(error)));
+      // A throwing clock is deterministic — retrying cannot clear it — so it
+      // settles permanent like the non-representable arm above (retriabilityOf
+      // fast-fails instead of burning the retry budget).
+      return err(
+        frameworkError.cacheError(
+          `checkpoint:${operation}`,
+          safeErrorMessage(error),
+          "permanent",
+        ),
+      );
     }
   }
 

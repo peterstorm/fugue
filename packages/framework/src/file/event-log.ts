@@ -53,6 +53,7 @@ import {
   probeErrorCode,
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
+  isMissingPathProbe,
 } from "../types/safe-error.js";
 import type { RecordedEvent } from "../state-machine/types.js";
 
@@ -88,7 +89,7 @@ const readStrict = (directory: string): StrictResult => {
     // read failure (fail closed with the directory named). A hostile errno
     // getter cannot escape and its inspection failure remains diagnostic.
     const codeProbe = probeErrorCode(error);
-    if (codeProbe.kind === "code" && codeProbe.code === "ENOENT") return ok([]);
+    if (isMissingPathProbe(codeProbe)) return ok([]);
     return err({
       message: `read ${eventsDir}: ${safeErrorMessageWithCodeProbe(error, codeProbe)}`,
     });

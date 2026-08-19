@@ -134,9 +134,39 @@ export class BufferedObserver implements Observer, Disposable {
     this.close();
   }
 
+  /**
+   * Hostile-seam guard for the injected clock, parity with the file backend's
+   * readClock discipline (ADR-0080): a throwing clock must never escape as an
+   * uncaught timer exception, and a non-finite stamp must never silently
+   * disable eviction (a NaN cutoff makes `createdAt < cutoff` permanently
+   * false — orphaned run buffers would never be dropped and no diagnostic
+   * would ever fire). Returns `null`, after a loud diagnostic, when the clock
+   * cannot be trusted this cycle; every caller skips rather than comparing
+   * against garbage.
+   */
+  private readClock(): number | null {
+    let nowMs: number;
+    try {
+      nowMs = this.now();
+    } catch (error) {
+      fwLogger().error(
+        `[BufferedObserver] clock threw — eviction disabled this cycle: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+    if (!Number.isFinite(nowMs)) {
+      fwLogger().warn(
+        `[BufferedObserver] clock returned a non-finite stamp (${String(nowMs)}) — eviction disabled this cycle`,
+      );
+      return null;
+    }
+    return nowMs;
+  }
+
   /** Drop run buffers that exceeded `ttlMs` without a run-end. */
   evictStale(): void {
-    const nowMs = this.now();
+    const nowMs = this.readClock();
+    if (nowMs === null) return;
     const cutoff = nowMs - this.ttlMs;
     for (const [runId, buf] of this.buffers) {
       if (buf.createdAt < cutoff) {
@@ -152,7 +182,21 @@ export class BufferedObserver implements Observer, Disposable {
   private buffer(runId: string, event: ObserverEvent): void {
     let buf = this.buffers.get(runId);
     if (!buf) {
-      buf = { events: [], createdAt: this.now() };
+      const createdAt = this.readClock();
+      if (createdAt === null) {
+        // A run buffer cannot be opened without a trustworthy stamp, and an
+        // unstampable buffer could never be evicted — fail loud through the
+        // established accounting (counted + dead-letter-or-log, never both,
+        // never neither) rather than persisting a NaN/Infinity stamp that
+        // orphans this run for the observer's lifetime.
+        this.accountDispatchFailure(
+          event,
+          new Error("clock unavailable — cannot stamp run buffer; event dropped"),
+          "buffer-open",
+        );
+        return;
+      }
+      buf = { events: [], createdAt };
       this.buffers.set(runId, buf);
     }
     buf.events.push(event);

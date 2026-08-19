@@ -442,8 +442,20 @@ const ownValue = (obj: object, key: string): unknown =>
  * round-trip check (JSON coerces NaN/±Infinity to `null`, which the
  * deep-equal rejects); the one ACCEPTED coercion (`-0` → `0`) is stated
  * in the module header.
+ *
+ * `labels` names the operation and root for rejection messages so a shared
+ * walk can serve sibling codecs without misattributing their failures to
+ * `serializeFileEventRecord` (the checkpoint codec passes its own labels;
+ * the event codec relies on the defaults, keeping its messages identical).
  */
-const assertLosslessEventUnchecked = (event: unknown): void => {
+const assertLosslessEventUnchecked = (
+  event: unknown,
+  labels: { operation: string; root: string } = {
+    operation: "serializeFileEventRecord",
+    root: "event",
+  },
+): void => {
+  const { operation, root } = labels;
   const walk = (
     value: unknown,
     path: string,
@@ -458,15 +470,15 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
         return;
       case "bigint":
         throw new Error(
-          `serializeFileEventRecord: ${path} is a BigInt — JSON has no BigInt representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
+          `${operation}: ${path} is a BigInt — JSON has no BigInt representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
         );
       case "symbol":
         throw new Error(
-          `serializeFileEventRecord: ${path} is a symbol — JSON has no symbol representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
+          `${operation}: ${path} is a symbol — JSON has no symbol representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
         );
       case "function":
         throw new Error(
-          `serializeFileEventRecord: ${path} is a function — JSON has no function representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
+          `${operation}: ${path} is a function — JSON has no function representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
         );
       case "object":
         break;
@@ -496,7 +508,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
     // threshold, so the maximum recursion this walk admits is safe.
     if (depth > MAX_SAFE_RECORD_DEPTH) {
       throw new Error(
-        `serializeFileEventRecord: event nesting exceeds the safe depth ceiling ${MAX_SAFE_RECORD_DEPTH} at ${path} (depth ${depth}) — deeper values would overflow the serializer's recursive walks; refusing to persist a value the write boundary cannot safely verify (FR-009)`,
+        `${operation}: ${root} nesting exceeds the safe depth ceiling ${MAX_SAFE_RECORD_DEPTH} at ${path} (depth ${depth}) — deeper values would overflow the serializer's recursive walks; refusing to persist a value the write boundary cannot safely verify (FR-009)`,
       );
     }
     active.set(value, path);
@@ -506,18 +518,18 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       if (value instanceof Date) {
         if (proto !== Date.prototype) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a ${kindName(value)} — a subclassed Date would round-trip as a plain Date; toJson cannot preserve the class (FR-009)`,
+            `${operation}: ${path} is a ${kindName(value)} — a subclassed Date would round-trip as a plain Date; toJson cannot preserve the class (FR-009)`,
           );
         }
         const own = Reflect.ownKeys(value);
         if (own.length > 0) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a Date with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the instant; the property would be silently dropped (FR-009)`,
+            `${operation}: ${path} is a Date with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the instant; the property would be silently dropped (FR-009)`,
           );
         }
         if (Number.isNaN(value.getTime())) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is an invalid Date (NaN instant) — it has no ISO-8601 representation (FR-009)`,
+            `${operation}: ${path} is an invalid Date (NaN instant) — it has no ISO-8601 representation (FR-009)`,
           );
         }
         return;
@@ -526,13 +538,13 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       if (value instanceof Map) {
         if (proto !== Map.prototype) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a ${kindName(value)} — a subclassed Map would round-trip as a plain Map; toJson cannot preserve the class (FR-009)`,
+            `${operation}: ${path} is a ${kindName(value)} — a subclassed Map would round-trip as a plain Map; toJson cannot preserve the class (FR-009)`,
           );
         }
         const own = Reflect.ownKeys(value);
         if (own.length > 0) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a Map with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the entries; the property would be silently dropped (FR-009)`,
+            `${operation}: ${path} is a Map with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the entries; the property would be silently dropped (FR-009)`,
           );
         }
         let index = 0;
@@ -547,13 +559,13 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       if (value instanceof Set) {
         if (proto !== Set.prototype) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a ${kindName(value)} — a subclassed Set would round-trip as a plain Set; toJson cannot preserve the class (FR-009)`,
+            `${operation}: ${path} is a ${kindName(value)} — a subclassed Set would round-trip as a plain Set; toJson cannot preserve the class (FR-009)`,
           );
         }
         const own = Reflect.ownKeys(value);
         if (own.length > 0) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a Set with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the items; the property would be silently dropped (FR-009)`,
+            `${operation}: ${path} is a Set with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the items; the property would be silently dropped (FR-009)`,
           );
         }
         let index = 0;
@@ -567,7 +579,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       if (Array.isArray(value)) {
         if (proto !== Array.prototype) {
           throw new Error(
-            `serializeFileEventRecord: ${path} is a ${kindName(value)} — a subclassed or foreign-realm array would round-trip as a plain array; toJson cannot preserve the class (FR-009)`,
+            `${operation}: ${path} is a ${kindName(value)} — a subclassed or foreign-realm array would round-trip as a plain array; toJson cannot preserve the class (FR-009)`,
           );
         }
         // JSON arrays persist only their indices (0..length-1): symbol keys,
@@ -581,7 +593,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
             Number(key) < value.length;
           if (!isIndex) {
             throw new Error(
-              `serializeFileEventRecord: ${path} is an array with own property ${renderPathSegment(key)} — JSON arrays persist only their indices (0..length-1); this property would be silently dropped (FR-009)`,
+              `${operation}: ${path} is an array with own property ${renderPathSegment(key)} — JSON arrays persist only their indices (0..length-1); this property would be silently dropped (FR-009)`,
             );
           }
         }
@@ -594,7 +606,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
           const descriptor = Object.getOwnPropertyDescriptor(value, String(i));
           if (descriptor !== undefined && "get" in descriptor) {
             throw new Error(
-              `serializeFileEventRecord: ${path}[${i}] is an array-index accessor — the losslessness pre-scan never invokes getters, and toJson would; the element's losslessness cannot be verified (FR-009)`,
+              `${operation}: ${path}[${i}] is an array-index accessor — the losslessness pre-scan never invokes getters, and toJson would; the element's losslessness cannot be verified (FR-009)`,
             );
           }
           walk(value[i], `${path}[${i}]`, active, depth + 1);
@@ -608,7 +620,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       // funnel to `{}`.
       if (proto !== Object.prototype && proto !== null) {
         throw new Error(
-          `serializeFileEventRecord: ${path} has kind ${kindName(value)} — only primitives, plain objects, arrays, and Date/Map/Set instances with their standard prototypes are representable losslessly (FR-009)`,
+          `${operation}: ${path} has kind ${kindName(value)} — only primitives, plain objects, arrays, and Date/Map/Set instances with their standard prototypes are representable losslessly (FR-009)`,
         );
       }
 
@@ -626,7 +638,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       const toJSONDescriptor = Object.getOwnPropertyDescriptor(obj, "toJSON");
       if (toJSONDescriptor !== undefined && "get" in toJSONDescriptor) {
         throw new Error(
-          `serializeFileEventRecord: ${path} has a custom toJSON accessor — JSON.stringify would invoke it and persist its return value instead of the object itself; the losslessness pre-scan never invokes getters, so the object cannot be verified (FR-009)`,
+          `${operation}: ${path} has a custom toJSON accessor — JSON.stringify would invoke it and persist its return value instead of the object itself; the losslessness pre-scan never invokes getters, so the object cannot be verified (FR-009)`,
         );
       }
       // Falls back to Object.prototype's own `toJSON` ONLY when the value has
@@ -638,7 +650,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       const toJSONValue = toJSONDescriptor !== undefined ? toJSONDescriptor.value : inheritedToJSON;
       if (typeof toJSONValue === "function") {
         throw new Error(
-          `serializeFileEventRecord: ${path} has a custom toJSON method — JSON.stringify would persist the method's return value instead of the object itself (FR-009)`,
+          `${operation}: ${path} has a custom toJSON method — JSON.stringify would persist the method's return value instead of the object itself (FR-009)`,
         );
       }
 
@@ -650,8 +662,8 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
         if (typeof key !== "string" || !enumerable.has(key)) {
           throw new Error(
             typeof key === "symbol"
-              ? `serializeFileEventRecord: ${path} has symbol-keyed own property ${renderPathSegment(key)} — Object.entries/JSON.stringify never visit symbol keys; it would be silently dropped (FR-009)`
-              : `serializeFileEventRecord: ${path} has non-enumerable own property ${renderPathSegment(key)} — JSON persists only enumerable own properties; it would be silently dropped (FR-009)`,
+              ? `${operation}: ${path} has symbol-keyed own property ${renderPathSegment(key)} — Object.entries/JSON.stringify never visit symbol keys; it would be silently dropped (FR-009)`
+              : `${operation}: ${path} has non-enumerable own property ${renderPathSegment(key)} — JSON persists only enumerable own properties; it would be silently dropped (FR-009)`,
           );
         }
       }
@@ -659,12 +671,12 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
       for (const key of enumerable) {
         if (POLLUTION_KEYS.has(key)) {
           throw new Error(
-            `serializeFileEventRecord: ${path} has key ${JSON.stringify(key)} — toJson filters it as a prototype-pollution vector, so it would be silently dropped from the persisted record (FR-009)`,
+            `${operation}: ${path} has key ${JSON.stringify(key)} — toJson filters it as a prototype-pollution vector, so it would be silently dropped from the persisted record (FR-009)`,
           );
         }
         if (RESERVED_TAG_KEYS.has(key)) {
           throw new Error(
-            `serializeFileEventRecord: ${path} has literal reserved tag key ${JSON.stringify(key)} — it is unambiguous only as serialize.ts's internal marker; in a plain event object it would round-trip as a different type or vanish (FR-009)`,
+            `${operation}: ${path} has literal reserved tag key ${JSON.stringify(key)} — it is unambiguous only as serialize.ts's internal marker; in a plain event object it would round-trip as a different type or vanish (FR-009)`,
           );
         }
         // Accessor properties (an own descriptor carrying a `get`) are
@@ -678,7 +690,7 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
         const descriptor = Object.getOwnPropertyDescriptor(obj, key);
         if (descriptor !== undefined && "get" in descriptor) {
           throw new Error(
-            `serializeFileEventRecord: ${path} has accessor property ${renderPathSegment(key)} — a getter's value is only observable by invoking it, which the losslessness pre-scan refuses to do; toJson would invoke it, so the property's losslessness cannot be verified (FR-009)`,
+            `${operation}: ${path} has accessor property ${renderPathSegment(key)} — a getter's value is only observable by invoking it, which the losslessness pre-scan refuses to do; toJson would invoke it, so the property's losslessness cannot be verified (FR-009)`,
           );
         }
       }
@@ -695,13 +707,16 @@ const assertLosslessEventUnchecked = (event: unknown): void => {
   // where the read side's raw scan starts counting — the two boundaries
   // share one depth domain, so a value accepted here is never rejected as
   // too deep when it is read back.
-  walk(event, "event", new Map<object, string>(), 1);
+  walk(event, root, new Map<object, string>(), 1);
 };
 
 /** Public typed throwing shell for the losslessness pre-scan. */
-export const assertLosslessEvent = (event: unknown): void => {
+export const assertLosslessEvent = (
+  event: unknown,
+  labels?: { operation: string; root: string },
+): void => {
   try {
-    assertLosslessEventUnchecked(event);
+    assertLosslessEventUnchecked(event, labels);
   } catch (error) {
     // Deterministic: re-running the pre-scan on the same value reproduces it.
     throw fileOperationError("assertLosslessEvent", "event payload", error, "permanent");

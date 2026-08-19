@@ -121,6 +121,7 @@ import { err, ok } from "../types/result.js";
 import { frameworkError } from "../types/error-factories.js";
 import {
   isMissingPathError,
+  isMissingPathProbe,
   probeErrorCode,
   safeDiagnosticRender,
   safeErrorMessage,
@@ -570,7 +571,7 @@ const createFileCheckpointerUnchecked = (
         // No `nodes/` yet = a run with meta and no completed node. That is the
         // normal state right after `setMeta`, not a failure.
         const codeProbe = probeErrorCode(error);
-        if (codeProbe.kind === "code" && codeProbe.code === "ENOENT") {
+        if (isMissingPathProbe(codeProbe)) {
           fileNames = [];
         } else {
           return err(

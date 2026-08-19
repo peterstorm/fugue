@@ -545,7 +545,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("settles a corrupt-checkpoint run `failed` and returns ok (no infinite retry)", async () => {
-    // service.ts:130-141 — a structurally-corrupt checkpoint cannot heal on
+    // service.ts:174-183 — a structurally-corrupt checkpoint cannot heal on
     // retry, so processRun settles the run terminal `failed` (a status poll
     // surfaces it) and returns OK so the worker acks the job rather than
     // re-processing the same corrupt state forever. The unit boundary
@@ -568,7 +568,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("returns err (queue retry) when settling `failed` after a host-infra failure also fails to write", async () => {
-    // service.ts:174-178 — the executor returns a host-infra `err`, so the run
+    // service.ts:211-226 — the executor returns a host-infra `err`, so the run
     // must settle `failed`; if that settle `setStatus` ITSELF fails there is no
     // durable terminal state, so processRun returns `err` and the worker retries
     // rather than acking a run still stuck `running`.
@@ -606,7 +606,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("returns err (queue retry) when folding a `completed` outcome into the store fails", async () => {
-    // service.ts:184-185 — the executor completed, but writing the `completed`
+    // service.ts:230-231 — the executor completed, but writing the `completed`
     // status fails; the outcome is not durably recorded, so processRun surfaces
     // the err for the worker to retry rather than silently losing the result.
     const dag = oneNodeDag();
@@ -635,7 +635,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("recordDecision returns err when the decision is stored but the resume enqueue fails (decided-but-not-woken)", async () => {
-    // service.ts:231-243 — putDecision succeeds (the approval is durable) but
+    // service.ts:274-289 — putDecision succeeds (the approval is durable) but
     // runQueue.enqueue fails, so the run is not re-woken. The decision is NOT
     // lost (it outlives via the store), but the half-completed approval must be
     // surfaced as `err` rather than reported ok, so the stuck run is diagnosable.

@@ -47,6 +47,37 @@ const serializeMeta = (meta: RunMeta, createdAtMs: number): string =>
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
   const stored: StoredMeta = JSON.parse(raw);
+  // Read-side sanity gates, mirroring the file codec's parseStoredMeta. The
+  // brand pass-through below is an honest re-typing of the ID domain only —
+  // it is never a license for corrupt bytes (a negative/Infinity/string
+  // nodeCount, a non-string dagId, non-string optional fields) to reach
+  // consumers as a "valid" checkpoint: the file twin rejects the identical
+  // bytes as `checkpoint-corrupt`, so this leg must fail the same way.
+  if (typeof stored.dagId !== "string") {
+    throw new Error(`Invalid dagId in checkpoint meta: ${safeDiagnosticRender(stored.dagId)}`);
+  }
+  if (typeof stored.startedAt !== "string") {
+    throw new Error(`Invalid startedAt in checkpoint meta: ${safeDiagnosticRender(stored.startedAt)}`);
+  }
+  if (typeof stored.createdAt !== "string") {
+    throw new Error(`Invalid createdAt in checkpoint meta: ${safeDiagnosticRender(stored.createdAt)}`);
+  }
+  if (
+    typeof stored.nodeCount !== "number" ||
+    !Number.isSafeInteger(stored.nodeCount) ||
+    stored.nodeCount < 0
+  ) {
+    throw new Error(`Invalid nodeCount in checkpoint meta: ${safeDiagnosticRender(stored.nodeCount)}`);
+  }
+  if (stored.subject !== undefined && typeof stored.subject !== "string") {
+    throw new Error(`Invalid subject in checkpoint meta: ${safeDiagnosticRender(stored.subject)}`);
+  }
+  if (stored.dagFingerprint !== undefined && typeof stored.dagFingerprint !== "string") {
+    throw new Error(`Invalid dagFingerprint in checkpoint meta: ${safeDiagnosticRender(stored.dagFingerprint)}`);
+  }
+  if (stored.frameworkVersion !== undefined && typeof stored.frameworkVersion !== "string") {
+    throw new Error(`Invalid frameworkVersion in checkpoint meta: ${safeDiagnosticRender(stored.frameworkVersion)}`);
+  }
   const startedAt = new Date(stored.startedAt);
   const createdAt = new Date(stored.createdAt);
   if (isNaN(startedAt.getTime()) || isNaN(createdAt.getTime())) {
@@ -81,6 +112,16 @@ const serializeNode = (state: NodeState): string =>
 
 const deserializeNode = (raw: string): NodeState => {
   const stored: StoredNodeState = JSON.parse(raw);
+  // Read-side sanity gate (parity with the meta twin and the file codec's
+  // parseStoredNode): a non-string nodeId from corrupt/drifted bytes must
+  // fail as corrupt HERE — per-entry, dropping the row into `corruptNodeIds`
+  // — never flow a number/object into the node map and node dispatch.
+  if (typeof stored.nodeId !== "string") {
+    throw new Error(`Invalid nodeId in checkpoint node: ${safeDiagnosticRender(stored.nodeId)}`);
+  }
+  if (typeof stored.completedAt !== "string") {
+    throw new Error(`Invalid completedAt in checkpoint node: ${safeDiagnosticRender(stored.completedAt)}`);
+  }
   const completedAt = new Date(stored.completedAt);
   if (isNaN(completedAt.getTime())) {
     throw new Error(`Invalid date in checkpoint node: completedAt=${stored.completedAt}`);
@@ -140,7 +181,16 @@ export class RedisCheckpointer implements Checkpointer {
       }
       return ok(ms);
     } catch (error) {
-      return err(frameworkError.cacheError(`checkpoint:${operation}`, safeErrorMessage(error)));
+      // A throwing clock is deterministic — retrying cannot clear it — so it
+      // settles permanent like the non-representable arm above (retriabilityOf
+      // fast-fails instead of burning the retry budget).
+      return err(
+        frameworkError.cacheError(
+          `checkpoint:${operation}`,
+          safeErrorMessage(error),
+          "permanent",
+        ),
+      );
     }
   }
 

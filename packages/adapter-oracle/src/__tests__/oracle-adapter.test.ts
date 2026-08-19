@@ -783,7 +783,7 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
     // No fake OracleQueryable is injected, so client.query() drives the REAL
     // per-query seam: pool.getConnection → conn.execute → finally conn.close.
     // A throwing execute must still release the connection or the pool leaks
-    // under query errors (the seam at adapter index.ts:415 was previously only
+    // under query errors (the seam at adapter index.ts:461 was previously only
     // covered for connect(), never the query path).
     let closed = 0;
     installOracledbMock(() => ({

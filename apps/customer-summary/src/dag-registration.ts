@@ -27,20 +27,19 @@ export const SummarizeInputSchema = z.object({
 // ---------------------------------------------------------------------------
 // DAG factory — creates a summary DAG with a default fixture source.
 //
-// NOTE: The existing createSummaryDag requires a ConversationSource and
-// customerId at construction time (DAG nodes close over them). For the host
-// registration, we create the DAG with a placeholder source; the actual
-// source resolution happens per-request inside the node's execute() function
-// via NodeContext (the node already handles this pattern internally).
-//
-// In the host model, per-request parameters (customer_id) arrive via the
-// validated input payload and are threaded through node execution context.
-// The DAG structure itself is static.
+// NOTE: createSummaryDag requires a ConversationSource and customerId at
+// construction time (DAG nodes close over them: createFetchCustomerNode closes
+// over the source; createAssembleResponseNode closes over the customerId). For
+// the host registration we pass a REAL fixture source (JsonFixtureSource) with
+// a placeholder customerId — the fetch node consumes the per-request
+// customer_id from the validated input payload via node execution context, so
+// the DAG structure itself is static while the customer comes from the request.
 // ---------------------------------------------------------------------------
 
 const createRegisteredDag = () => {
-  // The fixture source is used as the default for standalone mode.
-  // When hosted, the source is injected per-request via NodeContext.
+  // The fixture source is the default for standalone mode; when hosted, the
+  // per-request customerId arrives via the validated input payload (the
+  // customerId "placeholder" below is only the assembly node's closure).
   // Resolve fixtures relative to this module, not process CWD.
   // Ensures the DAG works whether loaded by the standalone server or the Fugue host.
   const fixturesDir = join(import.meta.dir, "..", "fixtures", "customers");

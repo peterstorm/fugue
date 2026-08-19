@@ -635,11 +635,16 @@ describeRedis("RedisCheckpointer", () => {
   // voided FR-027 TTL) and that a stateful `expectedDagFingerprint` getter
   // cannot make the load gate and comparison disagree.
   test("a throwing injected clock settles as a typed cache-error from load and setMeta", async () => {
+    // Seed the run with a HEALTHY checkpointer: the assertions are about the
+    // read path reaching the clock guard, and a hostile-clock setMeta fails
+    // by design — without a seeded meta, load would short-circuit ok(null)
+    // before ever touching the clock and the test would silently no-op.
+    const seed = new RedisCheckpointer(redisOrThrow());
+    await seed.setMeta(R("clock-throw"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
+
     const hostile = new RedisCheckpointer(redisOrThrow(), {
       now: () => { throw new Error("hostile clock"); },
     });
-    await hostile.setMeta(R("clock-throw"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
-
     const loaded = await hostile.load(R("clock-throw"));
     expect(loaded.ok).toBe(false);
     if (!loaded.ok) {
@@ -663,8 +668,10 @@ describeRedis("RedisCheckpointer", () => {
   });
 
   test("a NaN injected clock fails closed — the FR-027 TTL check cannot be silently voided", async () => {
+    // Seed with a healthy checkpointer (see the throwing-clock test above).
+    const seed = new RedisCheckpointer(redisOrThrow());
+    await seed.setMeta(R("clock-nan"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
     const cp = new RedisCheckpointer(redisOrThrow(), { now: () => Number.NaN });
-    await cp.setMeta(R("clock-nan"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
     const result = await cp.load(R("clock-nan"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -677,6 +684,10 @@ describeRedis("RedisCheckpointer", () => {
   });
 
   test("a throwing expectedDagFingerprint getter settles as a typed cache-error, never a raw rejection", async () => {
+    // Seed with a healthy checkpointer so the opts inspection is actually
+    // reached (a missing meta short-circuits load before the opts guard).
+    const seed = new RedisCheckpointer(redisOrThrow());
+    await seed.setMeta(R("opts-throw"), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
     const cp = new RedisCheckpointer(redisOrThrow());
     const opts = {
       get expectedDagFingerprint(): string {
@@ -717,5 +728,62 @@ describeRedis("RedisCheckpointer", () => {
     // Gate saw undefined → legacy no-check behaviour, exactly one read.
     expect(result.ok).toBe(true);
     expect(calls).toHaveLength(2); // the getter was read ONCE, not three times
+  });
+
+  // Round-19 sfh-2: the Redis read-side codec applies the file codec's shape
+  // gates before the id-domain brand pass-through. Corrupt meta bytes must
+  // settle as `checkpoint-corrupt` — never flow negative/Infinity/string
+  // counts or non-string ids into consumers as a "valid" checkpoint — and a
+  // corrupt node row must drop into `corruptNodeIds`, not into the map.
+  test.each([
+    ["negative nodeCount", { nodeCount: -7 }],
+    ["string nodeCount", { nodeCount: "3" }],
+    ["non-finite nodeCount (JSON null)", { nodeCount: 1e999 }],
+    ["missing nodeCount", { nodeCount: undefined }],
+    ["non-string dagId", { dagId: 42 }],
+    ["non-string startedAt", { startedAt: 123 }],
+    ["non-string createdAt", { createdAt: null }],
+  ])("corrupt stored meta (%s) settles as typed checkpoint-corrupt", async (_label, mutation) => {
+    const runId = makeRunId();
+    const meta = {
+      dagId: "d",
+      startedAt: new Date().toISOString(),
+      nodeCount: 1,
+      createdAt: new Date().toISOString(),
+      frameworkVersion: FRAMEWORK_VERSION,
+      ...mutation,
+    };
+    await redisOrThrow().set(`chkpt:${runId}:meta`, JSON.stringify(meta), "EX", 300);
+    const result = await cp.load(R(runId));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("checkpoint-corrupt");
+      if (result.error.kind === "checkpoint-corrupt") {
+        expect(result.error.message).toContain("deserialize failed");
+      }
+    }
+  });
+
+  test("a non-string nodeId in a stored node row drops the row as corrupt, never into the map", async () => {
+    const runId = makeRunId();
+    await cp.setMeta(R(runId), { dagId: D("d"), startedAt: new Date(), nodeCount: 2 });
+    await cp.saveNode(R(runId), N("good"), {
+      nodeId: N("good"),
+      output: { v: 1 },
+      completedAt: new Date(),
+    });
+    await redisOrThrow().hset(
+      `chkpt:${runId}`,
+      "evil",
+      JSON.stringify({ nodeId: 42, output: {}, completedAt: new Date().toISOString() }),
+    );
+
+    const result = await cp.load(R(runId));
+    expect(result.ok).toBe(true);
+    if (result.ok && result.value !== null) {
+      // The corrupt row is surfaced, not silently merged.
+      expect(result.value.corruptNodeIds).toContain("evil");
+      expect(Object.keys(result.value.nodes)).toEqual(["good"]);
+    }
   });
 });

@@ -144,6 +144,45 @@ describe("BufferedObserver", () => {
       else process.env.OBSERVER_STRICT = prev;
     }
   });
+
+  it("a throwing sweep clock is diagnosed and skips eviction (never an uncaught timer exception)", () => {
+    const inner = new RecordingObserver();
+    const buffered = new BufferedObserver(inner, alwaysOn(), {
+      now: () => {
+        throw new Error("clock exploded");
+      },
+      ttlMs: 1_000,
+    });
+
+    // An old buffer would be evictable under a healthy clock.
+    buffered.observe(runStart("r1"));
+    // The run buffer was stamped through the same guard: the failed clock
+    // accounts the open as a lost event instead of persisting garbage.
+    expect(buffered.dispatchErrors).toBe(1);
+
+    // evictStale must not throw out of the sweep timer.
+    expect(() => buffered.evictStale()).not.toThrow();
+    // Nothing is evicted and no count is fabricated — the no-op is loud, not
+    // silent.
+    expect(buffered.evicted).toBe(0);
+    buffered.close();
+  });
+
+  it("a non-finite sweep clock warns and skips eviction instead of NaN-comparing forever", () => {
+    const inner = new RecordingObserver();
+    const buffered = new BufferedObserver(inner, alwaysOn(), {
+      now: () => Number.NaN,
+      ttlMs: 1_000,
+    });
+    buffered.observe(runStart("r1"));
+    // NaN cannot stamp a buffer — accounted as a lost event, never a
+    // permanently-unevictable orphan.
+    expect(buffered.dispatchErrors).toBe(1);
+
+    expect(() => buffered.evictStale()).not.toThrow();
+    expect(buffered.evicted).toBe(0);
+    buffered.close();
+  });
 });
 
 describe("computeRunSummary", () => {

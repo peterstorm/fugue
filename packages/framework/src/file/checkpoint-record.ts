@@ -73,7 +73,13 @@ const serializeFileCheckpointUnchecked = <S, C>(
 
   const payload = { schemaVersion: JOURNAL_SCHEMA_VERSION, data };
   try {
-    assertLosslessEvent(payload);
+    // The shared FR-009 walk names this codec (not the event codec) and the
+    // payload root (not "event") so a rejected checkpoint data value is
+    // attributed to the operation that actually refused it.
+    assertLosslessEvent(payload, {
+      operation: "serializeFileCheckpoint",
+      root: "data",
+    });
   } catch (error) {
     throw new Error(
       `checkpoint payload is not losslessly serializable — ${fileThrownValueMessage(error)} (FR-009)`,

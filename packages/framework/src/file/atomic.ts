@@ -42,6 +42,7 @@ import { basename, join } from "node:path";
 import {
   type ErrorCodeProbe,
   isMissingPathError,
+  isMissingPathProbe,
   probeErrorCode,
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
@@ -488,7 +489,7 @@ const releaseLockIsAbsent = (
     return false;
   } catch (error) {
     const probe = probeErrorCode(error);
-    if (probe.kind === "code" && probe.code === "ENOENT") return true;
+    if (isMissingPathProbe(probe)) return true;
     throw releaseFailure(
       lockPath,
       `could not inspect the canonical lock while verifying release; lock left in place: ${safeErrorMessageWithCodeProbe(error, probe)}`,
@@ -510,8 +511,7 @@ const readReleaseMetadata = (
   } catch (error) {
     const probe = probeErrorCode(error);
     if (
-      probe.kind === "code"
-      && probe.code === "ENOENT"
+      isMissingPathProbe(probe)
       && releaseLockIsAbsent(lockPath)
     ) {
       return { kind: "absent" };

@@ -73,6 +73,38 @@ export interface FreshnessIndex {
 export type { WitnessCapturedEvent, WriteAttemptedEvent };
 
 /**
+ * Port-level ZSET member grammar for the FreshnessIndex port (ADR-0079).
+ * Redis stores `[runId, nodeId, witnessKind, witnessValue]` as the member of
+ * the per-resource ZSET; the file backend compares equal-score conflict
+ * winners byte-for-byte against these SAME bytes. ONE encoding, owned by the
+ * port that specifies the tie-break: both adapters consume it, so a change
+ * to the member tuple (order, fields, representation) can no longer silently
+ * diverge the file backend's conflict winners from the Redis adapter's.
+ */
+export const freshnessMemberKey = (
+  runId: RunId,
+  nodeId: NodeId,
+  witnessKind: string,
+  witnessValue: string,
+): string => JSON.stringify([runId, nodeId, witnessKind, witnessValue]);
+
+/**
+ * Redis compares equal-score ZSET members as unsigned byte strings; the
+ * conflict-winner rule must agree across adapters, so the comparator is
+ * port-owned alongside the member grammar it orders.
+ */
+export const compareFreshnessMemberKeys = (left: string, right: string): number => {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+};
+
+/**
  * The FreshnessIndex port's 24-hour singleton-lifetime contract (FR-032) —
  * ONE encoding, owned by the port file that specifies the expiry semantics,
  * independent of the Checkpointer port's FR-027 TTL (`TTL_SECONDS` in

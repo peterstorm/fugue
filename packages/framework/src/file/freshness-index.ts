@@ -48,13 +48,20 @@ import type {
   WriteEntry,
 } from "../types/freshness.js";
 import { parseFileFactoryClock } from "./options.js";
-import { FRESHNESS_TTL_SECONDS, __brandWitness, isWitnessKind } from "../types/freshness.js";
+import {
+  FRESHNESS_TTL_SECONDS,
+  __brandWitness,
+  compareFreshnessMemberKeys,
+  freshnessMemberKey,
+  isWitnessKind,
+} from "../types/freshness.js";
 import { isFrameworkError, type FrameworkError } from "../types/errors.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import {
   isMissingPathError,
+  isMissingPathProbe,
   probeErrorCode,
   safeDiagnosticRender,
   safeErrorMessage,
@@ -281,26 +288,16 @@ const parseConditionedOn = (value: unknown): Result<ConditionedOnSnapshot, strin
   });
 };
 
-/** Exact Redis member bytes used solely for equal-score winner parity. */
+/** Exact Redis member bytes used solely for equal-score winner parity —
+ * delegated to the port-owned grammar (`freshnessMemberKey`) so the file
+ * backend can never drift from the Redis adapter's member tuple (ADR-0079). */
 const serializeRedisFreshnessMember = (entry: PreparedFreshnessWrite): string =>
-  JSON.stringify([
+  freshnessMemberKey(
     entry.runId,
     entry.nodeId,
     entry.newWitness.kind,
     entry.newWitness.value,
-  ]);
-
-/** Redis compares equal-score members as unsigned byte strings. */
-const compareRedisMemberSerialization = (left: string, right: string): number => {
-  const leftBytes = new TextEncoder().encode(left);
-  const rightBytes = new TextEncoder().encode(right);
-  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < sharedLength; index += 1) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
-};
+  );
 
 const serializeStoredFreshnessEntry = (entry: StoredFreshnessEntry): string =>
   JSON.stringify({
@@ -382,7 +379,7 @@ const selectLatestWrite = (
   const incomingWins =
     incoming.succeededAtMs > current.succeededAtMs ||
     (incoming.succeededAtMs === current.succeededAtMs &&
-      compareRedisMemberSerialization(
+      compareFreshnessMemberKeys(
         serializeRedisFreshnessMember(incoming),
         serializeRedisFreshnessMember(current),
       ) > 0);
@@ -579,7 +576,7 @@ const createFileFreshnessIndexUnchecked = (
             current = parsed.value;
           } catch (error) {
             const codeProbe = probeErrorCode(error);
-            if (codeProbe.kind !== "code" || codeProbe.code !== "ENOENT") {
+            if (!isMissingPathProbe(codeProbe)) {
               return err(cacheFailure("freshness:recordWrite", resourceDigest, error, codeProbe));
             }
           }
@@ -677,5 +674,5 @@ export const createFileFreshnessIndex = (
 // Exported only for equal-score parity tests; omitted from the file barrel.
 export {
   serializeRedisFreshnessMember as __testSerializeRedisFreshnessMember,
-  compareRedisMemberSerialization as __testCompareRedisMemberSerialization,
+  compareFreshnessMemberKeys as __testCompareRedisMemberSerialization,
 };

@@ -4,7 +4,10 @@
  * Uses a ZSET per resource:
  *   Key:    `fugue:freshness:{resource}`
  *   Score:  `succeededAtMs`
- *   Member: JSON array `[runId, nodeId, witnessKind, witnessValue]`
+ *   Member: `freshnessMemberKey` — the port-owned
+ *           `[runId, nodeId, witnessKind, witnessValue]` JSON array
+ *           (types/freshness.js), shared with the file backend's
+ *           equal-score tie-break (ADR-0079).
  *
  * `recordWrite` is an atomic ZADD + EXPIRE (Lua script). `findConflict`
  * uses `ZREVRANGEBYSCORE ... LIMIT 0 1` to fetch the latest write only.
@@ -21,7 +24,12 @@
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type { FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
-import { FRESHNESS_TTL_SECONDS, __brandWitness, isWitnessKind } from "../types/freshness.js";
+import {
+  FRESHNESS_TTL_SECONDS,
+  __brandWitness,
+  freshnessMemberKey,
+  isWitnessKind,
+} from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -30,18 +38,6 @@ import { __brandRunId, __brandNodeId } from "../types/ids.js";
 import { fwLogger } from "../logger.js";
 
 const KEY_PREFIX = "fugue:freshness:";
-
-/**
- * Encode a write entry as a ZSET member. Uses a JSON array for unambiguous
- * parsing — witness values are freeform strings that may contain any
- * delimiter character.
- */
-const encodeMember = (
-  runId: RunId,
-  nodeId: NodeId,
-  witnessKind: string,
-  witnessValue: string,
-): string => JSON.stringify([runId, nodeId, witnessKind, witnessValue]);
 
 /**
  * Decode a ZSET member back to its components. Returns `null` on parse
@@ -126,7 +122,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
 
   async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const key = KEY_PREFIX + event.newWitness.resource;
-    const member = encodeMember(
+    const member = freshnessMemberKey(
       event.runId,
       event.nodeId,
       event.newWitness.kind,
@@ -234,4 +230,4 @@ export class RedisFreshnessIndex implements FreshnessIndex {
 }
 
 // Exported for unit testing of the encoding roundtrip.
-export { encodeMember as __testEncodeMember, decodeMember as __testDecodeMember };
+export { freshnessMemberKey as __testEncodeMember, decodeMember as __testDecodeMember };

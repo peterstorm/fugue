@@ -144,11 +144,21 @@ export const probeErrorCode = (error: unknown): ErrorCodeProbe => {
  * `code === "ENOENT"` check or an `existsSync` pre-probe elsewhere is a
  * parallel copy that can drift (an EACCES/ENOTDIR swallowed as absence is
  * the drift this prevents). Total: a hostile caught value can never throw.
+ *
+ * Sites that already hold an `ErrorCodeProbe` (the single-probe discipline
+ * forbids a second `probeErrorCode` on the same caught value) use
+ * `isMissingPathProbe` instead — the same ENOENT-only rule, probe-form.
  */
 export const isMissingPathError = (error: unknown): boolean => {
   const probe = probeErrorCode(error);
-  return probe.kind === "code" && probe.code === "ENOENT";
+  return isMissingPathProbe(probe);
 };
+
+/** Probe-accepting form of `isMissingPathError` (see above). */
+export const isMissingPathProbe = (
+  probe: ErrorCodeProbe,
+): probe is { readonly kind: "code"; readonly code: "ENOENT" } =>
+  probe.kind === "code" && probe.code === "ENOENT";
 
 /**
  * Render a primary failure while preserving a secondary errno-inspection

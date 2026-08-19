@@ -418,14 +418,12 @@ export const createFileJournal = (
   const writeCheckpoint = async (
     commit: FileCheckpointCommit<unknown, unknown>,
   ): Promise<void> => {
-    let validCommit: FileCheckpointCommit<unknown, unknown>;
     try {
       if (!isFileCheckpointCommit(commit)) {
         throw new TypeError(
           `checkpoint must be an opaque commit minted by serializeFileCheckpoint, got ${safeDiagnosticRender(commit)}`,
         );
       }
-      validCommit = commit;
     } catch (error) {
       // Deterministic caller bug (not an opaque commit) — retrying cannot
       // clear it; the TypeError's rendered value stays in the message.
@@ -438,7 +436,7 @@ export const createFileJournal = (
     }
     try {
       mkdirSync(directory, { recursive: true });
-      atomicWriteFile(checkpointPath, validCommit.json);
+      atomicWriteFile(checkpointPath, commit.json);
     } catch (error) {
       throw fsFailure("writeCheckpoint", directory, error);
     }
